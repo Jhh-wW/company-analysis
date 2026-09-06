@@ -73,6 +73,7 @@ def test_진행_화면이_알리는_단계_이름에_빼기로_한_문구가_없
     labels = json.loads(match.group(1))
 
     assert labels, "단계 이름이 하나도 내려가지 않았다"
+    assert "뉴스" not in REMOVED_PROGRESS_COPY_MARKERS
     for key, label in labels.items():
         for removed in REMOVED_PROGRESS_COPY_MARKERS:
             assert removed not in label, f"{key} 단계 이름에 「{removed}」가 남아 있다"

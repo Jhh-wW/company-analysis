@@ -112,9 +112,9 @@ services:
         sync: false
       - key: DART_API_KEY
         sync: false
-      - key: NAVER_CLIENT_ID
+      - key: NCP_APIGW_API_KEY_ID
         sync: false
-      - key: NAVER_CLIENT_SECRET
+      - key: NCP_APIGW_API_KEY
         sync: false
 
       # 실행 기록을 재시작 뒤에도 검증할 수 있도록 Render가 고정 비밀을 만든다.

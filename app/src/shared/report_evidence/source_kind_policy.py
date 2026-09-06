@@ -25,6 +25,7 @@ from src.shared.report_evidence.constants import (
     FORMAL_ATTEMPT_SOURCE_KINDS,
     FORMAL_DOCUMENT_SOURCE_KINDS,
     OFFICIAL_WEB_SOURCE_KINDS,
+    SOURCE_KIND_NEWS,
     SOURCE_KIND_DART_AUDIT_REPORT,
     SOURCE_KIND_DART_BUSINESS_REPORT,
     SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT,
@@ -35,6 +36,7 @@ from src.shared.report_evidence.constants import (
     SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
     SOURCE_KIND_OFFICIAL_WEB_PAGE,
     SOURCE_KIND_ROBOTS_TXT,
+    SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS,
     SourceRequirement,
     SourceTier,
 )
@@ -200,6 +202,67 @@ _RECENT_FILING_SLOT_IDS = frozenset(
     (*collector_slots_for("past_changes"), *collector_slots_for("current_challenges"))
 )
 
+# 언론 보도는 장별 산문만 보조한다. 수치 전용 칸, 1장 법인 정체성,
+# 9장 공식 비교 칸은 이 목록에 넣지 않아 transport 단계에서 닫는다.
+_NEWS_SUPPLEMENTARY_SLOT_IDS: Final[frozenset[str]] = frozenset(
+    {
+        "identity:business_definition",
+        "identity:legal_scope",
+        "identity:official_location",
+        "identity:self_positioning",
+        "business_model:revenue_model",
+        "business_model:customer_type",
+        "business_model:sales_channel",
+        "business_model:value_exchange",
+        "portfolio:product_role",
+        "portfolio:portfolio_priority",
+        "portfolio:customer_fit",
+        "portfolio:revenue_link",
+        "portfolio:lifecycle_stage",
+        # 5·6장은 회사·대표에게 귀속된 인용문만 허용한다(news_intake 매핑이 강제).
+        "current_challenges:issue",
+        "current_challenges:response",
+        "future_strategy:stated_plan",
+        "future_strategy:plan_status",
+        "past_changes:completed_execution",
+        "past_changes:cumulative_change",
+        "past_changes:change_context",
+        "past_changes:change_limit",
+        "operations_partners:value_chain",
+        "operations_partners:operating_role",
+        "operations_partners:supply_relation",
+        "operations_partners:distribution_relation",
+        "operations_partners:partnership",
+        "culture:leadership",
+        "culture:work_principle",
+        "culture:decision_process",
+        "culture:organization_change",
+        "culture:verified_case",
+        "competitive_position:self_context",
+        "competitive_position:stated_differentiator",
+        "competitive_position:limitation",
+    }
+)
+
+SUPPLEMENTARY_SLOT_IDS_BY_SOURCE_KIND: Final = MappingProxyType(
+    {SOURCE_KIND_NEWS: _NEWS_SUPPLEMENTARY_SLOT_IDS}
+)
+SUPPLEMENTARY_TRUST_BY_SOURCE_KIND: Final = MappingProxyType(
+    {
+        SOURCE_KIND_NEWS: frozenset(
+            {(SourceTier.TIER_SUPPLEMENTARY, SourceRequirement.OPTIONAL)}
+        )
+    }
+)
+SUPPLEMENTARY_WRITER_TRUST: Final = MappingProxyType(
+    {
+        SOURCE_KIND_NEWS: (
+            SourceTier.TIER_SUPPLEMENTARY,
+            SourceRequirement.OPTIONAL,
+        )
+    }
+)
+
 FORMAL_DOCUMENT_SLOT_IDS_BY_SOURCE_KIND: Final = MappingProxyType(
     {
         SOURCE_KIND_DART_BUSINESS_REPORT: _ALL_COLLECTOR_SLOT_IDS,
@@ -319,6 +382,18 @@ if (
     != FORMAL_DOCUMENT_SOURCE_KINDS
 ):
     raise FormalSourceKindContractError("공식 문서 종류와 Writer 자격 표가 다릅니다")
+if frozenset(SUPPLEMENTARY_SLOT_IDS_BY_SOURCE_KIND) != (
+    SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
+):
+    raise FormalSourceKindContractError("보조 문서 종류와 슬롯 소유권 표가 다릅니다")
+if frozenset(SUPPLEMENTARY_TRUST_BY_SOURCE_KIND) != (
+    SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
+):
+    raise FormalSourceKindContractError("보조 문서 종류와 신뢰·필수 조합 표가 다릅니다")
+if frozenset(SUPPLEMENTARY_WRITER_TRUST) != SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS:
+    raise FormalSourceKindContractError("보조 문서 종류와 Writer 자격 표가 다릅니다")
+if FORMAL_DOCUMENT_SOURCE_KINDS & SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS:
+    raise FormalSourceKindContractError("공식 문서와 보조 문서 종류가 겹칩니다")
 
 
 def _slots_for_source_kind(
@@ -344,6 +419,16 @@ def document_slots_for_formal_source_kind(source_kind: str) -> frozenset[str]:
         source_kind,
         ownership=FORMAL_DOCUMENT_SLOT_IDS_BY_SOURCE_KIND,
         label="공식 문서",
+    )
+
+
+def supplementary_slots_for_source_kind(source_kind: str) -> frozenset[str]:
+    """보조 문서 종류가 주장할 수 있는 산문 슬롯을 정확 일치로 돌려준다."""
+
+    return _slots_for_source_kind(
+        source_kind,
+        ownership=SUPPLEMENTARY_SLOT_IDS_BY_SOURCE_KIND,
+        label="보조 문서",
     )
 
 

@@ -27,6 +27,7 @@ from src.shared.official_ir import IR_METADATA_VERIFICATION_VALUE
 from src.shared.report_evidence.constants import (
     FORMAL_DOCUMENT_SOURCE_KINDS,
     SOURCE_KIND_OFFICIAL_IR_PDF,
+    SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS,
 )
 from src.shared.report_quality.comparison_claims import (
     comparison_context_claim_problems,
@@ -220,6 +221,9 @@ class CollectedFragment:
     #: URL·ID만 바꿔 여러 독립 문서로 세는 것을 유료 전 게이트가 막는다.
     #: legacy 조각은 문서 전체 바이트를 잃은 옛 모양이라 빈 문자열이다.
     document_content_sha256: str = ""
+    #: 보조 언론 문서는 원문 지문을 보존해도 공식 독립 문서 하한을 늘리지 않는다.
+    #: 기본값 True로 기존 formal·legacy packet의 바이트와 계수 동작을 유지한다.
+    counts_toward_document_floor: bool = True
     #: typed 수집기가 이 정확한 원문 조각에 결속한 claim slot. legacy는
     #: 종류→장 범위밖에 모르므로 빈 튜플을 유지하며 의미 칸을 추측하지 않는다.
     supported_claim_slots: tuple[str, ...] = ()
@@ -275,7 +279,9 @@ class VerifiedProgramEvidence:
             full_typed_source_registry_problem,
             has_valid_provenance_seal,
             is_canonical_official_with_registry,
+            is_publishable_supplementary,
         )
+        from src.features.composer.verify import _extract_numbers  # noqa: PLC0415
         from src.shared.report_generation.models import canonical_value  # noqa: PLC0415
         from src.shared.report_quality.fact_binding import (  # noqa: PLC0415
             fact_evidence_binding,
@@ -406,13 +412,31 @@ class VerifiedProgramEvidence:
             raise ValueError("프로그램 attester는 다른 attester를 연쇄 참조할 수 없습니다")
         registry_tuple = tuple(self.registry_sources)
         for source in self.registry_sources:
+            is_supplementary = is_publishable_supplementary(
+                source, registry_tuple
+            )
             if source.provenance_role == "citation" and not (
                 is_canonical_official_with_registry(source, registry_tuple)
+                or is_supplementary
             ):
                 raise ValueError(
                     "프로그램 citation Source가 공식 출처 등록부 계약을 "
                     "통과하지 못했습니다"
                 )
+            if is_supplementary:
+                source_fragment_ids = {
+                    fragment_id
+                    for fragment_id, source_id in source_id_by_fragment.items()
+                    if source_id == source.source_id
+                }
+                if any(
+                    source_fragment_ids & set(sentence.citations)
+                    and _extract_numbers(sentence.text)
+                    for sentence in self.sentences
+                ):
+                    raise ValueError(
+                        "프로그램 보조 언론 Source는 수치 문장을 인용할 수 없습니다"
+                    )
             if source.provenance_role == "attestation_only" and (
                 source.kind is not SourceKind.FILING
                 or not is_canonical_official_with_registry(source, registry_tuple)
@@ -724,6 +748,11 @@ class VerifiedProgramEvidence:
                     "text_sha256": exact_evidence_text_hash(fragment.text),
                     "document_identity": fragment.document_identity,
                     "document_content_sha256": fragment.document_content_sha256,
+                    **(
+                        {"counts_toward_document_floor": False}
+                        if not fragment.counts_toward_document_floor
+                        else {}
+                    ),
                     "source": canonical_value(fragment.bound_source),
                 }
                 for fragment in self.source_fragments
@@ -827,6 +856,8 @@ class SectionEvidencePacket:
                 for slot_id in fragment.supported_claim_slots
             ):
                 raise TypeError("section packet 지원 claim slot은 문자열 tuple이어야 합니다")
+            if type(fragment.counts_toward_document_floor) is not bool:
+                raise TypeError("section packet 독립 문서 계수 표식은 bool이어야 합니다")
             if len(fragment.supported_claim_slots) != len(
                 set(fragment.supported_claim_slots)
             ):
@@ -862,16 +893,43 @@ class SectionEvidencePacket:
                 fragment.source_collected_on.strip(),
             )
             if formal_kind:
+                known_typed_kinds = (
+                    FORMAL_DOCUMENT_SOURCE_KINDS
+                    | SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
+                )
+                is_supplementary = (
+                    formal_kind in SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
+                )
+                required_typed_extras = (
+                    fragment.source_publisher.strip(),
+                    fragment.source_collected_on.strip(),
+                ) if is_supplementary else typed_only_extras
                 if (
-                    formal_kind not in FORMAL_DOCUMENT_SOURCE_KINDS
+                    formal_kind not in known_typed_kinds
                     or not content_sha256
                     or not fragment.source_document_id.strip()
-                    or not all(typed_only_extras)
+                    or not all(required_typed_extras)
+                    or (is_supplementary and fragment.counts_toward_document_floor)
+                    or (
+                        not is_supplementary
+                        and not fragment.counts_toward_document_floor
+                    )
+                    or (
+                        is_supplementary
+                        and not all(
+                            (
+                                fragment.source_url.strip(),
+                                fragment.document_title.strip(),
+                                fragment.location.strip(),
+                                fragment.document_date.strip(),
+                            )
+                        )
+                    )
                 ):
                     raise ValueError(
                         "FULL typed 조각의 자료종류·문서지문·발행자·회사 결속이 불완전합니다"
                     )
-            elif any(typed_only_extras):
+            elif any(typed_only_extras) or not fragment.counts_toward_document_floor:
                 raise ValueError(
                     "legacy 조각에 typed 출처 메타데이터를 일부만 넣을 수 없습니다"
                 )
@@ -937,6 +995,11 @@ class SectionEvidencePacket:
                     "document_date": fragment.document_date,
                     "document_identity": fragment.document_identity,
                     "document_content_sha256": fragment.document_content_sha256,
+                    **(
+                        {"counts_toward_document_floor": False}
+                        if not fragment.counts_toward_document_floor
+                        else {}
+                    ),
                     "supported_claim_slots": fragment.supported_claim_slots,
                     "formal_source_kind": fragment.formal_source_kind,
                     "source_document_id": fragment.source_document_id,

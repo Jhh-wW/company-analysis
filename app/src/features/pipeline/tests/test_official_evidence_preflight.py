@@ -38,6 +38,7 @@ from src.shared.report_evidence.constants import (
     EvidenceReadiness,
     GenerationGateStatus,
     SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_NEWS,
     SOURCE_KIND_OFFICIAL_WEB_PAGE,
     SOURCE_KIND_ROBOTS_TXT,
     SourceRequirement,
@@ -120,6 +121,43 @@ def _packet_set(
         company_id=_COMPANY_ID,
         evidence_generation_sha256="e" * 64,
         packets=tuple(packets),
+    )
+
+
+def _supplementary_packet_set() -> SectionEvidencePacketSet:
+    packets = tuple(
+        SectionEvidencePacket(
+            company_id=_COMPANY_ID,
+            evidence_generation_sha256="e" * 64,
+            section_id=section_id,
+            fragments=(
+                CollectedFragment(
+                    fragment_id=f"news-{index}",
+                    kind="typed-news",
+                    text="회사는 새 계약을 체결했다고 밝혔다.",
+                    source_url=f"https://news.example/articles/{index}",
+                    document_title="회사 신규 계약",
+                    location="기사 본문",
+                    document_date="2026-09-05",
+                    document_identity=f"url:https://news.example/articles/{index}",
+                    document_content_sha256="a" * 64,
+                    counts_toward_document_floor=False,
+                    supported_claim_slots=(
+                        CLAIM_SLOTS_BY_SECTION[section_id][0],
+                    ),
+                    formal_source_kind=SOURCE_KIND_NEWS,
+                    source_document_id=f"article-{index}",
+                    source_publisher="OO경제",
+                    source_collected_on="2026-09-06",
+                ),
+            ),
+        )
+        for index, section_id in enumerate(SECTION_IDS, start=1)
+    )
+    return SectionEvidencePacketSet(
+        company_id=_COMPANY_ID,
+        evidence_generation_sha256="e" * 64,
+        packets=packets,
     )
 
 
@@ -1139,6 +1177,27 @@ def test_같은원문을_서로다른_URL로_복제해도_한문서로_센다() 
 
     assert preflight.independent_document_count == 1
     assert preflight.can_call_ai is False
+
+
+def test_뉴스보조조각은_문서원문hash가_있어도_독립문서수에_세지않는다() -> None:
+    preflight = assess_packet_document_sources(_supplementary_packet_set())
+
+    assert preflight.independent_document_count == 0
+    assert preflight.can_call_ai is False
+
+
+def test_정식문서조각은_표식기본값_true로_지금처럼_독립문서에_센다() -> None:
+    packets = _packet_set(
+        ("url:https://example.com/formal",),
+        content_hashes=("a" * 64,),
+    )
+
+    assert all(
+        fragment.counts_toward_document_floor is True
+        for packet in packets.packets
+        for fragment in packet.fragments
+    )
+    assert assess_packet_document_sources(packets).independent_document_count == 1
 
 
 def test_원문hash없는_임의URL과_위조document_host는_문서수를_못채운다() -> None:

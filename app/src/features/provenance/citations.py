@@ -26,6 +26,7 @@ import urllib.parse
 from dataclasses import replace
 from typing import Any, Optional
 
+from src.core.news_intake_switch import news_intake_enabled
 from src.features.provenance.constants import (
     DART_ACCOUNT_FRAGMENT_LABEL,
     DART_ACCOUNT_FRAGMENT_PREFIX,
@@ -227,6 +228,39 @@ def _news_source(number: int, frag: dict[str, Any]) -> Source:
     잘라내다 지어내는 셈이 되므로 원문 전체를 라벨로 남긴다.
     """
     text = frag.get("원문", "")
+    typed_url = str(frag.get("출처") or "").strip()
+    typed_date = str(frag.get("문서일") or "").strip()
+    typed_publisher = str(frag.get("발행처") or "").strip()
+    typed_title = str(frag.get("문서명") or "").strip()
+    typed_document_id = str(frag.get("문서ID") or "").strip()
+    typed_location = str(frag.get("원문위치") or "").strip()
+    if news_intake_enabled() and all(
+        (
+            typed_url,
+            typed_date,
+            typed_publisher,
+            typed_title,
+            typed_document_id,
+            typed_location,
+        )
+    ):
+        host = str(urllib.parse.urlparse(typed_url).hostname or "").lower()
+        return Source(
+            number=number,
+            kind=SourceKind.NEWS,
+            label=typed_title,
+            published_at=typed_date,
+            domain=host,
+            source_id=f"source-{number}",
+            title=typed_title,
+            publisher=typed_publisher,
+            host=host,
+            url=typed_url,
+            document_id=typed_document_id,
+            location=typed_location,
+            source_type="언론 보도",
+            fact_status="외부 보도",
+        )
     match = _NEWS_PREFIX_RE.match(text)
     if match is None:
         return Source(number=number, kind=SourceKind.NEWS, label=text.strip())

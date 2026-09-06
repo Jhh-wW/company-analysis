@@ -246,6 +246,82 @@ def test_canonical_metadata_does_not_promote_external_news_to_official_evidence(
     assert source.is_canonical_official is False
 
 
+def _publishable_news_source() -> Source:
+    return seal_collected_source(
+        Source(
+            number=5,
+            kind=SourceKind.NEWS,
+            label="가나다전자 신규 계약",
+            published_at="2026-08-13",
+            domain="news.example",
+            source_id="src-news-5",
+            title="가나다전자 신규 계약",
+            publisher="OO경제",
+            host="news.example",
+            url="https://news.example/articles/5",
+            document_id="article-5",
+            location="기사 본문",
+            source_type="외부 보도",
+            fact_status="보도 확인",
+            evidence_hashes=[evidence_text_hash("가나다전자가 계약을 발표했다")],
+        )
+    )
+
+
+def test_보조언론은_스위치ON이고_날짜_도메인_부록메타가_결속되면_승격된다(
+    monkeypatch,
+) -> None:
+    from src.core import news_intake_switch as switch
+    from src.features.provenance.sources import is_publishable_supplementary
+
+    switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+    monkeypatch.setenv(switch.NEWS_INTAKE_ENV_NAME, "1")
+    source = _publishable_news_source()
+    try:
+        assert is_publishable_supplementary(source, (source,)) is True
+        assert source.is_canonical_official is False
+    finally:
+        switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"published_at": ""},
+        {"domain": "other.example"},
+        {"publisher": ""},
+        {"title": ""},
+        {"url": ""},
+    ],
+)
+def test_보조언론은_날짜_도메인결속_부록메타가_하나라도_없으면_거절한다(
+    monkeypatch, changes
+) -> None:
+    from src.core import news_intake_switch as switch
+    from src.features.provenance.sources import is_publishable_supplementary
+
+    switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+    monkeypatch.setenv(switch.NEWS_INTAKE_ENV_NAME, "1")
+    source = seal_collected_source(replace(_publishable_news_source(), **changes))
+    try:
+        assert is_publishable_supplementary(source, (source,)) is False
+    finally:
+        switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+
+
+def test_보조언론은_스위치OFF에서_승격되지_않는다(monkeypatch) -> None:
+    from src.core import news_intake_switch as switch
+    from src.features.provenance.sources import is_publishable_supplementary
+
+    switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+    monkeypatch.delenv(switch.NEWS_INTAKE_ENV_NAME, raising=False)
+    source = _publishable_news_source()
+    try:
+        assert is_publishable_supplementary(source, (source,)) is False
+    finally:
+        switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+
+
 @pytest.mark.parametrize(
     ("kind", "source_type"),
     [
