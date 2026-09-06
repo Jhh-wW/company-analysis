@@ -43,6 +43,7 @@ from src.features.composer.constants import (
     OPERATIONS_FLOW_SECTION_ID,
     PARSE_RETRY_LIMIT,
     PROMPT_FRAGMENTS_HEAD,
+    PROMPT_FRAGMENT_LOCATION_LABEL,
     PROMPT_HEADER,
     PROMPT_TABLE_HEAD,
     RESPONSE_CITATIONS_KEY,
@@ -243,6 +244,12 @@ def _render_fragments(
         label = fragment.kind or "자료"
         if fragment.document_title:
             label = f"{label}·{fragment.document_title}"
+        if fragment.location:
+            # 안내문이 「원문위치에 … 표기가 있는 조각」을 고르라고 지시하므로
+            # 그 값을 실제로 보여 준다. 없는 조각(홈페이지 일부)은 그대로 둔다.
+            label = (
+                f"{label} · {PROMPT_FRAGMENT_LOCATION_LABEL}: {fragment.location}"
+            )
         if show_supported_claim_slots:
             supported = ", ".join(fragment.supported_claim_slots) or "없음"
             label = f"{label} · 지원 주장슬롯: {supported}"

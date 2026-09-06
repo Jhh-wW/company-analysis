@@ -39,7 +39,11 @@ from .constants import (
     NAME_EDGE_CHARS,
     NAME_SEPARATOR_RE,
     NUMERIC_OR_UNIT_ONLY_RE,
+    NON_PERSON_NAME_HEADERS,
     PERSON_NAME_HEADERS,
+    PERSON_NAME_HEADER_SUFFIXES,
+    PERSON_ROLE_HEADER_SUFFIXES,
+    PERSON_ROLE_HEADER_WORDS,
     PRODUCT_NAME_HEADERS,
     PRODUCT_SERVICE_SECTION_TITLES,
     REJECTED_NAME_KEYS,
@@ -163,13 +167,20 @@ def _table_rows(
     *,
     accepts_header: Callable[[tuple[str, ...]], bool],
 ) -> Iterator[tuple[tuple[str, ...], tuple[str, ...], str]]:
-    """머리말과 열 수가 정확히 같은 행만 원문 그대로 돌려준다."""
+    """머리말과 열 수가 정확히 같은 행만 원문 그대로 돌려준다.
+
+    ★ 사람 이름 열이 있는 행만 예외다 — 그 열을 뺀 값으로 발췌를 다시 잇는다.
+      표 구조 경로(`_row_excerpt`)는 처음부터 그렇게 했는데 이 평문 경로는
+      안 그래서, 「제품명 | 성명」 같은 표에서 실명이 발췌·작가 프롬프트·부록
+      까지 그대로 갔다(정확 일치 머리글에서도 샜다).
+    """
 
     lines = block.splitlines()
     for header_line_index, raw_header in enumerate(lines):
         headers = _split_columns(raw_header)
         if not headers or not accepts_header(headers):
             continue
+        person_indexes = _person_column_indexes(headers)
         for raw_line in lines[header_line_index + 1 :]:
             if not raw_line.strip():
                 continue
@@ -178,7 +189,13 @@ def _table_rows(
                 break
             if len(cells) != len(headers):
                 continue
-            yield headers, cells, raw_line.rstrip("\r")
+            # 사람 열이 없으면 원문 줄을 «글자 그대로» 넘긴다(기존 동작 보존).
+            excerpt = (
+                _row_excerpt(cells, headers)
+                if person_indexes
+                else raw_line.rstrip("\r")
+            )
+            yield headers, cells, excerpt
         return
 
 
@@ -412,12 +429,39 @@ def collect_name_candidates(
 # ─────────────────────────────────────────────────────────────────────
 
 
+def _is_person_header_key(key: str) -> bool:
+    """정규화된 머리글 키가 사람 이름 열인가 — 닫힌 어휘 규칙.
+
+    「대표이사 성명」처럼 앞말이 붙은 복합 머리글까지 막는다. 정확 일치만
+    보던 옛 규칙은 그런 열을 놓쳐 실명이 발췌·프롬프트까지 갔다.
+
+    Args:
+        key: `_header_key`로 정규화한 머리글.
+
+    Returns:
+        사람 이름 열이면 True. 「상품명」·「회사명」 같은 진짜 이름 열은 False.
+    """
+
+    if not key or key in NON_PERSON_NAME_HEADERS:
+        return False
+    if key in PERSON_NAME_HEADERS or key in ARTIST_MEMBER_HEADERS:
+        return True
+    if key.endswith(PERSON_NAME_HEADER_SUFFIXES):
+        return True
+    return any(
+        word in key and (key == word or key.endswith(PERSON_ROLE_HEADER_SUFFIXES))
+        for word in PERSON_ROLE_HEADER_WORDS
+    )
+
+
 def _person_column_indexes(headers: tuple[str, ...]) -> frozenset[int]:
     """사람 이름이 들어가는 열 번호를 모은다."""
 
     return frozenset(
-        _matching_header_indexes(headers, PERSON_NAME_HEADERS)
-    ) | frozenset(_matching_header_indexes(headers, ARTIST_MEMBER_HEADERS))
+        index
+        for index, cell in enumerate(headers)
+        if _is_person_header_key(_header_key(cell))
+    )
 
 
 def _row_excerpt(cells: tuple[str, ...], headers: tuple[str, ...]) -> str:
@@ -477,7 +521,7 @@ def _named_index(
     index = _header_index(headers, accepted)
     if index is None:
         return None
-    if _header_key(headers[index]) in PERSON_NAME_HEADERS:
+    if _is_person_header_key(_header_key(headers[index])):
         return None
     return index
 
@@ -806,8 +850,8 @@ def collect_name_candidates_from_tables(
 ) -> tuple[NameCandidate, ...]:
     """표 규칙의 후보를 순서대로 합치고 이름 기준으로 중복·상한을 적용한다.
 
-    상한은 «규칙마다» 건다. 전체 합계로 끊으면 제품 표가 큰 회사(실측: 삼성
-    전자·우리은행은 제품만으로 상한에 닿는다)에서 뒤 규칙의 대표 IP·종속회사·
+    상한은 «규칙마다» 건다. 전체 합계로 끊으면 제품 표가 큰 회사(실측: 대형
+    제조사·은행은 제품 목록만으로 상한에 닿는다)에서 뒤 규칙의 대표 IP·종속회사·
     계약 후보가 통째로 사라진다. 최종 자리 배분은 조각 예산이 따로 한다.
     """
 

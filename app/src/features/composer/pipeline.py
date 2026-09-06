@@ -72,6 +72,7 @@ from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.diagram_check import check_diagram_numbers, check_diagrams
 from src.features.composer.dup_detect import CONFIDENCE_CONFIRMED, find_numeric_duplicates
 from src.features.composer.extractive_summary import select_extractive_summary
+from src.features.composer.portfolio_names import portfolio_name_usage
 from src.features.composer.port import (
     AskFatalError,
     ComposedReport,
@@ -187,6 +188,16 @@ class V2RunOutput:
     #: ★ 기본값이 빈 tuple이라 이 필드를 모르는 기존 호출·저장 경로는
     #:   그대로 돈다(새 키 추가만, 읽기 호환 유지).
     diagram_drop_reasons: tuple[str, ...] = ()
+    #: 3장 packet에 대표 이름이 하한 이상 왔는데 카드가 하나도 안 쓴 경우의
+    #: «이름 수». 안 그러면 0이다.
+    #:
+    #: ★ 왜 개수만 싣나 — 이름 자체는 이미 보고서 근거 안에 있고, 실행 기록은
+    #:   운영 진단용이라 원문을 늘릴 이유가 없다. 「몇 개를 줬는데 안 썼나」만
+    #:   알면 안내문이 듣는지 아닌지를 다음 실행에서 바로 잰다.
+    unused_portfolio_name_count: int = 0
+    #: 그때의 종류 라벨별 이름 수. dataclass를 얼린 채로 실어 나르려고
+    #: dict가 아니라 (라벨, 수) 쌍의 tuple이다.
+    unused_portfolio_name_counts_by_label: tuple[tuple[str, int], ...] = ()
 
 
 class _CallLedgerRecorder:
@@ -1616,6 +1627,18 @@ def run_v2(
             manifest_bytes=rendered.public_structure_manifest.encode("utf-8"),
         )
 
+    # 3장 카드가 packet의 대표 이름을 실제로 썼는지 «판정만» 한다.
+    # 안 썼어도 카드를 지어내지 않는다 — 기록만 남기고 그대로 내보낸다.
+    name_usage = portfolio_name_usage(
+        final, _normalize_fragments(verification_fragments)
+    )
+    if name_usage.unused:
+        logger.warning(
+            "3장 packet에 대표 이름 %d개(%s)가 갔는데 카드가 하나도 쓰지 않았습니다",
+            name_usage.name_count,
+            name_usage.counts_by_label,
+        )
+
     return V2RunOutput(
         report=rendered,
         composed_sentences=composed_item_count,
@@ -1624,6 +1647,14 @@ def run_v2(
         generation_evidence=generation_evidence,
         generation_metrics=generation_metrics,
         diagram_drop_reasons=recorded_diagram_drop_reasons,
+        unused_portfolio_name_count=(
+            name_usage.name_count if name_usage.unused else 0
+        ),
+        unused_portfolio_name_counts_by_label=(
+            tuple(sorted(name_usage.counts_by_label.items()))
+            if name_usage.unused
+            else ()
+        ),
     )
 
 

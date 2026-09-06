@@ -5,28 +5,31 @@ from __future__ import annotations
 import re
 from typing import Final
 
-SUBJECT_PRODUCT: Final[str] = "product"
-SUBJECT_BRAND: Final[str] = "brand"
-SUBJECT_SEGMENT: Final[str] = "segment"
-SUBJECT_SUBSIDIARY: Final[str] = "subsidiary"
-SUBJECT_CONTRACT: Final[str] = "contract"
-SUBJECT_IP: Final[str] = "ip"
-SUBJECT_KINDS: Final[frozenset[str]] = frozenset(
-    {
-        SUBJECT_PRODUCT,
-        SUBJECT_BRAND,
-        SUBJECT_SEGMENT,
-        SUBJECT_SUBSIDIARY,
-        SUBJECT_CONTRACT,
-        SUBJECT_IP,
-    }
+from src.shared.name_fragments import (
+    NAME_KIND_BRAND,
+    NAME_KIND_CONTRACT,
+    NAME_KIND_IP,
+    NAME_KIND_PRODUCT,
+    NAME_KIND_SEGMENT,
+    NAME_KIND_SUBSIDIARY,
+    NAME_KINDS,
 )
+
+# 종류 id의 정본은 `shared/name_fragments.py`다 — 소비자(3장 판정)와 같은
+# 객체를 써야 한 쪽이 바뀔 때 조용히 어긋나지 않는다. 아래는 그 별명이다.
+SUBJECT_PRODUCT: Final[str] = NAME_KIND_PRODUCT
+SUBJECT_BRAND: Final[str] = NAME_KIND_BRAND
+SUBJECT_SEGMENT: Final[str] = NAME_KIND_SEGMENT
+SUBJECT_SUBSIDIARY: Final[str] = NAME_KIND_SUBSIDIARY
+SUBJECT_CONTRACT: Final[str] = NAME_KIND_CONTRACT
+SUBJECT_IP: Final[str] = NAME_KIND_IP
+SUBJECT_KINDS: Final[frozenset[str]] = NAME_KINDS
 
 MAX_NAME_CANDIDATES: Final[int] = 40
 # 조립기 프롬프트 길이는 곧 비용이므로 건당 300~400원 목표 안에서 제한한다.
 MAX_NAME_FRAGMENTS_PER_FILING: Final[int] = 16
-# 한 종류가 예산을 다 먹으면 다른 종류가 한 건도 못 들어간다. 실측(하이브)에서
-# 제품 후보가 11건이라, 종류별 상한이 없으면 대표 IP가 0건이 된다.
+# 한 종류가 예산을 다 먹으면 다른 종류가 한 건도 못 들어간다. 실측(상장 엔터사)
+# 에서 제품 후보가 열 건 넘게 먼저 나와, 종류별 상한이 없으면 대표 IP가 0건이 된다.
 MAX_NAME_FRAGMENTS_PER_KIND: Final[int] = 10
 # 조각 자리를 나눠 주는 순서. 사업부문 → 대표 IP → 제품 순으로,
 # 「그 회사가 무엇으로 불리는가」에 가까운 이름부터 자리를 준다.
@@ -165,8 +168,8 @@ IP_STAGE_HEADERS: Final[frozenset[str]] = frozenset(
     {"개발단계", "임상단계", "진행단계", "단계", "적응증"}
 )
 # 아티스트 전속계약 표(엔터)의 세 칸. 「그 룹」처럼 글자 사이 공백은 정규화된다.
-# 「팀」은 넣지 않는다 — 하이브의 실제 그룹명 「&팀」이 머리행 글자와 같아져
-# 이름 후보에서 통째로 떨어진다.
+# 「팀」은 넣지 않는다 — 한 글자짜리 머리행 어휘를 넣으면, 그 글자를 그대로 쓰는
+# 실제 그룹명이 머리행으로 오인돼 이름 후보에서 통째로 떨어진다(실측).
 ARTIST_GROUP_HEADERS: Final[frozenset[str]] = frozenset({"그룹", "그룹명"})
 ARTIST_MEMBER_HEADERS: Final[frozenset[str]] = frozenset(
     {"아티스트", "소속아티스트", "멤버", "구성원"}
@@ -174,6 +177,69 @@ ARTIST_MEMBER_HEADERS: Final[frozenset[str]] = frozenset(
 # 사람 이름이 들어가는 칸. 이 아래 값은 이름 후보로 쓰지 않는다.
 PERSON_NAME_HEADERS: Final[frozenset[str]] = frozenset(
     {"성명", "이름", "대표자", "대표자명", "임원", "직원", "담당자", "본인"}
+)
+
+# ─────────────────────────────────────────────────────────────────────
+# 복합 사람 머리글
+#
+# ★ 왜 생겼나 (독립 검토 재현) — 위 목록은 머리글이 «정확히 같을 때»만 막는다.
+#   그래서 「제품명 | 대표이사 성명」 같은 표에서 「대표이사 성명」이 사람 열로
+#   안 잡히고, 그 칸의 실명이 조각 원문·작가 프롬프트·부록까지 그대로 갔다.
+# ★ 규칙을 «닫아» 둔다 — 「사람처럼 보이면」 같은 열린 추측이 아니라 아래 세
+#   목록의 조합만 사람 열로 본다. 열어 두면 「상품명」처럼 진짜 이름 열까지
+#   삼켜 이름이 통째로 사라진다.
+# ─────────────────────────────────────────────────────────────────────
+
+#: 이 말로 «끝나는» 머리글은 앞에 무엇이 붙어도 사람 열이다.
+PERSON_NAME_HEADER_SUFFIXES: Final[tuple[str, ...]] = (
+    "성명",
+    "이름",
+    "본명",
+    "실명",
+)
+
+#: 사람의 «역할»을 가리키는 말. 단독으로 쓰이거나 이름 꼬리말과 함께 쓰인다.
+PERSON_ROLE_HEADER_WORDS: Final[frozenset[str]] = frozenset(
+    {
+        "대표이사",
+        "대표자",
+        "임원",
+        "감사",
+        "이사",
+        "담당자",
+        "책임자",
+        "아티스트",
+        "멤버",
+        "구성원",
+        "직원",
+        "본인",
+    }
+)
+
+#: 역할 말이 이 꼬리말과 함께 오면 사람 이름 열로 본다.
+PERSON_ROLE_HEADER_SUFFIXES: Final[tuple[str, ...]] = ("명", "성명", "이름")
+
+#: 사람 열로 «오해하면 안 되는» 이름 열. 위 규칙보다 먼저 본다.
+#: 이 목록이 없으면 「상품명」·「회사명」처럼 ``명``으로 끝나는 진짜 이름 열이
+#: 역할 규칙에 걸려 통째로 사라질 수 있다.
+NON_PERSON_NAME_HEADERS: Final[frozenset[str]] = frozenset(
+    {
+        "상품명",
+        "회사명",
+        "브랜드명",
+        "제품명",
+        "서비스명",
+        "법인명",
+        "계약명",
+        "모델명",
+        "펀드명",
+        "카드명",
+        "품목명",
+        "부문명",
+        "게임명",
+        "타이틀명",
+        "파이프라인명",
+    }
 )
 COMPANY_NAME_HEADERS: Final[frozenset[str]] = frozenset(
     {
