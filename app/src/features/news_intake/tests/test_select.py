@@ -3,8 +3,14 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass
 
+import pytest
+
 from src.features.news_intake import constants as c
-from src.features.news_intake.select import needs_extended_window, select_candidates
+from src.features.news_intake.select import (
+    needs_extended_window,
+    news_eligible_sections,
+    select_candidates,
+)
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 
 
@@ -171,3 +177,49 @@ def test_혼합요약은_업계표지가_있어도_통째로_버리지_않는다
     )
 
     assert result.selected_count == 1
+
+
+def _all_ready() -> dict[str, bool]:
+    return {section_id: True for section_id in REQUIRED_EVIDENCE_SECTION_IDS}
+
+
+def test_전장_READY이고_웹문서_0건이면_오육장을_뺀_전부가_대상이다() -> None:
+    eligible = news_eligible_sections(_all_ready(), official_web_documents=0)
+
+    assert eligible == frozenset(REQUIRED_EVIDENCE_SECTION_IDS) - c.NON_EXTENDABLE_SECTIONS
+    assert "current_challenges" not in eligible
+    assert "future_strategy" not in eligible
+
+
+def test_전장_READY이고_웹문서가_있으면_대상이_없다() -> None:
+    assert news_eligible_sections(_all_ready(), official_web_documents=1) == frozenset()
+
+
+def test_빈_장이_있으면_웹문서_0건이어도_빈_장만_대상이다() -> None:
+    ready = _all_ready()
+    ready["portfolio"] = False
+
+    assert news_eligible_sections(ready, official_web_documents=0) == frozenset(
+        {"portfolio"}
+    )
+
+
+def test_오육장만_미달이면_그_둘만_대상이다() -> None:
+    ready = _all_ready()
+    ready["current_challenges"] = False
+    ready["future_strategy"] = False
+    expected = frozenset({"current_challenges", "future_strategy"})
+
+    # 확장 창 판정은 5·6장을 보지 않지만, 대상 장 판정은 본다.
+    assert needs_extended_window(ready) is False
+    assert news_eligible_sections(ready, official_web_documents=0) == expected
+    assert news_eligible_sections(ready, official_web_documents=3) == expected
+
+
+def test_문서_수가_정수가_아니면_거절한다() -> None:
+    with pytest.raises(TypeError):
+        news_eligible_sections(_all_ready(), official_web_documents=True)
+    with pytest.raises(TypeError):
+        news_eligible_sections(_all_ready(), official_web_documents="0")
+    with pytest.raises(TypeError):
+        news_eligible_sections((), official_web_documents=0)
