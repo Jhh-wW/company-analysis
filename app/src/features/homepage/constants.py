@@ -450,6 +450,14 @@ WIDE_MAX_CHARS_PER_RANGE: Final[int] = 1_500
 #: 구간으로 남기기엔 너무 짧은 글자 수(메뉴 부스러기 제외).
 WIDE_MIN_CHARS_PER_RANGE: Final[int] = 40
 
+#: 신원 결속에는 성공했는데 문서를 하나도 만들지 못한 시도에 붙이는 사유
+#: 코드. 서버가 준 HTML에 사람이 읽는 본문이 없어(자바스크립트로 화면을 그리는
+#: 사이트) 쓸 만한 조각을 0개 뽑은 경우다. 이 코드가 없던 동안 그런 시도는
+#: state=OK·«신원 검증됨»으로 남아, 로그만 보면 «성공했는데 왜 근거가 0건인가»를
+#: 알 수 없었다(2026-09-06 하이브 실측). 자료가 막힌 것이 아니라 «없는 것»이므로
+#: state는 MISSING이다 — FAILED로 올리면 다른 근거까지 UNKNOWN으로 끌어내린다.
+WIDE_REASON_NO_USABLE_CONTENT: Final[str] = "no_usable_content"
+
 #: 문서 identity의 source_kind 값.
 WIDE_SOURCE_KIND_WEB_PAGE: Final[str] = SOURCE_KIND_OFFICIAL_WEB_PAGE
 WIDE_SOURCE_KIND_IR_PDF: Final[str] = SOURCE_KIND_OFFICIAL_IR_PDF

@@ -38,6 +38,7 @@ from src.features.homepage.constants import (
     WIDE_MAX_USABLE_RANGES_PER_DOCUMENT,
     WIDE_PARSER_VERSION,
     WIDE_PRIORITY_HOST_KEYWORDS,
+    WIDE_REASON_NO_USABLE_CONTENT,
     WIDE_REQUIRED_SLOT_IDS,
     WIDE_ROOT_IDENTITY_SUPPLEMENT_PATH_MARKERS,
     WIDE_SOURCE_KIND_IDENTITY_VERIFIED_WEB_PAGE,
@@ -115,6 +116,7 @@ from src.features.homepage.wide_fetch import (
     WideRobotsPolicy,
     WideTransportError,
     classify_general_outcome,
+    client_side_redirect_target,
     default_wide_transport,
     fetch_sitemap,
     load_robots_policy,
@@ -143,6 +145,12 @@ _DUAL_VERIFIED_IDENTITY_LABEL = "DART 법인명+등록번호 이중 검증 공�
 #: 등록번호를 홈페이지에 게시하지 않는 회사를 위한 좁은 예외이며, 라벨을
 #: 따로 두어 운영 진단에서 두 결속을 구분한다.
 _ROOT_NAME_ONLY_IDENTITY_LABEL = "DART hm_url host 법인명 검증 공식 웹(등록번호 미게시)"
+#: root HTML 신원 결속에는 실패했지만 IR PDF 자체 신원 검사(앞 2쪽 법인명·
+#: 별칭)만으로 확인한 문서에 붙이는 라벨. 웹 페이지 결속과 반드시 구분해야
+#: 하므로 별도 문구를 쓰고, 이 계보의 문서는 고신뢰로 올리지 않는다.
+_IR_ONLY_IDENTITY_LABEL = (
+    "DART hm_url host 공식 IR PDF 자체 신원 검증(root HTML 결속 없음)"
+)
 #: : robots·sitemap·전체 truncation·IR처럼 «호스트/수집 전체」에 걸린
 #: attempt이거나, 일반 페이지인데 URL로 페이지 유형을 못 알아낸 attempt에
 #: 붙이는 fallback slot 집합. 앱 계약(CollectionAttempt)은 빈 slot_ids를
@@ -179,6 +187,22 @@ _ALL_SLOT_IDS_FALLBACK: tuple[str, ...] = WIDE_REQUIRED_SLOT_IDS
 #: 무관하다(위 docstring 참조). 이름을 상수로 남겨 「이 값은 절대
 #: REQUIRED가 될 수 없다」는 불변식을 코드에서도 명시적으로 드러낸다.
 _BROAD_SLOT_REQUIREMENT: str = REQUIREMENT_OPTIONAL
+
+#: ``_build_web_document``가 문서를 만들지 못한 이유. 두 이유를 한 코드로
+#: 뭉치면 「본문이 없다」와 「이미 같은 본문을 모았다」를 구분할 수 없어,
+#: apex/www가 똑같은 화면을 주는 정상 사이트까지 「본문 없음」으로 잘못
+#: 진단하게 된다.
+_DOCUMENT_SKIP_NONE: str = ""
+_DOCUMENT_SKIP_NO_USABLE_CONTENT: str = WIDE_REASON_NO_USABLE_CONTENT
+_DOCUMENT_SKIP_DUPLICATE_CONTENT: str = "duplicate_content"
+_DOCUMENT_SKIP_SCOPE_MISMATCH: str = "content_scope_mismatch"
+
+#: 루트 HTML이 시키는 같은 origin 이동을 따라가는 최대 걸음 수. 실제 «한
+#: 걸음» 보장은 목적지에서 다시 이동을 찾지 않는(재귀하지 않는) 구현이
+#: 만든다. 이 상수는 그 정책을 이름으로 드러내고, 0으로 두면 기능 전체를
+#: 끄는 스위치가 된다. 연쇄 이동을 계속 쫓으면 페이지·바이트 상한과
+#: robots 판단을 이동 횟수만큼 다시 열게 되므로 한 걸음에서 멈춘다.
+_MAX_CLIENT_REDIRECT_HOPS: int = 1
 
 
 @dataclass
@@ -607,6 +631,9 @@ def collect_official_web_documents(
             documents_seen=0,
         )
 
+    # 교차 도메인 신원 확인 단계가 실제로 돌았는지. 등록번호가 없어 네트워크
+    # 0회로 fail-closed한 경우와 「확인해 봤는데 이름이 달랐다」를 가른다.
+    identity_phase_ran = identity is not None and identity.can_verify_cross_domain
     try:
         with request_deadline_scope(WIDE_COLLECTION_TIMEOUT_SEC) as deadline:
             if root_origin is not None and not root_identity_verification_required:
@@ -616,7 +643,7 @@ def collect_official_web_documents(
                     transport=transport,
                     deadline=deadline,
                 )
-            if identity is not None and identity.can_verify_cross_domain:
+            if identity is not None and identity_phase_ran:
                 _run_cross_domain_identity_phase(
                     state,
                     identity=identity,
@@ -639,6 +666,15 @@ def collect_official_web_documents(
                     ),
                     None,
                 )
+                if verified_ir_origin is None and identity_phase_ran:
+                    # root HTML 이름 대조 하나가 실패했다고 IR PDF 수집까지
+                    # 통째로 사라지면 안 된다. IR PDF는 앞 2쪽에서 법인명·
+                    # 별칭을 직접 확인하는 자체 신원 검사를 갖고 있어서, root
+                    # 결속과 별개로 시도해도 남의 회사 문서가 실릴 수 없다.
+                    # ★ 신원 확인을 «시도조차 못 한» 경우(등록번호 없음 →
+                    #   root_identity_unverifiable, 네트워크 0회)는 제외한다.
+                    #   그때는 이 host를 열어볼 근거 자체가 없다.
+                    verified_ir_origin = root_origin
             else:
                 verified_ir_origin = root_origin
             if verified_ir_origin is not None:
@@ -954,6 +990,82 @@ def _fetch_root_identity_supplements(
     return tuple(responses), total_bytes, had_failure
 
 
+def _fetch_client_redirect_target(
+    state: _CollectionState,
+    *,
+    response: WideRawResponse,
+    origin: OfficialOrigin,
+    policy: WideRobotsPolicy,
+    transport: RawWideTransport,
+    deadline: object,
+) -> tuple[WideRawResponse | None, int]:
+    """본문이 시키는 같은 origin 이동을 «딱 1회» 따라간다.
+
+    HTTP 3xx가 아니라 받은 HTML이 브라우저에게 다른 주소로 가라고 시키는
+    사이트가 있다(2026-09-06 하이브 실측: 루트가 ``location.replace``로
+    ``/ko/main``을 가리킨다). 우리는 HTML만 읽으므로 그 지시를 못 보면 본문
+    0글자짜리 껍데기를 «정상 수집»으로 착각한다.
+
+    fail-closed 경계는 넓히지 않는다 — 목적지가 (1) 같은 origin·회사 경로
+    안이고 (2) robots가 허용하고 (3) 지금 읽은 그 페이지가 아닐 때만, (4)
+    한 걸음만 읽는다. 목적지가 또 다른 이동을 시켜도 따라가지 않는다.
+
+    Returns:
+        ``(목적지 응답 또는 None, 이번에 읽은 UTF-8 바이트 수)``.
+    """
+
+    if _MAX_CLIENT_REDIRECT_HOPS < 1:
+        return None, 0
+    target_url = client_side_redirect_target(response.text, response.effective_url)
+    if not target_url:
+        return None, 0
+    if not origin.allows_content_url(target_url) or not policy.can_fetch(target_url):
+        # 다른 origin·회사 경로 밖·robots 거부는 따라가지 않는다.
+        return None, 0
+    if _scoped_canonical_url(target_url, origin) == _scoped_canonical_url(
+        response.effective_url, origin
+    ):
+        # 자기 자신을 가리키는 지시는 같은 페이지를 한 번 더 읽을 뿐이다.
+        return None, 0
+
+    deadline.remaining()  # type: ignore[attr-defined]
+    if (
+        state.pages_fetched >= WIDE_MAX_PAGES
+        or state.total_bytes >= WIDE_MAX_TOTAL_BYTES
+    ):
+        state.record_truncation(
+            WIDE_SOURCE_KIND_WEB_PAGE,
+            "truncated_client_redirect_cap",
+        )
+        return None, 0
+
+    def url_allowed(candidate: str) -> bool:
+        return origin.allows_content_url(candidate) and policy.can_fetch(candidate)
+
+    target_response: WideRawResponse | None = None
+    error: WideTransportError | None = None
+    try:
+        target_response = transport(target_url, url_allowed)
+    except WideTransportError as exc:
+        error = exc
+    state.pages_fetched += 1
+    target_bytes = len(
+        (target_response.text if target_response else "").encode(
+            "utf-8", errors="ignore"
+        )
+    )
+    state.total_bytes += target_bytes
+    target_state, _reason_code = classify_general_outcome(target_response, error)
+    if target_state != ATTEMPT_STATE_OK or target_response is None:
+        return None, target_bytes
+    if not origin.allows_content_url(
+        target_response.effective_url
+    ) or not policy.can_fetch(target_response.effective_url):
+        # 전송 계층이 최종 URL을 다시 검사하지만, 이 조립 경계도 스스로 확인한다.
+        return None, target_bytes
+    return target_response, target_bytes
+
+
 def _enqueue_verified_identity_link(
     state: _CollectionState,
     *,
@@ -1054,6 +1166,9 @@ def _collect_identity_verified_candidate(
     )
     state.total_bytes += response_bytes
     documents_seen = 0
+    # 문서를 못 만든 이유 모음(_DOCUMENT_SKIP_*). 「본문이 아예 없었다」와
+    # 「이미 같은 본문을 모았다」를 구분해 시도 사유 코드를 고르는 데 쓴다.
+    document_skip_reasons: set[str] = set()
     binding: BoundHost | None = None
 
     match: OfficialIdentityMatch | None = None
@@ -1071,7 +1186,26 @@ def _collect_identity_verified_candidate(
             reason_code = "redirect_scope_mismatch"
         else:
             identity_responses = (response,)
-            match = verify_official_company_identity(response.text, identity)
+            # 서버가 3xx 없이 본문으로 «다른 주소로 가라»고만 시키는 사이트가
+            # 있다. 그 지시를 못 보면 본문 0글자짜리 껍데기만 쥔다. 같은
+            # origin·robots 허용·딱 1회만 따라가 같은 검사를 그대로 거친다.
+            redirect_response, redirect_bytes = _fetch_client_redirect_target(
+                state,
+                response=response,
+                origin=origin,
+                policy=policy,
+                transport=transport,
+                deadline=deadline,
+            )
+            response_bytes += redirect_bytes
+            if redirect_response is not None:
+                identity_responses = (response, redirect_response)
+                match = verify_official_company_identity_pages(
+                    tuple(item.text for item in identity_responses),
+                    identity,
+                )
+            else:
+                match = verify_official_company_identity(response.text, identity)
             if match is None and promote_verified_root:
                 supplements, supplement_bytes, supplement_failed = (
                     _fetch_root_identity_supplements(
@@ -1084,7 +1218,7 @@ def _collect_identity_verified_candidate(
                     )
                 )
                 response_bytes += supplement_bytes
-                identity_responses = (response, *supplements)
+                identity_responses = (*identity_responses, *supplements)
                 if supplements:
                     match = verify_official_company_identity_pages(
                         tuple(item.text for item in identity_responses),
@@ -1178,7 +1312,7 @@ def _collect_identity_verified_candidate(
             response_classification = classify_official_page_url(
                 identity_response.effective_url
             )
-            document = _build_web_document(
+            document, skip_reason = _build_web_document(
                 state,
                 response=identity_response,
                 origin=origin,
@@ -1197,6 +1331,8 @@ def _collect_identity_verified_candidate(
             if document is not None:
                 state.documents.append(document)
                 documents_seen += 1
+            else:
+                document_skip_reasons.add(skip_reason)
         reason_code = (
             ("root_identity_name_only" if name_only_root else "root_identity_verified")
             if promote_verified_root
@@ -1272,11 +1408,28 @@ def _collect_identity_verified_candidate(
 
     # 성공한 문서·attempt·조각은 모두 실제 landing URL 하나로 분류한다.
     # 실패했을 때만 최종 URL을 믿을 수 없으므로 요청 URL로 진단한다.
-    attempt_classification = classify_official_page_url(
+    # ★ 이 판정은 아래 «조각 0개» 강등보다 먼저 굳힌다 — 강등은 「본문이
+    #   없다」는 사실을 말할 뿐, 어느 페이지를 실제로 읽었는지는 바꾸지 않는다.
+    landing_url = (
         response.effective_url
         if page_state == ATTEMPT_STATE_OK and response is not None
         else candidate_url
     )
+    # 신원은 맞았는데 쓸 만한 본문 조각이 하나도 없어 문서를 0건 만든 경우를
+    # 「성공」으로 남기지 않는다. 자바스크립트로 화면을 그리는 사이트는 서버가
+    # 주는 HTML에 사람이 읽는 글자가 없어 여기까지 온다(2026-09-06 하이브
+    # 실측). state=OK·«신원 검증됨»으로 남기면 운영 로그만 보고는 「성공했는데
+    # 왜 근거가 0건인가」를 영영 알 수 없다.
+    # ★ 중복 본문(apex/www가 같은 화면)으로 0건이 된 경우는 그대로 둔다 —
+    #   그건 「본문이 없다」가 아니라 「이미 모았다」이고, 기존 판정이 옳다.
+    if (
+        match is not None
+        and documents_seen == 0
+        and document_skip_reasons == {_DOCUMENT_SKIP_NO_USABLE_CONTENT}
+    ):
+        page_state = ATTEMPT_STATE_MISSING
+        reason_code = WIDE_REASON_NO_USABLE_CONTENT
+    attempt_classification = classify_official_page_url(landing_url)
     source_kind = (
         attempt_classification.source_kind
         if promote_verified_root
@@ -1444,7 +1597,7 @@ def _visit_page(
             state.official_link_source_urls.add(
                 _scoped_canonical_url(response.effective_url, origin)
             )
-        document = _build_web_document(
+        document, _skip_reason = _build_web_document(
             state,
             response=response,
             origin=origin,
@@ -1526,18 +1679,28 @@ def _build_web_document(
     source_kind: str,
     requirement: str,
     binding: BoundHost,
-) -> WideDocumentIdentity | None:
+) -> tuple[WideDocumentIdentity | None, str]:
+    """읽은 페이지 하나를 문서로 만들고, 못 만들었으면 그 이유를 함께 준다.
+
+    Returns:
+        만들었으면 ``(문서, _DOCUMENT_SKIP_NONE)``, 못 만들었으면
+        ``(None, _DOCUMENT_SKIP_*)``. 「본문이 없다」와 「이미 같은 본문을
+        모았다」는 서로 다른 사실이라, 호출자가 시도 사유 코드를 정확히 고를 수
+        있도록 이유를 돌려준다(apex/www가 같은 화면을 주는 정상 사이트를
+        「본문 없음」으로 잘못 진단하지 않기 위함).
+    """
+
     if not origin.allows_content_url(response.effective_url):
-        return None
+        return None, _DOCUMENT_SKIP_SCOPE_MISMATCH
     body_ranges, title = extract_usable_ranges(response.text)
     ranges = body_ranges + extract_json_ld_ranges(response.text) + extract_inline_spa_ranges(response.text)
     ranges = tuple(dict.fromkeys(ranges))[:WIDE_MAX_USABLE_RANGES_PER_DOCUMENT]
     if not ranges:
-        return None
+        return None, _DOCUMENT_SKIP_NO_USABLE_CONTENT
 
     content_sha256 = hashlib.sha256("\n".join(ranges).encode("utf-8")).hexdigest()
     if content_sha256 in state.content_hashes:
-        return None
+        return None, _DOCUMENT_SKIP_DUPLICATE_CONTENT
     state.content_hashes.add(content_sha256)
 
     canonical = _scoped_canonical_url(response.effective_url, origin)
@@ -1550,7 +1713,7 @@ def _build_web_document(
         redirect_from_host,
         redirect_to_host,
     ) = _profile_attestation_for_url(state, canonical)
-    return WideDocumentIdentity(
+    document = WideDocumentIdentity(
         company_id=state.company_id,
         document_id=document_id,
         canonical_url=canonical,
@@ -1581,6 +1744,7 @@ def _build_web_document(
         domain_redirect_from_host=redirect_from_host,
         domain_redirect_to_host=redirect_to_host,
     )
+    return document, _DOCUMENT_SKIP_NONE
 
 
 def _ensure_host_policy(
@@ -1712,6 +1876,29 @@ def _run_ir_pdf_phase(
         ),
         key=lambda item: (item[0].host != root_origin.host, item[0].host),
     )
+    root_policy = state.robots_policies.get(root_origin.host)
+    root_robots_allows = root_policy is not None and not root_policy.blocked and (
+        root_policy.can_fetch(root_origin.root_url)
+    )
+    if root_origin.host not in state.bound_hosts and root_robots_allows:
+        # root HTML 신원 결속이 없어도 IR PDF는 자체 신원 검사를 갖고 있으므로
+        # 독립적으로 시도한다. 대신 결속 근거 문구와 신뢰 등급으로 구분해,
+        # 확인되지 않은 host의 PDF가 REQUIRED 근거로 올라가지 않게 한다.
+        # ★ robots가 이 host의 시작 경로를 막았거나 robots 자체를 확인하지
+        #   못했으면 시도하지 않는다. 결속된 host는 그 조건을 이미 통과한
+        #   상태이므로, 이 갈래도 같은 문턱을 넘어야 fail-closed 경계가
+        #   넓어지지 않는다. 거부 사실은 robots attempt에 이미 남아 있어
+        #   「막혔다」를 「IR 조회 실패」로 바꿔 적지도 않는다.
+        candidate_origins.append(
+            (
+                root_origin,
+                BoundHost(
+                    host=root_origin.host,
+                    identity_binding=_IR_ONLY_IDENTITY_LABEL,
+                    is_high_confidence=False,
+                ),
+            )
+        )
     total_ir_documents = 0
     for origin, binding in candidate_origins:
         if total_ir_documents >= WIDE_MAX_IR_DOCUMENTS:
@@ -1996,12 +2183,18 @@ def _build_ir_document(
         parser_version=WIDE_PARSER_VERSION,
         # 외부 CDN 파일은 공식 HTML이 그 exact URL을 가리켰다는 provenance만
         # 확인했다. CDN host 전체나 파일 발행자를 회사 공식이라고 승격하지
-        # 않으며 필수 슬롯을 채울 수 없는 낮은 신뢰 후보로 보존한다.
+        # 않으며 필수 슬롯을 채울 수 없는 낮은 신뢰 후보로 보존한다. host
+        # 결속이 낮은 신뢰(root HTML 신원 확인 없이 IR PDF 자체 검사만 통과)일
+        # 때도 같은 이유로 후보 등급에 남긴다.
         requirement=(
-            REQUIREMENT_OPTIONAL if is_external_attachment else REQUIREMENT_REQUIRED
+            REQUIREMENT_OPTIONAL
+            if is_external_attachment or not binding.is_high_confidence
+            else REQUIREMENT_REQUIRED
         ),
         source_tier=(
-            SOURCE_TIER_3_TRUSTED if is_external_attachment else SOURCE_TIER_1_OFFICIAL
+            SOURCE_TIER_3_TRUSTED
+            if is_external_attachment or not binding.is_high_confidence
+            else SOURCE_TIER_1_OFFICIAL
         ),
         domain_attestation_source_id=attestation_source_id,
         domain_attestation_evidence=attestation_evidence,
