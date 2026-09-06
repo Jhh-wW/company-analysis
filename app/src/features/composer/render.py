@@ -43,6 +43,7 @@ from src.features.composer.constants import (
     DART_FINANCIAL_API_URL,
     DEFAULT_CITATION_STYLE,
     GRADE_INTERPRETED,
+    PORTFOLIO_TABLE_SECTION_ID,
     SECTION_IDS,
     SECTION_TITLES,
 )
@@ -59,6 +60,7 @@ from src.features.composer.port import (
     FilingMeta,
     PerformanceTable,
 )
+from src.features.composer.portfolio_name_table import PortfolioNameTable
 from src.features.composer.public_manifest import PublicStructureSeal
 from src.features.composer.prose_facts import ProseEvidence, build_verified_prose_fact
 from src.features.composer.quality_projection import bound_summary_fact_id
@@ -691,6 +693,36 @@ def _news_report_table(
     )
 
 
+def _name_report_table(
+    name_table: PortfolioNameTable, numbers: Mapping[str, int]
+) -> Optional[ReportTable]:
+    """3장 이름 표를 «일반 표»로 바꾼다. 인용할 번호가 없으면 None.
+
+    ★ 왜 ``presentation``을 건드리지 않나 — 기본값 ``table``이면 웹·PDF·노션이
+      이미 가진 «일반 표» 경로로 그대로 그려진다. 새 표현 값을 만들면 세
+      렌더러에 각각 분기가 생기고, 그중 하나만 고쳐지는 날 화면이 갈린다.
+      이 표는 두 열짜리 글자 표라 도식이 필요 없다.
+    ★ 캡션의 번호와 행 순서·글자는 공개 봉인(`public_manifest`)이 같은
+      `PortfolioNameTable`로 다시 만든다. 두 곳이 어긋나면 봉인이 «시끄럽게»
+      막는다 — 조용히 다른 표가 나가지 않는다.
+    """
+
+    cited = [
+        numbers[fragment_id]
+        for fragment_id in name_table.fragment_ids
+        if fragment_id in numbers
+    ]
+    if not cited or not name_table.rows:
+        return None
+    return ReportTable(
+        caption=name_table.caption,
+        headers=list(name_table.headers),
+        rows=[list(row) for row in name_table.rows],
+        cite=f"[{min(cited)}]",
+        numeric=False,
+    )
+
+
 def _build_source(
     meta: _FragmentMeta,
     number: int,
@@ -1062,6 +1094,7 @@ def render_report(
     release_mode: str = "",
     verified_program_facts: Sequence[FactRecord] = (),
     program_registry_sources: Sequence[Source] = (),
+    name_table: Optional[PortfolioNameTable] = None,
 ) -> Report:
     """검증 끝난 ComposedReport를 웹·PDF 공용 pipeline Report로 바꾼다.
 
@@ -1087,6 +1120,9 @@ def render_report(
         filing_meta: 이번 조사가 내려받은 공시의 신원(접수번호·보고서명·공시일).
             주면 전자공시 조각의 부록 줄에 «원문 주소»가 실린다. 없으면 주소
             없이 나가며, 그 사실이 화면에 그대로 보인다(빈 값을 지어내지 않는다).
+        name_table: 3장에 덧붙일 「회사가 공시한 대표 이름」 표. 조각의 글자와
+            인용만 투영한 결정적 표라 작가 카드와 달리 AI를 지나지 않는다.
+            None이면 3장에 이 표를 넣지 않는다(빈 표를 만들지 않는다).
 
     Returns:
         pipeline `Report` — 9개 장 전부(prose_lines: 문장 + [n] + 해석 표지,
@@ -1292,6 +1328,23 @@ def render_report(
                     if section.section_id not in owners:
                         owners.append(section.section_id)
                 tables.append(flow_table)
+        # 3장 「회사가 공시한 대표 이름」 — 작가 카드 «바로 뒤», 구성표 앞.
+        # 순서는 공개 봉인이 만드는 순서와 같아야 한다(어긋나면 봉인이 막는다).
+        if name_table is not None and section.section_id == PORTFOLIO_TABLE_SECTION_ID:
+            names_report_table = _name_report_table(name_table, numbers)
+            if names_report_table is not None:
+                # ★ 부록에는 «캡션에 인쇄되는» 대표 번호 하나만 올린다 —
+                #   flow 표와 같은 규칙이다. 나머지 조각 번호는 FULL 봉인이
+                #   `source_cites`를 채울 때 아래 공통 경로가 함께 올린다.
+                #   여기서 미리 올리면 봉인 없는 실행(SHADOW)에서 «부록에는
+                #   있는데 본문 어디에도 안 보이는» 번호가 생겨 출고 검증이
+                #   보고서를 통째로 막는다.
+                names_cite = citation_number(names_report_table.cite)
+                if names_cite and int(names_cite) in meta_by_number:
+                    owners = used_sections.setdefault(int(names_cite), [])
+                    if section.section_id not in owners:
+                        owners.append(section.section_id)
+                tables.append(names_report_table)
         for table, presentation in slots:
             converted = _performance_report_table(table, presentation)
             cite_number_text = citation_number(converted.cite)

@@ -1,9 +1,12 @@
-"""실측 공시 원문 → 3장 카드까지의 무과금 재현 — 결정적 이름 카드 편.
+"""실측 공시 원문 → 3장 표까지의 무과금 재현 — 결정적 이름 표 편.
 
 ★ 왜 필요했나 (2026-09-06) — 안내문이 「카드 하나는 «반드시» 그 이름들을
   담는다」로 강제했는데도 운영 실행 2회에서 작가 AI가 부문 카드 두 개만 냈다.
-  이제 composer가 이름 카드를 «결정적으로» 덧붙인다. 그 보강이 가공 픽스처가
-  아니라 «실제 공시 원문»에서도 이름을 뽑아 카드에 올리는지를 여기서 본다.
+  그래서 composer가 결정적 줄을 덧붙이게 했는데, 첫 설계는 그 줄을 «작가
+  카드»로 만들어 첫 이름을 제목 칸에 올렸다. 카드 제목 칸은 «종류»를 적는
+  자리라, 엔터사에서는 제목이 그룹 하나가 되고 제조사에서는 제품 하나가 됐다.
+  지금은 종류 라벨을 「구분」 열에 둔 «표»를 붙인다. 그 표가 가공 픽스처가
+  아니라 «실제 공시 원문»에서도 제대로 서는지를 여기서 본다.
 
 ★ AI·네트워크 0회. 원문 사본이 로컬에 없으면 그 시험만 건너뛴다.
 ★ 이름은 시험 코드에 «리터럴로 적지 않는다» — 원문에서 뽑은 값을 그대로
@@ -30,7 +33,12 @@ from src.features.composer.diagram_check import (
 )
 from src.features.composer.pipeline import run_v2
 from src.features.composer.port import filing_meta_from_raw, fragments_from_raw
-from src.features.composer.portfolio_name_card import NAME_CARD_REASON
+from src.features.composer.portfolio_name_table import (
+    NAME_TABLE_CAPTION_PREFIX,
+    NAME_TABLE_HEADERS,
+    NAME_TABLE_MAX_NAMES_PER_KIND,
+    NAME_TABLE_NAME_SEPARATOR,
+)
 from src.features.composer.portfolio_names import (
     MIN_REPRESENTATIVE_NAMES_FOR_CARD,
     representative_name_sources,
@@ -177,13 +185,29 @@ def _portfolio_rows(report) -> list[list[str]]:
     return [] if table is None else [list(row) for row in table.rows]
 
 
+def _name_table(report):
+    section = next(
+        section
+        for section in report.sections
+        if section.cell == PORTFOLIO_TABLE_SECTION_ID
+    )
+    return next(
+        (
+            table
+            for table in section.tables
+            if table.caption.startswith(NAME_TABLE_CAPTION_PREFIX)
+        ),
+        None,
+    )
+
+
 # ══════════════════════════════════════════════════════════
-# ① 작가가 이름을 안 쓰면 실측 이름으로 카드가 붙는다
+# ① 실측 원문의 이름이 «종류 라벨 행»으로 선다
 # ══════════════════════════════════════════════════════════
 
 
 @pytest.mark.parametrize("업종", sorted(_RECEIPTS))
-def test_실측_원문에서_작가가_이름을_안_쓰면_카드가_붙는다(
+def test_실측_원문에서_이름_표의_구분칸은_종류_라벨이다(
     업종: str, 스위치_켬
 ) -> None:
     receipt = _RECEIPTS[업종]
@@ -192,41 +216,52 @@ def test_실측_원문에서_작가가_이름을_안_쓰면_카드가_붙는다(
     frags = _frags_from_real_filing(receipt)
     expected = representative_name_sources(fragments_from_raw(frags))
     assert len(expected) >= MIN_REPRESENTATIVE_NAMES_FOR_CARD
+    실측라벨 = [source.label for source in expected]
+    실측이름 = {source.name for source in expected}
     writer = _Writer()
 
     output = _run(frags, writer)
 
     assert writer.portfolio_prompts, "3장 프롬프트가 한 번도 안 왔다"
-    assert output.portfolio_name_card_count > 0, (
-        f"이름 카드가 안 붙었습니다 — 사유: "
-        f"{output.portfolio_name_card_blocked_reason!r}"
+    assert output.portfolio_name_table_name_count > 0, (
+        f"이름 표가 안 붙었습니다 — 사유: "
+        f"{output.portfolio_name_table_blocked_reason!r}"
     )
-    assert output.unused_portfolio_name_count == 0
-    rows = _portfolio_rows(output.report)
-    assert len(rows) == 2, rows
-    card = rows[-1]
-    # 제목 = 실측 원문에서 뽑은 첫 이름 그대로.
-    assert card[0] == expected[0].name
-    assert card[2] == NAME_CARD_REASON
-    # 범위 칸의 이름은 전부 실측 원문에서 온 것이다.
-    listed = [name for name in re.split(r"[·/]| : ", card[1]) if name.strip()]
-    실측이름 = {source.name for source in expected}
-    assert all(
-        name.strip() in 실측이름 or name.strip().endswith(":") for name in listed
-    ), card[1]
+    table = _name_table(output.report)
+    assert table is not None
+    assert table.headers == list(NAME_TABLE_HEADERS)
+    # 작가 카드 표는 그대로 남고, 이름 표가 그 뒤에 따로 선다.
+    assert len(_portfolio_rows(output.report)) == 1
+
+    for 구분, 이름칸 in table.rows:
+        # ★ 이 단언이 이번 수정의 핵심이다 — 「구분」 칸은 실측 원문의 종류
+        #   라벨이지 그 종류의 «보기» 하나가 아니다. 앞선 설계에서는 여기에
+        #   첫 이름이 올라갔다.
+        assert 구분 in 실측라벨, (구분, sorted(set(실측라벨)))
+        assert 구분 not in 실측이름, 구분
+        보인이름 = 이름칸.split(" 외 ")[0].split(NAME_TABLE_NAME_SEPARATOR)
+        assert len(보인이름) <= NAME_TABLE_MAX_NAMES_PER_KIND
+        # 실린 이름은 전부 실측 원문에서 온 것이다(지어낸 글자가 없다).
+        assert all(name in 실측이름 for name in 보인이름), 이름칸
     # 부록에 실린 번호는 본문 어디선가 인용된 번호와 1:1이다(validate_v2 계약).
     assert output.report.citations
 
 
 # ══════════════════════════════════════════════════════════
-# ② 작가가 이미 이름을 쓰면 아무것도 안 붙는다
+# ② 작가가 이미 이름을 써도 표는 그대로 선다
 # ══════════════════════════════════════════════════════════
 
 
 @pytest.mark.parametrize("업종", sorted(_RECEIPTS))
-def test_실측_원문에서_작가가_이름을_쓰면_카드가_안_붙는다(
+def test_실측_원문에서_작가가_이름을_써도_표는_남는다(
     업종: str, 스위치_켬
 ) -> None:
+    """예측 가능성 — 같은 회사를 두 번 돌렸을 때 화면이 달라지면 안 된다.
+
+    ★ 앞선 설계는 「작가가 안 썼을 때만」 붙였다. 그래서 작가의 그날 기분에
+      따라 3장에 이름이 있기도 없기도 했다. 그 조건을 없앤 것을 여기서 잠근다.
+    """
+
     receipt = _RECEIPTS[업종]
     if _local_filing(receipt) is None:
         pytest.skip("로컬 공시 원문 사본이 없는 환경입니다")
@@ -239,11 +274,14 @@ def test_실측_원문에서_작가가_이름을_쓰면_카드가_안_붙는다(
     output = _run(frags, writer)
 
     assert writer.portfolio_prompts
-    assert output.portfolio_name_card_count == 0
-    # ★ 사유 칸은 «문제일 때만» 채운다. 작가가 이미 썼으면 문제가 아니므로
-    #   비어 있는 것이 맞다 — 미사용 표식도 함께 꺼져 있어야 짝이 맞는다.
-    assert output.portfolio_name_card_blocked_reason == ""
+    # 작가가 썼으므로 미사용 표식은 꺼진다.
     assert output.unused_portfolio_name_count == 0
+    # 그래도 이름 표는 «그대로» 붙는다.
+    assert output.portfolio_name_table_name_count > 0, (
+        f"작가가 썼다고 표가 사라졌습니다 — 사유: "
+        f"{output.portfolio_name_table_blocked_reason!r}"
+    )
     rows = _portfolio_rows(output.report)
     assert len(rows) == 1, rows
     assert rows[0][0] == 사용할이름[0]
+    assert _name_table(output.report) is not None

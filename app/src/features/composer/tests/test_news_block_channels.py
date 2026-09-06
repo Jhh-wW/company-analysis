@@ -483,6 +483,143 @@ def test_결속_못하는_모드에서는_표를_안_붙이고_사유만_남긴�
     assert list(사유) == ["release_mode_cannot_bind_structures"], 사유
 
 
+# ══════════════════════════════════════════════════════════
+# ⑤-c 3장에 이름 표와 보도표가 «함께» 실린다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 필요한가 — 두 표는 서로 다른 사람이 서로 다른 시점에 만들었고, 3장은
+#   둘 다 붙을 수 있는 유일한 장이다. 각자 자기 시험만 있으면 「같은 장에
+#   둘이 함께 있을 때」의 순서·index를 아무도 안 지킨다. 순서가 renderer와
+#   봉인에서 어긋나면 그 회사 보고서가 통째로 막힌다.
+
+
+_NEWS_IN_PORTFOLIO = (
+    ("51", "2026-08-15", "가나다전자는 물류 제품군을 현장에 적용한다."),
+    ("52", "2026-07-01", "가나다전자는 상담 제품군을 함께 공급한다."),
+)
+
+
+def _packets_with_names_and_news():
+    """이름 조각(3장)과 뉴스 조각(3장)을 한 packet에 함께 넣는다."""
+
+    from src.features.composer.constants import PORTFOLIO_TABLE_SECTION_ID
+    from src.features.composer.tests.test_portfolio_name_table_channels import (
+        _full_packets_with_names,
+    )
+
+    base = _full_packets_with_names()
+    rebuilt = []
+    for packet in base.packets:
+        if packet.section_id != PORTFOLIO_TABLE_SECTION_ID:
+            rebuilt.append(packet)
+            continue
+        rebuilt.append(
+            replace(
+                packet,
+                fragments=packet.fragments
+                + tuple(
+                    _news_fragment(fragment_id, published_on, text)
+                    for fragment_id, published_on, text in _NEWS_IN_PORTFOLIO
+                ),
+            )
+        )
+    return replace(base, packets=tuple(rebuilt))
+
+
+@pytest.fixture(scope="module")
+def 이름표와_보도표_실행결과():
+    from src.features.composer.tests.test_section_public_manifest import _run_full
+
+    with pytest.MonkeyPatch.context() as mp:
+        news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+        mp.setenv(news_intake_switch.NEWS_INTAKE_ENV_NAME, "1")
+        output, _writer, _reviewer, _diagram = _run_full(
+            packets=_packets_with_names_and_news()
+        )
+    news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+    return output
+
+
+def test_3장에_이름_표와_보도표가_함께_실린다(이름표와_보도표_실행결과) -> None:
+    from src.features.composer.constants import PORTFOLIO_TABLE_SECTION_ID
+    from src.features.composer.portfolio_name_table import (
+        NAME_TABLE_CAPTION_PREFIX,
+        NAME_TABLE_HEADERS,
+    )
+
+    output = 이름표와_보도표_실행결과
+    # 두 기능이 «둘 다 실제로 돌았는가»부터 확인한다 — 하나가 0이면 이 시험은
+    # 나머지 하나의 시험을 한 번 더 도는 것일 뿐이다.
+    assert output.portfolio_name_table_name_count == 3, (
+        output.portfolio_name_table_blocked_reason
+    )
+    assert dict(output.news_block_row_counts_by_section) == {
+        PORTFOLIO_TABLE_SECTION_ID: len(_NEWS_IN_PORTFOLIO)
+    }
+
+    section = next(
+        section
+        for section in output.report.sections
+        if section.cell == PORTFOLIO_TABLE_SECTION_ID
+    )
+    캡션들 = [table.caption for table in section.tables]
+    assert len(section.tables) == 2, 캡션들
+    # 순서: 이름 표(회사 공식 자료) → 보도표(보조). 작가 카드가 있으면 그
+    # 카드가 맨 앞에 오고 이 둘의 앞뒤 순서는 그대로다.
+    assert section.tables[0].headers == list(NAME_TABLE_HEADERS)
+    assert 캡션들[0].startswith(NAME_TABLE_CAPTION_PREFIX)
+    assert section.tables[1].headers == list(NEWS_BLOCK_HEADERS)
+    assert 캡션들[1] == news_block_caption(len(_NEWS_IN_PORTFOLIO))
+
+
+def test_두_표가_같은_장에_있어도_봉인이_통과한다(이름표와_보도표_실행결과) -> None:
+    """표 index가 renderer와 봉인에서 어긋나면 보고서가 통째로 막힌다."""
+
+    from src.features.composer.constants import PORTFOLIO_TABLE_SECTION_ID
+    from src.features.composer.public_manifest import assert_stored_strict_manifest
+    from src.features.storage.reports import report_from_json, report_to_json
+
+    report = 이름표와_보도표_실행결과.report
+    assert report.public_structure_manifest
+    section = next(
+        section
+        for section in report.sections
+        if section.cell == PORTFOLIO_TABLE_SECTION_ID
+    )
+    # 두 표 모두 자기 manifest 항목을 가리켜야 한다(비면 재로드가 막힌다).
+    assert all(table.manifest_ref for table in section.tables)
+    assert_stored_strict_manifest(report_from_json(report_to_json(report)))
+
+
+def test_두_표의_인용이_모두_부록에_있다(이름표와_보도표_실행결과) -> None:
+    from src.features.composer.constants import PORTFOLIO_TABLE_SECTION_ID
+
+    report = 이름표와_보도표_실행결과.report
+    section = next(
+        section
+        for section in report.sections
+        if section.cell == PORTFOLIO_TABLE_SECTION_ID
+    )
+    부록 = {source.number for source in report.citations}
+    for table in section.tables:
+        번호 = {
+            int(value)
+            for value in re.findall(r"\[(\d+)\]", " ".join(table.source_cites))
+        }
+        assert 번호, table.caption
+        assert 번호 <= 부록, (table.caption, sorted(번호))
+    # 보도표 쪽 번호가 이름 표 쪽과 섞이지 않았는지도 본다.
+    보도표_번호 = {
+        int(value)
+        for value in re.findall(
+            r"\[(\d+)\]", " ".join(section.tables[1].source_cites)
+        )
+    }
+    assert 보도표_번호 == {
+        int(fragment_id) for fragment_id, _date, _text in _NEWS_IN_PORTFOLIO
+    }
+
+
 class _ThinThenFullWriter:
     """1장만 첫 회차에 얇게 쓰고, 승인받은 재호출에서 채우는 가짜 작가.
 

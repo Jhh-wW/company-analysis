@@ -212,15 +212,14 @@ RUN_SUMMARY_STEP_NAMES: Final[tuple[str, ...]] = (
     "6_수집_공식근거생성입력",
     "7_이름후보",
     "3장_대표이름_미사용",
-    "3장_대표이름_카드_보강",
+    "3장_대표이름_표",
+    "3장_대표이름_표_불가",
     "v2_composer_완료",
 )
 
 #: 아직 생산 코드에 없는 단계 이름. 붙는 즉시 요약에 실리도록 미리 넣어 두고,
 #: 「이 이름이 실제로 만들어지는가」 시험에서만 뺀다.
-RUN_SUMMARY_PLANNED_STEP_NAMES: Final[frozenset[str]] = frozenset(
-    {"3장_대표이름_카드_보강"}
-)
+RUN_SUMMARY_PLANNED_STEP_NAMES: Final[frozenset[str]] = frozenset()
 
 #: 「부분 보고서로 내려갔다」를 뜻하는 단계. 요약의 등급 칸이 이걸 본다.
 RUN_SUMMARY_PARTIAL_STEP: Final[str] = "6_수집_DART부분보고서전환"
