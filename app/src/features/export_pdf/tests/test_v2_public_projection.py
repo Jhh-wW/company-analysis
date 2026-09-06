@@ -533,8 +533,11 @@ def test_v2_PDF_텍스트는_display_paragraphs와_글자_단위로_같다():
 #:   안 되는 사실»이므로 시험이 직접 들고 있어야 한다.
 #: PDF bytes는 결정적이다 — ``/CreationDate``가 고정 토큰이고 trailer ID도
 #: 내용 기반이라 프로세스·실행이 달라도 같은 bytes가 나온다(실측).
-_V1_DEMO_PDF_SHA256 = "17fbaf1f06025df9ff66d86cebf21b34e3046369c48511845c8ed94c2e05bc8a"
-_V1_DEMO_PDF_LENGTH = 93330
+#: ★ D-4(2026-09-06)에서 갱신했다 — 4장 실적 그래프의 음수 값 라벨을 0선 위로
+#:   올리고 막대를 무채색으로 바꾼 «그리기» 변경이다. 인쇄된 낱말이 하나도
+#:   바뀌지 않았음은 ``test_design_contract`` 의 낱말 지문이 따로 지킨다.
+_V1_DEMO_PDF_SHA256 = "2463521ff3625398970a44507b4d6b5847993c04b2436e47b3eab0904450149a"
+_V1_DEMO_PDF_LENGTH = 93291
 
 
 def test_v1_PDF는_바이트_불변이다():

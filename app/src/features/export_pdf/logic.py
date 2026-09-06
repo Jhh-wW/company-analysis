@@ -57,6 +57,7 @@ from reportlab.platypus import (
 from src.core import clock
 from src.core.citations import citation_marker
 from src.core.constants import section_display_heading
+from src.features.composer.constants import FLOW_UNCONFIRMED_CELL
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.composer.validate import validate_v2
 from src.features.export_pdf import constants
@@ -545,6 +546,14 @@ class _CompositionGraphic(Flowable):
             paragraph.drawOn(canvas, (column * column_width) + 11, row_bottom)
 
 
+#: 막대 위(또는 0선 위)에 찍는 값 라벨의 크기(pt)와 막대에서 띄우는 거리(pt).
+_TREND_VALUE_FONT_SIZE_PT: Final[float] = 7.5
+_TREND_VALUE_GAP_PT: Final[float] = 3.0
+#: 0선 «아래»로 내려 긋는 막대의 값 라벨을 0선에서 띄우는 거리(pt).
+#: 막대 끝 아래에 두면 칸 바닥의 축 연도 라벨과 겹친다 — 그래서 0선 위에 둔다.
+_TREND_NEGATIVE_LABEL_GAP_PT: Final[float] = 3.0
+
+
 class _TrendGraphic(Flowable):
     """계열별 독립 0축을 쓰는 3~6시점 막대 그래프."""
 
@@ -616,9 +625,14 @@ class _TrendGraphic(Flowable):
                 # 옛 경로(risk)도 같은 뜻이라 함께 본다.
                 draws_down = point.below or series.risk
                 bar_y = axis_y - bar_height if draws_down else axis_y
+                # ★ 아래로 내려 긋는 막대도 «무채색»이다. 디자인 토큰 v1은
+                #   컬러를 쓰지 않는다 — 빨강 막대 하나 때문에 무채색 보고서에
+                #   강조색이 생겼다(하이브 4장 당기순이익 실측). 적자라는
+                #   사실은 「-2,544」라는 값 라벨과 0선 아래라는 «자리»가
+                #   말해 준다. 가장 진한 회색을 써서 눈에는 제일 띄게 남긴다.
                 canvas.setFillColor(
                     colors.HexColor(
-                        constants.COLOR_RISK
+                        constants.COLOR_CHART_DARK
                         if draws_down
                         else _composition_color(
                             constants.CHART_PALETTE,
@@ -635,8 +649,17 @@ class _TrendGraphic(Flowable):
                     fill=1,
                     stroke=0,
                 )
-                canvas.setFont(constants.FONT_SEMIBOLD, 7.5)
-                value_y = bar_y - 9 if draws_down else bar_y + bar_height + 3
+                canvas.setFont(constants.FONT_SEMIBOLD, _TREND_VALUE_FONT_SIZE_PT)
+                # ★ 음수 값 라벨은 «0선 바로 위»에 둔다. 예전에는 막대 «끝»
+                #   아래(bar_y - 9)에 뒀는데, 막대가 칸 높이를 다 쓰면 그
+                #   자리가 축 연도 라벨과 겹쳐 「-2,544」와 「2025」가 포개졌다
+                #   (하이브 5쪽 실측). 0선 위는 음수 점에서 «항상» 비어 있고
+                #   축 라벨과 0선 사이 거리만큼 여유가 보장된다.
+                value_y = (
+                    axis_y + _TREND_NEGATIVE_LABEL_GAP_PT
+                    if draws_down
+                    else bar_y + bar_height + _TREND_VALUE_GAP_PT
+                )
                 canvas.setFillColor(colors.HexColor(constants.COLOR_INK))
                 _draw_text_with_fallback(
                     canvas,
@@ -644,7 +667,7 @@ class _TrendGraphic(Flowable):
                     value_y,
                     point.display,
                     font_name=constants.FONT_SEMIBOLD,
-                    font_size=7.5,
+                    font_size=_TREND_VALUE_FONT_SIZE_PT,
                     alignment="center",
                 )
                 canvas.setFillColor(colors.HexColor(constants.COLOR_WEAK))
@@ -672,6 +695,14 @@ _FLOW_CHEVRON_MAX_STEPS: Final[int] = 5
 _FLOW_CHEVRON_BODY_HEIGHT_MM: Final[float] = 14.0
 _FLOW_CHEVRON_GAP_PT: Final[float] = 2.0
 _FLOW_CHEVRON_TIP_PT: Final[float] = 10.0
+#: 머리글과 쉐브론 몸통 사이 간격(pt).
+_FLOW_CHEVRON_HEADER_GAP_PT: Final[float] = 3.0
+#: 회사가 밝히지 않아 「미확인」으로 채워진 칸의 글자 크기(pt)와 점선 테두리.
+#: 짙게 채우면 «가장 모르는 칸»이 도표에서 제일 눈에 띈다(인이지 2장 실측).
+_FLOW_UNCONFIRMED_FONT_SIZE_PT: Final[float] = 8.0
+_FLOW_UNCONFIRMED_LEADING_PT: Final[float] = 10.2
+_FLOW_UNCONFIRMED_DASH_PT: Final[tuple[float, float]] = (2.0, 2.0)
+_FLOW_UNCONFIRMED_BORDER_WIDTH_PT: Final[float] = 0.5
 
 # 관계도는 2~5행을 세로로 놓는다. 32mm 원과 4mm 간격이면 다섯 쌍도 A4
 # 본문 높이 안에 들어가며, 8.5pt 두 줄을 억지로 줄이지 않아도 된다.
@@ -813,11 +844,33 @@ class _FlowGraphic(Flowable):
             textColor=colors.white,
             wordWrap="CJK",
         )
+        self._unconfirmed_style = ParagraphStyle(
+            "FlowChevronUnconfirmed",
+            fontName=constants.FONT_REGULAR,
+            fontSize=_FLOW_UNCONFIRMED_FONT_SIZE_PT,
+            leading=_FLOW_UNCONFIRMED_LEADING_PT,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor(constants.COLOR_WEAK),
+            wordWrap="CJK",
+        )
         self._chevron_rows = [self._uses_chevrons(flow) for flow in visual.flows]
+        # ★ 열 이름은 «첫 쉐브론 줄 위에만» 한 번 찍는다. 줄마다 다시 찍으면
+        #   「핵심 자산 / 제품·서비스 / …」가 두세 번 반복돼 도표가 표처럼
+        #   무거워진다(인이지 3쪽·하이브 3쪽 실측). 상자 줄은 라벨이 «칸 안»에
+        #   붙는 다른 부품이라 이 규칙을 받지 않는다 — 칸마다 라벨이 없으면
+        #   무슨 값인지 알 수 없기 때문이다.
+        first_chevron = next(
+            (index for index, uses in enumerate(self._chevron_rows) if uses),
+            None,
+        )
+        self._header_rows = [
+            uses and index == first_chevron
+            for index, uses in enumerate(self._chevron_rows)
+        ]
         self._row_heights = [
-            self._measure_row_height(flow, chevrons=uses_chevrons)
-            for flow, uses_chevrons in zip(
-                visual.flows, self._chevron_rows, strict=True
+            self._measure_row_height(flow, chevrons=uses_chevrons, header=header)
+            for flow, uses_chevrons, header in zip(
+                visual.flows, self._chevron_rows, self._header_rows, strict=True
             )
         ]
         self.height = sum(self._row_heights) + (
@@ -849,9 +902,13 @@ class _FlowGraphic(Flowable):
         return True
 
     def _measure_row_height(
-        self, flow: Sequence[str], *, chevrons: bool
+        self, flow: Sequence[str], *, chevrons: bool, header: bool = True
     ) -> float:
         if chevrons:
+            if not header:
+                # 머리글을 안 찍는 줄은 몸통 높이만 쓴다 — 안 그리는 글자
+                # 자리를 남겨 두면 쉐브론 사이에 빈 띠가 생긴다.
+                return _FLOW_CHEVRON_BODY_HEIGHT_MM * mm
             header_width = max(8.0, self._chevron_width(flow) - 8)
             header_height = max(
                 (
@@ -862,7 +919,11 @@ class _FlowGraphic(Flowable):
                 ),
                 default=self._header_style.leading,
             )
-            return header_height + 3 + (_FLOW_CHEVRON_BODY_HEIGHT_MM * mm)
+            return (
+                header_height
+                + _FLOW_CHEVRON_HEADER_GAP_PT
+                + (_FLOW_CHEVRON_BODY_HEIGHT_MM * mm)
+            )
         box_width = self._box_width(flow)
         tallest = _FLOW_MIN_ROW_HEIGHT_MM * mm
         for column, value in enumerate(flow):
@@ -912,7 +973,13 @@ class _FlowGraphic(Flowable):
                 canvas.line(end, arrow_y, end - 4, arrow_y - 3)
 
     def _draw_chevron_row(
-        self, canvas: Canvas, flow: Sequence[str], y: float, row_height: float
+        self,
+        canvas: Canvas,
+        flow: Sequence[str],
+        y: float,
+        row_height: float,
+        *,
+        header_row: bool,
     ) -> None:
         chevron_height = _FLOW_CHEVRON_BODY_HEIGHT_MM * mm
         box_width = self._chevron_width(flow)
@@ -934,19 +1001,40 @@ class _FlowGraphic(Flowable):
             for point in points[1:]:
                 path.lineTo(*point)
             path.close()
-            canvas.setFillColor(
-                colors.HexColor(
-                    _composition_color(constants.CHART_PALETTE, column, len(flow))
+            # ★ 「미확인」 칸은 «비어 있다는 사실»이지 단계가 아니다. 짙게
+            #   채우면 회색 5단계의 마지막 칸으로 보여, 모르는 것이 도표에서
+            #   제일 진하게 나온다(인이지 3쪽 실측). 옅은 점선 테두리로
+            #   그려 «빈 칸»임이 모양에서 먼저 읽히게 한다. 글자는 그대로다.
+            unconfirmed = value.strip() == FLOW_UNCONFIRMED_CELL
+            if unconfirmed:
+                canvas.saveState()
+                canvas.setStrokeColor(colors.HexColor(constants.COLOR_LINE))
+                canvas.setLineWidth(_FLOW_UNCONFIRMED_BORDER_WIDTH_PT)
+                canvas.setDash(*_FLOW_UNCONFIRMED_DASH_PT)
+                canvas.drawPath(path, fill=0, stroke=1)
+                canvas.restoreState()
+            else:
+                canvas.setFillColor(
+                    colors.HexColor(
+                        _composition_color(constants.CHART_PALETTE, column, len(flow))
+                    )
                 )
-            )
-            canvas.drawPath(path, fill=1, stroke=0)
+                canvas.drawPath(path, fill=1, stroke=0)
 
-            header = Paragraph(_escape(self.headers[column]), self._header_style)
-            _, header_height = header.wrap(box_width - 8, row_height - chevron_height)
-            header.drawOn(canvas, x + 4, body_y + chevron_height + 3)
+            if header_row:
+                header = Paragraph(_escape(self.headers[column]), self._header_style)
+                header.wrap(box_width - 8, row_height - chevron_height)
+                header.drawOn(
+                    canvas,
+                    x + 4,
+                    body_y + chevron_height + _FLOW_CHEVRON_HEADER_GAP_PT,
+                )
 
             text_width = max(8.0, box_width - (tip * 1.6))
-            body = Paragraph(_escape(value), self._chevron_value_style)
+            body = Paragraph(
+                _escape(value),
+                self._unconfirmed_style if unconfirmed else self._chevron_value_style,
+            )
             _, text_height = body.wrap(text_width, chevron_height)
             text_x = x + ((box_width - text_width) / 2)
             text_y = body_y + ((chevron_height - text_height) / 2)
@@ -958,7 +1046,13 @@ class _FlowGraphic(Flowable):
             row_height = self._row_heights[row_index]
             y = self.height - sum(self._row_heights[: row_index + 1]) - (row_index * self.row_gap)
             if self._chevron_rows[row_index]:
-                self._draw_chevron_row(canvas, flow, y, row_height)
+                self._draw_chevron_row(
+                    canvas,
+                    flow,
+                    y,
+                    row_height,
+                    header_row=self._header_rows[row_index],
+                )
             else:
                 self._draw_box_row(canvas, flow, y, row_height)
 
@@ -1779,16 +1873,23 @@ def _add_flow_card_visualization(
       (제목·구분선 있는 라벨·값 행)을 여기서도 그대로 따른다.
     """
     caption = _cited_text(table.caption, table.cite)
-    flowables: list[Flowable] = [
+    head: list[Flowable] = [
         Paragraph(_escape(caption), styles["small_bold"]),
         Spacer(1, 3),
     ]
-    story.append(KeepTogether(flowables))
+    # ★ 캡션은 «첫 카드와 한 묶음»이다. 예전엔 캡션만 따로 묶어 내보내서,
+    #   쪽 끝에 캡션 한 줄만 남고 카드는 통째로 다음 쪽으로 넘어갔다
+    #   (하이브 3쪽 실측 — 제목만 있고 내용이 없는 쪽이 만들어진다).
     for card in visual.cards:
         card_table = _flow_card_table(card, styles, width)
         if card_table is None:
             continue
-        story.append(KeepTogether([card_table, Spacer(1, 8)]))
+        story.append(KeepTogether([*head, card_table, Spacer(1, 8)]))
+        head = []
+    if head:
+        # 그릴 카드가 하나도 없으면 캡션만이라도 남긴다 — 출처 번호가 붙은
+        # 줄이라 조용히 지우면 본문 번호와 부록의 1:1이 깨진다.
+        story.append(KeepTogether(head))
     story.append(Spacer(1, 4))
 
 
@@ -2056,6 +2157,40 @@ def _numbered_paragraph(
     return table
 
 
+def _keep_together_items(group: KeepTogether) -> list[Flowable]:
+    """``KeepTogether`` 안의 flowable 목록을 꺼낸다 (ReportLab 5.x ``_content``).
+
+    ReportLab이 이름을 바꾸면 조용히 빈 목록이 되지 않도록, 시험이 이 함수의
+    반환값을 직접 확인한다(``tests/test_d4_design_defects.py``).
+    """
+
+    return list(getattr(group, "_content", None) or ())
+
+
+def _lead_with_heading(
+    heading: Sequence[Flowable], content: Sequence[Flowable]
+) -> list[Flowable]:
+    """장 제목을 «첫 내용 묶음 안»에 넣어 ``KeepTogether`` 중첩을 없앤다.
+
+    ★ 왜 필요한가 — ReportLab의 ``KeepTogether.wrap()``은 split을 강제하려고
+      «항상» 높이 ``0xffffff``(약 3,355만 pt)를 돌려준다. 그래서 묶음 안에
+      묶음을 넣으면 바깥 묶음의 측정 높이가 그 값이 되어, 남은 자리가 아무리
+      넓어도 «늘» 다음 쪽으로 넘어간다. 카드나 도식으로 시작하는 장(3장 등)이
+      항상 새 쪽에서 시작해 앞 쪽 3/4가 비던 원인이다(인이지 3쪽 실측).
+    ★ 안쪽 묶음이 없으면 예전과 «똑같이» 한 묶음으로 돌려준다 — 이미 평평한
+      갈래(장별 카드 블록)의 모양을 바꾸지 않으려는 것이다.
+    """
+
+    items = list(content)
+    if not items or not isinstance(items[0], KeepTogether):
+        return [KeepTogether([*heading, *items])]
+    first, *rest = items
+    return [
+        KeepTogether([*heading, *_keep_together_items(cast(KeepTogether, first))]),
+        *rest,
+    ]
+
+
 def _add_section(
     story: list[Flowable],
     report: Report,
@@ -2099,7 +2234,7 @@ def _add_section(
             width,
             wrap_card=False,
         )
-        story.append(KeepTogether([*heading_flowables, *first_content]))
+        story.extend(_lead_with_heading(heading_flowables, first_content))
         for block in detail_blocks[1:]:
             _add_section_content_block(story, block, styles, width)
     elif section.prose_paragraphs:
@@ -2122,7 +2257,7 @@ def _add_section(
     elif section.tables:
         first_content = []
         _add_report_table(first_content, section.tables[0], styles, width)
-        story.append(KeepTogether([*heading_flowables, *first_content]))
+        story.extend(_lead_with_heading(heading_flowables, first_content))
     else:
         story.extend(heading_flowables)
 
@@ -2423,7 +2558,7 @@ def _add_projection_section(
                 first_content, display.tables[0], visuals_by_index.get(0), styles, width
             )
             table_start = 1
-        story.append(KeepTogether([*heading_flowables, *first_content]))
+        story.extend(_lead_with_heading(heading_flowables, first_content))
 
     for index in range(table_start, len(display.tables)):
         _add_projection_table(
