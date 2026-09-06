@@ -403,6 +403,59 @@ def test_분량을_늘리라면서_해석_천장도_같이_준다():
     )
 
 
+def test_조각_라벨은_운반_지문_대신_닫힌_출처_종류를_쓴다():
+    """typed 조각의 ``kind``는 운반 지문이라 작가에게 아무 뜻이 없다.
+
+    ★ 왜 필요한가 — 부분 보고서 경로가 typed 조각을 그대로 받게 되면서, 라벨이
+      ``news``·``dart_filing`` 같은 «닫힌 종류»에서 ``typed-evidence-v3:<hex>``
+      지문으로 바뀔 수 있다. 지문은 작가에게 정보가 아니라 잡음이라 프롬프트가
+      실행마다 흔들린다. 닫힌 종류가 있으면 그것을 먼저 쓴다.
+    """
+
+    typed = CollectedFragment(
+        fragment_id="1",
+        kind="typed-evidence-v3:" + "0" * 64,
+        text="가나다전자는 물류 자동화 제품군을 넓히고 있다.",
+        formal_source_kind="news",
+    )
+
+    prompt = build_section_prompt("가나다전자", "past_changes", (typed,), None)
+    line = next(line for line in prompt.splitlines() if "[조각 1]" in line)
+
+    assert "(news)" in line, line
+    assert "typed-evidence-v3" not in prompt
+
+
+def test_닫힌_종류가_없는_조각은_예전처럼_kind를_라벨로_쓴다():
+    """raw dict 경로의 조각은 ``kind``가 곧 「종류」다 — 글자가 안 바뀐다."""
+
+    legacy = CollectedFragment(
+        fragment_id="1",
+        kind="회사 공식 자료",
+        text="가나다전자는 공식 자료에서 사업 구조를 밝혔다.",
+    )
+
+    prompt = build_section_prompt("가나다전자", "past_changes", (legacy,), None)
+    line = next(line for line in prompt.splitlines() if "[조각 1]" in line)
+
+    assert "(회사 공식 자료)" in line, line
+
+
+def test_종류를_하나도_모르는_조각은_자료로_적는다():
+    """라벨 자리를 비우면 괄호가 빈 채로 나가 프롬프트 모양이 깨진다."""
+
+    unknown = CollectedFragment(
+        fragment_id="1",
+        kind="",
+        text="가나다전자는 물류 자동화 제품군을 넓히고 있다.",
+    )
+
+    prompt = build_section_prompt("가나다전자", "past_changes", (unknown,), None)
+    line = next(line for line in prompt.splitlines() if "[조각 1]" in line)
+
+    assert "(자료)" in line, line
+
+
 def test_프롬프트에_회사명과_조각_전체와_실적표가_실린다():
     fragments = fragments_from_raw(_raw_fragments())
 

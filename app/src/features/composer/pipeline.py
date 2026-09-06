@@ -76,6 +76,7 @@ from src.features.composer.extractive_summary import select_extractive_summary
 from src.features.composer.news_block import (
     NewsBlockResult,
     augment_news_blocks,
+    news_ownership_from_claim_slots,
 )
 from src.features.composer.portfolio_name_table import (
     BLOCKED_LABEL_NOT_IN_LOCATION,
@@ -699,13 +700,21 @@ def _augment_news_blocks(
       수 있고, 이 단계에 오는 조각은 flat union이라 어느 장 것인지 조각만 봐서는
       알 수 없다. 소유 밖 조각을 인용하는 행을 만들면 바로 다음 evidence
       invariant가 보고서 «전체»를 막는다. 만들고 나서 걸리는 대신 애초에
-      안 만든다. packet 계약이 없는 옛 경로에서는 표를 만들지 않는다.
+      안 만든다.
+
+    ★ packet이 없는 실행은 «부분 보고서» 경로다 — 사전검사가 자료 부족을 보고
+      갈래를 내리면 packet을 만들지 않는다. 그 경로에서 표를 통째로 포기하면
+      언론 보도가 가장 필요한 실행에서만 보도표가 사라진다(운영 실측:
+      ``뉴스_보도표_불가 {"no_section_ownership": 6}``). 그래서 packet이 없을
+      때는 조각이 스스로 봉인해 온 의미 칸에서 소유권을 되찾는다
+      (`news_ownership_from_claim_slots`). 소유권은 여전히 fail-closed다 —
+      의미 칸이 없는 조각은 어느 장에도 속하지 않는다.
 
     Args:
         report: 도식 검증·이름 카드까지 끝난 본문.
         fragments: 검증용 조각(대개 flat union).
-        prepared_evidence: 장별 packet 준비값. ``None``이면 장별 소유권을
-            확인할 방법이 없어 아무 표도 만들지 않는다.
+        prepared_evidence: 장별 packet 준비값. ``None``이면 부분 보고서
+            경로이므로 조각의 의미 칸에서 소유권 표를 만든다.
         enabled: 이 실행이 공개 표를 «결속할 수 있는» 경로인가
             (`augment_news_blocks`의 같은 이름 인자 설명 참고).
 
@@ -713,14 +722,16 @@ def _augment_news_blocks(
         보강 결과. 못 붙였으면 ``report``는 입력 그대로다.
     """
 
-    allowed_by_section = None
+    normalized = _normalize_fragments(fragments)
     if prepared_evidence is not None:
         allowed_by_section = getattr(
             prepared_evidence, "allowed_fragment_ids_by_section", None
         )
+    else:
+        allowed_by_section = news_ownership_from_claim_slots(normalized)
     result = augment_news_blocks(
         report,
-        _normalize_fragments(fragments),
+        normalized,
         allowed_fragment_ids_by_section=allowed_by_section,
         enabled=enabled,
     )

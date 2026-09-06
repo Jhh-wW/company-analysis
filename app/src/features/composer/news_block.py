@@ -31,6 +31,7 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from typing import Final, Mapping, Optional, Sequence
 
+from src.features.composer.constants import SECTION_IDS
 from src.features.composer.port import (
     ComposedReport,
     ComposedSection,
@@ -45,6 +46,23 @@ from src.shared.report_evidence.constants import (
     NEWS_EXCLUDED_SECTION_IDS,
     SOURCE_KIND_NEWS,
 )
+
+# ★ 「어느 의미 칸이 어느 장의 것인가」의 정본도 shared 하나뿐이다
+#   (`report_claim_policy`). 여기서 목록을 베껴 적으면 정책이 칸을 하나
+#   옮길 때 이쪽만 옛 장에 붙인다.
+from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+
+
+#: 의미 칸(claim slot) → 그 칸이 속한 장. 정본 표(장 → 칸들)를 뒤집은 것이다.
+#:
+#: ★ 칸 이름은 ``<장>:<칸>`` 모양이라 문자열을 잘라도 장이 나오지만, 자르지
+#:   않는다 — 이름 규칙이 바뀌면 조용히 틀린 장에 붙는다. 정본 표에서 뒤집으면
+#:   정책이 칸을 옮길 때 이 표도 같이 옮겨진다.
+_SECTION_OF_SLOT: Final[dict[str, str]] = {
+    slot_id: section_id
+    for section_id, slot_ids in CLAIM_SLOTS_BY_SECTION.items()
+    for slot_id in slot_ids
+}
 
 
 # ── 표 모양 ──────────────────────────────────────────────────────────
@@ -123,6 +141,50 @@ def _is_news_fragment(fragment: CollectedFragment) -> bool:
         str(getattr(fragment, "kind", "") or "").strip(),
     }
     return SOURCE_KIND_NEWS in declared
+
+
+def news_ownership_from_claim_slots(
+    fragments: Sequence[CollectedFragment],
+) -> dict[str, frozenset[str]]:
+    """뉴스 조각이 «스스로 봉인해 온» 의미 칸에서 장 소유권을 되찾는다.
+
+    ★ 왜 필요한가 — 장별 근거 packet은 FULL에서만 만들어진다. 자료가 모자라
+      부분 보고서로 내려가면 packet이 ``None``이라 소유권 표가 없고,
+      `augment_news_blocks`는 «모르면 안 싣는다»는 원칙대로 뉴스 조각을 전부
+      뺀다(사유 ``no_section_ownership``). 그런데 packet이 없는 그 경로가 바로
+      «부분 보고서» — 회사 공식 자료가 모자란 실행이고, 언론 보도가 가장
+      필요한 실행이다. 정작 필요한 자리에서만 표가 사라진다.
+
+    ★ 왜 이렇게 되찾아도 되는가 — typed 근거 운반 계약의 불변식이
+      「조각이 실리는 장의 집합 == 그 조각 ``supported_claim_slots``가 속한 장의
+      집합」이다. 즉 packet이 하던 일을 조각이 이미 스스로 들고 다닌다.
+      packet이 있으면 여전히 packet 표가 정본이고(FULL 동작 불변), 없을 때만
+      이 표를 쓴다.
+
+    Args:
+        fragments: 이 실행의 조각 전체(공식 조각이 섞여 있어도 된다).
+
+    Returns:
+        장 id → 그 장에서 인용해도 되는 뉴스 조각 id 집합. ``SECTION_IDS``의
+        모든 장이 키로 있으므로 ``.get(section_id)``가 ``None``을 돌려주지
+        않는다 — 소유를 «모른다»와 «없다»가 뒤섞이지 않게 한다. 의미 칸을
+        하나도 안 들고 온 조각은 어느 장에도 넣지 않는다(fail-closed).
+    """
+
+    owned: dict[str, set[str]] = {section_id: set() for section_id in SECTION_IDS}
+    for fragment in fragments:
+        if not _is_news_fragment(fragment):
+            continue
+        fragment_id = str(getattr(fragment, "fragment_id", "") or "").strip()
+        if not fragment_id:
+            continue
+        for slot_id in tuple(getattr(fragment, "supported_claim_slots", ()) or ()):
+            # 모르는 칸 이름은 «무시»한다. 보조 표 하나 때문에 보고서 전체를
+            # 예외로 막지 않는다 — 그 칸이 가리키는 장을 모를 뿐이다.
+            section_id = _SECTION_OF_SLOT.get(str(slot_id).strip())
+            if section_id in owned:
+                owned[section_id].add(fragment_id)
+    return {section_id: frozenset(ids) for section_id, ids in owned.items()}
 
 
 def _row_problem(
@@ -243,9 +305,13 @@ def augment_news_blocks(
         report: 검증·도식까지 끝난 본문. 아직 렌더·봉인 전이어야 한다.
         fragments: 검증용 조각(대개 장별 packet의 flat union).
         allowed_fragment_ids_by_section: 장별로 인용해도 되는 조각 id.
+            packet이 있으면 packet 표가, 없으면
+            `news_ownership_from_claim_slots`가 만든 표가 온다.
             ``None``이면 어느 조각이 어느 장 소유인지 알 수 없으므로 표를
             «만들지 않는다». 소유를 모른 채 실으면 다른 장 소유의 조각을
             인용하는 행이 생겨 evidence invariant가 보고서 전체를 막는다.
+            (지금 호출자는 언제나 표를 만들어 넘기지만, 이 방어는 남겨 둔다 —
+            표를 못 만드는 호출자가 새로 생겨도 여기서 fail-closed 된다.)
         enabled: 이 실행이 공개 구조(표)를 «결속할 수 있는» 경로인가.
             거짓이면 표를 만들지 않고 사유만 센다. 결속하지 못하는 모드에서
             표를 붙이면 품질 계약이 「fact_id와 결속되지 않은 공개 내용」으로
@@ -397,4 +463,5 @@ __all__ = [
     "augment_news_blocks",
     "news_block_caption",
     "news_block_steps",
+    "news_ownership_from_claim_slots",
 ]

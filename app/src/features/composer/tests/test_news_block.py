@@ -24,12 +24,14 @@ from src.features.composer.news_block import (
     augment_news_blocks,
     news_block_caption,
     news_block_steps,
+    news_ownership_from_claim_slots,
 )
 from src.features.composer.port import (
     CollectedFragment,
     ComposedReport,
     ComposedSection,
 )
+from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 
 
 #: 가공 회사·매체 이름 — 실존 회사·언론사를 시험에 박지 않는다.
@@ -54,18 +56,22 @@ def _news(
     text: str = _SENTENCE,
     published_on: str = "2026-09-01",
     publisher: str = _PUBLISHER,
+    slots: tuple[str, ...] = (),
+    kind: str = "news",
+    formal_source_kind: str = "news",
 ) -> CollectedFragment:
     return CollectedFragment(
         fragment_id=fragment_id,
-        kind="news",
+        kind=kind,
         text=text,
         source_url="https://media.example/news/one",
         document_title="가나다전자 물류 자동화",
         location=f"기사 본문 · news-fragment-{fragment_id}",
         document_date=published_on,
-        formal_source_kind="news",
+        formal_source_kind=formal_source_kind,
         source_publisher=publisher,
         counts_toward_document_floor=False,
+        supported_claim_slots=slots,
     )
 
 
@@ -371,6 +377,124 @@ def test_소유_밖_조각을_행으로_만들면_자체_검사가_뺀다(
     )
 
     assert problem == BLOCKED_NOT_SECTION_OWNED
+
+
+# ══════════════════════════════════════════════════════════
+# ②-b packet이 없는 부분 보고서 경로 — 의미 칸에서 장을 되찾는다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 필요한가 — 장별 근거 packet은 FULL에서만 만들어진다. 사전검사가 자료
+#   부족을 보고 부분 보고서 갈래를 열면 packet이 없어, 소유권 표가 ``None``이
+#   되고 뉴스 조각이 전부 빠졌다(운영 실측 사유 ``no_section_ownership`` 6건).
+#   그 경로가 바로 언론 보도가 가장 필요한 실행이다. typed 조각은 자기가
+#   지지하는 의미 칸을 이미 들고 다니므로 거기서 장을 되찾는다.
+
+
+def test_두_장의_의미_칸을_가진_뉴스_조각은_두_장_모두에_속한다() -> None:
+    owned = news_ownership_from_claim_slots(
+        (
+            _news(
+                "40",
+                slots=(
+                    CLAIM_SLOTS_BY_SECTION["identity"][0],
+                    CLAIM_SLOTS_BY_SECTION["portfolio"][2],
+                ),
+            ),
+        )
+    )
+
+    assert owned["identity"] == frozenset({"40"})
+    assert owned["portfolio"] == frozenset({"40"})
+    assert owned["business_model"] == frozenset()
+
+
+def test_뉴스가_아닌_조각은_어느_장에도_안_들어간다() -> None:
+    """공식 조각까지 이 표에 넣으면 보도표가 회사 공식 문장을 싣는다."""
+
+    공식_조각 = CollectedFragment(
+        fragment_id="1",
+        kind="회사 공식 자료",
+        text="가나다전자는 공식 자료에서 사업 구조를 밝혔다.",
+        formal_source_kind="official_identity_verified_web_page",
+        supported_claim_slots=(CLAIM_SLOTS_BY_SECTION["identity"][0],),
+    )
+
+    owned = news_ownership_from_claim_slots((공식_조각,))
+
+    assert all(not ids for ids in owned.values())
+
+
+def test_모르는_의미_칸은_무시하고_예외를_던지지_않는다() -> None:
+    """보조 표 하나 때문에 보고서 «전체»를 예외로 막지 않는다."""
+
+    owned = news_ownership_from_claim_slots(
+        (
+            _news(
+                "40",
+                slots=("없는장:없는칸", CLAIM_SLOTS_BY_SECTION["culture"][1]),
+            ),
+        )
+    )
+
+    assert owned["culture"] == frozenset({"40"})
+    assert sum(len(ids) for ids in owned.values()) == 1
+
+
+def test_의미_칸이_없는_뉴스_조각은_어느_장에도_안_들어간다() -> None:
+    """fail-closed — 모르면 싣지 않는다. 종류 이름으로 장을 추측하지 않는다."""
+
+    owned = news_ownership_from_claim_slots((_news("40"),))
+
+    assert all(not ids for ids in owned.values())
+
+
+def test_모든_장이_열쇠로_있어_소유_없음과_모름이_섞이지_않는다() -> None:
+    """``.get(장)``이 ``None``을 돌려주면 「모름」으로 읽혀 검사가 헐거워진다."""
+
+    owned = news_ownership_from_claim_slots((_news("40"),))
+
+    assert set(owned) == set(SECTION_IDS)
+    assert all(owned.get(section_id) is not None for section_id in SECTION_IDS)
+
+
+def test_되찾은_소유권으로_선언한_장에만_보도표가_붙는다() -> None:
+    fragments = (
+        _news("40", slots=(CLAIM_SLOTS_BY_SECTION["identity"][0],)),
+        _news("41", slots=(CLAIM_SLOTS_BY_SECTION["portfolio"][1],)),
+        # 의미 칸이 없는 조각은 어느 장에도 못 붙는다.
+        _news("42"),
+    )
+
+    result = augment_news_blocks(
+        _report(),
+        fragments,
+        allowed_fragment_ids_by_section=news_ownership_from_claim_slots(fragments),
+    )
+
+    assert dict(result.row_counts_by_section) == {"identity": 1, "portfolio": 1}
+    assert _table_rows(result, "identity") == [
+        ("2026-09-01", _PUBLISHER, _SENTENCE)
+    ]
+    assert _table_rows(result, "business_model") == []
+    # 의미 칸 없는 조각은 소유 밖이라 «그 행만» 빠진다.
+    assert dict(result.blocked_counts_by_reason) == {}
+
+
+def test_9장_의미_칸만_가진_뉴스_조각은_표가_안_붙는다() -> None:
+    """소유권을 되찾아도 9장 제외 규칙은 그대로다."""
+
+    fragments = (
+        _news("40", slots=(CLAIM_SLOTS_BY_SECTION["competitive_position"][0],)),
+    )
+
+    result = augment_news_blocks(
+        _report(),
+        fragments,
+        allowed_fragment_ids_by_section=news_ownership_from_claim_slots(fragments),
+    )
+
+    assert not result.added
+    assert dict(result.blocked_counts_by_reason) == {BLOCKED_EXCLUDED_SECTION: 1}
 
 
 # ══════════════════════════════════════════════════════════
