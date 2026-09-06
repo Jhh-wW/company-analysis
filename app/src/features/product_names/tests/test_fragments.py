@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from src.features.product_names.constants import MAX_NAME_FRAGMENTS_PER_FILING
+from src.features.product_names.constants import (
+    MAX_NAME_FRAGMENTS_PER_FILING,
+    MAX_NAME_FRAGMENTS_PER_KIND,
+    SUBJECT_IP,
+    SUBJECT_PRODUCT,
+    SUBJECT_SEGMENT,
+)
 from src.features.product_names.fragments import (
     NAME_FRAGMENT_SECTION_ID,
     NAME_FRAGMENT_SLOT_ID,
@@ -89,8 +95,10 @@ def test_카카오_이름후보는_원문해시와_3장슬롯을_그대로_가�
 
     assert made
     assert len(made) == min(len(candidates), MAX_NAME_FRAGMENTS_PER_FILING)
-    for candidate, raw in zip(candidates, made, strict=True):
-        assert raw["원문"] == candidate.excerpt
+    # 조각 순서는 후보 순서가 아니라 «종류별 예산» 순서다(사업부문 → 대표 IP → 제품).
+    by_excerpt = {candidate.excerpt: candidate for candidate in candidates}
+    for raw in made:
+        candidate = by_excerpt[str(raw["원문"])]
         assert exact_text_sha256(str(raw["원문"])) == candidate.excerpt_sha256
         assert raw["_evidence_section_ids"] == (NAME_FRAGMENT_SECTION_ID,)
         assert raw["_evidence_slot_ids"] == (NAME_FRAGMENT_SLOT_ID,)
@@ -106,7 +114,7 @@ def test_카카오_이름후보는_원문해시와_3장슬롯을_그대로_가�
         assert raw["문서ID"] == anchor["문서ID"]
 
 
-def test_이름조각은_후보순서를_유지하며_열두개에서_자른다() -> None:
+def test_한_종류만_있으면_예산_전부를_그_종류가_순서대로_쓴다() -> None:
     candidates = tuple(
         NameCandidate(
             name=f"제품{i}",
@@ -169,3 +177,99 @@ def test_인이지_감사보고서의_주요계약도_이름조각이_된다() -
     assert len(made) == 1
     assert made[0]["원문"] == contract.excerpt
     assert str(made[0]["원문위치"]).endswith("주요 계약")
+
+
+def _candidates_of(kind: str, count: int, *, prefix: str) -> tuple[NameCandidate, ...]:
+    return tuple(
+        NameCandidate(
+            name=f"{prefix}{index}",
+            subject_kind=kind,
+            description="",
+            source_kind=SOURCE_KIND_DART_BUSINESS_REPORT,
+            location="가. 주요 제품 및 서비스의 현황 · 2행",
+            excerpt=f"{prefix}{index} | 설명",
+            excerpt_sha256=exact_text_sha256(f"{prefix}{index} | 설명"),
+        )
+        for index in range(count)
+    )
+
+
+def test_한_종류가_예산을_다_먹지_않는다() -> None:
+    """실측(하이브): 제품 후보가 먼저 나와, 상한이 없으면 대표 IP가 0건이 된다."""
+
+    candidates = (
+        *_candidates_of("product", 20, prefix="제품"),
+        *_candidates_of("ip", 20, prefix="아이피"),
+    )
+
+    made = name_candidate_fragments(
+        candidates,
+        filing_meta=_filing(),
+        corp_id=CORP_ID,
+        typed_fragments=(_typed_anchor(),),
+    )
+    kinds = [str(raw["원문위치"]).rsplit(" · ", 1)[-1] for raw in made]
+
+    assert len(made) == MAX_NAME_FRAGMENTS_PER_FILING
+    assert kinds.count("대표 IP") == MAX_NAME_FRAGMENTS_PER_KIND
+    assert kinds.count("제품") == (
+        MAX_NAME_FRAGMENTS_PER_FILING - MAX_NAME_FRAGMENTS_PER_KIND
+    )
+
+
+def test_상한_숫자는_열여섯과_열이다() -> None:
+    """상수를 조용히 낮추면 3장 카드에 들어갈 이름이 줄어든다 — 값을 못 박는다."""
+
+    assert MAX_NAME_FRAGMENTS_PER_FILING == 16
+    assert MAX_NAME_FRAGMENTS_PER_KIND == 10
+
+
+def test_하이브_예산은_부문_여섯과_대표IP_열이다() -> None:
+    """브리프의 실측 기대치: 하이브면 부문 6개 + 대표 IP 10개가 들어가야 한다."""
+
+    candidates = (
+        *_candidates_of(SUBJECT_SEGMENT, 6, prefix="부문"),
+        *_candidates_of(SUBJECT_PRODUCT, 11, prefix="제품"),
+        *_candidates_of(SUBJECT_IP, 18, prefix="아이피"),
+    )
+
+    made = name_candidate_fragments(
+        candidates,
+        filing_meta=_filing(),
+        corp_id=CORP_ID,
+        typed_fragments=(_typed_anchor(),),
+    )
+    kinds = [str(raw["원문위치"]).rsplit(" · ", 1)[-1] for raw in made]
+
+    assert len(made) == 16
+    assert kinds.count("사업부문") == 6
+    assert kinds.count("대표 IP") == 10
+    assert kinds.count("제품") == 0
+
+
+def test_남는_자리는_종류별_상한을_넘어서라도_채운다() -> None:
+    """한 종류만 있는 회사(우리은행형)도 예산을 놀리지 않는다."""
+
+    made = name_candidate_fragments(
+        _candidates_of(SUBJECT_PRODUCT, 30, prefix="상품"),
+        filing_meta=_filing(),
+        corp_id=CORP_ID,
+        typed_fragments=(_typed_anchor(),),
+    )
+
+    assert len(made) == MAX_NAME_FRAGMENTS_PER_FILING
+    assert [raw["원문"] for raw in made] == [
+        f"상품{index} | 설명" for index in range(MAX_NAME_FRAGMENTS_PER_FILING)
+    ]
+
+
+def test_대표IP_조각의_원문위치에는_대표_IP가_적힌다() -> None:
+    made = name_candidate_fragments(
+        _candidates_of(SUBJECT_IP, 1, prefix="뉴"),
+        filing_meta=_filing(),
+        corp_id=CORP_ID,
+        typed_fragments=(_typed_anchor(),),
+    )
+
+    assert len(made) == 1
+    assert str(made[0]["원문위치"]).endswith(" · 대표 IP")
