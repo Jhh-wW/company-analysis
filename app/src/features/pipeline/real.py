@@ -119,7 +119,11 @@ from src.features.news_intake import (
     classify_and_read as classify_and_read_news,
     map_articles_to_fragments as map_news_articles_to_fragments,
     needs_extended_window as news_needs_extended_window,
+    news_eligible_sections,
     select_news_items,
+)
+from src.features.news_intake.constants import (
+    WEB_DOCUMENT_ZERO_THRESHOLD as NEWS_WEB_DOCUMENT_ZERO_THRESHOLD,
 )
 from src.features.product_names.constants import MAX_NAME_FRAGMENTS_PER_FILING
 from src.features.product_names.fragments import (
@@ -146,6 +150,7 @@ from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
 from src.shared.report_generation.models import exact_text_sha256
 from src.shared.report_evidence.constants import (
     CollectionState,
+    OFFICIAL_WEB_SOURCE_KINDS,
     ReleaseMode,
     SOURCE_KIND_OFFICIAL_IR_PDF,
     SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
@@ -325,6 +330,11 @@ NEWS_INTAKE_INTERNAL_ERROR_CODE: Final[str] = "news_intake_internal_error"
 NEWS_CLASSIFICATION_INVALID_CODE: Final[str] = "classification_invalid_json"
 NEWS_BODY_FETCH_FAILED_CODE: Final[str] = "fetch_failed"
 NEWS_FRAGMENT_LIMIT_CODE: Final[str] = "fragment_limit"
+#: steps 「창」 값 정본. 기본·확장은 기사 기간(1년·3년)을 뜻하고,
+#: 웹0건보강은 기간을 늘리지 않은 채 웹 0건 조건으로 열린 경우다.
+NEWS_WINDOW_LABEL_DEFAULT: Final[str] = "기본"
+NEWS_WINDOW_LABEL_EXTENDED: Final[str] = "확장"
+NEWS_WINDOW_LABEL_WEB_ZERO: Final[str] = "웹0건보강"
 _NEWS_SEARCH_RESULT_OK: Final[str] = "success"
 _NEWS_SEARCH_FAILURE_CODES: Final[frozenset[str]] = frozenset(
     {
@@ -3575,6 +3585,9 @@ class RealPipeline:
                     section_id: section_id in ready_ids
                     for section_id in REQUIRED_EVIDENCE_SECTION_IDS
                 },
+                official_web_documents=_official_web_document_count(
+                    official_evidence
+                ),
                 as_of=business_date,
                 collected_on=business_date.isoformat(),
                 steps=steps,
@@ -5728,6 +5741,43 @@ def _news_raw_fragment(
     }
 
 
+def _official_web_document_count(
+    result: OfficialEvidenceCollectionResult | None,
+) -> int:
+    """Writer가 실제로 인용할 수 있는 공식 웹 문서 수를 센다.
+
+    같은 문서가 여러 장 후보에 붙을 수 있어 문서 식별자로 중복을 없앤다.
+    provenance-only 문서는 Writer 자격이 없어(``OfficialProvenanceDocument``
+    설명) 「웹에서 읽어 온 문장이 보고서에 있는가」라는 이 판정에 넣지 않는다.
+    """
+
+    if result is None:
+        # 실서비스에서는 preflight가 있으면 수집 결과도 있으므로 닿지 않는다.
+        # 그래도 「모르니까 있다고 치자」로 뭉개지 않고 0으로 정직하게 센다.
+        return 0
+    document_ids = {
+        document.document_id
+        for candidate in result.candidates
+        for document in candidate.documents
+        if document.source_kind in OFFICIAL_WEB_SOURCE_KINDS
+    }
+    return len(document_ids)
+
+
+def _news_window_label(*, web_zero_backfill: bool, extended_window: bool) -> str:
+    """steps에 남길 「창」 값을 실제로 쓴 기사 기간에서 고른다.
+
+    검색을 몇 번 했는지로 정하지 않는다. 검색 횟수는 이미 「검색호출」에 따로
+    남고, 두 값은 어긋날 수 있다 — 1년 창으로 열어도 검색은 두 쪽을 읽는다.
+    """
+
+    if extended_window:
+        return NEWS_WINDOW_LABEL_EXTENDED
+    if web_zero_backfill:
+        return NEWS_WINDOW_LABEL_WEB_ZERO
+    return NEWS_WINDOW_LABEL_DEFAULT
+
+
 def _collect_news_intake(
     *,
     search_news: Callable[..., Any],
@@ -5739,18 +5789,40 @@ def _collect_news_intake(
     executive_names: tuple[str, ...],
     corp_id: str,
     section_ready: dict[str, bool],
+    official_web_documents: int,
     as_of: Any,
     collected_on: str,
     steps: list[dict[str, Any]],
 ) -> list[dict[str, object]]:
-    """공식 근거의 빈 장에만 뉴스 보조 조각을 fail-open으로 더한다."""
+    """뉴스를 받을 수 있는 장이 있으면 보조 조각을 fail-open으로 더한다.
 
-    if not news_needs_extended_window(section_ready):
+    어느 장이 대상인지는 ``news_eligible_sections``가 정한다 — 미달인 장,
+    또는 미달이 없고 공식 웹 문서가 0건이면 5·6장을 뺀 모든 장이다. 대상이
+    하나도 없으면 검색조차 하지 않는다. 기사 기간은 5·6장을 뺀 장 중에 미달이
+    있을 때만 3년이고 그 밖에는 1년이며, 문장 자체의 허용 규칙(따옴표·귀속·
+    숫자 금지)은 어느 경우에도 그대로 적용된다.
+    """
+
+    # 「어느 장이 뉴스를 받을 수 있나」의 정본은 뉴스 기능 폴더다. 여기서는
+    # 그 결과로 발동 여부와 기사 기간만 정한다.
+    eligible_sections = news_eligible_sections(
+        section_ready,
+        official_web_documents=official_web_documents,
+    )
+    extended_window = news_needs_extended_window(section_ready)
+    # 「창」은 왜 이 창으로 열렸는지를 적는 진단값이다. 대상 장을 고르는 규칙은
+    # 위 한 곳에만 두고, 여기서는 같은 문턱 상수를 읽어 이름만 붙인다 — 공식 웹
+    # 문서가 있는데 「웹0건보강」이라고 적는 일이 없어야 한다.
+    web_zero_backfill = (
+        not extended_window
+        and official_web_documents <= NEWS_WEB_DOCUMENT_ZERO_THRESHOLD
+    )
+    if not eligible_sections:
         steps.append(
             {
                 "step": "5b_뉴스_수집",
                 "스위치": True,
-                "창": "기본",
+                "창": NEWS_WINDOW_LABEL_DEFAULT,
                 "검색": 0,
                 "선별": 0,
                 "분류AI호출": 0,
@@ -5810,7 +5882,9 @@ def _collect_news_intake(
             as_of,
             company_domain=company_domain,
             executive_names=executive_names,
-            extended_window=True,
+            # 웹 0건으로 열었을 때는 기간을 늘리지 않는다. 빈 장을 메우는
+            # 목적이 아니라 최근 공식 발표를 대신 읽는 목적이기 때문이다.
+            extended_window=extended_window,
         )
 
         def counted_classify(prompt: str) -> str:
@@ -5824,7 +5898,7 @@ def _collect_news_intake(
                 selection.candidates,
                 classify=counted_classify,
                 fetch_text=fetch_text,
-                section_ready=section_ready,
+                eligible_sections=eligible_sections,
             )
         mapping = map_news_articles_to_fragments(
             classification.articles,
@@ -5860,7 +5934,10 @@ def _collect_news_intake(
             {
                 "step": "5b_뉴스_수집",
                 "스위치": True,
-                "창": "확장" if search_calls > 1 else "기본",
+                "창": _news_window_label(
+                    web_zero_backfill=web_zero_backfill,
+                    extended_window=extended_window,
+                ),
                 "검색": diagnostics.searched_count,
                 "선별": diagnostics.selected_count,
                 "분류AI호출": classification_calls,
@@ -5891,7 +5968,10 @@ def _collect_news_intake(
             {
                 "step": "5b_뉴스_수집",
                 "스위치": True,
-                "창": "확장" if search_calls > 1 else "기본",
+                "창": _news_window_label(
+                    web_zero_backfill=web_zero_backfill,
+                    extended_window=extended_window,
+                ),
                 "검색": len(raw_items),
                 "선별": 0,
                 "분류AI호출": classification_calls,

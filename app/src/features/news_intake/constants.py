@@ -7,6 +7,11 @@ from typing import Final
 
 DEFAULT_WINDOW_DAYS: Final[int] = 365
 EXTENDED_WINDOW_DAYS: Final[int] = 1_095
+#: 공식 웹 문서가 이 수 이하이면 회사 사이트에서 읽어 온 문장이 보고서에
+#: 하나도 없다는 뜻이다(본문을 자바스크립트로 만드는 사이트가 대표적이다).
+#: 그런 회사는 모든 장이 READY라도 공식 웹 몫이 통째로 비므로 보조 문장을
+#: 받을 장이 생긴다. 발동 규칙의 정본은 파이프라인이 아니라 이 기능 폴더다.
+WEB_DOCUMENT_ZERO_THRESHOLD: Final[int] = 0
 MAX_CANDIDATES: Final[int] = 20
 MAX_SECTIONS_PER_CANDIDATE: Final[int] = 3
 ATTRIBUTION_CONTEXT_CHARS: Final[int] = 20

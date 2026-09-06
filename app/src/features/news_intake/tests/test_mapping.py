@@ -7,8 +7,14 @@ from src.features.news_intake.classify import classify_and_read
 from src.features.news_intake.mapping import map_articles_to_fragments
 from src.features.news_intake.models import NewsCandidate, build_diagnostics
 from src.features.news_intake.select import select_candidates
-from src.shared.report_evidence.policy import collector_slots_for
+from src.shared.report_evidence.policy import (
+    REQUIRED_EVIDENCE_SECTION_IDS,
+    collector_slots_for,
+)
 from src.shared.report_generation.models import exact_text_sha256
+
+
+_ALL_SECTIONS = frozenset(REQUIRED_EVIDENCE_SECTION_IDS)
 
 
 def _candidate(*, sections: tuple[str, ...], body: str, published_on: str = "2026-08-01"):
@@ -30,7 +36,7 @@ def _candidate(*, sections: tuple[str, ...], body: str, published_on: str = "202
         (candidate,),
         classify=lambda _prompt: response,
         fetch_text=lambda _url: body,
-        section_ready={},
+        eligible_sections=_ALL_SECTIONS,
     ).articles[0]
 
 
@@ -127,7 +133,7 @@ def test_진단숫자는_검색부터_장별조각까지_정합하다() -> None:
         selection.candidates,
         classify=lambda _prompt: response,
         fetch_text=lambda _url: "인이지는 최적화 제품을 공개했다.",
-        section_ready={},
+        eligible_sections=_ALL_SECTIONS,
     )
     mapping = map_articles_to_fragments(
         classification.articles,

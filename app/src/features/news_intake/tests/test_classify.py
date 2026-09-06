@@ -9,6 +9,16 @@ from src.features.news_intake.classify import (
     classify_candidates,
 )
 from src.features.news_intake.models import NewsCandidate
+from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
+
+
+_ALL_SECTIONS = frozenset(REQUIRED_EVIDENCE_SECTION_IDS)
+
+
+def _eligible(*, ready: tuple[str, ...] = ()) -> frozenset[str]:
+    """READY 장을 뺀 뉴스 대상 장. 정본은 ``select.news_eligible_sections``다."""
+
+    return _ALL_SECTIONS - frozenset(ready)
 
 
 def _candidate(number: int) -> NewsCandidate:
@@ -50,7 +60,7 @@ def test_닫힌목록_밖_장은_버리고_유효한_장만_남긴다() -> None:
     result = classify_candidates(
         (_candidate(1),),
         classify=lambda _prompt: response,
-        section_ready={},
+        eligible_sections=_eligible(),
     )
 
     assert result.classified[0].section_ids == ("portfolio",)
@@ -75,7 +85,7 @@ def test_후보당_세장초과와_없는_ID와_모르는_종류를_폐기한다
     result = classify_candidates(
         (_candidate(1), _candidate(2)),
         classify=lambda _prompt: response,
-        section_ready={},
+        eligible_sections=_eligible(),
     )
 
     assert result.classified == ()
@@ -84,7 +94,7 @@ def test_후보당_세장초과와_없는_ID와_모르는_종류를_폐기한다
     assert result.exclusion_counts[c.EXCLUDED_UNKNOWN_KIND] == 1
 
 
-def test_READY_장만_고른_후보는_본문을_호출하지_않는다() -> None:
+def test_대상이_아닌_장만_고른_후보는_본문을_호출하지_않는다() -> None:
     calls: list[str] = []
     response = json.dumps(
         {
@@ -103,7 +113,7 @@ def test_READY_장만_고른_후보는_본문을_호출하지_않는다() -> Non
         (_candidate(1), _candidate(2)),
         classify=lambda _prompt: response,
         fetch_text=lambda url: calls.append(url) or "대표는 「현장을 본다」고 말했다.",
-        section_ready={"portfolio": True},
+        eligible_sections=_eligible(ready=("portfolio",)),
     )
 
     assert [item.candidate.id for item in result.classified] == ["news-002"]
@@ -118,7 +128,7 @@ def test_깨진_JSON은_본문호출_없이_진단으로_남긴다() -> None:
         (_candidate(1),),
         classify=lambda _prompt: "```json\n{}\n```",
         fetch_text=lambda url: calls.append(url) or "본문",
-        section_ready={},
+        eligible_sections=_eligible(),
     )
 
     assert result.classified == ()
@@ -127,24 +137,14 @@ def test_깨진_JSON은_본문호출_없이_진단으로_남긴다() -> None:
     assert result.exclusion_counts[c.EXCLUDED_INVALID_JSON] == 1
 
 
-def test_모든_장이_READY면_분류기도_본문함수도_부르지_않는다() -> None:
+def test_대상_장이_하나도_없으면_분류기도_본문함수도_부르지_않는다() -> None:
     calls: list[str] = []
 
     result = classify_and_read(
         (_candidate(1),),
         classify=lambda _prompt: calls.append("classify") or '{"items":[]}',
         fetch_text=lambda _url: calls.append("fetch") or "본문",
-        section_ready={
-            "identity": True,
-            "business_model": True,
-            "portfolio": True,
-            "past_changes": True,
-            "current_challenges": True,
-            "future_strategy": True,
-            "operations_partners": True,
-            "culture": True,
-            "competitive_position": True,
-        },
+        eligible_sections=frozenset(),
     )
 
     assert result.classified == ()

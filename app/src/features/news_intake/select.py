@@ -349,3 +349,48 @@ def needs_extended_window(section_ready: Mapping[str, bool]) -> bool:
         for section_id in REQUIRED_EVIDENCE_SECTION_IDS
         if section_id not in c.NON_EXTENDABLE_SECTIONS
     )
+
+
+def news_eligible_sections(
+    section_ready: Mapping[str, bool],
+    *,
+    official_web_documents: int,
+) -> frozenset[str]:
+    """뉴스 보조 문장을 받을 수 있는 장을 정한다.
+
+    두 가지 경우가 있다.
+
+    1. READY가 아닌 장이 있으면 **그 장만** 대상이다. 5·6장을 뺀 장 중에 미달이
+       있으면 기사 기간이 3년까지 넓어지므로(``needs_extended_window``), 이미
+       공식 자료로 채운 장에까지 대상을 넓히면 최신 공식 사실 옆에 3년 전 보도가
+       서게 된다. 5·6장만 미달이면 기간은 1년 그대로지만 대상 규칙은 같다.
+    2. READY가 아닌 장이 하나도 없는데 공식 웹 문서가 0건이면, 회사 사이트에서
+       읽어 온 문장이 보고서에 하나도 없다는 뜻이다. 이때만 5·6장을 뺀 모든
+       장이 대상이 된다. 기간은 1년 그대로다. 5·6장은 회사·대표에게 귀속된
+       인용부호 문장만 받는 장이라, 「웹에서 못 읽은 몫을 메운다」는 이 보강의
+       목적과 맞지 않아 뺀다.
+
+    그 밖에는 빈 집합이다 — 부를 이유가 없다는 뜻이므로 호출부는 검색조차
+    하지 않아야 한다.
+    """
+
+    if not isinstance(section_ready, Mapping):
+        raise TypeError("장별 READY 상태는 Mapping이어야 합니다")
+    if isinstance(official_web_documents, bool) or not isinstance(
+        official_web_documents, int
+    ):
+        raise TypeError("공식 웹 문서 수는 정수여야 합니다")
+    unready = frozenset(
+        section_id
+        for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+        if not bool(section_ready.get(section_id, False))
+    )
+    if unready:
+        return unready
+    if official_web_documents <= c.WEB_DOCUMENT_ZERO_THRESHOLD:
+        return frozenset(
+            section_id
+            for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+            if section_id not in c.NON_EXTENDABLE_SECTIONS
+        )
+    return frozenset()
