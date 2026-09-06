@@ -12,15 +12,34 @@
   `composition_tables_from_raw`(«표 전부»)로 바꿨다. 제품별·지역별 두 표를
   다 2장에 붙이기 위해서다(과제 2). 시험도 tuple 반환에 맞춰 고쳤다 — 값
   검증 내용(줄이기만 한다·합계를 뺀다 등)은 그대로 지킨다.
+
+★ 설계 변경 2 (P4-3, 하이브 실측) — «연도가 둘 이상인» 구성 변화 표는
+  줄이지 않는다. 예전에는 가장 큰 연도 열 하나만 남겨 도식으로 그렸는데,
+  캡션이 「… 변화 (2023~2025)」인데 그림에는 2025년 한 해뿐이라 독자가
+  세 해의 변화를 봤다고 오해했다. 2023·2024 숫자는 화면에서 사라졌다.
+  이제 원표 그대로 두고 도식 없이 표로 낸다.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from src.features.composer.port import composition_tables_from_raw
 from src.features.pipeline.port import ReportTable
 from src.features.revenuemix.logic import build as build_revenue_mix
+from src.features.revenuemix.logic import build_multi_year
 from src.features.report_standard.visualization import table_visualization
 from src.shared.revenue_table_provenance import revenue_row_evidence_matches
+
+#: 하이브 사업보고서 실측 원문 — 3개년 구성 변화 표가 실제로 나오는 자료.
+_하이브_원문 = (
+    Path(__file__).resolve().parents[3]
+    / "features"
+    / "revenuemix"
+    / "tests"
+    / "fixtures"
+    / "hybe_product_and_region.txt"
+)
 
 #: 진영 실측에서 실제로 나온 표 (지역별 매출 비중).
 _실측표 = [
@@ -58,17 +77,85 @@ def test_실측표가_도식이_그려지는_모양으로_바뀐다():
     assert table_visualization(_as_report_table(표)).kind == "composition"
 
 
-def test_연도열은_순서와_무관하게_최신연도를_고르고_캡션에_밝힌다():
+def test_연도가_둘_이상이면_한_해로_줄이지_않고_표_그대로_둔다():
+    """★★ P4-3 — 3개년 표를 2025년 한 해로 줄이면 나머지 두 해가 사라진다.
+
+    캡션은 「… 변화 (2023~2025)」인데 그림에는 한 해뿐이라, 독자는 세 해의
+    변화를 봤다고 오해한다. 줄이지 않으면 도식 판정기가 «2열»이 아니라서
+    도식을 만들지 않고 웹·PDF 둘 다 표로 낸다 — 세 해 숫자가 다 보인다.
+    """
+    원표 = [
+        {
+            "caption": "제품·서비스별 매출 비중 변화 (2023~2025)",
+            "headers": ["구분", "2025 비중", "2023 비중", "2024 비중"],
+            "rows": [
+                ["제품가", "60%", "40%", "50%"],
+                ["제품나", "30%", "40%", "35%"],
+                ["제품다", "10%", "20%", "15%"],
+                ["합계", "100%", "100%", "100%"],
+            ],
+        }
+    ]
+
+    표 = composition_tables_from_raw(원표)[0]
+
+    assert 표.headers == ("구분", "2025 비중", "2023 비중", "2024 비중")
+    assert 표.rows == tuple(tuple(row) for row in 원표[0]["rows"])
+    # 단일 연도로 투영하지 않았으므로 「(2025년 비중)」 꼬리표도 붙지 않는다.
+    assert 표.caption == "제품·서비스별 매출 비중 변화 (2023~2025)"
+
+
+def test_다개년_구성변화표에는_도식_명세를_만들지_않는다():
+    """표를 도식으로 «대체»하지 않는다 — 대체하면 안 그려진 해가 사라진다."""
     표 = composition_tables_from_raw(
         [
             {
                 "caption": "제품·서비스별 매출 비중 변화 (2023~2025)",
-                "headers": ["구분", "2025 비중", "2023 비중", "2024 비중"],
+                "headers": ["구분", "2023 비중", "2024 비중", "2025 비중"],
                 "rows": [
-                    ["제품가", "60%", "40%", "50%"],
-                    ["제품나", "30%", "40%", "35%"],
-                    ["제품다", "10%", "20%", "15%"],
-                    ["합계", "100%", "100%", "100%"],
+                    ["제품가", "40%", "50%", "60%"],
+                    ["제품나", "40%", "35%", "30%"],
+                    ["제품다", "20%", "15%", "10%"],
+                ],
+            }
+        ]
+    )[0]
+
+    assert table_visualization(_as_report_table(표)) is None
+
+
+def test_같은_연도가_두_열에_있으면_다개년이_아니라_예전처럼_줄인다():
+    """연도 «개수»가 아니라 «서로 다른 연도»의 개수로 가른다 (경계)."""
+    표 = composition_tables_from_raw(
+        [
+            {
+                "caption": "2025년 매출 구성",
+                "headers": ["구분", "2025 매출 비중", "2025 비중"],
+                "rows": [
+                    ["제품가", "60%", "60%"],
+                    ["제품나", "30%", "30%"],
+                    ["제품다", "10%", "10%"],
+                ],
+            }
+        ]
+    )[0]
+
+    assert 표.headers == ("구분", "2025 비중")
+    assert 표.caption == "2025년 매출 구성 (2025년 비중)"
+
+
+def test_연도가_하나뿐인_비중열은_예전처럼_줄이고_캡션에_밝힌다():
+    """단년 표의 동작은 그대로다 — 바뀌는 것은 다개년 표뿐이다."""
+    표 = composition_tables_from_raw(
+        [
+            {
+                "caption": "무엇을 팔아 번 돈인가 — 제품·서비스별 매출 비중",
+                "headers": ["구분", "매출액 (백만원)", "2025 비중"],
+                "rows": [
+                    ["제품가", "6,000", "60%"],
+                    ["제품나", "3,000", "30%"],
+                    ["제품다", "1,000", "10%"],
+                    ["합계", "10,000", "100%"],
                 ],
             }
         ]
@@ -76,7 +163,31 @@ def test_연도열은_순서와_무관하게_최신연도를_고르고_캡션에
 
     assert 표.headers == ("구분", "2025 비중")
     assert 표.rows == (("제품가", "60%"), ("제품나", "30%"), ("제품다", "10%"))
-    assert 표.caption == "제품·서비스별 매출 비중 변화 (2023~2025) (2025년 비중)"
+    assert 표.caption == (
+        "무엇을 팔아 번 돈인가 — 제품·서비스별 매출 비중 (2025년 비중)"
+    )
+    assert table_visualization(_as_report_table(표)).kind == "composition"
+
+
+def test_하이브_실측_3개년표가_세_해_그대로_나간다():
+    """실제 공시 원문으로 끝에서 끝까지 확인한다 — 합성 표만 보지 않는다."""
+    표들 = composition_tables_from_raw(
+        build_multi_year(_하이브_원문.read_text(encoding="utf-8"), cite="[2]")
+    )
+
+    assert len(표들) == 2
+    for 표 in 표들:
+        assert 표.headers == ("구분", "2023 비중", "2024 비중", "2025 비중")
+        assert table_visualization(_as_report_table(표)) is None
+        assert "(2025년 비중)" not in 표.caption
+    제품표 = 표들[0]
+    assert 제품표.caption == "제품·서비스별 매출 비중 변화 (2023~2025)"
+    assert 제품표.rows[0] == (
+        "음반/음원 음반, 음원 등",
+        "44.56%",
+        "38.17%",
+        "29.17%",
+    )
 
 
 def test_연도없는_기존표의_캡션과_오른쪽_비중열은_그대로다():
