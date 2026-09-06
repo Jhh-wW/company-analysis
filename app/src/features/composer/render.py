@@ -48,6 +48,11 @@ from src.features.composer.constants import (
     SECTION_TITLES,
 )
 from src.features.composer.logic import FragmentsInput
+from src.features.composer.news_block import (
+    NEWS_BLOCK_HEADERS,
+    NEWS_BLOCK_PRESENTATION,
+    news_block_caption,
+)
 from src.features.composer.port import (
     ComposedReport,
     ComposedSection,
@@ -637,6 +642,54 @@ def _flow_report_table(
         cite=f"[{min(cited)}]",
         numeric=False,
         presentation=FLOW_PRESENTATION,
+    )
+
+
+def _news_report_table(
+    section: ComposedSection, numbers: Mapping[str, int]
+) -> Optional[ReportTable]:
+    """장 끝의 「최근 보도 (보조)」 표를 만든다. 실을 줄이 없으면 None.
+
+    ★ 세 칸은 흐름으로 «이어지지 않는다» — 발행일·매체는 그 문장이 어디서
+      언제 나왔는지를 밝히는 표식이고, 보도 문장이 내용 전부다. 그래서
+      presentation을 「표」로 두어 도식으로 그려지지 않게 한다.
+    ★ 근거 없는 줄은 `news_block`이 이미 뺐다. 여기서는 «실존하는 조각을
+      가리키는가»만 한 번 더 본다 — 없는 번호를 인쇄하지 않기 위해서다.
+    """
+
+    if not section.news_rows:
+        return None
+    rows: list[list[str]] = []
+    cited: list[int] = []
+    for row in section.news_rows:
+        row_numbers = [
+            numbers[str(citation).strip()]
+            for citation in row.citations
+            if str(citation).strip() in numbers
+        ]
+        if not row_numbers:
+            continue
+        rows.append([str(cell).strip() for cell in row.cells])
+        cited.extend(row_numbers)
+    if not rows:
+        return None
+    return ReportTable(
+        caption=news_block_caption(len(rows)),
+        headers=list(NEWS_BLOCK_HEADERS),
+        rows=rows,
+        # 캡션 근거는 표 전체를 대표하는 첫 조각 하나만 단다(흐름표와 같은 규칙).
+        cite=f"[{min(cited)}]",
+        numeric=False,
+        presentation=NEWS_BLOCK_PRESENTATION,
+        # ★ 행별 조각 번호를 «여기서» 싣는다(흐름표와 다른 점). 이 칸이
+        #   `ReportTable`이 「표의 모든 행이 실제로 쓴 공개 출처 번호」를 담으라고
+        #   둔 자리이고, 출고 검증(`validate._cited_numbers_in_body`)은 이 칸을
+        #   «본문이 쓴 번호»로 센다.
+        #   안 실으면: 아래 호출부가 부록에 올린 2·3행의 번호를 출고 검증이
+        #   「부록에 있는데 본문 어디에서도 안 쓴 번호」로 보고 «보고서 전체»를
+        #   막는다(SHADOW 실측 재현: [42], [43]). FULL은 봉인이 같은 값을 다시
+        #   덮어쓰므로 봉인 권위는 그대로다.
+        source_cites=[f"[{number}]" for number in sorted(set(cited))],
     )
 
 
@@ -1317,6 +1370,25 @@ def render_report(
                     presentation=converted.presentation,
                 )
             tables.append(converted)
+
+        # 언론 보조 보도표는 «장의 맨 끝»에 붙인다 — 회사 공식 자료로 만든
+        # 표를 먼저 보이고, 보조 자료는 그 뒤에 둔다. 순서를 바꾸면 독자가
+        # 언론 보도를 그 장의 주된 근거로 읽는다.
+        news_table = _news_report_table(section, numbers)
+        if news_table is not None:
+            # ★ 행마다 «전부» 부록 사용 목록에 등록한다(흐름표와 다른 점).
+            #   보도표의 조각은 본문 문장이 인용하지 않는 조각이라, 여기서
+            #   등록하지 않으면 부록에 그 기사가 한 줄도 안 생긴다 — 표에는
+            #   [n]이 찍히는데 부록에 n이 없는 «고아 번호»가 된다.
+            for row in section.news_rows:
+                for citation in row.citations:
+                    row_number = numbers.get(str(citation).strip())
+                    if row_number is None or row_number not in meta_by_number:
+                        continue
+                    owners = used_sections.setdefault(row_number, [])
+                    if section.section_id not in owners:
+                        owners.append(section.section_id)
+            tables.append(news_table)
 
         # FULL에서는 renderer가 구조를 결정한 뒤, 독립 canonicalizer가 미리
         # 만든 행 근거·전체 출처·manifest 참조를 같은 table index에 붙인다.

@@ -5012,10 +5012,15 @@ def _unused_name_steps(output: Any) -> list[dict[str, Any]]:
       «정본»은 둘 다 composer가 소유하고, 이 함수는 그것을 부르기만 한다.
       단계 이름·필드를 여기서 손으로 다시 적으면 한쪽이 바뀔 때 조용히 어긋난다.
 
-    ★ 이름을 왜 안 바꿨나 — 담는 범위가 넓어졌으니 `_portfolio_name_steps`가
-      더 맞는 이름이지만, `_run_v2_composer`가 이 헬퍼를 «실제로 부르는지»를
-      AST로 지키는 기존 회귀 시험이 이 이름에 걸려 있다. 이름을 바꾸면 그
-      가드를 같이 고쳐야 해서, 지금은 이름을 두고 이 주석으로 범위를 밝힌다.
+    여기에 장 끝 언론 보조 보도표의 기록 두 줄(`뉴스_보도표`·`뉴스_보도표_불가`)도
+    함께 담는다. 그 dict의 정본 역시 composer(`composer/news_block.py`)가
+    소유하고 이 함수는 부르기만 한다.
+
+    ★ 이름을 왜 안 바꿨나 — 담는 내용이 「3장 이름」을 넘어섰으니
+      `_composer_observation_steps` 같은 이름이 더 맞지만, `_run_v2_composer`가
+      이 헬퍼를 «실제로 부르는지»를 AST로 지키는 기존 회귀 시험이 이 이름에
+      걸려 있다. 이름을 바꾸면 그 가드를 같이 고쳐야 해서, 지금은 이름을 두고
+      이 주석으로 범위를 밝힌다.
 
     Args:
         output: composer `run_v2`의 결과. 이 필드를 모르는 옛 결과도 받는다.
@@ -5024,6 +5029,9 @@ def _unused_name_steps(output: Any) -> list[dict[str, Any]]:
         남길 단계가 없으면 빈 목록. 둘 다 켜져 있으면 두 줄을 «다 남긴다».
     """
 
+    from src.features.composer.news_block import (  # noqa: PLC0415
+        news_block_steps,
+    )
     from src.features.composer.portfolio_name_table import (  # noqa: PLC0415
         portfolio_name_table_steps,
     )
@@ -5031,7 +5039,9 @@ def _unused_name_steps(output: Any) -> list[dict[str, Any]]:
         UNUSED_REPRESENTATIVE_NAMES_STEP,
     )
 
-    steps: list[dict[str, Any]] = list(portfolio_name_table_steps(output))
+    steps: list[dict[str, Any]] = list(portfolio_name_table_steps(output)) + list(
+        news_block_steps(output)
+    )
     try:
         count = int(getattr(output, "unused_portfolio_name_count", 0) or 0)
     except (TypeError, ValueError):

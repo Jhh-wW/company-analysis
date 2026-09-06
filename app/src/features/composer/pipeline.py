@@ -73,6 +73,10 @@ from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.diagram_check import check_diagram_numbers, check_diagrams
 from src.features.composer.dup_detect import CONFIDENCE_CONFIRMED, find_numeric_duplicates
 from src.features.composer.extractive_summary import select_extractive_summary
+from src.features.composer.news_block import (
+    NewsBlockResult,
+    augment_news_blocks,
+)
 from src.features.composer.portfolio_name_table import (
     BLOCKED_LABEL_NOT_IN_LOCATION,
     BLOCKED_NAME_NOT_IN_SOURCE,
@@ -219,6 +223,11 @@ class V2RunOutput:
     #: 이름은 왔는데 표를 «못» 만들었을 때의 이유 코드
     #: (`portfolio_name_table.BLOCKED_*`). 만들었거나 이름이 애초에 없으면 ""다.
     portfolio_name_table_blocked_reason: str = ""
+    #: 장 끝 「최근 보도 (보조)」 표에 실린 장별 행 수. 붙인 장만 담는다.
+    #: dataclass를 얼린 채로 실어 나르려고 dict가 아니라 (장, 수) 쌍의 tuple이다.
+    news_block_row_counts_by_section: tuple[tuple[str, int], ...] = ()
+    #: 보도표에서 «뺀 행»과 «못 붙인 장»의 사유별 수(`news_block.BLOCKED_*`).
+    news_block_blocked_counts_by_reason: tuple[tuple[str, int], ...] = ()
 
 
 class _CallLedgerRecorder:
@@ -543,7 +552,17 @@ def _merge_selected_sections(
     by_id = {section.section_id: section for section in replacements.sections}
     return ComposedReport(
         sections=tuple(
-            by_id.get(section.section_id, section) for section in base.sections
+            # ★ 보도표는 «다시 쓴 장»에도 그대로 남긴다. 이 표는 작가 응답이
+            #   아니라 조각에서만 나오므로, 보충 회차가 그 장을 새로 써도 값이
+            #   달라질 이유가 없다. 안 옮기면 3장·5장처럼 보충이 도는 장에서만
+            #   보도표가 조용히 사라져, 「어떤 실행에서는 있고 어떤 실행에서는
+            #   없다」가 된다 — 이 기능이 없애려던 바로 그 증상이다.
+            replace(
+                by_id[section.section_id], news_rows=section.news_rows
+            )
+            if section.section_id in by_id
+            else section
+            for section in base.sections
         ),
         summary=(),
     )
@@ -663,6 +682,59 @@ def _build_name_table(
         # (이름 부족)는 대부분의 회사에서 정상 흐름이다.
         logger.warning(
             "3장 이름 표를 만들지 못했습니다 — 사유 %s", result.blocked_reason
+        )
+    return result
+
+
+def _augment_news_blocks(
+    report: ComposedReport,
+    fragments: FragmentsInput,
+    prepared_evidence: object,
+    *,
+    enabled: bool,
+) -> NewsBlockResult:
+    """장 끝 보도표 보강을 «장별 근거 소유권 안에서» 부른다.
+
+    ★ 왜 소유권 표를 통째로 넘기나 — 뉴스 조각은 여러 장 packet에 동시에 실릴
+      수 있고, 이 단계에 오는 조각은 flat union이라 어느 장 것인지 조각만 봐서는
+      알 수 없다. 소유 밖 조각을 인용하는 행을 만들면 바로 다음 evidence
+      invariant가 보고서 «전체»를 막는다. 만들고 나서 걸리는 대신 애초에
+      안 만든다. packet 계약이 없는 옛 경로에서는 표를 만들지 않는다.
+
+    Args:
+        report: 도식 검증·이름 카드까지 끝난 본문.
+        fragments: 검증용 조각(대개 flat union).
+        prepared_evidence: 장별 packet 준비값. ``None``이면 장별 소유권을
+            확인할 방법이 없어 아무 표도 만들지 않는다.
+        enabled: 이 실행이 공개 표를 «결속할 수 있는» 경로인가
+            (`augment_news_blocks`의 같은 이름 인자 설명 참고).
+
+    Returns:
+        보강 결과. 못 붙였으면 ``report``는 입력 그대로다.
+    """
+
+    allowed_by_section = None
+    if prepared_evidence is not None:
+        allowed_by_section = getattr(
+            prepared_evidence, "allowed_fragment_ids_by_section", None
+        )
+    result = augment_news_blocks(
+        report,
+        _normalize_fragments(fragments),
+        allowed_fragment_ids_by_section=allowed_by_section,
+        enabled=enabled,
+    )
+    if result.added:
+        logger.info(
+            "언론 보조 보도표를 %d개 장에 %d행 붙였습니다 (%s)",
+            result.section_count,
+            result.row_count,
+            dict(result.row_counts_by_section),
+        )
+    elif result.blocked_counts_by_reason:
+        logger.warning(
+            "언론 보조 보도표를 못 붙였습니다 — 사유별 %s",
+            dict(result.blocked_counts_by_reason),
         )
     return result
 
@@ -1050,6 +1122,23 @@ def run_v2(
         ),
     )
     name_table = name_table_result.table
+
+    # ②-c-3 언론 보조 보도표 — 뉴스 조각이 온 장 끝에 표 하나를 결정적으로
+    # 붙인다. 작가가 그 조각을 인용했는지와 무관하다(실측: 조각 6개가 갔는데
+    # 보고서·부록에 흔적 0건). 조각이 없으면 아무 장도 바뀌지 않는다.
+    #
+    # ★ ENFORCE_NO_PARTIAL에서는 «안» 붙인다 — 그 모드는 pre-render manifest를
+    #   만들지 않아 표를 결속하지 못한다. 붙이면 엄격 품질 계약이 그 장을
+    #   「fact_id와 결속되지 않은 공개 내용」으로 보고 보고서 «전체»를 막는다
+    #   (실측 재현: 그 모드는 이미 flow 행이 있는 장에서 같은 이유로 막힌다).
+    #   보조 표 하나 때문에 보고서를 잃지 않는다. 사유는 실행 기록에 남는다.
+    news_block = _augment_news_blocks(
+        verified,
+        verification_fragments,
+        prepared_evidence,
+        enabled=release_mode is not ReleaseMode.ENFORCE_NO_PARTIAL,
+    )
+    verified = news_block.report
 
     # ②-d 첫 구조화 claim 슬라이스 — 검증된 DART 3개년 표의 원값에서
     # 누적 증감률을 코드로 재계산한다. AI 산문에서 숫자를 역추출하지 않으며,
@@ -1766,6 +1855,8 @@ def run_v2(
             name_table.table_titles if name_table is not None else ()
         ),
         portfolio_name_table_blocked_reason=name_table_result.blocked_reason,
+        news_block_row_counts_by_section=news_block.row_counts_by_section,
+        news_block_blocked_counts_by_reason=news_block.blocked_counts_by_reason,
     )
 
 

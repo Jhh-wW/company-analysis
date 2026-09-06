@@ -57,6 +57,18 @@ SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
     {SOURCE_KIND_NEWS}
 )
 
+# 언론 보조 문장을 아예 받지 않는 장. 9장은 「회사가 밝힌 차별점」이라 회사가
+# 스스로 밝힌 말만 싣는 장이고, 기자가 쓴 비교나 증권 칼럼의 해석은 그 정의에
+# 맞지 않는다. 기간만 1년으로 두는 뉴스 확장 창 목록과는 뜻이 다르므로(그쪽은
+# 조건부로 대상이 된다) 하나로 합치지 않는다.
+#
+# ★ 왜 shared에 있나 — 이 목록을 «수집하는 쪽»(news_intake)과 «보고서에 싣는
+#   쪽»(composer)이 둘 다 본다. 어느 한 feature 안에 두면 다른 feature가 그
+#   feature를 직접 import하게 되고(경계 위반), 목록을 베껴 적으면 한쪽만
+#   바뀔 때 조용히 어긋난다. 정본은 여기 하나뿐이고 news_intake는 별명으로
+#   같은 객체를 다시 내보낸다.
+NEWS_EXCLUDED_SECTION_IDS: Final[frozenset[str]] = frozenset({"competitive_position"})
+
 # 「그 출처 전체를 아예 확인할 수 없었다」는 site-probe 게이트 시도의
 # source_kind 정본(P1-B). robots.txt 차단은 그 호스트의 모든 후보 페이지
 # 조회를 원천 차단하는 유일한 지점 — 개별 후보 페이지 하나가 404거나
