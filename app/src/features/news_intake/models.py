@@ -157,12 +157,56 @@ class FetchedNewsArticle:
 
 
 @dataclass(frozen=True)
+class NewsBodyFetchResult:
+    """기사 본문 한 번 읽기의 결과 — 성공이면 글자와 «어느 겹에서 얻었나»,
+    실패면 사유 코드 하나를 담는다.
+
+    예전에는 본문 함수가 ``str | None``만 돌려줘서 실패가 전부
+    ``fetch_failed`` 하나로 뭉개졌다. 그 상태로는 운영 로그만 보고
+    「robots가 막았나」·「403인가」·「200인데 본문이 0자인가」를 가를 수
+    없어서 고칠 곳을 찾지 못한다.
+    """
+
+    text: str = ""
+    reason_code: str = ""
+    stage: str = ""
+
+    def __post_init__(self) -> None:
+        for value, label in (
+            (self.text, "기사 본문"),
+            (self.reason_code, "본문 실패 사유"),
+            (self.stage, "본문 추출 단계"),
+        ):
+            if not isinstance(value, str):
+                raise TypeError(f"{label}은 문자열이어야 합니다")
+        text = self.text.strip()
+        reason_code = self.reason_code.strip()
+        stage = self.stage.strip()
+        if bool(text) == bool(reason_code):
+            raise ValueError("본문 결과는 글자와 실패 사유 중 정확히 하나만 담습니다")
+        if text and not stage:
+            raise ValueError("본문을 얻었으면 어느 단계에서 얻었는지 남겨야 합니다")
+        if reason_code and stage:
+            raise ValueError("실패한 본문 결과에는 추출 단계를 담을 수 없습니다")
+        object.__setattr__(self, "text", text)
+        object.__setattr__(self, "reason_code", reason_code)
+        object.__setattr__(self, "stage", stage)
+
+    @property
+    def succeeded(self) -> bool:
+        return bool(self.text)
+
+
+@dataclass(frozen=True)
 class NewsClassificationResult:
     """분류 채택과 실제 본문 조회 결과."""
 
     classified: tuple[ClassifiedNewsCandidate, ...]
     articles: tuple[FetchedNewsArticle, ...]
     exclusion_counts: Mapping[str, int] = field(default_factory=dict)
+    #: 본문을 어느 겹에서 얻었는지의 단계별 기사 수. 「메타 설명 한 문장으로
+    #: 겨우 건진 기사」와 「본문을 통째로 읽은 기사」를 운영에서 가르는 값이다.
+    body_stage_counts: Mapping[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         classified_ids = tuple(item.candidate.id for item in self.classified)
@@ -177,6 +221,11 @@ class NewsClassificationResult:
             self,
             "exclusion_counts",
             _counts(self.exclusion_counts, label="분류 제외 사유"),
+        )
+        object.__setattr__(
+            self,
+            "body_stage_counts",
+            _counts(self.body_stage_counts, label="본문 추출 단계"),
         )
 
     @property

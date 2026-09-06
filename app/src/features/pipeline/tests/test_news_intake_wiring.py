@@ -12,6 +12,7 @@ from src.features.news_intake import constants as news_constants
 from src.features.news_intake.constants import (
     NON_EXTENDABLE_SECTIONS as NON_EXTENDABLE_SECTION_IDS,
 )
+from src.features.news_intake.models import NewsBodyFetchResult
 from src.features.news_intake.select import news_trigger
 from src.features.pipeline import real
 from src.features.pipeline.evidence_transport import (
@@ -898,3 +899,69 @@ def test_full_runtime_off_ignores_zero_web_documents(
         raw.get("종류") == "news"
         for raw in calls.composers[0]["frags"].values()
     )
+
+
+# ------------------------------- 본문 실패 사유 세분화와 본문 단계 (n12)
+
+
+def test_본문_실패는_사유별로_제외에_남고_총괄_실패도_그_사유다() -> None:
+    """예전에는 무슨 이유든 ``fetch_failed`` 하나로 뭉개져 고칠 곳을 못 찾았다."""
+
+    fragments, steps = _collect(
+        search_news=lambda _query, **kwargs: _result(
+            items=[_item()] if kwargs["start"] == 1 else []
+        ),
+        fetch_text=lambda _url: NewsBodyFetchResult(
+            reason_code=news_constants.EXCLUDED_FETCH_ROBOTS_BLOCKED
+        ),
+    )
+
+    assert fragments == []
+    assert steps[0]["본문읽기"] == 0
+    assert steps[0]["제외"]["fetch_robots_blocked"] == 1
+    assert steps[0]["실패"] == "fetch_robots_blocked"
+    assert "fetch_failed" not in steps[0]["제외"]
+
+
+def test_상태_코드는_그대로_제외_사유에_남는다() -> None:
+    _fragments, steps = _collect(
+        search_news=lambda _query, **kwargs: _result(
+            items=[_item()] if kwargs["start"] == 1 else []
+        ),
+        fetch_text=lambda _url: NewsBodyFetchResult(reason_code="fetch_http_403"),
+    )
+
+    assert steps[0]["제외"]["fetch_http_403"] == 1
+    assert steps[0]["실패"] == "fetch_http_403"
+
+
+def test_본문을_어느_겹에서_얻었는지_steps에_남는다() -> None:
+    _fragments, steps = _collect(
+        search_news=lambda _query, **kwargs: _result(
+            items=[_item()] if kwargs["start"] == 1 else []
+        ),
+        fetch_text=lambda _url: NewsBodyFetchResult(
+            text=ARTICLE_BODY, stage=news_constants.BODY_STAGE_META_DESCRIPTION
+        ),
+    )
+
+    assert steps[0]["본문단계"] == {"meta_description": 1}
+    assert steps[0]["실패"] is None
+
+
+def test_뉴스_단계_기록은_어느_경로에서도_같은_열쇠를_가진다() -> None:
+    """열쇠가 경로마다 다르면 그 값을 읽는 화면·진단이 조용히 깨진다."""
+
+    _fragments, 대상없음 = _collect(
+        search_news=lambda _query, **_kwargs: _result(items=[]),
+        section_ready=_ready(),
+        official_web_documents=WEB_DOCUMENTS_PRESENT,
+    )
+    _fragments2, 정상 = _collect(
+        search_news=lambda _query, **kwargs: _result(
+            items=[_item()] if kwargs["start"] == 1 else []
+        ),
+    )
+
+    assert set(대상없음[0]) == set(정상[0])
+    assert "본문단계" in 대상없음[0]
