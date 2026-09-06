@@ -5,11 +5,18 @@ from __future__ import annotations
 import json
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable
+from dataclasses import replace
 
 from src.features.news_intake import constants as c
+from src.features.news_intake.fetch import (
+    body_fetch_urls,
+    normalize_body_result,
+    rebind_candidate_to_url,
+)
 from src.features.news_intake.models import (
     ClassifiedNewsCandidate,
     FetchedNewsArticle,
+    NewsBodyFetchResult,
     NewsCandidate,
     NewsClassificationResult,
 )
@@ -17,7 +24,10 @@ from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 
 
 Classifier = Callable[[str], str]
-TextFetcher = Callable[[str], str | None]
+#: 본문 함수는 ``NewsBodyFetchResult``(사유 코드까지 아는 실제 수집기)를
+#: 돌려주는 게 정본이고, ``str | None``(사유를 모르는 주입 함수)도 그대로
+#: 받는다 — 그 경우 실패는 예전과 같이 ``fetch_failed`` 하나로 센다.
+TextFetcher = Callable[[str], "str | None | NewsBodyFetchResult"]
 
 
 class _DuplicateJsonKey(ValueError):
@@ -192,6 +202,38 @@ def classify_candidates(
     )
 
 
+def _read_one_body(
+    candidate: NewsCandidate,
+    *,
+    fetch_text: TextFetcher,
+) -> tuple[NewsBodyFetchResult, NewsCandidate, tuple[str, ...]]:
+    """한 기사의 주소를 순서대로 시도한다.
+
+    Returns:
+        (성공한 결과 또는 마지막 실패 결과, 본문을 읽은 주소로 다시 묶은
+        기사 후보, 실패한 시도의 사유 코드 전부). 사유는 «시도한 주소마다»
+        남긴다 — 언론사 원문이 robots에 막혀 검색 서비스 주소로 넘어갔다는
+        사실이 진단에서 보여야 하기 때문이다.
+    """
+
+    failures: list[str] = []
+    last = NewsBodyFetchResult(reason_code=c.EXCLUDED_FETCH_FAILED)
+    for url in body_fetch_urls(candidate):
+        try:
+            raw = fetch_text(url)
+        except Exception:  # noqa: BLE001 - 한 주소가 터져도 다음 주소는 시도한다
+            raw = None
+        result = normalize_body_result(raw)
+        if result.succeeded:
+            return result, rebind_candidate_to_url(candidate, url), tuple(failures)
+        failures.append(result.reason_code)
+        last = result
+    if not failures:
+        # 주소 칸이 통째로 비어 시도조차 못 한 기사.
+        failures.append(last.reason_code)
+    return last, candidate, tuple(failures)
+
+
 def classify_and_read(
     candidates: Iterable[NewsCandidate],
     *,
@@ -199,7 +241,7 @@ def classify_and_read(
     fetch_text: TextFetcher,
     eligible_sections: Collection[str],
 ) -> NewsClassificationResult:
-    """분류 채택 후보만 주입 본문 함수로 한 번씩 읽는다."""
+    """분류 채택 후보의 본문을 ``BODY_FETCH_URL_FIELD_ORDER`` 순서로 읽는다."""
 
     classification = classify_candidates(
         candidates,
@@ -207,18 +249,27 @@ def classify_and_read(
         eligible_sections=eligible_sections,
     )
     excluded = Counter(classification.exclusion_counts)
+    stages: Counter[str] = Counter()
     articles: list[FetchedNewsArticle] = []
     for item in classification.classified:
-        try:
-            text = fetch_text(item.candidate.source_url)
-        except Exception:
-            text = None
-        if not isinstance(text, str) or not text.strip():
-            excluded[c.EXCLUDED_FETCH_FAILED] += 1
+        result, read_candidate, failures = _read_one_body(
+            item.candidate, fetch_text=fetch_text
+        )
+        excluded.update(failures)
+        if not result.succeeded:
             continue
-        articles.append(FetchedNewsArticle(classified=item, text=text))
+        stages[result.stage] += 1
+        # 조각의 출처는 «본문을 읽은 주소»여야 한다. 다른 주소에서 읽고
+        # 언론사 원문만 적으면 그 주소에 없는 문장을 가리키게 된다.
+        read_item = (
+            item
+            if read_candidate is item.candidate
+            else replace(item, candidate=read_candidate)
+        )
+        articles.append(FetchedNewsArticle(classified=read_item, text=result.text))
     return NewsClassificationResult(
         classified=classification.classified,
         articles=tuple(articles),
         exclusion_counts=dict(excluded),
+        body_stage_counts=dict(stages),
     )
