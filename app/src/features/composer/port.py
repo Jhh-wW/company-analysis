@@ -1224,6 +1224,18 @@ def filing_meta_from_raw(filing: Any) -> Optional[FilingMeta]:
 #: 비중 열을 알아보는 말.
 _RATIO_HEADER_HINTS: Final[tuple[str, ...]] = ("비중", "%")
 
+#: 「구성 «변화»」로 볼 최소 연도 수. 머리행의 비중 열에서 서로 «다른» 연도가
+#: 이만큼 나오면 그 표는 한 해의 구성이 아니라 여러 해의 변화를 말한다.
+#:
+#: ★ 왜 이 값이 필요한가 (하이브 실측 P4-3) — 3개년 표가 「가장 큰 연도 열」
+#:   하나로 줄어들어 4장에 2025년 누적 막대 하나만 나갔다. 캡션은
+#:   「… 변화 (2023~2025)」인데 그림에는 한 해뿐이라, 독자가 «변화»를 봤다고
+#:   착각한다. 2023·2024 숫자는 화면에서 통째로 사라졌다.
+#: ★ 하한이 2인 이유 — `revenuemix.build_multi_year`가 «두 해 이상»일 때만
+#:   변화 표를 만든다(그 아래는 단년 표와 중복이라 아예 안 만든다). 같은
+#:   기준을 써야 생산자와 이 어댑터가 같은 표를 같은 것으로 본다.
+_COMPOSITION_CHANGE_MIN_YEARS: Final[int] = 2
+
 
 def _composition_shape(
     headers: tuple[str, ...], rows: tuple[tuple[str, ...], ...]
@@ -1269,6 +1281,19 @@ def _composition_projection(
         if (match := re.search(r"(?<!\d)20\d{2}(?!\d)", headers[index]))
         is not None
     )
+    # ★ 다개년 구성 «변화» 표는 줄이지 않는다 (하이브 실측 P4-3).
+    #   서로 다른 연도가 둘 이상이면 이 표의 주제는 «한 해의 몫»이 아니라
+    #   «해마다 몫이 어떻게 달라졌나»다. 한 해로 줄이면 나머지 해의 숫자가
+    #   화면에서 사라지는데, 캡션은 그대로 「(2023~2025)」라 독자가 세 해를
+    #   봤다고 오해한다. 원표 그대로 두면 도식 판정기가 «2열»이 아니라서
+    #   도식을 만들지 않고(report_standard/visualization._composition),
+    #   웹·PDF 둘 다 짙은 머리행 표로 낸다 — 세 해 숫자가 다 보인다.
+    #   ★ 여기서 합계 행도 그대로 남는다. 도식이라면 「부분의 합이 전체」라는
+    #     그림을 깨뜨려 빼야 하지만, 표에서는 공시가 적은 검산 줄이라 남기는
+    #     쪽이 정직하다.
+    distinct_years = {year for year, _index in year_ratio_indices}
+    if len(distinct_years) >= _COMPOSITION_CHANGE_MIN_YEARS:
+        return headers, rows, identity_rows, identity_columns
     # 연도가 명시된 표는 열 순서가 아니라 가장 큰 연도를 고른다. 연도가 없는
     # 기존 표는 오른쪽 비중 열을 고르던 순서를 그대로 유지한다.
     ratio_index = (

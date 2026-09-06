@@ -52,6 +52,7 @@ from src.shared.report_generation.public_projection import PublicProjectionError
 from src.features.composer.validate import V2ValidationError
 from src.features.pipeline.port import Grade, ReportTable
 from src.features.provenance.sources import has_valid_provenance_seal
+from src.features.report_standard.visualization import table_visualization
 from src.features.storage.reports import (
     report_from_dict,
     report_from_json,
@@ -1555,11 +1556,26 @@ def test_3개년_구성변화표는_실적표_뒤에서_render와_manifest가_�
         for table in manifest_payload["tables"]
         if table["section_id"] == "past_changes"
     ]
+    # ★ P4-3 — 「(2025년 비중)」 꼬리표는 «한 해로 줄였을 때만» 붙는다.
+    #   3개년 표는 줄이지 않으므로 캡션도 공시 그대로다.
     assert rendered_captions == manifest_captions == [
         "최근 3개년 실적",
-        "제품·서비스별 매출 비중 변화 (2023~2025) (2025년 비중)",
-        "지역별 매출 비중 변화 (2023~2025) (2025년 비중)",
+        "제품·서비스별 매출 비중 변화 (2023~2025)",
+        "지역별 매출 비중 변화 (2023~2025)",
     ]
+    # ★ 그리고 세 해 열이 그대로 남아 있어야 캡션의 「(2023~2025)」가 사실이 된다.
+    변화표들 = [
+        table
+        for section in rendered.sections
+        if section.cell == "past_changes"
+        for table in section.tables
+        if "비중 변화" in table.caption
+    ]
+    assert len(변화표들) == 2
+    for table in 변화표들:
+        assert table.headers == ["구분", "2023 비중", "2024 비중", "2025 비중"]
+        # 표를 «대체»하는 도식을 만들지 않는다 — 만들면 안 그려진 해가 사라진다.
+        assert table_visualization(table) is None
 
 
 def test_공개행만_되풀이한_가짜_evidence_JSON은_인용원문_근거가_아니다():

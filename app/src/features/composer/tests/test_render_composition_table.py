@@ -39,6 +39,7 @@ from src.features.composer.render import (
     COMPOSITION_PRESENTATION,
     render_report,
 )
+from src.features.report_standard.visualization import table_visualization
 
 
 def _raw_fragments() -> dict[int, dict[str, Any]]:
@@ -110,10 +111,18 @@ def _performance() -> PerformanceTable:
 
 
 def _composition_change(caption: str) -> PerformanceTable:
+    """4장 구성 «변화» 표 — 실제 생산자(`revenuemix.build_multi_year`)와 같은
+    3개년 모양이다. 예전 이 도우미는 「구분 · 2025 비중」 두 열이었는데, 그건
+    composer가 세 해를 한 해로 줄인 «뒤»의 모양이라 진짜 입력이 아니었다
+    (P4-3에서 그 줄이기를 없앴다)."""
     return PerformanceTable(
         caption=caption,
-        headers=("구분", "2025 비중"),
-        rows=(("가", "60%"), ("나", "30%"), ("다", "10%")),
+        headers=("구분", "2023 비중", "2024 비중", "2025 비중"),
+        rows=(
+            ("가", "40%", "50%", "60%"),
+            ("나", "40%", "35%", "30%"),
+            ("다", "20%", "15%", "10%"),
+        ),
         cite="조각 1·매출수주",
     )
 
@@ -228,6 +237,37 @@ def test_4장은_실적표_뒤에_제품_지역_구성변화표를_붙인다():
         COMPOSITION_PRESENTATION,
         COMPOSITION_PRESENTATION,
     ]
+
+
+def test_4장_구성변화표는_세_해_열을_그대로_싣고_도식으로_바뀌지_않는다():
+    """★★ P4-3 — 캡션이 「(2023~2025)」라면 세 해 숫자가 실제로 실려야 한다.
+
+    도식 명세가 만들어지면 웹·PDF가 표 «대신» 그림을 그린다. 그 그림은 한 해
+    누적 막대뿐이라 2023·2024가 화면에서 사라진다 — 그래서 명세가 없어야 한다.
+    """
+    report = render_report(
+        "가나다전자(주)",
+        _composed(),
+        _raw_fragments(),
+        _performance(),
+        table_presentation="trend",
+        composition_tables=(
+            _composition_change("제품·서비스별 매출 비중 변화 (2023~2025)"),
+            _composition_change("지역별 매출 비중 변화 (2023~2025)"),
+        ),
+    )
+
+    변화표들 = [
+        table
+        for table in _section_of(report, "past_changes").tables
+        if "비중 변화" in table.caption
+    ]
+
+    assert len(변화표들) == 2
+    for table in 변화표들:
+        assert table.headers == ["구분", "2023 비중", "2024 비중", "2025 비중"]
+        assert table.rows[0] == ["가", "40%", "50%", "60%"]
+        assert table_visualization(table) is None
 
 
 # ══════════════════════════════════════════════════════════
