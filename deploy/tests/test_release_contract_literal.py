@@ -35,10 +35,14 @@ EXPECTED_RUNTIME_CONTRACT = "render-portfolio-link-v1"
 EXPECTED_RELEASE_MODE = "FULL"
 #: 출시에서 선언하지 않는 kill switch 이름.
 TYPED_COLLECTOR_ENV_NAME = "TYPED_DART_COLLECTOR"
+#: 언론 보조 문서 입구. 출시에서는 선언하지 않는 것이 off다.
+NEWS_INTAKE_ENV_NAME = "NEWS_INTAKE"
 #: AI 근거 재판정 kill switch 이름. 선언하지 않는 것이 off다.
 EVIDENCE_RECLASSIFY_ENV_NAME = "EVIDENCE_RECLASSIFY"
 #: 1단계 매출표 범용 파서 kill switch 이름. 이것도 선언하지 않는 것이 off다.
 REVENUE_TABLE_V2_ENV_NAME = "REVENUE_TABLE_V2"
+#: 뉴스룸 글자 날짜의 AI 예비 단계. 프로그램 판정은 이 값과 무관하게 켜진다.
+NEWSROOM_DATE_AI_ENV_NAME = "NEWSROOM_DATE_AI"
 
 
 def _render_web_service_env() -> dict[str, object]:
@@ -104,6 +108,16 @@ def test_TYPED_DART_COLLECTOR는_render_yaml에_없다() -> None:
     )
 
 
+def test_NEWS_INTAKE는_render_yaml에_없다() -> None:
+    """언론 보조 문서 입구를 출시 Blueprint에서 미리 켜지 않는다."""
+
+    render_values = _render_web_service_env()
+
+    assert NEWS_INTAKE_ENV_NAME not in render_values, (
+        "출시 릴리스는 언론 보조 문서 입구를 끈 채로 나갑니다"
+    )
+
+
 def test_EVIDENCE_RECLASSIFY는_render_yaml에_없다() -> None:
     """운영 검증 전인 AI 근거 재판정을 출시와 함께 켜지 않는다."""
 
@@ -111,6 +125,16 @@ def test_EVIDENCE_RECLASSIFY는_render_yaml에_없다() -> None:
 
     assert EVIDENCE_RECLASSIFY_ENV_NAME not in render_values, (
         "출시 릴리스는 근거 재판정을 끈 채로 나갑니다 — 검증 뒤 별도로 결정합니다"
+    )
+
+
+def test_NEWSROOM_DATE_AI는_render_yaml에_없다() -> None:
+    """실제 provider 연결 전에는 프로그램 날짜 판정만 출시한다."""
+
+    render_values = _render_web_service_env()
+
+    assert NEWSROOM_DATE_AI_ENV_NAME not in render_values, (
+        "뉴스룸 날짜 AI 예비 단계는 미선언 상태로 출시해야 합니다"
     )
 
 
@@ -137,6 +161,8 @@ def test_deploy_readme가_새_kill_switch를_적어_둔다() -> None:
 
     assert REVENUE_TABLE_V2_ENV_NAME in readme
     assert EVIDENCE_RECLASSIFY_ENV_NAME in readme
+    assert NEWS_INTAKE_ENV_NAME in readme
+    assert NEWSROOM_DATE_AI_ENV_NAME in readme
     assert "키를 지우고 재배포" in readme
 
 

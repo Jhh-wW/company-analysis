@@ -62,9 +62,10 @@ def test_진행_단계는_회사분석_흐름_7단계다():
 
 
 def test_진행_단계_이름은_모으는_자료를_사실대로_말한다():
-    """뉴스 검색은 설계 단계에서 뺐다 — 단계 이름이 하지 않는 일을 말하면 안 된다."""
+    """폐기한 과정 문장만 막고 언론 수집의 사실형 결과는 허용한다."""
     labels = [label for _key, label in C.PROGRESS_STEPS]
 
+    assert "뉴스" not in C.REMOVED_PROGRESS_COPY_MARKERS
     for label in labels:
         for removed in C.REMOVED_PROGRESS_COPY_MARKERS:
             assert removed not in label, f"단계 이름 「{label}」에 「{removed}」가 남아 있습니다"

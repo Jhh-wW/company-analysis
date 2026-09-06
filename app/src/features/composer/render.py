@@ -20,6 +20,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Final, Optional
+from urllib.parse import urlsplit
 
 from src.core.citations import citation_number
 from src.features.composer.constants import (
@@ -74,6 +75,7 @@ from src.features.provenance.sources import (
     full_typed_source_registry_problem,
     has_valid_provenance_seal,
     is_canonical_official_with_registry,
+    is_publishable_supplementary,
     seal_collected_source,
 )
 from src.shared.report_quality.fact_binding import fact_evidence_binding
@@ -90,6 +92,7 @@ from src.shared.report_evidence.source_kind_policy import (
     formal_web_public_source_metadata,
 )
 from src.shared.report_evidence.constants import (
+    SOURCE_KIND_NEWS,
     SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
 )
 from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
@@ -701,7 +704,29 @@ def _build_source(
         domain_redirect_from_host=meta.domain_redirect_from_host,
         domain_redirect_to_host=meta.domain_redirect_to_host,
     )
-    if identity_host and identity_document_id:
+    if meta.formal_source_kind == SOURCE_KIND_NEWS:
+        news_host = str(urlsplit(meta.source_url).hostname or "")
+        source = Source(
+            number=number,
+            kind=SourceKind.NEWS,
+            label=_source_label(meta, filing_meta),
+            collected_at=meta.source_collected_on,
+            published_at=meta.document_date,
+            domain=news_host,
+            source_id=f"{V2_SOURCE_ID_PREFIX}{meta.fragment_id}",
+            title=meta.document_title,
+            publisher=meta.source_publisher,
+            host=news_host,
+            url=meta.source_url,
+            document_id=meta.source_document_id,
+            location=meta.location,
+            source_type="언론 보도",
+            fact_status="외부 보도",
+            used_in=list(used_in),
+            evidence_hashes=evidence_hashes,
+            exact_evidence_hashes=exact_evidence_hashes,
+        )
+    elif identity_host and identity_document_id:
         source = Source(
             number=number,
             kind=SourceKind.FILING,
@@ -857,6 +882,11 @@ def _build_source(
             and not is_canonical_official_with_registry(sealed, [sealed])
         ):
             raise ValueError("DART sidecar 공식 웹 출처의 공식성 proof가 손상됐습니다")
+        if (
+            meta.formal_source_kind == SOURCE_KIND_NEWS
+            and not is_publishable_supplementary(sealed, [sealed])
+        ):
+            raise ValueError("FULL 보조 언론 출처의 공개 provenance가 손상됐습니다")
     return sealed
 
 

@@ -92,7 +92,6 @@ def test_launcher_refuses_real_pipeline_without_the_boot_required_secret() -> No
     "stale",
     [
         "워드로 내려받기",
-        "뉴스 조사",
         "60~250원",
         "82원",
         "Python314",
@@ -102,9 +101,7 @@ def test_launcher_has_no_stale_promise(stale: str) -> None:
     """지금은 사실이 아닌 안내가 화면에 남아 있으면 안 된다.
 
     워드 주소는 410으로 닫혔고(``src/web/routers/reports.py``의 ``download_docx``),
-    공식 근거 보고서는 뉴스를 쓰지 않으며(``src/features/pipeline/real.py``가
-    수집 자체를 생략한다), 1건 비용은 회사·자료량마다 달라 실행기가 숫자로
-    약속할 수 없다.
+    1건 비용은 회사·자료량마다 달라 실행기가 숫자로 약속할 수 없다.
     """
     assert stale not in SCRIPT, f"현재 동작과 다른 안내가 남아 있습니다: {stale}"
 

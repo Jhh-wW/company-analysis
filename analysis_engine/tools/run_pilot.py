@@ -229,10 +229,7 @@ def identify(client: anthropic.Anthropic, company: str, address: str,
     if not hits:
         # 웹(뉴스) 검색 보강 — 기사에서 법인명 표기를 뽑아 DART 대조.
         # 사명 변경(한글과컴퓨터→한컴)·브랜드명 문제의 1차 방어. 실패하면 AI 5회로.
-        try:
-            news = search_news(company, display=10)
-        except Exception:
-            news = []
+        news = search_news(company, display=10).items
         name_re = re.compile(r"(?:㈜|\(주\)|주식회사)\s*([가-힣A-Za-z0-9&]{2,15})"
                              r"|([가-힣A-Za-z0-9&]{2,15})\s*(?:㈜|\(주\))")
         # 가드레일 (오식별 실측 — 네오와이즈→네오펄스): ① 입력 회사명을 실제로
@@ -508,11 +505,11 @@ def collect_news(company: str, profile: dict[str, Any], homonym_count: int,
     동명 단서는 기업개황의 대표자·주소 토큰과 대조한다.
     한계(기록): 조건 「타사 3개 미만」은 제목 내 타사 수를 셀 방법이 없어 미적용.
     """
-    try:
-        items = search_news(company, display=20, sort="date")
-    except Exception as exc:  # 한도·인증·네트워크 — 사유만 기록하고 뉴스 없이 진행
-        steps.append({"step": "6_수집_뉴스", "오류": f"{type(exc).__name__}: {str(exc)[:80]}"})
+    search_result = search_news(company, display=20, sort="date")
+    if not search_result.ok:
+        steps.append({"step": "6_수집_뉴스", "오류": search_result.reason_code})
         return []
+    items = search_result.items
     today = business_date or today_kst()
     ceo = (profile.get("ceo_nm") or "").strip().split(",")[0].strip()
     adres_tokens = [t for t in (profile.get("adres") or "").split()[:2] if len(t) >= 2]

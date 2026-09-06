@@ -22,6 +22,7 @@ from html.parser import HTMLParser
 from typing import Callable, Optional
 from urllib import robotparser
 
+from src.core.newsroom_date_switch import newsroom_date_ai_enabled
 from src.features.homepage.constants import (
     BRAND_PATH_EXCLUDED_TOKENS,
     BRAND_PATH_MAX_PREFIX_GAP,
@@ -39,6 +40,12 @@ from src.features.homepage.constants import (
     SINGLE_LABEL_PUBLIC_SUFFIXES,
     TIMEOUT_SEC,
     USER_AGENT,
+)
+from src.features.homepage.newsroom_date import (
+    NewsroomDateAiCall,
+    NewsroomDateCacheLoad,
+    NewsroomDateCacheSave,
+    extract_newsroom_date,
 )
 from src.features.homepage.robots_cache import (
     RobotsDecision,
@@ -283,6 +290,9 @@ def collect_homepage_fragments(
     *,
     allow_dart_www_alias: bool = False,
     www_redirect_probe: DartWwwRedirectProbe | None = None,
+    newsroom_date_ai_call: NewsroomDateAiCall | None = None,
+    newsroom_date_cache_load: NewsroomDateCacheLoad | None = None,
+    newsroom_date_cache_save: NewsroomDateCacheSave | None = None,
 ) -> HomepageCollectResult:
     """홈페이지 수집 전체를 하나의 절대시간·DNS cache 경계에서 실행한다.
 
@@ -297,6 +307,9 @@ def collect_homepage_fragments(
                 homepage_url,
                 fetch=fetch,
                 lookup_cert_names=lookup_cert_names,
+                newsroom_date_ai_call=newsroom_date_ai_call,
+                newsroom_date_cache_load=newsroom_date_cache_load,
+                newsroom_date_cache_save=newsroom_date_cache_save,
             )
             alias_url = (
                 dart_homepage_www_alias_url(homepage_url)
@@ -320,6 +333,9 @@ def collect_homepage_fragments(
                     verified_alias_url,
                     fetch=fetch,
                     lookup_cert_names=lookup_cert_names,
+                    newsroom_date_ai_call=newsroom_date_ai_call,
+                    newsroom_date_cache_load=newsroom_date_cache_load,
+                    newsroom_date_cache_save=newsroom_date_cache_save,
                 )
                 if alias_result.state == "ok" or (
                     result.state == "failed" and alias_result.state != "failed"
@@ -362,6 +378,10 @@ def _collect_homepage_fragments_impl(
     homepage_url: str,
     fetch: Fetcher = default_fetch,
     lookup_cert_names: CertNameLookup = default_lookup_cert_names,
+    *,
+    newsroom_date_ai_call: NewsroomDateAiCall | None = None,
+    newsroom_date_cache_load: NewsroomDateCacheLoad | None = None,
+    newsroom_date_cache_save: NewsroomDateCacheSave | None = None,
 ) -> HomepageCollectResult:
     """홈페이지 주소 하나에서 조각 목록을 모은다.
 
@@ -469,6 +489,9 @@ def _collect_homepage_fragments_impl(
             seen_text,
             total_chars,
             final_url_verified=root_url_verified,
+            newsroom_date_ai_call=newsroom_date_ai_call,
+            newsroom_date_cache_load=newsroom_date_cache_load,
+            newsroom_date_cache_save=newsroom_date_cache_save,
         )
     else:
         candidate_scope_complete = False
@@ -518,6 +541,9 @@ def _collect_homepage_fragments_impl(
             seen_text,
             total_chars,
             final_url_verified=link_verified,
+            newsroom_date_ai_call=newsroom_date_ai_call,
+            newsroom_date_cache_load=newsroom_date_cache_load,
+            newsroom_date_cache_save=newsroom_date_cache_save,
         )
         for discovered in _extract_links(page_html, effective_link, parsed_root.netloc):
             if discovered in seen_urls or discovered in queued_urls:
@@ -964,6 +990,9 @@ def _collect_page(
     total_chars: int,
     *,
     final_url_verified: bool = False,
+    newsroom_date_ai_call: NewsroomDateAiCall | None = None,
+    newsroom_date_cache_load: NewsroomDateCacheLoad | None = None,
+    newsroom_date_cache_save: NewsroomDateCacheSave | None = None,
 ) -> int:
     """페이지 하나를 조각으로 만들어 `fragments`에 더한다.
 
@@ -980,8 +1009,20 @@ def _collect_page(
     kept = text[:remaining]
     fragment = {"종류": FRAGMENT_KIND, "원문": kept, "출처": page_url}
     published_at = _published_date_from_html(raw_html)
+    newsroom_result = None
+    if not published_at:
+        newsroom_result = extract_newsroom_date(
+            raw_html,
+            ai_call=newsroom_date_ai_call,
+            ai_enabled=newsroom_date_ai_enabled,
+            cache_load=newsroom_date_cache_load,
+            cache_save=newsroom_date_cache_save,
+        )
+        published_at = newsroom_result.date
     if published_at:
         fragment["문서일"] = published_at
+    if newsroom_result is not None and newsroom_result.origin:
+        fragment["date_origin"] = newsroom_result.origin
     if final_url_verified and urllib.parse.urlsplit(page_url).scheme.casefold() == "https":
         fragment["후보출처검증"] = "https_exact_dart_host"
     fragments.append(fragment)
