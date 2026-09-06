@@ -13,6 +13,7 @@ from src.features.product_names.fragments import (
     formal_source_kind_for_filing,
     name_candidate_fragments,
 )
+from src.shared.name_fragments import name_fragment_label_and_name
 from src.features.product_names.logic import collect_name_candidates
 from src.features.product_names.models import NameCandidate
 from src.shared.report_evidence.constants import (
@@ -176,7 +177,7 @@ def test_인이지_감사보고서의_주요계약도_이름조각이_된다() -
 
     assert len(made) == 1
     assert made[0]["원문"] == contract.excerpt
-    assert str(made[0]["원문위치"]).endswith("주요 계약")
+    assert name_fragment_label_and_name(str(made[0]["원문위치"]))[0] == "주요 계약"
 
 
 def _candidates_of(kind: str, count: int, *, prefix: str) -> tuple[NameCandidate, ...]:
@@ -208,7 +209,9 @@ def test_한_종류가_예산을_다_먹지_않는다() -> None:
         corp_id=CORP_ID,
         typed_fragments=(_typed_anchor(),),
     )
-    kinds = [str(raw["원문위치"]).rsplit(" · ", 1)[-1] for raw in made]
+    kinds = [
+        name_fragment_label_and_name(str(raw["원문위치"]))[0] for raw in made
+    ]
 
     assert len(made) == MAX_NAME_FRAGMENTS_PER_FILING
     assert kinds.count("대표 IP") == MAX_NAME_FRAGMENTS_PER_KIND
@@ -239,7 +242,9 @@ def test_하이브_예산은_부문_여섯과_대표IP_열이다() -> None:
         corp_id=CORP_ID,
         typed_fragments=(_typed_anchor(),),
     )
-    kinds = [str(raw["원문위치"]).rsplit(" · ", 1)[-1] for raw in made]
+    kinds = [
+        name_fragment_label_and_name(str(raw["원문위치"]))[0] for raw in made
+    ]
 
     assert len(made) == 16
     assert kinds.count("사업부문") == 6
@@ -263,7 +268,10 @@ def test_남는_자리는_종류별_상한을_넘어서라도_채운다() -> Non
     ]
 
 
-def test_대표IP_조각의_원문위치에는_대표_IP가_적힌다() -> None:
+def test_대표IP_조각의_원문위치에는_대표_IP와_이름이_적힌다() -> None:
+    """★ 라벨만으로는 부족하다 — 조각 원문은 표 «한 행»이라 어느 칸이 우리가
+    고른 이름인지 알 수 없다. 이름까지 실어야 하류가 추측하지 않는다."""
+
     made = name_candidate_fragments(
         _candidates_of(SUBJECT_IP, 1, prefix="뉴"),
         filing_meta=_filing(),
@@ -272,4 +280,11 @@ def test_대표IP_조각의_원문위치에는_대표_IP가_적힌다() -> None:
     )
 
     assert len(made) == 1
-    assert str(made[0]["원문위치"]).endswith(" · 대표 IP")
+    label, name = name_fragment_label_and_name(str(made[0]["원문위치"]))
+    assert label == "대표 IP"
+    assert name == "뉴0"
+
+
+def test_이름_조각이_아닌_위치는_라벨도_이름도_빈다() -> None:
+    assert name_fragment_label_and_name("사업의 내용") == ("", "")
+    assert name_fragment_label_and_name("") == ("", "")

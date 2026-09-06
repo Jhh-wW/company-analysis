@@ -13,6 +13,10 @@ from src.shared.report_evidence.constants import (
     SOURCE_KIND_DART_QUARTERLY_REPORT,
     SOURCE_KIND_DART_SEMIANNUAL_REPORT,
 )
+from src.shared.name_fragments import (
+    NAME_KIND_LABELS,
+    name_fragment_location,
+)
 from src.shared.report_evidence.source_kind_policy import (
     FormalSourceKindContractError,
     document_slots_for_formal_source_kind,
@@ -23,12 +27,6 @@ from .constants import (
     MAX_NAME_FRAGMENTS_PER_FILING,
     MAX_NAME_FRAGMENTS_PER_KIND,
     NAME_FRAGMENT_KIND_ORDER,
-    SUBJECT_BRAND,
-    SUBJECT_CONTRACT,
-    SUBJECT_IP,
-    SUBJECT_PRODUCT,
-    SUBJECT_SEGMENT,
-    SUBJECT_SUBSIDIARY,
 )
 from .models import NameCandidate
 
@@ -108,14 +106,6 @@ _COPIED_PROVENANCE_KEYS: Final[tuple[str, ...]] = (
     "문서일",
     *tuple(sorted(_TYPED_METADATA_KEYS)),
 )
-_SUBJECT_KIND_LABELS: Final[dict[str, str]] = {
-    SUBJECT_PRODUCT: "제품",
-    SUBJECT_BRAND: "브랜드",
-    SUBJECT_SEGMENT: "사업부문",
-    SUBJECT_SUBSIDIARY: "종속회사",
-    SUBJECT_CONTRACT: "주요 계약",
-    SUBJECT_IP: "대표 IP",
-}
 _DART_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
     {
         SOURCE_KIND_DART_BUSINESS_REPORT,
@@ -219,8 +209,8 @@ def _budgeted_candidates(
 ) -> tuple[NameCandidate, ...]:
     """예산 안에서 종류를 골고루 담는다.
 
-    한 종류가 예산을 다 먹으면 다른 종류가 한 건도 못 들어간다. 실측(하이브)
-    에서 제품 후보가 먼저 나와, 종류별 상한이 없으면 대표 IP가 0건이 됐다.
+    한 종류가 예산을 다 먹으면 다른 종류가 한 건도 못 들어간다. 실측(상장
+    엔터사)에서 제품 후보가 먼저 나와, 종류별 상한이 없으면 대표 IP가 0건이 됐다.
     그래서 ①정해진 종류 순서로 종류별 상한까지 담고, ②그래도 자리가 남으면
     같은 순서로 남은 후보를 마저 담는다(한 종류만 있는 회사도 예산을 쓴다).
     """
@@ -279,7 +269,7 @@ def name_candidate_fragments(
     limited = _budgeted_candidates(candidates)
     made: list[dict[str, object]] = []
     for index, candidate in enumerate(limited, start=1):
-        label = _SUBJECT_KIND_LABELS.get(candidate.subject_kind)
+        label = NAME_KIND_LABELS.get(candidate.subject_kind)
         if (
             label is None
             or candidate.source_kind != source_kind
@@ -298,7 +288,11 @@ def name_candidate_fragments(
         raw.update(
             {
                 "원문": candidate.excerpt,
-                "원문위치": f"{candidate.location} · {label}",
+                "원문위치": name_fragment_location(
+                    candidate.location,
+                    kind=candidate.subject_kind,
+                    name=candidate.name,
+                ),
                 _RAW_SECTION_IDS_KEY: (NAME_FRAGMENT_SECTION_ID,),
                 _RAW_SLOT_IDS_KEY: (NAME_FRAGMENT_SLOT_ID,),
                 _RAW_ORIGIN_FRAGMENT_IDS_KEY: (

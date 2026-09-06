@@ -4956,6 +4956,44 @@ def _comparison_generation_digest(
     ).hexdigest()
 
 
+def _unused_name_steps(output: Any) -> list[dict[str, Any]]:
+    """3장 카드가 packet의 대표 이름을 하나도 안 썼을 때만 한 줄 남긴다.
+
+    ★ 카드를 만들거나 고치지 않는다 — 근거 없이 카드를 지어내는 것이 이
+      보고서에서 가장 하면 안 되는 일이다. 「이름을 몇 개 줬는데 안 썼다」는
+      사실만 실행 기록에 남겨, 안내문이 듣는지를 다음 실행에서 바로 잰다.
+
+    Args:
+        output: composer `run_v2`의 결과. 이 필드를 모르는 옛 결과도 받는다.
+
+    Returns:
+        남길 단계가 없으면 빈 목록, 있으면 단계 dict 하나짜리 목록.
+    """
+
+    from src.features.composer.portfolio_names import (  # noqa: PLC0415
+        UNUSED_REPRESENTATIVE_NAMES_STEP,
+    )
+
+    try:
+        count = int(getattr(output, "unused_portfolio_name_count", 0) or 0)
+    except (TypeError, ValueError):
+        return []
+    if count <= 0:
+        return []
+    pairs = getattr(output, "unused_portfolio_name_counts_by_label", ()) or ()
+    try:
+        by_label = {str(label): int(value) for label, value in pairs}
+    except (TypeError, ValueError):
+        by_label = {}
+    return [
+        {
+            "step": UNUSED_REPRESENTATIVE_NAMES_STEP,
+            "이름수": count,
+            "종류별": by_label,
+        }
+    ]
+
+
 def _run_v2_composer(
     *,
     engine: _MeteredEngine,
@@ -5257,6 +5295,7 @@ def _run_v2_composer(
                     "사유": list(dropped_diagram_reasons),
                 }
             )
+        steps.extend(_unused_name_steps(output))
         if release_mode is not ReleaseMode.SHADOW:
             from src.shared.report_generation.models import (  # noqa: PLC0415
                 GenerationProducerEvidence,
