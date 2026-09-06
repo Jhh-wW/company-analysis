@@ -107,6 +107,24 @@ def test_0선_아래_막대는_빨강이_아니라_가장_진한_회색이다() 
         assert "--risk" not in body, f"{selector} 의 값 글자가 아직 붉습니다"
 
 
+def test_보고서_화면_어디에도_빨간색을_쓰지_않는다() -> None:
+    """디자인 토큰 v1의 「컬러 금지」를 결과 화면 «전체»에 건다.
+
+    ★ 왜 막대 규칙만으로는 모자란가 — 3개년 변화 요약 띠도 「내려간 값」을
+      빨강으로 칠하고 있었다(`.period-summary li.dir-down .ps-change`). PDF는
+      같은 띠를 처음부터 무채색으로 그려 두 채널이 갈라져 있었다.
+    ★ `--risk`·`--risk-text` 정의 자체는 남겨 둔다 — 관리자 화면처럼 보고서가
+      아닌 자리에서 쓸 수 있다. 여기서 막는 것은 «결과 화면에서의 사용»이다.
+    """
+
+    offenders = [
+        selector.strip()
+        for selector, body in re.findall(r"([^{}]+)\{([^}]*)\}", _css())
+        if ".result-page" in selector and "--risk" in body
+    ]
+    assert offenders == [], f"결과 화면 규칙이 빨간색을 씁니다: {offenders}"
+
+
 def test_화면과_PDF의_0선_아래_막대_색이_같은_값이다() -> None:
     """두 채널이 갈라지면 같은 그림이 색만 다르게 나온다."""
 
@@ -256,8 +274,9 @@ def test_표지_실적_띠는_값이_셋이면_세_칸을_그린다(
 ) -> None:
     """고르는 쪽이 셋을 넘기면 화면은 그대로 세 칸을 그린다.
 
-    ★ 지금 «고르는» 함수(report_standard.cover_metrics)는 두 개까지만 넘긴다.
-      이 시험은 그리는 쪽(화면 틀·CSS)이 셋을 받을 준비가 됐음을 지킨다.
+    ★ «고르는» 쪽(report_standard.cover_metrics)이 실제로 셋을 고르는지는
+      report_standard 시험이 본다. 여기서는 그리는 쪽(화면 틀·CSS)만 떼어
+      확인한다 — 고르는 함수를 갈아 끼워, 값이 셋이면 칸도 셋인지만 본다.
     """
 
     monkeypatch.setattr(

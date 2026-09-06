@@ -29,20 +29,20 @@ PERIOD_HEADER: Final[str] = "사업연도"
 #:
 #: ★ ``build_three_year_table``이 «반드시» 만들어 내는 두 필수 지표의 열 이름을
 #:   그대로 쓴다(``company_performance/logic.py``의 ``_ACCOUNT_IDS`` ·
-#:   ``_REQUIRED_METRICS``). 선택 지표(당기순이익)까지 실으면 회사마다 띠의
-#:   칸 수가 달라져 표지 모양이 흔들린다.
+#:   ``_REQUIRED_METRICS``). 이 목록은 «표를 알아보는 기준»이지 띠에 올리는
+#:   칸의 전부가 아니다 — 실을 값은 아래 ``COVER_METRIC_CANDIDATES``가 정한다.
 #: ★ 라벨을 새로 짓지 않고 표의 «한국어 열 이름»을 옮기는 이유 — ``KPI`` 같은
 #:   영문 약어는 출고 게이트(``publish.py``의 ``_FORBIDDEN_JOB_TOPIC``)가
 #:   지원자 직무 소재로 보고 차단한다.
 COVER_METRIC_LABELS: Final[tuple[str, ...]] = ("매출액", "영업이익")
 
-#: 띠에 올릴 «후보» 지표 — 앞에서부터 표에 있는 것으로 COVER_METRIC_COUNT 개를 고른다.
+#: 띠에 올릴 «후보» 지표 — 앞에서부터 표에 있는 것으로 COVER_METRIC_MAX 개를 고른다.
 #:
 #: ★ 은행 손익계산서에는 「매출액」에 해당하는 계정이 «아예 없다»
 #:   (실측: 우리은행). 예전에는 매출액·영업이익이 «둘 다» 있어야 띠를 그렸기 때문에
 #:   그런 회사는 표지 실적 박스가 통째로 사라졌다.
 #:   후보를 하나 늘려 「매출액·영업이익」이 안 되면 「영업이익·당기순이익」으로 그린다.
-#: ★ 보통 회사(세 지표가 다 있는 경우)는 앞 둘이 그대로 뽑혀 예전과 «똑같다».
+#: ★ 순서가 곧 «칸 순서»다. 매출액 → 영업이익 → 당기순이익으로 왼쪽부터 놓인다.
 #: ★ 목록은 여전히 «닫혀» 있다 — 표에 있는 아무 열이나 크게 띄우지 않는다.
 COVER_METRIC_CANDIDATES: Final[tuple[str, ...]] = (
     "매출액",
@@ -50,15 +50,35 @@ COVER_METRIC_CANDIDATES: Final[tuple[str, ...]] = (
     "당기순이익",
 )
 
-#: 띠에 올리는 칸 수. 회사마다 칸 수가 달라지면 표지 모양이 흔들린다.
-COVER_METRIC_COUNT: Final[int] = len(COVER_METRIC_LABELS)
+#: 이 표를 «실적표로 알아보는» 최소 지표 수.
+#:
+#: ★ 왜 관문이 필요한가 — 첫 열이 ``사업연도``인 숫자표는 실적표 말고도 나올 수
+#:   있다. 후보 지표가 둘 이상 있어야 4장 실적표로 본다.
+#: ★ 왜 3이 아니라 2인가 — 은행 손익계산서에는 「매출액」에 해당하는 계정이
+#:   «아예 없다»(실측: 우리은행). 관문을 3으로 올리면 지표가 「영업이익·
+#:   당기순이익」 둘뿐인 그런 회사의 표가 «실적표가 아니다»로 판정돼 표지
+#:   띠가 통째로 사라진다.
+COVER_METRIC_MIN: Final[int] = 2
+
+#: 띠에 «올리는» 최대 칸 수.
+#:
+#: ★ 왜 MIN과 나눠 두나 — 예전에는 상수 하나(``COVER_METRIC_COUNT``)가
+#:   「표를 알아보는 관문」과 「올리는 칸 수」를 «겸했다». 그래서 칸을 늘리려고
+#:   그 값을 올리면 관문까지 같이 올라가는 구조였다. 두 값은 서로 다른 질문에
+#:   답하므로 상수도 둘이어야 한다.
+#: ★ 상한이 후보 수인 이유 — 정본(디자인과_PDF_QA §6-1·부품 D)이 한 줄에
+#:   최대 4칸을 허용하고, 닫힌 후보 목록이 셋이라 실제 상한은 셋이다.
+#:   칸 수는 회사마다 다르다 — 세 지표가 다 있으면 3칸, 둘뿐이면 2칸이다.
+#:   적자 전환처럼 표지에서 가장 먼저 보여야 할 사실이 순이익 칸에 있는
+#:   회사가 실제로 있다(실측: 하이브 당기순이익 -2,544억원).
+COVER_METRIC_MAX: Final[int] = len(COVER_METRIC_CANDIDATES)
 
 
 def cover_metric_labels(headers: list[str]) -> list[str]:
     """표의 열 이름에서 띠에 올릴 지표를 «후보 순서대로» 고른다."""
 
     present = [label for label in COVER_METRIC_CANDIDATES if label in headers]
-    return present[:COVER_METRIC_COUNT]
+    return present[:COVER_METRIC_MAX]
 
 #: 띠 제목의 꼬리말. 표 캡션의 「주요 실적」과 같은 뜻이며 새 주장이 아니다.
 COVER_TITLE_SUFFIX: Final[str] = "실적"
@@ -127,7 +147,7 @@ def _is_performance_table(table: Any) -> bool:
         return False
     if headers[0] != PERIOD_HEADER:
         return False
-    if len(cover_metric_labels(headers)) < COVER_METRIC_COUNT:
+    if len(cover_metric_labels(headers)) < COVER_METRIC_MIN:
         return False
     if not bool(getattr(table, "numeric", False)):
         return False

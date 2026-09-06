@@ -1946,9 +1946,14 @@ td.center { text-align: center; }
   font-variant-numeric: tabular-nums;
   letter-spacing: -.01em;
 }
-/* 방향은 «좋고 나쁨»이 아니라 수치의 방향이다. 그래서 색을 쓰되
-   빨강은 «0선 아래로 내려간 것»에만 준다(추이 막대와 같은 규칙). */
-.result-page .period-summary li.dir-down .ps-change { color: var(--risk-text); }
+/* ★ 방향에 색을 주지 않는다. 예전에는 내려간 값만 빨강이었는데(「추이 막대와
+   같은 규칙」이라는 이유였고, 그 막대는 이제 무채색이다), 디자인 토큰 v1은
+   컬러를 쓰지 않는다. PDF는 같은 띠를 처음부터 무채색으로 그려 두 채널이
+   갈라져 있었다.
+   ★ 방향은 «글자»가 말한다 — `change` 값이 「+4.9%」·「-3.8%p」·「적자 확대」처럼
+   부호나 말을 이미 담고 있어, 색을 빼도 무엇이 줄었는지 그대로 읽힌다
+   (정본 §2 「상태를 색만으로 구분하지 않고 텍스트를 함께 쓴다」).
+   ★ `dir-*` class는 그대로 둔다 — 화면 값의 «뜻»을 담은 표시라 지우지 않는다. */
 .result-page .ps-basis {
   color: var(--ink-3);
   font-size: 11px;

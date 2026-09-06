@@ -442,8 +442,9 @@ def test_표지_실적_띠는_당기순이익까지_세_칸을_그린다(
 ) -> None:
     """고르는 쪽이 셋을 넘겨주면 표지는 그대로 세 칸으로 그린다.
 
-    ★ 지금 «고르는» 함수(report_standard.cover_metrics)는 두 개까지만 넘긴다.
-      이 시험은 그리는 쪽(export_pdf)이 셋을 받을 준비가 됐음을 지킨다.
+    ★ «고르는» 쪽(report_standard.cover_metrics)이 실제로 셋을 고르는지는
+      report_standard 시험이 본다. 여기서는 그리는 쪽(export_pdf)만 떼어
+      확인한다 — 고르는 함수를 갈아 끼워, 값이 셋이면 칸도 셋인지만 본다.
     """
 
     from src.features.export_pdf import logic as pdf_logic  # noqa: PLC0415

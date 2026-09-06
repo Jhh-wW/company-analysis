@@ -141,6 +141,7 @@ def test_API가_비면_감사보고서_2개년_표와_전용_원문_조각을_�
     assert [(item.label, item.value) for item in metrics.items] == [
         ("매출액", "43"),
         ("영업이익", "-24"),
+        ("당기순이익", "-22"),
     ]
     assert metrics.cite == table.cite
 

@@ -14,18 +14,18 @@ from __future__ import annotations
 import io
 
 import pdfplumber
-import pytest
 
 from src.core.citations import citation_marker, citation_number
 from src.features.export_pdf import logic as export_pdf_logic
 from src.features.export_pdf.logic import build_pdf
 from src.features.report_standard.cover_metrics import (
-    COVER_METRIC_LABELS,
+    COVER_METRIC_CANDIDATES,
     cover_metrics,
 )
 from src.features.report_standard.publish import _forbidden_text_problem
 from src.features.report_standard.tests.test_cover_metrics import (
     _report,
+    _three_metric_table,
     performance_table,  # noqa: F401 — pytest fixture 재사용
 )
 from src.web import request_helpers
@@ -50,29 +50,69 @@ def test_표지_띠_라벨에_출고_차단어가_없다() -> None:
     차단어를 화면에 쓰지 않는다는 계약을 여기서 잠근다.
     """
 
-    for label in COVER_METRIC_LABELS:
+    # 후보 «전부»를 본다 — 당기순이익도 표지에 오르는 칸이 됐다(2026-09-06).
+    for label in COVER_METRIC_CANDIDATES:
         assert _forbidden_text_problem(label) == ""
         assert label.isascii() is False, "라벨은 표의 한국어 열 이름을 그대로 쓴다"
 
 
-def test_PDF_표지_띠는_정본_좌표_안에_그려진다(
-    performance_table,  # noqa: F811 — 위에서 가져온 fixture
-) -> None:
-    report = _report(performance_table)
+def _band_extent_mm(report) -> tuple[float, float, int]:
+    """PDF 표지에서 띠 글자가 차지한 세로 범위(mm)와 찾은 글자 수."""
+
     metrics = cover_metrics(report)
     assert metrics, "시험 전제가 깨졌다 — 띠가 있어야 좌표를 볼 수 있다."
 
     with pdfplumber.open(io.BytesIO(build_pdf(report))) as document:
         words = document.pages[0].extract_words()
 
-    wanted = {item.value for item in metrics.items} | set(COVER_METRIC_LABELS)
+    wanted = {item.value for item in metrics.items} | {
+        item.label for item in metrics.items
+    }
     band_words = [word for word in words if word["text"] in wanted]
     assert len(band_words) >= len(wanted)
 
-    top_mm = min(float(word["top"]) for word in band_words) / _PT_PER_MM
-    bottom_mm = max(float(word["bottom"]) for word in band_words) / _PT_PER_MM
+    return (
+        min(float(word["top"]) for word in band_words) / _PT_PER_MM,
+        max(float(word["bottom"]) for word in band_words) / _PT_PER_MM,
+        len(metrics.items),
+    )
+
+
+def test_PDF_표지_띠는_정본_좌표_안에_그려진다(
+    performance_table,  # noqa: F811 — 위에서 가져온 fixture
+) -> None:
+    top_mm, bottom_mm, columns = _band_extent_mm(_report(performance_table))
+
+    assert columns == 2
     assert export_pdf_logic._COVER_METRICS_TOP_MM <= top_mm
     assert bottom_mm <= export_pdf_logic._COVER_METRICS_BOTTOM_MM
+
+
+def test_세_칸이어도_PDF_띠가_정본_좌표를_넘지_않는다() -> None:
+    """★ 칸이 늘면 칸 «폭»이 좁아진다 — 라벨이 두 줄로 접히면 띠가 아래로 샌다.
+
+    값·라벨뿐 아니라 띠 «제목»까지 포함해, 제목 블록과 핵심 요약 사이에 찍힌
+    글자 전부가 정본 영역(138~166mm) 안에 있는지 본다.
+    ⚠️ 이 시험이 깨지면 표지 띠가 핵심 요약 영역을 침범한다.
+    """
+    report = _report(_three_metric_table())
+    top_mm, bottom_mm, columns = _band_extent_mm(report)
+
+    assert columns == 3
+    assert export_pdf_logic._COVER_METRICS_TOP_MM <= top_mm
+    assert bottom_mm <= export_pdf_logic._COVER_METRICS_BOTTOM_MM
+
+    words = _gap_words(report)
+    assert words, "띠가 있어야 할 자리에 글자가 하나도 없다."
+    for word in words:
+        assert (
+            export_pdf_logic._COVER_METRICS_TOP_MM
+            <= float(word["top"]) / _PT_PER_MM
+        ), (word["text"], float(word["top"]) / _PT_PER_MM)
+        assert (
+            float(word["bottom"]) / _PT_PER_MM
+            <= export_pdf_logic._COVER_METRICS_BOTTOM_MM
+        ), (word["text"], float(word["bottom"]) / _PT_PER_MM)
 
 
 def test_PDF_표지_띠는_제목과_핵심요약_영역을_침범하지_않는다(
@@ -151,9 +191,17 @@ def test_PDF_표지_띠는_4장_실적표와_같은_출처_번호를_쓴다(
     )
 
 
-@pytest.mark.parametrize("label", COVER_METRIC_LABELS)
 def test_표지_띠_라벨은_실적표_열_이름_그대로다(
-    label: str,
     performance_table,  # noqa: F811
 ) -> None:
-    assert label in performance_table.headers
+    """칸이 둘이든 셋이든, 라벨은 «그 표에 있는» 열 이름에서만 온다.
+
+    ★ 상수 목록이 아니라 «고른 결과»를 보는 이유 — 칸 수가 회사마다 달라졌다.
+      상수를 그대로 훑으면 그 회사 표에 없는 열까지 있다고 주장하게 된다.
+    """
+
+    for table in (performance_table, _three_metric_table()):
+        metrics = cover_metrics(_report(table))
+        assert metrics.items, "시험 전제 — 띠가 있어야 라벨을 볼 수 있다"
+        for item in metrics.items:
+            assert item.label in table.headers
