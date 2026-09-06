@@ -18,12 +18,11 @@ from src.features.composer.portfolio_names import (
     UNUSED_REPRESENTATIVE_NAMES_STEP,
     representative_names,
 )
-from src.shared import name_fragments as shared_names
-from src.shared.name_fragments import (
+from src.shared.name_fragments import constants as shared_names
+from src.shared.name_fragments.constants import (
     NAME_KIND_LABELS,
     REPRESENTATIVE_NAME_LABELS,
-    name_fragment_label_and_name,
-    representative_label_and_name as label_and_name,
+    parse_name_location,
 )
 from src.features.pipeline import real
 from src.features.product_names.constants import (
@@ -266,7 +265,8 @@ def test_원문경로를_넘기면_표에서_대표IP_조각이_생긴다() -> N
     ip_names = [
         name
         for raw in frags.values()
-        if (pair := label_and_name(str(raw.get("원문위치") or "")))[0] == "대표 IP"
+        if (pair := parse_name_location(str(raw.get("원문위치") or ""))) is not None
+        and pair[0] == NAME_KIND_LABELS["ip"]
         for name in (pair[1],)
     ]
     # 이 픽스처에는 대표 IP 한 종류뿐이라 남는 자리까지 IP가 채운다.
@@ -411,7 +411,8 @@ def test_실측_원문의_대표IP가_3장_packet과_작가_프롬프트까지_�
     name_fragments = [
         fragment
         for fragment in portfolio_packet.fragments
-        if label_and_name(fragment.location)[0]
+        if (parsed := parse_name_location(fragment.location)) is not None
+        and parsed[0] in REPRESENTATIVE_NAME_LABELS
     ]
     assert len(name_fragments) >= MIN_REPRESENTATIVE_NAMES_FOR_CARD
     assert len(name_fragments) <= added
@@ -434,7 +435,8 @@ def test_실측_원문의_대표IP가_3장_packet과_작가_프롬프트까지_�
         #   이 줄이 이번 수정 이전의 실제 결함이었다(표기가 한 번도 안 실렸다).
         assert fragment.text in prompt
         assert f"{PROMPT_FRAGMENT_LOCATION_LABEL}: {fragment.location}" in prompt
-        assert label_and_name(fragment.location)[1] in prompt
+        assert (parsed := parse_name_location(fragment.location)) is not None
+        assert parsed[1] in prompt
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -525,7 +527,7 @@ def test_두_기능이_같은_라벨_객체를_읽는다() -> None:
 
     # 생산자: 라벨표와 원문위치 조립기를 정본에서 가져다 쓴다.
     assert producer.NAME_KIND_LABELS is shared_names.NAME_KIND_LABELS
-    assert producer.name_fragment_location is shared_names.name_fragment_location
+    assert producer.compose_name_location is shared_names.compose_name_location
     # 생산자: 종류 id도 정본의 같은 객체다.
     assert producer_constants.SUBJECT_KINDS is shared_names.NAME_KINDS
     for name, kind in (
@@ -538,9 +540,10 @@ def test_두_기능이_같은_라벨_객체를_읽는다() -> None:
     ):
         assert getattr(producer_constants, name) is kind, name
     # 소비자: 읽는 함수도 정본의 같은 객체다.
+    assert consumer.parse_name_location is shared_names.parse_name_location
     assert (
-        consumer.representative_label_and_name
-        is shared_names.representative_label_and_name
+        consumer.REPRESENTATIVE_NAME_LABELS
+        is shared_names.REPRESENTATIVE_NAME_LABELS
     )
     # 어느 쪽도 라벨 글자를 자기 파일에 다시 적어 두지 않았다.
     for module in (producer, consumer):
@@ -577,8 +580,9 @@ def test_대표이름_라벨이_실제_생산자와_같다() -> None:
         assert len(made) == 1, kind
         location = str(made[0]["원문위치"])
         # 생산자와 소비자가 같은 값을 읽어야 한다.
-        assert name_fragment_label_and_name(location) == label_and_name(location)
-        label, name = label_and_name(location)
+        parsed = parse_name_location(location)
+        assert parsed is not None
+        label, name = parsed
         assert name == "가나다이름"
         produced.add(label)
 
@@ -607,8 +611,8 @@ def test_사업부문_라벨은_대표이름으로_세지_않는다() -> None:
     location = str(made[0]["원문위치"])
 
     # 생산자는 라벨을 읽지만 소비자(3장 판정)는 대표 이름으로 세지 않는다.
-    assert name_fragment_label_and_name(location)[0] == NAME_KIND_LABELS["segment"]
-    assert label_and_name(location) == ("", "")
+    assert parse_name_location(location) == (NAME_KIND_LABELS["segment"], "가나다부문")
+    assert NAME_KIND_LABELS["segment"] not in REPRESENTATIVE_NAME_LABELS
 
 
 # ─────────────────────────────────────────────────────────────────────

@@ -13,7 +13,7 @@ from src.features.product_names.fragments import (
     formal_source_kind_for_filing,
     name_candidate_fragments,
 )
-from src.shared.name_fragments import name_fragment_label_and_name
+from src.shared.name_fragments.constants import parse_name_location
 from src.features.product_names.logic import collect_name_candidates
 from src.features.product_names.models import NameCandidate
 from src.shared.report_evidence.constants import (
@@ -177,7 +177,7 @@ def test_인이지_감사보고서의_주요계약도_이름조각이_된다() -
 
     assert len(made) == 1
     assert made[0]["원문"] == contract.excerpt
-    assert name_fragment_label_and_name(str(made[0]["원문위치"]))[0] == "주요 계약"
+    assert parse_name_location(str(made[0]["원문위치"]))[0] == "주요 계약"
 
 
 def _candidates_of(kind: str, count: int, *, prefix: str) -> tuple[NameCandidate, ...]:
@@ -210,7 +210,7 @@ def test_한_종류가_예산을_다_먹지_않는다() -> None:
         typed_fragments=(_typed_anchor(),),
     )
     kinds = [
-        name_fragment_label_and_name(str(raw["원문위치"]))[0] for raw in made
+        parse_name_location(str(raw["원문위치"]))[0] for raw in made
     ]
 
     assert len(made) == MAX_NAME_FRAGMENTS_PER_FILING
@@ -243,7 +243,7 @@ def test_하이브_예산은_부문_여섯과_대표IP_열이다() -> None:
         typed_fragments=(_typed_anchor(),),
     )
     kinds = [
-        name_fragment_label_and_name(str(raw["원문위치"]))[0] for raw in made
+        parse_name_location(str(raw["원문위치"]))[0] for raw in made
     ]
 
     assert len(made) == 16
@@ -280,11 +280,11 @@ def test_대표IP_조각의_원문위치에는_대표_IP와_이름이_적힌다(
     )
 
     assert len(made) == 1
-    label, name = name_fragment_label_and_name(str(made[0]["원문위치"]))
+    label, name = parse_name_location(str(made[0]["원문위치"]))
     assert label == "대표 IP"
     assert name == "뉴0"
 
 
-def test_이름_조각이_아닌_위치는_라벨도_이름도_빈다() -> None:
-    assert name_fragment_label_and_name("사업의 내용") == ("", "")
-    assert name_fragment_label_and_name("") == ("", "")
+def test_이름_조각이_아닌_위치는_읽히지_않는다() -> None:
+    assert parse_name_location("사업의 내용") is None
+    assert parse_name_location("") is None
