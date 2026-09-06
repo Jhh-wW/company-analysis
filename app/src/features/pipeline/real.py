@@ -119,11 +119,12 @@ from src.features.news_intake import (
     classify_and_read as classify_and_read_news,
     map_articles_to_fragments as map_news_articles_to_fragments,
     needs_extended_window as news_needs_extended_window,
-    news_eligible_sections,
+    news_trigger,
     select_news_items,
 )
 from src.features.news_intake.constants import (
-    WEB_DOCUMENT_ZERO_THRESHOLD as NEWS_WEB_DOCUMENT_ZERO_THRESHOLD,
+    NEWS_TRIGGER_NONE,
+    NEWS_TRIGGER_WEB_ZERO,
 )
 from src.features.product_names.constants import MAX_NAME_FRAGMENTS_PER_FILING
 from src.features.product_names.fragments import (
@@ -5807,18 +5808,25 @@ def _official_web_document_count(
     return len(document_ids)
 
 
-def _news_window_label(*, web_zero_backfill: bool, extended_window: bool) -> str:
-    """steps에 남길 「창」 값을 실제로 쓴 기사 기간에서 고른다.
+def _news_window_label(*, trigger_reason: str, extended_window: bool) -> str:
+    """steps에 남길 「창」 값을 발동 사유에서 고른다.
 
     검색을 몇 번 했는지로 정하지 않는다. 검색 횟수는 이미 「검색호출」에 따로
     남고, 두 값은 어긋날 수 있다 — 1년 창으로 열어도 검색은 두 쪽을 읽는다.
+
+    공식 웹 문서 수를 여기서 다시 읽지 않는다. 사유는 대상 장을 고른 자리
+    (``news_trigger``)에서 그대로 받는다. 다시 읽으면 미달 장 때문에 열렸는데도
+    「웹0건보강」이라고 적히는 어긋남이 생긴다 — 5·6장만 미달이면서 공식 웹
+    문서가 0건인 경우가 그렇다. 이때 기간은 1년이고 이유는 「미달」이므로
+    올바른 이름은 「기본」이다.
     """
 
-    if extended_window:
-        return NEWS_WINDOW_LABEL_EXTENDED
-    if web_zero_backfill:
+    if trigger_reason == NEWS_TRIGGER_NONE:
+        # 열지 않았으므로 기간도 없다. 「확장」처럼 읽히지 않게 기본으로 적는다.
+        return NEWS_WINDOW_LABEL_DEFAULT
+    if trigger_reason == NEWS_TRIGGER_WEB_ZERO:
         return NEWS_WINDOW_LABEL_WEB_ZERO
-    return NEWS_WINDOW_LABEL_DEFAULT
+    return NEWS_WINDOW_LABEL_EXTENDED if extended_window else NEWS_WINDOW_LABEL_DEFAULT
 
 
 def _collect_news_intake(
@@ -5839,33 +5847,31 @@ def _collect_news_intake(
 ) -> list[dict[str, object]]:
     """뉴스를 받을 수 있는 장이 있으면 보조 조각을 fail-open으로 더한다.
 
-    어느 장이 대상인지는 ``news_eligible_sections``가 정한다 — 미달인 장,
-    또는 미달이 없고 공식 웹 문서가 0건이면 5·6장을 뺀 모든 장이다. 대상이
-    하나도 없으면 검색조차 하지 않는다. 기사 기간은 5·6장을 뺀 장 중에 미달이
-    있을 때만 3년이고 그 밖에는 1년이며, 문장 자체의 허용 규칙(따옴표·귀속·
-    숫자 금지)은 어느 경우에도 그대로 적용된다.
+    어느 장이 대상인지와 왜 열렸는지는 ``news_trigger``가 정한다 — 미달인 장,
+    또는 미달이 없고 공식 웹 문서가 0건이면 5·6장을 뺀 모든 장이다(9장은 어느
+    경우에도 대상이 아니다). 대상이 하나도 없으면 검색조차 하지 않는다.
+    기사 기간은 5·6장을 뺀 장 중에 미달이 있을 때만 3년이고 그 밖에는
+    1년이며, 문장 자체의 허용 규칙(따옴표·귀속·숫자 금지)은 어느 경우에도
+    그대로 적용된다.
     """
 
-    # 「어느 장이 뉴스를 받을 수 있나」의 정본은 뉴스 기능 폴더다. 여기서는
-    # 그 결과로 발동 여부와 기사 기간만 정한다.
-    eligible_sections = news_eligible_sections(
+    # 「어느 장이 뉴스를 받을 수 있나」와 「왜 열렸나」의 정본은 뉴스 기능
+    # 폴더다. 여기서는 그 결과로 발동 여부와 기사 기간만 정하고, 같은 조건을
+    # 다시 계산하지 않는다.
+    eligible_sections, trigger_reason = news_trigger(
         section_ready,
         official_web_documents=official_web_documents,
     )
     extended_window = news_needs_extended_window(section_ready)
-    # 「창」은 왜 이 창으로 열렸는지를 적는 진단값이다. 대상 장을 고르는 규칙은
-    # 위 한 곳에만 두고, 여기서는 같은 문턱 상수를 읽어 이름만 붙인다 — 공식 웹
-    # 문서가 있는데 「웹0건보강」이라고 적는 일이 없어야 한다.
-    web_zero_backfill = (
-        not extended_window
-        and official_web_documents <= NEWS_WEB_DOCUMENT_ZERO_THRESHOLD
-    )
     if not eligible_sections:
         steps.append(
             {
                 "step": "5b_뉴스_수집",
                 "스위치": True,
-                "창": NEWS_WINDOW_LABEL_DEFAULT,
+                "창": _news_window_label(
+                    trigger_reason=trigger_reason,
+                    extended_window=extended_window,
+                ),
                 "검색": 0,
                 "선별": 0,
                 "분류AI호출": 0,
@@ -5978,7 +5984,7 @@ def _collect_news_intake(
                 "step": "5b_뉴스_수집",
                 "스위치": True,
                 "창": _news_window_label(
-                    web_zero_backfill=web_zero_backfill,
+                    trigger_reason=trigger_reason,
                     extended_window=extended_window,
                 ),
                 "검색": diagnostics.searched_count,
@@ -6012,7 +6018,7 @@ def _collect_news_intake(
                 "step": "5b_뉴스_수집",
                 "스위치": True,
                 "창": _news_window_label(
-                    web_zero_backfill=web_zero_backfill,
+                    trigger_reason=trigger_reason,
                     extended_window=extended_window,
                 ),
                 "검색": len(raw_items),

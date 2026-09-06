@@ -52,5 +52,24 @@ def test_보조_목록_밖_칸은_붙이지_않고_빈_장은_뺀다() -> None:
     assert remaining == ("identity",)
 
 
+def test_구장은_보조_칸을_하나도_얻지_못한다() -> None:
+    """9장은 회사가 밝힌 차별점만 싣는 장이라 산문 칸까지 통째로 닫혀 있다."""
+
+    section_id = "competitive_position"
+
+    assert collector_slots_for(section_id)  # 장 자체에는 칸이 있다
+    assert mapping._supported_slots((section_id,)) == ()
+    assert mapping._sections_with_slots(
+        (section_id,), mapping._supported_slots((section_id,))
+    ) == ()
+
+
+def test_구장은_분류_대상_장에서도_빠진다() -> None:
+    assert "competitive_position" in c.NEWS_EXCLUDED_SECTIONS
+    # 5·6장을 빼는 규칙과 뜻이 달라 목록을 합치지 않는다.
+    assert not (c.NEWS_EXCLUDED_SECTIONS & c.NON_EXTENDABLE_SECTIONS)
+
+
 def test_탈락_사유_상수가_있다() -> None:
     assert c.EXCLUDED_NO_SUPPLEMENTARY_SLOT == "no_supplementary_slot"
+    assert c.EXCLUDED_ARTICLE_FRAGMENT_LIMIT == "article_fragment_limit"

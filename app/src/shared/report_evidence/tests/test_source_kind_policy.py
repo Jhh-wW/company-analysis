@@ -138,7 +138,7 @@ def test_보조종류표_세개는_formal과_겹치지_않고_뉴스한종류로
     assert not FORMAL_DOCUMENT_SOURCE_KINDS & SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
 
 
-def test_뉴스보조슬롯은_산문만_허용하고_정체성_수치_비교칸을_제외한다() -> None:
+def test_뉴스보조슬롯은_산문만_허용하고_정체성_수치_구장전체를_제외한다() -> None:
     slots = SUPPLEMENTARY_SLOT_IDS_BY_SOURCE_KIND[SOURCE_KIND_NEWS]
 
     assert {
@@ -147,17 +147,22 @@ def test_뉴스보조슬롯은_산문만_허용하고_정체성_수치_비교칸
         "past_changes:completed_execution",
         "operations_partners:partnership",
         "culture:leadership",
-        "competitive_position:stated_differentiator",
     } <= slots
     assert {
         "identity:corporate_identity",
         "business_model:regional_mix",
         "past_changes:historical_performance",
+        # 9장은 회사가 밝힌 차별점만 싣는 장이라 산문 칸까지 통째로 닫는다.
+        "competitive_position:self_context",
+        "competitive_position:stated_differentiator",
+        "competitive_position:limitation",
         "competitive_position:comparison_target",
         "competitive_position:comparison_metric",
         "competitive_position:comparison_basis",
         "competitive_position:comparison_judgment",
     }.isdisjoint(slots)
+    # 「비교 칸만 뺐다」로 되돌아가지 않게 9장 접두 칸이 하나도 없음을 잠근다.
+    assert not any(slot.startswith("competitive_position:") for slot in slots)
     assert SUPPLEMENTARY_TRUST_BY_SOURCE_KIND[SOURCE_KIND_NEWS] == frozenset(
         {(SourceTier.TIER_SUPPLEMENTARY, SourceRequirement.OPTIONAL)}
     )
