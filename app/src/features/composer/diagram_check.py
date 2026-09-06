@@ -152,10 +152,18 @@ def _compact_surface(value: str) -> str:
     return "".join(compact)
 
 
-def _portfolio_name_is_grounded(
+def portfolio_name_is_grounded(
     name: str, source_texts: Sequence[str]
 ) -> bool:
-    """3장 이름이 인용한 조각 하나의 표면 부분문자열인지 확인한다."""
+    """3장 이름이 인용한 조각 하나의 표면 부분문자열인지 확인한다.
+
+    ★ 공개 함수인 이유 — 3장에 «결정적으로» 덧붙이는 이름 카드
+      (`portfolio_name_card.py`)도 같은 잣대로 자기 이름을 검사해야 한다.
+      잣대가 두 벌이면 한쪽만 고쳐져 「검사는 통과인데 화면에서는 비워지는」
+      카드가 생긴다.
+    ★ 빈 이름에 ``True``를 주는 것은 «검사 대상이 아니다»라는 뜻이다.
+      「이름이 있어야 한다」는 요구는 부르는 쪽이 따로 확인한다.
+    """
 
     if not name.strip():
         return True
@@ -240,7 +248,7 @@ def _clear_ungrounded_portfolio_names(
     rejected: list[str] = []
     for row in rows:
         name = row.cells[0] if row.cells else ""
-        if _portfolio_name_is_grounded(name, _source_texts(row, texts)):
+        if portfolio_name_is_grounded(name, _source_texts(row, texts)):
             grounded.append(row)
             continue
         grounded.append(

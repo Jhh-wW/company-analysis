@@ -8,8 +8,10 @@
 ★ 업종·회사로 갈리는 분기를 두지 않는다. 판정은 오직 조각의 «종류 라벨»만
   본다 — 엔터·제조·금융 어디서 온 이름이든 같은 규칙을 지난다.
 
-★ 이 모듈은 «판정»만 한다. 카드를 만들거나 고치지 않는다 — 근거 없이
-  카드를 지어내는 것이 이 보고서에서 가장 하면 안 되는 일이다.
+★ 이 모듈은 «판정»과 «이름 뽑기»만 한다. 카드를 만들거나 고치지 않는다 —
+  근거 없이 카드를 지어내는 것이 이 보고서에서 가장 하면 안 되는 일이다.
+  조각의 글자만 투영하는 결정적 카드는 `portfolio_name_card.py`가 만들고,
+  그쪽도 여기서 뽑은 이름·조각 id·원문 밖으로는 한 글자도 쓰지 않는다.
 """
 
 from __future__ import annotations
@@ -87,16 +89,35 @@ def _normalized(text: str) -> str:
     return "".join(character for character in folded if not character.isspace())
 
 
-def representative_names(
+@dataclass(frozen=True)
+class RepresentativeName:
+    """대표 이름 하나와 그 이름이 «어느 조각에서 왔는지»."""
+
+    #: 종류 라벨 — 정본 표(`shared/name_fragments`)의 글자 그대로.
+    label: str
+    #: 파서가 조각 원문위치에 적어 둔 이름.
+    name: str
+    #: 그 이름이 실린 조각 id. 카드가 인용할 번호다.
+    fragment_id: str
+    #: 그 조각의 원문(표 한 행). 접지 검사가 대조할 글자다.
+    text: str
+
+
+def representative_name_sources(
     fragments: Iterable[CollectedFragment],
-) -> tuple[tuple[str, str], ...]:
-    """3장 packet 조각에서 대표 이름을 (라벨, 이름) 쌍으로 뽑는다.
+) -> tuple[RepresentativeName, ...]:
+    """3장 packet 조각에서 대표 이름을 «출처 조각과 함께» 뽑는다.
 
     이름은 조각 원문에서 «추측»하지 않는다 — 원문은 표 한 행이라 어느 칸이
     이름인지 알 수 없다. 파서가 원문위치에 적어 둔 값을 그대로 읽는다.
+
+    ★ 왜 조각 id·원문까지 함께 내나 — 이 이름을 카드에 실으려면 그 이름이
+      나온 조각을 «인용»해야 하고, 그 조각 원문에 이름이 글자 그대로 있는지
+      다시 대조해야 한다. 뽑기와 되찾기를 두 벌로 구현하면 둘이 어긋난 채
+      「인용은 A 조각인데 이름은 B 조각에서 온」 줄이 만들어진다.
     """
 
-    found: list[tuple[str, str]] = []
+    found: list[RepresentativeName] = []
     seen: set[str] = set()
     for fragment in fragments:
         parsed = parse_name_location(getattr(fragment, "location", ""))
@@ -108,8 +129,26 @@ def representative_names(
         if label not in REPRESENTATIVE_NAME_LABELS or not key or key in seen:
             continue
         seen.add(key)
-        found.append((label, name))
+        found.append(
+            RepresentativeName(
+                label=label,
+                name=name,
+                fragment_id=str(getattr(fragment, "fragment_id", "")).strip(),
+                text=str(getattr(fragment, "text", "")),
+            )
+        )
     return tuple(found)
+
+
+def representative_names(
+    fragments: Iterable[CollectedFragment],
+) -> tuple[tuple[str, str], ...]:
+    """3장 packet 조각에서 대표 이름을 (라벨, 이름) 쌍으로 뽑는다."""
+
+    return tuple(
+        (source.label, source.name)
+        for source in representative_name_sources(fragments)
+    )
 
 
 def portfolio_name_usage(
@@ -151,7 +190,9 @@ def portfolio_name_usage(
 __all__ = [
     "MIN_REPRESENTATIVE_NAMES_FOR_CARD",
     "PortfolioNameUsage",
+    "RepresentativeName",
     "UNUSED_REPRESENTATIVE_NAMES_STEP",
     "portfolio_name_usage",
+    "representative_name_sources",
     "representative_names",
 ]
