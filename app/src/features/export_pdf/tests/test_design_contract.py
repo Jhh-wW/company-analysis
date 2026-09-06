@@ -538,18 +538,41 @@ def test_상단띠는_페이지의_첫_장제목_하나를_보여준다(demo_pdf
             assert current in top_text
 
 
-def test_본문_추출글자는_디자인변경전_골든과_글자단위로_같다(
-    demo_pdf: bytes,
-) -> None:
+#: 본문에 실제로 인쇄된 «낱말 전부»를 순서와 무관하게 잰 지문.
+#:
+#: ★ 왜 정렬해서 재나 — 도형의 값 라벨을 «옮기면» 추출 순서가 바뀐다. 글자를
+#:   한 자도 안 건드려도 순서 지문은 깨지므로, 「문장·숫자·출처가 그대로인가」를
+#:   지키려면 순서에 안 흔들리는 지문이 따로 있어야 한다. 이 값은 디자인
+#:   토큰 v1 시점부터 D-4 도형 수정까지 «한 번도 바뀌지 않았다»(실측 대조).
+#: ★ 낱말이 하나라도 사라지거나 새로 생기면 이 지문이 깨진다 — 도형을 옮기는
+#:   변경이 슬그머니 글자를 지우는 것을 막는 자리다.
+_BODY_WORDS_SHA256 = (
+    "af25490e77cb450a163239ea202b7049736ff65b7c1488f1a85c5b4a4c3e8a5b"
+)
+
+#: 줄바꿈·쪽 나눔까지 포함한 «배치» 지문. 디자인을 바꾸면 여기서 먼저 깨진다.
+#: D-4에서 음수 값 라벨을 0선 위로 올리면서 갱신했다(낱말은 위 지문이 지킨다).
+_BODY_LAYOUT_SHA256 = (
+    "113c176b11a83a40ddd49b5313c7ab99af7d1852b909db4fc96d600785e3b3ff"
+)
+
+
+def _body_text(demo_pdf: bytes) -> str:
     with pdfplumber.open(io.BytesIO(demo_pdf)) as document:
         pages = [page.extract_text() or "" for page in document.pages[1:]]
+    # 머리말·바닥글은 디자인 부품이라 제외한다.
+    return "\n".join("\n".join(page.splitlines()[1:-1]) for page in pages)
 
-    # 머리말·바닥글은 디자인 부품이라 제외한다. 나머지 장 제목·문장·숫자·
-    # 출처·번호의 줄바꿈까지 변경 전 출력과 같아야 한다.
-    body = "\n".join(
-        "\n".join(page.splitlines()[1:-1])
-        for page in pages
-    )
-    assert hashlib.sha256(body.encode("utf-8")).hexdigest() == (
-        "1ff8894b18e931c1326ae862644935185ba70d6d8c8a823a1e60732bc9d5bcdf"
-    )
+
+def test_본문_낱말은_디자인변경과_무관하게_그대로다(demo_pdf: bytes) -> None:
+    """도형을 옮겨도 인쇄된 문장·숫자·출처 낱말은 하나도 늘거나 줄지 않는다."""
+
+    words = " ".join(sorted(_body_text(demo_pdf).split()))
+    assert hashlib.sha256(words.encode("utf-8")).hexdigest() == _BODY_WORDS_SHA256
+
+
+def test_본문_배치는_승인된_디자인_골든과_같다(demo_pdf: bytes) -> None:
+    """장 제목·문장·숫자·출처의 줄바꿈까지 승인된 출력과 같아야 한다."""
+
+    body = _body_text(demo_pdf)
+    assert hashlib.sha256(body.encode("utf-8")).hexdigest() == _BODY_LAYOUT_SHA256

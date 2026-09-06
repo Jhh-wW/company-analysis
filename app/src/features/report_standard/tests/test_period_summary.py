@@ -19,7 +19,7 @@ from src.features.company_performance.logic import build_three_year_table
 from src.features.pipeline.port import Grade, Report, ReportSection, ReportTable
 from src.features.report_standard.cover_metrics import (
     COVER_METRIC_CANDIDATES,
-    COVER_METRIC_COUNT,
+    COVER_METRIC_MIN,
     COVER_METRIC_LABELS,
     PERIOD_HEADER,
     cover_metrics,
@@ -170,7 +170,7 @@ def test_두_띠와_표의_최소_지표_수가_같다() -> None:
     from src.features.company_performance.logic import MIN_METRICS_FOR_TABLE
 
     assert MIN_METRICS_FOR_BAND == MIN_METRICS_FOR_TABLE
-    assert MIN_METRICS_FOR_BAND == COVER_METRIC_COUNT
+    assert MIN_METRICS_FOR_BAND == COVER_METRIC_MIN
     assert KNOWN_METRIC_LABELS == COVER_METRIC_CANDIDATES
 
 
