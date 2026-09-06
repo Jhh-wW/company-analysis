@@ -203,7 +203,7 @@ _RECENT_FILING_SLOT_IDS = frozenset(
 )
 
 # 언론 보도는 장별 산문만 보조한다. 수치 전용 칸, 1장 법인 정체성,
-# 9장 공식 비교 칸은 이 목록에 넣지 않아 transport 단계에서 닫는다.
+# 9장의 모든 칸은 이 목록에 넣지 않아 transport 단계에서 닫는다.
 _NEWS_SUPPLEMENTARY_SLOT_IDS: Final[frozenset[str]] = frozenset(
     {
         "identity:business_definition",
@@ -238,9 +238,9 @@ _NEWS_SUPPLEMENTARY_SLOT_IDS: Final[frozenset[str]] = frozenset(
         "culture:decision_process",
         "culture:organization_change",
         "culture:verified_case",
-        "competitive_position:self_context",
-        "competitive_position:stated_differentiator",
-        "competitive_position:limitation",
+        # 9장 칸은 비교 칸뿐 아니라 산문 칸까지 통째로 뺀다. 「회사가 밝힌
+        # 차별점」은 회사가 스스로 밝힌 말만 싣는 장이라, 기자가 쓴 해석이
+        # 들어가면 장의 정의가 무너진다.
     }
 )
 

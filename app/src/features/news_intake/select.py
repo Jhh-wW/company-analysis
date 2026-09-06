@@ -47,6 +47,15 @@ class _CandidateSeed:
 _SPACE_RE = re.compile(r"\s+")
 _SYMBOL_RE = re.compile(r"[^0-9a-z가-힣]+", re.IGNORECASE)
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])\s+|[\r\n]+")
+_OPENING_BRACKETS = "".join(opening for opening, _closing in c.COLUMN_TAG_BRACKETS)
+_CLOSING_BRACKETS = "".join(closing for _opening, closing in c.COLUMN_TAG_BRACKETS)
+#: 「[○○머니]」 꼴 꼬리표의 안쪽만 뽑는다. 괄호 문자를 안쪽에서 빼 두면
+#: 여는 괄호가 겹쳐 나와도 가장 안쪽 짝만 잡히고 되짚기가 폭주하지 않는다.
+_COLUMN_TAG_RE = re.compile(
+    f"[{re.escape(_OPENING_BRACKETS)}]"
+    f"([^{re.escape(_OPENING_BRACKETS + _CLOSING_BRACKETS)}]*)"
+    f"[{re.escape(_CLOSING_BRACKETS)}]"
+)
 
 
 def normalize_company_name(value: str) -> str:
@@ -125,6 +134,41 @@ def _is_rumor_only(description: str) -> bool:
     return bool(sentences) and all(
         any(marker in sentence for marker in c.RUMOR_ONLY_MARKERS)
         for sentence in sentences
+    )
+
+
+def _is_stock_article(text: str) -> bool:
+    """증권·투자 칼럼이면 True.
+
+    세 가지를 본다.
+
+    1. 그 낱말만으로 증권 기사가 확실한 어휘(``STOCK_KEYWORDS``).
+    2. 낱말 하나로는 사업 기사와 못 가르는 말의 결합형(``STOCK_PHRASES``).
+       「매출 급등」·「지분 매수」는 회사가 한 일이라 남기고, 「주가 급등」·
+       「매수 추천」만 뺀다. 띄어쓰기 차이를 타지 않게 공백을 지우고 견주되,
+       **줄마다 따로** 견준다 — 제목 끝의 「지분 매수」와 요약 첫머리의
+       「추천 상품」이 이어 붙어 「매수 추천」이 되면 안 된다.
+    3. 제목 앞뒤의 연재 꼬리표. 꼬리표 어휘(``투자``·``종목`` 등)는 본문
+       아무 데나 나올 수 있어 대괄호 안에서만 찾는다.
+
+    회사 공식 행사인 ``주주총회``를 따로 빼 주지 않아도 된다. 어느 목록에도
+    낱말 ``주주``가 단독으로 없기 때문이다 — 예외를 두는 대신 어휘를 좁혔다.
+    """
+
+    scanned = str(text or "")
+    if any(marker in scanned for marker in c.STOCK_KEYWORDS):
+        return True
+    compact_lines = tuple(_SPACE_RE.sub("", line) for line in scanned.splitlines())
+    if any(
+        _SPACE_RE.sub("", phrase) in line
+        for line in compact_lines
+        for phrase in c.STOCK_PHRASES
+    ):
+        return True
+    return any(
+        marker in tag
+        for tag in _COLUMN_TAG_RE.findall(scanned)
+        for marker in c.STOCK_COLUMN_TAG_KEYWORDS
     )
 
 
@@ -256,7 +300,7 @@ def select_candidates(
         if _is_rumor_only(description):
             excluded[c.EXCLUDED_RUMOR_ONLY] += 1
             continue
-        if any(marker in combined for marker in c.STOCK_KEYWORDS):
+        if _is_stock_article(combined):
             excluded[c.EXCLUDED_STOCK_ARTICLE] += 1
             continue
         published_date = _parse_date(getattr(item, "pubDate", ""))
@@ -351,6 +395,41 @@ def needs_extended_window(section_ready: Mapping[str, bool]) -> bool:
     )
 
 
+def news_trigger(
+    section_ready: Mapping[str, bool],
+    *,
+    official_web_documents: int,
+) -> tuple[frozenset[str], str]:
+    """대상 장과 「왜 열렸는지」를 한 번에 돌려준다.
+
+    대상 장을 고르는 규칙은 ``news_eligible_sections``의 설명 그대로이고, 이
+    함수는 거기에 발동 사유(``NEWS_TRIGGER_*``)를 붙인 정본이다. 사유를 함께
+    주는 이유는 호출부가 「공식 웹 문서가 0건인가」를 다시 계산하지 않게 하기
+    위해서다. 다시 계산하면 ①로 열렸는데도 ②의 이름(``웹0건보강``)이 붙는
+    어긋남이 생긴다 — 5·6장만 미달이면서 공식 웹 문서가 0건인 경우가 그렇다.
+
+    대상이 비면 사유는 ``NEWS_TRIGGER_NONE``이다.
+    """
+
+    eligible = news_eligible_sections(
+        section_ready, official_web_documents=official_web_documents
+    )
+    if not eligible:
+        return eligible, c.NEWS_TRIGGER_NONE
+    unready = _unready_sections(section_ready)
+    return eligible, (
+        c.NEWS_TRIGGER_UNREADY if unready else c.NEWS_TRIGGER_WEB_ZERO
+    )
+
+
+def _unready_sections(section_ready: Mapping[str, bool]) -> frozenset[str]:
+    return frozenset(
+        section_id
+        for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+        if not bool(section_ready.get(section_id, False))
+    )
+
+
 def news_eligible_sections(
     section_ready: Mapping[str, bool],
     *,
@@ -370,6 +449,11 @@ def news_eligible_sections(
        인용부호 문장만 받는 장이라, 「웹에서 못 읽은 몫을 메운다」는 이 보강의
        목적과 맞지 않아 뺀다.
 
+    두 경우 모두 9장(``NEWS_EXCLUDED_SECTIONS``)은 대상에서 뺀다. 9장은 회사가
+    스스로 밝힌 차별점만 싣는 장이라 기자 서술이 들어갈 자리가 아니다. 그래서
+    9장만 미달인 경우에는 대상이 비고, ②로 넘어가지도 않는다 — 9장 미달은
+    기간을 3년으로 넓히므로, 넘어가면 이미 채운 장에 3년 전 보도가 붙는다.
+
     그 밖에는 빈 집합이다 — 부를 이유가 없다는 뜻이므로 호출부는 검색조차
     하지 않아야 한다.
     """
@@ -380,17 +464,14 @@ def news_eligible_sections(
         official_web_documents, int
     ):
         raise TypeError("공식 웹 문서 수는 정수여야 합니다")
-    unready = frozenset(
-        section_id
-        for section_id in REQUIRED_EVIDENCE_SECTION_IDS
-        if not bool(section_ready.get(section_id, False))
-    )
+    unready = _unready_sections(section_ready)
     if unready:
-        return unready
+        return unready - c.NEWS_EXCLUDED_SECTIONS
     if official_web_documents <= c.WEB_DOCUMENT_ZERO_THRESHOLD:
         return frozenset(
             section_id
             for section_id in REQUIRED_EVIDENCE_SECTION_IDS
             if section_id not in c.NON_EXTENDABLE_SECTIONS
+            and section_id not in c.NEWS_EXCLUDED_SECTIONS
         )
     return frozenset()

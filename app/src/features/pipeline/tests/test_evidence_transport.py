@@ -167,9 +167,11 @@ def _without_web_provenance(raw: dict[str, object]) -> dict[str, object]:
 
 def _news_typed_raw() -> dict[str, object]:
     source_url = "https://news.example/articles/contract-1"
+    # 9장 칸은 뉴스 보조 목록에서 통째로 닫혔으므로, 「정상 통과」 표본은
+    # 열려 있는 산문 칸으로 잡는다.
     raw = _typed_raw(
-        section_id="competitive_position",
-        slot_id="competitive_position:stated_differentiator",
+        section_id="portfolio",
+        slot_id="portfolio:product_role",
         source_kind=SOURCE_KIND_NEWS,
         source_url=source_url,
         document_id="contract-1",
@@ -472,9 +474,13 @@ def test_뉴스보조조각은_스위치OFF에서_등록되지않은종류로_�
         "identity:corporate_identity",
         "past_changes:historical_performance",
         "competitive_position:comparison_metric",
+        # 9장은 회사가 밝힌 차별점만 싣는 장이라 산문 칸도 주장할 수 없다.
+        "competitive_position:self_context",
+        "competitive_position:stated_differentiator",
+        "competitive_position:limitation",
     ],
 )
-def test_뉴스보조조각은_정체성_수치_비교슬롯을_주장할수없다(
+def test_뉴스보조조각은_정체성_수치_구장슬롯을_주장할수없다(
     monkeypatch: pytest.MonkeyPatch, slot_id: str
 ) -> None:
     news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001

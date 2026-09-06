@@ -241,6 +241,13 @@ def map_news_fragments(
                 ),
             )
         )
+    if len(fragments) > c.MAX_FRAGMENTS_PER_ARTICLE:
+        # 앞선 정렬(문장 순서)을 그대로 두고 뒤에서 잘라, 같은 기사가 전체
+        # 조각 상한을 혼자 채우지 못하게 한다.
+        excluded[c.EXCLUDED_ARTICLE_FRAGMENT_LIMIT] += (
+            len(fragments) - c.MAX_FRAGMENTS_PER_ARTICLE
+        )
+        fragments = fragments[: c.MAX_FRAGMENTS_PER_ARTICLE]
     return NewsMappingResult(fragments=tuple(fragments), exclusion_counts=dict(excluded))
 
 
