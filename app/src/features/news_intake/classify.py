@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable
 
 from src.features.news_intake import constants as c
 from src.features.news_intake.models import (
@@ -85,7 +85,7 @@ def _validated_classifications(
     *,
     candidates: tuple[NewsCandidate, ...],
     raw_response: object,
-    section_ready: Mapping[str, bool],
+    eligible_sections: Collection[str],
 ) -> tuple[tuple[ClassifiedNewsCandidate, ...], dict[str, int]]:
     excluded: Counter[str] = Counter()
     raw_items = _strict_payload(raw_response)
@@ -126,7 +126,9 @@ def _validated_classifications(
         for section_id in raw_sections:
             if section_id not in allowed_sections:
                 excluded[c.EXCLUDED_UNKNOWN_SECTION] += 1
-            elif bool(section_ready.get(section_id, False)):
+            elif section_id not in eligible_sections:
+                # 대상에서 빠지는 장은 결국 공식 근거로 이미 채운 READY 장뿐이라
+                # 사유 코드 이름은 그대로 둔다.
                 excluded[c.EXCLUDED_READY_SECTION] += 1
             else:
                 valid_sections.append(section_id)
@@ -150,21 +152,25 @@ def classify_candidates(
     candidates: Iterable[NewsCandidate],
     *,
     classify: Classifier,
-    section_ready: Mapping[str, bool],
+    eligible_sections: Collection[str],
 ) -> NewsClassificationResult:
-    """주입 분류기를 정확히 한 번 호출하고 응답을 닫힌 목록으로 검증한다."""
+    """주입 분류기를 정확히 한 번 호출하고 응답을 닫힌 목록으로 검증한다.
+
+    ``eligible_sections``는 「뉴스 보조 문장을 받을 수 있는 장」이다. 정본은
+    ``select.news_eligible_sections``이며, 여기서는 그 결과를 그대로 쓴다.
+    """
 
     candidate_tuple = tuple(candidates)
     excluded: Counter[str] = Counter()
     if len(candidate_tuple) > c.MAX_CANDIDATES:
         excluded[c.EXCLUDED_CANDIDATE_LIMIT] += len(candidate_tuple) - c.MAX_CANDIDATES
         candidate_tuple = candidate_tuple[: c.MAX_CANDIDATES]
-    unknown_ready = set(section_ready) - set(REQUIRED_EVIDENCE_SECTION_IDS)
-    if unknown_ready:
-        raise ValueError("장별 READY 상태에 닫힌 목록 밖 장이 있습니다")
+    unknown_sections = set(eligible_sections) - set(REQUIRED_EVIDENCE_SECTION_IDS)
+    if unknown_sections:
+        raise ValueError("뉴스 대상 장에 닫힌 목록 밖 장이 있습니다")
     if not candidate_tuple:
         return NewsClassificationResult(classified=(), articles=(), exclusion_counts={})
-    if all(bool(section_ready.get(section_id, False)) for section_id in REQUIRED_EVIDENCE_SECTION_IDS):
+    if not eligible_sections:
         return NewsClassificationResult(classified=(), articles=(), exclusion_counts={})
     try:
         raw_response = classify(build_classification_prompt(candidate_tuple))
@@ -176,7 +182,7 @@ def classify_candidates(
     classified, validation_counts = _validated_classifications(
         candidates=candidate_tuple,
         raw_response=raw_response,
-        section_ready=section_ready,
+        eligible_sections=eligible_sections,
     )
     excluded.update(validation_counts)
     return NewsClassificationResult(
@@ -191,14 +197,14 @@ def classify_and_read(
     *,
     classify: Classifier,
     fetch_text: TextFetcher,
-    section_ready: Mapping[str, bool],
+    eligible_sections: Collection[str],
 ) -> NewsClassificationResult:
     """분류 채택 후보만 주입 본문 함수로 한 번씩 읽는다."""
 
     classification = classify_candidates(
         candidates,
         classify=classify,
-        section_ready=section_ready,
+        eligible_sections=eligible_sections,
     )
     excluded = Counter(classification.exclusion_counts)
     articles: list[FetchedNewsArticle] = []

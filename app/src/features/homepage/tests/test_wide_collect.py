@@ -3445,3 +3445,522 @@ def test_보조_신원페이지_조회가_실패하면_이름만으로_결속하
         attempt.reason_code == "root_identity_name_only"
         for attempt in result.attempts
     )
+
+
+# ── W10: 화면을 자바스크립트로 그리는 사이트(서버 HTML에 본문 0글자) ──
+
+
+def _csr_stub(company: str = "주식회사 와이즐리컴퍼니", script: str = "") -> str:
+    """서버가 주는 HTML에 사람이 읽는 본문이 없는 껍데기(하이브형).
+
+    회사명은 짧게 한 번만 나오므로 신원 대조에는 걸리지만
+    (``WIDE_MIN_CHARS_PER_RANGE`` 미만이라) 본문 조각은 하나도 안 나온다.
+    """
+
+    return (
+        "<html><head><title>" + company + "</title></head><body>"
+        '<div id="root">' + company + "</div>"
+        + script
+        + "</body></html>"
+    )
+
+
+def test_본문조각이_0개면_신원이_맞아도_no_usable_content_MISSING으로_남긴다():
+    """조각 0개를 「성공」으로 남기지 않는다(2026-09-06 하이브 실측).
+
+    예전에는 state=OK·root_identity_name_only로 남고 documents_seen만 0이라,
+    운영 로그만 봐서는 「신원 검증에 성공했는데 왜 근거가 0건인가」를 알 수
+    없었다. 이제 사유 코드가 원인을 그대로 말한다.
+    """
+
+    root = "https://csr-only.example"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(_csr_stub(), f"{root}/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    assert result.documents == ()
+    zero_content = [
+        attempt
+        for attempt in result.attempts
+        if attempt.reason_code == "no_usable_content"
+    ]
+    assert zero_content, [a.reason_code for a in result.attempts]
+    assert all(attempt.state == "MISSING" for attempt in zero_content)
+    assert all(attempt.documents_seen == 0 for attempt in zero_content)
+    # 「성공했는데 0건」으로 읽히는 옛 기록이 남아 있으면 안 된다.
+    assert not any(
+        attempt.state == "OK" and attempt.reason_code == "root_identity_name_only"
+        for attempt in result.attempts
+    )
+
+
+def test_본문이_있으면_사유코드와_상태가_예전_그대로다():
+    """조각이 1개라도 나오면 기존 판정(OK·root_identity_verified)을 그대로 쓴다."""
+
+    root = "https://alive-root.example"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(
+            _identity_body("2018년에 설립해 생활용품을 제조 및 판매하는 주요 사업을 영위합니다"),
+            f"{root}/",
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    root_attempt = next(
+        attempt
+        for attempt in result.attempts
+        if attempt.reason_code == "root_identity_verified"
+    )
+    assert root_attempt.state == "OK"
+    assert root_attempt.documents_seen == 1
+    assert not any(
+        attempt.reason_code == "no_usable_content" for attempt in result.attempts
+    )
+
+
+def test_apex_www가_같은_화면이면_중복이지_본문없음이_아니다():
+    """apex/www가 똑같은 HTML을 주는 정상 사이트를 「본문 없음」으로 깎지 않는다.
+
+    두 번째 host는 내용이 같아 문서가 0건이 되지만, 그건 「본문이 없다」가
+    아니라 「이미 모았다」다. 이 구분이 없으면 멀쩡한 회사의 www 시도가
+    MISSING으로 잘못 내려간다.
+    """
+
+    root = "https://mirror-root.example"
+    www = "https://www.mirror-root.example"
+    body = _identity_body("2018년에 설립해 생활용품을 제조 및 판매하는 주요 사업을 영위합니다")
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(body, f"{root}/"),
+        f"{www}/robots.txt": _missing(f"{www}/robots.txt"),
+        f"{www}/sitemap.xml": _missing(f"{www}/sitemap.xml"),
+        f"{www}/": _page(body, f"{www}/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    assert len(result.documents) == 1
+    mirrored = [
+        attempt
+        for attempt in result.attempts
+        if attempt.reason_code == "root_identity_verified"
+    ]
+    assert len(mirrored) == 2
+    assert {attempt.documents_seen for attempt in mirrored} == {0, 1}
+    assert not any(
+        attempt.reason_code == "no_usable_content" for attempt in result.attempts
+    )
+
+
+# ── W10: 본문이 시키는 같은 origin 이동을 1회만 따라간다 ──────────
+
+
+def test_같은_origin_스크립트_이동은_1회_따라가_본문을_모은다():
+    root = "https://redirect-stub.example"
+    landing = f"{root}/ko/main"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(
+            _csr_stub(
+                script="<script>location.replace(window.location.origin + '/ko/main')</script>"
+            ),
+            f"{root}/",
+        ),
+        landing: _page(
+            _identity_body("2018년에 설립해 생활용품을 제조 및 판매하는 주요 사업을 영위합니다"),
+            landing,
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    assert landing in site.calls
+    assert [doc.canonical_url for doc in result.documents] == [landing]
+    assert not any(
+        attempt.reason_code == "no_usable_content" for attempt in result.attempts
+    )
+
+
+def test_meta_refresh_이동도_같은_origin이면_따라간다():
+    root = "https://meta-stub.example"
+    landing = f"{root}/company"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(
+            '<html><head><meta http-equiv="refresh" content="0;url=/company">'
+            "<title>주식회사 와이즐리컴퍼니</title></head><body></body></html>",
+            f"{root}/",
+        ),
+        landing: _page(
+            _identity_body("2018년에 설립해 생활용품을 제조 및 판매하는 주요 사업을 영위합니다"),
+            landing,
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    assert landing in site.calls
+    assert [doc.canonical_url for doc in result.documents] == [landing]
+
+
+def test_이동_목적지도_본문이_없으면_여전히_no_usable_content다():
+    """하이브 실측이 이 모양이다 — 목적지도 자바스크립트로 그린다."""
+
+    root = "https://csr-both.example"
+    landing = f"{root}/ko/main"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(
+            _csr_stub(script="<script>location.replace('/ko/main')</script>"),
+            f"{root}/",
+        ),
+        landing: _page(_csr_stub(), landing),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    assert landing in site.calls
+    assert result.documents == ()
+    assert any(
+        attempt.reason_code == "no_usable_content" and attempt.state == "MISSING"
+        for attempt in result.attempts
+    )
+
+
+def test_다른_origin으로_보내는_이동은_따라가지_않는다():
+    root = "https://offsite-stub.example"
+    outside = "https://other-company.example/ko/main"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(
+            _csr_stub(script="<script>location.replace('" + outside + "')</script>"),
+            f"{root}/",
+        ),
+        outside: _page(
+            _identity_body("남의 회사 페이지지만 우리 신원 표식을 그대로 베껴 두었다"),
+            outside,
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    assert outside not in site.calls
+    assert result.documents == ()
+    assert any(
+        attempt.reason_code == "no_usable_content" for attempt in result.attempts
+    )
+
+
+def test_robots가_막은_이동_목적지는_따라가지_않는다():
+    root = "https://blocked-target.example"
+    landing = f"{root}/ko/main"
+    pages = {
+        f"{root}/robots.txt": _page(
+            "User-agent: *" + chr(10) + "Disallow: /ko" + chr(10),
+            f"{root}/robots.txt",
+            "text/plain",
+        ),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(
+            _csr_stub(script="<script>location.replace('/ko/main')</script>"),
+            f"{root}/",
+        ),
+        landing: _page(_identity_body("막힌 경로의 본문"), landing),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    assert landing not in site.calls
+    assert result.documents == ()
+
+
+def test_이동은_딱_한걸음이라_연쇄_이동은_따라가지_않는다():
+    root = "https://chained-stub.example"
+    first = f"{root}/ko"
+    second = f"{root}/ko/main"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(
+            _csr_stub(script="<script>location.replace('/ko')</script>"),
+            f"{root}/",
+        ),
+        first: _page(
+            _csr_stub(script="<script>location.replace('/ko/main')</script>"),
+            first,
+        ),
+        second: _page(_identity_body("두 걸음 뒤의 본문"), second),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    assert first in site.calls
+    assert second not in site.calls
+    assert result.documents == ()
+
+
+# ── W10: IR PDF는 root 신원 결속과 분리해 시도한다 ────────────────
+
+
+def test_root_신원이_어긋나도_IR_PDF_단계는_독립적으로_시도한다():
+    """root HTML 이름 대조 실패 하나로 IR PDF 수집이 통째로 사라지지 않는다.
+
+    IR PDF는 앞 2쪽에서 법인명·별칭을 직접 확인하는 자체 신원 검사를 갖고
+    있으므로 root 결속과 별개로 시도할 수 있다(2026-09-06 조사 §5-3).
+    """
+
+    root = "https://reassigned-ir.example"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(
+            _identity_body(
+                "전혀 다른 회사의 소개 문장이 길게 이어지는 재할당된 도메인입니다",
+                number="999-99-99999",
+            ).replace("주식회사 와이즐리컴퍼니", "주식회사 다른컴퍼니"),
+            f"{root}/",
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    assert any(
+        attempt.reason_code == "root_identity_mismatch" for attempt in result.attempts
+    )
+    ir_attempts = [
+        attempt
+        for attempt in result.attempts
+        if attempt.attempt_id.startswith("ir-")
+    ]
+    assert ir_attempts, [attempt.attempt_id for attempt in result.attempts]
+    # 신원이 안 맞은 root의 본문은 여전히 문서가 되지 않는다.
+    assert result.documents == ()
+
+
+def test_등록번호가_없으면_IR_단계도_열지_않는다():
+    """확인을 「시도조차 못 한」 fail-closed는 그대로 둔다(네트워크 0회)."""
+
+    site = _FakeWideSite({})
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=(),
+        root_homepage_url="https://unknown-owner.example/",
+        root_identity_verification_required=True,
+    )
+
+    assert site.calls == []
+    assert [attempt.reason_code for attempt in result.attempts] == [
+        "root_identity_unverifiable"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("root_company", "expected_requirement", "expected_tier"),
+    (
+        ("주식회사 와이즐리컴퍼니", "REQUIRED", "TIER_1_OFFICIAL"),
+        ("주식회사 다른컴퍼니", "OPTIONAL", "TIER_3_TRUSTED"),
+    ),
+)
+def test_root_결속이_없는_IR_문서는_후보등급에_머문다(
+    monkeypatch, root_company, expected_requirement, expected_tier
+):
+    """IR PDF는 root 결속 없이도 모으지만, 등급까지 올려 주지는 않는다.
+
+    첫 줄(이름이 맞는 root)은 예전과 같은 REQUIRED·TIER_1이고, 둘째 줄
+    (재할당된 도메인)은 IR PDF 자체 신원 검사만 통과한 후보라 OPTIONAL·
+    TIER_3에 머문다. 둘을 함께 잠가야 「분리했더니 등급까지 헐거워졌다」를
+    잡을 수 있다.
+    """
+
+    from src.shared.official_ir import (
+        IR_ATTACHMENT_URL_FIELD,
+        IR_METADATA_VERIFICATION_FIELD,
+        IR_METADATA_VERIFICATION_VALUE,
+        IR_REPORTING_PERIOD_FIELD,
+    )
+
+    root = "https://ir-standalone.example"
+    pdf_url = f"{root}/ir/2026.pdf"
+    pages = {
+        f"{root}/robots.txt": _missing(f"{root}/robots.txt"),
+        f"{root}/sitemap.xml": _missing(f"{root}/sitemap.xml"),
+        f"{root}/": _page(
+            _identity_body(
+                "회사 소개와 주요 사업을 길게 적어 둔 공식 홈페이지 첫 화면입니다"
+            ).replace("주식회사 와이즐리컴퍼니", root_company),
+            f"{root}/",
+        ),
+    }
+    site = _FakeWideSite(pages)
+
+    def fake_collect_ir(homepage_url, **_kwargs):
+        if homepage_url != f"{root}/":
+            return OfficialIrCollectResult(
+                state="none", fragments=[], downloaded_pdf_bytes=0
+            )
+        return OfficialIrCollectResult(
+            state="ok",
+            fragments=[
+                {
+                    "종류": "공식 IR",
+                    "문서ID": "standalone-ir-2026",
+                    "출처": pdf_url,
+                    "문서명": "2026 IR 실적 발표 자료",
+                    "문서일": "2026-05-15",
+                    IR_REPORTING_PERIOD_FIELD: "2026-Q1",
+                    IR_ATTACHMENT_URL_FIELD: pdf_url,
+                    IR_METADATA_VERIFICATION_FIELD: IR_METADATA_VERIFICATION_VALUE,
+                    "원문": (
+                        "주식회사 와이즐리컴퍼니의 2026년 실적과 성장 전략을 "
+                        "담은 공식 IR 자료입니다."
+                    ),
+                    "원문위치": "PDF p.1 1문단 · pypdf 6.16.1",
+                }
+            ],
+            downloaded_pdf_bytes=1024,
+        )
+
+    monkeypatch.setattr(wide_collect, "collect_official_ir_fragments", fake_collect_ir)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    ir_documents = [
+        document
+        for document in result.documents
+        if document.source_kind == "official_ir_pdf"
+    ]
+    assert len(ir_documents) == 1, [d.source_kind for d in result.documents]
+    assert ir_documents[0].requirement == expected_requirement
+    assert ir_documents[0].source_tier == expected_tier
+
+
+def test_robots가_막은_root는_IR_단계도_열지_않는다():
+    """결속 없이 IR만 시도하는 갈래가 robots 경계를 넓히면 안 된다.
+
+    결속에 성공한 host는 이미 «robots가 시작 경로를 허용한다»를 통과한
+    상태다. 결속 없이 IR만 시도하는 갈래도 같은 문턱을 넘어야 한다. 거부
+    사실은 robots 시도 기록에 이미 남으므로, 그것을 «IR 조회 실패»로 바꿔
+    적지도 않는다.
+    """
+
+    root = "https://robots-denied-ir.example"
+    pages = {
+        f"{root}/robots.txt": _page(
+            "User-agent: *" + chr(10) + "Disallow: /" + chr(10),
+            f"{root}/robots.txt",
+            "text/plain",
+        ),
+        f"{root}/": _page(_identity_body("막힌 호스트의 본문"), f"{root}/"),
+    }
+    site = _FakeWideSite(pages)
+
+    result = _collect(
+        site,
+        company_name="주식회사 와이즐리컴퍼니",
+        company_registration_numbers=("1234567890",),
+        root_homepage_url=root,
+        root_identity_verification_required=True,
+    )
+
+    assert f"{root}/" not in site.calls
+    assert result.documents == ()
+    assert [
+        attempt.reason_code
+        for attempt in result.attempts
+        if attempt.attempt_id.startswith("ir-")
+    ] == []
+    # 막혔다는 사실 자체는 robots 기록에 그대로 남아 있어야 한다.
+    assert any(
+        attempt.source_kind == "robots_txt" and attempt.state == "OK"
+        for attempt in result.attempts
+    )
