@@ -44,6 +44,10 @@ PERSISTENT_SCHEMA_BOOTSTRAPS: Final[tuple[PersistentSchemaBootstrap, ...]] = (
         "src/features/observability/admin_audit_store.py",
     ),
     PersistentSchemaBootstrap(
+        "실행 진단 단계 기록", "src.features.observability.run_steps_store",
+        "src/features/observability/run_steps_store.py",
+    ),
+    PersistentSchemaBootstrap(
         "백업 실행 상태", "src.features.backup.status",
         "src/features/backup/status.py",
     ),

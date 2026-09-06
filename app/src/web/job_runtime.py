@@ -37,6 +37,8 @@ from src.features.business_candidate.constants import CANDIDATE_ATTEMPT_TTL_SEC
 from src.features.cost_tracking import store as cost_store
 from src.features.observability import constants as obs
 from src.features.observability import lifecycle
+from src.features.observability import run_diagnostics
+from src.features.observability import run_steps_store
 from src.features.pipeline.demo import available_companies
 from src.features.pipeline.port import (
     CompanyCard,
@@ -231,6 +233,11 @@ class Job:
     card: CompanyCard
     #: 지금까지 끝난 단계 키 목록
     done_steps: list[str] = field(default_factory=list)
+    #: 파이프라인이 남긴 실행 진단 기록 원본. 관리자 화면 전용이며,
+    #: 워커 스레드가 채우고 마감 단계가 실행 기록에 함께 저장한다.
+    diagnostic_steps: list[dict] = field(default_factory=list)
+    #: 실행 진단을 이미 저장했는가. 두 번 쓰지 않기 위한 표식.
+    diagnostics_persisted: bool = False
     #: 지금 하고 있는 단계 키
     current_step: str = ""
     finished: bool = False
@@ -830,6 +837,21 @@ def _prepare_generation_session(job: Job) -> None:
     )
 
 
+def _run_pipeline_worker_with_diagnostics(job: Job) -> RunResult:
+    """워커 스레드 «안에서» 진단 수집칸을 열고 파이프라인을 돌린다.
+
+    ★ 수집칸은 ContextVar라 스레드마다 따로다. 바깥(이벤트 루프)에서 열면
+      파이프라인이 도는 스레드에서는 안 보여 조용히 빈 칸이 된다. 그래서
+      스레드 안에서 열고, 결과는 두 스레드가 함께 보는 `job`에 담아 넘긴다.
+    """
+
+    with run_diagnostics.capture() as captured:
+        try:
+            return _run_pipeline_worker(job)
+        finally:
+            job.diagnostic_steps = captured.steps
+
+
 def _run_pipeline_worker(job: Job) -> RunResult:
     """무료 preflight→owner 확정→지연 비용 phase 순서로 pipeline을 돌린다."""
 
@@ -983,7 +1005,9 @@ async def _run_job(job: Job) -> None:
                 message=PIPELINE_FAILED_MESSAGE,
             )
             return
-        worker = asyncio.create_task(asyncio.to_thread(_run_pipeline_worker, job))
+        worker = asyncio.create_task(
+            asyncio.to_thread(_run_pipeline_worker_with_diagnostics, job)
+        )
         job.result = await _await_worker_before_execution_deadline(job, worker)
         if not isinstance(job.result, RunResult):
             raise TypeError("파이프라인 결과 계약이 올바르지 않습니다")
@@ -1355,6 +1379,7 @@ async def _run_job(job: Job) -> None:
             # 화면의 ``finished``는 본문·PDF artifact 확정 시도보다 먼저
             # 열리지 않아야 최초 GET이 구형 재렌더 경로로 빠지지 않는다.
             _log_failed_run(job)
+            _persist_run_diagnostics(job)
             job.finished = True
             job.finished_at = time.monotonic()
             _ensure_link_job_closed(job)
@@ -1429,6 +1454,28 @@ def _log_failed_run(job: Job) -> None:
         " ".join(job.card.legal_name.split()),
         reason_code,
     )
+
+
+def _persist_run_diagnostics(job: Job) -> None:
+    """실행 진단 기록 원본을 실행 번호와 함께 한 번만 저장한다.
+
+    ★ 저장에 실패해도 조용히 넘어간다 — 진단이 없다고 마감·자리 반환을 막으면
+      실행 하나가 통째로 새어 나간다. 대신 실패 사실은 로그에 남긴다.
+    """
+
+    if job.diagnostics_persisted or not job.diagnostic_steps:
+        return
+    job.diagnostics_persisted = True
+    try:
+        with storage_db.connect() as conn:
+            run_steps_store.record_once(
+                conn,
+                run_id=job.job_id,
+                steps=job.diagnostic_steps,
+                recorded_at=clock.iso_now_kst(),
+            )
+    except Exception:  # noqa: BLE001 — 진단 저장 실패가 마감을 막으면 안 된다
+        logger.exception("실행 진단 기록을 저장하지 못했습니다 job_id=%s", job.job_id)
 
 
 def _finish_link_job(

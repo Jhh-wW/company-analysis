@@ -2,6 +2,7 @@
 
 import base64
 import datetime as dt
+import json
 import logging
 import os
 import re
@@ -20,6 +21,8 @@ from src.features.auth import logic as auth_logic
 from src.features.feedback_report import constants as feedback_constants
 from src.features.feedback_report import logic as feedback_logic
 from src.features.observability import admin_audit, admin_audit_store
+from src.features.observability import constants as obs_constants
+from src.features.observability import run_steps_store
 from src.features.budget import constants as budget_constants
 from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.budget import spend_store
@@ -1663,6 +1666,81 @@ async def admin_link_generated_report(request: Request, report_id: str):
     return _admin_response(
         request,
         RedirectResponse(f"/admin/reports/{clean_report_id}", status_code=303),
+    )
+
+
+#: 실행 번호에 허용하는 글자. 화면 주소에서 오는 값이라 좁게 잡는다.
+_RUN_ID_PATTERN = re.compile(rf"^[A-Za-z0-9_-]{{1,{RUN_ID_MAX_CHARS}}}$")
+
+
+@router.get("/admin/runs/{run_id}/diagnostics", response_class=HTMLResponse)
+async def admin_run_diagnostics(request: Request, run_id: str):
+    """실행 하나의 진단 기록(steps) 전체를 관리자에게 그대로 보여 준다.
+
+    ★ 요약 로그는 개수·코드만 담는다. 여기서만 원본을 펼친다 — 그래서 기존
+      관리자 가드를 그대로 지나야 하고, 로그인하지 않은 사용자는 볼 수 없다.
+    """
+
+    blocked = request_helpers.require_admin(request)
+    if blocked is not None:
+        return blocked
+    clean_run_id = str(run_id or "").strip()
+    if not _RUN_ID_PATTERN.match(clean_run_id):
+        return _admin_response(
+            request,
+            HTMLResponse("올바르지 않은 실행 식별자입니다.", status_code=404),
+        )
+    try:
+        with storage_db.connect() as conn:
+            saved = run_steps_store.load(conn, clean_run_id)
+    except Exception:  # noqa: BLE001 — 진단을 못 읽어도 「없다」로 뭉개지 않는다
+        logger.exception("실행 진단 기록을 읽지 못했습니다")
+        return _admin_response(
+            request,
+            request_helpers.templates.TemplateResponse(
+                request=request,
+                name="admin_run_diagnostics.html",
+                context=request_helpers._ctx(
+                    request,
+                    diagnostics_run_id=clean_run_id,
+                    diagnostics_steps_json="",
+                    diagnostics_step_count=0,
+                    diagnostics_omitted_count=0,
+                    diagnostics_recorded_at_label="",
+                    diagnostics_error="실행 진단 기록을 읽지 못했습니다.",
+                ),
+                status_code=503,
+            ),
+        )
+    if saved is None:
+        steps_json = ""
+        step_count = 0
+        omitted_count = 0
+        recorded_at_label = ""
+    else:
+        steps_json = json.dumps(
+            saved.steps,
+            ensure_ascii=False,
+            indent=obs_constants.RUN_STEPS_VIEW_INDENT,
+        )
+        step_count = saved.step_count
+        omitted_count = saved.omitted_count
+        recorded_at_label = _kst_timestamp_label(saved.recorded_at)
+    return _admin_response(
+        request,
+        request_helpers.templates.TemplateResponse(
+            request=request,
+            name="admin_run_diagnostics.html",
+            context=request_helpers._ctx(
+                request,
+                diagnostics_run_id=clean_run_id,
+                diagnostics_steps_json=steps_json,
+                diagnostics_step_count=step_count,
+                diagnostics_omitted_count=omitted_count,
+                diagnostics_recorded_at_label=recorded_at_label,
+                diagnostics_error="",
+            ),
+        ),
     )
 
 

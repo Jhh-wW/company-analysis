@@ -194,3 +194,67 @@ PERCENT_DECIMALS: Final[int] = 1
 #: ⑥ 개별 요청 조회에 내보내는 「최근」 건수 상한. 화면단이 더 필요하면 페이지네이션은
 #: 화면단 몫이다 — 여기서는 최신순으로 이만큼만 잘라 준다.
 RECENT_LIMIT: Final[int] = 50
+
+# ══════════════════════════════════════════════════════════
+# 실행 진단 요약 — 「어느 단계를 로그 한 줄에 담나」
+# ══════════════════════════════════════════════════════════
+
+#: 실행이 끝날 때 요약 로그 한 줄에 담을 단계 이름.
+#: ★ 이 이름들은 파이프라인(`features/pipeline`)과 작성기(`features/composer`)가
+#:   만든다. feature 간 직접 import는 금지라 값만 여기 다시 적는다 — 이름이 바뀌면
+#:   요약이 조용히 비므로, 시험이 실제 생산 코드에 같은 이름이 있는지 대조한다.
+#: ★ 여기 없는 단계는 요약에 절대 실리지 않는다. 원문 발췌·주소가 섞인 단계를
+#:   실수로 로그에 흘리지 않기 위한 「허용 목록」이다.
+RUN_SUMMARY_STEP_NAMES: Final[tuple[str, ...]] = (
+    "5b_뉴스_수집",
+    "6_수집_공식근거사전검사",
+    "6_수집_DART부분보고서전환",
+    "6_수집_공식근거생성입력",
+    "7_이름후보",
+    "3장_대표이름_미사용",
+    "3장_대표이름_카드_보강",
+    "v2_composer_완료",
+)
+
+#: 아직 생산 코드에 없는 단계 이름. 붙는 즉시 요약에 실리도록 미리 넣어 두고,
+#: 「이 이름이 실제로 만들어지는가」 시험에서만 뺀다.
+RUN_SUMMARY_PLANNED_STEP_NAMES: Final[frozenset[str]] = frozenset(
+    {"3장_대표이름_카드_보강"}
+)
+
+#: 「부분 보고서로 내려갔다」를 뜻하는 단계. 요약의 등급 칸이 이걸 본다.
+RUN_SUMMARY_PARTIAL_STEP: Final[str] = "6_수집_DART부분보고서전환"
+#: 「본문 작성까지 끝냈다」를 뜻하는 단계.
+RUN_SUMMARY_COMPOSED_STEP: Final[str] = "v2_composer_완료"
+
+RUN_GRADE_FULL: Final[str] = "정식"
+RUN_GRADE_PARTIAL: Final[str] = "부분"
+#: 본문 작성 전에 멈춰 등급을 말할 수 없는 실행. 지어내지 않고 「미상」으로 둔다.
+RUN_GRADE_UNKNOWN: Final[str] = "미상"
+
+#: 요약 로그 한 줄(JSON)의 글자 상한. 넘으면 뒤쪽 단계부터 덜어낸다.
+RUN_SUMMARY_MAX_CHARS: Final[int] = 2000
+#: 요약에 실을 문자열 하나의 글자 상한. 원문 발췌가 통째로 실리는 것을 막는다.
+RUN_SUMMARY_MAX_LABEL_CHARS: Final[int] = 60
+#: 요약에 실을 목록·사전 한 개의 항목 수 상한.
+RUN_SUMMARY_MAX_ITEMS: Final[int] = 12
+#: 요약에서 따라 들어갈 중첩 깊이 상한. 더 깊으면 종류 이름만 남긴다.
+RUN_SUMMARY_MAX_DEPTH: Final[int] = 2
+#: 잘라낸 자리에 남기는 표시.
+RUN_SUMMARY_TRUNCATED_MARK: Final[str] = "…"
+#: 주소(URL)를 지운 자리에 남기는 표시.
+RUN_SUMMARY_REDACTED_MARK: Final[str] = "[주소가려짐]"
+#: 요약 로그 앞머리. 운영 로그에서 이 말로 찾는다.
+RUN_SUMMARY_LOG_PREFIX: Final[str] = "실행 진단 요약"
+
+# ══════════════════════════════════════════════════════════
+# 실행 진단 원본(steps) 보관 — 관리자 화면 전용
+# ══════════════════════════════════════════════════════════
+
+#: 실행 기록에 함께 저장하는 steps 원본의 표 형식 판.
+RUN_STEPS_SCHEMA_VERSION: Final[int] = 1
+#: steps 원본 JSON 한 건의 바이트 상한. 넘으면 뒤쪽 단계부터 덜어내고 표시를 남긴다.
+#: 1GB 운영 디스크에서 진단 하나가 저장소를 밀어내지 않게 하는 값이다.
+RUN_STEPS_MAX_BYTES: Final[int] = 256 * 1024
+#: 관리자 화면이 steps를 보기 좋게 펼칠 때 쓰는 들여쓰기 칸 수.
+RUN_STEPS_VIEW_INDENT: Final[int] = 2
