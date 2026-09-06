@@ -30,6 +30,7 @@ EXPECTED_TABLES = {
         "observability_run_lifecycle_audit",
     },
     "src.features.observability.admin_audit_store": {"admin_audit_events"},
+    "src.features.observability.run_steps_store": {"observability_run_steps"},
     "src.features.backup.status": {"backup_run_state", "backup_run_events"},
     "src.features.admin_dashboard.kpi": {
         "dashboard_report_kpi_attempts",

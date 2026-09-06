@@ -140,6 +140,7 @@ from src.features.news_intake.constants import (
     NEWS_TRIGGER_NONE,
     NEWS_TRIGGER_WEB_ZERO,
 )
+from src.features.observability import run_diagnostics
 from src.features.product_names.constants import MAX_NAME_FRAGMENTS_PER_FILING
 from src.features.product_names.fragments import (
     formal_source_kind_for_filing,
@@ -2591,6 +2592,10 @@ class RealPipeline:
             raise generation_coordination.GenerationCoordinationError(
                 "유료 생성을 시작하려면 정상 배포 epoch 영수증이 필요합니다"
             )
+        # 단계 기록이 쌓일 자리를 여기서 연다. 본체(_run_metered)만 갖고 있으면
+        # 어느 갈래로 끝나든 그 목록이 함수와 함께 사라져, 운영에서 「어디서 몇 개
+        # 모으다 멈췄나」를 물어볼 곳이 없어진다.
+        diagnostics = run_diagnostics.begin_run()
         try:
             result = self._run_metered(
                 user_input,
@@ -2641,6 +2646,10 @@ class RealPipeline:
                 outcome=Outcome.FAILED,
                 message=_message(Outcome.FAILED),
             )
+        finally:
+            # 성공·실패·요청 전역 중단을 가리지 않고 여기 한 곳에서만 남긴다.
+            # 갈래마다 적으면 새 종료가 늘 때 한 곳은 반드시 빠진다.
+            diagnostics.finish(corp_code=card.ref)
         # 어느 조기 종료로 나왔든 비용·모델은 한 요청의 client 응답을 정본으로 삼는다.
         # 단계별 return에 따로 적으면 새 종료가 추가될 때 한 곳은 반드시 빠진다.
         return replace(
@@ -2676,7 +2685,9 @@ class RealPipeline:
         engine.load_env()
         client = _metered_client(engine, engine._client())
         counter = engine.UsageCounter()
-        steps: list[dict[str, Any]] = []
+        # `run`이 열어 둔 자리에 그대로 쌓는다. 자리가 없는 옛 호출부는 예전처럼
+        # 자기만 쓰는 새 목록을 받는다 — 진단이 본 기능을 막지 않는다.
+        steps: list[dict[str, Any]] = run_diagnostics.current_steps()
         model = getattr(engine, "MODEL", "")
 
         tell("identify")   # 이미 끝났다 — 화면에는 지나간 단계로 표시된다
@@ -6007,6 +6018,7 @@ def _collect_news_intake(
             {
                 "step": "5b_뉴스_수집",
                 "스위치": True,
+                "공식웹문서수": official_web_documents,
                 "창": _news_window_label(
                     trigger_reason=trigger_reason,
                     extended_window=extended_window,
@@ -6123,6 +6135,7 @@ def _collect_news_intake(
             {
                 "step": "5b_뉴스_수집",
                 "스위치": True,
+                "공식웹문서수": official_web_documents,
                 "창": _news_window_label(
                     trigger_reason=trigger_reason,
                     extended_window=extended_window,
@@ -6162,6 +6175,7 @@ def _collect_news_intake(
             {
                 "step": "5b_뉴스_수집",
                 "스위치": True,
+                "공식웹문서수": official_web_documents,
                 "창": _news_window_label(
                     trigger_reason=trigger_reason,
                     extended_window=extended_window,

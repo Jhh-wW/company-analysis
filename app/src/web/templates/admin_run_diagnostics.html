@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}실행 진단 기록 · 기업분석{% endblock %}
+
+{# 실행 하나가 남긴 단계 기록(steps) 전체를 관리자에게 그대로 보여 주는 화면.
+
+   ★ 왜 필요한가 — 이 기록은 지금까지 실행이 끝나는 순간 사라졌다. 운영에서
+     「뉴스를 몇 건 걸렀나」·「이름 후보가 몇 개였나」를 물어볼 곳이 없어
+     원인 추적이 두 번 막혔다.
+   ★ 로그에는 개수·코드만 남긴다. 원문이 섞일 수 있는 원본은 여기서만 펼친다 —
+     그래서 이 화면은 로그인한 관리자만 볼 수 있다. #}
+
+{% block content %}
+
+<h1>실행 진단 기록</h1>
+<p class="lede">
+  조사 실행 하나가 단계마다 남긴 기록입니다.
+  실행 번호 <code>{{ diagnostics_run_id }}</code>
+  {% if diagnostics_recorded_at_label %} · 기록 {{ diagnostics_recorded_at_label }}{% endif %}
+</p>
+
+{% if diagnostics_error %}
+<div class="warn-line" role="alert" style="margin-bottom:16px">
+  <span>⚠️</span><span><strong>{{ diagnostics_error }}</strong><br>
+  기록이 없는 것과 읽지 못한 것은 다릅니다. 잠시 뒤 다시 열어 보세요.</span>
+</div>
+{% elif diagnostics_steps_json %}
+{% if diagnostics_omitted_count %}
+<div class="warn-line" role="status" style="margin-bottom:16px">
+  <span>ℹ️</span><span>기록이 너무 길어 <strong>뒤쪽 {{ diagnostics_omitted_count }}단계</strong>는
+  저장하지 않았습니다. 앞쪽 {{ diagnostics_step_count }}단계만 아래에 있습니다.</span>
+</div>
+{% endif %}
+<div class="card">
+  <p class="muted">단계 {{ diagnostics_step_count }}개</p>
+  <pre style="white-space:pre-wrap;word-break:break-all;overflow-x:auto">{{ diagnostics_steps_json }}</pre>
+</div>
+{% else %}
+<div class="card">
+  <p class="muted">이 실행에는 저장된 진단 기록이 없습니다.
+  진단 저장을 붙이기 «전»에 끝난 실행이거나, 단계를 하나도 남기지 못하고 멈춘 실행입니다.</p>
+</div>
+{% endif %}
+
+<div class="btn-row">
+  <a class="btn ghost" href="/admin/links">LINK 목록으로</a>
+  <a class="btn ghost" href="/admin">관리자 화면으로</a>
+</div>
+{% endblock %}

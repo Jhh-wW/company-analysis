@@ -89,6 +89,9 @@ Render에서는 `/var/data` 하나를 영속 루트로 사용한다.
   결과의 현재 정본. 비용 attempt 원장 전환 뒤 재시작 검증과 대시보드는 이 DB를 읽음
 - `observability/runs.jsonl`: 전환 전 외부 분석도구용 호환 사본. 전환 뒤에는 더 쓰지
   않으며 64MiB 파일·16KiB 행 상한 안에서만 스트리밍해 옛 자료를 이관함
+- `storage.db`의 `observability_run_steps`: 실행 하나가 남긴 단계 기록 원본(실행당 1행,
+  256KiB 상한, 덧붙이기 전용). 관리자 화면 `/admin/runs/{run_id}/diagnostics`에서만 펼쳐
+  보며, 같은 실행의 요약은 원문·주소 없이 개수·코드만 담아 운영 로그에도 한 줄 남는다
 - `cache/`: 공식 API·도메인 분석의 재생성 가능한 캐시
 - `backups/`: SQLite online snapshot과 그 snapshot이 참조하는 PDF bytes를 묶은 recovery generation
 

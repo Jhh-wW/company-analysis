@@ -73,7 +73,7 @@ pipeline ── demo 또는 real 조사 조립
 | `storage` | 보고서·사실 원장·세션·캐시 저장과 조회 | DB·정본 스키마 → 저장·조회 결과 | 구형 캐시를 새 정본으로 승격 |
 | `backup` | 실행 중 SQLite snapshot과 그 snapshot이 참조하는 불변 PDF를 한 recovery generation으로 봉인·재검증 | 영속 DB·artifact root → exact DB/PDF/manifest 세대 | 운영 외부 업로드·독립 서명·복구 전환·비밀값 백업(현재 BLOCKED) |
 | `admin_dashboard` | 관리자 보고서·휴지통·주간 XLSX와 기간별 정기 작업 상태 관리 | 운영 DB·관리자 명령·cron claim → 대시보드 조회·XLSX·정리 결과 | 분석 실행·AI 호출·사용자 보고서 내용 변경 |
-| `observability` | 단계·게이트·비용·시간·실패 이유 기록 | 실행 사건 → 감사 기록·지표 | 분석 실행·비용 차단 |
+| `observability` | 단계·게이트·비용·시간·실패 이유 기록과 실행 진단 요약 로그·관리자 전용 단계 기록 보관 | 실행 사건·파이프라인 단계 기록 → 감사 기록·지표·요약 로그 한 줄·관리자 진단 화면 | 분석 실행·비용 차단·로그에 주소나 원문 싣기 |
 | `export_pdf` | 정본을 A4 PDF로 준비하고 report/PDF/page hash 결속 자동검사·자동출고 관리 | 정본 보고서 → 자동출고 PDF 또는 `GATE_STOPPED` | 사실 추가·수동 승인 우회 |
 | `export_notion` | 같은 자동출고 정본을 Notion 블록으로 변환 | 자동출고 보고서·설정 → 페이지·URL | 별도 활용 질문·추가 분석 |
 | `cost_tracking` | 단계별 내부 AI 변동원가와 고객 청구·서버 고정비 분리 | model/token/cache/batch/출고 → 비용 이벤트·청구 결정 | 가격 확정·결제 처리 |

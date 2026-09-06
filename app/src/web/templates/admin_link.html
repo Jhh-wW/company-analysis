@@ -299,6 +299,8 @@
         {% if run.release_sha256 %}
           <br><span class="muted">release {{ run.release_sha256 }}</span>
         {% endif %}
+        {# 실행이 단계마다 남긴 기록. 실패한 실행일수록 여기부터 본다. #}
+        <br><a href="/admin/runs/{{ run.run_id }}/diagnostics">실행 진단 기록 보기</a>
       </td>
     </tr>
     {% endfor %}
