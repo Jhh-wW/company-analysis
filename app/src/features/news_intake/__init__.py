@@ -23,6 +23,7 @@ from src.features.news_intake.models import (
 )
 from src.features.news_intake.select import (
     needs_extended_window,
+    news_eligible_sections,
     select_candidates,
     select_news_items,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "map_articles_to_fragments",
     "map_news_fragments",
     "needs_extended_window",
+    "news_eligible_sections",
     "select_candidates",
     "select_news_items",
 ]
