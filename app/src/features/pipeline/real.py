@@ -175,6 +175,7 @@ from src.shared.report_evidence.constants import (
     SOURCE_KIND_OFFICIAL_IR_PDF,
     SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
     SOURCE_KIND_OFFICIAL_WEB_PAGE,
+    SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS,
 )
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 from src.shared.report_evidence.date_normalization import (
@@ -237,6 +238,7 @@ from src.features.pipeline.evidence_transport import (
     RAW_EVIDENCE_SLOT_IDS_KEY,
     EvidenceTransportError,
     build_section_evidence_packet_set,
+    typed_fragments_from_raw,
 )
 from src.features.pipeline.comparison_transport import (
     build_typed_comparison_candidate_inputs,
@@ -5217,6 +5219,52 @@ def _run_v2_composer(
             final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
         )
 
+    # ★ 조각의 typed 신원은 릴리스 모드와 무관한 «사실»이다. FULL은 장별 packet을
+    #   만들지만 부분 보고서 갈래는 packet을 만들 수 없어(아홉 장·문서 하한을 못
+    #   채워서 열린 길이다) 지금까지 작성기에 raw dict를 그대로 넘겼다. raw dict
+    #   어댑터는 종류·원문·출처·문서명·원문위치만 읽어 발행처·문서일·문서 종류·
+    #   의미 칸·장 선언을 통째로 버리고, 그래서 보조 문서로 만드는 표는 소유 장을
+    #   잃어 부분 보고서에서만 구조적으로 만들어지지 않았다. packet 없이 같은
+    #   검증을 지난 typed 조각만 넘겨 그 손실을 없앤다.
+    # ★ 위 FULL 갈래의 `except EvidenceTransportError`(최종 게이트로 보고서를
+    #   막는 쪽)와 절대 섞이면 안 되므로 «별도 try»로 감싼다 — 부분 보고서를 이
+    #   변환 때문에 잃으면 안 된다.
+    composer_fragments: Any = frags
+    if release_mode is not ReleaseMode.FULL and frags:
+        try:
+            typed_composer_fragments = typed_fragments_from_raw(
+                corp_id=corp_id,
+                frags=frags,
+                filing_meta=filing_identity,
+            )
+        except EvidenceTransportError as exc:
+            # 오늘과 같은 raw dict 전달로 되돌아가되 사유코드를 실행 기록에
+            # 남긴다. 조용히 되돌아가면 운영에서 「왜 표가 없나」를 못 가른다.
+            logger.warning(
+                "엔진 v2 부분 보고서 조각 typed 전달 불가: %s",
+                exc.detail_code,
+            )
+            steps.append(
+                {
+                    "step": "v2_조각_typed전달_불가",
+                    "사유코드": exc.detail_code,
+                }
+            )
+        else:
+            composer_fragments = typed_composer_fragments
+            steps.append(
+                {
+                    "step": "v2_조각_typed전달",
+                    "조각": len(typed_composer_fragments),
+                    "보조": sum(
+                        1
+                        for fragment in typed_composer_fragments
+                        if fragment.formal_source_kind
+                        in SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
+                    ),
+                }
+            )
+
     if release_mode is ReleaseMode.FULL:
         assert section_evidence_packets is not None
         document_preflight = assess_packet_document_sources(
@@ -5325,7 +5373,9 @@ def _run_v2_composer(
     try:
         output = composer_pipeline.run_v2(
             company_name,
-            frags,
+            # FULL은 예전 그대로 raw dict를 넘긴다(장별 packet이 정본이다).
+            # 부분 보고서만 위에서 만든 typed 조각을 받는다.
+            composer_fragments,
             performance_table,
             writer_ask=writer_ask,
             reviewer_ask=reviewer_ask,

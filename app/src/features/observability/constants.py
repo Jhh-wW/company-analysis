@@ -216,6 +216,8 @@ RUN_SUMMARY_STEP_NAMES: Final[tuple[str, ...]] = (
     "3장_대표이름_표_불가",
     "뉴스_보도표",
     "뉴스_보도표_불가",
+    "v2_조각_typed전달",
+    "v2_조각_typed전달_불가",
     "v2_composer_완료",
 )
 

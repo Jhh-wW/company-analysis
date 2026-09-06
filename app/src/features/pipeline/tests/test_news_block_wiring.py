@@ -81,8 +81,13 @@ def _reset_news_switch(monkeypatch: pytest.MonkeyPatch):
     news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
 
 
-def _typed_news_fragments(monkeypatch: pytest.MonkeyPatch):
-    """진짜 수집·transport를 태워 typed 뉴스 조각과 장별 소유권 표를 얻는다."""
+def _partial_path_calls(monkeypatch: pytest.MonkeyPatch):
+    """부분 보고서 갈래를 진짜 수집·분류·transport로 한 번 돌린다.
+
+    돌려주는 것은 ``(_wire_runtime`` 기록, 실행 결과) 쌍이다 — 이 하네스를
+    쓰는 다른 시험이 「작성기 연결부가 실제로 무엇을 받았나」까지 볼 수 있게
+    조각이 아니라 «호출 기록»을 그대로 넘긴다.
+    """
 
     monkeypatch.setenv(news_intake_switch.NEWS_INTAKE_ENV_NAME, "1")
     _freeze_runtime(
@@ -132,6 +137,13 @@ def _typed_news_fragments(monkeypatch: pytest.MonkeyPatch):
         news_fetch_text=lambda _url: _ARTICLE_BODY,
     ).run(user_input, card)
     assert result.outcome is real.Outcome.REPORT, result.message
+    return calls, result
+
+
+def _typed_news_fragments(monkeypatch: pytest.MonkeyPatch):
+    """진짜 수집·transport를 태워 typed 뉴스 조각과 장별 소유권 표를 얻는다."""
+
+    calls, _result = _partial_path_calls(monkeypatch)
     composer = calls.composers[0]
     packets = real._full_section_evidence_packets(  # noqa: SLF001
         corp_id=composer["corp_id"],

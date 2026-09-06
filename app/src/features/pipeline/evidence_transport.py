@@ -551,6 +551,127 @@ def _is_typed_raw(raw: Mapping[str, object]) -> bool:
     return bool(_TYPED_REQUIRED_KEYS & set(raw))
 
 
+def _collected_fragment_from_raw(
+    public_id: int,
+    raw: Mapping[str, object],
+    *,
+    corp_id: str,
+    filing_meta: Any,
+    seen_origin_ids: set[str],
+) -> tuple[CollectedFragment, tuple[str, ...]]:
+    """공개 번호 하나를 검증된 조각과 그 조각이 선언한 장 목록으로 옮긴다.
+
+    장별 packet 빌더와 평면 변환기가 «같은» 검증·같은 바이트를 쓰게 하는 단
+    하나의 자리다. 두 곳에 같은 코드를 복사하면 한쪽만 고쳐져 부분 보고서와
+    FULL이 서로 다른 조각을 보게 된다.
+
+    ``seen_origin_ids``는 호출자가 소유하고 이 함수가 갱신한다 — 같은 typed
+    origin 조각이 두 공개 번호로 들어오는 것을 묶음 단위로 막기 위해서다.
+    """
+
+    if not isinstance(raw, Mapping):
+        raise _packet_invalid("근거 조각은 Mapping이어야 합니다")
+    text = _require_text(raw.get("원문"), field="원문")
+    source_kind = _require_text(raw.get("종류"), field="종류")
+
+    source_url = _optional_text(raw, "출처")
+    typed = _is_typed_raw(raw)
+    if typed:
+        (
+            section_ids,
+            supported_claim_slots,
+            origin_ids,
+            document_identity,
+            document_content_sha256,
+            formal_source_kind,
+            source_document_id,
+            source_publisher,
+            identity_binding,
+            source_collected_on,
+            domain_attestation_source_id,
+            domain_attestation_evidence,
+            reporting_period,
+            attachment_url,
+            ir_metadata_verification,
+            domain_redirect_verification,
+            domain_redirect_from_host,
+            domain_redirect_to_host,
+            packet_kind,
+        ) = _typed_metadata(
+            raw,
+            corp_id=corp_id,
+            source_kind=source_kind,
+            source_url=source_url,
+        )
+        duplicate_origins = seen_origin_ids & set(origin_ids)
+        if duplicate_origins:
+            raise _packet_invalid(
+                "같은 typed origin 조각을 둘 이상의 공개 번호로 만들 수 없습니다"
+            )
+        seen_origin_ids.update(origin_ids)
+    else:
+        if source_kind not in LEGACY_FRAGMENT_KINDS:
+            raise _unregistered_kind()
+        section_ids = tuple(
+            section_id
+            for section_id in SECTION_IDS
+            if section_id in sections_for_legacy_fragment_kind(source_kind)
+        )
+        document_identity = _legacy_document_identity(
+            raw, text=text, source_url=source_url, filing_meta=filing_meta
+        )
+        document_content_sha256 = ""
+        formal_source_kind = ""
+        source_document_id = _optional_text(raw, "문서ID")
+        source_publisher = ""
+        identity_binding = ""
+        source_collected_on = ""
+        domain_attestation_source_id = ""
+        domain_attestation_evidence = ""
+        reporting_period = ""
+        attachment_url = ""
+        ir_metadata_verification = ""
+        domain_redirect_verification = ""
+        domain_redirect_from_host = ""
+        domain_redirect_to_host = ""
+        # legacy 종류는 장 범위만 알고, 그 안의 정확한 의미 칸은 모른다.
+        # 종류→slot을 추측하면 근거가 없는 claim까지 지원한다고 과대 표시한다.
+        supported_claim_slots = ()
+        packet_kind = source_kind
+
+    if not _document_identity_is_valid(document_identity):
+        raise _packet_invalid("근거 조각의 문서 신원을 확인할 수 없습니다")
+    fragment = CollectedFragment(
+        fragment_id=str(public_id),
+        kind=packet_kind,
+        text=text,
+        source_url=source_url,
+        document_title=_optional_text(raw, "문서명"),
+        location=_optional_text(raw, "원문위치"),
+        document_date=_optional_text(raw, "문서일"),
+        document_identity=document_identity,
+        document_content_sha256=document_content_sha256,
+        supported_claim_slots=supported_claim_slots,
+        formal_source_kind=formal_source_kind,
+        source_document_id=source_document_id,
+        source_publisher=source_publisher,
+        identity_binding=identity_binding,
+        source_collected_on=source_collected_on,
+        domain_attestation_source_id=domain_attestation_source_id,
+        domain_attestation_evidence=domain_attestation_evidence,
+        reporting_period=reporting_period,
+        attachment_url=attachment_url,
+        ir_metadata_verification=ir_metadata_verification,
+        domain_redirect_verification=domain_redirect_verification,
+        domain_redirect_from_host=domain_redirect_from_host,
+        domain_redirect_to_host=domain_redirect_to_host,
+        counts_toward_document_floor=(
+            formal_source_kind not in SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
+        ),
+    )
+    return fragment, section_ids
+
+
 def build_section_evidence_packet_set(
     *,
     corp_id: str,
@@ -582,106 +703,12 @@ def build_section_evidence_packet_set(
     if any(type(public_id) is not int or public_id <= 0 for public_id in public_ids):
         raise _packet_invalid("공개 근거 번호는 양의 정수여야 합니다")
     for public_id in sorted(public_ids):
-        raw = frags[public_id]
-        if not isinstance(raw, Mapping):
-            raise _packet_invalid("근거 조각은 Mapping이어야 합니다")
-        text = _require_text(raw.get("원문"), field="원문")
-        source_kind = _require_text(raw.get("종류"), field="종류")
-
-        source_url = _optional_text(raw, "출처")
-        typed = _is_typed_raw(raw)
-        if typed:
-            (
-                section_ids,
-                supported_claim_slots,
-                origin_ids,
-                document_identity,
-                document_content_sha256,
-                formal_source_kind,
-                source_document_id,
-                source_publisher,
-                identity_binding,
-                source_collected_on,
-                domain_attestation_source_id,
-                domain_attestation_evidence,
-                reporting_period,
-                attachment_url,
-                ir_metadata_verification,
-                domain_redirect_verification,
-                domain_redirect_from_host,
-                domain_redirect_to_host,
-                packet_kind,
-            ) = _typed_metadata(
-                raw,
-                corp_id=corp_id,
-                source_kind=source_kind,
-                source_url=source_url,
-            )
-            duplicate_origins = seen_origin_ids & set(origin_ids)
-            if duplicate_origins:
-                raise _packet_invalid(
-                    "같은 typed origin 조각을 둘 이상의 공개 번호로 만들 수 없습니다"
-                )
-            seen_origin_ids.update(origin_ids)
-        else:
-            if source_kind not in LEGACY_FRAGMENT_KINDS:
-                raise _unregistered_kind()
-            section_ids = tuple(
-                section_id
-                for section_id in SECTION_IDS
-                if section_id in sections_for_legacy_fragment_kind(source_kind)
-            )
-            document_identity = _legacy_document_identity(
-                raw, text=text, source_url=source_url, filing_meta=filing_meta
-            )
-            document_content_sha256 = ""
-            formal_source_kind = ""
-            source_document_id = _optional_text(raw, "문서ID")
-            source_publisher = ""
-            identity_binding = ""
-            source_collected_on = ""
-            domain_attestation_source_id = ""
-            domain_attestation_evidence = ""
-            reporting_period = ""
-            attachment_url = ""
-            ir_metadata_verification = ""
-            domain_redirect_verification = ""
-            domain_redirect_from_host = ""
-            domain_redirect_to_host = ""
-            # legacy 종류는 장 범위만 알고, 그 안의 정확한 의미 칸은 모른다.
-            # 종류→slot을 추측하면 근거가 없는 claim까지 지원한다고 과대 표시한다.
-            supported_claim_slots = ()
-            packet_kind = source_kind
-
-        if not _document_identity_is_valid(document_identity):
-            raise _packet_invalid("근거 조각의 문서 신원을 확인할 수 없습니다")
-        fragment = CollectedFragment(
-            fragment_id=str(public_id),
-            kind=packet_kind,
-            text=text,
-            source_url=source_url,
-            document_title=_optional_text(raw, "문서명"),
-            location=_optional_text(raw, "원문위치"),
-            document_date=_optional_text(raw, "문서일"),
-            document_identity=document_identity,
-            document_content_sha256=document_content_sha256,
-            supported_claim_slots=supported_claim_slots,
-            formal_source_kind=formal_source_kind,
-            source_document_id=source_document_id,
-            source_publisher=source_publisher,
-            identity_binding=identity_binding,
-            source_collected_on=source_collected_on,
-            domain_attestation_source_id=domain_attestation_source_id,
-            domain_attestation_evidence=domain_attestation_evidence,
-            reporting_period=reporting_period,
-            attachment_url=attachment_url,
-            ir_metadata_verification=ir_metadata_verification,
-            domain_redirect_verification=domain_redirect_verification,
-            domain_redirect_from_host=domain_redirect_from_host,
-            domain_redirect_to_host=domain_redirect_to_host,
-            counts_toward_document_floor=(
-                formal_source_kind not in SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
-            ),
+        fragment, section_ids = _collected_fragment_from_raw(
+            public_id,
+            frags[public_id],
+            corp_id=corp_id,
+            filing_meta=filing_meta,
+            seen_origin_ids=seen_origin_ids,
         )
         for section_id in section_ids:
             fragments_by_section[section_id].append(fragment)
@@ -711,3 +738,64 @@ def build_section_evidence_packet_set(
         )
     except (TypeError, ValueError) as error:
         raise _packet_invalid("장별 근거 packet 생성 계약이 손상됐습니다") from error
+
+
+def typed_fragments_from_raw(
+    *,
+    corp_id: str,
+    frags: Mapping[int, Mapping[str, object]],
+    filing_meta: Any,
+) -> tuple[CollectedFragment, ...]:
+    """장별 묶음 없이도 조각의 typed 신원을 그대로 보존해 넘긴다.
+
+    ★ 왜 packet 없이 이 함수가 필요한가 — 장별 packet은 FULL 출고 계약(아홉 장
+      모두에 근거가 있고 독립 문서 하한을 채운다)에 묶여 있다. 부분 보고서
+      갈래는 그 하한을 못 채워서 열린 길이므로 packet을 만들 수 없고, 지금까지
+      작성기에 raw dict를 그대로 넘겼다. raw dict를 받는 작성기 어댑터는 종류·
+      원문·출처·문서명·원문위치만 읽어 발행처·문서일·문서 종류·의미 칸·장
+      선언을 통째로 버린다. 그래서 보조 문서(보도 자료)로 만드는 표는 소유 장을
+      잃고 «부분 보고서에서만» 구조적으로 만들어지지 않았다.
+
+    ★ 조각의 typed 신원은 릴리스 모드와 무관한 사실이다. 그래서 이 함수는 packet
+      빌더와 «같은» ``_collected_fragment_from_raw`` 검증을 지난다. 다른 것은
+      장별 묶음과 문서 하한뿐이다 — 아홉 장 중 빈 장이 있어도, 근거가 0개여도
+      여기서는 막지 않는다.
+
+    Args:
+        corp_id: 여덟 자리 회사 고유번호. typed 조각의 회사 결속을 검산한다.
+        frags: 공개 인용 번호(양의 정수) → raw 조각 Mapping.
+        filing_meta: legacy 조각의 문서 신원을 만들 때 쓰는 공시 문서 신원.
+
+    Returns:
+        공개 번호 오름차순 ``CollectedFragment`` 튜플. ``frags``가 비면 ``()``.
+
+    Raises:
+        EvidenceTransportError: 조각·회사 식별자 계약이 깨진 경우. 진단
+            코드는 packet 빌더와 같은 값을 그대로 쓴다.
+    """
+
+    if type(corp_id) is not str or _COMPANY_ID_RE.fullmatch(corp_id) is None:
+        raise _packet_invalid("근거 transport 회사 식별자가 올바르지 않습니다")
+    if not isinstance(frags, Mapping):
+        raise _packet_invalid("근거 transport 조각 묶음이 비었습니다")
+    if not frags:
+        # 부분 보고서는 조각이 0개일 수도 있다. 그건 계약 손상이 아니라 실제
+        # 수집 결과이므로 예외 대신 빈 튜플로 정직하게 돌려준다.
+        return ()
+
+    public_ids = tuple(frags)
+    if any(type(public_id) is not int or public_id <= 0 for public_id in public_ids):
+        raise _packet_invalid("공개 근거 번호는 양의 정수여야 합니다")
+
+    seen_origin_ids: set[str] = set()
+    fragments: list[CollectedFragment] = []
+    for public_id in sorted(public_ids):
+        fragment, _section_ids = _collected_fragment_from_raw(
+            public_id,
+            frags[public_id],
+            corp_id=corp_id,
+            filing_meta=filing_meta,
+            seen_origin_ids=seen_origin_ids,
+        )
+        fragments.append(fragment)
+    return tuple(fragments)

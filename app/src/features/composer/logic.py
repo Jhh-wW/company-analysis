@@ -241,7 +241,12 @@ def _render_fragments(
     """조각 전체를 id·종류와 함께 나열한다 — 작가가 이 id로 인용한다."""
     lines: list[str] = [PROMPT_FRAGMENTS_HEAD]
     for fragment in fragments:
-        label = fragment.kind or "자료"
+        # ★ 왜 formal_source_kind가 먼저인가 — typed 조각의 ``kind``는 운반
+        #   지문(``typed-evidence-v3:<hex>``)이라 작가에게 아무 뜻이 없다.
+        #   닫힌 출처 종류는 ``formal_source_kind``에만 봉인돼 있다. raw 조각은
+        #   그 필드가 비어 있고 ``kind``가 곧 「종류」라 옛 프롬프트와 글자가
+        #   같다 — 지문이 라벨로 새는 경우만 고친다.
+        label = fragment.formal_source_kind or fragment.kind or "자료"
         if fragment.document_title:
             label = f"{label}·{fragment.document_title}"
         if fragment.location:

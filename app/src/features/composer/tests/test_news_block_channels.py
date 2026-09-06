@@ -65,8 +65,20 @@ _NEWS_SECTIONS = tuple(_NEWS_BY_SECTION)
 _ARTIFACT_DIR = Path(__file__).resolve().parents[5] / ".local-artifacts" / "n13"
 
 
-def _news_fragment(fragment_id: str, published_on: str, text: str) -> CollectedFragment:
-    """운영 transport(`real._news_raw_fragment`)가 만드는 모양 그대로 만든다."""
+def _news_fragment(
+    fragment_id: str,
+    published_on: str,
+    text: str,
+    *,
+    section_id: str = "",
+) -> CollectedFragment:
+    """운영 transport(`real._news_raw_fragment`)가 만드는 모양 그대로 만든다.
+
+    ``section_id``를 주면 그 장의 의미 칸을 ``supported_claim_slots``에 봉인한다.
+    운영 typed 조각은 언제나 이 칸을 들고 다니며(운반 계약 불변식: 조각이 실리는
+    장의 집합 == 그 조각 의미 칸이 속한 장의 집합), packet이 없는 부분 보고서
+    경로에서는 이 칸이 «장 소유권의 유일한 근거»가 된다.
+    """
 
     identity = document_identity_from_parts(
         document_id=_ARTICLE_URL,
@@ -91,6 +103,9 @@ def _news_fragment(fragment_id: str, published_on: str, text: str) -> CollectedF
         source_document_id=_ARTICLE_URL,
         source_publisher=_PUBLISHER,
         source_collected_on=_COLLECTED_ON,
+        supported_claim_slots=(
+            CLAIM_SLOTS_BY_SECTION[section_id] if section_id else ()
+        ),
     )
 
 
@@ -111,12 +126,32 @@ def _packets_with_news():
                 packet,
                 fragments=packet.fragments
                 + tuple(
-                    _news_fragment(fragment_id, published_on, text)
+                    _news_fragment(
+                        fragment_id,
+                        published_on,
+                        text,
+                        section_id=packet.section_id,
+                    )
                     for fragment_id, published_on, text in extra
                 ),
             )
         )
     return replace(base, packets=tuple(rebuilt))
+
+
+def _flat_typed_fragments() -> tuple[CollectedFragment, ...]:
+    """packet을 평면으로 편 typed 조각 튜플 — 부분 보고서 경로의 입력 모양.
+
+    사전검사가 부분 보고서 갈래를 열면 packet을 만들지 않고 typed 조각만
+    ``run_v2(fragments=...)``로 넘긴다. 조각의 필드는 packet 경로와 같은 것을
+    쓰므로, 여기서 새로 만들지 않고 packet에서 그대로 꺼낸다.
+    """
+
+    return tuple(
+        fragment
+        for packet in _packets_with_news().packets
+        for fragment in packet.fragments
+    )
 
 
 @pytest.fixture(scope="module")
@@ -484,6 +519,194 @@ def test_결속_못하는_모드에서는_표를_안_붙이고_사유만_남긴�
 
 
 # ══════════════════════════════════════════════════════════
+# ⑤-d packet이 없는 «부분 보고서» 경로 — 여기가 뉴스가 가장 필요한 자리다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 필요한가 (2026-09-06 운영 실측) — 사전검사가 자료 부족을 보고 부분
+#   보고서 갈래를 열면 release mode가 SHADOW로 내려가고 장별 근거 packet을
+#   아예 만들지 않는다. 그때 보도표가 통째로 사라졌다
+#   (``뉴스_보도표_불가 {"no_section_ownership": 6}``). 공식 자료가 모자란
+#   실행에서만 언론 보도가 빠지는 셈이라, 정확히 반대로 동작했다.
+
+
+class _FlatSectionWriter:
+    """평면(packet 없음) 경로용 가짜 작가 — 장마다 «자기» 공식 조각을 인용한다.
+
+    ★ 왜 옆의 `_CompletePacketWriter`를 그대로 못 쓰나 — 그 작가는 프롬프트에
+      «그 장 조각만» 온다고 보고 맨 앞 조각을 인용한다. 평면 경로는 아홉 장
+      프롬프트에 조각 «전체»가 실리므로, 아홉 장이 모두 1번 조각을 같은 글로
+      인용하고 장 간 중복 제거가 여덟 장을 통째로 비운다. 그러면 보도표가
+      「본문이 빈 장」에만 붙는 비현실적인 모양이 된다.
+
+    ★ 뉴스 조각은 «한 번도» 인용하지 않는다 — 2026-09-06 운영 실측에서 실제
+      작가가 한 그대로다. 표가 붙는 이유가 작가 인용이 아님을 이 파일의 다른
+      시험이 따로 못 박는다.
+    """
+
+    def __init__(self) -> None:
+        from src.features.composer.tests.test_section_public_manifest import (
+            _ENDINGS,
+            _MARKS,
+        )
+
+        self._endings = _ENDINGS
+        self._marks = _MARKS
+        self.calls = 0
+
+    def __call__(self, prompt: str) -> str:
+        import json
+
+        from src.features.composer.constants import GRADE_CONFIRMED
+
+        if self.calls >= len(SECTION_IDS):
+            # 요약 회차 — 빈 문장 목록은 «정상 파싱»이라 재요청이 안 일어난다.
+            # 요약은 검증을 마친 본문 문장으로 보충된다.
+            return json.dumps({"문장들": []}, ensure_ascii=False)
+        section_id = SECTION_IDS[self.calls]
+        mark = self._marks[self.calls]
+        # 평면 프롬프트에는 조각 전체가 오므로 «이 장의» 공식 조각을 골라 쓴다.
+        fragment_id = str(self.calls + 1)
+        assert f"[조각 {fragment_id}] (" in prompt, fragment_id
+        self.calls += 1
+        slots = CLAIM_SLOTS_BY_SECTION[section_id]
+        return json.dumps(
+            {
+                "문장들": [
+                    {
+                        "글": (
+                            f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 "
+                            f"과제 대응 협력 실적 {ending} 공식 자료에서 "
+                            "확인했다."
+                        ),
+                        "인용": [fragment_id],
+                        "등급": GRADE_CONFIRMED,
+                        "주장슬롯": slots[index % len(slots)],
+                    }
+                    for index, ending in enumerate(self._endings)
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+
+@pytest.fixture(scope="module")
+def packet없는_부분경로_실행결과():
+    """packet 없이 typed 조각 튜플만 주고 SHADOW로 돌린다."""
+
+    from src.features.composer.pipeline import run_v2
+    from src.features.composer.tests.test_section_public_manifest import (
+        _BoundGroupedReviewer,
+    )
+    from src.shared.report_evidence.constants import ReleaseMode
+
+    writer = _FlatSectionWriter()
+    with pytest.MonkeyPatch.context() as mp:
+        news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+        mp.setenv(news_intake_switch.NEWS_INTAKE_ENV_NAME, "1")
+        output = run_v2(
+            "가나다전자",
+            _flat_typed_fragments(),
+            None,
+            writer_ask=writer,
+            reviewer_ask=_BoundGroupedReviewer(),
+            release_mode=ReleaseMode.SHADOW,
+            section_evidence_packets=None,
+            company_id="00123456",
+        )
+    news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+    assert writer.calls == len(SECTION_IDS), writer.calls
+    return output
+
+
+def test_packet_없는_부분_경로에서도_보도표가_붙고_출고검증을_통과한다(
+    packet없는_부분경로_실행결과,
+) -> None:
+    output = packet없는_부분경로_실행결과
+    report = output.report
+
+    # ① 조각이 «선언한» 장에만 표가 붙는다 — 의미 칸이 유일한 소유 근거다.
+    붙은_장 = [
+        section.cell
+        for section in report.sections
+        if _news_table(report, section.cell) is not None
+    ]
+    assert 붙은_장 == list(_NEWS_SECTIONS), 붙은_장
+    assert _news_table(report, "competitive_position") is None
+    assert _news_table(report, "culture") is None
+
+    # ② 실행 기록 수치가 채워지고 「소유권 없음」 사유가 사라졌다.
+    assert dict(output.news_block_row_counts_by_section) == {
+        "identity": NEWS_BLOCK_MAX_ROWS,
+        "business_model": 1,
+        "current_challenges": 1,
+    }
+    assert "no_section_ownership" not in dict(
+        output.news_block_blocked_counts_by_reason
+    )
+
+    # ③ 행에 발행일·매체·원문이 그대로 있다.
+    table = _news_table(report, "identity")
+    assert table.caption == news_block_caption(NEWS_BLOCK_MAX_ROWS)
+    assert [row[0] for row in table.rows] == [
+        "2026-09-02",
+        "2026-08-11",
+        "2026-07-05",
+    ]
+    assert {row[1] for row in table.rows} == {_PUBLISHER}
+    글자_by_id = {
+        fragment_id: text
+        for rows in _NEWS_BY_SECTION.values()
+        for fragment_id, _published_on, text in rows
+    }
+    assert {row[2] for row in table.rows} <= set(글자_by_id.values())
+
+    # ④ 표가 가리킨 번호가 부록에 «기사»로 올라 인용-부록 1:1이 성립한다.
+    부록 = {source.number: source for source in report.citations}
+    실린 = {
+        int(number)
+        for number in re.findall(r"\[(\d+)\]", " ".join(table.source_cites))
+    }
+    assert len(실린) == NEWS_BLOCK_MAX_ROWS, table.source_cites
+    assert 실린 <= set(부록)
+    for number in sorted(실린):
+        source = 부록[number]
+        assert source.source_type == "언론 보도", source
+        assert source.publisher == _PUBLISHER
+        assert source.published_at, source
+        # 뉴스 Source는 보도일·언론사 도메인이 없으면 부록에서 무효가 된다.
+        assert source.is_valid, source
+
+    # ⑤ 표가 붙은 장에 «본문도» 있다. 본문이 빈 장에만 표가 붙는 모양이면
+    #    이 시험이 부분 보고서를 재현하지 못한 것이고, 위 단정이 헐거워진다.
+    for section_id in _NEWS_SECTIONS:
+        section = next(
+            section for section in report.sections if section.cell == section_id
+        )
+        assert section.prose_lines, section_id
+
+
+def test_부분_경로에서도_작가는_뉴스를_한_문장도_인용하지_않았다(
+    packet없는_부분경로_실행결과,
+) -> None:
+    """이 시험이 없으면 「작가가 인용해서 실린 것」과 구분이 안 된다."""
+
+    report = packet없는_부분경로_실행결과.report
+    본문_인용 = {
+        citation
+        for section in report.sections
+        for _text, citation in section.prose_lines
+        if citation
+    }
+    뉴스_번호 = {
+        fragment_id
+        for rows in _NEWS_BY_SECTION.values()
+        for fragment_id, _published_on, _text in rows
+    }
+
+    assert not (본문_인용 & 뉴스_번호)
+
+
+# ══════════════════════════════════════════════════════════
 # ⑤-c 3장에 이름 표와 보도표가 «함께» 실린다
 # ══════════════════════════════════════════════════════════
 #
@@ -518,7 +741,12 @@ def _packets_with_names_and_news():
                 packet,
                 fragments=packet.fragments
                 + tuple(
-                    _news_fragment(fragment_id, published_on, text)
+                    _news_fragment(
+                        fragment_id,
+                        published_on,
+                        text,
+                        section_id=PORTFOLIO_TABLE_SECTION_ID,
+                    )
                     for fragment_id, published_on, text in _NEWS_IN_PORTFOLIO
                 ),
             )
