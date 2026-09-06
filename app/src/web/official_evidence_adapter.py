@@ -92,6 +92,28 @@ def _dart_requirement_by_source_kind() -> dict[str, str]:
 _DART_DOCUMENT_REQUIREMENT_BY_SOURCE_KIND: Final[dict[str, str]] = (
     _dart_requirement_by_source_kind()
 )
+
+
+def _dart_requirement_is_honest(source_kind: str, requirement: str) -> bool:
+    """문서가 주장한 필수 여부가 정책보다 «강하지 않은지» 본다.
+
+    정책이 OPTIONAL인 종류가 REQUIRED라고 주장하면 위조다(필수 문서 수를 채울 수
+    있으므로 거절). 반대로 REQUIRED 종류의 문서가 OPTIONAL이라고 낮춰 말하는 것은
+    정직하다 — 엔진은 직전 사업연도 공시를 그렇게 내보낸다(2026-09-06 운영 실측:
+    이를 같음으로 강제하던 검사가 상장사 조사를 통째로 멈췄다).
+    """
+
+    policy_requirement = _DART_DOCUMENT_REQUIREMENT_BY_SOURCE_KIND.get(source_kind)
+    if policy_requirement is None:
+        return False
+    if requirement not in {
+        SourceRequirement.REQUIRED.value,
+        SourceRequirement.OPTIONAL.value,
+    }:
+        return False
+    if requirement == SourceRequirement.REQUIRED.value:
+        return policy_requirement == SourceRequirement.REQUIRED.value
+    return True
 _DART_IDENTITY_CHECK_STATES: Final[frozenset[str]] = frozenset(
     {"verified_match", "unverifiable_no_fetcher_metadata"}
 )
@@ -327,22 +349,35 @@ def _unclassified_evidence_observation(
             )
         except (TypeError, ValueError) as error:
             raise ValueError("typed DART 무분류 문서 URL이 올바르지 않습니다") from error
-        if (
-            source_kind not in _DART_DOCUMENT_SOURCE_KINDS
-            or document_id != f"{source_kind}:{receipt_number}"
-            or _DART_RECEIPT_NUMBER_RE.fullmatch(receipt_number) is None
-            or source_tier != SourceTier.TIER_1_OFFICIAL.value
-            or requirement
-            != _DART_DOCUMENT_REQUIREMENT_BY_SOURCE_KIND.get(source_kind)
-            or not _is_canonical_dart_candidate_url(canonical_url)
-            or parsed_url.scheme != "https"
-            or (parsed_url.hostname or "").casefold().rstrip(".")
-            != "dart.fss.or.kr"
-            or parsed_url.path != "/dsaf001/main.do"
-            or parsed_query != {"rcpNo": [receipt_number]}
-            or parsed_url.fragment
-        ):
-            raise ValueError("typed DART 무분류 문서 신원이 올바르지 않습니다")
+        # 어느 조건이 어긋났는지 로그 요약에 드러나게 꼬리표를 붙인다(값은 싣지 않는다).
+        identity_problem = (
+            "문서 종류"
+            if source_kind not in _DART_DOCUMENT_SOURCE_KINDS
+            else "문서 ID·접수번호"
+            if (
+                document_id != f"{source_kind}:{receipt_number}"
+                or _DART_RECEIPT_NUMBER_RE.fullmatch(receipt_number) is None
+            )
+            else "등급"
+            if source_tier != SourceTier.TIER_1_OFFICIAL.value
+            else "필수 여부"
+            if not _dart_requirement_is_honest(source_kind, requirement)
+            else "URL"
+            if (
+                not _is_canonical_dart_candidate_url(canonical_url)
+                or parsed_url.scheme != "https"
+                or (parsed_url.hostname or "").casefold().rstrip(".")
+                != "dart.fss.or.kr"
+                or parsed_url.path != "/dsaf001/main.do"
+                or parsed_query != {"rcpNo": [receipt_number]}
+                or parsed_url.fragment
+            )
+            else None
+        )
+        if identity_problem is not None:
+            raise ValueError(
+                f"typed DART 무분류 문서 신원이 올바르지 않습니다({identity_problem})"
+            )
         expected_identity_prefix = (
             f"corp_code={company_id};rcept_no={receipt_number};"
             f"source_kind={source_kind};identity_check="
