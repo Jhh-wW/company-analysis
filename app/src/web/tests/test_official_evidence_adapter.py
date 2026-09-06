@@ -1223,3 +1223,73 @@ def test_무분류관측지문은_나열순서가아닌_원문hash에_결속된�
         normal_observation.observation_sha256
         != changed_observation.observation_sha256
     )
+
+
+def test_무분류문서는_정책의_모든_DART종류를_받는다_연결감사보고서_포함() -> None:
+    """2026-09-06 운영 실측: 엔진이 연결감사보고서를 무분류 문서로 내보내자 손으로 적은
+    종류 표에 없어 상장사 조사가 통째로 멈췄다. 표는 정책 정본에서 유도한다."""
+
+    from src.shared.report_evidence.constants import FORMAL_DOCUMENT_SOURCE_KINDS
+    from src.shared.report_evidence.source_kind_policy import (
+        FORMAL_DOCUMENT_TRUST_BY_SOURCE_KIND,
+    )
+
+    competition = "가나다전자는 베타전자와 경쟁합니다."
+    receipt = "20250315000002"
+    dart_kinds = sorted(k for k in FORMAL_DOCUMENT_SOURCE_KINDS if k.startswith("dart_"))
+    assert "dart_consolidated_audit_report" in dart_kinds
+
+    for source_kind in dart_kinds:
+        requirement = next(
+            req.value
+            for tier, req in FORMAL_DOCUMENT_TRUST_BY_SOURCE_KIND[source_kind]
+            if tier.value == "TIER_1_OFFICIAL"
+        )
+        document_id = f"{source_kind}:{receipt}"
+        envelope = {
+            "unclassified_documents": [
+                {
+                    "company_id": COMPANY_ID,
+                    "document_id": document_id,
+                    "canonical_url": f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}",
+                    "source_tier": "TIER_1_OFFICIAL",
+                    "source_kind": source_kind,
+                    "publisher": "금융감독원 전자공시시스템(DART)",
+                    "title": "연결감사보고서 (2024.12)",
+                    "published_on": "20250315",
+                    "collected_at": "2026-09-04T00:00:00+09:00",
+                    "content_sha256": hashlib.sha256(b"full-document").hexdigest(),
+                    "usable_ranges": [{"start": 30, "end": 30 + len(competition)}],
+                    "exact_evidence_hashes": [],
+                    "identity_binding": (
+                        f"corp_code={COMPANY_ID};rcept_no={receipt};"
+                        f"source_kind={source_kind};"
+                        "identity_check=unverifiable_no_fetcher_metadata"
+                    ),
+                    "collector_version": "evidence_collection/1.0",
+                    "parser_version": "evidence_collection_segment/1.0",
+                    "requirement": requirement,
+                }
+            ],
+            "unclassified_fragments": [
+                {
+                    "company_id": COMPANY_ID,
+                    "fragment_id": f"short-{source_kind}",
+                    "document_id": document_id,
+                    "location": f"30-{30 + len(competition)}",
+                    "text": competition,
+                    "text_sha256": hashlib.sha256(competition.encode("utf-8")).hexdigest(),
+                    "section_id": "",
+                    "slot_id": "",
+                    "covered_slot_ids": [],
+                    "score_millis": 0,
+                    "reason_codes": ["no_signal"],
+                }
+            ],
+        }
+
+        candidates = official_evidence_adapter._comparison_candidate_evidence(
+            envelope,
+            company_id=COMPANY_ID,
+        )
+        assert len(candidates) == 1, source_kind
