@@ -12,6 +12,7 @@ from src.features.news_intake import constants as news_constants
 from src.features.news_intake.constants import (
     NON_EXTENDABLE_SECTIONS as NON_EXTENDABLE_SECTION_IDS,
 )
+from src.features.news_intake.select import news_trigger
 from src.features.pipeline import real
 from src.features.pipeline.evidence_transport import (
     RAW_EVIDENCE_COLLECTED_ON_KEY,
@@ -41,6 +42,17 @@ from src.features.pipeline.tests.test_official_evidence_runtime import (
 AS_OF = dt.date(2026, 9, 6)
 ARTICLE_URL = "https://media.example/news/company-strategy"
 ARTICLE_BODY = "가나다전자는 고객 업무를 잇는 새 제품군을 중심 사업으로 운영한다."
+#: 기사당 조각 상한을 넘기려고 쓰는 본문 — 조건에 걸리지 않는 문장 네 개다.
+MULTI_SENTENCE_ARTICLE_BODY = "\n".join(
+    (
+        "가나다전자는 고객 업무를 잇는 새 제품군을 중심 사업으로 운영한다.",
+        "가나다전자는 물류 제품군을 현장에 적용한다.",
+        "가나다전자는 상담 제품군을 함께 공급한다.",
+        "가나다전자는 설비 제품군도 운영한다.",
+    )
+)
+#: 증권 칼럼 시험용 기사 URL.
+STOCK_COLUMN_URL = "https://media.example/news/weekend-money-column"
 #: 공식 웹 문서가 「있다」는 쪽을 뜻하는 시험용 문서 수. 발동 문턱(0)을 넘는
 #: 값이면 무엇이든 같은 뜻이라 경계 바로 위 값을 쓴다.
 WEB_DOCUMENTS_PRESENT = 1
@@ -75,6 +87,18 @@ def _item() -> SimpleNamespace:
         originallink=ARTICLE_URL,
         link=ARTICLE_URL,
         description="가나다전자가 고객 업무를 잇는 제품군을 공개했다.",
+        pubDate="2026-09-01",
+    )
+
+
+def _stock_column_item() -> SimpleNamespace:
+    """증권 칼럼 한 건 — 연재 꼬리표와 종목 추천 어휘를 함께 가진 기사."""
+
+    return SimpleNamespace(
+        title="[머니플러스] 가나다전자 수혜주는",
+        originallink=STOCK_COLUMN_URL,
+        link=STOCK_COLUMN_URL,
+        description="가나다전자를 두고 증권가가 종목을 꼽았다.",
         pubDate="2026-09-01",
     )
 
@@ -377,6 +401,87 @@ def test_only_chapter_five_and_six_gap_opens_news_in_the_default_window() -> Non
     assert step["제외"][news_constants.EXCLUDED_READY_SECTION] == 1
 
 
+def test_chapter_five_six_gap_with_zero_web_documents_is_the_default_window() -> None:
+    """5·6장만 미달 + 공식 웹 0건 — 이유는 「미달」이므로 창은 「기본」이다.
+
+    공식 웹 문서 수를 창 이름 판정에서 다시 읽으면 「웹0건보강」이 찍힌다.
+    기간은 1년이므로 1년 밖 기사는 선별에서 빠져야 한다.
+    """
+
+    ready = {
+        section_id: section_id not in NON_EXTENDABLE_SECTION_IDS
+        for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+    }
+    eligible, reason = news_trigger(ready, official_web_documents=WEB_DOCUMENTS_ZERO)
+
+    assert eligible == frozenset(NON_EXTENDABLE_SECTION_IDS)
+    assert reason == news_constants.NEWS_TRIGGER_UNREADY
+
+    def search_news(_query: str, **kwargs: object) -> SimpleNamespace:
+        return _result(items=[_item(), _old_item()] if kwargs["start"] == 1 else [])
+
+    _fragments, steps = _collect(
+        search_news=search_news,
+        section_ready=ready,
+        official_web_documents=WEB_DOCUMENTS_ZERO,
+    )
+
+    step = steps[0]
+    assert step["창"] == real.NEWS_WINDOW_LABEL_DEFAULT
+    assert step["검색호출"] == real.NEWS_SEARCH_CALL_LIMIT == 2
+    assert step["선별"] == 1
+    assert step["제외"][news_constants.EXCLUDED_OUTSIDE_WINDOW] == 1
+
+
+def test_every_section_ready_with_zero_web_documents_is_the_web_zero_window() -> None:
+    """미달 장이 하나도 없어야 「웹0건보강」이다."""
+
+    ready = {section_id: True for section_id in REQUIRED_EVIDENCE_SECTION_IDS}
+    eligible, reason = news_trigger(ready, official_web_documents=WEB_DOCUMENTS_ZERO)
+
+    assert reason == news_constants.NEWS_TRIGGER_WEB_ZERO
+    assert eligible
+
+    def search_news(_query: str, **kwargs: object) -> SimpleNamespace:
+        return _result(items=[_item()] if kwargs["start"] == 1 else [])
+
+    _fragments, steps = _collect(
+        search_news=search_news,
+        section_ready=ready,
+        official_web_documents=WEB_DOCUMENTS_ZERO,
+    )
+
+    assert steps[0]["창"] == real.NEWS_WINDOW_LABEL_WEB_ZERO
+
+
+def test_extendable_section_gap_is_the_extended_window() -> None:
+    """5·6장 밖의 장이 미달이면 창은 「확장」이고 3년 전 기사도 받는다."""
+
+    ready = {
+        section_id: section_id in NON_EXTENDABLE_SECTION_IDS
+        for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+    }
+    eligible, reason = news_trigger(ready, official_web_documents=WEB_DOCUMENTS_PRESENT)
+
+    assert reason == news_constants.NEWS_TRIGGER_UNREADY
+    # 9장은 미달이어도 대상이 아니다.
+    assert "competitive_position" not in eligible
+
+    def search_news(_query: str, **kwargs: object) -> SimpleNamespace:
+        return _result(items=[_item(), _old_item()] if kwargs["start"] == 1 else [])
+
+    _fragments, steps = _collect(
+        search_news=search_news,
+        section_ready=ready,
+        official_web_documents=WEB_DOCUMENTS_PRESENT,
+    )
+
+    step = steps[0]
+    assert step["창"] == real.NEWS_WINDOW_LABEL_EXTENDED
+    assert step["선별"] == 2
+    assert news_constants.EXCLUDED_OUTSIDE_WINDOW not in step["제외"]
+
+
 def test_official_web_document_count_reads_only_official_web_kinds() -> None:
     """장마다 붙은 같은 문서를 한 번만 세고, 웹 종류만 센다."""
 
@@ -386,6 +491,92 @@ def test_official_web_document_count_reads_only_official_web_kinds() -> None:
     assert real._official_web_document_count(_official_result(document_count=3)) == 3
     assert real._official_web_document_count(_dart_only_official_result()) == 0
     assert real._official_web_document_count(None) == 0
+
+
+def test_stock_column_article_is_dropped_before_the_classifier_is_called() -> None:
+    """증권 칼럼은 선별에서 빠져 AI 분류에도 가지 않는다."""
+
+    classify_calls = 0
+
+    def classify(_prompt: str) -> str:
+        nonlocal classify_calls
+        classify_calls += 1
+        return '{"items":[]}'
+
+    def search_news(_query: str, **kwargs: object) -> SimpleNamespace:
+        return _result(items=[_stock_column_item()] if kwargs["start"] == 1 else [])
+
+    fragments, steps = _collect(search_news=search_news, classify=classify)
+
+    assert fragments == []
+    assert classify_calls == 0
+    step = steps[0]
+    assert step["검색"] == 1
+    assert step["선별"] == 0
+    assert step["제외"][news_constants.EXCLUDED_STOCK_ARTICLE] == 1
+
+
+def test_chapter_nine_gap_alone_never_opens_the_news_path() -> None:
+    """9장만 비어 있으면 뉴스를 아예 열지 않는다 — 검색조차 하지 않는다."""
+
+    ready = {section_id: True for section_id in REQUIRED_EVIDENCE_SECTION_IDS}
+    ready["competitive_position"] = False
+    calls = {"search": 0}
+
+    def search_news(_query: str, **_kwargs: object) -> SimpleNamespace:
+        calls["search"] += 1
+        return _result(items=[_item()])
+
+    fragments, steps = _collect(
+        search_news=search_news,
+        section_ready=ready,
+        official_web_documents=WEB_DOCUMENTS_PRESENT,
+    )
+
+    assert fragments == []
+    assert calls["search"] == 0
+    assert steps[0]["검색호출"] == 0
+    assert steps[0]["분류AI호출"] == 0
+
+
+def test_chapter_nine_is_refused_even_when_the_classifier_asks_for_it() -> None:
+    """9장은 회사가 밝힌 것만 싣는 장이라 분류가 지목해도 자리를 주지 않는다."""
+
+    ready = _ready()
+    ready["competitive_position"] = False
+
+    def search_news(_query: str, **kwargs: object) -> SimpleNamespace:
+        return _result(items=[_item()] if kwargs["start"] == 1 else [])
+
+    fragments, steps = _collect(
+        search_news=search_news,
+        classify=lambda _prompt: (
+            '{"items":[{"id":"news-001","sections":["competitive_position"],'
+            '"kind":"press_release"}]}'
+        ),
+        section_ready=ready,
+    )
+
+    assert fragments == []
+    assert steps[0]["분류AI호출"] == 1
+    assert steps[0]["제외"][news_constants.EXCLUDED_READY_SECTION] == 1
+
+
+def test_one_article_gives_at_most_two_fragments() -> None:
+    """조각 여섯 개 자리를 기사 한 건이 다 채우지 못한다."""
+
+    def search_news(_query: str, **kwargs: object) -> SimpleNamespace:
+        return _result(items=[_item()] if kwargs["start"] == 1 else [])
+
+    fragments, steps = _collect(
+        search_news=search_news,
+        fetch_text=lambda _url: MULTI_SENTENCE_ARTICLE_BODY,
+    )
+
+    assert len(fragments) == news_constants.MAX_FRAGMENTS_PER_ARTICLE
+    step = steps[0]
+    assert step["조각"] == news_constants.MAX_FRAGMENTS_PER_ARTICLE
+    assert step["제외"][news_constants.EXCLUDED_ARTICLE_FRAGMENT_LIMIT] == 2
 
 
 def test_missing_news_credentials_are_a_normal_no_news_result() -> None:
