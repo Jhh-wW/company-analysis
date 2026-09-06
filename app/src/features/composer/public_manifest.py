@@ -37,6 +37,11 @@ from src.features.composer.constants import (
     SECTION_TITLES,
 )
 from src.features.composer.logic import FragmentsInput, _normalize_fragments
+from src.features.composer.news_block import (
+    NEWS_BLOCK_HEADERS,
+    NEWS_BLOCK_PRESENTATION,
+    news_block_caption,
+)
 from src.features.composer.port import (
     CollectedFragment,
     ComposedReport,
@@ -849,6 +854,107 @@ def _flow_binding(
     }
 
 
+def _news_binding(
+    fragment_id: str,
+    fragments: Mapping[str, _FragmentBinding],
+    *,
+    headers: Sequence[str],
+    row: Sequence[str],
+) -> dict[str, object]:
+    """보도표 한 행을 그 행이 옮겨 적은 조각 «하나»에 결속한다.
+
+    ★ 흐름표 결속과 달리 ``semantic_review``에 「bundled:true」를 적지 않는다 —
+      이 행은 검수 AI를 지나지 않는 결정적 줄이고, 지나지도 않은 판정을
+      결속에 적으면 나중에 그 표식을 믿는 코드가 생겼을 때 거짓말이 된다.
+    """
+
+    source = fragments.get(str(fragment_id).strip())
+    if source is None:
+        raise PublicManifestError("보도표 행이 검증된 출처 조각에 결속되지 않았습니다")
+    return {
+        "source_fragment_ids": [source.fragment_id],
+        "document_identities": [source.document_identity],
+        "exact_evidence_hashes": [source.exact_evidence_hash],
+        # 행 전체가 그 조각 원문 한 문장이라, 행 근거 지문이 곧 조각 지문이다.
+        "row_evidence_hash": source.exact_evidence_hash,
+        "injected_fact_id": "",
+        "semantic_review": "deterministic:news-block",
+        "typed_cells": [
+            _typed_cell(
+                header=header,
+                column_index=index,
+                public_value=value,
+                source_field=f"news-block-cell:{index}",
+                source_value=value,
+            )
+            for index, (header, value) in enumerate(zip(headers, row))
+        ],
+    }
+
+
+def _news_table_payload(
+    section: object,
+    fragment_bindings: Mapping[str, _FragmentBinding],
+) -> dict[str, object] | None:
+    """장 끝 보도표를 pre-render 정본 표 항목으로 만든다. 없으면 None.
+
+    renderer(`render._news_report_table`)와 «같은 순서·같은 글자»를 만들어야
+    한다 — 하나라도 어긋나면 봉인 대조가 보고서 전체를 막는다.
+    """
+
+    news_rows = tuple(getattr(section, "news_rows", ()) or ())
+    if not news_rows:
+        return None
+    rows: list[list[str]] = []
+    row_bindings: list[dict[str, object]] = []
+    source_ids: list[str] = []
+    for row in news_rows:
+        citations = tuple(
+            str(value).strip() for value in row.citations if str(value).strip()
+        )
+        if len(citations) != 1:
+            raise PublicManifestError("보도표 행은 조각 하나만 인용해야 합니다")
+        public_row = [str(cell).strip() for cell in row.cells]
+        row_bindings.append(
+            _news_binding(
+                citations[0],
+                fragment_bindings,
+                headers=NEWS_BLOCK_HEADERS,
+                row=public_row,
+            )
+        )
+        rows.append(public_row)
+        source_ids.append(citations[0])
+    source_cites = _normalized_source_cites(tuple(source_ids))
+    return _table_payload(
+        section_id=str(getattr(section, "section_id", "")),
+        table_index=0,
+        # ★ 「news」가 아니라 「program」이다 — 이 칸은 «독립 검증기가 actual
+        #   보고서만 보고 다시 셀 수 있는 값»이어야 한다. 그쪽
+        #   (`shared/report_generation/canonical._actual_table_fields`)은
+        #   presentation이 flow가 아니면 전부 program으로 세므로, 여기서만
+        #   news라고 적으면 어느 실행에서도 대조가 실패한다. 표의 «출처»는
+        #   행별 결속(source_fragment_ids)이 이미 정확히 말한다.
+        kind="program",
+        caption=news_block_caption(len(rows)),
+        headers=NEWS_BLOCK_HEADERS,
+        rows=rows,
+        cite=source_cites[0],
+        numeric=False,
+        presentation=NEWS_BLOCK_PRESENTATION,
+        display_unit="",
+        raw_rows=(),
+        scale_divisor="",
+        scale_places=0,
+        entity_scope="",
+        raw_unit="",
+        unit_dimension="",
+        source_cites=source_cites,
+        row_fact_ids=("",) * len(rows),
+        row_bindings=row_bindings,
+    )
+
+
 def _table_payload(
     *,
     section_id: str,
@@ -1632,6 +1738,10 @@ def build_public_structure_seal(
                     row_bindings=row_bindings,
                 )
             )
+        # 보도표는 «장의 맨 끝». renderer도 같은 자리에 붙인다.
+        news_payload = _news_table_payload(section, fragment_bindings)
+        if news_payload is not None:
+            section_tables.append(news_payload)
         for table_index, payload in enumerate(section_tables):
             payload["table_index"] = table_index
             ref = _sha256_text(_canonical_json(payload))

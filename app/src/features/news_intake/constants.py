@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from src.shared.report_evidence.constants import NEWS_EXCLUDED_SECTION_IDS
+
 
 DEFAULT_WINDOW_DAYS: Final[int] = 365
 EXTENDED_WINDOW_DAYS: Final[int] = 1_095
@@ -179,11 +181,16 @@ DATED_QUOTE_ONLY_SECTIONS: Final[frozenset[str]] = frozenset({"culture"})
 NON_EXTENDABLE_SECTIONS: Final[frozenset[str]] = frozenset(
     {"current_challenges", "future_strategy"}
 )
-#: 뉴스 보조 문장을 아예 받지 않는 장. 9장은 「회사가 밝힌 차별점」이라
-#: 회사가 스스로 밝힌 말만 싣는 장이고, 기자가 쓴 비교나 증권 칼럼의 해석은
-#: 그 정의에 맞지 않는다. 기간만 1년으로 두는 NON_EXTENDABLE_SECTIONS와는
-#: 뜻이 다르므로(그쪽은 조건부로 대상이 된다) 하나로 합치지 않는다.
-NEWS_EXCLUDED_SECTIONS: Final[frozenset[str]] = frozenset({"competitive_position"})
+#: 뉴스 보조 문장을 아예 받지 않는 장(9장). 정본은 shared에 있고 여기서는
+#: 같은 객체를 별명으로 다시 내보내기만 한다.
+#:
+#: ★ 왜 shared로 옮겼나 — 이 목록을 «수집하는 쪽»(여기)과 «보고서에 싣는
+#:   쪽»(`composer/news_block.py`)이 둘 다 본다. 여기 두면 composer가
+#:   news_intake를 직접 import하게 되어 feature 경계를 깬다. 새 이름을 만들지
+#:   않고 «같은 객체»를 가리켜, 어느 쪽으로 읽어도 같은 값이 되게 한다.
+#: ★ 기간만 1년으로 두는 NON_EXTENDABLE_SECTIONS와는 뜻이 다르므로(그쪽은
+#:   조건부로 대상이 된다) 하나로 합치지 않는다.
+NEWS_EXCLUDED_SECTIONS: Final[frozenset[str]] = NEWS_EXCLUDED_SECTION_IDS
 
 #: 뉴스 경로가 「왜」 열렸는지. 대상 장을 정하는 규칙과 한 자리에서 나오므로
 #: 호출부가 같은 조건을 다시 계산하지 않아도 된다. 창 이름은 이 값으로만

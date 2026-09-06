@@ -170,6 +170,22 @@ class FlowRow:
 
 
 @dataclass(frozen=True)
+class NewsRow:
+    """장 끝 「최근 보도 (보조)」 표의 한 줄 — 발행일 / 매체 / 보도 문장.
+
+    ★ 왜 FlowRow를 재사용하지 않나 — flow_rows는 «사업 경로»라는 뜻이 붙어
+      있고 도식 검증(`diagram_check`)이 그 목록을 통째로 읽어 AI에게 관계를
+      묻는다. 보도 문장을 그 자리에 넣으면 「이 경로가 근거에 맞나」라는
+      엉뚱한 질문을 AI에게 보내고, 화살표·카드 도식으로도 그려진다.
+      뜻이 다른 줄은 다른 자리에 둔다.
+    """
+
+    cells: tuple[str, ...]
+    #: 이 줄이 옮겨 적은 조각 id 하나. 비면 근거 없는 줄이라 싣지 않는다.
+    citations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ComposedSection:
     """장 하나. 장 삭제 금지 — 자료가 부족해도 안내문으로 남긴다."""
 
@@ -181,6 +197,10 @@ class ComposedSection:
     notice: str = ""
     #: 7장 운영 경로표. 근거가 없으면 빈 튜플 — 빈 도식을 만들지 않는다.
     flow_rows: tuple[FlowRow, ...] = ()
+    #: 장 끝에 붙는 언론 보조 보도표의 행들. 뉴스 조각이 안 왔으면 빈 튜플.
+    #: ★ 기본값이 빈 튜플이라 이 필드를 모르는 기존 생성·저장 경로는 그대로
+    #:   돈다(새 칸 추가만, 읽기 호환 유지).
+    news_rows: tuple[NewsRow, ...] = ()
 
 
 @dataclass(frozen=True)
