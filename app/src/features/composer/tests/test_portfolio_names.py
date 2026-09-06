@@ -43,13 +43,12 @@ from src.features.composer.portfolio_names import (
     portfolio_name_usage,
     representative_names,
 )
-from src.shared.name_fragments import (
+from src.shared.name_fragments.constants import (
     NAME_KIND_LABELS,
     NAME_KIND_SEGMENT,
-    NAME_LABEL_SEPARATOR,
-    NAME_VALUE_SEPARATOR,
     REPRESENTATIVE_NAME_LABELS,
-    representative_label_and_name as label_and_name,
+    compose_name_location,
+    parse_name_location,
 )
 
 
@@ -90,13 +89,14 @@ _INDUSTRIES = {
 }
 
 
-def _location(title: str, row: int, label: str, name: str) -> str:
-    """`product_names/fragments.py`가 만드는 원문위치 모양 그대로."""
+#: 라벨 → 종류 id. 시험이 라벨로 자료를 쓰므로 조립기 인자용으로 뒤집는다.
+_KIND_OF_LABEL = {label: kind for kind, label in NAME_KIND_LABELS.items()}
 
-    return (
-        f"{title} · {row}행"
-        f"{NAME_LABEL_SEPARATOR}{label}{NAME_VALUE_SEPARATOR}{name}"
-    )
+
+def _location(title: str, row: int, label: str, name: str) -> str:
+    """생산자가 만드는 원문위치 모양 그대로 — 정본 조립기를 그대로 쓴다."""
+
+    return compose_name_location(f"{title} · {row}행", _KIND_OF_LABEL[label], name)
 
 
 def _name_fragment(
@@ -157,7 +157,9 @@ def test_작가_프롬프트의_조각줄이_원문위치와_이름을_보여_�
     for fragment in fragments:
         assert fragment.location in prompt
         # ★ 표기의 «: 뒤»가 이름이라고 안내문이 말하므로 이름도 프롬프트에 있다.
-        assert label_and_name(fragment.location)[1] in prompt
+        parsed = parse_name_location(fragment.location)
+        assert parsed is not None
+        assert parsed[1] in prompt
 
 
 def test_원문위치가_없는_조각은_이름표를_붙이지_않는다() -> None:
@@ -201,6 +203,21 @@ def test_3장_안내문은_세_종류를_열거하고_이름_카드를_반드시
     assert "이름을 줄이거나 번역하거나 새로 짓지 않는다" in guide
     for label in REPRESENTATIVE_NAME_LABELS:
         assert label in guide
+
+
+def test_안내문이_약속한_표기가_실제_표기와_같다() -> None:
+    """★ 안내문은 작가에게 「: 뒤가 이름」이라고 «글자로» 약속한다.
+
+    정본의 구분자가 바뀌면 이 약속이 거짓말이 된다. 두 자리를 리터럴로 함께
+    못 박아, 한쪽만 고치면 반드시 빨간불이 나게 한다.
+    """
+
+    assert "「… · 종류: 이름」 모양이고 «: 뒤가 그 조각의 이름»이다" in (
+        PORTFOLIO_TABLE_GUIDE_V2
+    )
+    assert compose_name_location("가. 표 · 3행", "ip", "가람이름").endswith(
+        " · 대표 IP: 가람이름"
+    )
 
 
 def test_3장_안내문은_부문명만_쓰고_끝내지_말라고_말한다() -> None:
@@ -247,23 +264,36 @@ def test_카드_제목은_인용_조각에_있는_이름으로만_쓰라고_말�
 def test_원문위치_표기에서_종류와_이름을_읽는다() -> None:
     location = _location("가. 주요 제품 및 서비스의 현황", 3, PRODUCT_LABEL, "가람메모리 D9")
 
-    assert label_and_name(location) == (PRODUCT_LABEL, "가람메모리 D9")
+    assert parse_name_location(location) == (PRODUCT_LABEL, "가람메모리 D9")
 
 
 def test_대표_이름이_아닌_표기는_읽지_않는다() -> None:
     """사업부문·종속회사·주요 계약은 이 규칙의 충족 근거가 아니다."""
 
-    assert label_and_name(
-        _location("가. 주요 제품 및 서비스의 현황", 3, SEGMENT_LABEL, "메모리")
-    ) == ("", "")
-    assert label_and_name("사업의 내용") == ("", "")
-    assert label_and_name("") == ("", "")
+    segment_location = _location(
+        "가. 주요 제품 및 서비스의 현황", 3, SEGMENT_LABEL, "메모리"
+    )
+    # 표기 자체는 읽히지만 «대표 이름» 라벨이 아니라 충족 근거로 세지 않는다.
+    assert parse_name_location(segment_location) == (SEGMENT_LABEL, "메모리")
+    assert SEGMENT_LABEL not in REPRESENTATIVE_NAME_LABELS
+    assert representative_names(
+        (
+            CollectedFragment(
+                fragment_id="1",
+                kind="dart_business_report",
+                text="메모리 | 설명",
+                location=segment_location,
+            ),
+        )
+    ) == ()
+    assert parse_name_location("사업의 내용") is None
+    assert parse_name_location("") is None
 
 
 def test_이름_안에_구분자가_또_있어도_마지막_표기를_기준으로_자른다() -> None:
-    location = _location("가. 표", 2, BRAND_LABEL, f"사슴{NAME_LABEL_SEPARATOR}달")
+    location = _location("가. 표", 2, BRAND_LABEL, "사슴 · 달")
 
-    assert label_and_name(location) == (BRAND_LABEL, f"사슴{NAME_LABEL_SEPARATOR}달")
+    assert parse_name_location(location) == (BRAND_LABEL, "사슴 · 달")
 
 
 def test_같은_이름이_여러_행에_있어도_한_번만_센다() -> None:

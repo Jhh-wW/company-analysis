@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
-from src.shared.name_fragments import (
+from src.shared.name_fragments.constants import (
     NAME_KIND_BRAND,
     NAME_KIND_CONTRACT,
     NAME_KIND_IP,
