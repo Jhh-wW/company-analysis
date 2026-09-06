@@ -65,6 +65,7 @@ from src.features.composer.logic import (
 )
 from src.features.composer.constants import (
     DEFAULT_CITATION_STYLE,
+    PORTFOLIO_TABLE_SECTION_ID,
     SECTION_IDS,
     SECTION_TITLES,
 )
@@ -72,6 +73,11 @@ from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.diagram_check import check_diagram_numbers, check_diagrams
 from src.features.composer.dup_detect import CONFIDENCE_CONFIRMED, find_numeric_duplicates
 from src.features.composer.extractive_summary import select_extractive_summary
+from src.features.composer.portfolio_name_card import (
+    BLOCKED_NAME_NOT_IN_SOURCE,
+    PortfolioNameCardResult,
+    augment_portfolio_name_card,
+)
 from src.features.composer.portfolio_names import portfolio_name_usage
 from src.features.composer.port import (
     AskFatalError,
@@ -198,6 +204,18 @@ class V2RunOutput:
     #: 그때의 종류 라벨별 이름 수. dataclass를 얼린 채로 실어 나르려고
     #: dict가 아니라 (라벨, 수) 쌍의 tuple이다.
     unused_portfolio_name_counts_by_label: tuple[tuple[str, int], ...] = ()
+    #: 작가가 이름을 하나도 안 써서 «결정적으로» 덧붙인 이름 카드에 실린
+    #: 이름 수. 안 덧붙였으면 0이다.
+    #:
+    #: ★ 위 `unused_…`와 «동시에 0이 아닐 수 없다» — 카드를 덧붙이면 그
+    #:   카드가 이름을 쓴 것이므로 미사용 판정이 풀린다. 두 필드가 함께
+    #:   0이 아니면 어딘가 어긋난 것이다(그 불변식을 시험이 지킨다).
+    portfolio_name_card_count: int = 0
+    #: 그 카드에 실린 이름의 종류 라벨별 수.
+    portfolio_name_card_counts_by_label: tuple[tuple[str, int], ...] = ()
+    #: 이름을 안 썼는데 카드도 «못» 덧붙였을 때의 이유 코드
+    #: (`portfolio_name_card.BLOCKED_*`). 덧붙였거나 덧붙일 필요가 없으면 ""다.
+    portfolio_name_card_blocked_reason: str = ""
 
 
 class _CallLedgerRecorder:
@@ -588,6 +606,58 @@ def _append_verified_program_sentences(
     )
 
 
+def _augment_name_card(
+    report: ComposedReport,
+    fragments: FragmentsInput,
+    prepared_evidence: object,
+    *,
+    enabled: bool,
+) -> PortfolioNameCardResult:
+    """3장 이름 카드 보강을 «장별 근거 소유권 안에서» 부른다.
+
+    ★ 왜 allowed 집합을 넘기나 — 이름 조각은 3장 packet 소속이지만 이 단계에
+      오는 조각은 flat union이다. 거르지 않고 인용하면 다른 장 소유의 조각을
+      3장 줄이 인용하는 줄이 만들어져, 바로 다음 evidence invariant가 보고서
+      전체를 막는다. «만들고 나서 걸리는» 대신 애초에 안 만든다.
+
+    Args:
+        report: 도식 검증까지 끝난 본문.
+        fragments: 검증용 조각(대개 flat union).
+        prepared_evidence: 장별 packet 준비값. ``None``이면 장별 소유권이
+            없는 legacy 경로라 거르지 않는다.
+        enabled: 이 실행이 flow 줄을 «공개할 수 있는» 경로인가. ENFORCE_NO_
+            PARTIAL(관계 미결속)에서는 모든 flow 줄이 방금 비워졌으므로
+            여기서 한 줄을 되살리면 그 정책을 우회하게 된다.
+
+    Returns:
+        보강 결과. 꺼져 있거나 못 붙였으면 ``report``는 입력 그대로다.
+    """
+
+    if not enabled:
+        return PortfolioNameCardResult(report=report)
+    allowed = None
+    if prepared_evidence is not None:
+        allowed = getattr(
+            prepared_evidence, "allowed_fragment_ids_by_section", {}
+        ).get(PORTFOLIO_TABLE_SECTION_ID)
+    result = augment_portfolio_name_card(
+        report,
+        _normalize_fragments(fragments),
+        allowed_fragment_ids=allowed,
+    )
+    if result.added:
+        logger.info(
+            "3장 카드가 대표 이름을 안 써서 이름 카드 %d개(%s)를 덧붙였습니다",
+            result.name_count,
+            result.counts_by_label,
+        )
+    elif result.blocked_reason == BLOCKED_NAME_NOT_IN_SOURCE:
+        # 이 사유만 «상류가 깨졌다»는 뜻이라 경고로 올린다. 나머지 사유
+        # (이미 씀·이름 부족)는 정상 흐름이다.
+        logger.warning("3장 이름 카드 보강 실패 — 이름이 인용 원문에 없습니다")
+    return result
+
+
 def _raise_recovery_stop(
     reason_code: str, quality_problem_codes: tuple[str, ...] = ()
 ) -> None:
@@ -960,6 +1030,19 @@ def run_v2(
     for problem in diagram_problems:
         logger.warning("도식 검증에서 뺀 경로 — %s", problem)
 
+    # ②-c-2 3장 «대표 이름» 카드 보강 — 작가가 이름을 하나도 안 썼으면
+    # 조각의 글자와 인용만 투영한 카드 하나를 결정적으로 덧붙인다.
+    # 안내문 강제(카드 하나는 반드시)를 작가의 순응에만 맡기지 않는다.
+    name_card = _augment_name_card(
+        verified,
+        verification_fragments,
+        prepared_evidence,
+        enabled=(
+            release_mode is ReleaseMode.SHADOW or prepared_evidence is not None
+        ),
+    )
+    verified = name_card.report
+
     # ②-d 첫 구조화 claim 슬라이스 — 검증된 DART 3개년 표의 원값에서
     # 누적 증감률을 코드로 재계산한다. AI 산문에서 숫자를 역추출하지 않으며,
     # 표의 회계범위·원단위·원 payload가 하나라도 빠지면 아무것도 만들지 않는다.
@@ -1303,6 +1386,19 @@ def run_v2(
                 stage="supplement-merged-numeric-safety",
             )
             verified = merged_body
+            # 3장이 보충 대상이면 그 장은 «새로 쓴 것»으로 통째로 갈린다 —
+            # 첫 후보에 붙였던 이름 카드도 함께 사라진다. 그래서 병합 뒤에
+            # 다시 부른다. 3장이 대상이 아니면 카드가 이미 있어 이 호출은
+            # 「이미 씀」으로 아무것도 하지 않는다(멱등).
+            supplement_name_card = _augment_name_card(
+                verified,
+                verification_fragments,
+                prepared_evidence,
+                enabled=True,
+            )
+            verified = supplement_name_card.report
+            if supplement_name_card.added or not name_card.added:
+                name_card = supplement_name_card
             numeric_filtering = numeric_filtering.merged(
                 supplement_numeric_filtering
             ).merged(merged_numeric_filtering)
@@ -1654,6 +1750,13 @@ def run_v2(
             tuple(sorted(name_usage.counts_by_label.items()))
             if name_usage.unused
             else ()
+        ),
+        portfolio_name_card_count=name_card.name_count,
+        portfolio_name_card_counts_by_label=tuple(
+            sorted(name_card.counts_by_label.items())
+        ),
+        portfolio_name_card_blocked_reason=(
+            name_card.blocked_reason if name_usage.unused else ""
         ),
     )
 

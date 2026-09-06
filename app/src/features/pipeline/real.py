@@ -4987,41 +4987,59 @@ def _comparison_generation_digest(
 
 
 def _unused_name_steps(output: Any) -> list[dict[str, Any]]:
-    """3장 카드가 packet의 대표 이름을 하나도 안 썼을 때만 한 줄 남긴다.
+    """3장 «대표 이름»에 관한 실행 기록 줄을 만든다.
 
-    ★ 카드를 만들거나 고치지 않는다 — 근거 없이 카드를 지어내는 것이 이
-      보고서에서 가장 하면 안 되는 일이다. 「이름을 몇 개 줬는데 안 썼다」는
-      사실만 실행 기록에 남겨, 안내문이 듣는지를 다음 실행에서 바로 잰다.
+    두 가지를 남긴다. 둘은 서로 배타적이다 — 카드를 덧붙이면 그 카드가
+    이름을 쓴 것이므로 미사용 판정이 풀린다.
+      · 이름 카드를 덧붙였다 (`3장_대표이름_카드_보강`)
+      · 이름이 하한 이상 왔는데 카드가 하나도 안 썼고 덧붙이지도 못했다
+        (`3장_대표이름_미사용`)
+
+    ★ 여기서 카드를 만들거나 고치지 않는다 — 근거 없이 카드를 지어내는 것이
+      이 보고서에서 가장 하면 안 되는 일이다. 카드를 만드는 판단과 단계 dict의
+      «정본»은 둘 다 composer가 소유하고, 이 함수는 그것을 부르기만 한다.
+      단계 이름·필드를 여기서 손으로 다시 적으면 한쪽이 바뀔 때 조용히 어긋난다.
+
+    ★ 이름을 왜 안 바꿨나 — 「보강」까지 담게 됐으니 `_portfolio_name_steps`가
+      더 맞는 이름이지만, `_run_v2_composer`가 이 헬퍼를 «실제로 부르는지»를
+      AST로 지키는 기존 회귀 시험이 이 이름에 걸려 있다. 이름을 바꾸면 그
+      가드를 같이 고쳐야 해서, 지금은 이름을 두고 이 주석으로 범위를 밝힌다.
 
     Args:
         output: composer `run_v2`의 결과. 이 필드를 모르는 옛 결과도 받는다.
 
     Returns:
-        남길 단계가 없으면 빈 목록, 있으면 단계 dict 하나짜리 목록.
+        남길 단계가 없으면 빈 목록. 둘 다 켜져 있으면(있어서는 안 되는 상태)
+        두 줄을 «다 남긴다» — 진단이 사라지는 것보다 모순이 보이는 편이 낫다.
     """
 
+    from src.features.composer.portfolio_name_card import (  # noqa: PLC0415
+        portfolio_name_card_steps,
+    )
     from src.features.composer.portfolio_names import (  # noqa: PLC0415
         UNUSED_REPRESENTATIVE_NAMES_STEP,
     )
 
+    steps: list[dict[str, Any]] = list(portfolio_name_card_steps(output))
     try:
         count = int(getattr(output, "unused_portfolio_name_count", 0) or 0)
     except (TypeError, ValueError):
-        return []
+        return steps
     if count <= 0:
-        return []
+        return steps
     pairs = getattr(output, "unused_portfolio_name_counts_by_label", ()) or ()
     try:
         by_label = {str(label): int(value) for label, value in pairs}
     except (TypeError, ValueError):
         by_label = {}
-    return [
+    steps.append(
         {
             "step": UNUSED_REPRESENTATIVE_NAMES_STEP,
             "이름수": count,
             "종류별": by_label,
         }
-    ]
+    )
+    return steps
 
 
 def _run_v2_composer(

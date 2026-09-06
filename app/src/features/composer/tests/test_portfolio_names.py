@@ -527,13 +527,69 @@ def _run(industry: str, writer: _PortfolioWriter):
 
 
 @pytest.mark.parametrize("industry", sorted(_INDUSTRIES))
-def test_이름을_안_쓴_카드는_실행결과에_이름수와_종류별이_실린다(industry: str) -> None:
+def test_이름을_안_쓴_카드에는_결정적_이름_카드가_붙는다(industry: str) -> None:
+    """2026-09-06 이전에는 이 실행이 「미사용」으로 기록만 되고 끝났다.
+
+    ★ 왜 기대가 바뀌었나 — 안내문 강제(「카드 하나는 반드시」)를 두 번 실측한
+      운영 실행에서 작가 AI가 그대로 무시했다. 이제 composer가 조각 글자만
+      투영한 카드를 «덧붙이므로», 같은 입력에서 미사용 표식이 아니라 보강
+      표식이 켜지는 것이 맞는 결과다. 두 표식은 동시에 켜질 수 없다.
+    """
+
     _title, label, _texts, names = _INDUSTRIES[industry]
     writer = _PortfolioWriter("사업부문 하나", "부문 설명", ("1",))
 
     output = _run(industry, writer)
 
     assert writer.portfolio_prompts, "3장 프롬프트가 한 번도 안 왔다"
+    assert output.portfolio_name_card_count == len(names)
+    assert output.portfolio_name_card_counts_by_label == ((label, len(names)),)
+    assert output.portfolio_name_card_blocked_reason == ""
+    # 카드가 이름을 쓴 것이므로 미사용 판정은 «풀린다».
+    assert output.unused_portfolio_name_count == 0
+    assert output.unused_portfolio_name_counts_by_label == ()
+    제품장 = next(
+        section
+        for section in output.report.sections
+        if section.cell == PORTFOLIO_TABLE_SECTION_ID
+    )
+    assert 제품장.tables, (
+        f"3장 표가 사라졌습니다 — 버림 사유: {output.diagram_drop_reasons}"
+    )
+    rows = 제품장.tables[0].rows
+    assert len(rows) == 2, rows
+    assert rows[-1][0] == names[0]
+    assert all(name in rows[-1][1] for name in names), rows[-1]
+
+
+@pytest.mark.parametrize("industry", sorted(_INDUSTRIES))
+def test_이름이_원문에_없으면_보강도_못_하고_미사용으로_남는다(industry: str) -> None:
+    """보강이 «막히는» 경우에도 기존 미사용 기록은 그대로 남아야 한다.
+
+    ★ 이 시험이 없으면 미사용 표식을 지켜 주는 시험이 하나도 안 남는다 —
+      보강이 항상 성공하는 픽스처만 있으면 그 경로가 죽어도 초록불이다.
+    """
+
+    title, label, _texts, names = _INDUSTRIES[industry]
+    frags = _run_fragments(industry)
+    # 원문위치는 이름을 말하는데 원문에는 그 이름이 없다(상류 파손 재현).
+    for index, name in enumerate(names):
+        frags[index + 3]["원문"] = "부문 | 대상 | 매출"
+        frags[index + 3]["원문위치"] = _location(title, index * 3 + 2, label, name)
+    writer = _PortfolioWriter("사업부문 하나", "부문 설명", ("1",))
+
+    output = run_v2(
+        "가나다회사",
+        frags,
+        None,
+        writer_ask=writer,
+        reviewer_ask=_AlwaysTrueReviewer(),
+        corp_type="상장사",
+        as_of_date="2026-09-06",
+    )
+
+    assert output.portfolio_name_card_count == 0
+    assert output.portfolio_name_card_blocked_reason == "name_not_in_source"
     assert output.unused_portfolio_name_count == len(names)
     assert output.unused_portfolio_name_counts_by_label == ((label, len(names)),)
 
