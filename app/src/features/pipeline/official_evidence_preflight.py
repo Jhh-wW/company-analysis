@@ -142,7 +142,7 @@ def _identity_rejected_web_evidence_is_bound(
     자리(``wide_collect.py:1084-1091``)가 속한 ``_collect_identity_verified_
     candidate``에서 문서를 만드는 블록은 ``match is not None`` 안에만 있어서
     (``wide_collect.py:1092``·append는 1165), 신원 대조에 실패한 시도는 MISSING
-    attempt만 남기고 documents를 하나도 내보내지 않는다. 우리은행 실측도 같았다
+    attempt만 남기고 documents를 하나도 내보내지 않는다. 은행 실측도 같았다
     — 수집 문서 12건이 전부 DART였고 불일치 시도가 남긴 문서·조각은 0건이다.
 
     그렇다고 «불일치가 있으면 웹 문서가 없다»는 아니다. 신원이 확인돼 결속된
@@ -299,7 +299,7 @@ def assess_official_evidence(
         and not required_dart_collection_incomplete
         and _has_usable_dart_evidence(result)
     )
-    # (갈래 1) 회사 웹 경로가 «막혀서» 확인을 끝내지 못한 경우. 하이브 실측이
+    # (갈래 1) 회사 웹 경로가 «막혀서» 확인을 끝내지 못한 경우. 상장 엔터사 실측이
     # 이 모양이었다 — robots.txt 거부로 FAILED가 나 STOP_TRANSIENT_FAILURE로
     # 닫혔고, DART 근거로 SHADOW 부분 보고서가 정상 생성됐다.
     transient_partial_fallback = (
@@ -312,7 +312,7 @@ def assess_official_evidence(
             for attempt in incomplete_attempts
         )
     )
-    # (갈래 2) 확인은 끝냈는데 일부 장의 자료가 없는 경우. 우리은행 실측이
+    # (갈래 2) 확인은 끝냈는데 일부 장의 자료가 없는 경우. 은행 실측이
     # 이 모양이었다 — DART ir_url이 비어 공식 웹 후보가 없었고 남은 웹 경로는
     # 전부 신원 대조에 실패해 MISSING으로 닫혔다. 아홉 장 중 일곱 장이 READY
     # 인데도 갈래 1의 조건(FAILED/TRUNCATED)에 걸리지 않아 보고서가 0건
@@ -326,7 +326,7 @@ def assess_official_evidence(
         and len(decision.ready_section_ids) >= MINIMUM_PUBLISHABLE_SECTION_COUNT
     )
     # (갈래 3) 아홉 장을 다 확인했는데도 완성 보고서의 독립 문서 하한에 닿을
-    # 길이 없는 경우. 우리은행 실측이 이 모양이다 — 사전검사는 9장 READY지만
+    # 길이 없는 경우. 은행 실측이 이 모양이다 — 사전검사는 9장 READY지만
     # 수집한 독립 문서가 DART 공시 3건뿐이라, 뒤에 합쳐질 문서를 다 더해도
     # ``MIN_DOCUMENT_SOURCES``를 채울 수 없다. 그 8건은 부족한 보고서를
     # 지우는 값이 아니라 완성/부분을 가르는 하한이므로, 도달 불가가 이미

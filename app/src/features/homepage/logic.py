@@ -757,7 +757,7 @@ def _registrable_core_name(host: str) -> str:
 def _is_same_organization(original_host: str, candidate_host: str) -> bool:
     """두 호스트 이름이 «같은 회사」로 보이는지 판정한다 (핵심 이름 비교).
 
-    ★ 가장 중요한 안전장치. 이게 없으면 하이브(hiveoil.co.kr)처럼 호스팅
+    ★ 가장 중요한 안전장치. 이게 없으면 회사 이름과 앞글자만 겹치는 남의 도메인에서 호스팅
       업체의 기본 인증서(realserver2.com)를 회사 홈페이지로 착각해 따라간다.
     """
     original_core = _registrable_core_name(original_host)
@@ -802,7 +802,7 @@ def _attempt_cert_fallback(
         None,
     )
     if matched_host is None:
-        return None  # 같은 회사로 볼 만한 이름이 없다 — 포기한다 (하이브 사례)
+        return None  # 같은 회사로 볼 만한 이름이 없다 — 포기한다 (상장 엔터사 사례)
 
     retry_url = _swap_host(original_url, matched_host)
     try:
@@ -938,10 +938,10 @@ def _link_priority(url: str) -> int:
 def _is_brand_landing_path(parsed: urllib.parse.ParseResult) -> bool:
     """브랜드명이 경로 끝에 있는 회사소개 landing page인지 판정한다.
 
-    JYP처럼 회사소개가 ``/ko/JYP``인 사이트를 위한 작은 보완이다. 등록
+    회사 약칭이 회사소개 경로 끝에 오는 ``/ko/<약칭>`` 사이트를 위한 작은 보완이다. 등록
     도메인의 핵심 라벨과 마지막 경로 조각만 비교하므로 ``company.example``
     호스트의 모든 링크가 ``company`` 우선순위를 받던 문제는 되살리지 않는다.
-    또한 ``/ko/JYP/History`` 같은 하위 namespace 전체를 올리지 않아 5쪽 예산을
+    또한 ``/ko/<약칭>/History`` 같은 하위 namespace 전체를 올리지 않아 5쪽 예산을
     같은 회사소개 메뉴가 독점하지 않는다.
     """
     core = re.sub(

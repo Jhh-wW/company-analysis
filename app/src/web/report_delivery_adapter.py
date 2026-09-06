@@ -580,7 +580,7 @@ def persist_approved_delivery(
         if bind_cache_entry:
             # ★ cache_usable(접수번호+재무 도장)은 정식 캐시에 «묶을 때만» 요구한다.
             #   감사보고서만 내는 비상장사는 DART 재무 API가 013이라 재무 도장이
-            #   비고(2026-09-05 인이지 실측), pipeline은 cache_eligible=False로
+            #   비고(2026-09-05 비상장 소프트웨어사 실측), pipeline은 cache_eligible=False로
             #   넘긴다. 여기서 cache_usable을 무조건 요구하면 AI 비용을 다 쓴 뒤
             #   출고 직전에 실패한다(실측 사고). 캐시 재사용은 그대로 막힌다.
             if not stored_source.cache_usable:

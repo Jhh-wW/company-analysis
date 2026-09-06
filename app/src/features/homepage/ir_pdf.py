@@ -1539,7 +1539,7 @@ def _company_identity_terms(
     if len(legal_core) >= 4 and legal_core not in _GENERIC_IDENTITY_ALIASES:
         principal.add(legal_core)
 
-    # JYP의 실제 IR PDF는 공식명이 ``JYP Ent.``여도 앞쪽 표지에는 ``JYP``만
+    # 어떤 회사의 실제 IR PDF는 공식명이 ``<약칭> Ent.``여도 앞쪽 표지에는 ``<약칭>``만
     # 글자로 추출된다. 짧은 영문 약자를 무조건 허용하면 SK·AI 같은 일반 글자와
     # 충돌하므로, DART가 확인한 공식 홈페이지 도메인의 브랜드 라벨과 0~2글자
     # 차이로 맞는 첫 단어일 때만 보조 principal로 인정한다.

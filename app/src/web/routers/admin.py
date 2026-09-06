@@ -795,7 +795,7 @@ def render_member_admin_page(request: Request) -> HTMLResponse:
 def _normalized_company_name(value: str) -> str:
     """회사 표시명을 비교용으로 다듬는다.
 
-    ★ 「(주)진영」과 「진영」은 같은 회사다. 폼에 손으로 적는 이름은 법인격
+    ★ 「(주)회사이름」과 「회사이름」은 같은 회사다. 폼에 손으로 적는 이름은 법인격
       표기·띄어쓰기가 매번 달라서 글자 그대로 비교하면 «같은 회사인데 막히는»
       쪽으로 자주 틀린다. 이름이 정말 같은 «동명 회사»는 고유번호로 갈라낸다.
 
@@ -989,7 +989,7 @@ async def admin_link_new(
 
     Args:
         audience_label: 관리 화면에서 이 링크를 알아보려고 붙이는 표시 이름
-            (예: 「하이브 인사팀」). **받는 사람 화면에는 쓰지 않는다** —
+            (예: 「상장 엔터사 인사팀」). **받는 사람 화면에는 쓰지 않는다** —
             내부 메모(`note`)와 마찬가지로 우리 쪽 편의를 위한 값이다.
     """
     if deployment_mode.render_admin_no_forwarded():

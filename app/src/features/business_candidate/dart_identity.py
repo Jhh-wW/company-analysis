@@ -432,7 +432,7 @@ def _token_alias_match(query_tokens: tuple[str, ...], alias: DartNameAlias) -> b
         return False
     # A candidate may contain extra legal-name tokens, but a one-token alias may
     # not discard a qualifier supplied by the user (for example, the stale
-    # ``JYP Corporation`` alias must not consume ``JYP Entertainment``).
+    # ``XYZ Corporation`` alias must not consume ``XYZ Entertainment``).
     if not query_set <= alias_set:
         return False
     if len(query_set) == 1:

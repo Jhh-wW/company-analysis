@@ -197,13 +197,13 @@ FRAGMENT_KIND: Final[str] = LEGACY_KIND_HOMEPAGE
 #:   경영철학·경영이념·핵심가치·인재상·윤리기준. 이 페이지들은 이름에
 #:   `about`·`business`가 없어 `company`(회사 공통 경로)로만 걸렸고, 그러면
 #:   연혁·조직도·CI/BI와 같은 순위가 되어 `MAX_PAGES`(6쪽) 예산 밖으로 밀린다.
-#:   실측((주)진영): 경영철학이 실린 `/company/overview.php`가
+#:   실측(소재 제조사): 경영철학이 실린 `/company/overview.php`가
 #:   후보 42개 중 18번째라 6쪽 안에 못 들어왔다. `MAX_PAGES`를 올리면 모든
 #:   회사의 수집 시간이 늘어나므로, 예산은 그대로 두고 «순서»만 바꾼다.
 #:
 #: ⚠️ 여기 앞쪽에 넣는 말은 «회사 소개 경로에서만 쓰이는» 것으로 제한한다.
 #:   흔한 일반 단어를 올리면 엉뚱한 페이지가 6쪽을 먼저 차지한다.
-#:   실측 반례(삼성전자): 맨 앞에 `overview`만 넣었더니
+#:   실측 반례(대형 제조사): 맨 앞에 `overview`만 넣었더니
 #:   `/sustainability/accessibility/overview/`가 1등이 되어 접근성 하위
 #:   페이지가 예산을 다 먹었고, 경영이념(인재제일·최고지향·변화선도·정도경영·
 #:   상생추구)이 실린 `/about-us/brand-identity/brand-story/`를 **놓쳤다**.
@@ -277,7 +277,7 @@ PRIORITY_PATH_KEYWORDS: Final[tuple[str, ...]] = (
 BRAND_PATH_MIN_TOKEN_CHARS: Final[int] = 3
 
 #: 등록 도메인 핵심 이름과 브랜드 경로가 prefix 관계일 때 허용하는 최대 차이.
-#: 예: ``jype.com`` ↔ ``/JYP``는 1글자 차이라 허용한다. 짧은 우연 일치가
+#: 예: ``<브랜드>e.com`` ↔ ``/<브랜드>``는 1글자 차이라 허용한다. 짧은 우연 일치가
 #: 전혀 다른 경로를 회사소개로 올리는 것은 막는다.
 BRAND_PATH_MAX_PREFIX_GAP: Final[int] = 2
 
@@ -454,7 +454,7 @@ WIDE_MIN_CHARS_PER_RANGE: Final[int] = 40
 #: 코드. 서버가 준 HTML에 사람이 읽는 본문이 없어(자바스크립트로 화면을 그리는
 #: 사이트) 쓸 만한 조각을 0개 뽑은 경우다. 이 코드가 없던 동안 그런 시도는
 #: state=OK·«신원 검증됨»으로 남아, 로그만 보면 «성공했는데 왜 근거가 0건인가»를
-#: 알 수 없었다(2026-09-06 하이브 실측). 자료가 막힌 것이 아니라 «없는 것»이므로
+#: 알 수 없었다(2026-09-06 상장 엔터사 실측). 자료가 막힌 것이 아니라 «없는 것»이므로
 #: state는 MISSING이다 — FAILED로 올리면 다른 근거까지 UNKNOWN으로 끌어내린다.
 WIDE_REASON_NO_USABLE_CONTENT: Final[str] = "no_usable_content"
 

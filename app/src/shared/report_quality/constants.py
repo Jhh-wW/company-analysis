@@ -85,7 +85,7 @@ STRICT_REQUIRED_QUALITY_SECTION_IDS: Final[tuple[str, ...]] = (
 STRICT_MAX_NOTICE_ONLY_SECTIONS: Final[int] = 0
 
 # FULL 보고서의 «해석»은 사실 문장을 대신해 분량을 채울 수 없다. 기준 보고서
-# 실측(진영 17.7%, 하이브 12.0%)보다 여유를 두되 폭주만 막는 상한이다.
+# 실측(소재 제조사 17.7%, 상장 엔터사 12.0%)보다 여유를 두되 폭주만 막는 상한이다.
 # 장당 상한은 작가 프롬프트와 출고 게이트가 같은 정본을 읽는다. 전체 상한은
 # 긴 보고서가 비율만 맞춰 해석 문장을 무한히 늘리지 못하게 개수·비율을 모두 둔다.
 MAX_INTERPRETED_CLAIMS_PER_SECTION: Final[int] = 2
