@@ -12,7 +12,7 @@ import 하지 않는 것이 이 저장소의 경계 규칙이라, 두 곳이 같
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import Final, Mapping
+from typing import Final, Mapping, Optional
 
 
 # ── 이름 종류 ────────────────────────────────────────────────────────
@@ -50,6 +50,7 @@ REPRESENTATIVE_NAME_KINDS: Final[tuple[str, ...]] = (
     NAME_KIND_BRAND,
 )
 
+#: 위 종류의 라벨. 손으로 적지 않고 정본 표에서 «만든다».
 REPRESENTATIVE_NAME_LABELS: Final[tuple[str, ...]] = tuple(
     NAME_KIND_LABELS[kind] for kind in REPRESENTATIVE_NAME_KINDS
 )
@@ -66,7 +67,7 @@ NAME_LABEL_SEPARATOR: Final[str] = " · "
 NAME_VALUE_SEPARATOR: Final[str] = ": "
 
 
-def name_fragment_location(location: str, *, kind: str, name: str) -> str:
+def compose_name_location(location: str, kind: str, name: str) -> str:
     """이름 조각의 ``원문위치`` 값을 만든다.
 
     Args:
@@ -78,41 +79,39 @@ def name_fragment_location(location: str, *, kind: str, name: str) -> str:
         `"{location} · {라벨}: {name}"`.
 
     Raises:
-        KeyError: 등록되지 않은 종류일 때.
+        KeyError: 등록되지 않은 종류일 때. 조용히 넘기지 않는다 — 표기가
+            깨지면 하류가 이름을 못 읽고, 그 실패는 초록불로 보인다.
     """
 
     label = NAME_KIND_LABELS[kind]
     return f"{location}{NAME_LABEL_SEPARATOR}{label}{NAME_VALUE_SEPARATOR}{name}"
 
 
-def _label_and_name(location: str, labels: tuple[str, ...]) -> tuple[str, str]:
+def parse_name_location(location: str) -> Optional[tuple[str, str]]:
+    """``원문위치``에서 종류 라벨과 이름을 되읽는다.
+
+    이름 안에 같은 표기가 또 있을 수 있으므로 «마지막» 표기를 기준으로 자른다.
+
+    Args:
+        location: 조각의 ``원문위치`` 값.
+
+    Returns:
+        (종류 라벨, 이름). 이름 조각의 표기가 없으면 ``None``.
+    """
+
     text = str(location or "")
-    for label in labels:
+    best: Optional[tuple[int, str, str]] = None
+    for label in NAME_KIND_LABELS.values():
         marker = f"{NAME_LABEL_SEPARATOR}{label}{NAME_VALUE_SEPARATOR}"
-        # 이름 안에 같은 표기가 또 있을 수 있으니 «마지막»을 기준으로 자른다.
         index = text.rfind(marker)
-        if index != -1:
-            return label, text[index + len(marker):].strip()
-    return "", ""
-
-
-def name_fragment_label_and_name(location: str) -> tuple[str, str]:
-    """이름 조각의 ``원문위치``에서 종류 라벨과 이름을 되읽는다.
-
-    이름 조각이 아니면 두 값 모두 빈 문자열이다.
-    """
-
-    return _label_and_name(location, tuple(NAME_KIND_LABELS.values()))
-
-
-def representative_label_and_name(location: str) -> tuple[str, str]:
-    """«대표 이름» 종류일 때만 라벨과 이름을 돌려준다.
-
-    사업부문·종속회사·주요 계약은 3장 이름 요구의 충족 근거가 아니므로 여기서
-    빈 값이 된다.
-    """
-
-    return _label_and_name(location, REPRESENTATIVE_NAME_LABELS)
+        if index == -1:
+            continue
+        # 두 라벨 표기가 함께 보이면 «뒤에 있는» 것이 이 조각의 표기다.
+        if best is None or index > best[0]:
+            best = (index, label, text[index + len(marker):].strip())
+    if best is None:
+        return None
+    return best[1], best[2]
 
 
 __all__ = [
@@ -128,7 +127,6 @@ __all__ = [
     "NAME_VALUE_SEPARATOR",
     "REPRESENTATIVE_NAME_KINDS",
     "REPRESENTATIVE_NAME_LABELS",
-    "name_fragment_label_and_name",
-    "name_fragment_location",
-    "representative_label_and_name",
+    "compose_name_location",
+    "parse_name_location",
 ]

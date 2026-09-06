@@ -13,9 +13,9 @@ from src.shared.report_evidence.constants import (
     SOURCE_KIND_DART_QUARTERLY_REPORT,
     SOURCE_KIND_DART_SEMIANNUAL_REPORT,
 )
-from src.shared.name_fragments import (
+from src.shared.name_fragments.constants import (
     NAME_KIND_LABELS,
-    name_fragment_location,
+    compose_name_location,
 )
 from src.shared.report_evidence.source_kind_policy import (
     FormalSourceKindContractError,
@@ -288,10 +288,10 @@ def name_candidate_fragments(
         raw.update(
             {
                 "원문": candidate.excerpt,
-                "원문위치": name_fragment_location(
+                "원문위치": compose_name_location(
                     candidate.location,
-                    kind=candidate.subject_kind,
-                    name=candidate.name,
+                    candidate.subject_kind,
+                    candidate.name,
                 ),
                 _RAW_SECTION_IDS_KEY: (NAME_FRAGMENT_SECTION_ID,),
                 _RAW_SLOT_IDS_KEY: (NAME_FRAGMENT_SLOT_ID,),

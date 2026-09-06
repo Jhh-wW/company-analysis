@@ -20,7 +20,10 @@ from typing import Final, Iterable, Sequence
 
 from src.features.composer.constants import PORTFOLIO_TABLE_SECTION_ID
 from src.features.composer.port import CollectedFragment, ComposedReport
-from src.shared.name_fragments import representative_label_and_name
+from src.shared.name_fragments.constants import (
+    REPRESENTATIVE_NAME_LABELS,
+    parse_name_location,
+)
 
 
 # 종류 라벨·표기 구분자·«대표 이름» 종류의 정본은 `shared/name_fragments.py`다.
@@ -96,9 +99,13 @@ def representative_names(
     found: list[tuple[str, str]] = []
     seen: set[str] = set()
     for fragment in fragments:
-        label, name = representative_label_and_name(getattr(fragment, "location", ""))
+        parsed = parse_name_location(getattr(fragment, "location", ""))
+        if parsed is None:
+            continue
+        label, name = parsed
+        # 사업부문·종속회사·주요 계약은 이 요구의 «충족 근거»가 아니다.
         key = _normalized(name)
-        if not label or not key or key in seen:
+        if label not in REPRESENTATIVE_NAME_LABELS or not key or key in seen:
             continue
         seen.add(key)
         found.append((label, name))
