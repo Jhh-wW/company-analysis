@@ -29,11 +29,11 @@ from src.shared.report_evidence.runtime_port import (
     UnclassifiedEvidenceObservation,
 )
 from src.shared.report_evidence.constants import SourceRequirement, SourceTier
+from src.shared.report_evidence.source_kind_policy import (
+    FORMAL_DOCUMENT_TRUST_BY_SOURCE_KIND,
+)
 from src.shared.report_evidence.constants import (
-    SOURCE_KIND_DART_AUDIT_REPORT,
-    SOURCE_KIND_DART_BUSINESS_REPORT,
-    SOURCE_KIND_DART_QUARTERLY_REPORT,
-    SOURCE_KIND_DART_SEMIANNUAL_REPORT,
+    FORMAL_DOCUMENT_SOURCE_KINDS,
     SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
     SOURCE_KIND_OFFICIAL_IR_PDF,
     SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
@@ -59,20 +59,39 @@ _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 _DART_RECEIPT_NUMBER_RE = re.compile(r"^[0-9]{14}$")
 _DART_FRAGMENT_LOCATION_RE = re.compile(r"^([0-9]{1,10})-([0-9]{1,10})$")
 _DART_DOCUMENT_LOCATION_MAX_CHARS: Final[int] = 8 * 1024 * 1024
+#: DART 문서 종류와 필수 여부는 정책 정본(`source_kind_policy`)에서 유도한다.
+#: 2026-09-06 운영 실측: 엔진이 연결감사보고서(`dart_consolidated_audit_report`)를
+#: 내보내기 시작했는데 이 파일의 손으로 적은 표에 그 종류가 없어 상장사 조사가
+#: 통째로 「내부 연결 오류」로 멈췄다. 표를 복제하지 않고 정본을 읽어 재발을 막는다.
+_DART_SOURCE_KIND_PREFIX: Final[str] = "dart_"
 _DART_DOCUMENT_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
-    {
-        SOURCE_KIND_DART_AUDIT_REPORT,
-        SOURCE_KIND_DART_BUSINESS_REPORT,
-        SOURCE_KIND_DART_QUARTERLY_REPORT,
-        SOURCE_KIND_DART_SEMIANNUAL_REPORT,
-    }
+    kind
+    for kind in FORMAL_DOCUMENT_SOURCE_KINDS
+    if kind.startswith(_DART_SOURCE_KIND_PREFIX)
 )
-_DART_DOCUMENT_REQUIREMENT_BY_SOURCE_KIND: Final[dict[str, str]] = {
-    SOURCE_KIND_DART_BUSINESS_REPORT: SourceRequirement.REQUIRED.value,
-    SOURCE_KIND_DART_AUDIT_REPORT: SourceRequirement.REQUIRED.value,
-    SOURCE_KIND_DART_SEMIANNUAL_REPORT: SourceRequirement.OPTIONAL.value,
-    SOURCE_KIND_DART_QUARTERLY_REPORT: SourceRequirement.OPTIONAL.value,
-}
+
+
+def _dart_requirement_by_source_kind() -> dict[str, str]:
+    """DART 종류별 필수 여부를 정책 정본의 TIER_1 항목에서 읽는다(정확히 하나)."""
+
+    result: dict[str, str] = {}
+    for kind in sorted(_DART_DOCUMENT_SOURCE_KINDS):
+        official = {
+            requirement
+            for tier, requirement in FORMAL_DOCUMENT_TRUST_BY_SOURCE_KIND[kind]
+            if tier is SourceTier.TIER_1_OFFICIAL
+        }
+        if len(official) != 1:
+            raise RuntimeError(
+                f"DART 문서 종류 {kind}의 공식 필수 여부가 정책에서 하나로 정해지지 않았습니다"
+            )
+        result[kind] = next(iter(official)).value
+    return result
+
+
+_DART_DOCUMENT_REQUIREMENT_BY_SOURCE_KIND: Final[dict[str, str]] = (
+    _dart_requirement_by_source_kind()
+)
 _DART_IDENTITY_CHECK_STATES: Final[frozenset[str]] = frozenset(
     {"verified_match", "unverifiable_no_fetcher_metadata"}
 )
