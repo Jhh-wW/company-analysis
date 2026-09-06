@@ -144,7 +144,11 @@
   {% for flow in visual.flows %}
   <ol class="flow-row"{% if flow|length >= 3 and flow|length <= 5 %} data-flow-style="chevron"{% endif %}>
   {% for value in flow %}
-  <li><small>{{ t.headers[loop.index0] }}</small><span>{{ value }}</span></li>
+  {#- 「미확인」 칸은 흐름의 «단계»가 아니라 비어 있다는 사실이라, 짙게 채우지
+      않고 옅은 빈 쉐브론으로 그린다(style.css의 data-flow-cell). 글자는 그대로
+      두고 «모양»만 바꾼다. 이 낱말이 composer 상수와 어긋나지 않는지는
+      web/tests/test_d4_web_design_defects.py 가 지킨다. -#}
+  <li{% if value == '미확인' %} data-flow-cell="unconfirmed"{% endif %}><small>{{ t.headers[loop.index0] }}</small><span>{{ value }}</span></li>
   {% endfor %}
   </ol>
   {% endfor %}
@@ -299,7 +303,11 @@
   {% for flow in visual.flows %}
   <ol class="flow-row"{% if flow|length >= 3 and flow|length <= 5 %} data-flow-style="chevron"{% endif %}>
   {% for value in flow %}
-  <li><small>{{ t.headers[loop.index0] }}</small><span>{{ value }}</span></li>
+  {#- 「미확인」 칸은 흐름의 «단계»가 아니라 비어 있다는 사실이라, 짙게 채우지
+      않고 옅은 빈 쉐브론으로 그린다(style.css의 data-flow-cell). 글자는 그대로
+      두고 «모양»만 바꾼다. 이 낱말이 composer 상수와 어긋나지 않는지는
+      web/tests/test_d4_web_design_defects.py 가 지킨다. -#}
+  <li{% if value == '미확인' %} data-flow-cell="unconfirmed"{% endif %}><small>{{ t.headers[loop.index0] }}</small><span>{{ value }}</span></li>
   {% endfor %}
   </ol>
   {% endfor %}

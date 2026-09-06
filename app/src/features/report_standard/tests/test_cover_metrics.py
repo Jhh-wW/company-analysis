@@ -33,8 +33,9 @@ from src.features.pipeline.port import (
 from src.features.provenance.sources import Source, SourceKind
 from src.features.report_standard.cover_metrics import (
     COVER_METRIC_CANDIDATES,
-    COVER_METRIC_COUNT,
     COVER_METRIC_LABELS,
+    COVER_METRIC_MAX,
+    COVER_METRIC_MIN,
     PERIOD_HEADER,
     cover_metrics,
 )
@@ -118,27 +119,85 @@ def test_매출액이_없는_표도_표지_띠를_그린다() -> None:
     metrics = cover_metrics(_report(table))
 
     assert [item.label for item in metrics.items] == ["영업이익", "당기순이익"]
-    assert len(metrics.items) == COVER_METRIC_COUNT
+    assert len(metrics.items) == 2
 
 
-def test_세_지표가_다_있으면_예전과_같은_두_칸이다() -> None:
-    """★ 회귀 방지 — 보통 회사의 표지는 하나도 바뀌면 안 된다."""
+def _three_metric_table() -> ReportTable:
+    """매출액·영업이익·당기순이익이 «다» 있는 보통 회사의 실적표."""
+
     full = _financials()
     full["list"].append(
         _dart_row("ifrs-full_ProfitLoss", "당기순이익", _NET_INCOME)
     )
     table = build_three_year_table(full, cite=_CITE)
+    assert table is not None, "시험 전제 — 세 지표짜리 표가 만들어져야 한다"
+    return table
+
+
+def test_세_지표가_다_있으면_당기순이익까지_세_칸이다() -> None:
+    """★ 제품 결정 ② (2026-09-06) — 있는 것을 다 보여 준다.
+
+    예전에는 세 지표가 다 있어도 앞 «둘»만 실었다. 그런데 적자 전환처럼 표지에서
+    가장 먼저 보여야 할 사실이 순이익 칸에 있는 회사가 실제로 있다
+    (실측: 하이브 2025 당기순이익 -2,544억원이 표지에서 안 보였다).
+    ⚠️ 이 시험이 깨지면 그 회사의 표지가 다시 「매출·영업이익만 있는 표지」가 된다.
+    """
+    metrics = cover_metrics(_report(_three_metric_table()))
+
+    assert [item.label for item in metrics.items] == [
+        "매출액",
+        "영업이익",
+        "당기순이익",
+    ]
+    assert len(metrics.items) == 3
+
+
+def test_지표가_둘뿐이면_두_칸_그대로다() -> None:
+    """★ 칸 수는 «표에 있는 만큼»이다 — 없는 지표를 지어내 채우지 않는다."""
+    table = build_three_year_table(_financials(), cite=_CITE)
     assert table is not None
 
     metrics = cover_metrics(_report(table))
 
-    assert [item.label for item in metrics.items] == list(COVER_METRIC_LABELS)
+    assert [item.label for item in metrics.items] == ["매출액", "영업이익"]
+    assert len(metrics.items) == 2
 
 
-def test_띠_후보는_닫힌_목록이다() -> None:
-    """★ 안전선 — 표에 있는 아무 열이나 표지에 크게 띄우지 않는다."""
+def test_지표가_하나뿐인_표는_실적표로_보지_않는다() -> None:
+    """★ 관문 — 「사업연도」 열이 있는 아무 숫자표나 표지에 올리지 않는다.
+
+    ``build_three_year_table``은 이런 표를 «만들지 않는다». 그래서 손으로
+    조립해, 관문이 실제로 막는지를 본다.
+    """
+    table = ReportTable(
+        caption="전자공시 최근 세 사업연도 주요 실적",
+        headers=[PERIOD_HEADER, "매출액"],
+        rows=[["2025", "8,219"], ["2024", "6,018"]],
+        cite=_CITE,
+        numeric=True,
+        display_unit="억원",
+    )
+
+    metrics = cover_metrics(_report(table))
+
+    assert not metrics
+    assert metrics.items == ()
+
+
+def test_띠_후보는_닫힌_목록이고_관문과_칸수는_다른_값이다() -> None:
+    """★ 안전선 — 표에 있는 아무 열이나 표지에 크게 띄우지 않는다.
+
+    ★ 두 상수를 «리터럴»로 못 박는 이유 — 예전에는 상수 하나가 「표를 알아보는
+      관문」과 「올리는 칸 수」를 겸했다. 두 값을 서로에게서 유도하면 다시
+      하나로 붙어도 시험이 못 잡는다.
+    """
     assert COVER_METRIC_CANDIDATES == ("매출액", "영업이익", "당기순이익")
-    assert COVER_METRIC_LABELS == COVER_METRIC_CANDIDATES[:COVER_METRIC_COUNT]
+    assert COVER_METRIC_LABELS == ("매출액", "영업이익")
+    assert COVER_METRIC_MIN == 2
+    assert COVER_METRIC_MAX == 3
+    assert COVER_METRIC_MIN < COVER_METRIC_MAX, (
+        "관문과 칸 수가 같아지면 지표가 둘뿐인 회사의 표지 띠가 사라진다"
+    )
 
 
 @pytest.fixture(scope="module")
@@ -355,6 +414,50 @@ def test_PDF_표지에_실적표와_같은_값이_나온다(
     for item in metrics.items:
         assert item.label in cover_text
         assert item.value in cover_text
+
+
+def test_세_칸짜리_회사는_세_채널_모두_당기순이익_칸을_그린다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 고르는 함수는 하나인데 그리는 곳은 셋이다 — 한 곳만 두 칸이면 안 된다.
+
+    ⚠️ 이 시험이 깨지면 같은 보고서가 채널마다 다른 칸 수를 보여 준다.
+    """
+    from src.features.export_notion.logic import (  # noqa: PLC0415
+        _v2_cover_metrics_blocks,
+    )
+    from src.features.report_standard.public_projection import (  # noqa: PLC0415
+        _cover_metrics_block,
+    )
+
+    report = _report(_three_metric_table())
+    metrics = cover_metrics(report)
+    values = [item.value for item in metrics.items]
+    assert len(values) == 3, "시험 전제 — 세 칸짜리 표본이어야 한다"
+
+    # 화면
+    body = _result_html(monkeypatch, report)
+    assert _WEB_METRIC_VALUE.findall(body) == values
+    assert "당기순이익" in body
+
+    # PDF
+    cover_text = _pdf_cover_text(report)
+    for label, value in zip(
+        [item.label for item in metrics.items], values, strict=True
+    ):
+        assert label in cover_text
+        assert value in cover_text
+
+    # 노션 — 봉인 블록을 지나 표 세 행이 된다.
+    block = _cover_metrics_block(report)
+    assert block is not None and len(block.items) == 3
+    notion_blocks = _v2_cover_metrics_blocks(block)
+    table = next(
+        item for item in notion_blocks if item.get("type") == "table"
+    )
+    rows = table["table"]["children"]
+    # 머리행 1 + 지표 3
+    assert len(rows) == 4
 
 
 def test_화면과_PDF_표지가_같은_값을_쓴다(
