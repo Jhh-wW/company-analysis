@@ -248,7 +248,7 @@ def _normalized_latin_acronym(value: str) -> str:
 
 
 def _latin_acronym_korean(value: str) -> str:
-    """JYP/jyp 같은 2~5자 영문 약어만 ‘제이와이피’로 펼친다.
+    """XYZ/xyz 같은 2~5자 영문 약어만 ‘엑스와이지’로 펼친다.
 
     일반 영문명·혼합 문자열을 억지 음역하지 않는다. 이 좁은 규칙만 결정론적으로 쓴다.
     """
@@ -258,7 +258,7 @@ def _latin_acronym_korean(value: str) -> str:
 def _latin_acronym_token_match(query: str, candidate_name: str) -> bool:
     """영문 법인명 안의 독립된 약어 토큰을 찾는다.
 
-    ``JYP`` → ``JYP Ent.``는 허용하지만 ``SM`` → ``Smart Media``처럼 단어
+    ``XYZ`` → ``XYZ Ent.``는 허용하지만 ``SM`` → ``Smart Media``처럼 단어
     앞글자만 우연히 같은 경우는 허용하지 않는다. 대문자 2~5자 입력과 완전히 같은
     영문 토큰이 법인명에 실제로 적혀 있을 때만 참이다.
     """

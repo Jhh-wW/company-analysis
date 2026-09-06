@@ -402,10 +402,10 @@ def build_section_prompt(
         claim_slot_guide,
         # 7장은 «경로표»를 함께 내야 해서 스키마 안내를 통째로 바꾼다.
         # 덧붙이면 기본 안내의 「이 JSON만 출력한다」와 충돌해 작가가 경로표를
-        # 빼먹는다 (진영 실측).
+        # 빼먹는다 (소재 제조사 실측).
         # 흐름표를 내는 장(5장 대응표·7장 경로표)은 스키마 안내를 통째로 «바꾼다».
         # 덧붙이면 기본 안내의 「이 JSON만 출력한다」와 충돌해 작가가 표를
-        # 빼먹는다 (진영 실측).
+        # 빼먹는다 (소재 제조사 실측).
         FLOW_PROMPT_BY_SECTION.get(section_id, JSON_SCHEMA_GUIDE),
         _render_table(performance_table),
         _render_already_written(already_written),

@@ -611,7 +611,7 @@
     <section class="report-section" data-report-cell="{{ s.cell }}">
       <h2><span class="no">{{ s.display_number or loop.index }}</span><span class="txt">{{ s.title }}</span><span class="section-badge" aria-hidden="true"></span>{% if s.tag %}<span class="section-tag">{{ s.tag }}</span>{% endif %}</h2>
       {# ★ 문단 단위로 낸다. 예전에는 한 장의 문장을 «전부 이어 붙여» 한
-         문단으로 냈다 — 진영 2장은 8문장이 줄바꿈 없이 한 덩어리였다.
+         문단으로 냈다 — 소재 제조사 2장은 8문장이 줄바꿈 없이 한 덩어리였다.
          prose_paragraphs가 없으면(옛 저장본) 예전처럼 이어 붙인다.
          ★ 본문 속 [n]은 «작은 위첨자 링크»로 바꿔 인쇄한다. 그냥 찍으면
          본문과 같은 크기의 대괄호 숫자가 박혀 읽기가 끊긴다. 번호는 render.py가

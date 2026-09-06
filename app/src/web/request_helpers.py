@@ -102,7 +102,7 @@ def _request_uses_readonly_existing(request: Request) -> bool:
 # ★ 구성 도식의 «색 고르는 규칙»을 화면 틀에서도 쓴다.
 #   PDF(export_pdf/logic.py)와 «같은 함수»여야 화면과 인쇄물의 색이 안 어긋난다.
 #   틀 안에서 `loop.index0 % 5` 식으로 따로 계산하면 항목 수가 바뀔 때
-#   두 곳이 조용히 달라진다 (하이브 6부문에서 실제로 그랬다).
+#   두 곳이 조용히 달라진다 (상장 엔터사 6부문에서 실제로 그랬다).
 templates.env.globals["composition_tone"] = composition_tone
 
 # ★ 4장 «3개년 변화 요약» — 표 안의 두 값만으로 증감을 만든다.

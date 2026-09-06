@@ -237,8 +237,8 @@ def robots_decision(
       차단하던 예전 분류를 4xx 한 덩어리로 되돌린 이유:
 
       (1) 실측(2026-09-05) — robots.txt를 두지 않은 정적 호스팅(S3/CloudFront)이
-          404가 아니라 **403**을 돌려준다. 하이브 ``hybecorp.com``·
-          ``www.hybecorp.com``이 그랬고, 같은 호스트의 루트 페이지는 200으로
+          404가 아니라 **403**을 돌려준다. 상장 엔터사의 회사 도메인과 그
+          ``www.`` 호스트가 그랬고, 같은 호스트의 루트 페이지는 200으로
           멀쩡히 열렸다. 즉 403은 「크롤링하지 마라」가 아니라 「그런 파일이
           없다」는 뜻이었는데 우리는 그걸 회사 전체 차단으로 읽고 있었다.
       (2) 표준 — RFC 9309 §2.3.1.3은 400~499를 통째로 «unavailable»로 묶고,
@@ -428,7 +428,7 @@ def _truncate_utf8_bytes(text: str, max_bytes: int) -> str:
 # ══════════════════════════════════════════════════════════
 
 #: 이동 지시 뒤에서 목적지 문자열을 찾을 때 살펴보는 최대 글자 수.
-#: 하이브 실측처럼 ``location.replace(origin + '/ko/main' + search)``로
+#: 상장 엔터사 실측처럼 ``location.replace(origin + '/ko/main' + search)``로
 #: 이어 붙인 식도 첫 문자열 상수를 찾을 수 있게 넉넉히 두되, 파일 전체를
 #: 훑어 엉뚱한 문자열을 집지 않도록 한 구문 길이로 제한한다.
 _CLIENT_REDIRECT_ARGUMENT_WINDOW: Final[int] = 200
@@ -515,7 +515,7 @@ def client_side_redirect_target(html: str, base_url: str) -> str:
     """HTML 본문이 시키는 이동 목적지를 절대 URL로 돌려준다(없으면 빈 문자열).
 
     서버가 HTTP 3xx로 옮겨 주지 않고 «받은 HTML이 브라우저에게 다른 주소로
-    가라고 시키는» 사이트가 있다(2026-09-06 하이브 실측: 루트 HTML이
+    가라고 시키는» 사이트가 있다(2026-09-06 상장 엔터사 실측: 루트 HTML이
     ``location.replace``로 ``/ko/main``을 가리킨다). 우리 수집기는 HTML만
     읽으므로 그 지시를 못 보고 본문이 0글자인 껍데기만 쥐게 된다.
 
