@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import http.client
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -420,3 +421,130 @@ def _truncate_utf8_bytes(text: str, max_bytes: int) -> str:
     if len(encoded) <= max_bytes:
         return text
     return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+# ══════════════════════════════════════════════════════════
+# 본문이 시키는 «클라이언트 쪽 이동» 판별
+# ══════════════════════════════════════════════════════════
+
+#: 이동 지시 뒤에서 목적지 문자열을 찾을 때 살펴보는 최대 글자 수.
+#: 하이브 실측처럼 ``location.replace(origin + '/ko/main' + search)``로
+#: 이어 붙인 식도 첫 문자열 상수를 찾을 수 있게 넉넉히 두되, 파일 전체를
+#: 훑어 엉뚱한 문자열을 집지 않도록 한 구문 길이로 제한한다.
+_CLIENT_REDIRECT_ARGUMENT_WINDOW: Final[int] = 200
+
+#: ``location.replace(...)``·``location.assign(...)`` 호출 지점.
+#: 앞에 식별자 글자가 붙은 ``myLocation.replace``는 제외한다.
+_CLIENT_REDIRECT_CALL_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<![\w$])(?:(?:window|document|self|top)\s*\.\s*)?"
+    r"location\s*\.\s*(?:replace|assign)\s*\(",
+    re.IGNORECASE,
+)
+
+#: ``location.href = '...'`` 대입 지점.
+_CLIENT_REDIRECT_HREF_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<![\w$])(?:(?:window|document|self|top)\s*\.\s*)?"
+    r"location\s*\.\s*href\s*=",
+    re.IGNORECASE,
+)
+
+#: 위 두 지점 뒤에서 목적지로 인정하는 문자열 상수. 공백·꺾쇠·따옴표가
+#: 없는 URL 모양만 받는다(템플릿 리터럴과 변수는 값을 모르므로 제외).
+_QUOTED_LITERAL_RE: Final[re.Pattern[str]] = re.compile(
+    r"[\"']\s*([^\"'`<>\s]{1,2048})\s*[\"']"
+)
+
+_META_TAG_RE: Final[re.Pattern[str]] = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+_META_ATTRIBUTE_RE: Final[re.Pattern[str]] = re.compile(
+    r"([a-zA-Z][a-zA-Z0-9_:-]*)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'>]+))"
+)
+_META_REFRESH_URL_RE: Final[re.Pattern[str]] = re.compile(
+    r"url\s*=\s*[\"']?([^\"'>;\s]{1,2048})", re.IGNORECASE
+)
+
+
+def _first_quoted_literal(fragment: str) -> str:
+    match = _QUOTED_LITERAL_RE.search(fragment)
+    return match.group(1) if match is not None else ""
+
+
+def _meta_refresh_target(html: str) -> str:
+    """``<meta http-equiv="refresh" content="0;url=...">``의 목적지를 뽑는다."""
+
+    for tag in _META_TAG_RE.finditer(html):
+        attributes: dict[str, str] = {}
+        for attribute in _META_ATTRIBUTE_RE.finditer(tag.group(0)):
+            name = attribute.group(1).casefold()
+            if name in attributes:
+                continue
+            value = next(
+                (group for group in attribute.groups()[1:] if group is not None),
+                "",
+            )
+            attributes[name] = value
+        if attributes.get("http-equiv", "").strip().casefold() != "refresh":
+            continue
+        target = _META_REFRESH_URL_RE.search(attributes.get("content", ""))
+        if target is not None and target.group(1).strip():
+            return target.group(1).strip()
+    return ""
+
+
+def _script_redirect_target(html: str) -> str:
+    """본문 스크립트가 지시하는 이동 목적지 문자열 상수를 뽑는다."""
+
+    for pattern, terminators in (
+        (_CLIENT_REDIRECT_CALL_RE, ")"),
+        (_CLIENT_REDIRECT_HREF_RE, ";\n\r}"),
+    ):
+        match = pattern.search(html)
+        if match is None:
+            continue
+        window = html[match.end() : match.end() + _CLIENT_REDIRECT_ARGUMENT_WINDOW]
+        cut = min(
+            (index for terminator in terminators if (index := window.find(terminator)) >= 0),
+            default=len(window),
+        )
+        literal = _first_quoted_literal(window[:cut])
+        if literal:
+            return literal
+    return ""
+
+
+def client_side_redirect_target(html: str, base_url: str) -> str:
+    """HTML 본문이 시키는 이동 목적지를 절대 URL로 돌려준다(없으면 빈 문자열).
+
+    서버가 HTTP 3xx로 옮겨 주지 않고 «받은 HTML이 브라우저에게 다른 주소로
+    가라고 시키는» 사이트가 있다(2026-09-06 하이브 실측: 루트 HTML이
+    ``location.replace``로 ``/ko/main``을 가리킨다). 우리 수집기는 HTML만
+    읽으므로 그 지시를 못 보고 본문이 0글자인 껍데기만 쥐게 된다.
+
+    보는 순서는 ``<meta http-equiv="refresh">`` → ``location.replace/assign``
+    → ``location.href`` 대입이며, 먼저 찾은 것 하나만 쓴다. 변수·템플릿
+    리터럴처럼 값을 알 수 없는 목적지는 추측하지 않고 빈 문자열을 준다.
+
+    ★ 이 함수는 «어디를 가리키는가»만 답한다. 그 주소를 실제로 읽어도 되는지
+      (같은 origin·robots 허용·횟수 제한)는 호출자가 판단한다 — 이 함수의
+      결과만 믿고 조회하면 안 된다.
+
+    Args:
+        html: 방금 읽은 페이지 본문.
+        base_url: 상대 주소를 절대 주소로 만들 기준(그 응답의 최종 URL).
+
+    Returns:
+        절대 URL 문자열. 지시가 없거나 해석할 수 없으면 빈 문자열.
+    """
+
+    if not html or not base_url:
+        return ""
+    target = _meta_refresh_target(html) or _script_redirect_target(html)
+    if not target:
+        return ""
+    try:
+        absolute = urllib.parse.urljoin(base_url, target)
+    except ValueError:
+        return ""
+    parsed = urllib.parse.urlsplit(absolute)
+    if parsed.scheme.casefold() not in ("http", "https") or not parsed.hostname:
+        return ""
+    return absolute
