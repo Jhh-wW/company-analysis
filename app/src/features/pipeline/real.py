@@ -31,7 +31,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Final, Iterable, Optional
+from typing import Any, Callable, Final, Iterable, Mapping, Optional
 
 from src.core import news_intake_switch, paths, typed_collector_switch
 from src.core.clock import subtract_years, today_kst
@@ -102,6 +102,7 @@ from src.features.business_candidate.dart_identity import (
 from src.features.grading.financial import parse_financial_table
 from src.features.homepage import link as homepage_link
 from src.features.homepage.constants import FRAGMENT_KIND as HOMEPAGE_FRAGMENT_KIND
+from src.features.homepage.constants import TIMEOUT_SEC as HOMEPAGE_TIMEOUT_SEC
 from src.features.homepage.logic import collect_homepage_fragments
 from src.features.homepage.ir_pdf import (
     OFFICIAL_IR_FRAGMENT_KIND,
@@ -110,19 +111,32 @@ from src.features.homepage.ir_pdf import (
 from src.features.homepage.safe_http import collection_cache_scope
 from src.features.homepage.wide_extract import extract_usable_ranges
 from src.features.homepage.wide_fetch import (
+    WideTransportError,
     default_wide_transport,
     load_robots_policy,
 )
 from src.features.news_intake import (
+    NewsBodyFetchResult,
     NewsMappingResult,
+    article_url_variants as news_url_variants,
     build_diagnostics as build_news_intake_diagnostics,
     classify_and_read as classify_and_read_news,
+    decode_looks_broken as news_decode_looks_broken,
+    extract_article_text as extract_news_article_text,
+    http_status_code as news_http_status_code,
     map_articles_to_fragments as map_news_articles_to_fragments,
     needs_extended_window as news_needs_extended_window,
     news_trigger,
     select_news_items,
 )
 from src.features.news_intake.constants import (
+    EXCLUDED_FETCH_DECODE_ERROR,
+    EXCLUDED_FETCH_EMPTY_BODY,
+    EXCLUDED_FETCH_ORIGIN_DENIED,
+    EXCLUDED_FETCH_ROBOTS_BLOCKED,
+    EXCLUDED_FETCH_TIMEOUT,
+    EXCLUDED_FETCH_TRANSPORT_ERROR,
+    FETCH_HTTP_CODE_PREFIX,
     NEWS_TRIGGER_NONE,
     NEWS_TRIGGER_WEB_ZERO,
 )
@@ -334,6 +348,22 @@ NEWS_SEARCH_INTERNAL_ERROR_CODE: Final[str] = "news_search_internal_error"
 NEWS_INTAKE_INTERNAL_ERROR_CODE: Final[str] = "news_intake_internal_error"
 NEWS_CLASSIFICATION_INVALID_CODE: Final[str] = "classification_invalid_json"
 NEWS_BODY_FETCH_FAILED_CODE: Final[str] = "fetch_failed"
+#: 기사 본문 요청의 시간 제한. 전송 계층(``default_wide_transport``)이 실제로
+#: 쓰는 값과 같아야 「시간 초과」와 「그 밖의 전송 실패」 판정이 맞는다 —
+#: 두 값이 갈라지지 않게 시험이 직접 견준다.
+NEWS_BODY_FETCH_TIMEOUT_SEC: Final[int] = HOMEPAGE_TIMEOUT_SEC
+#: 총괄 실패 코드를 고를 때의 우선순위. 수가 같으면 앞에 적힌 사유를 고른다 —
+#: 우리가 손댈 수 있는 원인(본문 0자·해독 깨짐)을 robots처럼 손댈 수 없는
+#: 원인보다 먼저 보여 줘야 고칠 곳이 드러난다.
+_NEWS_BODY_FAILURE_PRIORITY: Final[tuple[str, ...]] = (
+    EXCLUDED_FETCH_EMPTY_BODY,
+    EXCLUDED_FETCH_DECODE_ERROR,
+    EXCLUDED_FETCH_TIMEOUT,
+    EXCLUDED_FETCH_TRANSPORT_ERROR,
+    EXCLUDED_FETCH_ROBOTS_BLOCKED,
+    EXCLUDED_FETCH_ORIGIN_DENIED,
+    NEWS_BODY_FETCH_FAILED_CODE,
+)
 NEWS_FRAGMENT_LIMIT_CODE: Final[str] = "fragment_limit"
 #: steps 「창」 값 정본. 기본·확장은 기사 기간(1년·3년)을 뜻하고,
 #: 웹0건보강은 기간을 늘리지 않은 채 웹 0건 조건으로 열린 경우다.
@@ -5679,13 +5709,44 @@ def _news_origin_allowed(source_url: str) -> Callable[[str], bool]:
     return allowed
 
 
-def _fetch_news_article_text(source_url: str) -> str | None:
-    """robots·SSRF·응답 상한을 지킨 뒤 기사 본문 글자만 돌려준다."""
+def _news_primary_body(raw_html: str) -> str:
+    """본문 폴백의 첫 겹 — 공식 웹 수집기와 «같은» 본문 구간 추출을 쓴다."""
 
-    allowed_origin = _news_origin_allowed(source_url)
-    if not allowed_origin(source_url):
-        return None
-    parsed = urllib.parse.urlsplit(source_url)
+    ranges, _title = extract_usable_ranges(raw_html)
+    return "\n".join(ranges).strip()
+
+
+def _news_transport_failure_code(
+    error: Exception,
+    *,
+    elapsed_seconds: float,
+) -> str:
+    """상태 코드를 못 받은 전송 실패를 시간 초과와 그 밖으로 가른다.
+
+    전송 계층은 실패 문장을 한국어 리터럴로 만든다. 문장을 견주면 말이
+    바뀔 때마다 판정이 조용히 어긋나므로, (1) 예외 원인 사슬에
+    ``TimeoutError``가 있는지와 (2) 실제로 시간 제한만큼 걸렸는지만 본다.
+    """
+
+    if elapsed_seconds >= NEWS_BODY_FETCH_TIMEOUT_SEC:
+        return EXCLUDED_FETCH_TIMEOUT
+    cause: BaseException | None = error
+    seen: set[int] = set()
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, TimeoutError):
+            return EXCLUDED_FETCH_TIMEOUT
+        cause = cause.__cause__ or cause.__context__
+    return EXCLUDED_FETCH_TRANSPORT_ERROR
+
+
+def _fetch_news_article_once(article_url: str) -> NewsBodyFetchResult:
+    """주소 하나를 robots·SSRF·응답 상한을 지켜 읽고 «실패 사유»까지 남긴다."""
+
+    allowed_origin = _news_origin_allowed(article_url)
+    if not allowed_origin(article_url):
+        return NewsBodyFetchResult(reason_code=EXCLUDED_FETCH_ORIGIN_DENIED)
+    parsed = urllib.parse.urlsplit(article_url)
     robots_url = urllib.parse.urlunsplit(
         (parsed.scheme, parsed.netloc, "/robots.txt", "", "")
     )
@@ -5695,18 +5756,58 @@ def _fetch_news_article_text(source_url: str) -> str | None:
         fetch=default_wide_transport,
         url_allowed=allowed_origin,
     )
-    if policy.blocked or not policy.can_fetch(source_url):
-        return None
+    if policy.blocked or not policy.can_fetch(article_url):
+        # robots가 막은 사이트는 «우회하지 않는다». 사유만 남기고 끝낸다.
+        return NewsBodyFetchResult(reason_code=EXCLUDED_FETCH_ROBOTS_BLOCKED)
 
     def allowed(candidate: str) -> bool:
         return allowed_origin(candidate) and policy.can_fetch(candidate)
 
-    response = default_wide_transport(source_url, allowed)
+    started = time.monotonic()
+    try:
+        response = default_wide_transport(article_url, allowed)
+    except WideTransportError as error:
+        return NewsBodyFetchResult(
+            reason_code=_news_transport_failure_code(
+                error, elapsed_seconds=time.monotonic() - started
+            )
+        )
     if response.status != 200:
-        return None
-    ranges, _title = extract_usable_ranges(response.text)
-    text = "\n".join(ranges).strip()
-    return text or None
+        return NewsBodyFetchResult(reason_code=news_http_status_code(response.status))
+    if news_decode_looks_broken(response.text):
+        # 깨진 글자를 근거 조각으로 만들지 않는다.
+        return NewsBodyFetchResult(reason_code=EXCLUDED_FETCH_DECODE_ERROR)
+    text, stage = extract_news_article_text(
+        response.text, primary_extract=_news_primary_body
+    )
+    if not text:
+        return NewsBodyFetchResult(reason_code=EXCLUDED_FETCH_EMPTY_BODY)
+    return NewsBodyFetchResult(text=text, stage=stage)
+
+
+def _fetch_news_article_text(source_url: str) -> NewsBodyFetchResult:
+    """같은 기사를 가리키는 «표기만 다른» 주소까지 순서대로 시도한다.
+
+    ``http://``나 ``www`` 없는 표기는 언론사가 301로 정식 주소에 돌려보내는데,
+    리다이렉트가 origin을 벗어나면 (같은 origin만 허용하는) 방어에 걸려
+    ``robots.txt`` 확인 단계부터 실패한다 — 실측에서 그런 주소는 예외 없이
+    본문 0건이었다. 그래서 리다이렉트를 느슨하게 푸는 대신 **정식 표기
+    주소로 처음부터 다시 요청**한다. 그러면 그 origin의 robots.txt를 새로
+    확인하게 되므로 robots도 리다이렉트 방어도 조금도 약해지지 않는다.
+
+    실패하면 «첫 주소의 사유»를 돌려준다 — 그게 검색이 준 원래 주소이고,
+    운영에서 고칠 곳을 가리키는 값이기 때문이다.
+    """
+
+    first_failure: NewsBodyFetchResult | None = None
+    for article_url in news_url_variants(source_url):
+        result = _fetch_news_article_once(article_url)
+        if result.succeeded:
+            return result
+        first_failure = first_failure or result
+    return first_failure or NewsBodyFetchResult(
+        reason_code=EXCLUDED_FETCH_ORIGIN_DENIED
+    )
 
 
 def _news_default_classifier(engine: Any, client: Any) -> Callable[[str], str]:
@@ -5847,6 +5948,44 @@ def _news_window_label(*, trigger_reason: str, extended_window: bool) -> str:
     return NEWS_WINDOW_LABEL_EXTENDED if extended_window else NEWS_WINDOW_LABEL_DEFAULT
 
 
+def _dominant_news_body_failure(exclusions: Mapping[str, int]) -> str | None:
+    """본문 읽기 실패 중 가장 많은 사유 하나를 총괄 실패 코드로 고른다.
+
+    ``fetch_http_403``처럼 상태를 담은 코드는 미리 다 적을 수 없으므로
+    앞머리로 알아본다. 수가 같으면 ``_NEWS_BODY_FAILURE_PRIORITY`` 순서로
+    가른다 — 순서가 없으면 실행마다 다른 코드가 뽑혀 운영에서 못 견준다.
+    """
+
+    def is_body_failure(code: str) -> bool:
+        return code in _NEWS_BODY_FAILURE_PRIORITY or code.startswith(
+            FETCH_HTTP_CODE_PREFIX
+        )
+
+    def rank(code: str) -> int:
+        try:
+            return _NEWS_BODY_FAILURE_PRIORITY.index(code)
+        except ValueError:
+            # 상태 코드 계열은 「손댈 수 있는 원인」과 robots 사이에 둔다.
+            return _NEWS_BODY_FAILURE_PRIORITY.index(EXCLUDED_FETCH_TRANSPORT_ERROR)
+
+    body_failures = {
+        code: count
+        for code, count in exclusions.items()
+        if count and is_body_failure(code)
+    }
+    if not body_failures:
+        return None
+    return min(body_failures, key=lambda code: (-body_failures[code], rank(code), code))
+
+
+def _news_reason_summary(exclusions: Mapping[str, int]) -> str:
+    """제외 사유별 수를 「코드:수」로 이어 붙인 한 줄. 원문·주소는 담지 않는다."""
+
+    return ",".join(
+        f"{code}:{count}" for code, count in sorted(exclusions.items()) if count
+    )
+
+
 def _collect_news_intake(
     *,
     search_news: Callable[..., Any],
@@ -5904,6 +6043,7 @@ def _collect_news_intake(
                     section_id: 0 for section_id in REQUIRED_EVIDENCE_SECTION_IDS
                 },
                 "제외": {},
+                "본문단계": {},
             }
         )
         return []
@@ -5981,8 +6121,8 @@ def _collect_news_intake(
         exclusions = dict(diagnostics.exclusion_counts)
         if failure_code is None and exclusions.get(NEWS_CLASSIFICATION_INVALID_CODE):
             failure_code = NEWS_CLASSIFICATION_INVALID_CODE
-        elif failure_code is None and exclusions.get(NEWS_BODY_FETCH_FAILED_CODE):
-            failure_code = NEWS_BODY_FETCH_FAILED_CODE
+        elif failure_code is None:
+            failure_code = _dominant_news_body_failure(exclusions)
 
         document_hashes = {
             article.candidate.source_url: exact_text_sha256(article.text)
@@ -6017,12 +6157,17 @@ def _collect_news_intake(
                 "상한잘림": truncated_count,
                 "장별조각": dict(diagnostics.fragment_counts_by_section),
                 "제외": exclusions,
+                "본문단계": dict(classification.body_stage_counts),
             }
         )
         if failure_code:
+            # ★ 사유별 수까지 남긴다. 예전에는 code=fetch_failed 한 줄뿐이라
+            #   robots 차단인지 403인지 「200인데 본문 0자」인지 알 수 없었다.
+            #   기사 주소·본문 글자는 로그에 넣지 않는다.
             logger.warning(
-                "언론 보조 근거 수집 일부를 완료하지 못했습니다 code=%s",
+                "언론 보조 근거 수집 일부를 완료하지 못했습니다 code=%s reasons=%s",
                 failure_code,
+                _news_reason_summary(exclusions),
             )
         return raw_fragments
     except Exception as error:  # noqa: BLE001 - 뉴스 실패는 전체 보고서를 막지 않는다
@@ -6053,6 +6198,7 @@ def _collect_news_intake(
                     section_id: 0 for section_id in REQUIRED_EVIDENCE_SECTION_IDS
                 },
                 "제외": {},
+                "본문단계": {},
             }
         )
         return []

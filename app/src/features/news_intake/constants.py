@@ -224,3 +224,76 @@ EXCLUDED_PUBLISHED_ON_REQUIRED: Final[str] = "published_on_required"
 EXCLUDED_DUPLICATE_SENTENCE: Final[str] = "duplicate_sentence"
 #: 같은 기사에서 상한(MAX_FRAGMENTS_PER_ARTICLE)을 넘겨 뺀 문장.
 EXCLUDED_ARTICLE_FRAGMENT_LIMIT: Final[str] = "article_fragment_limit"
+
+#: 기사 본문 읽기 실패 사유. 예전에는 아래 사유가 모두 ``fetch_failed`` 하나로
+#: 뭉개져 「robots가 막았다」와 「200인데 본문이 0자다」를 운영 로그에서 가를 수
+#: 없었다. 사유마다 고쳐야 할 곳이 다르므로(robots는 손댈 수 없고, 본문 0자는
+#: 추출 폴백으로 살릴 수 있다) 코드도 따로 둔다.
+#: 주소 자체가 http/https 공개 웹이 아니거나 origin을 만들 수 없다.
+EXCLUDED_FETCH_ORIGIN_DENIED: Final[str] = "fetch_origin_denied"
+#: robots.txt가 이 경로를 막았거나 robots.txt 자체를 확인하지 못했다(fail-closed).
+EXCLUDED_FETCH_ROBOTS_BLOCKED: Final[str] = "fetch_robots_blocked"
+#: 200을 받았지만 본문 폴백을 다 거쳐도 쓸 글자가 없었다.
+EXCLUDED_FETCH_EMPTY_BODY: Final[str] = "fetch_empty_body"
+#: 받은 글자에 대체문자(U+FFFD)가 너무 많다 — 해독이 깨졌다는 뜻이다.
+EXCLUDED_FETCH_DECODE_ERROR: Final[str] = "fetch_decode_error"
+#: 시간 제한 안에 응답을 끝내지 못했다.
+EXCLUDED_FETCH_TIMEOUT: Final[str] = "fetch_timeout"
+#: 상태 코드조차 받지 못한 그 밖의 전송 실패(DNS·연결 거부·응답 형식 거부 등).
+EXCLUDED_FETCH_TRANSPORT_ERROR: Final[str] = "fetch_transport_error"
+#: HTTP 상태별 사유 코드의 앞머리. 403·429처럼 상태마다 대응이 달라서
+#: 하나로 합치지 않고 ``fetch_http_403`` 꼴로 상태를 그대로 남긴다.
+FETCH_HTTP_CODE_PREFIX: Final[str] = "fetch_http_"
+
+#: 본문을 어느 겹에서 얻었는지 남기는 단계 코드. 「메타 설명 한 문장으로
+#: 겨우 건졌다」와 「기사 본문을 통째로 읽었다」는 근거의 두께가 다르므로
+#: steps에 단계별 수를 남겨 사람이 가를 수 있게 한다.
+BODY_STAGE_USABLE_RANGES: Final[str] = "usable_ranges"
+BODY_STAGE_JSON_LD: Final[str] = "json_ld_article_body"
+BODY_STAGE_ARTICLE_TAG: Final[str] = "article_tag"
+BODY_STAGE_META_DESCRIPTION: Final[str] = "meta_description"
+#: 파이프라인 밖에서 본문 글자를 그대로 주입받은 경우(시험·대체 수집기).
+#: 실제 폴백 사다리를 거치지 않았으므로 위 네 단계와 섞지 않는다.
+BODY_STAGE_PROVIDED: Final[str] = "provided_text"
+#: 본문 폴백을 시도하는 순서. **이 tuple이 폴백 사다리의 정본이다** —
+#: 항목을 빼면 그 겹이 실제로 꺼진다(음성 대조가 이 성질을 쓴다).
+BODY_EXTRACTION_STAGE_ORDER: Final[tuple[str, ...]] = (
+    BODY_STAGE_USABLE_RANGES,
+    BODY_STAGE_JSON_LD,
+    BODY_STAGE_ARTICLE_TAG,
+    BODY_STAGE_META_DESCRIPTION,
+)
+#: 본문으로 인정하는 최소 글자 수. 메타 설명 한 문장(보통 80~160자)은 넘고,
+#: 「더보기」 같은 조각 글자는 넘지 못하는 자리에 둔다.
+BODY_MIN_CHARS: Final[int] = 20
+#: 해독이 깨졌다고 볼 대체문자 비율. 정상 문서에도 U+FFFD가 한두 개 섞일 수
+#: 있으므로 개수가 아니라 비율로 본다.
+DECODE_REPLACEMENT_RATIO_LIMIT: Final[float] = 0.02
+DECODE_REPLACEMENT_CHAR: Final[str] = "\ufffd"
+
+#: 한 기사에서 본문을 시도할 주소의 순서. 언론사 원문을 먼저 보고, 그 주소가
+#: 막히거나 본문이 비면 검색 서비스가 준 주소를 같은 규칙(robots 포함)으로
+#: 시도한다. 순서를 뒤집으려면 이 tuple만 바꾼다.
+BODY_FETCH_URL_FIELD_ORDER: Final[tuple[str, ...]] = (
+    "source_url",
+    "originallink",
+    "link",
+)
+
+#: 같은 기사를 가리키는 «표기만 다른» 주소를 만들 때 쓰는 변형과 그 순서.
+#: 네이버 검색이 주는 originallink에는 ``http://``나 ``www`` 없는 표기가 흔한데,
+#: 언론사 대부분이 그것을 301로 정식 주소에 돌려보낸다. 리다이렉트를 따라가는
+#: 대신 «정식 표기 주소로 처음부터 다시 요청»한다 — 그래야 그 origin의
+#: robots.txt를 새로 확인하게 되고, 같은 origin만 허용하는 리다이렉트 방어를
+#: 조금도 느슨하게 만들지 않는다.
+URL_VARIANT_AS_GIVEN: Final[str] = "as_given"
+URL_VARIANT_HTTPS_UPGRADE: Final[str] = "https_upgrade"
+URL_VARIANT_WWW_TOGGLE: Final[str] = "www_toggle"
+URL_VARIANT_ORDER: Final[tuple[str, ...]] = (
+    URL_VARIANT_AS_GIVEN,
+    URL_VARIANT_HTTPS_UPGRADE,
+    URL_VARIANT_WWW_TOGGLE,
+)
+#: 주소 변형 상한. 변형마다 robots.txt 확인이 한 번 더 붙으므로 늘리면
+#: 요청 수가 그대로 늘어난다.
+MAX_URL_VARIANTS: Final[int] = 3
