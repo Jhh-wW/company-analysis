@@ -272,6 +272,43 @@ def test_구성변화표는_행이_여섯개를_넘으면_그래프없이_표로
     assert table_visualization(table) is None
 
 
+def test_연도가_여럿인_비중표는_구성_도식으로_대체하지_않는다() -> None:
+    """★★ P4-3 (하이브 실측) — 한 해 누적 막대로 바꾸면 나머지 해가 사라진다.
+
+    캡션은 「… 변화 (2023~2025)」인데 그림에는 2025년 한 해만 남아, 독자가
+    세 해의 변화를 봤다고 오해했다. 여기서 ``None``을 돌려주면 웹·PDF가 둘 다
+    원래 표(짙은 머리행)를 그대로 내므로 세 해 숫자가 모두 보인다.
+    """
+    table = ReportTable(
+        caption="제품·서비스별 매출 비중 변화 (2023~2025)",
+        headers=["구분", "2023 비중", "2024 비중", "2025 비중"],
+        rows=[
+            ["제품가", "40%", "50%", "60%"],
+            ["제품나", "40%", "35%", "30%"],
+            ["제품다", "20%", "15%", "10%"],
+        ],
+        presentation="composition",
+    )
+
+    assert table_visualization(table) is None
+
+
+def test_한_해짜리_비중표는_예전대로_구성_도식으로_그린다() -> None:
+    """다개년 규칙이 단년 표까지 끄지 않는지 «반대쪽»을 함께 못 박는다."""
+    table = ReportTable(
+        caption="제품·서비스별 매출 비중 (2025년)",
+        headers=["구분", "2025 비중"],
+        rows=[["제품가", "60%"], ["제품나", "30%"], ["제품다", "10%"]],
+        presentation="composition",
+    )
+
+    visualization = table_visualization(table)
+
+    assert visualization is not None
+    assert visualization.kind == "composition"
+    assert [item.label for item in visualization.items] == ["제품가", "제품나", "제품다"]
+
+
 def test_flow_preserves_each_complete_left_to_right_row() -> None:
     visualization = table_visualization(
         ReportTable(
