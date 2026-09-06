@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 합성 픽스처: 로컬 DART 원문이 없어도 조사 보고서 ¶3의 카카오 실사례 값을
+     같은 표 모양으로 재현했다. TABLE/TR/TD와 ROWSPAN·COLSPAN, 단위 표 뒤에
+     이어지는 본표까지 DART 마크업 그대로 흉내 낸다. -->
+<DOCUMENT>
+<BODY>
+
+<P USERMARK="B">2. 주요 제품 및 서비스</P>
+
+<TABLE BORDER="0" WIDTH="1024" ACLASS="NORMAL">
+<TBODY>
+<TR><TD ALIGN="RIGHT">(단위 : 백만원)</TD></TR>
+</TBODY>
+</TABLE>
+
+<TABLE BORDER="1" WIDTH="1022" ACLASS="NORMAL">
+<TBODY>
+<TR>
+<TD ROWSPAN="2" ALIGN="CENTER">사업부문</TD>
+<TD ROWSPAN="2" ALIGN="CENTER">주요 제품·서비스</TD>
+<TD COLSPAN="2" ALIGN="CENTER">2025년 제31기</TD>
+</TR>
+<TR>
+<TD ALIGN="CENTER">매 출 액</TD>
+<TD ALIGN="CENTER">비 중</TD>
+</TR>
+<TR>
+<TD ROWSPAN="3">플랫폼 부문</TD>
+<TD>카카오톡,선물하기</TD>
+<TD ALIGN="RIGHT">1,234,567</TD>
+<TD ALIGN="RIGHT">41.20%</TD>
+</TR>
+<TR>
+<TD>다음(Daum)</TD>
+<TD ALIGN="RIGHT">234,567</TD>
+<TD ALIGN="RIGHT">7.83%</TD>
+</TR>
+<TR>
+<TD>기타(A/S) 등</TD>
+<TD ALIGN="RIGHT">12,345</TD>
+<TD ALIGN="RIGHT">0.41%</TD>
+</TR>
+<TR>
+<TD>콘텐츠 부문</TD>
+<TD>픽코마,카카오페이지,카카오웹툰</TD>
+<TD ALIGN="RIGHT">987,654</TD>
+<TD ALIGN="RIGHT">32.96%</TD>
+</TR>
+<TR>
+<TD COLSPAN="2">합계</TD>
+<TD ALIGN="RIGHT">2,996,533</TD>
+<TD ALIGN="RIGHT">100.00%</TD>
+</TR>
+</TBODY>
+</TABLE>
+
+<P USERMARK="B">가. 주요 종속회사의 업종 및 주요 사업</P>
+
+<TABLE BORDER="1" ACLASS="NORMAL">
+<TBODY>
+<TR>
+<TH>회사명</TH><TH>업종</TH><TH>주요 사업</TH>
+</TR>
+<TR>
+<TD>㈜카카오엔터테인먼트</TD><TD>콘텐츠 제작업</TD><TD>웹툰·웹소설 제작</TD>
+</TR>
+<TR>
+<TD>㈜카카오모빌리티</TD><TD>운수 지원 서비스업</TD><TD>이동 플랫폼 운영</TD>
+</TR>
+</TBODY>
+</TABLE>
+
+<P USERMARK="B">나. 총 계약금액이 직전 회계연도 매출액의 5% 이상인 계약</P>
+
+<TABLE BORDER="1" ACLASS="NORMAL">
+<TBODY>
+<TR>
+<TH>계약명</TH><TH>계약기간</TH><TH>진행률</TH>
+</TR>
+<TR>
+<TD>공공 클라우드 전환 구축</TD><TD>2024-07-01~2025-06-30</TD><TD>91%</TD>
+</TR>
+<TR>
+<TD>합계</TD><TD>-</TD><TD>-</TD>
+</TR>
+</TBODY>
+</TABLE>
+
+</BODY>
+</DOCUMENT>

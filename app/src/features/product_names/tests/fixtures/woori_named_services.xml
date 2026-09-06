@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 합성 픽스처: 금융업의 「상품 구분 | 상품 내용」 표와 게임·브랜드 표를
+     DART 마크업으로 재현했다. 실제 공시처럼 상품 구분 칸이 COLSPAN으로
+     두 칸을 덮는 행과, 사람 이름 열이 섞인 표를 함께 담는다. -->
+<DOCUMENT>
+<BODY>
+
+<P USERMARK="B">라. 취급 업무 및 상품ㆍ서비스 개요</P>
+
+<TABLE BORDER="1" ACLASS="NORMAL">
+<TBODY>
+<TR>
+<TD COLSPAN="2" ALIGN="CENTER">상품 구분</TD>
+<TD ALIGN="CENTER">상품 내용</TD>
+</TR>
+<TR>
+<TD ROWSPAN="2" ALIGN="CENTER">신용카드</TD>
+<TD>GPCC(General Purpose Credit Card)</TD>
+<TD>일반적인 범용 신용카드</TD>
+</TR>
+<TR>
+<TD>PLCC(Private Label Credit Card)</TD>
+<TD>파트너사의 브랜드와 로열티 프로그램 기반 신용카드</TD>
+</TR>
+<TR>
+<TD COLSPAN="2">단기카드대출 (현금서비스)</TD>
+<TD>사전에 부여된 한도 안에서 자금을 대여하고 결제일에 상환하는 금융상품</TD>
+</TR>
+</TBODY>
+</TABLE>
+
+<P USERMARK="B">마. 주요 게임 현황</P>
+
+<TABLE BORDER="1" ACLASS="NORMAL">
+<TBODY>
+<TR>
+<TH>타이틀</TH><TH>내용</TH>
+</TR>
+<TR>
+<TD>오딘: 발할라 라이징</TD><TD>모바일 MMORPG</TD>
+</TR>
+<TR>
+<TD>아키에이지 워</TD><TD>모바일 MMORPG</TD>
+</TR>
+</TBODY>
+</TABLE>
+
+<P USERMARK="B">바. 임원 현황</P>
+
+<TABLE BORDER="1" ACLASS="NORMAL">
+<TBODY>
+<TR>
+<TH>성명</TH><TH>직위</TH><TH>담당 업무</TH>
+</TR>
+<TR>
+<TD>홍길동</TD><TD>대표이사</TD><TD>경영 총괄</TD>
+</TR>
+</TBODY>
+</TABLE>
+
+</BODY>
+</DOCUMENT>

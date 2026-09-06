@@ -11,38 +11,55 @@ from src.shared.report_generation.models import exact_text_sha256
 
 from .constants import (
     ALL_HEADER_KEYS,
+    ARTIST_GROUP_HEADERS,
+    ARTIST_MEMBER_HEADERS,
     BUSINESS_HEADERS,
     COLUMN_SEPARATOR_RE,
     COMPANY_MARKERS,
     COMPANY_NAME_HEADERS,
+    CONTRACT_FIELD_HEADERS,
     CONTRACT_NAME_HEADERS,
     CONTRACT_PERIOD_HEADERS,
     CONTRACT_PROGRESS_HEADERS,
     DESCRIPTION_HEADERS,
+    EXCLUDED_TABLE_TITLE_KEYWORDS,
     HEADER_KEY_NOISE_RE,
+    IP_NAME_HEADERS,
+    IP_STAGE_HEADERS,
+    IP_TABLE_TITLE_KEYWORDS,
     MAJOR_CONTRACT_SECTION_TITLES,
+    MAX_HEADER_ROWS,
     MAX_NAME_CANDIDATES,
     MAX_NAME_CHARS,
     MIN_NAME_CHARS,
     NAMED_SERVICE_NAME_HEADERS,
     NAMED_SERVICE_SECTION_TITLES,
+    NAME_BRACKET_CLOSERS,
+    NAME_BRACKET_OPENERS,
     NAME_EDGE_CHARS,
     NAME_SEPARATOR_RE,
     NUMERIC_OR_UNIT_ONLY_RE,
+    PERSON_NAME_HEADERS,
     PRODUCT_NAME_HEADERS,
     PRODUCT_SERVICE_SECTION_TITLES,
     REJECTED_NAME_KEYS,
+    REJECTED_NAME_PREFIXES,
     RELATION_HEADERS,
     SECTION_HEADING_RE,
     SEGMENT_HEADERS,
     SUBJECT_CONTRACT,
+    SUBJECT_IP,
     SUBJECT_PRODUCT,
     SUBJECT_SEGMENT,
     SUBJECT_SUBSIDIARY,
     SUBSIDIARY_SECTION_TITLES,
+    TABLE_CELL_JOINER,
+    TABLE_ROW_LOCATION_SUFFIX,
     UNSPECIFIED_SOURCE_KIND,
+    UNTITLED_TABLE_LOCATION,
 )
 from .models import NameCandidate
+from .tables import FilingTable
 
 
 def _header_key(value: str) -> str:
@@ -65,9 +82,35 @@ def _is_valid_name(value: str) -> bool:
     key = _header_key(value)
     if not key or key in ALL_HEADER_KEYS or key in REJECTED_NAME_KEYS:
         return False
+    if key.startswith(REJECTED_NAME_PREFIXES):
+        return False
     if NUMERIC_OR_UNIT_ONLY_RE.fullmatch(value) is not None:
         return False
     return any(character.isalpha() for character in value)
+
+
+def _split_names(value: str) -> tuple[str, ...]:
+    """한 칸에 여러 이름이 붙어 있으면 나눈다. 괄호 안은 나누지 않는다.
+
+    괄호 밖에서만 나누는 이유는 「기타(A/S) 등」처럼 이름 안에 든 ``/``까지
+    쪼개면 없는 이름(``S) 등``)이 생기기 때문이다.
+    """
+
+    parts: list[str] = []
+    buffer: list[str] = []
+    depth = 0
+    for character in value:
+        if character in NAME_BRACKET_OPENERS:
+            depth += 1
+        elif character in NAME_BRACKET_CLOSERS:
+            depth = max(0, depth - 1)
+        if depth == 0 and NAME_SEPARATOR_RE.fullmatch(character):
+            parts.append("".join(buffer))
+            buffer = []
+            continue
+        buffer.append(character)
+    parts.append("".join(buffer))
+    return tuple(parts)
 
 
 def _split_columns(raw_line: str) -> tuple[str, ...]:
@@ -204,7 +247,7 @@ def parse_product_service_table(text: str) -> tuple[NameCandidate, ...]:
                     location=location,
                     excerpt=excerpt,
                 )
-            for name in NAME_SEPARATOR_RE.split(cells[name_index]):
+            for name in _split_names(cells[name_index]):
                 _append_candidate(
                     output,
                     name=name,
@@ -360,10 +403,446 @@ def collect_name_candidates(
     return tuple(output)
 
 
+# ─────────────────────────────────────────────────────────────────────
+# 표 구조 입력 규칙
+#
+# 위 네 규칙은 「공백이 한 칸으로 접힌 평문」을 읽는다. 파이프라인이 실제로
+# 넘기는 ``filing_text``가 바로 그 모양이라 표의 칸 경계가 남지 않고, 실측에서
+# 후보가 0건이었다. 아래 규칙은 같은 판정을 **원문 표 구조**에 대고 돌린다.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _person_column_indexes(headers: tuple[str, ...]) -> frozenset[int]:
+    """사람 이름이 들어가는 열 번호를 모은다."""
+
+    return frozenset(
+        _matching_header_indexes(headers, PERSON_NAME_HEADERS)
+    ) | frozenset(_matching_header_indexes(headers, ARTIST_MEMBER_HEADERS))
+
+
+def _row_excerpt(cells: tuple[str, ...], headers: tuple[str, ...]) -> str:
+    """행의 칸을 이어 원문 발췌를 만든다. 사람 이름 열은 빼고 잇는다.
+
+    이름 후보로 안 쓰는 것만으로는 부족하다 — 발췌는 작가 프롬프트와 부록의
+    근거 원문에 그대로 실리므로, 멤버 본명이 거기까지 갈 이유가 없다.
+    """
+
+    skipped = _person_column_indexes(headers)
+    kept = tuple(
+        cell for index, cell in enumerate(cells) if index not in skipped
+    )
+    return TABLE_CELL_JOINER.join(kept).strip()
+
+
+def _row_location(table: FilingTable, row_index: int) -> str:
+    title = table.title.strip() or UNTITLED_TABLE_LOCATION
+    return f"{title} · {row_index + 1}{TABLE_ROW_LOCATION_SUFFIX}"
+
+
+def _is_header_like_row(cells: tuple[str, ...]) -> bool:
+    """빈 칸을 뺀 모든 칸이 머리행 어휘면 자료 행이 아니라 머리행이다."""
+
+    filled = [cell for cell in cells if cell.strip()]
+    if not filled:
+        return True
+    return all(_header_key(cell) in ALL_HEADER_KEYS for cell in filled)
+
+
+def _table_header_row(
+    table: FilingTable, accepts: Callable[[tuple[str, ...]], bool]
+) -> tuple[int, tuple[str, ...]] | None:
+    """표 맨 위 몇 줄 안에서 조건에 맞는 머리행을 찾는다."""
+
+    for index, cells in enumerate(table.rows[:MAX_HEADER_ROWS]):
+        if accepts(cells):
+            return index, cells
+    return None
+
+
+def _table_data_rows(
+    table: FilingTable, header_index: int
+) -> Iterator[tuple[int, tuple[str, ...]]]:
+    for index in range(header_index + 1, len(table.rows)):
+        cells = table.rows[index]
+        if _is_header_like_row(cells):
+            continue
+        yield index, cells
+
+
+def _named_index(
+    headers: tuple[str, ...], accepted: frozenset[str]
+) -> int | None:
+    """이름 칸 후보를 고른다. 사람 이름 열은 절대 이름 칸으로 쓰지 않는다."""
+
+    index = _header_index(headers, accepted)
+    if index is None:
+        return None
+    if _header_key(headers[index]) in PERSON_NAME_HEADERS:
+        return None
+    return index
+
+
+def _title_says_ip(title: str) -> bool:
+    return any(keyword in title for keyword in IP_TABLE_TITLE_KEYWORDS)
+
+
+def _is_person_name(group: str, member: str) -> bool:
+    """그룹 칸 값이 사람 이름인지 본다.
+
+    솔로 활동은 그룹 칸에 활동명이 들어가고 아티스트 칸에 본명이 들어간다.
+    두 값이 같거나 그룹 값이 본명 안에 통째로 들어 있으면(「민현」/「황민현」)
+    그것은 그룹 이름이 아니라 사람 이름이므로 이름 후보로 내지 않는다.
+    """
+
+    group_key = _name_key(group)
+    member_key = _name_key(member)
+    if not group_key or not member_key:
+        return False
+    return group_key in member_key
+
+
+def _is_excluded_name_table(table: FilingTable) -> bool:
+    """재고·원재료·설비 명세는 제품 이름 표가 아니다."""
+
+    return any(
+        keyword in table.title for keyword in EXCLUDED_TABLE_TITLE_KEYWORDS
+    )
+
+
+def _ip_name_index(table: FilingTable, headers: tuple[str, ...]) -> int | None:
+    """이 표의 이름 칸을 「대표 IP」로 읽어야 하면 그 칸 번호를 돌려준다."""
+
+    index = _named_index(headers, IP_NAME_HEADERS)
+    if index is not None:
+        return index
+    product_index = _named_index(headers, PRODUCT_NAME_HEADERS)
+    if (
+        product_index is not None
+        and _header_index(headers, IP_STAGE_HEADERS) is not None
+    ):
+        # 「제품명 + 개발단계」는 바이오·제약의 파이프라인 표 모양이다.
+        return product_index
+    if not _title_says_ip(table.title):
+        return None
+    for accepted in (PRODUCT_NAME_HEADERS, NAMED_SERVICE_NAME_HEADERS):
+        found = _named_index(headers, accepted)
+        if found is not None:
+            return found
+    return None
+
+
+def parse_product_service_tables(
+    tables: Iterable[FilingTable],
+) -> tuple[NameCandidate, ...]:
+    """제품·서비스 표에서 사업부문과 제품·서비스 이름을 읽는다."""
+
+    output: list[NameCandidate] = []
+    for table in tables:
+        if _is_excluded_name_table(table):
+            continue
+        found = _table_header_row(
+            table,
+            lambda cells: _named_index(cells, PRODUCT_NAME_HEADERS) is not None,
+        )
+        if found is None:
+            continue
+        header_index, headers = found
+        if _ip_name_index(table, headers) is not None:
+            continue  # 대표 IP 표는 아래 규칙이 따로 읽는다.
+        name_index = _named_index(headers, PRODUCT_NAME_HEADERS)
+        if name_index is None:  # pragma: no cover - 머리행 관문의 불변식
+            continue
+        segment_index = _named_index(headers, SEGMENT_HEADERS)
+        for row_index, cells in _table_data_rows(table, header_index):
+            excerpt = _row_excerpt(cells, headers)
+            location = _row_location(table, row_index)
+            if segment_index is not None and segment_index != name_index:
+                _append_candidate(
+                    output,
+                    name=cells[segment_index],
+                    subject_kind=SUBJECT_SEGMENT,
+                    description="",
+                    location=location,
+                    excerpt=excerpt,
+                )
+            for name in _split_names(cells[name_index]):
+                _append_candidate(
+                    output,
+                    name=name,
+                    subject_kind=SUBJECT_PRODUCT,
+                    description="",
+                    location=location,
+                    excerpt=excerpt,
+                )
+    return tuple(output)
+
+
+def parse_named_service_tables(
+    tables: Iterable[FilingTable],
+) -> tuple[NameCandidate, ...]:
+    """``상품명 | 주요 내용``처럼 이름과 설명이 함께 있는 표를 읽는다."""
+
+    def accepts(cells: tuple[str, ...]) -> bool:
+        return (
+            _named_index(cells, NAMED_SERVICE_NAME_HEADERS) is not None
+            and _header_index(cells, DESCRIPTION_HEADERS) is not None
+        )
+
+    output: list[NameCandidate] = []
+    for table in tables:
+        if _is_excluded_name_table(table):
+            continue
+        found = _table_header_row(table, accepts)
+        if found is None:
+            continue
+        header_index, headers = found
+        if _ip_name_index(table, headers) is not None:
+            continue
+        name_index = _named_index(headers, NAMED_SERVICE_NAME_HEADERS)
+        description_index = _header_index(headers, DESCRIPTION_HEADERS)
+        if name_index is None or description_index is None:  # pragma: no cover
+            continue
+        for row_index, cells in _table_data_rows(table, header_index):
+            _append_candidate(
+                output,
+                name=cells[name_index],
+                subject_kind=SUBJECT_PRODUCT,
+                description=cells[description_index],
+                location=_row_location(table, row_index),
+                excerpt=_row_excerpt(cells, headers),
+            )
+    return tuple(output)
+
+
+def parse_artist_contract_tables(
+    tables: Iterable[FilingTable],
+) -> tuple[NameCandidate, ...]:
+    """``회사명 | 그룹 | 아티스트`` 표에서 **그룹 이름만** 읽는다.
+
+    아티스트 칸은 사람 이름이라 이름 후보로 내보내지 않는다. ROWSPAN 채움 때문에
+    같은 그룹이 여러 행에 걸치므로 값이 바뀌는 첫 행만 남긴다.
+    """
+
+    def accepts(cells: tuple[str, ...]) -> bool:
+        return (
+            _header_index(cells, COMPANY_NAME_HEADERS) is not None
+            and _header_index(cells, ARTIST_GROUP_HEADERS) is not None
+            and _header_index(cells, ARTIST_MEMBER_HEADERS) is not None
+        )
+
+    output: list[NameCandidate] = []
+    for table in tables:
+        found = _table_header_row(table, accepts)
+        if found is None:
+            continue
+        header_index, headers = found
+        company_index = _header_index(headers, COMPANY_NAME_HEADERS)
+        group_index = _header_index(headers, ARTIST_GROUP_HEADERS)
+        member_index = _header_index(headers, ARTIST_MEMBER_HEADERS)
+        if company_index is None or group_index is None:  # pragma: no cover
+            continue
+        previous_group = ""
+        for row_index, cells in _table_data_rows(table, header_index):
+            group = _clean_name(cells[group_index])
+            company = _clean_name(cells[company_index])
+            if not group or group == previous_group:
+                continue
+            previous_group = group
+            if _name_key(group) == _name_key(company):
+                continue
+            if member_index is not None and _is_person_name(
+                group, cells[member_index]
+            ):
+                continue
+            _append_candidate(
+                output,
+                name=group,
+                subject_kind=SUBJECT_IP,
+                description=f"{company} 소속" if company else "",
+                location=_row_location(table, row_index),
+                excerpt=_row_excerpt(cells, headers),
+            )
+    return tuple(output)
+
+
+def parse_ip_tables(tables: Iterable[FilingTable]) -> tuple[NameCandidate, ...]:
+    """브랜드·게임 타이틀·개발 파이프라인처럼 회사가 내세우는 이름을 읽는다."""
+
+    output: list[NameCandidate] = []
+    for table in tables:
+        found = _table_header_row(
+            table, lambda cells: _ip_name_index(table, cells) is not None
+        )
+        if found is None:
+            continue
+        header_index, headers = found
+        name_index = _ip_name_index(table, headers)
+        if name_index is None:  # pragma: no cover - 머리행 관문의 불변식
+            continue
+        description_index = _header_index(headers, DESCRIPTION_HEADERS)
+        stage_index = _header_index(headers, IP_STAGE_HEADERS)
+        for row_index, cells in _table_data_rows(table, header_index):
+            descriptions = [
+                cells[index].strip()
+                for index in (description_index, stage_index)
+                if index is not None and cells[index].strip()
+            ]
+            _append_candidate(
+                output,
+                name=cells[name_index],
+                subject_kind=SUBJECT_IP,
+                description=" · ".join(descriptions),
+                location=_row_location(table, row_index),
+                excerpt=_row_excerpt(cells, headers),
+            )
+    return tuple(output)
+
+
+def parse_subsidiary_tables(
+    tables: Iterable[FilingTable],
+) -> tuple[NameCandidate, ...]:
+    """``회사명 + 업종/주요 사업`` 두 칸을 모두 가진 표만 종속회사로 읽는다."""
+
+    def accepts(cells: tuple[str, ...]) -> bool:
+        return (
+            _named_index(cells, COMPANY_NAME_HEADERS) is not None
+            and _header_index(cells, BUSINESS_HEADERS) is not None
+        )
+
+    output: list[NameCandidate] = []
+    for table in tables:
+        found = _table_header_row(table, accepts)
+        if found is None:
+            continue
+        header_index, headers = found
+        company_index = _named_index(headers, COMPANY_NAME_HEADERS)
+        if company_index is None:  # pragma: no cover - 머리행 관문의 불변식
+            continue
+        relation_index = _header_index(headers, RELATION_HEADERS)
+        special = _is_special_relationship_location(table.title)
+        business_indexes = _matching_header_indexes(headers, BUSINESS_HEADERS)
+        for row_index, cells in _table_data_rows(table, header_index):
+            if special and (
+                relation_index is None
+                or "종속" not in _header_key(cells[relation_index])
+            ):
+                continue
+            descriptions = tuple(
+                cells[index] for index in business_indexes if cells[index].strip()
+            )
+            _append_candidate(
+                output,
+                name=cells[company_index],
+                subject_kind=SUBJECT_SUBSIDIARY,
+                description=" · ".join(descriptions),
+                location=_row_location(table, row_index),
+                excerpt=_row_excerpt(cells, headers),
+            )
+    return tuple(output)
+
+
+def parse_major_contract_tables(
+    tables: Iterable[FilingTable],
+) -> tuple[NameCandidate, ...]:
+    """계약명 칸이 있는 표에서 계약 이름과 기간·진행률을 읽는다."""
+
+    def accepts(cells: tuple[str, ...]) -> bool:
+        if _named_index(cells, CONTRACT_NAME_HEADERS) is None:
+            return False
+        # 계약명 칸 하나뿐인 표는 세로로 세운 계약 요약이다. 그 표의 아래 행은
+        # 「만기일」·「거래상대방」처럼 항목 이름이라 계약명이 아니다.
+        return any(
+            _header_index(cells, accepted) is not None
+            for accepted in (
+                CONTRACT_PERIOD_HEADERS,
+                CONTRACT_PROGRESS_HEADERS,
+                CONTRACT_FIELD_HEADERS,
+                DESCRIPTION_HEADERS,
+                COMPANY_NAME_HEADERS,
+            )
+        )
+
+    output: list[NameCandidate] = []
+    for table in tables:
+        found = _table_header_row(table, accepts)
+        if found is None:
+            continue
+        header_index, headers = found
+        name_index = _named_index(headers, CONTRACT_NAME_HEADERS)
+        if name_index is None:  # pragma: no cover - 머리행 관문의 불변식
+            continue
+        period_index = _header_index(headers, CONTRACT_PERIOD_HEADERS)
+        progress_index = _header_index(headers, CONTRACT_PROGRESS_HEADERS)
+        for row_index, cells in _table_data_rows(table, header_index):
+            descriptions: list[str] = []
+            if period_index is not None and cells[period_index].strip():
+                descriptions.append(f"계약기간: {cells[period_index].strip()}")
+            if progress_index is not None and cells[progress_index].strip():
+                descriptions.append(f"진행률: {cells[progress_index].strip()}")
+            _append_candidate(
+                output,
+                name=cells[name_index],
+                subject_kind=SUBJECT_CONTRACT,
+                description=" · ".join(descriptions),
+                location=_row_location(table, row_index),
+                excerpt=_row_excerpt(cells, headers),
+            )
+    return tuple(output)
+
+
+_TableParser = Callable[[Iterable[FilingTable]], tuple[NameCandidate, ...]]
+TABLE_PARSERS: tuple[_TableParser, ...] = (
+    parse_product_service_tables,
+    parse_artist_contract_tables,
+    parse_ip_tables,
+    parse_named_service_tables,
+    parse_subsidiary_tables,
+    parse_major_contract_tables,
+)
+
+
+def collect_name_candidates_from_tables(
+    tables: Iterable[FilingTable], *, source_kind: str
+) -> tuple[NameCandidate, ...]:
+    """표 규칙의 후보를 순서대로 합치고 이름 기준으로 중복·상한을 적용한다.
+
+    상한은 «규칙마다» 건다. 전체 합계로 끊으면 제품 표가 큰 회사(실측: 삼성
+    전자·우리은행은 제품만으로 상한에 닿는다)에서 뒤 규칙의 대표 IP·종속회사·
+    계약 후보가 통째로 사라진다. 최종 자리 배분은 조각 예산이 따로 한다.
+    """
+
+    materialized = tuple(
+        table for table in tables if isinstance(table, FilingTable) and table.rows
+    )
+    if not materialized:
+        return ()
+    output: list[NameCandidate] = []
+    seen: set[str] = set()
+    for parser in TABLE_PARSERS:
+        taken = 0
+        for candidate in parser(materialized):
+            if taken >= MAX_NAME_CANDIDATES:
+                break
+            key = _name_key(candidate.name)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            output.append(replace(candidate, source_kind=str(source_kind)))
+            taken += 1
+    return tuple(output)
+
+
 __all__ = [
     "collect_name_candidates",
+    "collect_name_candidates_from_tables",
+    "parse_artist_contract_tables",
+    "parse_ip_tables",
+    "parse_major_contract_tables",
     "parse_major_contracts",
     "parse_named_service_table",
+    "parse_named_service_tables",
     "parse_product_service_table",
+    "parse_product_service_tables",
     "parse_subsidiary_table",
+    "parse_subsidiary_tables",
 ]

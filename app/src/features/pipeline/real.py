@@ -130,7 +130,11 @@ from src.features.product_names.fragments import (
     formal_source_kind_for_filing,
     name_candidate_fragments,
 )
-from src.features.product_names.logic import collect_name_candidates
+from src.features.product_names.logic import (
+    collect_name_candidates,
+    collect_name_candidates_from_tables,
+)
+from src.features.product_names.tables import read_filing_tables
 from src.shared.report_generation.models import exact_text_sha256
 from src.features.provenance.citations import build_citations
 from src.features.provenance.sources import (
@@ -6558,6 +6562,10 @@ def _safe_error_summary(error: BaseException) -> str:
 
 #: 이름 조각 사전 검증용 generation 표식. 실제 봉인에는 쓰지 않는다.
 _NAME_FRAGMENT_DRY_RUN_GENERATION: Final[str] = exact_text_sha256("이름후보 사전검증")
+# 이름 후보를 무엇으로 읽었는지 단계 기록에 남긴다 — 표를 못 읽고 평문으로
+# 되돌아간 실행을 나중에 구별할 수 있어야 한다.
+NAME_INPUT_TABLE: Final[str] = "표"
+NAME_INPUT_TEXT: Final[str] = "텍스트"
 
 
 def _name_fragments_passing_transport(
@@ -6602,8 +6610,16 @@ def _attach_name_candidate_fragments(
     corp_id: str,
     typed_fragments: Iterable[dict[str, object]],
     steps: list[dict[str, Any]],
+    raw_path: str = "",
 ) -> tuple[dict[int, dict[str, object]], int]:
-    """공시 이름 표를 같은 공시의 typed 신원에만 묶어 뒤에 더한다."""
+    """공시 이름 표를 같은 공시의 typed 신원에만 묶어 뒤에 더한다.
+
+    Args:
+        raw_path: 내려받아 저장한 공시 원문 파일 경로. ``filing_text``는 표의
+            행·칸 경계가 지워진 평문이라 이름 표를 읽을 수 없어서, 원문 파일을
+            다시 열어 표 구조로 읽는다. 파일이 없거나 표가 0개면 평문으로
+            되돌아간다(옛 동작 그대로).
+    """
 
     typed_sources = tuple(typed_fragments)
     source_kind = formal_source_kind_for_filing(
@@ -6611,7 +6627,12 @@ def _attach_name_candidate_fragments(
         corp_id=corp_id,
         typed_fragments=typed_sources,
     )
-    candidates = collect_name_candidates(filing_text, source_kind=source_kind)
+    tables = read_filing_tables(raw_path) if raw_path else ()
+    candidates = (
+        collect_name_candidates_from_tables(tables, source_kind=source_kind)
+        if tables
+        else collect_name_candidates(filing_text, source_kind=source_kind)
+    )
     made = name_candidate_fragments(
         candidates,
         filing_meta=filing_meta,
@@ -6663,6 +6684,8 @@ def _attach_name_candidate_fragments(
             "조각": len(accepted),
             "종류별": counts,
             "상한적용": len(candidates) > MAX_NAME_FRAGMENTS_PER_FILING,
+            "입력": NAME_INPUT_TABLE if tables else NAME_INPUT_TEXT,
+            "표수": len(tables),
             **({"탈락": rejected} if rejected else {}),
         }
     )
@@ -6708,11 +6731,14 @@ def _collect(
         9장 비교에서 한쪽 자료만 있는 비교를 막는 데 다시 쓴다.
     """
     filing_text = ""
+    # 이름 표는 공백이 접힌 평문이 아니라 «저장된 원문 파일»에서 읽는다.
+    filing_raw_path = ""
     if filing:
         try:
             downloader = dart_download_document or engine.download_document
             path = downloader(filing["rcept_no"], engine.RAW_DIR, counter)
             filing_text = engine.read_filing_text(path)
+            filing_raw_path = str(path or "")
         except (RuntimeError, OSError) as exc:
             # 못 가져온 사실을 남긴다 — 조용히 넘어가면 「회사에 자료가 없다」로 잘못 읽힌다.
             steps.append({"step": "6_수집_원문", "오류": str(exc)[:120]})
@@ -6933,6 +6959,7 @@ def _collect(
         corp_id=corp_code,
         typed_fragments=typed_name_sources,
         steps=steps,
+        raw_path=filing_raw_path,
     )
     dart_fragment_count += name_fragment_count
     multi_year_tables, multi_year_diagnostics = (

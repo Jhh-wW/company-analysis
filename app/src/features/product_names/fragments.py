@@ -21,8 +21,11 @@ from src.shared.report_generation.models import exact_text_sha256
 
 from .constants import (
     MAX_NAME_FRAGMENTS_PER_FILING,
+    MAX_NAME_FRAGMENTS_PER_KIND,
+    NAME_FRAGMENT_KIND_ORDER,
     SUBJECT_BRAND,
     SUBJECT_CONTRACT,
+    SUBJECT_IP,
     SUBJECT_PRODUCT,
     SUBJECT_SEGMENT,
     SUBJECT_SUBSIDIARY,
@@ -111,6 +114,7 @@ _SUBJECT_KIND_LABELS: Final[dict[str, str]] = {
     SUBJECT_SEGMENT: "사업부문",
     SUBJECT_SUBSIDIARY: "종속회사",
     SUBJECT_CONTRACT: "주요 계약",
+    SUBJECT_IP: "대표 IP",
 }
 _DART_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
     {
@@ -210,6 +214,35 @@ def formal_source_kind_for_filing(
     return str(template["종류"]) if template is not None else ""
 
 
+def _budgeted_candidates(
+    candidates: Iterable[NameCandidate],
+) -> tuple[NameCandidate, ...]:
+    """예산 안에서 종류를 골고루 담는다.
+
+    한 종류가 예산을 다 먹으면 다른 종류가 한 건도 못 들어간다. 실측(하이브)
+    에서 제품 후보가 먼저 나와, 종류별 상한이 없으면 대표 IP가 0건이 됐다.
+    그래서 ①정해진 종류 순서로 종류별 상한까지 담고, ②그래도 자리가 남으면
+    같은 순서로 남은 후보를 마저 담는다(한 종류만 있는 회사도 예산을 쓴다).
+    """
+
+    by_kind: dict[str, list[NameCandidate]] = {}
+    for candidate in candidates:
+        by_kind.setdefault(candidate.subject_kind, []).append(candidate)
+    ordered_kinds = [kind for kind in NAME_FRAGMENT_KIND_ORDER if kind in by_kind]
+    ordered_kinds += [kind for kind in by_kind if kind not in NAME_FRAGMENT_KIND_ORDER]
+
+    taken: list[NameCandidate] = []
+    used: dict[str, int] = {}
+    for limit in (MAX_NAME_FRAGMENTS_PER_KIND, MAX_NAME_FRAGMENTS_PER_FILING):
+        for kind in ordered_kinds:
+            for candidate in by_kind[kind][used.get(kind, 0) : limit]:
+                if len(taken) >= MAX_NAME_FRAGMENTS_PER_FILING:
+                    return tuple(taken)
+                taken.append(candidate)
+                used[kind] = used.get(kind, 0) + 1
+    return tuple(taken)
+
+
 def _origin_fragment_id(candidate: NameCandidate, index: int) -> str:
     material = "\x1f".join(
         (
@@ -243,7 +276,7 @@ def name_candidate_fragments(
     if template is None:
         return []
     source_kind = str(template["종류"])
-    limited = tuple(candidates)[:MAX_NAME_FRAGMENTS_PER_FILING]
+    limited = _budgeted_candidates(candidates)
     made: list[dict[str, object]] = []
     for index, candidate in enumerate(limited, start=1):
         label = _SUBJECT_KIND_LABELS.get(candidate.subject_kind)
