@@ -24,7 +24,11 @@ from src.features.composer.diagram_check import (
     FLOW_REVIEW_ROW_NUMBER_PATTERN,
 )
 from src.features.composer.pipeline import run_v2
-from src.features.composer.portfolio_name_card import PORTFOLIO_NAME_CARD_STEP
+from src.features.composer.portfolio_name_table import (
+    BLOCKED_NAME_NOT_IN_SOURCE,
+    PORTFOLIO_NAME_TABLE_BLOCKED_STEP,
+    PORTFOLIO_NAME_TABLE_STEP,
+)
 from src.features.composer.portfolio_names import (
     UNUSED_REPRESENTATIVE_NAMES_STEP,
 )
@@ -50,8 +54,8 @@ def _fragments(*, names_in_text: bool) -> dict[int, dict[str, str]]:
     """이름 조각이 든 flat 조각.
 
     ``names_in_text``가 거짓이면 원문위치는 이름을 말하는데 원문에는 그 이름이
-    없다 — 상류(이름 표 파서)가 보장을 잃은 상태를 재현한다. 그러면 보강이
-    fail-closed로 막히고 기존 「미사용」 기록만 남아야 한다.
+    없다 — 상류(이름 표 파서)가 보장을 잃은 상태를 재현한다. 그러면 표가
+    fail-closed로 막히고 「표 불가」 사유와 기존 「미사용」 기록이 남아야 한다.
     """
 
     frags: dict[int, dict[str, str]] = {
@@ -130,33 +134,62 @@ def _steps(*, names_in_text: bool) -> list[dict[str, object]]:
     return real._unused_name_steps(output)  # noqa: SLF001
 
 
-def test_보강되면_steps에_카드_보강이_남고_미사용은_없다() -> None:
+def test_표가_생기면_steps에_이름수_종류별_표제목이_남는다() -> None:
     steps = _steps(names_in_text=True)
 
-    assert steps == [
+    table_steps = [
+        step for step in steps if step["step"] == PORTFOLIO_NAME_TABLE_STEP
+    ]
+    assert table_steps == [
         {
-            "step": PORTFOLIO_NAME_CARD_STEP,
+            "step": PORTFOLIO_NAME_TABLE_STEP,
             "이름수": len(_NAMES),
             "종류별": {_IP_LABEL: len(_NAMES)},
+            "표제목": [_TITLE],
         }
     ], steps
-    # 두 표식은 배타적이다 — 카드가 이름을 썼으므로 미사용은 꺼져야 한다.
-    assert all(step["step"] != UNUSED_REPRESENTATIVE_NAMES_STEP for step in steps)
+    assert all(
+        step["step"] != PORTFOLIO_NAME_TABLE_BLOCKED_STEP for step in steps
+    )
 
 
-def test_보강이_막히면_steps에_미사용이_남는다() -> None:
-    """보강이 항상 성공하는 픽스처만 있으면 미사용 경로가 죽어도 초록불이다."""
+def test_작가가_이름을_안_쓰면_미사용도_함께_남는다() -> None:
+    """두 표식은 «배타적이지 않다» — 서로 다른 것을 재기 때문이다.
+
+    ★ 이 시험이 지키는 것 — 표를 항상 만들게 바꾼 뒤에도 「작가가 안내문을
+      지켰나」를 재는 기존 지표가 살아 있어야 한다. 표가 생겼다고 미사용
+      표식을 끄면 작가 순응이 나빠져도 아무도 모른다.
+    """
+
+    steps = _steps(names_in_text=True)
+    names = [step["step"] for step in steps]
+
+    assert PORTFOLIO_NAME_TABLE_STEP in names, steps
+    assert UNUSED_REPRESENTATIVE_NAMES_STEP in names, steps
+    unused = next(
+        step for step in steps if step["step"] == UNUSED_REPRESENTATIVE_NAMES_STEP
+    )
+    assert unused == {
+        "step": UNUSED_REPRESENTATIVE_NAMES_STEP,
+        "이름수": len(_NAMES),
+        "종류별": {_IP_LABEL: len(_NAMES)},
+    }
+
+
+def test_표가_막히면_steps에_사유가_남는다() -> None:
+    """표가 항상 성공하는 픽스처만 있으면 «불가» 경로가 죽어도 초록불이다."""
 
     steps = _steps(names_in_text=False)
 
-    assert steps == [
-        {
-            "step": UNUSED_REPRESENTATIVE_NAMES_STEP,
-            "이름수": len(_NAMES),
-            "종류별": {_IP_LABEL: len(_NAMES)},
-        }
-    ], steps
-    assert all(step["step"] != PORTFOLIO_NAME_CARD_STEP for step in steps)
+    assert {
+        "step": PORTFOLIO_NAME_TABLE_BLOCKED_STEP,
+        "사유": BLOCKED_NAME_NOT_IN_SOURCE,
+    } in steps, steps
+    assert all(step["step"] != PORTFOLIO_NAME_TABLE_STEP for step in steps)
+    # 이름은 왔는데 아무도 안 썼다는 기존 표식도 함께 남는다.
+    assert any(
+        step["step"] == UNUSED_REPRESENTATIVE_NAMES_STEP for step in steps
+    )
 
 
 def test_실행기록_헬퍼가_composer_정본을_부른다() -> None:
@@ -180,4 +213,4 @@ def test_실행기록_헬퍼가_composer_정본을_부른다() -> None:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
 
-    assert "portfolio_name_card_steps" in called
+    assert "portfolio_name_table_steps" in called
