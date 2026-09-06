@@ -1108,11 +1108,36 @@ def test_비교후보_차선은_짧은_공식원문_한문장만_문서hash에_�
             company_id=COMPANY_ID,
         )
 
-    wrong_requirement = copy.deepcopy(envelope)
-    wrong_requirement["unclassified_documents"][0]["requirement"] = "OPTIONAL"
+    # REQUIRED 종류(사업보고서)의 문서가 OPTIONAL이라고 낮춰 말하는 것은 정직하다
+    # (엔진의 직전 사업연도 공시). 거절하면 안 된다.
+    lowered_requirement = copy.deepcopy(envelope)
+    lowered_requirement["unclassified_documents"][0]["requirement"] = "OPTIONAL"
+    assert (
+        len(
+            official_evidence_adapter._comparison_candidate_evidence(
+                lowered_requirement,
+                company_id=COMPANY_ID,
+            )
+        )
+        == 1
+    )
+
+    # OPTIONAL 종류(연결감사보고서)가 REQUIRED라고 주장하면 위조 — 거절한다.
+    forged_requirement = copy.deepcopy(envelope)
+    forged_document = forged_requirement["unclassified_documents"][0]
+    forged_document["source_kind"] = "dart_consolidated_audit_report"
+    forged_document["document_id"] = "dart_consolidated_audit_report:20250315000001"
+    forged_document["identity_binding"] = (
+        "corp_code=00126380;rcept_no=20250315000001;"
+        "source_kind=dart_consolidated_audit_report;"
+        "identity_check=unverifiable_no_fetcher_metadata"
+    )
+    for fragment in forged_requirement["unclassified_fragments"]:
+        fragment["document_id"] = forged_document["document_id"]
+    forged_document["requirement"] = "REQUIRED"
     with pytest.raises(ValueError, match="문서 신원"):
         official_evidence_adapter._comparison_candidate_evidence(
-            wrong_requirement,
+            forged_requirement,
             company_id=COMPANY_ID,
         )
 
