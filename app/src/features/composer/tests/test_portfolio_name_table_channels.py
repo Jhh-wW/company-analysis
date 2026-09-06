@@ -1,9 +1,13 @@
-"""결정적 이름 카드가 «세 채널 전부»에 실제로 그려지는지 본다.
+"""3장 「회사가 공시한 대표 이름」 표가 «세 채널 전부»에 실제로 그려지는지 본다.
 
-★ 왜 필요한가 — 데이터 층에 카드 한 줄을 더해 놓고도 화면·PDF·노션 중 한
-  곳이라도 그 줄을 안 그리면, 우리는 「붙였다」고 믿는데 독자는 못 본다.
-  3장은 카드로 그려지는 장이라 렌더러가 «빈 칸을 빼는» 특별 경로를 타므로
-  일반 표 시험이 이 경로를 대신해 주지 못한다.
+★ 왜 필요한가 — 자료 층에 표 하나를 더해 놓고도 화면·PDF·노션 중 한 곳이라도
+  그 표를 안 그리면, 우리는 「넣었다」고 믿는데 독자는 못 본다. 3장은 작가
+  카드를 «카드»로 그리는 장이라 렌더러가 특별 경로를 타므로, 그 장에 «일반
+  표»가 하나 더 실렸을 때 세 채널이 다 그리는지를 따로 확인해야 한다.
+
+★ 이 표는 앞선 설계(작가 카드 안에 첫 이름을 제목으로 올린 카드)를 대체한다.
+  그 카드는 제목 칸에 종류가 아니라 종류의 «보기» 하나가 올라가는 문제가
+  있었다 — 카드가 아니라 표여야 「구분: 대표 IP」를 정직하게 쓸 수 있다.
 
 ★ AI·네트워크 0회. 가짜 작가가 이름을 하나도 안 쓴 부문 카드만 낸다 —
   2026-09-06 운영 실측에서 실제 작가가 낸 모양이다.
@@ -31,9 +35,14 @@ from src.features.composer.diagram_check import (
 )
 from src.features.composer.pipeline import run_v2
 from src.features.composer.port import CollectedFragment
-from src.features.composer.portfolio_name_card import NAME_CARD_REASON
+from src.features.composer.portfolio_name_table import (
+    NAME_TABLE_CAPTION_PREFIX,
+    NAME_TABLE_HEADERS,
+    NAME_TABLE_NAME_SEPARATOR,
+)
 from src.shared.name_fragments.constants import (
     NAME_KIND_IP,
+    NAME_KIND_LABELS,
     compose_name_location,
 )
 
@@ -46,7 +55,10 @@ _ROW_TEXTS = (
     "㈜가나다뮤직 | 바다소녀들",
     "㈜라마바뮤직 | 별무리",
 )
-_ARTIFACT_DIR = Path(__file__).resolve().parents[5] / ".local-artifacts" / "p38"
+_IP_LABEL = NAME_KIND_LABELS[NAME_KIND_IP]
+_JOINED_NAMES = NAME_TABLE_NAME_SEPARATOR.join(_NAMES)
+_EXPECTED_CAPTION = f"{NAME_TABLE_CAPTION_PREFIX} ({len(_NAMES)}개)"
+_ARTIFACT_DIR = Path(__file__).resolve().parents[5] / ".local-artifacts" / "p39"
 
 
 def _fragments() -> dict[int, dict[str, str]]:
@@ -112,7 +124,7 @@ def _reviewer(prompt: str) -> str:
 
 
 @pytest.fixture(scope="module")
-def 보강된_보고서():
+def 이름표_보고서():
     output = run_v2(
         "가나다회사",
         _fragments(),
@@ -122,38 +134,62 @@ def 보강된_보고서():
         corp_type="상장사",
         as_of_date="2026-09-06",
     )
-    assert output.portfolio_name_card_count == len(_NAMES), (
-        f"이름 카드가 안 붙었습니다 — 사유: "
-        f"{output.portfolio_name_card_blocked_reason!r}"
+    assert output.portfolio_name_table_name_count == len(_NAMES), (
+        f"이름 표가 안 붙었습니다 — 사유: "
+        f"{output.portfolio_name_table_blocked_reason!r}"
     )
     return output.report
 
 
-def _portfolio_table(report):
-    section = next(
+def _section(report):
+    return next(
         section
         for section in report.sections
         if section.cell == PORTFOLIO_TABLE_SECTION_ID
     )
+
+
+def _card_table(report):
     return next(
-        table for table in section.tables if table.caption == PORTFOLIO_TABLE_CAPTION
+        table
+        for table in _section(report).tables
+        if table.caption == PORTFOLIO_TABLE_CAPTION
+    )
+
+
+def _name_table(report):
+    return next(
+        table
+        for table in _section(report).tables
+        if table.caption.startswith(NAME_TABLE_CAPTION_PREFIX)
     )
 
 
 # ══════════════════════════════════════════════════════════
-# ① 자료 층 — 표에 카드 두 줄이 있고 둘째 줄이 우리 것이다
+# ① 자료 층 — 작가 카드 표와 이름 표가 «따로» 있다
 # ══════════════════════════════════════════════════════════
 
 
-def test_3장_표에_작가_카드와_이름_카드가_함께_있다(보강된_보고서) -> None:
-    rows = _portfolio_table(보강된_보고서).rows
+def test_3장에_작가_카드_표와_이름_표가_함께_있다(이름표_보고서) -> None:
+    captions = [table.caption for table in _section(이름표_보고서).tables]
 
-    assert len(rows) == 2, rows
-    assert rows[0][0] == "사업부문 하나"
-    assert rows[1][0] == _NAMES[0]
-    assert rows[1][1] == "·".join(_NAMES)
-    assert rows[1][2] == NAME_CARD_REASON
-    assert rows[1][3] == ""
+    assert captions == [PORTFOLIO_TABLE_CAPTION, _EXPECTED_CAPTION], captions
+    # 작가 카드는 우리가 손대지 않는다 — 작가가 낸 그대로 한 줄이다.
+    assert _card_table(이름표_보고서).rows == [
+        ["사업부문 하나", "부문 설명", "부문을 운영한다", "주력"]
+    ]
+
+
+def test_이름_표의_행은_종류_라벨이다(이름표_보고서) -> None:
+    table = _name_table(이름표_보고서)
+
+    assert table.headers == list(NAME_TABLE_HEADERS)
+    assert table.rows == [[_IP_LABEL, _JOINED_NAMES]]
+    # 제목 칸이 「하늘소년단」이던 옛 카드로 돌아가지 않는다.
+    assert table.rows[0][0] != _NAMES[0]
+    # 일반 표 경로로 그려진다(도식·카드가 아니라).
+    assert table.presentation == "table"
+    assert table.numeric is False
 
 
 # ══════════════════════════════════════════════════════════
@@ -161,7 +197,7 @@ def test_3장_표에_작가_카드와_이름_카드가_함께_있다(보강된_�
 # ══════════════════════════════════════════════════════════
 
 
-def test_화면이_이름_카드를_라벨값_카드로_그린다(보강된_보고서) -> None:
+def test_화면이_이름_표를_일반_표로_그린다(이름표_보고서) -> None:
     from fastapi.testclient import TestClient
 
     from src.features.auth import constants as auth_constants
@@ -171,14 +207,14 @@ def test_화면이_이름_카드를_라벨값_카드로_그린다(보강된_보�
     from src.web.routers import reports as reports_router
     from src.web.tests.report_route_support import serve_legacy_report_snapshot
 
-    job_id = f"p38-name-card-{uuid.uuid4().hex}"
+    job_id = f"p39-name-table-{uuid.uuid4().hex}"
     job_runtime._JOBS.pop(job_id, None)  # noqa: SLF001
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "0")
         mp.setenv(auth_constants.ENV_ADMIN_EMAILS, "admin@example.com")
         job_runtime._start_job_runtime()  # noqa: SLF001
-        serve_legacy_report_snapshot(mp, 보강된_보고서, report_id=job_id)
+        serve_legacy_report_snapshot(mp, 이름표_보고서, report_id=job_id)
         mp.setattr(job_runtime, "_link_expired", lambda _report: False)
         mp.setattr(
             reports_router, "_release_state", lambda **_kwargs: (object(), None)
@@ -193,14 +229,14 @@ def test_화면이_이름_카드를_라벨값_카드로_그린다(보강된_보�
 
     assert response.status_code == 200, response.text[:400]
     body = response.text
-    # 카드 경로로 떨어졌는가(표·화살표가 아니라).
+    # 작가 카드는 여전히 카드 경로로 그려진다.
     assert 'class="section-content-card"' in body
-    # 제목 = 첫 이름, 범위 칸 = 이름 전부.
-    assert f"<h4>{_NAMES[0]}</h4>" in body or _NAMES[0] in body
-    assert "·".join(_NAMES) in body
-    assert f"<dd>{NAME_CARD_REASON}</dd>" in body
-    # 「사업적 역할」은 빈 칸이라 우리 카드에서는 «빠져야» 한다.
-    assert body.count("<dt>사업적 역할</dt>") == 1
+    # 이름 표는 «일반 표» 경로로 그려진다 — 캡션·머리글·행 글자가 다 있다.
+    assert _EXPECTED_CAPTION in body
+    assert f"<th scope=\"col\">{NAME_TABLE_HEADERS[0]}</th>" in body
+    assert f"<th scope=\"col\">{NAME_TABLE_HEADERS[1]}</th>" in body
+    assert f"<td>{_IP_LABEL}</td>" in body
+    assert f"<td>{_JOINED_NAMES}</td>" in body
 
 
 # ══════════════════════════════════════════════════════════
@@ -208,43 +244,49 @@ def test_화면이_이름_카드를_라벨값_카드로_그린다(보강된_보�
 # ══════════════════════════════════════════════════════════
 
 
-def test_PDF가_이름_카드를_실제로_그린다(보강된_보고서) -> None:
+def _pdf_text(pdf_bytes: bytes) -> str:
+    return "".join(
+        "".join((page.extract_text() or "").splitlines())
+        for page in PdfReader(io.BytesIO(pdf_bytes)).pages
+    )
+
+
+def _loosely_in(needle: str, haystack: str) -> bool:
+    """CJK는 글자 사이에 공백이 낄 수 있어 느슨하게 찾는다."""
+
+    return re.search(r"\s*".join(map(re.escape, needle)), haystack) is not None
+
+
+def test_PDF가_이름_표를_실제로_그린다(이름표_보고서) -> None:
     import pypdfium2 as pdfium
 
     from src.features.export_pdf import release as pdf_release
 
-    candidate = pdf_release.prepare_pdf_release(보강된_보고서)
+    candidate = pdf_release.prepare_pdf_release(이름표_보고서)
     pdf_bytes = candidate.pdf_bytes
     assert pdf_bytes.startswith(b"%PDF-")
 
-    text = "".join(
-        "".join((page.extract_text() or "").splitlines())
-        for page in PdfReader(io.BytesIO(pdf_bytes)).pages
-    )
-    # CJK는 글자 사이에 공백이 낄 수 있어 느슨하게 찾는다.
+    text = _pdf_text(pdf_bytes)
     for name in _NAMES:
-        assert re.search(r"\s*".join(map(re.escape, name)), text), name
-    assert re.search(r"\s*".join(map(re.escape, NAME_CARD_REASON)), text)
+        assert _loosely_in(name, text), name
+    assert _loosely_in(NAME_TABLE_CAPTION_PREFIX, text)
+    assert _loosely_in(_IP_LABEL, text)
 
     # 사람이 눈으로 볼 수 있게 그림 한 장을 남긴다(시험 판정에는 안 쓴다).
     document = pdfium.PdfDocument(pdf_bytes)
     try:
+        pages = PdfReader(io.BytesIO(pdf_bytes)).pages
         page_index = next(
             index
             for index in range(len(document))
-            if re.search(
-                r"\s*".join(map(re.escape, _NAMES[0])),
-                "".join(
-                    (
-                        PdfReader(io.BytesIO(pdf_bytes)).pages[index].extract_text()
-                        or ""
-                    ).splitlines()
-                ),
+            if _loosely_in(
+                NAME_TABLE_CAPTION_PREFIX,
+                "".join((pages[index].extract_text() or "").splitlines()),
             )
         )
         _ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
         document[page_index].render(scale=2.0).to_pil().save(
-            _ARTIFACT_DIR / "name_card.png"
+            _ARTIFACT_DIR / "name_table.png"
         )
     finally:
         document.close()
@@ -270,12 +312,13 @@ def _notion_table_rows(report) -> list[list[str]]:
     ]
 
 
-def test_노션_블록에_이름_카드_행이_있다(FULL_보강된_보고서) -> None:
-    """노션은 «공개 봉인 projection»만 읽는다 — 그 투영에 카드가 남는지 본다."""
+def test_노션_블록에_이름_표_행이_있다(FULL_이름표_보고서) -> None:
+    """노션은 «공개 봉인 projection»만 읽는다 — 그 투영에 표가 남는지 본다."""
 
-    rows = _notion_table_rows(FULL_보강된_보고서)
+    rows = _notion_table_rows(FULL_이름표_보고서)
 
-    assert [_FULL_NAMES[0], "·".join(_FULL_NAMES), NAME_CARD_REASON, ""] in rows, rows
+    assert list(NAME_TABLE_HEADERS) in rows, rows
+    assert [_IP_LABEL, _JOINED_NAMES] in rows, rows
 
 
 # ══════════════════════════════════════════════════════════
@@ -283,7 +326,7 @@ def test_노션_블록에_이름_카드_행이_있다(FULL_보강된_보고서) 
 # ══════════════════════════════════════════════════════════
 #
 # ★ 왜 SHADOW로 못 끝내나 — 노션은 공개 봉인 projection만 읽고, 그 투영은
-#   FULL이 만드는 표 manifest 참조를 요구한다. 그리고 우리 카드가 진짜로
+#   FULL이 만드는 표 manifest 참조를 요구한다. 그리고 우리 표가 진짜로
 #   위험한 자리가 바로 거기다: 인용이 장별 근거 소유권을 벗어나거나 봉인이
 #   행을 못 읽으면 «보고서 전체»가 막힌다. 그 경로를 안 태우면 이 기능은
 #   운영에서 처음으로 터진다.
@@ -375,30 +418,41 @@ def FULL_실행결과():
 
 
 @pytest.fixture(scope="module")
-def FULL_보강된_보고서(FULL_실행결과):
+def FULL_이름표_보고서(FULL_실행결과):
     return FULL_실행결과.report
 
 
-def test_FULL도_이름_카드를_덧붙이고_봉인을_통과한다(FULL_실행결과) -> None:
+def test_FULL도_이름_표를_덧붙이고_봉인을_통과한다(FULL_실행결과) -> None:
     output = FULL_실행결과
 
-    assert output.portfolio_name_card_count == len(_FULL_NAMES), (
-        f"이름 카드가 안 붙었습니다 — 사유: "
-        f"{output.portfolio_name_card_blocked_reason!r}"
+    assert output.portfolio_name_table_name_count == len(_FULL_NAMES), (
+        f"이름 표가 안 붙었습니다 — 사유: "
+        f"{output.portfolio_name_table_blocked_reason!r}"
     )
-    assert output.unused_portfolio_name_count == 0
     # 봉인·투영이 실제로 만들어졌다는 뜻 — 이게 없으면 노션이 못 읽는다.
     assert output.report.public_projection is not None
     assert output.report.public_structure_manifest
-    rows = _portfolio_table(output.report).rows
-    assert rows == [
-        [
-            _FULL_NAMES[0],
-            "·".join(_FULL_NAMES),
-            NAME_CARD_REASON,
-            "",
-        ]
-    ], rows
+    assert _name_table(output.report).rows == [[_IP_LABEL, _JOINED_NAMES]]
+
+
+def test_작가가_이름을_써도_표는_그대로_나간다(FULL_실행결과) -> None:
+    """예측 가능성 — 「안 썼을 때만」이라는 조건을 두지 않는다.
+
+    ★ 이 시험이 지키는 것 — 이 실행의 작가는 3장 산문에 이름을 쓰지 않지만,
+      판정 모듈이 「썼다」고 볼 때에도 표가 사라지면 안 된다. 그래서 표
+      생성이 «작가 사용 여부»를 아예 안 본다는 사실을 여기서 못 박는다.
+    """
+
+    from src.features.composer import portfolio_name_table
+
+    # 표를 만드는 함수는 보고서(작가 산출물)를 인자로 받지 않는다.
+    import inspect
+
+    signature = inspect.signature(
+        portfolio_name_table.build_portfolio_name_table
+    )
+    assert list(signature.parameters) == ["fragments", "allowed_fragment_ids"]
+    assert _name_table(FULL_실행결과.report).rows
 
 
 class _ThinThenFullWriter:
@@ -478,10 +532,10 @@ def _run_recovering_full_with_names():
     return output, writer
 
 
-def test_보충_회차가_3장을_다시_써도_이름_카드가_남는다() -> None:
-    """3장이 보충 대상이면 그 장이 통째로 갈린다 — 카드도 함께 사라진다.
+def test_보충_회차가_3장을_다시_써도_이름_표가_남는다() -> None:
+    """3장이 보충 대상이면 그 장의 «본문»이 통째로 갈린다.
 
-    ★ 이 시험이 없으면 보충이 도는 회사에서만 카드가 조용히 없어진다.
+    ★ 이 시험이 없으면 보충이 도는 회사에서만 표가 조용히 없어진다.
       첫 후보에서는 붙었으니 어떤 시험도 안 깨지고, 운영에서만 안 보인다.
     """
 
@@ -492,25 +546,24 @@ def test_보충_회차가_3장을_다시_써도_이름_카드가_남는다() -> 
     assert writer.section_calls[PORTFOLIO_TABLE_SECTION_ID] == 2, (
         writer.section_calls
     )
-    assert output.portfolio_name_card_count == len(_FULL_NAMES), (
-        f"보충 뒤 이름 카드가 사라졌습니다 — 사유: "
-        f"{output.portfolio_name_card_blocked_reason!r}"
+    assert output.portfolio_name_table_name_count == len(_FULL_NAMES), (
+        f"보충 뒤 이름 표가 사라졌습니다 — 사유: "
+        f"{output.portfolio_name_table_blocked_reason!r}"
     )
-    rows = _portfolio_table(output.report).rows
-    assert rows[-1][0] == _FULL_NAMES[0], rows
+    assert _name_table(output.report).rows == [[_IP_LABEL, _JOINED_NAMES]]
 
 
-def test_FULL_인용은_3장_소유_조각만_쓴다(FULL_보강된_보고서) -> None:
+def test_FULL_인용은_3장_소유_조각만_쓴다(FULL_이름표_보고서) -> None:
     """소유 밖 조각을 인용하면 evidence invariant가 보고서를 통째로 막는다."""
 
-    table = _portfolio_table(FULL_보강된_보고서)
+    table = _name_table(FULL_이름표_보고서)
     cited = {
         int(value)
         for value in re.findall(r"\[(\d+)\]", " ".join(table.source_cites))
     }
 
     assert cited == {30, 31, 32}
-    # 그 번호 전부가 «부록에도» 있어야 한다 — 인용-부록 1:1이 이 카드에서
+    # 그 번호 전부가 «부록에도» 있어야 한다 — 인용-부록 1:1이 이 표에서
     # 깨지면 validate_v2가 보고서를 통째로 막는다.
-    부록 = {source.number for source in FULL_보강된_보고서.citations}
+    부록 = {source.number for source in FULL_이름표_보고서.citations}
     assert cited <= 부록, sorted(부록)

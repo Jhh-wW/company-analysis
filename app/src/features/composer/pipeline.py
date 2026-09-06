@@ -73,10 +73,11 @@ from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.diagram_check import check_diagram_numbers, check_diagrams
 from src.features.composer.dup_detect import CONFIDENCE_CONFIRMED, find_numeric_duplicates
 from src.features.composer.extractive_summary import select_extractive_summary
-from src.features.composer.portfolio_name_card import (
+from src.features.composer.portfolio_name_table import (
+    BLOCKED_LABEL_NOT_IN_LOCATION,
     BLOCKED_NAME_NOT_IN_SOURCE,
-    PortfolioNameCardResult,
-    augment_portfolio_name_card,
+    PortfolioNameTableResult,
+    build_portfolio_name_table,
 )
 from src.features.composer.portfolio_names import portfolio_name_usage
 from src.features.composer.port import (
@@ -204,18 +205,20 @@ class V2RunOutput:
     #: 그때의 종류 라벨별 이름 수. dataclass를 얼린 채로 실어 나르려고
     #: dict가 아니라 (라벨, 수) 쌍의 tuple이다.
     unused_portfolio_name_counts_by_label: tuple[tuple[str, int], ...] = ()
-    #: 작가가 이름을 하나도 안 써서 «결정적으로» 덧붙인 이름 카드에 실린
-    #: 이름 수. 안 덧붙였으면 0이다.
+    #: 3장에 «결정적으로» 덧붙인 「회사가 공시한 대표 이름」 표에 실린 이름 수.
+    #: 표를 안 만들었으면 0이다.
     #:
-    #: ★ 위 `unused_…`와 «동시에 0이 아닐 수 없다» — 카드를 덧붙이면 그
-    #:   카드가 이름을 쓴 것이므로 미사용 판정이 풀린다. 두 필드가 함께
-    #:   0이 아니면 어딘가 어긋난 것이다(그 불변식을 시험이 지킨다).
-    portfolio_name_card_count: int = 0
-    #: 그 카드에 실린 이름의 종류 라벨별 수.
-    portfolio_name_card_counts_by_label: tuple[tuple[str, int], ...] = ()
-    #: 이름을 안 썼는데 카드도 «못» 덧붙였을 때의 이유 코드
-    #: (`portfolio_name_card.BLOCKED_*`). 덧붙였거나 덧붙일 필요가 없으면 ""다.
-    portfolio_name_card_blocked_reason: str = ""
+    #: ★ 위 `unused_…`와 «함께» 0이 아닐 수 있다 — 이 표는 작가가 이름을
+    #:   썼든 안 썼든 항상 만든다. 두 값은 서로 다른 것을 잰다: `unused_…`는
+    #:   「작가가 안내문을 지켰나」, 이쪽은 「독자가 이름을 볼 수 있나」다.
+    portfolio_name_table_name_count: int = 0
+    #: 그 표에 실린 이름의 종류 라벨별 수.
+    portfolio_name_table_counts_by_label: tuple[tuple[str, int], ...] = ()
+    #: 이름이 나온 공시 표의 제목들. 실행 기록의 「표제목」 값.
+    portfolio_name_table_titles: tuple[str, ...] = ()
+    #: 이름은 왔는데 표를 «못» 만들었을 때의 이유 코드
+    #: (`portfolio_name_table.BLOCKED_*`). 만들었거나 이름이 애초에 없으면 ""다.
+    portfolio_name_table_blocked_reason: str = ""
 
 
 class _CallLedgerRecorder:
@@ -606,55 +609,61 @@ def _append_verified_program_sentences(
     )
 
 
-def _augment_name_card(
-    report: ComposedReport,
+def _build_name_table(
     fragments: FragmentsInput,
     prepared_evidence: object,
     *,
     enabled: bool,
-) -> PortfolioNameCardResult:
-    """3장 이름 카드 보강을 «장별 근거 소유권 안에서» 부른다.
+) -> PortfolioNameTableResult:
+    """3장 이름 표를 «장별 근거 소유권 안에서» 만든다.
 
     ★ 왜 allowed 집합을 넘기나 — 이름 조각은 3장 packet 소속이지만 이 단계에
       오는 조각은 flat union이다. 거르지 않고 인용하면 다른 장 소유의 조각을
-      3장 줄이 인용하는 줄이 만들어져, 바로 다음 evidence invariant가 보고서
+      3장 표가 인용하는 줄이 만들어져, 바로 다음 evidence invariant가 보고서
       전체를 막는다. «만들고 나서 걸리는» 대신 애초에 안 만든다.
 
+    ★ 이 표는 본문(`ComposedReport`)을 건드리지 않는다. 작가 카드 옆에 놓는
+      «별도의 표»이므로 보충 회차가 3장을 통째로 다시 써도 사라지지 않는다.
+
     Args:
-        report: 도식 검증까지 끝난 본문.
         fragments: 검증용 조각(대개 flat union).
         prepared_evidence: 장별 packet 준비값. ``None``이면 장별 소유권이
             없는 legacy 경로라 거르지 않는다.
-        enabled: 이 실행이 flow 줄을 «공개할 수 있는» 경로인가. ENFORCE_NO_
-            PARTIAL(관계 미결속)에서는 모든 flow 줄이 방금 비워졌으므로
-            여기서 한 줄을 되살리면 그 정책을 우회하게 된다.
+        enabled: 이 실행이 근거 결속 없는 공개를 «할 수 없는» 경로인가.
+            ENFORCE_NO_PARTIAL(관계 미결속)은 3장 flow 줄을 방금 통째로
+            비운 정책이라, 같은 실행에서 이름 표만 내보내면 그 정책을
+            우회하게 된다.
 
     Returns:
-        보강 결과. 꺼져 있거나 못 붙였으면 ``report``는 입력 그대로다.
+        표 생성 결과. 꺼져 있으면 표 없이 사유도 없는 빈 결과다.
     """
 
     if not enabled:
-        return PortfolioNameCardResult(report=report)
+        return PortfolioNameTableResult()
     allowed = None
     if prepared_evidence is not None:
         allowed = getattr(
             prepared_evidence, "allowed_fragment_ids_by_section", {}
         ).get(PORTFOLIO_TABLE_SECTION_ID)
-    result = augment_portfolio_name_card(
-        report,
+    result = build_portfolio_name_table(
         _normalize_fragments(fragments),
         allowed_fragment_ids=allowed,
     )
-    if result.added:
+    if result.table is not None:
         logger.info(
-            "3장 카드가 대표 이름을 안 써서 이름 카드 %d개(%s)를 덧붙였습니다",
-            result.name_count,
-            result.counts_by_label,
+            "3장에 공시 대표 이름 표를 덧붙였습니다 — 이름 %d개(%s)",
+            result.table.name_count,
+            result.table.counts_by_label,
         )
-    elif result.blocked_reason == BLOCKED_NAME_NOT_IN_SOURCE:
-        # 이 사유만 «상류가 깨졌다»는 뜻이라 경고로 올린다. 나머지 사유
-        # (이미 씀·이름 부족)는 정상 흐름이다.
-        logger.warning("3장 이름 카드 보강 실패 — 이름이 인용 원문에 없습니다")
+    elif result.blocked_reason in {
+        BLOCKED_NAME_NOT_IN_SOURCE,
+        BLOCKED_LABEL_NOT_IN_LOCATION,
+    }:
+        # 이 두 사유만 «상류가 깨졌다»는 뜻이라 경고로 올린다. 나머지 사유
+        # (이름 부족)는 대부분의 회사에서 정상 흐름이다.
+        logger.warning(
+            "3장 이름 표를 만들지 못했습니다 — 사유 %s", result.blocked_reason
+        )
     return result
 
 
@@ -1030,18 +1039,17 @@ def run_v2(
     for problem in diagram_problems:
         logger.warning("도식 검증에서 뺀 경로 — %s", problem)
 
-    # ②-c-2 3장 «대표 이름» 카드 보강 — 작가가 이름을 하나도 안 썼으면
-    # 조각의 글자와 인용만 투영한 카드 하나를 결정적으로 덧붙인다.
-    # 안내문 강제(카드 하나는 반드시)를 작가의 순응에만 맡기지 않는다.
-    name_card = _augment_name_card(
-        verified,
+    # ②-c-2 3장 「회사가 공시한 대표 이름」 표 — 조각의 글자와 인용만 투영한
+    # 결정적 표 하나를 작가 카드 옆에 놓는다. 작가가 이름을 썼든 안 썼든
+    # 항상 만든다 — 같은 회사를 두 번 돌렸을 때 화면이 달라지면 안 된다.
+    name_table_result = _build_name_table(
         verification_fragments,
         prepared_evidence,
         enabled=(
             release_mode is ReleaseMode.SHADOW or prepared_evidence is not None
         ),
     )
-    verified = name_card.report
+    name_table = name_table_result.table
 
     # ②-d 첫 구조화 claim 슬라이스 — 검증된 DART 3개년 표의 원값에서
     # 누적 증감률을 코드로 재계산한다. AI 산문에서 숫자를 역추출하지 않으며,
@@ -1126,6 +1134,7 @@ def run_v2(
                 if prepared_evidence is not None
                 else ()
             ),
+            name_table=name_table,
         )
         extractive = select_extractive_summary(verified, body_rendered.fact_records)
         # FULL은 이 시점의 결과가 아직 ``primary`` 후보일 뿐이다. 요약이
@@ -1183,6 +1192,7 @@ def run_v2(
             latest_performance_period=latest_performance_period,
             citation_style=citation_style,
             program_registry_sources=prepared_evidence.program_sources,
+            name_table=name_table,
         )
 
     # ⑤ 렌더 — 웹·PDF가 이미 소비하는 공용 구조로
@@ -1218,6 +1228,7 @@ def run_v2(
             if prepared_evidence is not None
             else ()
         ),
+        name_table=name_table,
         **seal_render_kwargs,
     )
     primary_block_sha256s: tuple[tuple[str, str], ...] = ()
@@ -1386,19 +1397,10 @@ def run_v2(
                 stage="supplement-merged-numeric-safety",
             )
             verified = merged_body
-            # 3장이 보충 대상이면 그 장은 «새로 쓴 것»으로 통째로 갈린다 —
-            # 첫 후보에 붙였던 이름 카드도 함께 사라진다. 그래서 병합 뒤에
-            # 다시 부른다. 3장이 대상이 아니면 카드가 이미 있어 이 호출은
-            # 「이미 씀」으로 아무것도 하지 않는다(멱등).
-            supplement_name_card = _augment_name_card(
-                verified,
-                verification_fragments,
-                prepared_evidence,
-                enabled=True,
-            )
-            verified = supplement_name_card.report
-            if supplement_name_card.added or not name_card.added:
-                name_card = supplement_name_card
+            # ★ 이름 표는 보충 뒤에 다시 만들 필요가 없다 — 본문이 아니라
+            #   «별도의 표»라서, 3장이 통째로 다시 쓰여도 사라지지 않는다.
+            #   재료(3장 packet 조각)도 그대로다. 앞선 설계는 이름을 작가
+            #   카드 «안»에 넣었기 때문에 보충 회차마다 다시 붙여야 했다.
             numeric_filtering = numeric_filtering.merged(
                 supplement_numeric_filtering
             ).merged(merged_numeric_filtering)
@@ -1424,6 +1426,7 @@ def run_v2(
                 release_mode=release_mode.value,
                 verified_program_facts=prepared_evidence.program_facts,
                 program_registry_sources=prepared_evidence.program_sources,
+                name_table=name_table,
             )
             extractive = select_extractive_summary(
                 verified,
@@ -1461,6 +1464,7 @@ def run_v2(
                 latest_performance_period=latest_performance_period,
                 citation_style=citation_style,
                 program_registry_sources=prepared_evidence.program_sources,
+                name_table=name_table,
             )
             rendered = render_report(
                 company_name,
@@ -1482,6 +1486,7 @@ def run_v2(
                 public_structure_seal=public_structure_seal,
                 verified_program_facts=prepared_evidence.program_facts,
                 program_registry_sources=prepared_evidence.program_sources,
+                name_table=name_table,
             )
             assert_report_matches_public_structure(
                 rendered,
@@ -1751,13 +1756,16 @@ def run_v2(
             if name_usage.unused
             else ()
         ),
-        portfolio_name_card_count=name_card.name_count,
-        portfolio_name_card_counts_by_label=tuple(
-            sorted(name_card.counts_by_label.items())
+        portfolio_name_table_name_count=(
+            name_table.name_count if name_table is not None else 0
         ),
-        portfolio_name_card_blocked_reason=(
-            name_card.blocked_reason if name_usage.unused else ""
+        portfolio_name_table_counts_by_label=(
+            name_table.counts_by_label if name_table is not None else ()
         ),
+        portfolio_name_table_titles=(
+            name_table.table_titles if name_table is not None else ()
+        ),
+        portfolio_name_table_blocked_reason=name_table_result.blocked_reason,
     )
 
 

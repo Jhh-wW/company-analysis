@@ -33,6 +33,7 @@ from src.features.composer.constants import (
     GRADE_INTERPRETED,
     CITATION_STYLE_MERGED,
     PARAGRAPH_MAX_SENTENCES,
+    PORTFOLIO_TABLE_SECTION_ID,
     SECTION_IDS,
     SECTION_TITLES,
 )
@@ -45,6 +46,7 @@ from src.features.composer.port import (
     PerformanceTable,
     StructuredClaim,
 )
+from src.features.composer.portfolio_name_table import PortfolioNameTable
 from src.features.pipeline.port import Report, ReportTable
 from src.features.provenance.sources import (
     Source,
@@ -96,6 +98,8 @@ from src.shared.revenue_table_provenance import (
 
 
 _COMPOSITION_PRESENTATION: Final[str] = "composition"
+#: 3장 이름 표 행 결속의 표식. AI 검수를 지나지 않은 «결정적» 행임을 남긴다.
+_NAME_TABLE_PROJECTION: Final[str] = "grounded-name-table"
 _SOURCE_ID_PREFIX: Final[str] = "v2-frag-"
 _HEX_64_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _NUMERIC_TOKEN_RE: Final[re.Pattern[str]] = re.compile(
@@ -849,6 +853,52 @@ def _flow_binding(
     }
 
 
+def _name_table_binding(
+    fragment_ids: Sequence[str],
+    fragments: Mapping[str, _FragmentBinding],
+    *,
+    headers: Sequence[str],
+    row: Sequence[str],
+) -> dict[str, object]:
+    """3장 이름 표 한 행을 그 행이 인용한 조각들에 결속한다.
+
+    ★ flow 행 결속과 모양이 같고 표식만 다르다. 같은 이유로 셀 값을 그대로
+      원자료 값으로 둔다 — 이 표의 칸은 조각 원문에서 «글자 그대로» 뽑은
+      이름과 정본 종류 라벨뿐이라, 원자료의 다른 필드로 옮겨 적을 것이 없다.
+      칸의 글자가 정말 조각 원문에 있는지는 표를 만들기 전에
+      `portfolio_name_table._verified_names`가 이미 대조했다.
+    ★ 표식을 flow와 다르게 두는 이유 — 이 행은 AI 검수(bundled review)를
+      지나지 않은 «결정적» 행이다. 같은 표식을 쓰면 뒷날 감사에서 검수받은
+      행과 구분되지 않는다.
+    """
+
+    ids = tuple(dict.fromkeys(str(value).strip() for value in fragment_ids))
+    sources = tuple(fragments.get(fragment_id) for fragment_id in ids)
+    if not ids or any(source is None for source in sources):
+        raise PublicManifestError(
+            "이름 표 행이 검증된 출처 조각에 완전히 결속되지 않았습니다"
+        )
+    concrete = tuple(source for source in sources if source is not None)
+    return {
+        "source_fragment_ids": [source.fragment_id for source in concrete],
+        "document_identities": [source.document_identity for source in concrete],
+        "exact_evidence_hashes": [source.exact_evidence_hash for source in concrete],
+        "row_evidence_hash": "",
+        "injected_fact_id": "",
+        "deterministic_projection": _NAME_TABLE_PROJECTION,
+        "typed_cells": [
+            _typed_cell(
+                header=header,
+                column_index=index,
+                public_value=value,
+                source_field=f"{_NAME_TABLE_PROJECTION}-cell:{index}",
+                source_value=value,
+            )
+            for index, (header, value) in enumerate(zip(headers, row))
+        ],
+    }
+
+
 def _table_payload(
     *,
     section_id: str,
@@ -1493,8 +1543,13 @@ def build_public_structure_seal(
     latest_performance_period: str,
     citation_style: str,
     program_registry_sources: Sequence[Source] = (),
+    name_table: PortfolioNameTable | None = None,
 ) -> PublicStructureSeal:
-    """검증된 pre-render 입력만으로 공개 표·flow 정본을 만든다."""
+    """검증된 pre-render 입력만으로 공개 표·flow 정본을 만든다.
+
+    ``name_table``은 3장에 덧붙는 「회사가 공시한 대표 이름」 표다. renderer가
+    받는 것과 «같은 객체»여야 하며, 그래야 두 곳이 같은 캡션·행·인용을 만든다.
+    """
 
     normalized_fragments = _normalize_fragments(fragments)
     fragment_bindings = {
@@ -1568,6 +1623,57 @@ def build_public_structure_seal(
                     source_cites=source_cites,
                     row_fact_ids=("",) * len(rows),
                     row_bindings=row_bindings,
+                )
+            )
+        # 3장 「회사가 공시한 대표 이름」 — renderer가 넣는 자리와 같은 순서
+        # (작가 카드 바로 뒤, 구성표 앞)에 둔다.
+        if name_table is not None and section.section_id == PORTFOLIO_TABLE_SECTION_ID:
+            name_rows = [list(row) for row in name_table.rows]
+            name_row_bindings = [
+                _name_table_binding(
+                    row_ids,
+                    fragment_bindings,
+                    headers=name_table.headers,
+                    row=public_row,
+                )
+                for row_ids, public_row in zip(
+                    name_table.row_fragment_ids, name_rows
+                )
+            ]
+            name_source_cites = _normalized_source_cites(
+                tuple(
+                    fragment_id
+                    for binding in name_row_bindings
+                    for fragment_id in binding["source_fragment_ids"]
+                )
+            )
+            section_tables.append(
+                _table_payload(
+                    section_id=section.section_id,
+                    table_index=0,
+                    # ★ ``kind``를 고를 자유가 없다 — actual 쪽 역정규화
+                    #   (`shared/report_generation/canonical._actual_table_fields`)는
+                    #   표현이 ``flow``면 flow, 아니면 program으로 «계산»한다.
+                    #   여기서 다른 이름을 쓰면 봉인 대조가 이유 없이 막힌다.
+                    #   이 표가 결정적 투영이라는 사실은 행 결속의
+                    #   ``deterministic_projection`` 표식이 남긴다.
+                    kind="program",
+                    caption=name_table.caption,
+                    headers=name_table.headers,
+                    rows=name_rows,
+                    cite=name_source_cites[0],
+                    numeric=False,
+                    presentation="table",
+                    display_unit="",
+                    raw_rows=(),
+                    scale_divisor="",
+                    scale_places=0,
+                    entity_scope="",
+                    raw_unit="",
+                    unit_dimension="",
+                    source_cites=name_source_cites,
+                    row_fact_ids=("",) * len(name_rows),
+                    row_bindings=name_row_bindings,
                 )
             )
         program_slots: list[tuple[PerformanceTable, str]] = []
