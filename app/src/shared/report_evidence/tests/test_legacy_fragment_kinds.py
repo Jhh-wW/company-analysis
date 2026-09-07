@@ -16,6 +16,7 @@ from src.shared.report_evidence.legacy_fragment_kinds import (
     LEGACY_FRAGMENT_KINDS_BY_SECTION,
     LEGACY_SEMANTIC_SECTIONS_BY_ENGINE_CELL,
     LEGACY_KIND_AUDITOR_FINDING,
+    LEGACY_KIND_AUDIT_FINANCIAL,
     LEGACY_KIND_BUSINESS_CONTENT,
     LEGACY_KIND_FINANCIAL,
     LEGACY_KIND_GOODS_CONTENT,
@@ -51,6 +52,11 @@ from src.shared.revenue_table_provenance import (
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[5]
 _RUN_PILOT = _PROJECT_ROOT / "analysis_engine" / "tools" / "run_pilot.py"
+#: 「감사보고서 재무」 조각을 만드는 유일한 생산자. 무거운 파이프라인을
+#: import하지 않고 AST로만 읽는다(엔진 표를 읽는 방식과 같다).
+_REAL_PIPELINE = (
+    _PROJECT_ROOT / "app" / "src" / "features" / "pipeline" / "real.py"
+)
 
 _ENGINE_SECTION_KINDS = frozenset(
     {
@@ -91,6 +97,32 @@ def _literal_assignment(path: Path, name: str) -> object:
     raise AssertionError(f"{path}에서 {name} 대입을 찾지 못했습니다")
 
 
+def _assigned_name(path: Path, name: str) -> str:
+    """이름에 «어떤 이름을» 대입했는지 AST로 읽는다.
+
+    문자열 리터럴을 다시 적는 생산자는 정본과 조용히 갈라진다. 실제로
+    「감사보고서 재무」가 그렇게 갈려 그 조각만 거절됐다. 그래서 여기서는
+    값이 아니라 «정본 상수를 가져다 썼는가»를 본다.
+    """
+
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
+        if not any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in targets
+        ):
+            continue
+        if not isinstance(node.value, ast.Name):
+            raise AssertionError(
+                f"{path}의 {name}이 정본 상수가 아닌 값을 대입했습니다"
+            )
+        return node.value.id
+    raise AssertionError(f"{path}에서 {name} 대입을 찾지 못했습니다")
+
+
 def test_실제_생산자가_만드는_모든_종류가_정본에_정확히_등록된다() -> None:
     """생산자 추가·이름 변경 시 정본과 함께 바꾸지 않으면 실패한다."""
 
@@ -101,6 +133,12 @@ def test_실제_생산자가_만드는_모든_종류가_정본에_정확히_등�
     assert HOMEPAGE_FRAGMENT_KIND == LEGACY_KIND_HOMEPAGE
     assert OFFICIAL_IR_FRAGMENT_KIND == LEGACY_KIND_OFFICIAL_IR
     assert NEWS_FRAGMENT_KIND == LEGACY_KIND_NEWS
+    # 「감사보고서 재무」는 엔진 표가 아니라 파이프라인이 직접 만든다. 비상장
+    # 외감 회사에는 사업보고서가 없어 이 조각이 유일한 숫자 근거다.
+    assert (
+        _assigned_name(_REAL_PIPELINE, "_AUDIT_FINANCIALS_FRAGMENT_KIND")
+        == "LEGACY_KIND_AUDIT_FINANCIAL"
+    )
     produced = (
         frozenset(section_heads)
         | frozenset(EXTRA_SECTION_HEADS)
@@ -109,12 +147,13 @@ def test_실제_생산자가_만드는_모든_종류가_정본에_정확히_등�
                 HOMEPAGE_FRAGMENT_KIND,
                 OFFICIAL_IR_FRAGMENT_KIND,
                 NEWS_FRAGMENT_KIND,
+                LEGACY_KIND_AUDIT_FINANCIAL,
             }
         )
     )
 
     assert produced == LEGACY_FRAGMENT_KINDS
-    assert len(produced) == 20
+    assert len(produced) == 21
 
 
 def test_실제_CELL_SOURCES가_보내는_DART종류의_semantic장을_정본이_누락하지않는다() -> None:
@@ -177,6 +216,11 @@ def test_정확한_종류별_장_소유행렬을_고정한다() -> None:
         },
         "수익인식": {"business_model"},
         "재무": {"business_model", "past_changes", "competitive_position"},
+        "감사보고서 재무": {
+            "business_model",
+            "past_changes",
+            "competitive_position",
+        },
         "MD&A": {"past_changes", "current_challenges", "future_strategy"},
         "연구개발": {
             "portfolio",
@@ -227,6 +271,22 @@ def test_정확한_종류별_장_소유행렬을_고정한다() -> None:
         assert kinds == frozenset(
             kind for kind, sections in expected.items() if section_id in sections
         )
+
+
+def test_감사보고서_재무는_재무와_같은_장을_소유한다() -> None:
+    """감사보고서 재무제표 발췌는 DART API 주요계정과 같은 성격의 근거다.
+
+    두 이름이 실제로 같은 장을 갖는지는 리터럴로 한 번, 서로 대조로 한 번
+    본다. 한쪽만 보면 둘이 함께 틀려도 통과한다.
+    """
+
+    assert LEGACY_KIND_AUDIT_FINANCIAL in LEGACY_FRAGMENT_KINDS
+    assert sections_for_legacy_fragment_kind(
+        LEGACY_KIND_AUDIT_FINANCIAL
+    ) == frozenset({"business_model", "past_changes", "competitive_position"})
+    assert sections_for_legacy_fragment_kind(
+        LEGACY_KIND_AUDIT_FINANCIAL
+    ) == sections_for_legacy_fragment_kind(LEGACY_KIND_FINANCIAL)
 
 
 def test_홈페이지는_실제_수집범위의_직접관련_장에도_간다() -> None:

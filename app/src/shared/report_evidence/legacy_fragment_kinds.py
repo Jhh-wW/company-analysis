@@ -27,6 +27,10 @@ from src.shared.revenue_table_provenance import (
 LEGACY_KIND_BUSINESS_CONTENT: Final[str] = "사업내용"
 LEGACY_KIND_REVENUE_RECOGNITION: Final[str] = "수익인식"
 LEGACY_KIND_FINANCIAL: Final[str] = "재무"
+#: 비상장 외감 회사는 사업보고서를 내지 않아 감사보고서 재무제표 발췌가 유일한
+#: 숫자 근거가 된다. 생산자(pipeline real.py)가 이 이름으로 조각을 만드는데
+#: 정본에 없으면 그 조각 하나가 「등록되지 않은 종류」로 거절된다.
+LEGACY_KIND_AUDIT_FINANCIAL: Final[str] = "감사보고서 재무"
 LEGACY_KIND_MDA: Final[str] = "MD&A"
 LEGACY_KIND_RESEARCH_AND_DEVELOPMENT: Final[str] = "연구개발"
 LEGACY_KIND_RELATED_PARTY: Final[str] = "특수관계자"
@@ -139,6 +143,13 @@ _LEGACY_SECTIONS_BY_FRAGMENT_KIND = {
     ),
     LEGACY_KIND_REVENUE_RECOGNITION: frozenset({"business_model"}),
     LEGACY_KIND_FINANCIAL: frozenset(
+        {"business_model", "past_changes", "competitive_position"}
+    ),
+    # 감사보고서 재무제표 발췌는 DART API 주요계정과 «같은 성격»의 재무 근거다.
+    # 담는 숫자도 소비하는 장도 같으므로 「재무」와 같은 장 집합을 소유한다.
+    # 이 값을 「재무」에서 파생시키지 않고 따로 적는 이유는, 두 이름이 실제로
+    # 같은 장을 갖는지를 시험이 «독립 리터럴»로 대조할 수 있게 하기 위해서다.
+    LEGACY_KIND_AUDIT_FINANCIAL: frozenset(
         {"business_model", "past_changes", "competitive_position"}
     ),
     LEGACY_KIND_MDA: frozenset(

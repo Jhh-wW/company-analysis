@@ -40,6 +40,15 @@ _ORIGINAL_RUN_V2_COMPOSER = real._run_v2_composer  # noqa: SLF001
 _TYPED_STEP = "v2_조각_typed전달"
 _TYPED_STEP_BLOCKED = "v2_조각_typed전달_불가"
 
+#: 정본 등록표에 없는 종류. 운영에서는 「감사보고서 재무」가 이 자리였다.
+#: 시험은 특정 이름이 아니라 「모르는 이름이 와도 묶음을 안 버린다」를 지킨다.
+_UNREGISTERED_KIND = "미등록종류"
+#: 사유 열쇠는 「종류: 메시지」다. 메시지 하나에 스무 가지 넘는 생산자가
+#: 걸려서, 종류가 없으면 운영에서 어느 조각이 걸렸는지 못 가른다.
+#: 문구는 생산 상수를 끌어오지 않고 리터럴로 적는다 — 문구가 조용히 바뀌면
+#: 실행 기록을 읽는 사람이 못 알아보므로 시험이 같이 따라가면 안 된다.
+_UNREGISTERED_REASON = "미등록종류: 등록되지 않은 수집 조각 종류입니다"
+
 
 @pytest.fixture(autouse=True)
 def _reset_news_switch(monkeypatch: pytest.MonkeyPatch):
@@ -164,6 +173,69 @@ def test_부분보고서는_typed전달_단계를_실행기록에_남긴다(
         ]
     )
     assert typed_step["보조"] > 0
+    assert typed_step["typed"] > 0
+    # 세 갈래의 합이 실제로 넘어간 조각 수와 같아야 기록이 거짓말을 안 한다.
+    assert (
+        typed_step["typed"] + typed_step["legacy"] + typed_step["원형유지"]
+    ) == len(writer.fragments)
+    # 정상 묶음에는 원형 유지·빈 원문이 없다 — 있으면 조용히 뭔가 샌 것이다.
+    assert typed_step["원형유지"] == 0
+    assert typed_step["빈원문"] == 0
+    assert "원형유지_사유별" not in typed_step
+    assert _TYPED_STEP_BLOCKED not in _step_names(steps)
+
+
+def test_미등록_종류가_섞여도_typed조각과_원형조각이_함께_넘어간다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """조각 하나가 계약을 못 채워도 묶음 전체를 잃지 않는지 «배선에서» 본다.
+
+    변환기 단위 시험만으로는 부족하다. 운영 결함은 「변환기가 예외를 냈다」가
+    아니라 「그래서 작성기가 raw dict를 받았다」였고, 그건 연결부에서만 보인다.
+    """
+
+    calls, _result = _partial_path_calls(monkeypatch)
+    composer_kwargs = calls.composers[0]
+    frags = dict(composer_kwargs["frags"])
+    assert frags, "부분 경로가 조각을 하나도 만들지 못했습니다"
+    unregistered_id = max(frags) + 1
+    frags[unregistered_id] = {
+        "종류": _UNREGISTERED_KIND,
+        "원문": "가나다전자의 등록되지 않은 종류 근거다.",
+    }
+
+    result, writer, steps = _replay_connector(
+        monkeypatch, composer_kwargs, frags=frags
+    )
+
+    assert result.outcome is Outcome.REPORT, result.message
+    assert type(writer.fragments) is tuple, type(writer.fragments)
+    by_id = {
+        fragment.fragment_id: fragment for fragment in writer.fragments
+    }
+    # ① 모르는 종류는 버려지지 않고 옛 어댑터 모양으로 실려 간다.
+    carried = by_id[str(unregistered_id)]
+    assert carried.kind == _UNREGISTERED_KIND
+    assert carried.formal_source_kind == ""
+    assert carried.supported_claim_slots == ()
+    # ② 같은 묶음의 뉴스 조각은 typed 신원을 그대로 지킨다.
+    news = [
+        fragment
+        for fragment in writer.fragments
+        if fragment.formal_source_kind == SOURCE_KIND_NEWS
+    ]
+    assert news, "모르는 종류 하나가 뉴스의 typed 신원까지 지웠습니다"
+    for fragment in news:
+        assert fragment.source_publisher == "media.example"
+        assert fragment.document_date == "2026-09-01"
+        assert fragment.supported_claim_slots
+
+    typed_step = next(
+        step for step in steps if step.get("step") == _TYPED_STEP
+    )
+    assert typed_step["원형유지"] == 1
+    assert typed_step["원형유지_사유별"] == {_UNREGISTERED_REASON: 1}
+    assert typed_step["조각"] == len(writer.fragments)
     assert _TYPED_STEP_BLOCKED not in _step_names(steps)
 
 

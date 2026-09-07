@@ -10,7 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Final
 from urllib.parse import urlsplit
 
@@ -28,6 +30,7 @@ from src.features.composer.port import (
     CollectedFragment,
     SectionEvidencePacket,
     SectionEvidencePacketSet,
+    fragments_from_raw,
 )
 from src.shared.final_gate_diagnostics import (
     FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID,
@@ -740,12 +743,74 @@ def build_section_evidence_packet_set(
         raise _packet_invalid("장별 근거 packet 생성 계약이 손상됐습니다") from error
 
 
+#: 원형 유지 사유 문자열의 상한. 실행 기록·로그에 그대로 실리므로 길이를 묶어
+#: 둔다. 사유는 조각 종류와 닫힌 내부 메시지뿐이고 원문·URL은 들어가지 않는다.
+CARRIED_RAW_REASON_MAX_LENGTH: Final[int] = 80
+#: 종류가 비었거나 문자열이 아닐 때 쓰는 자리표시자. 빈 접두를 그대로 두면
+#: 「: 메시지」가 되어 종류를 안 적은 건지 빈 건지 읽는 사람이 못 가른다.
+CARRIED_RAW_UNKNOWN_KIND: Final[str] = "(종류 없음)"
+
+
+def _carried_raw_reason(error: EvidenceTransportError, *, kind: str) -> str:
+    """원형 유지 사유를 「종류: 메시지」 한 줄로 줄인다.
+
+    ★ 왜 메시지만으로는 모자라나 — 사유 메시지 하나(예: 「등록되지 않은 수집
+      조각 종류입니다」)에 스무 가지 넘는 생산자가 걸린다. 운영 기록에서
+      「어느 생산자의 조각이 걸렸나」를 바로 읽으려면 종류가 함께 있어야 한다.
+    """
+
+    label = kind.strip() or CARRIED_RAW_UNKNOWN_KIND
+    message = str(error).strip() or "알 수 없는 사유"
+    reason = f"{label}: {message}"
+    if len(reason) > CARRIED_RAW_REASON_MAX_LENGTH:
+        # 잘렸다는 사실이 보이게 마지막 한 글자를 말줄임으로 바꾼다.
+        reason = reason[: CARRIED_RAW_REASON_MAX_LENGTH - 1] + "…"
+    return reason
+
+
+@dataclass(frozen=True)
+class FlatFragmentConversion:
+    """부분 보고서 평면 변환의 결과와 «무엇이 어떻게 실렸는지»를 함께 담는다.
+
+    수만 세는 것이 아니라 사유별 수까지 돌려주는 이유는, 운영에서 보도표가
+    비었을 때 「조각이 없었나」와 「조각이 원형으로 실렸나」를 실행 기록만 보고
+    가를 수 있어야 하기 때문이다. 처음 판은 성공/실패 두 갈래뿐이라 원인을
+    가르지 못했다.
+    """
+
+    #: 공개 번호 오름차순 조각. typed·legacy·원형 유지가 섞여 있다.
+    fragments: tuple[CollectedFragment, ...] = ()
+    #: typed transport 메타를 다 채워 봉인된 신원 그대로 실린 조각 수.
+    typed_count: int = 0
+    #: typed 키 없이 정본에 등록된 legacy 종류로 변환된 조각 수.
+    legacy_count: int = 0
+    #: 계약을 못 채워 옛 어댑터 모양으로 실린 조각 수(버리지 않는다).
+    carried_raw_count: int = 0
+    #: 원문이 비어 옛 어댑터와 같은 규칙으로 건너뛴 조각 수.
+    skipped_empty_count: int = 0
+    #: (「종류: 사유 메시지」, 개수) 쌍을 사유 문자열 오름차순으로 담는다.
+    carried_raw_reasons: tuple[tuple[str, int], ...] = ()
+
+    @property
+    def supplementary_count(self) -> int:
+        """보조 문서(보도 자료 등) 종류로 실린 조각 수.
+
+        호출자가 같은 계산을 다시 쓰면 「보조가 무엇인가」의 정본이 둘로 갈린다.
+        """
+
+        return sum(
+            1
+            for fragment in self.fragments
+            if fragment.formal_source_kind in SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
+        )
+
+
 def typed_fragments_from_raw(
     *,
     corp_id: str,
     frags: Mapping[int, Mapping[str, object]],
     filing_meta: Any,
-) -> tuple[CollectedFragment, ...]:
+) -> FlatFragmentConversion:
     """장별 묶음 없이도 조각의 typed 신원을 그대로 보존해 넘긴다.
 
     ★ 왜 packet 없이 이 함수가 필요한가 — 장별 packet은 FULL 출고 계약(아홉 장
@@ -756,10 +821,23 @@ def typed_fragments_from_raw(
       선언을 통째로 버린다. 그래서 보조 문서(보도 자료)로 만드는 표는 소유 장을
       잃고 «부분 보고서에서만» 구조적으로 만들어지지 않았다.
 
-    ★ 조각의 typed 신원은 릴리스 모드와 무관한 사실이다. 그래서 이 함수는 packet
-      빌더와 «같은» ``_collected_fragment_from_raw`` 검증을 지난다. 다른 것은
-      장별 묶음과 문서 하한뿐이다 — 아홉 장 중 빈 장이 있어도, 근거가 0개여도
-      여기서는 막지 않는다.
+    ★ 조각의 typed 신원은 릴리스 모드와 무관한 사실이다. 그래서 조각 하나의
+      검증은 packet 빌더와 «같은» ``_collected_fragment_from_raw``를 지난다.
+
+    ★ 왜 FULL packet은 엄격한데 여기는 조각별로 관용하는가 (2026-09-07 실측) —
+      비상장 외감 회사의 묶음에는 「감사보고서 재무」처럼 정본 등록표에 아직
+      없던 종류가 섞인다. 처음 판에서는 그 조각 하나가 ``EvidenceTransportError``
+      를 내면 «묶음 전체»가 raw dict로 되돌아갔고, 같은 묶음에 있던 정상 뉴스
+      조각의 typed 신원까지 함께 잃어 보도표가 0건이 됐다. FULL은 아홉 장 계약
+      자체가 걸린 출고 관문이라 하나라도 어긋나면 거절하는 것이 맞지만, 부분
+      보고서는 애초에 그 하한을 못 채워서 열린 길이다. 여기서 묶음을 통째로
+      포기하면 «고칠 수 있었던 조각»까지 같이 버린다.
+
+    그래서 조각 하나가 계약을 어기면 그 조각만 옛 어댑터(``fragments_from_raw``)
+    모양으로 싣고(버리지 않는다) 사유를 세어 돌려준다. 옛 어댑터와 마찬가지로
+    원문이 빈 조각만 건너뛴다. 묶음 자체가 잘못된 입력(회사 식별자·공개 번호·
+    묶음/조각 자료형)일 때만 예외로 남긴다 — 그건 한 조각의 품질 문제가 아니라
+    호출자의 계약 위반이라 조용히 넘기면 원인을 못 찾는다.
 
     Args:
         corp_id: 여덟 자리 회사 고유번호. typed 조각의 회사 결속을 검산한다.
@@ -767,11 +845,12 @@ def typed_fragments_from_raw(
         filing_meta: legacy 조각의 문서 신원을 만들 때 쓰는 공시 문서 신원.
 
     Returns:
-        공개 번호 오름차순 ``CollectedFragment`` 튜플. ``frags``가 비면 ``()``.
+        ``FlatFragmentConversion``. 조각은 공개 번호 오름차순이고 ``frags``가
+        비면 조각도 사유도 비어 있다.
 
     Raises:
-        EvidenceTransportError: 조각·회사 식별자 계약이 깨진 경우. 진단
-            코드는 packet 빌더와 같은 값을 그대로 쓴다.
+        EvidenceTransportError: 묶음 단위 입력 계약이 깨진 경우. 진단 코드는
+            packet 빌더와 같은 값을 그대로 쓴다.
     """
 
     if type(corp_id) is not str or _COMPANY_ID_RE.fullmatch(corp_id) is None:
@@ -780,8 +859,8 @@ def typed_fragments_from_raw(
         raise _packet_invalid("근거 transport 조각 묶음이 비었습니다")
     if not frags:
         # 부분 보고서는 조각이 0개일 수도 있다. 그건 계약 손상이 아니라 실제
-        # 수집 결과이므로 예외 대신 빈 튜플로 정직하게 돌려준다.
-        return ()
+        # 수집 결과이므로 예외 대신 빈 결과로 정직하게 돌려준다.
+        return FlatFragmentConversion(fragments=())
 
     public_ids = tuple(frags)
     if any(type(public_id) is not int or public_id <= 0 for public_id in public_ids):
@@ -789,13 +868,61 @@ def typed_fragments_from_raw(
 
     seen_origin_ids: set[str] = set()
     fragments: list[CollectedFragment] = []
+    typed_count = 0
+    legacy_count = 0
+    carried_raw_count = 0
+    skipped_empty_count = 0
+    carried_raw_reasons: Counter[str] = Counter()
     for public_id in sorted(public_ids):
-        fragment, _section_ids = _collected_fragment_from_raw(
-            public_id,
-            frags[public_id],
-            corp_id=corp_id,
-            filing_meta=filing_meta,
-            seen_origin_ids=seen_origin_ids,
-        )
+        raw = frags[public_id]
+        if not isinstance(raw, Mapping):
+            # 조각이 Mapping이 아니면 옛 어댑터도 읽을 수 없다. 이건 한 조각의
+            # 품질 문제가 아니라 호출자가 넘긴 자료형 계약 위반이다.
+            raise _packet_invalid("근거 조각은 Mapping이어야 합니다")
+        if not str(raw.get("원문") or "").strip():
+            # 옛 어댑터와 같은 규칙이다 — 인용해도 대조할 원문이 없으면 근거가
+            # 못 된다. 내용을 보고 거르는 게 아니라 «비어 있는가»만 본다.
+            skipped_empty_count += 1
+            continue
+        # ★ 실패한 조각의 origin이 묶음 상태에 남으면 뒤 조각이 「중복 origin」
+        #   으로 잘못 거절된다. 도우미는 packet 빌더와 공유하므로 손대지 않고,
+        #   사본을 넘겨 «성공했을 때만» 되돌려 받는다.
+        attempted_origin_ids = set(seen_origin_ids)
+        try:
+            fragment, _section_ids = _collected_fragment_from_raw(
+                public_id,
+                raw,
+                corp_id=corp_id,
+                filing_meta=filing_meta,
+                seen_origin_ids=attempted_origin_ids,
+            )
+        except EvidenceTransportError as error:
+            carried = fragments_from_raw({public_id: raw})
+            if not carried:
+                # 위 빈 원문 검사와 옛 어댑터의 규칙이 어긋난 경우에만 온다.
+                # 만들 수 없는 조각을 지어내지 않고 건너뛴 것으로 센다.
+                skipped_empty_count += 1
+                continue
+            fragments.extend(carried)
+            carried_raw_count += 1
+            carried_raw_reasons[
+                _carried_raw_reason(
+                    error, kind=str(raw.get("종류") or "").strip()
+                )
+            ] += 1
+            continue
+        seen_origin_ids = attempted_origin_ids
         fragments.append(fragment)
-    return tuple(fragments)
+        if _is_typed_raw(raw):
+            typed_count += 1
+        else:
+            legacy_count += 1
+
+    return FlatFragmentConversion(
+        fragments=tuple(fragments),
+        typed_count=typed_count,
+        legacy_count=legacy_count,
+        carried_raw_count=carried_raw_count,
+        skipped_empty_count=skipped_empty_count,
+        carried_raw_reasons=tuple(sorted(carried_raw_reasons.items())),
+    )
