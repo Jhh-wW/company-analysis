@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import threading
 import time
 import unicodedata
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -18,7 +20,11 @@ from src.features.auth import logic as auth_logic
 from src.features.budget import logic as budget_logic
 from src.features.budget import spend_store
 from src.features.budget.constants import SPEND_PHASE_CANDIDATE, SPEND_PHASE_IDENTIFY
-from src.features.business_candidate.constants import CANDIDATE_ATTEMPT_TTL_SEC
+from src.features.business_candidate import providers as candidate_providers
+from src.features.business_candidate.constants import (
+    AI_RERANK_RESERVE_KRW,
+    CANDIDATE_ATTEMPT_TTL_SEC,
+)
 from src.features.business_candidate.logic import (
     CandidateResolution,
     ProviderRateLimited,
@@ -27,6 +33,7 @@ from src.features.business_candidate.logic import (
     ResolutionStatus,
 )
 from src.features.admin_dashboard import store as dashboard_store
+from src.features.pipeline import real as pipeline_real
 from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline.port import (
     CompanyCard,
@@ -1945,3 +1952,411 @@ def test_Google검색중_요청취소뒤_같은_grant는_재호출과_재과금�
             assert google.calls == 1
 
     asyncio.run(scenario())
+
+
+# ── 동점 후보의 AI 보조 재정렬 ────────────────────────────────
+
+
+class _가짜_재정렬_ask:
+    """계량 AI ask 자리에 들어가는 가짜. 네트워크를 쓰지 않는다."""
+
+    def __init__(self, response: str, spent_krw: float) -> None:
+        self._response = response
+        self.spent_krw = spent_krw
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return self._response
+
+
+class TiedCandidateFakeRealPipeline:
+    """같은 점수의 후보 다섯 개를 돌려주는 무과금 DART-local fixture."""
+
+    business_candidate_provider_costs_money = False
+    SUFFIXES = ("물류", "서비스", "유통", "판매", "홀딩스")
+
+    def __init__(self, rerank_ask=None) -> None:
+        self.rerank_ask = rerank_ask
+        self.search_calls = 0
+        self.rerank_factory_calls = 0
+
+    def make_candidate_rerank_ask(self):
+        self.rerank_factory_calls += 1
+        return self.rerank_ask
+
+    def search_business_candidates(self, **kwargs):
+        self.search_calls += 1
+        return [
+            RawBusinessCandidate(
+                candidate_name=f"가나다전자{suffix}",
+                address="서울특별시 강동구 강동대로 1",
+                source_label="전자공시(DART) 기업개황 fixture",
+                source_url="https://opendart.fss.or.kr/",
+                provider_name="DART",
+                candidate_ref=f"0000000{index}",
+            )
+            for index, suffix in enumerate(self.SUFFIXES)
+        ]
+
+
+class AiLessTiedCandidateFakeRealPipeline(TiedCandidateFakeRealPipeline):
+    """계량 AI ask를 만들 수 없는 파이프라인 — 재정렬 자체가 열리지 않는다."""
+
+    make_candidate_rerank_ask = None
+
+
+def _tied_pipeline(rerank_ask=None, *, with_ai: bool = True):
+    if not with_ai:
+        return AiLessTiedCandidateFakeRealPipeline()
+    return TiedCandidateFakeRealPipeline(rerank_ask)
+
+
+def _candidate_names_in_order(body: str) -> list[str]:
+    """화면에 나타난 순서대로 후보 이름을 뽑는다(같은 이름이 여러 번 나와도 한 번)."""
+
+    found = re.findall(r"가나다전자(?:물류|서비스|유통|판매|홀딩스)", body)
+    return list(dict.fromkeys(found))
+
+
+def _lift_raw_candidate_cap(monkeypatch) -> None:
+    """원시 후보 상한을 풀어 «동점 4개» 상황 자체가 만들어지게 한다.
+
+    ⚠️ 운영 어댑터는 원시 후보를 세 개로 자른다
+    (``providers.py::PipelineProviderAdapter.max_results``). 그 상한 그대로면
+    ``resolve_candidates``가 받는 후보가 화면 상한과 같아 재정렬 조건이 성립할 수
+    없다. 이 시험은 상한이 풀렸을 때 «배선»이 맞는지만 확인한다.
+    """
+
+    assert candidate_providers.PipelineProviderAdapter.max_results == 3
+    monkeypatch.setattr(
+        candidate_providers.PipelineProviderAdapter, "max_results", 5
+    )
+
+
+def test_동점후보는_AI가_준_순서로_보이고_비용은_구글과_같은_자리에_남는다(monkeypatch):
+    monkeypatch.delenv("CANDIDATE_AI_RERANK", raising=False)
+    _lift_raw_candidate_cap(monkeypatch)
+    ask = _가짜_재정렬_ask('{"order":[3,4]}', spent_krw=2.0)
+    pipeline = _tied_pipeline(ask)
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    client, csrf = _admin_client()
+    try:
+        candidates = client.post("/confirm", data=_form(csrf, company="가나다전자"))
+        assert candidates.status_code == 200, candidates.text
+        assert pipeline.search_calls == 1
+        assert len(ask.prompts) == 1
+        # 프롬프트에는 사용자가 적은 값과 후보 공개 필드만 담긴다.
+        assert '"가나다전자"' in ask.prompts[0]
+        assert '"서울 강동구"' in ask.prompts[0]
+
+        assert _candidate_names_in_order(candidates.text) == [
+            "가나다전자판매",
+            "가나다전자홀딩스",
+            "가나다전자물류",
+        ]
+        # Google 후보 검색 비용이 남는 «그 자리»에 같은 방식으로 기록한다.
+        assert "약 2원은" in candidates.text
+        attempt_token = _hidden(candidates.text, "candidate_attempt_token")
+        assert job_runtime._CANDIDATE_ATTEMPTS[attempt_token].candidate_cost_krw == 2.0
+    finally:
+        client.close()
+
+
+def test_재정렬_스위치가_꺼져_있으면_AI를_부르지_않는다(monkeypatch):
+    monkeypatch.setenv("CANDIDATE_AI_RERANK", "0")
+    _lift_raw_candidate_cap(monkeypatch)
+    ask = _가짜_재정렬_ask('{"order":[3,4]}', spent_krw=2.0)
+    pipeline = _tied_pipeline(ask)
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    client, csrf = _admin_client()
+    try:
+        candidates = client.post("/confirm", data=_form(csrf, company="가나다전자"))
+        assert candidates.status_code == 200, candidates.text
+        assert ask.prompts == []
+        assert pipeline.rerank_factory_calls == 0
+        assert _candidate_names_in_order(candidates.text) == [
+            "가나다전자물류",
+            "가나다전자서비스",
+            "가나다전자유통",
+        ]
+        assert "이 후보 검색은 비용을 사용하지 않았습니다" in candidates.text
+        attempt_token = _hidden(candidates.text, "candidate_attempt_token")
+        assert job_runtime._CANDIDATE_ATTEMPTS[attempt_token].candidate_cost_krw == 0.0
+    finally:
+        client.close()
+
+
+def test_AI_엔진이_없는_파이프라인은_재정렬을_열지_않는다(monkeypatch):
+    monkeypatch.delenv("CANDIDATE_AI_RERANK", raising=False)
+    _lift_raw_candidate_cap(monkeypatch)
+    pipeline = _tied_pipeline(with_ai=False)
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    client, csrf = _admin_client()
+    try:
+        candidates = client.post("/confirm", data=_form(csrf, company="가나다전자"))
+        assert candidates.status_code == 200, candidates.text
+        assert pipeline.rerank_factory_calls == 0
+        assert _candidate_names_in_order(candidates.text) == [
+            "가나다전자물류",
+            "가나다전자서비스",
+            "가나다전자유통",
+        ]
+        assert "이 후보 검색은 비용을 사용하지 않았습니다" in candidates.text
+    finally:
+        client.close()
+
+
+# ── 재정렬 비용 승인·예약 경계 ────────────────────────────────
+
+
+class _가짜_provider_messages:
+    """네트워크 없이 provider의 `messages.create` 응답 모양만 흉내 낸다."""
+
+    def __init__(self, order):
+        self.order = list(order)
+        self.requests: list[dict] = []
+
+    def create(self, **kwargs):
+        self.requests.append(kwargs)
+        return SimpleNamespace(
+            model=kwargs["model"],
+            stop_reason="end_turn",
+            content=[SimpleNamespace(text=json.dumps({"order": self.order}))],
+            usage=SimpleNamespace(
+                input_tokens=1200,
+                output_tokens=30,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            ),
+        )
+
+
+class _가짜_1판엔진:
+    """1판 `_ask`와 같은 경계로 실제 전송까지 가는 가짜 엔진."""
+
+    MODEL = "engine-default"
+
+    def __init__(self, messages: _가짜_provider_messages) -> None:
+        self._messages = messages
+        self.loaded = 0
+
+    def load_env(self):
+        self.loaded += 1
+
+    def _client(self):
+        return SimpleNamespace(messages=self._messages)
+
+    def _ask(self, client, prompt, schema, max_tokens):
+        response = client.messages.create(
+            model=self.MODEL,
+            max_tokens=max_tokens,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+            output_config={"format": {"type": "json_schema", "schema": schema}},
+        )
+        return json.loads(response.content[0].text), {
+            "in": response.usage.input_tokens,
+            "out": response.usage.output_tokens,
+        }
+
+
+class MeteredRerankFakeRealPipeline(TiedCandidateFakeRealPipeline):
+    """재정렬 ask 자리에 «진짜» 계량 껍데기를 놓는 fixture."""
+
+    def make_candidate_rerank_ask(self):
+        self.rerank_factory_calls += 1
+        self.rerank_ask = pipeline_real.MeteredCandidateRerankAsk()
+        return self.rerank_ask
+
+
+def _spy_begin_paid_phase(monkeypatch) -> list[dict]:
+    """열린 phase의 실제 예약 인자를 그대로 기록한다(원래 동작은 유지)."""
+
+    seen: list[dict] = []
+    original = paid_runtime._begin_paid_phase
+
+    def spy(**kwargs):
+        seen.append(dict(kwargs))
+        return original(**kwargs)
+
+    monkeypatch.setattr(paid_runtime, "_begin_paid_phase", spy)
+    return seen
+
+
+def _spy_observed_resolutions(monkeypatch) -> list:
+    """관측 경계로 넘어간 최종 후보 결과를 기록한다(원래 동작은 유지)."""
+
+    seen: list = []
+    original = analysis_router._observe_candidate_resolution
+
+    def spy(resolution, **kwargs):
+        seen.append(resolution)
+        return original(resolution, **kwargs)
+
+    monkeypatch.setattr(analysis_router, "_observe_candidate_resolution", spy)
+    return seen
+
+
+def _enable_attempt_ledger() -> None:
+    """운영(`PIPELINE=real`) lifespan이 하는 attempt 원장 전환을 그대로 켠다.
+
+    전환 전 legacy 모드에서는 `_activate_paid_provider`가 `attempt_context`를
+    설치하지 않아 계량 AI 호출이 전송 전에 거절된다(그때는 재정렬만 조용히
+    포기하고 후보는 그대로 나온다). 이 시험은 «전환된» 운영 조건을 본다.
+    """
+
+    paid_runtime.prepare_budget_state_machine_cutover()
+    paid_runtime._seed_ledger()
+
+
+def test_무료_DART갈래도_예약문맥을_열어_재정렬_AI가_실제로_전송된다(monkeypatch):
+    """★ 예전엔 여기서 «원자 예약 문맥이 설치되지 않았습니다»로 전송 전에 막혔다."""
+
+    monkeypatch.delenv("CANDIDATE_AI_RERANK", raising=False)
+    _lift_raw_candidate_cap(monkeypatch)
+    _enable_attempt_ledger()
+    messages = _가짜_provider_messages([3, 4])
+    monkeypatch.setattr(
+        pipeline_real, "_engine", lambda: _가짜_1판엔진(messages)
+    )
+    pipeline = MeteredRerankFakeRealPipeline()
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    reservations = _spy_begin_paid_phase(monkeypatch)
+    observed = _spy_observed_resolutions(monkeypatch)
+
+    client, csrf = _admin_client()
+    try:
+        candidates = client.post("/confirm", data=_form(csrf, company="가나다전자"))
+        assert candidates.status_code == 200, candidates.text
+
+        # ① provider 경계까지 실제로 나갔다(전송 전 거절이 아니다).
+        assert len(messages.requests) == 1
+        assert messages.requests[0]["model"] == "claude-haiku-4-5"
+        assert messages.requests[0]["max_tokens"] == 200
+
+        # ② 무료 갈래도 후보검색 phase를 재정렬 예약액으로 연다.
+        assert [item["requested_cost_krw"] for item in reservations] == [
+            AI_RERANK_RESERVE_KRW
+        ]
+        assert reservations[0]["phase"] == SPEND_PHASE_CANDIDATE
+
+        # ③ AI가 준 순서가 화면에 반영됐다.
+        assert _candidate_names_in_order(candidates.text) == [
+            "가나다전자판매",
+            "가나다전자홀딩스",
+            "가나다전자물류",
+        ]
+        assert observed[-1].rerank_status == "applied"
+
+        # ④ 실제로 쓴 돈이 관측·attempt 원장·화면 안내문 세 자리에 같은 값으로 남는다.
+        spent = pipeline.rerank_ask.spent_krw
+        assert 0 < spent < AI_RERANK_RESERVE_KRW
+        attempt_token = _hidden(candidates.text, "candidate_attempt_token")
+        assert (
+            job_runtime._CANDIDATE_ATTEMPTS[attempt_token].candidate_cost_krw == spent
+        )
+        assert f"약 {spent:.0f}원은" in candidates.text
+        assert pipeline.rerank_ask.billing_uncertain is False
+    finally:
+        client.close()
+
+
+def test_재정렬_비용승인이_거절되면_AI없이_후보만_정상으로_돌려준다(monkeypatch):
+    monkeypatch.delenv("CANDIDATE_AI_RERANK", raising=False)
+    _lift_raw_candidate_cap(monkeypatch)
+    messages = _가짜_provider_messages([3, 4])
+    monkeypatch.setattr(
+        pipeline_real, "_engine", lambda: _가짜_1판엔진(messages)
+    )
+    pipeline = MeteredRerankFakeRealPipeline()
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    # 일일 예산·회원 한도에서 거절된 상황을 그대로 모사한다.
+    monkeypatch.setattr(paid_runtime, "_begin_paid_phase", lambda **_kwargs: None)
+    observed = _spy_observed_resolutions(monkeypatch)
+
+    client, csrf = _admin_client()
+    try:
+        candidates = client.post("/confirm", data=_form(csrf, company="가나다전자"))
+        assert candidates.status_code == 200, candidates.text
+
+        assert messages.requests == []
+        assert observed[-1].rerank_status == "skipped_budget"
+        # 후보 검색 자체는 어떤 경우에도 실패하지 않는다.
+        assert _candidate_names_in_order(candidates.text) == [
+            "가나다전자물류",
+            "가나다전자서비스",
+            "가나다전자유통",
+        ]
+        assert "이 후보 검색은 비용을 사용하지 않았습니다" in candidates.text
+        attempt_token = _hidden(candidates.text, "candidate_attempt_token")
+        assert job_runtime._CANDIDATE_ATTEMPTS[attempt_token].candidate_cost_krw == 0.0
+    finally:
+        client.close()
+
+
+class GoogleFallbackRerankPipeline(TiedCandidateFakeRealPipeline):
+    """로컬 후보 0건 → 구글 갈래로 넘어가면서 재정렬 ask도 주는 fixture."""
+
+    def search_business_candidates(self, **kwargs):
+        self.search_calls += 1
+        return []
+
+    def find_company_metered(self, user_input: UserInput) -> CompanyLookupResult:
+        # 이름 식별도 0건이어야 명시 Google 버튼 화면까지 간다.
+        return CompanyLookupResult(card=None, model="fake-dart")
+
+
+def test_구글_갈래_예약액은_구글_예상비용에_재정렬_예약을_더한다(monkeypatch):
+    monkeypatch.delenv("CANDIDATE_AI_RERANK", raising=False)
+    ask = _가짜_재정렬_ask('{"order":[]}', spent_krw=0.0)
+    pipeline = GoogleFallbackRerankPipeline(ask)
+    google = PaidGoogleFixture()
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    monkeypatch.setenv(evaluation_mode.ENV_MODE, "1")
+    monkeypatch.setenv(evaluation_mode.ENV_PAID_PROVIDERS, "1")
+    monkeypatch.setattr(
+        request_helpers, "_strict_loopback_http_request", lambda _r: True
+    )
+    monkeypatch.setattr(
+        candidate_providers,
+        "configured_provider",
+        lambda _pipeline, **_kwargs: google,
+    )
+    reservations = _spy_begin_paid_phase(monkeypatch)
+
+    client, csrf = _admin_client()
+    try:
+        workflow_id = _hidden(client.get("/").text, "evaluation_workflow_id")
+        missed = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                evaluation_paid_consent="yes",
+                evaluation_workflow_id=workflow_id,
+            ),
+        )
+        assert missed.status_code == 200, missed.text
+        search_grant = _hidden(missed.text, "candidate_search_grant")
+        consent_grant = _hidden(missed.text, "evaluation_consent_grant")
+
+        candidates = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                candidate_search_requested="yes",
+                candidate_search_grant=search_grant,
+                evaluation_consent_grant=consent_grant,
+            ),
+        )
+        assert candidates.status_code == 200, candidates.text
+        assert google.calls == 1
+
+        # 첫 값은 로컬 DART 갈래가 재정렬용으로 연 phase, 둘째가 구글 갈래다.
+        assert [
+            item["requested_cost_krw"]
+            for item in reservations
+            if item["phase"] == SPEND_PHASE_CANDIDATE
+        ] == [AI_RERANK_RESERVE_KRW, 49.0 + AI_RERANK_RESERVE_KRW]
+    finally:
+        client.close()

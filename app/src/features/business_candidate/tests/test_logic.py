@@ -502,3 +502,165 @@ def test_DART_local_cold_timeout은_외부provider_8초경계와_분리된다(mo
     )
     assert generic_result.status is logic.ResolutionStatus.TIMED_OUT
     time.sleep(0.04)  # timeout 뒤 worker callback이 slot을 반환할 때까지 기다린다.
+
+
+# ── AI 보조 재정렬 배선 ────────────────────────────────
+
+
+def _tied_rows(count: int = 5):
+    """같은 점수가 되도록 이름만 다른 후보를 만든다(주소·홈페이지·코드 동일)."""
+
+    suffixes = ("물류", "서비스", "유통", "판매", "홀딩스", "네트웍스", "에너지")
+    return [
+        logic.RawBusinessCandidate(
+            candidate_name=f"가나다전자{suffixes[index]}",
+            address="서울특별시 가나구 가나대로 1",
+            source_label="공식 사업자 검색 API",
+            source_url="https://example.org/",
+        )
+        for index in range(count)
+    ]
+
+
+def _resolve_tied(monkeypatch, *, rate_key: str, rows=None, **changes):
+    _fresh_rate(monkeypatch)
+    provider = FixtureProvider(_tied_rows() if rows is None else rows)
+    result = logic.resolve_candidates(
+        provider,
+        company="가나다전자",
+        address_hint="서울 가나구",
+        rate_key=rate_key,
+        now=60.0,
+        **changes,
+    )
+    return provider, result
+
+
+def test_동점후보의_결정적_순서는_ask없이_그대로다(monkeypatch):
+    _provider, result = _resolve_tied(monkeypatch, rate_key="rerank-none")
+
+    assert result.status is logic.ResolutionStatus.OK
+    assert result.rerank_status == ""
+    assert [row.candidate_name for row in result.candidates] == [
+        "가나다전자물류",
+        "가나다전자서비스",
+        "가나다전자유통",
+    ]
+    assert len({row.score for row in result.candidates}) == 1
+
+
+def test_AI가_준_순서가_상위3개를_고르고_applied로_기록된다(monkeypatch):
+    asked: list[str] = []
+
+    def ask(prompt: str) -> str:
+        asked.append(prompt)
+        return '{"order":[3,4]}'
+
+    _provider, result = _resolve_tied(
+        monkeypatch, rate_key="rerank-applied", rerank_ask=ask
+    )
+
+    assert len(asked) == 1
+    assert "가나다전자판매" in asked[0]
+    assert result.rerank_status == "applied"
+    assert [row.candidate_name for row in result.candidates] == [
+        "가나다전자판매",
+        "가나다전자홀딩스",
+        "가나다전자물류",
+    ]
+
+
+def test_동점이_없으면_ask를_한번도_부르지_않는다(monkeypatch):
+    calls: list[str] = []
+    rows = [
+        logic.RawBusinessCandidate(
+            candidate_name="가나다전자",
+            address="서울특별시 가나구 가나대로 1",
+        ),
+        logic.RawBusinessCandidate(
+            candidate_name="가나다전자서비스",
+            address="서울특별시 가나구 가나대로 1",
+        ),
+    ]
+    _provider, result = _resolve_tied(
+        monkeypatch,
+        rate_key="rerank-no-tie",
+        rows=rows,
+        rerank_ask=calls.append,
+    )
+
+    assert calls == []
+    assert result.rerank_status == "no_tie"
+    assert result.candidates[0].candidate_name == "가나다전자"
+
+
+def test_재정렬_시간초과는_원래순서와_failed로_끝난다(monkeypatch):
+    monkeypatch.setattr(logic, "AI_RERANK_TIMEOUT_SEC", 0.01)
+
+    def 느린_ask(_prompt: str) -> str:
+        time.sleep(0.3)
+        return '{"order":[4,3]}'
+
+    _provider, result = _resolve_tied(
+        monkeypatch, rate_key="rerank-timeout", rerank_ask=느린_ask
+    )
+
+    assert result.rerank_status == "failed"
+    assert [row.candidate_name for row in result.candidates] == [
+        "가나다전자물류",
+        "가나다전자서비스",
+        "가나다전자유통",
+    ]
+
+
+def test_재정렬_worker가_없으면_ask를_부르지_않고_failed로_끝난다(monkeypatch):
+    """공급자 호출은 마지막 슬롯을 쓰고, 뒤이은 재정렬은 기다리지 않고 포기한다."""
+
+    class 한번만_주는_슬롯:
+        def __init__(self) -> None:
+            self.acquires = 0
+
+        def acquire(self, blocking: bool = True) -> bool:
+            self.acquires += 1
+            return self.acquires == 1
+
+        def release(self) -> None:
+            return None
+
+    slots = 한번만_주는_슬롯()
+    monkeypatch.setattr(logic, "_PROVIDER_WORKER_SLOTS", slots)
+
+    def 부르면안되는_ask(_prompt: str) -> str:  # pragma: no cover - 부르면 실패다
+        raise AssertionError("worker가 없으면 ask를 부르면 안 된다")
+
+    _provider, result = _resolve_tied(
+        monkeypatch, rate_key="rerank-noworker", rerank_ask=부르면안되는_ask
+    )
+
+    assert slots.acquires == 2
+    assert result.rerank_status == "failed"
+    assert [row.candidate_name for row in result.candidates] == [
+        "가나다전자물류",
+        "가나다전자서비스",
+        "가나다전자유통",
+    ]
+
+
+def test_재정렬은_후보를_잃지_않고_사용자입력만_프롬프트에_싣는다(monkeypatch):
+    asked: list[str] = []
+
+    def ask(prompt: str) -> str:
+        asked.append(prompt)
+        return '{"order":[4]}'
+
+    provider, result = _resolve_tied(
+        monkeypatch, rate_key="rerank-payload", rerank_ask=ask
+    )
+
+    assert provider.calls == 1
+    assert result.candidates[0].candidate_name == "가나다전자홀딩스"
+    assert len(result.candidates) == MAX_CANDIDATES
+    # 후보의 공개 필드와 사용자가 적은 값 말고는 담지 않는다.
+    assert '"가나다전자"' in asked[0]
+    assert '"서울 가나구"' in asked[0]
+    assert "rerank-payload" not in asked[0]

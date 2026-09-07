@@ -21,6 +21,7 @@ import logging
 import time
 import traceback
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from html.parser import HTMLParser
@@ -28,7 +29,9 @@ from typing import Protocol, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from src.features.budget import logic as budget_logic
+from src.features.business_candidate import ai_rerank
 from src.features.business_candidate.constants import (
+    AI_RERANK_TIMEOUT_SEC,
     CANDIDATE_ATTEMPT_TTL_SEC,
     MAX_ADDRESS_CHARS,
     MAX_CANDIDATES,
@@ -176,6 +179,9 @@ class CandidateResolution:
     #: DART 로컬 후보의 profile 보강만 실패한 좁은 관측 표식. 일반 공급자 장애·
     #: timeout·rate limit에는 절대 쓰지 않으며 운영 점검 심각도를 낮추지 않는다.
     local_profile_enrichment_failed: bool = False
+    #: AI 보조 재정렬 결과(`ai_rerank.RERANK_STATUS_*`). 부르지 않았으면 빈 문자열이다.
+    #: 후보 집합은 이 값과 무관하게 같고, 어떤 값도 회사를 확정하지 않는다.
+    rerank_status: str = ""
 
 
 class BusinessCandidateProvider(Protocol):
@@ -725,6 +731,38 @@ def _call_once(
         executor.shutdown(wait=False, cancel_futures=True)
 
 
+def _timeboxed_rerank_ask(ask: ai_rerank.RerankAsk) -> ai_rerank.RerankAsk:
+    """AI 재정렬 응답을 공급자 호출과 «같은» worker·시간 상한 안에 가둔다.
+
+    재정렬은 공급자 호출이 끝난 뒤에 돌아 같은 슬롯을 다시 빌린다. 슬롯이 없으면
+    기다리지 않고 즉시 포기해, 보조 단계가 후보 화면을 붙잡지 않게 한다.
+    """
+
+    def bounded(prompt: str) -> str:
+        if not _PROVIDER_WORKER_SLOTS.acquire(blocking=False):
+            raise ProviderWorkerUnavailable("회사 후보 재정렬 worker가 모두 사용 중입니다")
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+        def invoke() -> str:
+            return str(ask(prompt) or "")
+
+        try:
+            # ThreadPoolExecutor는 contextvars를 자동 전파하지 않는다. 요청 로컬
+            # attempt/예산 문맥을 명시적으로 복사해야 하위 gateway가 막지 않는다.
+            request_context = contextvars.copy_context()
+            future = executor.submit(request_context.run, invoke)
+            future.add_done_callback(lambda _future: _PROVIDER_WORKER_SLOTS.release())
+            return future.result(timeout=AI_RERANK_TIMEOUT_SEC)
+        except BaseException:
+            if "future" not in locals():
+                _PROVIDER_WORKER_SLOTS.release()
+            raise
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    return bounded
+
+
 def resolve_candidates(
     provider: BusinessCandidateProvider | None,
     *,
@@ -733,10 +771,12 @@ def resolve_candidates(
     rate_key: str,
     now: float | None = None,
     allow_paid_provider: bool = False,
+    rerank_ask: Callable[[str], str] | None = None,
 ) -> CandidateResolution:
     """공급자를 최대 한 번 호출하고, 안전한 상위 후보만 돌려준다.
 
     반환 후보는 어디까지나 사용자가 선택할 목록이다. 이 함수에는 자동 확정 경로가 없다.
+    ``rerank_ask``를 주면 결정적 순위가 갈리지 않을 때만 AI에 순서를 한 번 물어본다.
     """
     if provider is None:
         return CandidateResolution(ResolutionStatus.UNCONFIGURED)
@@ -893,10 +933,21 @@ def resolve_candidates(
             item.address,
         )
     )
+    rerank_status = ""
+    if rerank_ask is not None:
+        # 상위 3개를 자르기 «전»에 순서를 다시 잡아야 밀려 있던 정답이 화면에 든다.
+        ranked, rerank_status = ai_rerank.rerank_candidates(
+            ranked,
+            query=safe_company,
+            address_hint=safe_address_hint,
+            ask=_timeboxed_rerank_ask(rerank_ask),
+        )
+
     selected = tuple(ranked[:MAX_CANDIDATES])
     return CandidateResolution(
         ResolutionStatus.OK if selected else ResolutionStatus.NO_MATCHES,
         selected,
         provider_called=True,
         provider_name=provider_name,
+        rerank_status=rerank_status,
     )
