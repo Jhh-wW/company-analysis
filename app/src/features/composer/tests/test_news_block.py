@@ -173,7 +173,9 @@ def test_행은_최신_발행일부터_실린다() -> None:
 def test_장당_행_수는_상한을_넘지_않는다() -> None:
     ids = tuple(str(70 + offset) for offset in range(NEWS_BLOCK_MAX_ROWS + 2))
     fragments = tuple(
-        _news(fragment_id, published_on=f"2026-09-0{index + 1}")
+        # 두 자리로 적는다 — 상한이 여덟을 넘으면 «2026-09-010» 같은 값이 나와
+        # 정렬이 조용히 뒤집힌다.
+        _news(fragment_id, published_on=f"2026-09-{index + 1:02d}")
         for index, fragment_id in enumerate(ids)
     )
     result = augment_news_blocks(
@@ -186,6 +188,56 @@ def test_장당_행_수는_상한을_넘지_않는다() -> None:
     assert dict(result.blocked_counts_by_reason)[BLOCKED_ROW_LIMIT] == (
         len(ids) - NEWS_BLOCK_MAX_ROWS
     )
+
+
+def test_장당_상한은_뉴스_수집_전체_상한과_같다() -> None:
+    """장당 행 상한 == 회사 하나에서 모으는 뉴스 조각 전체 상한.
+
+    ★ 왜 같아야 하나 — 수집이 한 회사에서 만드는 보조 조각은 최대
+      ``NEWS_FRAGMENT_COUNT_LIMIT``개다. 장당 상한이 그보다 «작으면», 모은
+      조각이 한 장에 몰렸을 때 나머지가 ``row_limit``으로 빠진다. 우리가
+      돈을 들여 모아 놓고 표에서 숨기는 조각이 생기는 것이다
+      (2026-09-07 운영 실측: 조각 여섯이 전부 3장에 배정됐는데 옛 상한
+      셋 때문에 절반이 사라졌다). 반대로 «크면» 상한이 아무 일도 하지
+      않는다 — 어차피 그만큼 오지 않는다.
+
+    ★ 두 상수를 견주기만 하면 둘이 «같이» 내려갈 때도 통과한다. 그래서 값
+      자체도 한 번 못 박는다 — 어느 한쪽만 고쳐도, 둘 다 고쳐도 걸린다.
+    """
+
+    from src.features.pipeline.real import NEWS_FRAGMENT_COUNT_LIMIT
+
+    assert NEWS_BLOCK_MAX_ROWS == NEWS_FRAGMENT_COUNT_LIMIT
+    assert NEWS_BLOCK_MAX_ROWS == 6
+
+
+def test_수집_상한만큼_온_조각은_한_장에_몰려도_한_행도_안_빠진다() -> None:
+    """위 시험의 «뜻»을 동작으로 다시 잰다 — 상수 대조만으로는 부족하다.
+
+    ★ 상수 두 개가 같아도 상한을 «세는 자리»가 바뀌면 행이 또 빠질 수 있다.
+      수집 상한만큼(여섯) 조각을 한 장에 몰아넣고 ``row_limit``이 0인지 본다.
+    """
+
+    from src.features.pipeline.real import NEWS_FRAGMENT_COUNT_LIMIT
+
+    # 표본 크기를 생산 상수에서 가져오므로, 상한이 내려가면 표본도 같이
+    # 줄어 이 시험만으로는 회귀를 못 잡는다. 위 시험의 리터럴 단정이 그
+    # 구멍을 막는다.
+    assert NEWS_FRAGMENT_COUNT_LIMIT == 6
+    ids = tuple(str(80 + offset) for offset in range(NEWS_FRAGMENT_COUNT_LIMIT))
+    fragments = tuple(
+        _news(fragment_id, published_on=f"2026-09-{index + 1:02d}")
+        for index, fragment_id in enumerate(ids)
+    )
+
+    result = augment_news_blocks(
+        _report(),
+        fragments,
+        allowed_fragment_ids_by_section=_owned(identity=ids),
+    )
+
+    assert len(_table_rows(result, "identity")) == NEWS_FRAGMENT_COUNT_LIMIT
+    assert BLOCKED_ROW_LIMIT not in dict(result.blocked_counts_by_reason)
 
 
 def test_작가가_이미_인용한_조각도_표에_실린다() -> None:

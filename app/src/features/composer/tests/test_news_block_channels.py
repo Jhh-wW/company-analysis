@@ -43,12 +43,24 @@ _COLLECTED_ON = "2026-09-06"
 
 #: 장 → (조각 id, 발행일, 보도 문장). 숫자·퍼센트를 한 글자도 넣지 않는다
 #: (상류 매핑이 숫자 있는 문장을 아예 조각으로 만들지 않는다).
+#:
+#: ★ 1장(identity)은 «상한 + 1»개다 — 상한이 실제로 한 행을 빼는 것을 보려면
+#:   상한보다 많이 와야 한다. 상한과 같으면 상한을 0으로 만들어도 이 파일의
+#:   시험이 전부 통과한다.
+#: ★ 1장의 «적는 순서»는 (발행일 순서가 아니라) 「실리는 조각 먼저, 빠지는
+#:   조각 맨 뒤」다. 그래야 화면 시험이 `[:NEWS_BLOCK_MAX_ROWS]`를 실린 행으로,
+#:   `[NEWS_BLOCK_MAX_ROWS]`를 빠진 행으로 읽을 수 있다. 맨 뒤 조각(49)의
+#:   발행일이 나머지 어느 것보다도 오래되어야 이 성질이 유지된다.
 _NEWS_BY_SECTION: dict[str, tuple[tuple[str, str, str], ...]] = {
     "identity": (
         ("41", "2026-08-11", "가나다전자는 물류 자동화 제품군을 넓히고 있다."),
         ("42", "2026-09-02", "가나다전자는 현장 설비 회사로 알려져 있다."),
         ("43", "2026-07-05", "가나다전자는 수도권 물류 현장에 제품을 넣었다."),
         ("44", "2026-06-01", "가나다전자는 협력사와 설비를 함께 만든다."),
+        ("47", "2026-08-25", "가나다전자는 물류 설비 인증을 새로 받았다."),
+        ("48", "2026-07-20", "가나다전자는 상담 조직을 현장에 두고 있다."),
+        # ↓ 가장 오래된 발행일 — 상한을 넘겨 빠지는 행이다(맨 뒤에 둔다).
+        ("49", "2026-05-10", "가나다전자는 협력사 교육 과정을 열어 왔다."),
     ),
     "business_model": (
         ("45", "2026-08-20", "가나다전자는 기업 고객에게 설비를 직접 공급한다."),
@@ -231,7 +243,15 @@ def test_행은_최신순으로_상한까지만_실린다(보고서) -> None:
     table = _news_table(보고서, "identity")
 
     assert table.caption == news_block_caption(NEWS_BLOCK_MAX_ROWS)
-    assert [row[0] for row in table.rows] == ["2026-09-02", "2026-08-11", "2026-07-05"]
+    # 최신순으로 상한까지. 맨 오래된 2026-05-10(조각 49)이 빠진 행이다.
+    assert [row[0] for row in table.rows] == [
+        "2026-09-02",
+        "2026-08-25",
+        "2026-08-11",
+        "2026-07-20",
+        "2026-07-05",
+        "2026-06-01",
+    ]
     assert {row[1] for row in table.rows} == {_PUBLISHER}
 
 
@@ -381,11 +401,14 @@ def test_화면이_보도표를_일반_표로_그린다(보고서) -> None:
     assert 머리글줄 in body, 머리글줄
     # 숫자 표가 아니라 글자 표여야 첫 칸이 한 글자 폭으로 찌그러지지 않는다.
     assert 'class="texts"' in body
-    for _fragment_id, published_on, text in _NEWS_BY_SECTION["identity"][:3]:
+    # fixture는 「실리는 조각 먼저, 빠지는 조각 맨 뒤」 순서다(맨 위 주석).
+    for _fragment_id, published_on, text in _NEWS_BY_SECTION["identity"][
+        :NEWS_BLOCK_MAX_ROWS
+    ]:
         assert f"<td>{published_on}</td>" in body
         assert f"<td>{text}</td>" in body
     # 상한을 넘겨 뺀 행은 화면에도 없어야 한다.
-    빠진_행 = _NEWS_BY_SECTION["identity"][3]
+    빠진_행 = _NEWS_BY_SECTION["identity"][NEWS_BLOCK_MAX_ROWS]
     assert 빠진_행[2] not in body
 
 
@@ -647,10 +670,14 @@ def test_packet_없는_부분_경로에서도_보도표가_붙고_출고검증�
     # ③ 행에 발행일·매체·원문이 그대로 있다.
     table = _news_table(report, "identity")
     assert table.caption == news_block_caption(NEWS_BLOCK_MAX_ROWS)
+    # 최신순으로 상한까지. 맨 오래된 2026-05-10(조각 49)이 빠진 행이다.
     assert [row[0] for row in table.rows] == [
         "2026-09-02",
+        "2026-08-25",
         "2026-08-11",
+        "2026-07-20",
         "2026-07-05",
+        "2026-06-01",
     ]
     assert {row[1] for row in table.rows} == {_PUBLISHER}
     글자_by_id = {
@@ -939,10 +966,14 @@ def test_보충_회차가_그_장을_다시_써도_보도표가_남는다() -> N
     assert writer.section_calls["identity"] == 2, writer.section_calls
     table = _news_table(output.report, "identity")
     assert table is not None, "보충 뒤 보도표가 사라졌습니다"
+    # 최신순으로 상한까지. 맨 오래된 2026-05-10(조각 49)이 빠진 행이다.
     assert [row[0] for row in table.rows] == [
         "2026-09-02",
+        "2026-08-25",
         "2026-08-11",
+        "2026-07-20",
         "2026-07-05",
+        "2026-06-01",
     ]
 
 
