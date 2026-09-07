@@ -25,12 +25,16 @@ from src.features.news_intake import constants as news_constants
 from src.features.news_intake.models import NewsEvidenceFragment
 from src.features.pipeline import real
 from src.features.pipeline.evidence_transport import (
+    CARRIED_RAW_KIND_MAX_LENGTH,
+    CARRIED_RAW_KIND_OUT_OF_FORM,
     CARRIED_RAW_REASON_MAX_LENGTH,
     CARRIED_RAW_UNKNOWN_KIND,
     RAW_EVIDENCE_SECTION_IDS_KEY,
     RAW_EVIDENCE_SLOT_IDS_KEY,
     EvidenceTransportError,
     FlatFragmentConversion,
+    _carried_raw_kind_label,
+    _carried_raw_reason,
     build_section_evidence_packet_set,
     typed_fragments_from_raw,
 )
@@ -44,7 +48,16 @@ from src.features.pipeline.tests.test_evidence_transport import (
 from src.shared.final_gate_diagnostics import (
     FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID,
 )
-from src.shared.report_evidence.constants import SOURCE_KIND_NEWS
+from src.shared.report_evidence.constants import (
+    FORMAL_DOCUMENT_SOURCE_KINDS,
+    SOURCE_KIND_NEWS,
+    SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
+    SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS,
+)
+from src.shared.report_evidence.legacy_fragment_kinds import LEGACY_FRAGMENT_KINDS
+from src.shared.report_evidence.source_kind_policy import (
+    FORMAL_DOCUMENT_WRITER_TRUST_BY_SOURCE_KIND,
+)
 from src.shared.report_generation.models import exact_text_sha256
 
 #: 뉴스 조각이 실린 문서의 원문 지문. 값 자체는 시험 표본이라 자리표시자다.
@@ -72,6 +85,17 @@ _DUPLICATE_ORIGIN_MESSAGE = (
     "같은 typed origin 조각을 둘 이상의 공개 번호로 만들 수 없습니다"
 )
 _DUPLICATE_ORIGIN_REASON = f"{_TYPED_KIND}: {_DUPLICATE_ORIGIN_MESSAGE}"
+#: 형식을 벗어난 종류가 실리는 사유 열쇠. 종류 자리가 통째로 자리표시자로
+#: 바뀌므로, 서로 다른 «형식 밖» 값들은 한 칸에 모여 세어진다.
+_OUT_OF_FORM_REASON = "(형식 밖 종류): 등록되지 않은 수집 조각 종류입니다"
+#: 이 모듈에서 가장 긴 닫힌 사유 메시지(쉰두 자). 가장 긴 정본 종류 이름
+#: (서른다섯 자)과 만나면 여든아홉 자가 되어 상한에 걸린다.
+_LONGEST_TRANSPORT_MESSAGE = (
+    "typed 근거의 도메인 attestation Source ID와 exact 원문이 갈렸습니다"
+)
+#: 정본 종류 이름의 수 하한(2026-09-07 실측 31개 = legacy 21 + 공식·보조 문서
+#: 종류). 표를 못 읽어 «빈 묶음»을 도는 시험이 조용히 통과하지 않게 한다.
+_CANONICAL_KIND_COUNT_FLOOR = 31
 
 
 @pytest.fixture(autouse=True)
@@ -346,6 +370,39 @@ def test_같은_origin을_두_공개번호가_주장하면_둘째만_원형으�
     assert str(caught.value) == _DUPLICATE_ORIGIN_MESSAGE
 
 
+def test_실패한_조각의_origin은_뒤_조각의_typed신원을_뺏지_않는다() -> None:
+    """실패한 조각이 origin을 «선점»하면 뒤 조각이 억울하게 거절된다.
+
+    도달 경로 — typed 조각은 typed 메타 단계에서 origin을 묶음 상태에 등록한
+    뒤, 그 «다음» 단계인 ``문서명`` 형식 검사에서 터질 수 있다(정식 typed
+    조각은 ``문서명``을 typed 메타 단계에서 읽지 않는다). 실패한 조각의 origin이
+    묶음 상태에 남으면 같은 origin을 공유하는 뒤 조각이 「같은 typed origin」
+    으로 잘못 거절돼, 고칠 것 없는 조각의 typed 신원까지 사라진다.
+
+    변환기는 사본을 넘겨 «성공했을 때만» 되돌려 받는 방식으로 이걸 막는데,
+    그 사본을 별칭으로 되돌려도 다른 시험은 전부 통과했다(2026-09-07 실측).
+    """
+
+    orphaned = _typed_raw()
+    # 상류가 문서명을 목록으로 실어 보낸 모양. origin 등록 «뒤»에 터지는 자리다.
+    orphaned["문서명"] = ["가나다전자 제품 소개"]
+
+    conversion = _flat({1: orphaned, 2: _typed_raw()})
+    by_id = _by_id(conversion.fragments)
+
+    # 두 조각 모두 남고, 뒤 조각은 typed 신원을 그대로 지킨다.
+    assert sorted(by_id) == ["1", "2"]
+    assert by_id["1"].formal_source_kind == ""
+    assert by_id["2"].formal_source_kind == _TYPED_KIND
+    assert by_id["2"].supported_claim_slots == ("portfolio:product_role",)
+    assert conversion.typed_count == 1
+    assert conversion.carried_raw_count == 1
+    # 사유는 「중복 origin」이 아니라 «진짜 원인»인 문서명 형식이어야 한다.
+    assert conversion.carried_raw_reasons == (
+        (f"{_TYPED_KIND}: 근거 조각의 문서명 형식이 올바르지 않습니다", 1),
+    )
+
+
 def test_두_조각이_실패하면_사유별로_따로_센다() -> None:
     """사유가 하나로 뭉치면 운영에서 원인을 못 가른다."""
 
@@ -434,18 +491,18 @@ def test_원형유지_사유는_여든자를_넘지_않는다() -> None:
     )
 
 
-def test_종류가_아주_길면_사유를_자르고_잘림표시를_붙인다() -> None:
-    """종류는 생산자가 정하는 값이라 길이를 우리가 못 정한다."""
+def test_종류가_아주_길면_사유에_안_싣고_자리표시자로_바꾼다() -> None:
+    """종류는 생산자가 정하는 값이라 길이를 우리가 못 정한다.
+
+    2026-09-07 이전에는 백 자짜리 종류가 사유에 그대로 실렸다가 여든 자에서
+    잘렸다. 잘라 실으면 앞부분(URL이면 host)이 그대로 남으므로, 이제는 길이가
+    상한을 넘는 순간 통째로 자리표시자로 바꾼다.
+    """
 
     conversion = _flat({1: _typed_raw(source_kind="가" * 100)})
 
     assert conversion.carried_raw_count == 1
-    (reason, count), = conversion.carried_raw_reasons
-    assert count == 1
-    assert len(reason) == 80
-    # 잘렸다는 사실이 보여야 읽는 사람이 「이게 전부」라고 오해하지 않는다.
-    assert reason.endswith("…")
-    assert reason.startswith("가" * 79)
+    assert conversion.carried_raw_reasons == ((_OUT_OF_FORM_REASON, 1),)
 
 
 def test_종류가_비면_자리표시자_접두가_붙는다() -> None:
@@ -524,3 +581,98 @@ def test_조각이_Mapping이_아니면_막는다() -> None:
         _flat({1: "조각이 아니라 문자열"})
 
     assert str(caught.value) == "근거 조각은 Mapping이어야 합니다"
+
+
+# ══════════════════════════════════════════════════════════
+# ⑧ 사유 열쇠에는 «형식이 맞는» 종류 이름만 실린다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 — 이 관용 경로는 애초에 「정본이 모르는 종류」를 위해 열린 길인데,
+#   정작 그 종류 필드만 아무 검사 없이 실행 기록(``v2_조각_typed전달.
+#   원형유지_사유별``)과 경고 로그의 열쇠가 됐다. 사유 열쇠는 «어느 생산자가
+#   걸렸나»를 세는 자리지 URL·자유 문장을 옮기는 자리가 아니다.
+
+
+def test_종류에_URL이_오면_사유열쇠에_주소가_실리지_않는다() -> None:
+    """상류가 종류 칸에 주소를 담아 보내도 실행 기록에는 남지 않는다."""
+
+    url_kind = "https://news.example/articles/1"
+
+    conversion = _flat({1: {"종류": url_kind, "원문": _NEWS_TEXT}})
+
+    assert conversion.carried_raw_count == 1
+    assert conversion.carried_raw_reasons == ((_OUT_OF_FORM_REASON, 1),)
+    # ★ 여기서 좁히는 것은 «실행 기록의 열쇠»뿐이다. 조각 자체는 이 관용 이전과
+    #   똑같이 옛 어댑터 규칙으로 실린다 — 원문은 여전히 근거이기 때문이다.
+    assert _by_id(conversion.fragments)["1"].kind == url_kind
+
+
+def test_종류에_줄바꿈이나_콜론이_섞이면_자리표시자로_바꾼다() -> None:
+    """열쇠가 「종류: 메시지」라서 콜론·줄바꿈이 섞이면 읽는 자리가 어긋난다."""
+
+    conversion = _flat(
+        {1: {"종류": "사업내용\n담당: 아무개", "원문": "가나다전자의 근거 문장이다."}}
+    )
+
+    assert conversion.carried_raw_count == 1
+    assert conversion.carried_raw_reasons == ((_OUT_OF_FORM_REASON, 1),)
+
+
+def test_종류_길이_상한은_마흔자이고_경계까지는_그대로_싣는다() -> None:
+    """상한을 넘는 자유 문장만 가리고, 경계 안의 이름은 그대로 둔다."""
+
+    assert CARRIED_RAW_KIND_MAX_LENGTH == 40
+    assert CARRIED_RAW_KIND_OUT_OF_FORM == "(형식 밖 종류)"
+    at_limit = "가" * 40
+    over_limit = "가" * 41
+
+    kept = _flat({1: _legacy_raw(at_limit)})
+    masked = _flat({1: _legacy_raw(over_limit)})
+
+    assert kept.carried_raw_reasons == (
+        (f"{at_limit}: 등록되지 않은 수집 조각 종류입니다", 1),
+    )
+    assert masked.carried_raw_reasons == ((_OUT_OF_FORM_REASON, 1),)
+
+
+def test_정본_종류_이름은_모두_사유열쇠에_그대로_실린다() -> None:
+    """정제가 정본 이름을 가리면 실행 기록이 쓸모없어진다.
+
+    상한(마흔 자)·허용 글자는 실측으로 정한 값이라, 새 정본 종류 이름이 그
+    범위를 벗어나면 여기서 먼저 깨져 사람이 값을 다시 정하게 만든다.
+    """
+
+    canonical_kinds = (
+        set(LEGACY_FRAGMENT_KINDS)
+        | set(FORMAL_DOCUMENT_SOURCE_KINDS)
+        | set(SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS)
+        | set(FORMAL_DOCUMENT_WRITER_TRUST_BY_SOURCE_KIND)
+    )
+
+    # 표를 못 읽어 «빈 묶음»을 도는 시험은 아무것도 안 지킨다.
+    assert len(canonical_kinds) >= _CANONICAL_KIND_COUNT_FLOOR
+    for kind in sorted(canonical_kinds):
+        assert _carried_raw_kind_label(kind) == kind, kind
+
+
+def test_사유가_여든자를_넘으면_여전히_자르고_잘림표시를_붙인다() -> None:
+    """종류를 형식으로 좁혀도 «메시지가 긴» 사유는 그대로 상한에 걸린다.
+
+    가장 긴 정본 종류 이름(서른다섯 자)과 이 모듈의 가장 긴 닫힌 메시지(쉰두
+    자)가 만나면 여든아홉 자가 된다. 끝에서 끝까지 재현 대신 사유를 «만드는»
+    자리를 직접 부르는 이유는, 이 조합을 조각으로 만들려면 도메인 attestation
+    fixture가 따로 필요해서다.
+    """
+
+    reason = _carried_raw_reason(
+        EvidenceTransportError(
+            _LONGEST_TRANSPORT_MESSAGE,
+            detail_code=FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID,
+        ),
+        kind=SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
+    )
+
+    assert len(reason) == 80
+    assert reason.startswith(f"{SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE}: ")
+    # 잘렸다는 사실이 보여야 읽는 사람이 「이게 전부」라고 오해하지 않는다.
+    assert reason.endswith("…")

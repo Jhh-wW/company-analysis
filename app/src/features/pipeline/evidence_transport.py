@@ -749,6 +749,54 @@ CARRIED_RAW_REASON_MAX_LENGTH: Final[int] = 80
 #: 종류가 비었거나 문자열이 아닐 때 쓰는 자리표시자. 빈 접두를 그대로 두면
 #: 「: 메시지」가 되어 종류를 안 적은 건지 빈 건지 읽는 사람이 못 가른다.
 CARRIED_RAW_UNKNOWN_KIND: Final[str] = "(종류 없음)"
+#: 사유 열쇠에 실을 수 있는 종류 이름의 길이 상한. 2026-09-07 실측으로 정본
+#: 종류 이름의 최대 길이는 서른다섯 자(``official_identity_verified_web_page``,
+#: ``FORMAL_DOCUMENT_WRITER_TRUST_BY_SOURCE_KIND``)이고 legacy 정본은 여덟 자
+#: (「감사보고서 재무」, ``LEGACY_FRAGMENT_KINDS``)다. 새 정본 이름이 조금 길어져도
+#: 가려지지 않게 다섯 자 여유를 둔다. 상한을 넘는 정본 이름이 생기면 시험
+#: ``test_정본_종류_이름은_모두_사유열쇠에_그대로_실린다``가 먼저 깨진다.
+CARRIED_RAW_KIND_MAX_LENGTH: Final[int] = 40
+#: 종류 이름에 허용하는 글자. 한글 음절·영숫자·공백과 정본 이름이 실제로 쓰는
+#: 이음 기호(``&``·``_``·``-``·``·``·괄호)뿐이다. URL의 「:」·「/」와 자유 문장의
+#: 마침표·쉼표·따옴표·줄바꿈은 여기서 걸린다.
+CARRIED_RAW_KIND_ALLOWED_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[가-힣A-Za-z0-9 &_\-·()]+$"
+)
+#: 길이나 글자 형식을 벗어난 종류를 대신할 자리표시자. 「종류 없음」과 다른 말을
+#: 쓰는 이유는, 안 적어서 빈 것과 적었는데 형식이 아닌 것이 서로 다른 고장이라
+#: 운영에서 같은 칸으로 세면 원인을 못 가르기 때문이다.
+CARRIED_RAW_KIND_OUT_OF_FORM: Final[str] = "(형식 밖 종류)"
+
+
+def _carried_raw_kind_label(kind: str) -> str:
+    """사유 열쇠에 실을 종류 이름을 «형식이 맞는 것»으로만 좁힌다.
+
+    ★ 왜 필요한가 — 이 관용 경로는 애초에 「정본이 모르는 종류」를 위해 열린
+      길인데, 정작 그 종류 필드만 아무 검사 없이 실행 기록(``v2_조각_typed전달.
+      원형유지_사유별``)과 경고 로그의 열쇠가 됐다. 상류가 종류 칸에 URL이나
+      사람 이름·자유 문장을 담아 보내면 그것이 그대로 운영 기록에 남는다. 사유
+      열쇠는 «어느 생산자의 조각이 걸렸나»를 세는 자리지 원문을 옮기는 자리가
+      아니므로, 형식을 벗어난 값은 자리표시자로 바꾼다.
+
+    ★ 왜 잘라 싣지 않고 통째로 바꾸나 — 앞 마흔 자만 남기면 URL의 host가 그대로
+      남는다. 형식을 벗어났다는 사실만 세는 것이 사유 열쇠의 목적에 맞다.
+
+    Args:
+        kind: raw 조각이 적어 낸 종류. 앞뒤 공백은 여기서 지운다.
+
+    Returns:
+        형식이 맞으면 그대로, 비면 ``CARRIED_RAW_UNKNOWN_KIND``, 길이·글자
+        형식을 벗어나면 ``CARRIED_RAW_KIND_OUT_OF_FORM``.
+    """
+
+    label = kind.strip()
+    if not label:
+        return CARRIED_RAW_UNKNOWN_KIND
+    if len(label) > CARRIED_RAW_KIND_MAX_LENGTH:
+        return CARRIED_RAW_KIND_OUT_OF_FORM
+    if CARRIED_RAW_KIND_ALLOWED_RE.fullmatch(label) is None:
+        return CARRIED_RAW_KIND_OUT_OF_FORM
+    return label
 
 
 def _carried_raw_reason(error: EvidenceTransportError, *, kind: str) -> str:
@@ -757,9 +805,12 @@ def _carried_raw_reason(error: EvidenceTransportError, *, kind: str) -> str:
     ★ 왜 메시지만으로는 모자라나 — 사유 메시지 하나(예: 「등록되지 않은 수집
       조각 종류입니다」)에 스무 가지 넘는 생산자가 걸린다. 운영 기록에서
       「어느 생산자의 조각이 걸렸나」를 바로 읽으려면 종류가 함께 있어야 한다.
+
+    종류 이름 자체는 ``_carried_raw_kind_label``로 형식을 좁힌 뒤에 싣는다 —
+    상류가 보낸 값을 검사 없이 실행 기록의 열쇠로 쓰지 않기 위해서다.
     """
 
-    label = kind.strip() or CARRIED_RAW_UNKNOWN_KIND
+    label = _carried_raw_kind_label(kind)
     message = str(error).strip() or "알 수 없는 사유"
     reason = f"{label}: {message}"
     if len(reason) > CARRIED_RAW_REASON_MAX_LENGTH:
