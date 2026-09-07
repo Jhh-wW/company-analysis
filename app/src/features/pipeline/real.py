@@ -175,7 +175,6 @@ from src.shared.report_evidence.constants import (
     SOURCE_KIND_OFFICIAL_IR_PDF,
     SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
     SOURCE_KIND_OFFICIAL_WEB_PAGE,
-    SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS,
 )
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 from src.shared.report_evidence.date_normalization import (
@@ -187,6 +186,7 @@ from src.shared.report_evidence.runtime_port import (
     OfficialEvidenceCollector,
 )
 from src.shared.report_evidence.legacy_fragment_kinds import (
+    LEGACY_KIND_AUDIT_FINANCIAL,
     LEGACY_KIND_REVENUE_AND_ORDERS,
 )
 from src.shared.revenue_table_provenance import (
@@ -330,7 +330,9 @@ from src.features.storage import db as storage_db
 from src.shared.report_quality.source_identity import document_identity_from_parts
 
 
-_AUDIT_FINANCIALS_FRAGMENT_KIND = "감사보고서 재무"
+# 이 이름은 shared 정본이 소유한다. 여기에 문자열을 다시 적으면 정본 등록표와
+# 조용히 갈라져 이 조각만 「등록되지 않은 종류」로 거절된다(실측된 결함).
+_AUDIT_FINANCIALS_FRAGMENT_KIND = LEGACY_KIND_AUDIT_FINANCIAL
 _AUDIT_FINANCIALS_SUCCESS = "성공"
 _AUDIT_FINANCIALS_DOCUMENT_MISSING = "접수번호 미확인"
 _AUDIT_FINANCIALS_EVIDENCE_MISMATCH = "원문지문 불일치"
@@ -5229,10 +5231,13 @@ def _run_v2_composer(
     # ★ 위 FULL 갈래의 `except EvidenceTransportError`(최종 게이트로 보고서를
     #   막는 쪽)와 절대 섞이면 안 되므로 «별도 try»로 감싼다 — 부분 보고서를 이
     #   변환 때문에 잃으면 안 된다.
+    # ★ 변환기는 «조각별»로 관용한다. 계약을 못 채운 조각은 옛 어댑터 모양
+    #   그대로 실려 오고(버려지지 않는다) 사유별 수가 함께 온다. 그러니 아래
+    #   except는 이제 «묶음 자체»가 잘못된 경우에만 걸린다.
     composer_fragments: Any = frags
     if release_mode is not ReleaseMode.FULL and frags:
         try:
-            typed_composer_fragments = typed_fragments_from_raw(
+            flat_conversion = typed_fragments_from_raw(
                 corp_id=corp_id,
                 frags=frags,
                 filing_meta=filing_identity,
@@ -5240,9 +5245,12 @@ def _run_v2_composer(
         except EvidenceTransportError as exc:
             # 오늘과 같은 raw dict 전달로 되돌아가되 사유코드를 실행 기록에
             # 남긴다. 조용히 되돌아가면 운영에서 「왜 표가 없나」를 못 가른다.
+            # 사유코드만으로는 묶음 계약 위반 네 가지를 못 가르므로 닫힌 내부
+            # 예외문도 함께 남긴다(원문·URL은 이 문장에 들어가지 않는다).
             logger.warning(
-                "엔진 v2 부분 보고서 조각 typed 전달 불가: %s",
+                "엔진 v2 부분 보고서 조각 typed 전달 불가: %s (%s)",
                 exc.detail_code,
+                exc,
             )
             steps.append(
                 {
@@ -5251,19 +5259,30 @@ def _run_v2_composer(
                 }
             )
         else:
-            composer_fragments = typed_composer_fragments
-            steps.append(
-                {
-                    "step": "v2_조각_typed전달",
-                    "조각": len(typed_composer_fragments),
-                    "보조": sum(
-                        1
-                        for fragment in typed_composer_fragments
-                        if fragment.formal_source_kind
-                        in SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
-                    ),
-                }
-            )
+            composer_fragments = flat_conversion.fragments
+            typed_transport_step: dict[str, Any] = {
+                "step": "v2_조각_typed전달",
+                "조각": len(flat_conversion.fragments),
+                "typed": flat_conversion.typed_count,
+                "legacy": flat_conversion.legacy_count,
+                "원형유지": flat_conversion.carried_raw_count,
+                "빈원문": flat_conversion.skipped_empty_count,
+                "보조": flat_conversion.supplementary_count,
+            }
+            if flat_conversion.carried_raw_count:
+                # 조각별 관용은 묶음을 살리지만 «무엇을 잃었는지»는 남겨야 한다.
+                # 사유별 수가 없으면 운영에서 보도표가 빈 원인을 못 가른다.
+                # 열쇠는 「종류: 메시지」다 — 사유 메시지 하나에 스무 가지 넘는
+                # 생산자가 걸려서 메시지만으로는 어느 조각인지 못 가른다.
+                typed_transport_step["원형유지_사유별"] = dict(
+                    flat_conversion.carried_raw_reasons
+                )
+                logger.warning(
+                    "엔진 v2 부분 보고서 조각 원형 유지 %d건: %s",
+                    flat_conversion.carried_raw_count,
+                    flat_conversion.carried_raw_reasons,
+                )
+            steps.append(typed_transport_step)
 
     if release_mode is ReleaseMode.FULL:
         assert section_evidence_packets is not None
