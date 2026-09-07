@@ -117,6 +117,9 @@ from src.shared.report_generation.canonical import (
     public_content_digests,
     report_verification_payload,
 )
+from src.features.composer.quality_observation_log import (
+    log_generation_quality_observation,
+)
 from src.features.composer.quality_projection import (
     build_generation_quality_candidate,
 )
@@ -1358,14 +1361,11 @@ def run_v2(
             )
         ),
     )
-    if not quality_observation.release_allowed:
-        logger.warning(
-            "v2 생성 품질 판정(전체 안전은 관측 전용): 계약=%s · 품질=%s · 안전=%s · 문제=%s",
-            quality_observation.contract_version,
-            quality_observation.quality_grade,
-            quality_observation.safety_decision,
-            quality_observation.safety_problems,
-        )
+    log_generation_quality_observation(
+        quality_observation,
+        release_mode,
+        logger=logger,
+    )
     candidate_sha256 = ""
     validation_receipts: tuple[GenerationValidationReceipt, ...] = ()
     if release_mode is ReleaseMode.FULL:
