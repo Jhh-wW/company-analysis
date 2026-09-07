@@ -718,8 +718,19 @@ def _name_report_table(
         caption=name_table.caption,
         headers=list(name_table.headers),
         rows=[list(row) for row in name_table.rows],
+        # 캡션 근거는 표 전체를 대표하는 첫 조각 하나만 단다(흐름표·보도표와
+        # 같은 규칙). 캡션에 여덟 개를 늘어놓으면 표 제목이 번호로 덮인다.
         cite=f"[{min(cited)}]",
         numeric=False,
+        # ★ 행이 실제로 쓴 조각 번호를 «전부» 여기 싣는다(보도표와 같은 규칙).
+        #   이 표의 이름 여덟 개는 서로 다른 조각에서 오는데, 이 칸을 비우면
+        #   봉인 없는 실행(SHADOW·부분 보고서)에서 캡션 번호 하나만 부록에
+        #   올라가고 나머지 조각은 부록에 «한 줄도» 안 생긴다 — 독자가 그
+        #   이름의 원문을 찾아갈 길이 사라진다.
+        #   ★ 값·순서를 공개 봉인의 `_normalized_source_cites`와 «똑같이»
+        #     만든다(번호 오름차순, `[n]` 모양, 중복 제거). FULL에서 봉인이
+        #     같은 자리를 덮어쓰므로 한 글자라도 다르면 봉인 대조가 막는다.
+        source_cites=[f"[{number}]" for number in sorted(set(cited))],
     )
 
 
@@ -1333,14 +1344,19 @@ def render_report(
         if name_table is not None and section.section_id == PORTFOLIO_TABLE_SECTION_ID:
             names_report_table = _name_report_table(name_table, numbers)
             if names_report_table is not None:
-                # ★ 부록에는 «캡션에 인쇄되는» 대표 번호 하나만 올린다 —
-                #   flow 표와 같은 규칙이다. 나머지 조각 번호는 FULL 봉인이
-                #   `source_cites`를 채울 때 아래 공통 경로가 함께 올린다.
-                #   여기서 미리 올리면 봉인 없는 실행(SHADOW)에서 «부록에는
-                #   있는데 본문 어디에도 안 보이는» 번호가 생겨 출고 검증이
-                #   보고서를 통째로 막는다.
-                names_cite = citation_number(names_report_table.cite)
-                if names_cite and int(names_cite) in meta_by_number:
+                # ★ 부록에는 이 표가 «행마다» 인용한 조각을 전부 올린다
+                #   (보도표와 같은 규칙). 캡션 번호 하나만 올리면 이름 여덟 개
+                #   중 일곱 개는 부록에 원문 줄이 없어 독자가 확인할 수 없다.
+                #   ★ 「부록에만 있는 번호」 차단이 생기지 않는 이유 —
+                #     여기 올리는 번호는 `_name_report_table`이 표의
+                #     `source_cites`에 실은 번호와 «같은 집합»이고, 출고 검증
+                #     (`validate._cited_numbers_in_body`)은 그 칸을 «본문이 쓴
+                #     번호»로 센다. 그러니 봉인 없는 실행(SHADOW·부분 보고서)
+                #     에서도 본문 사용 번호와 부록이 1:1로 맞는다.
+                for raw_cite in names_report_table.source_cites:
+                    names_cite = citation_number(raw_cite)
+                    if not names_cite or int(names_cite) not in meta_by_number:
+                        continue
                     owners = used_sections.setdefault(int(names_cite), [])
                     if section.section_id not in owners:
                         owners.append(section.section_id)
