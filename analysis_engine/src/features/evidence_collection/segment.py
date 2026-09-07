@@ -210,8 +210,18 @@ def _split_paragraphs(
         ):
             truncation_reason = c.REASON_DOCUMENT_FRAGMENT_CHARS_EXCEEDED
             return
-        trimmed = raw.rstrip("\r\n")
-        paragraphs.append((current_start, current_start + len(trimmed), trimmed))
+        # 적격 판정은 ``stripped``로 하면서 내보내는 원문만 개행을 뗀 값
+        # (``raw.rstrip("\r\n")``)이면 XML 들여쓰기에서 온 앞 공백·줄 끝 공백이
+        # 조각 원문에 그대로 실린다. 그 원문은 app transport 경계
+        # (``value != value.strip()``이면 거절)를 통과하지 못해, 조각이 typed
+        # 신원을 잃거나 packet 전체가 거절된다. 판정과 산출을 같은 값으로
+        # 맞추고 좌표도 뗀 만큼 함께 옮긴다 — ``text_sha256``·usable range가
+        # 이 좌표·원문에서 파생되므로 하류에서 원문만 다시 strip하면 결속이
+        # 깨진다. ``str.strip()``은 U+3000·U+00A0 같은 유니코드 공백도 떼며,
+        # app 검사도 같은 ``str.strip()``을 쓰므로 두 판정이 대칭이다.
+        lead_whitespace_chars = len(raw) - len(raw.lstrip())
+        start = current_start + lead_whitespace_chars
+        paragraphs.append((start, start + len(stripped), stripped))
         accepted_chars += len(stripped)
 
     # ``splitlines``는 짧은 줄 수백만 개를 한꺼번에 list로 만들어 메모리를

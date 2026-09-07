@@ -13,6 +13,7 @@ import pytest
 from src.features.chapter_evidence.produce import produce_from_collection_envelopes
 from src.features.chapter_evidence.tests.fixtures import build_wisely_type_fixture
 from src.features.homepage.wide_fetch import WideRawResponse, WideTransportError
+from src.features.pipeline import evidence_transport
 from src.features.pipeline.official_evidence_preflight import assess_official_evidence
 from src.features.pipeline.official_evidence_transport_adapter import (
     merge_official_evidence_fragments,
@@ -250,6 +251,70 @@ def test_일반Writer조각은_location_hash_쌍과_실제_usable_range에_동�
             forged,
             company_id=COMPANY_ID,
         )
+
+
+def test_들여쓴_공시XML에서_온_조각은_FULL결속과_원문형식검사를_함께_통과한다() -> None:
+    """평문화가 남기는 들여쓰기 공백이 조각 원문에 새면 두 경계가 동시에 막힌다.
+
+    transport는 ``value != value.strip()``인 원문을 거절하고(원문 형식),
+    adapter는 ``location``이 실제 usable range와 길이까지 같은지 본다(결속).
+    하류에서 원문만 strip해 앞 경계를 통과하면 뒤 경계가 깨지므로, 두 검사를
+    한 시험에서 «같은 산출물»로 함께 확인한다. 엔진 수집기는 진짜 구현을
+    돌리고 조회 경계만 엔진이 이미 가진 가짜 fetcher로 바꾼다 — 실제
+    네트워크·DART 호출 0건.
+    """
+
+    collect_module, engine_fetcher_module, serialize_module = (
+        official_evidence_adapter._typed_dart_collector_modules()
+    )
+    from features.evidence_collection.filing_select import (  # noqa: PLC0415
+        RawFilingRow,
+    )
+    from features.evidence_collection.tests.fixtures import (  # noqa: PLC0415
+        fake_fetcher,
+        synthetic_documents,
+    )
+
+    flat_text = engine_fetcher_module._xml_to_plain_text(
+        synthetic_documents.INDENTED_BUSINESS_REPORT_XML.encode("utf-8")
+    )
+    rcept_no = "20250315000009"
+    fetcher = fake_fetcher.FakeFetcher(
+        list_responses_by_pblntf_ty={
+            "A": fake_fetcher.FilingListResult(
+                state="OK",
+                rows=(RawFilingRow(rcept_no, "사업보고서 (2025.03)", "20250315"),),
+            ),
+        },
+        document_responses_by_rcept_no={
+            rcept_no: fake_fetcher.DocumentFetchResult(state="OK", text=flat_text),
+        },
+    )
+    harvest = collect_module.collect_dart_evidence(
+        fetcher, COMPANY_ID, now="2026-09-07T00:00:00+09:00"
+    )
+    envelope = serialize_module.harvest_to_mapping(harvest)
+
+    official_evidence_adapter._classified_evidence_location_bindings(
+        envelope,
+        company_id=COMPANY_ID,
+    )
+
+    fragments = envelope["fragments"]
+    assert fragments
+    starts_after_whitespace = 0
+    for fragment in fragments:
+        # 생산 transport가 실제로 쓰는 판정 함수를 그대로 부른다.
+        assert (
+            evidence_transport._require_text(fragment["text"], field="원문")
+            == fragment["text"]
+        )
+        start = int(str(fragment["location"]).split("-", 1)[0])
+        if start > 0 and flat_text[start - 1] == " ":
+            starts_after_whitespace += 1
+
+    # 「원문에 애초에 공백이 없어 통과한 것」이 아님을 못 박는다.
+    assert starts_after_whitespace >= 1
 
 
 def test_일반Writer조각_location만_바꾸면_exact_결속목록과_달라_거절한다() -> None:

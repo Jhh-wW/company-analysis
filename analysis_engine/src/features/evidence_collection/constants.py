@@ -353,7 +353,9 @@ FINANCIAL_COMPANY_REVENUE_KEYWORDS: Final[tuple[str, ...]] = (
 # ══════════════════════════════════════════════════════════
 
 COLLECTOR_VERSION: Final[str] = "evidence_collection/1.0"
-PARSER_VERSION: Final[str] = "evidence_collection_segment/1.0"
+#: 1.1 (2026-09-07): 문단 가장자리 공백을 떼고 좌표를 함께 옮긴다 — 같은
+#: 문서라도 1.0과는 조각 원문·좌표·text_sha256이 다를 수 있다.
+PARSER_VERSION: Final[str] = "evidence_collection_segment/1.1"
 DART_PUBLISHER_NAME: Final[str] = "금융감독원 전자공시시스템(DART)"
 #: composer/constants.py DART_DOCUMENT_URL_TEMPLATE와 같은 값(rcept_no만 다른 키 이름).
 DART_DOCUMENT_URL_TEMPLATE: Final[str] = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
