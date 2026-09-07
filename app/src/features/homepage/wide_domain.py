@@ -468,6 +468,12 @@ def bind_registered_subdomain(root_host: str, candidate_host: str) -> BoundHost 
     # DART root가 www 별칭이면 자손 관계의 기준은 www 자체가 아니라 그와
     # 동치로 인정한 registrable apex다. 그래도 후보는 apex의 실제 자손이어야
     # 하므로 a.company ↔ b.company 같은 임의 sibling 승격은 생기지 않는다.
+    # ★ 영수증 쪽 정본은 같은 규칙을 shared에 둔다 —
+    #   ``shared/report_evidence/profile_domain_attestation.py``의
+    #   ``registered_subdomain_root_basis``. 한쪽만 바꾸면 수집은 승인하는데
+    #   영수증이 비어 typed 신원이 조용히 사라진다(N18). 다만 이 수집기는 root가
+    #   apex/www 짝이 아닐 때 «아예» 결속하지 않는 더 좁은 규칙이라 그 도우미로
+    #   대체하지 않는다 — 대체하면 공유 플랫폼 하위호스트 root까지 열린다.
     if not is_actual_registered_subdomain(root_core, candidate_host):
         return None
     return BoundHost(
