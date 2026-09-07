@@ -27,6 +27,7 @@ from src.features.composer.diagram_check import (
     FLOW_REVIEW_PROMPT_HEADER,
     VERDICT_FALSE,
     VERDICT_TRUE,
+    check_diagram_numbers,
     check_diagrams,
 )
 from src.features.composer.port import (
@@ -435,3 +436,75 @@ def test_빈_칸이_있어도_참_판정이면_줄이_살아남는다():
     문화장 = next(s for s in 보고서.sections if s.section_id == "culture")
     assert len(문화장.flow_rows) == 1, "★ 빈 칸 때문에 줄이 또 떨어졌다"
     assert tuple(사유) == ()
+
+
+# ══════════════════════════════════════════════════════════
+# ⑩ 연도는 근거의 «날짜 표기»로 근거 삼는다 (2026-09-07 운영 실측)
+# ══════════════════════════════════════════════════════════
+#
+# ★ 무엇이 고장났었나 — 「영업권 손상차손 인식(2025년 100억 5,910만원)」의
+#   «2025»가 근거에는 「2025.12.31」·「제52기(2025.01.01~2025.12.31)」 같은
+#   날짜로만 있었다. 맨 숫자 대조는 「2025.12.31」을 소수 2025.12로 읽어
+#   2025를 못 찾았고, 그 한 수 때문에 경로가 통째로 버려졌다(엔터사 4곳 전부).
+
+_손상차손_원문 = (
+    "제52기(2025.01.01~2025.12.31) 연결 재무제표에서 영업권 손상차손 "
+    "100억 5,910만원을 인식하였다."
+)
+_손상차손_경로 = (
+    FlowRow(
+        cells=(
+            "영업권",
+            "회수가능액 평가",
+            "영업권 손상차손 인식(2025년 100억 5,910만원)",
+        ),
+        citations=("7",),
+    ),
+)
+
+
+def _조각(원문: str) -> tuple[CollectedFragment, ...]:
+    return (CollectedFragment(fragment_id="7", kind="사업내용", text=원문),)
+
+
+def test_근거가_날짜로만_적은_해는_경로를_버리지_않는다():
+    """★ 운영 진입 함수를 그대로 부른다 — strict·legacy 두 경로가 함께 쓰는
+    한 구현이라, 여기서 막히면 화면에도 도식이 안 나온다."""
+    report, problems = check_diagram_numbers(
+        _report(_손상차손_경로), _조각(_손상차손_원문)
+    )
+
+    assert _운영장(report).flow_rows == _손상차손_경로, (
+        "근거가 날짜로만 적어 둔 해를 «없는 수»로 잡아 경로를 버렸습니다"
+    )
+    assert problems == ()
+
+
+def test_연도가_통과해도_금액이_어긋나면_경로를_뺀다():
+    """금액 규칙은 그대로다 — 연도를 읽어 준다고 금액까지 눈감지 않는다.
+    사유에 걸린 수도 연도(2025)가 아니라 금액(100)이어야 한다."""
+    어긋난_원문 = (
+        "제52기(2025.01.01~2025.12.31) 연결 재무제표에서 영업권 손상차손 "
+        "12억 3,400만원을 인식하였다."
+    )
+
+    report, problems = check_diagram_numbers(
+        _report(_손상차손_경로), _조각(어긋난_원문)
+    )
+
+    assert _운영장(report).flow_rows == ()
+    assert len(problems) == 1
+    assert "의 수 100" in problems[0]
+    assert "의 수 2025" not in problems[0], "연도를 «없는 수»로 잡았습니다"
+
+
+def test_연도만_문제였던_경로가_의미검수까지_지나_남는다():
+    """숫자 검사 → 의미 검수 사슬 끝까지 살아남아야 화면에 그려진다."""
+    ask = _검수({1: VERDICT_TRUE})
+
+    report, problems = check_diagrams(
+        _report(_손상차손_경로), _조각(_손상차손_원문), ask
+    )
+
+    assert _운영장(report).flow_rows == _손상차손_경로
+    assert problems == ()

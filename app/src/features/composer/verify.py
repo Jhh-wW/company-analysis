@@ -171,12 +171,52 @@ REWRITE_EVIDENCE_HEAD: Final[str] = "\n근거 원문:\n"
 REWRITE_SENTENCE_HEAD: Final[str] = "\n불합격 문장: "
 
 # ── 수치 검증 ──
+#: 숫자 바로 뒤에 올 수 있는 배율 글자와 꼬리 단위. 아래 정규식 세 개가 이
+#: 목록 하나를 함께 본다 — 한쪽에만 단위를 더하면 잣대가 갈라진다.
+_MAGNITUDE_CHARS: Final[str] = "조억만"
+_TAIL_UNITS: Final[tuple[str, ...]] = ("원", "%", "퍼센트", "배")
+_UNIT_SUFFIX_ALTERNATION: Final[str] = "|".join((*_MAGNITUDE_CHARS, *_TAIL_UNITS))
+
 #: 숫자 토큰 + 바로 뒤 단위. «내용» 검사가 아니라 «숫자와 그 배율» 추출 전용이다.
 _NUMBER_UNIT_RE: Final[re.Pattern[str]] = re.compile(
     r"(?P<num>\d+(?:,\d{3})*(?:\.\d+)?)"
-    r"(?:\s*(?P<mag>[조억만]))?"
-    r"(?:\s*(?P<tail>원|%|퍼센트|배))?"
+    rf"(?:\s*(?P<mag>[{_MAGNITUDE_CHARS}]))?"
+    rf"(?:\s*(?P<tail>{'|'.join(_TAIL_UNITS)}))?"
 )
+
+# ── 연도 토큰 (2026-09-07 운영 실측으로 추가) ──
+# ★ 왜 필요한가 — 「2025년 매출 37.02% 점유」의 «2025»가 근거 원문에는
+#   「2025.12.31」·「제52기(2025.01.01~2025.12.31)」 같은 날짜 표기로만 있어
+#   맨 숫자 대조에 실패했다. 그 한 수 때문에 도식 경로가 통째로 버려졌다
+#   (엔터사 4곳 전부에서 발생). 연도는 «날짜 표기»로 근거를 삼는다.
+#: 연도로 읽을 네 자리 수의 모양. 「1,172」처럼 쉼표가 든 수를 연도로 오인하지
+#: 않도록 네 자리가 붙어 있어야 하고, 앞 두 자리는 19·20만 본다.
+_YEAR_DIGITS: Final[str] = r"(?:19|20)\d{2}"
+#: 월·일 자리. 자릿수 범위를 지켜야 「2025-30」 같은 범위·뺄셈을 날짜로 읽지 않는다.
+_MONTH_DIGITS: Final[str] = r"(?:0?[1-9]|1[0-2])(?!\d)"
+_DAY_DIGITS: Final[str] = r"(?:0?[1-9]|[12]\d|3[01])(?!\d)"
+#: 날짜 표기 안의 연도. 네 갈래를 읽는다 —
+#:   ⓐ 「2025년」  ⓑ 「2025-12」·「2025/12」·「2025-12-31」
+#:   ⓒ 「2025.12.31」(점이 둘이면 소수일 수 없다)
+#:   ⓓ 「2025.12」(소수와 모양이 같다 — 뒤에 배율·단위가 붙으면
+#:      「1995.5억원」 같은 금액이므로 날짜로 읽지 않는다)
+_DATE_EXPR_RE: Final[re.Pattern[str]] = re.compile(
+    rf"(?P<year>{_YEAR_DIGITS})"
+    r"(?:"
+    r"\s*년"
+    rf"|(?P<sep>[-/])\s*{_MONTH_DIGITS}(?:(?P=sep)\s*{_DAY_DIGITS})?"
+    rf"|\.\s*{_MONTH_DIGITS}\.\s*{_DAY_DIGITS}"
+    rf"|\.\s*{_MONTH_DIGITS}(?!\s*(?:{_UNIT_SUFFIX_ALTERNATION}))"
+    r")"
+)
+#: 근거 쪽 «맨 네 자리 연도» — 실적표 머리글 「2024」처럼 날짜 표기가 아닌 연도다.
+#: 쉼표·소수점에 이어졌거나 배율·단위가 바로 붙은 수는 연도가 아니다.
+_BARE_YEAR_RE: Final[re.Pattern[str]] = re.compile(
+    rf"(?<![\d,.]){_YEAR_DIGITS}(?![\d,.]|(?:{_UNIT_SUFFIX_ALTERNATION}))"
+)
+#: 날짜 표기 안에서 월·일 숫자를 다시 읽을 때 쓴다 (연도 뒤 구간 전용).
+_PLAIN_DIGITS_RE: Final[re.Pattern[str]] = re.compile(r"\d+")
+
 #: 공개 산문에 옮기면 안 되는 원 단위 전체 금액. 억원·조원 표시값은 잡지 않는다.
 _RAW_WON_AMOUNT_RE: Final[re.Pattern[str]] = re.compile(
     r"\d{1,3}(?:,\d{3}){3,}\s*원"
@@ -243,17 +283,65 @@ def _safe_ask(ask: AskFn, prompt: str) -> Optional[str]:
 
 @dataclass(frozen=True)
 class _SentenceNumber:
-    """문장에서 추출한 숫자 하나 — 토큰 값·배율·단위 표기 여부."""
+    """글에서 추출한 숫자 하나 — 토큰 값·배율·단위 표기 여부·연도 여부."""
 
     token: Decimal
     scale: Decimal
     unit_marked: bool
+    #: 날짜 표기(「2025년」·「2025.12.31」 등)에서 읽은 연도인가.
+    #: 연도는 배율·단위가 없고, 근거 대조도 «근거의 연도 집합»으로만 한다.
+    is_year: bool = False
+
+
+def _overlaps_any(span: tuple[int, int], spans: Sequence[tuple[int, int]]) -> bool:
+    """글자 구간이 이미 «날짜»로 읽은 구간과 겹치는지 본다."""
+    start, end = span
+    return any(
+        start < other_end and other_start < end for other_start, other_end in spans
+    )
 
 
 def _extract_numbers(text: str) -> tuple[_SentenceNumber, ...]:
-    """글에서 숫자 토큰과 바로 뒤 단위(조/억/만·원·%·배)를 뽑는다."""
-    out: list[_SentenceNumber] = []
+    """글에서 숫자 토큰과 바로 뒤 단위(조/억/만·원·%·배)를 뽑는다.
+
+    ★ 날짜 표기가 먼저다 — 「2025.12.31」을 맨 숫자 규칙으로 읽으면 소수
+      「2025.12」와 「31」이 되어, 같은 날을 「2025년 12월 31일」로 적은 근거와
+      영원히 어긋난다. 날짜로 읽은 자리는 연도 1개 + 월·일 숫자로 편다.
+    ★ 나온 순서는 글에 적힌 순서 그대로다 — 사유 기록이 «맨 앞의 문제 수»를
+      집어 말하므로 순서가 흔들리면 안 된다.
+    """
+    found: list[tuple[int, _SentenceNumber]] = []
+    date_spans: list[tuple[int, int]] = []
+    for match in _DATE_EXPR_RE.finditer(text):
+        date_spans.append(match.span())
+        found.append(
+            (
+                match.start("year"),
+                _SentenceNumber(
+                    token=Decimal(match.group("year")),
+                    scale=_NO_SCALE,
+                    unit_marked=False,
+                    is_year=True,
+                ),
+            )
+        )
+        # 연도 뒤 구간(월·일)은 맨 숫자로 남긴다 — 「11월」을 「12월」 근거로
+        # 통과시키지 않기 위해서다.
+        for part in _PLAIN_DIGITS_RE.finditer(text, match.end("year"), match.end()):
+            found.append(
+                (
+                    part.start(),
+                    _SentenceNumber(
+                        token=Decimal(part.group()),
+                        scale=_NO_SCALE,
+                        unit_marked=False,
+                    ),
+                )
+            )
     for match in _NUMBER_UNIT_RE.finditer(text):
+        start, end = match.span("num")
+        if _overlaps_any((start, end), date_spans):
+            continue
         try:
             token = Decimal(match.group("num").replace(",", ""))
         except InvalidOperation:
@@ -263,12 +351,15 @@ def _extract_numbers(text: str) -> tuple[_SentenceNumber, ...]:
         scale = _MAGNITUDE_SCALES.get(magnitude or "", _NO_SCALE)
         if tail in ("%", "퍼센트"):
             scale = scale * _PERCENT_SCALE
-        out.append(
-            _SentenceNumber(
-                token=token, scale=scale, unit_marked=bool(magnitude or tail)
+        found.append(
+            (
+                start,
+                _SentenceNumber(
+                    token=token, scale=scale, unit_marked=bool(magnitude or tail)
+                ),
             )
         )
-    return tuple(out)
+    return tuple(number for _start, number in sorted(found, key=lambda item: item[0]))
 
 
 def _has_raw_won_amount(text: str) -> bool:
@@ -279,27 +370,55 @@ def _has_raw_won_amount(text: str) -> bool:
 
 def _evidence_number_pools(
     evidence_texts: Sequence[str],
-) -> tuple[frozenset[Decimal], frozenset[Decimal], bool]:
-    """근거 글 묶음에서 (원시 토큰 값, 배율 적용 절대값, 단위 정보 존재 여부)를 만든다.
+) -> tuple[frozenset[Decimal], frozenset[Decimal], bool, frozenset[int]]:
+    """근거 글 묶음에서 (원시 토큰 값, 배율 적용 절대값, 단위 정보 존재 여부,
+    연도 집합)을 만든다.
 
     ★ 세 번째 값은 근거 «어딘가»에 명시적 단위(조각 원문의 인접 단위 또는
       실적표 unit 필드로 채워 넣은 값 — 아래 _table_texts)가 하나라도
       있었는지다. 전부 맨 숫자뿐이면 단위 붙은 문장 숫자를 확인도 반증도
       못 한다(②의 개선 — 하단 _numeric_disposal 참고).
+    ★ 네 번째 값이 «연도»다. 두 갈래를 모은다 —
+      ⓐ 날짜 표기에서 읽은 연도(「2025.12.31」·「제52기(2025.01.01~…)」),
+      ⓑ 실적표 머리글 「2024」처럼 날짜 표기가 아닌 맨 네 자리 연도.
+      ⓑ가 없으면 연도 머리글만 있는 실적표를 근거로 든 문장이 «없는 수»로
+      몰린다 — 지금까지 맨 숫자 대조가 해 주던 일을 그대로 잇는다.
+      배율·단위가 붙은 수(「2,025억원」의 2025)는 연도가 아니므로 넣지 않는다.
     """
     raw_values: set[Decimal] = set()
     absolute_values: set[Decimal] = set()
+    years: set[int] = set()
     has_unit_context = False
     for text in evidence_texts:
         for number in _extract_numbers(text):
             raw_values.add(number.token)
+            if number.is_year:
+                years.add(int(number.token))
             if number.unit_marked:
                 has_unit_context = True
             try:
                 absolute_values.add(number.token * number.scale)
             except (InvalidOperation, Overflow):
                 continue
-    return frozenset(raw_values), frozenset(absolute_values), has_unit_context
+        years.update(int(match.group()) for match in _BARE_YEAR_RE.finditer(text))
+    return (
+        frozenset(raw_values),
+        frozenset(absolute_values),
+        has_unit_context,
+        frozenset(years),
+    )
+
+
+def _year_found(number: _SentenceNumber, years: frozenset[int]) -> bool:
+    """연도 토큰 전용 — 근거가 «그 해»를 말했는지만 본다.
+
+    ★ 배율·단위 계산 경로를 타지 않는다. 연도는 금액이 아니므로 환산할 것이
+      없고, 맨 숫자 대조에 맡기면 근거의 「2025.12.31」이 소수 2025.12로 읽혀
+      「2025년」과 어긋난다(이 함수가 생긴 이유).
+    ★ 근거에 없는 해는 그대로 «없는 수»로 남긴다 — 근거가 2024년 자료뿐인데
+      2025년이라 쓰면 잡아야 한다.
+    """
+    return int(number.token) in years
 
 
 def _number_found(
@@ -307,7 +426,10 @@ def _number_found(
     raw_values: frozenset[Decimal],
     absolute_values: frozenset[Decimal],
 ) -> bool:
-    """단위 «없는» 문장 숫자(연도·개수 등) 전용 — 종전 규칙 그대로.
+    """단위 «없는» 문장 숫자(개수·월·일 등) 전용 — 종전 규칙 그대로.
+
+    ★ 연도는 여기 오지 않는다 — 날짜 표기를 소수로 읽는 사고가 있어
+      _year_found로 따로 갈랐다.
 
     허용 규칙 2가지:
       ⓐ 토큰 그대로 존재 (예: 실적표 셀 「456」 ↔ 문장 「456곳」)
@@ -409,6 +531,9 @@ def _numeric_disposal(
         그친다(제거 아님 — ②의 개선).
       · 단위 없는 맨 숫자(연도·개수 등)는 서술의 부수 정보다 —
         실패해도 문장 뼈대는 남을 수 있으므로 **해석 강등**에 그친다.
+      · 연도는 근거의 «연도 집합»으로만 대조한다(_year_found). 근거에 없는
+        해를 쓴 문장은 지금까지처럼 해석 강등이다 — 처분은 그대로고,
+        날짜 표기를 못 읽어 억울하게 강등되던 것만 없앤다.
     """
     numbers = _extract_numbers(sentence.text)
     if not numbers:
@@ -418,13 +543,16 @@ def _numeric_disposal(
         for citation in sentence.citations
         if citation in frag_by_id
     ]
-    raw_values, absolute_values, has_unit_context = _evidence_number_pools(
+    raw_values, absolute_values, has_unit_context, years = _evidence_number_pools(
         [*cited_texts, *table_texts]
     )
     remove = False
     demote = False
     for number in numbers:
-        if number.unit_marked:
+        if number.is_year:
+            if not _year_found(number, years):
+                demote = True
+        elif number.unit_marked:
             if _number_matches_by_math(number, absolute_values):
                 continue
             if has_unit_context:

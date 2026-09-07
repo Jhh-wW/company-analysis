@@ -76,6 +76,7 @@ from src.features.composer.verify import (
     _extract_numbers,
     _number_found,
     _number_matches_by_math,
+    _year_found,
 )
 from src.features.composer.port import (
     AskFatalError,
@@ -180,7 +181,8 @@ def _numbers_are_grounded(cell: str, source_text: str) -> Optional[str]:
     """칸 안의 수가 인용 원문에 있는가. 없으면 그 수를 돌려준다.
 
     ★ 잣대를 «문장 검증과 같은 것»으로 쓴다 (verify._extract_numbers ·
-      _evidence_number_pools · _number_matches_by_math · _number_found).
+      _evidence_number_pools · _number_matches_by_math · _number_found ·
+      _year_found).
       적대 검토가 잡은 결함 — 여기서 따로 만든 자릿수 비교는 단위를 안 봐서
       「1,683원」이 「1,683억원」 근거로 통과했고, 소수점을 지워 「1.5조원」과
       「15개국」이 같은 수가 됐다. 잣대가 두 벌이면 반드시 어긋난다.
@@ -193,11 +195,17 @@ def _numbers_are_grounded(cell: str, source_text: str) -> Optional[str]:
     numbers = _extract_numbers(cell)
     if not numbers:
         return None
-    raw_values, absolute_values, has_unit_context = _evidence_number_pools(
+    raw_values, absolute_values, has_unit_context, years = _evidence_number_pools(
         [source_text]
     )
     for number in numbers:
-        if number.unit_marked:
+        if number.is_year:
+            # ★ 연도는 근거의 «연도 집합»으로만 본다. 근거가 「2025.12.31」로만
+            #   적어 둔 해를 못 읽어 경로를 통째로 버리던 것이 실측 결함이었다
+            #   (엔터사 4곳). 근거에 없는 해는 그대로 «없는 수»로 남는다.
+            if _year_found(number, years):
+                continue
+        elif number.unit_marked:
             if _number_matches_by_math(number, absolute_values):
                 continue
             # ★ 여기서 «문장 규칙과 갈라진다». 문장은 근거에 단위 정보가
