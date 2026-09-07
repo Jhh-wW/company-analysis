@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 import time
 
 import pytest
@@ -14,6 +16,7 @@ from core.dart_client import (
 )
 from features.evidence_collection import collect as collect_module
 from features.evidence_collection import constants as c
+from features.evidence_collection import dart_fetcher
 from features.evidence_collection.collect import collect_dart_evidence
 from features.evidence_collection.filing_select import (
     DiscoveredDocumentUrl,
@@ -27,6 +30,7 @@ from features.evidence_collection.tests.fixtures.fake_fetcher import FakeFetcher
 from features.evidence_collection.tests.fixtures.synthetic_documents import (
     AUDIT_ONLY_REPORT_TEXT,
     FINANCIAL_REPORT_TEXT,
+    INDENTED_BUSINESS_REPORT_XML,
     LISTED_BUSINESS_REPORT_TEXT,
 )
 
@@ -110,6 +114,77 @@ def test_상장형_수집_전체_흐름() -> None:
         if a.state == c.ATTEMPT_STATE_OK and a.attempt_id.startswith("document:")
     ]
     assert len(ok_document_attempts) == 1
+
+
+#: DART 조각 ``location``은 「시작-끝」 offset 문자열이다(app 경계와 같은 모양).
+_FRAGMENT_LOCATION_RE = re.compile(r"([0-9]+)-([0-9]+)")
+
+
+def _document_ranges_by_id(
+    documents: list[dict[str, object]],
+) -> dict[str, set[tuple[int, int]]]:
+    """문서 Mapping 목록에서 document_id별 usable range 집합을 모은다.
+
+    무분류 차선 문서는 분류된 문서와 ``document_id``가 같고 usable range만
+    다르므로(collect.py) 두 목록을 한 dict에 섞으면 서로를 덮어쓴다.
+    """
+
+    return {
+        document["document_id"]: {
+            (item["start"], item["end"]) for item in document["usable_ranges"]
+        }
+        for document in documents
+    }
+
+
+def test_들여쓴_XML에서_나온_조각은_원문도_좌표도_가장자리_공백을_달지_않는다() -> None:
+    """평문화가 남기는 들여쓰기 공백이 조각 원문·해시·구간까지 새지 않는다.
+
+    app transport 경계는 ``value != value.strip()``인 원문을 거절한다. 그
+    거절을 하류에서 원문만 strip해 피하면 ``text_sha256``·usable range 결속이
+    깨지므로, 원천인 세그먼터가 좌표까지 함께 옮겨야 한다.
+    """
+
+    # 실제 평문화 함수를 그대로 쓴다 — 손으로 만든 평문은 공백 처리 방식이
+    # 생산과 어긋나도 시험이 초록불이 된다.
+    flat_text = dart_fetcher._xml_to_plain_text(  # noqa: SLF001 - 생산 평문화 계약
+        INDENTED_BUSINESS_REPORT_XML.encode("utf-8")
+    )
+    row = RawFilingRow("20250315000009", "사업보고서 (2025.03)", "20250315")
+
+    harvest = collect_dart_evidence(_fetcher("A", row, flat_text), "00126380", now=_NOW)
+    envelope = harvest_to_mapping(harvest)
+
+    lanes = (
+        (envelope["fragments"], _document_ranges_by_id(envelope["documents"])),
+        (
+            envelope["unclassified_fragments"],
+            _document_ranges_by_id(envelope["unclassified_documents"]),
+        ),
+    )
+    assert envelope["fragments"] and envelope["unclassified_fragments"]
+    starts_after_whitespace = 0
+    for fragments, ranges_by_document_id in lanes:
+        for fragment in fragments:  # type: ignore[union-attr]
+            text = fragment["text"]
+            matched = _FRAGMENT_LOCATION_RE.fullmatch(fragment["location"])
+            assert matched is not None
+            start, end = (int(value) for value in matched.groups())
+
+            assert text == text.strip()
+            assert (
+                hashlib.sha256(text.encode("utf-8")).hexdigest()
+                == fragment["text_sha256"]
+            )
+            assert flat_text[start:end] == text
+            assert (start, end) in ranges_by_document_id[fragment["document_id"]]
+            assert end - start == len(text)
+            if start > 0 and flat_text[start - 1] == " ":
+                starts_after_whitespace += 1
+
+    # 「원문에 애초에 공백이 없어서 통과한 것」이 아님을 못 박는다 — 실제로
+    # 앞 공백을 떼고 시작 좌표를 옮긴 조각이 있어야 한다.
+    assert starts_after_whitespace >= 1
 
 
 def test_감사보고서형_수집() -> None:

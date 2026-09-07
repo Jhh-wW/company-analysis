@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from features.evidence_collection import constants as c
 from features.evidence_collection.models import CollectedDocument, DocumentTextRange
 from features.evidence_collection.segment import (
@@ -110,6 +112,98 @@ def test_P2_점_leader와_쪽번호로_끝나는_목차_항목_줄은_표제로_
     # 진짜 본문 표제 아래 문단은 그대로 잡힌다.
     assert any("당사는 전자부품을 제조하는 주식회사이며 법인이다" in c.text for c in candidates)
     assert any("당사의 매출은 판매에서 발생한다" in c.text for c in candidates)
+
+
+#: 문단 앞뒤에 공백이 붙는 변형 — (문단 원문, 앞 공백 글자 수, 기대 조각 원문).
+#: ``str.strip()``이 떼는 유니코드 공백(U+3000 전각 공백·U+00A0 줄바꿈 없는
+#: 공백)까지 넣는다. app transport 경계도 같은 ``str.strip()``으로 판정하므로,
+#: 세그먼터가 이 공백을 남기면 그 조각은 그 자리에서 통째로 거절된다.
+_EDGE_WHITESPACE_PARAGRAPHS = (
+    (
+        " 앞에 공백 한 칸이 붙은 문단이며 길이는 충분하다.\n",
+        1,
+        "앞에 공백 한 칸이 붙은 문단이며 길이는 충분하다.",
+    ),
+    (
+        "뒤에 공백 한 칸이 붙은 문단이며 길이는 충분하다. \n",
+        0,
+        "뒤에 공백 한 칸이 붙은 문단이며 길이는 충분하다.",
+    ),
+    (
+        "　전각 공백으로 감싼 문단이며 길이는 충분하다.　\n",
+        1,
+        "전각 공백으로 감싼 문단이며 길이는 충분하다.",
+    ),
+    (
+        " 줄바꿈 없는 공백으로 감싼 문단이며 길이는 충분하다. \n",
+        1,
+        "줄바꿈 없는 공백으로 감싼 문단이며 길이는 충분하다.",
+    ),
+    (
+        " 첫 줄에도 앞 공백이 있고 \n 둘째 줄에도 앞 공백이 있다. \n",
+        1,
+        "첫 줄에도 앞 공백이 있고 \n 둘째 줄에도 앞 공백이 있다.",
+    ),
+)
+
+#: 대상 문단 앞에 두는 문단 — 좌표가 0이 아닌 자리에서도 맞는지 보려는 것이다.
+_PARAGRAPH_PREAMBLE = "가나다전자 공시 원문 맨 앞에 놓인 문단이며 길이는 충분하다.\n\n"
+
+
+@pytest.mark.parametrize(
+    ("paragraph", "lead_whitespace_chars", "expected_text"),
+    _EDGE_WHITESPACE_PARAGRAPHS,
+)
+def test_문단_가장자리_공백은_떼고_시작_끝_좌표도_함께_옮긴다(
+    paragraph: str,
+    lead_whitespace_chars: int,
+    expected_text: str,
+) -> None:
+    text = _PARAGRAPH_PREAMBLE + paragraph
+
+    matched = [
+        candidate
+        for candidate in segment_document(text)
+        if expected_text in candidate.text
+    ]
+
+    assert len(matched) == 1
+    candidate = matched[0]
+    # 내부 개행·공백은 그대로 두고 «가장자리»만 뗀다 — 기대값이 줄 사이
+    # 공백을 그대로 담고 있으므로 이 동등 비교가 보존까지 함께 확인한다.
+    assert candidate.text == expected_text
+    assert candidate.text == candidate.text.strip()
+    assert text[candidate.start : candidate.end] == candidate.text
+    assert candidate.start == len(_PARAGRAPH_PREAMBLE) + lead_whitespace_chars
+    assert candidate.end == candidate.start + len(expected_text)
+
+
+def test_최소_길이_판정은_공백을_뗀_길이로_한다() -> None:
+    """MIN_FRAGMENT_CHARS는 지금 20자다 — 가장자리 공백은 그 길이에 못 낀다."""
+
+    nineteen_chars = "  " + "가" * 19 + "  \n"
+    twenty_chars = "  " + "나" * 20 + "  \n"
+
+    assert [candidate.text for candidate in segment_document(nineteen_chars)] == []
+    assert [candidate.text for candidate in segment_document(twenty_chars)] == [
+        "나" * 20
+    ]
+
+
+def test_들여쓰기만_다른_반복_문장도_같은_상투_문구로_빠진다() -> None:
+    repeated = "이 문장은 문서 전체에서 반복되는 상투 문구입니다."
+    text = (
+        f"  {repeated}  \n\n"
+        f"\t{repeated}\n\n"
+        "  가나다전자의 주요 매출은 반도체 부품 판매에서 발생한다.\n"
+    )
+
+    candidates = segment_document(text)
+
+    assert not any(repeated in candidate.text for candidate in candidates)
+    assert [candidate.text for candidate in candidates] == [
+        "가나다전자의 주요 매출은 반도체 부품 판매에서 발생한다."
+    ]
 
 
 def test_각_후보의_start_end는_실제_원문과_일치한다() -> None:
