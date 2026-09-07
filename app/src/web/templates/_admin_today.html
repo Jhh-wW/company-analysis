@@ -41,4 +41,35 @@
       <a class="btn ghost" href="/admin/issues">문제 목록 보기</a>
     {% endif %}
   </article>
+  <article class="card">
+    <p class="frame-eyebrow">최근 실행 진단</p>
+    <h3 id="today-recent-runs-title">실행 진단 기록</h3>
+    {% if not dashboard_recent_runs_available %}
+      <p><strong>확인 불가</strong></p>
+      <p class="muted">진단 기록을 읽지 못했습니다. 다른 운영 정보는 그대로 표시합니다.</p>
+    {% elif dashboard_recent_runs %}
+      <p class="muted">어느 링크로 만들었든 최근 실행 {{ dashboard_recent_runs_limit }}건. 실패한 실행일수록 여기부터 본다.</p>
+      <div class="data-table-scroll" role="region" tabindex="0" aria-labelledby="today-recent-runs-title">
+      <table aria-labelledby="today-recent-runs-title">
+        <thead><tr>
+          <th scope="col">기록 시각</th><th scope="col">회사</th><th scope="col">상태</th>
+          <th scope="col">실행 번호</th><th scope="col">진단</th>
+        </tr></thead>
+        <tbody>
+        {% for run in dashboard_recent_runs %}
+        <tr>
+          <td>{{ run.recorded_at_label }}</td>
+          <td>{{ run.company or "—" }}</td>
+          <td>{{ run.status_label }}</td>
+          <td><code>{{ run.run_id_short }}</code></td>
+          <td><a href="/admin/runs/{{ run.run_id }}/diagnostics">실행 진단 기록 보기</a></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    {% else %}
+      <p class="muted">아직 기록된 실행이 없습니다.</p>
+    {% endif %}
+  </article>
 </section>

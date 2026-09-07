@@ -11,6 +11,7 @@ from dataclasses import asdict, replace
 from datetime import timedelta
 import logging
 import os
+import sqlite3
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -22,6 +23,8 @@ from src.features.admin_dashboard import store as dashboard_store
 from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
+from src.features.observability import constants as obs_constants
+from src.features.observability import run_steps_store
 from src.features.report_access import logic as report_access_logic
 from src.features.backup import status as backup_status
 from src.features.sharelink import allowlist as share_allow
@@ -45,6 +48,9 @@ from src.web.security import CSRF_TOKEN_MAX_CHARS, REFERENCE_MAX_CHARS
 router = APIRouter()
 logger = logging.getLogger(__name__)
 _FEEDBACK_MAX_CHARS = 3000
+#: 링크 실행 이력에 없는 실행의 상태 자리에 적는 말. 진단은 링크와 무관하게
+#: 쌓이므로 「상태 없음」이 아니라 «어디서 만들었는지»를 말한다.
+_RUN_WITHOUT_LINK_LABEL = "링크 밖 실행"
 _CORRECTED_PAYLOAD_MAX_CHARS = 250_000
 _XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -56,6 +62,21 @@ def _status_labels() -> dict[str, str]:
         dashboard_store.REPORT_STATUS_RECHECKING: "재검사 중",
         dashboard_store.REPORT_STATUS_RECHECK_FAILED: "재검사 실패",
         dashboard_store.REPORT_STATUS_NORMAL: "정상",
+    }
+
+
+def _run_status_labels() -> dict[str, str]:
+    """LINK 실행 이력의 상태 코드를 사람이 읽는 말로 바꾼다.
+
+    ★ 화면 두 곳(링크 상세·오늘 상태)이 같은 표를 쓴다. 사본을 늘리면 한쪽만
+      고쳐 놓고 「다 고쳤다」고 말하게 된다.
+    """
+    return {
+        share_store.RUN_STATUS_RUNNING: "생성 중",
+        share_store.RUN_STATUS_AWAITING_RELEASE: "자동출고 검사 대기",
+        share_store.RUN_STATUS_COMPLETED: "완료",
+        share_store.RUN_STATUS_STOPPED: "중단",
+        share_store.RUN_STATUS_INTERRUPTED: "서버 종료로 중단",
     }
 
 
@@ -445,6 +466,42 @@ def _member_limit_rows(
     return rows, True
 
 
+def _recent_run_rows(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    """최근 실행 진단을 「오늘 상태」 표에 쓸 모양으로 편다.
+
+    ★ 왜 진단 표를 정본으로 쓰나 — 링크 실행 이력은 어느 링크로 만들었는지
+      알아야 찾을 수 있다. 진단 기록은 링크와 무관하게 실행마다 쌓이므로,
+      링크 밖에서 만든 보고서도 여기서는 빠지지 않는다.
+    """
+
+    labels = _run_status_labels()
+    rows: list[dict[str, object]] = []
+    for saved in run_steps_store.list_recent(
+        conn, limit=obs_constants.RECENT_RUN_STEPS_LIMIT
+    ):
+        run = share_store.load_run(conn, saved.run_id)
+        rows.append(
+            {
+                "run_id": saved.run_id,
+                "run_id_short": saved.run_id[: obs_constants.RUN_ID_SHORT_CHARS],
+                "recorded_at": saved.recorded_at,
+                "recorded_at_label": _link_timestamp_label(saved.recorded_at),
+                "company": (
+                    ""
+                    if run is None
+                    else (run.confirmed_company or run.input_company)
+                ),
+                "status_label": (
+                    _RUN_WITHOUT_LINK_LABEL
+                    if run is None
+                    else labels.get(run.status, "확인 불가")
+                ),
+                "report_id": "" if run is None else run.report_id,
+            }
+        )
+    return rows
+
+
 def _dashboard_context(request: Request) -> dict:
     """오늘 화면과 조각 새로고침이 같은 정본을 사용한다."""
     service, service_available = _dashboard_read(
@@ -486,6 +543,9 @@ def _dashboard_context(request: Request) -> dict:
         "최근 해결 문제",
         [],
         lambda conn: dashboard_store.list_recent_resolved_issues(conn, limit=5),
+    )
+    recent_runs, recent_runs_available = _dashboard_read(
+        "최근 실행 진단", [], _recent_run_rows
     )
     member_company_counts, member_company_counts_available = _dashboard_read(
         "친구 회사 유형", {company_type: 0 for company_type in dashboard_store.COMPANY_TYPES},
@@ -612,6 +672,9 @@ def _dashboard_context(request: Request) -> dict:
         dashboard_reports_available=reports_available,
         dashboard_resolved_issues=[asdict(item) for item in resolved_issues],
         dashboard_resolved_available=resolved_available,
+        dashboard_recent_runs=recent_runs,
+        dashboard_recent_runs_available=recent_runs_available,
+        dashboard_recent_runs_limit=obs_constants.RECENT_RUN_STEPS_LIMIT,
         dashboard_members=members,
         dashboard_members_available=members_available,
         dashboard_links=links,
@@ -1235,13 +1298,7 @@ async def link_detail(request: Request, key_hash: str):
                     event.id: _link_timestamp_label(event.opened_at)
                     for event in open_events
                 },
-                dashboard_run_status_labels={
-                    share_store.RUN_STATUS_RUNNING: "생성 중",
-                    share_store.RUN_STATUS_AWAITING_RELEASE: "자동출고 검사 대기",
-                    share_store.RUN_STATUS_COMPLETED: "완료",
-                    share_store.RUN_STATUS_STOPPED: "중단",
-                    share_store.RUN_STATUS_INTERRUPTED: "서버 종료로 중단",
-                },
+                dashboard_run_status_labels=_run_status_labels(),
                 dashboard_run_stop_reason_labels={
                     "company_not_found": "회사를 확정하지 못함",
                     "unsupported_public_entity": "분석 대상이 아닌 공공기관",
