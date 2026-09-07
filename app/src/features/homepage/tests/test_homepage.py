@@ -7,10 +7,12 @@ from __future__ import annotations
 import pytest
 
 from src.features.homepage import safe_http
+from src.features.composer.port import filing_meta_from_raw
 from src.features.homepage.constants import (
     MAX_CHARS_PER_PAGE,
     MAX_PAGES,
     MAX_TOTAL_CHARS,
+    MIN_FRAGMENT_CHARS,
 )
 from src.features.homepage.logic import (
     FetchedPage,
@@ -19,9 +21,12 @@ from src.features.homepage.logic import (
     HomepageRobotsUnavailable,
     HomepageRobotsUnreachable,
     HomepageSecurityPolicyError,
+    _collect_page,
+    _cut_at_whitespace,
     collect_homepage_fragments,
     strip_html,
 )
+from src.features.pipeline.evidence_transport import typed_fragments_from_raw
 
 ROOT = "http://example.com"
 
@@ -980,3 +985,226 @@ def test_회사와_무관한_overview는_회사소개보다_앞서지_않는다(
     assert page_calls.index(f"{ROOT}/about-us/brand-identity") < page_calls.index(
         f"{ROOT}/sustainability/accessibility/overview"
     ), "회사소개(about)보다 접근성 overview를 먼저 읽으면 경영이념을 놓칩니다"
+
+
+# ── 절단 경계 공백 ────────────────────────────────────────
+#
+# 글자 수로만 자르면 절단점이 공백이거나 낱말 중간일 수 있다. 공백에서 잘린
+# 원문은 근거 transport의 원문 형식 검사(`값 != 값.strip()`이면 거절)에 걸려
+# 조각이 typed 신원을 잃는다.
+
+#: 가공 본문에서 쓰는 낱말 길이(첫 낱말 제외).
+_TOKEN_CHARS = 6
+#: 낱말 하나 + 그 뒤 공백 한 칸이 차지하는 간격.
+_STRIDE_CHARS = _TOKEN_CHARS + 1
+#: 첫 낱말이 이보다 짧으면 절단 자리를 옮기는 뜻이 흐려진다.
+_MIN_LEAD_CHARS = 2
+#: 낱말이 서로 달라야 「마지막 낱말이 온전한가」를 셀 수 있다.
+_WORD_FILLERS = "가나다라마바사아자차"
+
+
+def _fixture_word(index: int, length: int) -> str:
+    """길이가 정확히 `length`이고 서로 구분되는 가공 낱말을 만든다."""
+
+    number = str(index)
+    if len(number) >= length:
+        return number[-length:]
+    filler = _WORD_FILLERS[index % len(_WORD_FILLERS)]
+    return filler * (length - len(number)) + number
+
+
+def _spaced_text(*, lead_chars: int, total_chars: int) -> str:
+    """공백 자리를 계산할 수 있는 가공 본문을 만든다.
+
+    공백은 `lead_chars`, `lead_chars + _STRIDE_CHARS`, ... 자리에 온다.
+    첫 낱말 길이를 바꾸면 절단점이 공백·낱말 중간 중 어디에 걸리는지 고를 수 있다.
+    """
+
+    words = [_fixture_word(0, lead_chars)]
+    length = lead_chars
+    index = 1
+    while length < total_chars:
+        words.append(_fixture_word(index, _TOKEN_CHARS))
+        length += _STRIDE_CHARS
+        index += 1
+    return " ".join(words)
+
+
+def _lead_for_space_at(position: int) -> int:
+    """공백이 정확히 `position` 자리에 오도록 첫 낱말 길이를 고른다."""
+
+    lead = position % _STRIDE_CHARS
+    return lead if lead >= _MIN_LEAD_CHARS else lead + _STRIDE_CHARS
+
+
+def _page_html(text: str) -> str:
+    return f"<html><body><p>{text}</p></body></html>"
+
+
+def _collect_one(
+    text: str,
+    *,
+    total_chars: int = 0,
+    page_url: str = f"{ROOT}/about",
+) -> tuple[list[dict[str, str]], int]:
+    """`_collect_page`를 운영과 같은 인자로 한 번 부른다."""
+
+    raw_html = _page_html(text)
+    assert strip_html(raw_html) == text, "가공 본문이 HTML 정리를 거치며 바뀌었습니다"
+    fragments: list[dict[str, str]] = []
+    seen_text: set[str] = set()
+    total = _collect_page(page_url, raw_html, fragments, seen_text, total_chars)
+    return fragments, total
+
+
+def _assert_clean_cut(kept: str, *, source: str, limit: int) -> None:
+    """자른 결과가 공백을 남기지 않고 낱말도 쪼개지 않았는지 본다."""
+
+    assert kept == kept.strip(), "자른 원문 끝(또는 앞)에 공백이 남았습니다"
+    assert len(kept) <= limit
+    assert source.startswith(kept), "자른 결과가 원문의 앞부분이 아닙니다"
+    assert kept.split()[-1] in source.split(), "마지막 낱말이 중간에서 잘렸습니다"
+
+
+@pytest.mark.parametrize(
+    ("text", "limit", "expected"),
+    [
+        ("가나다 라마", 3, "가나다"),  # 절단점 바로 뒤가 반각 공백
+        ("가나 다라마", 3, "가나"),  # 절단점 앞이 반각 공백 — 그대로 두면 공백이 남는다
+        ("가나\n다라마", 3, "가나"),  # 줄바꿈 경계
+        ("가나\u3000다라마", 3, "가나"),  # 전각 공백 경계
+        ("가나다 라마바사", 5, "가나다"),  # 낱말 중간 — 앞 공백까지 되감는다
+        ("가나다라마", 5, "가나다라마"),  # 정확히 limit
+        (" 가나다 ", 10, "가나다"),  # limit 미만이면 strip만
+        ("가나다라마바", 4, "가나다라"),  # 공백 없는 한 덩어리
+    ],
+)
+def test_공백경계_되감기가_경계마다_공백없는_결과를_준다(
+    text: str, limit: int, expected: str
+) -> None:
+    kept = _cut_at_whitespace(text, limit)
+
+    assert kept == expected
+    assert kept == kept.strip()
+    assert len(kept) <= limit
+
+
+@pytest.mark.parametrize(
+    ("lead_chars", "설명"),
+    [
+        (_lead_for_space_at(MAX_CHARS_PER_PAGE), "절단점 바로 뒤가 공백"),
+        (_lead_for_space_at(MAX_CHARS_PER_PAGE - 1), "절단점 앞이 공백"),
+        (_TOKEN_CHARS, "절단점이 낱말 중간"),
+    ],
+)
+def test_페이지_상한_절단이_공백이나_낱말을_남기지_않는다(
+    lead_chars: int, 설명: str
+) -> None:
+    text = _spaced_text(lead_chars=lead_chars, total_chars=MAX_CHARS_PER_PAGE * 2)
+    assert len(text) > MAX_CHARS_PER_PAGE, "가공 본문이 페이지 상한을 넘지 않습니다"
+
+    fragments, total = _collect_one(text)
+
+    assert len(fragments) == 1, 설명
+    kept = fragments[0]["원문"]
+    assert len(kept) < len(text), "실제로 자르지 않았습니다"
+    _assert_clean_cut(kept, source=text, limit=MAX_CHARS_PER_PAGE)
+    assert total == len(kept)
+
+
+#: 전체 상한의 잔여가 낱말 «중간»에 걸리도록 고른 잔여 글자 수.
+_REMAINING_MID_WORD_CHARS = _STRIDE_CHARS * 70 + 3
+
+
+def test_전체_상한_잔여_절단도_낱말_경계에서_멈춘다() -> None:
+    """앞선 쪽들이 예산을 거의 다 쓴 마지막 쪽의 잔여 절단."""
+
+    text = _spaced_text(lead_chars=_TOKEN_CHARS, total_chars=MAX_CHARS_PER_PAGE * 2)
+    page_text = _cut_at_whitespace(text, MAX_CHARS_PER_PAGE)
+    assert not page_text[_REMAINING_MID_WORD_CHARS].isspace()
+    assert not page_text[_REMAINING_MID_WORD_CHARS - 1].isspace()
+    used = MAX_TOTAL_CHARS - _REMAINING_MID_WORD_CHARS
+
+    fragments, total = _collect_one(text, total_chars=used)
+
+    assert len(fragments) == 1
+    kept = fragments[0]["원문"]
+    assert len(kept) < _REMAINING_MID_WORD_CHARS, "잔여 절단이 일어나지 않았습니다"
+    _assert_clean_cut(kept, source=text, limit=_REMAINING_MID_WORD_CHARS)
+    assert total == used + len(kept)
+    assert total <= MAX_TOTAL_CHARS
+
+
+def test_되감아_조각하한_아래로_내려가면_조각을_만들지_않는다() -> None:
+    """되감은 결과가 토막이면 싣지 않는다 — 하한을 우회하는 조각을 막는다."""
+
+    head_chars = MIN_FRAGMENT_CHARS // 2
+    remaining = MIN_FRAGMENT_CHARS + head_chars
+    text = (
+        _fixture_word(0, head_chars)
+        + " "
+        + _fixture_word(1, MIN_FRAGMENT_CHARS * 3)
+    )
+    assert MIN_FRAGMENT_CHARS <= len(text) <= MAX_CHARS_PER_PAGE
+    used = MAX_TOTAL_CHARS - remaining
+
+    fragments, total = _collect_one(text, total_chars=used)
+
+    assert fragments == []
+    assert total == used
+
+
+#: 근거 transport 검사에 넣을 가공 회사 고유번호(여덟 자리).
+_TRANSPORT_CORP_ID = "00126380"
+_TRANSPORT_FILING_META = filing_meta_from_raw(
+    {
+        "rcept_no": "20260315000123",
+        "report_nm": "사업보고서 (2025.12)",
+        "rcept_dt": "20260315",
+    }
+)
+
+
+def test_절단된_홈페이지_조각이_근거_transport의_원문검사를_통과한다() -> None:
+    """운영 변환 함수를 그대로 불러 「원문 형식」 거절이 없는지 본다."""
+
+    frags: dict[int, dict[str, str]] = {}
+    for number, lead_chars in enumerate(
+        (
+            _lead_for_space_at(MAX_CHARS_PER_PAGE),
+            _lead_for_space_at(MAX_CHARS_PER_PAGE - 1),
+            _TOKEN_CHARS,
+        ),
+        start=1,
+    ):
+        text = _spaced_text(lead_chars=lead_chars, total_chars=MAX_CHARS_PER_PAGE * 2)
+        fragments, _total = _collect_one(text, page_url=f"{ROOT}/about{number}")
+        assert len(fragments) == 1
+        frags[number] = fragments[0]
+
+    conversion = typed_fragments_from_raw(
+        corp_id=_TRANSPORT_CORP_ID,
+        frags=frags,
+        filing_meta=_TRANSPORT_FILING_META,
+    )
+
+    assert conversion.carried_raw_reasons == ()
+    assert conversion.carried_raw_count == 0
+    assert conversion.skipped_empty_count == 0
+    assert conversion.legacy_count == len(frags)
+    assert len(conversion.fragments) == len(frags)
+
+
+def test_절단없는_짧은_페이지는_원문이_그대로_실린다() -> None:
+    """대조군 — 상한에 걸리지 않는 쪽은 이 변경으로 결과가 바뀌지 않는다."""
+
+    text = _spaced_text(
+        lead_chars=_TOKEN_CHARS, total_chars=MIN_FRAGMENT_CHARS * 4
+    )
+    assert len(text) < MAX_CHARS_PER_PAGE
+
+    fragments, total = _collect_one(text)
+
+    assert len(fragments) == 1
+    assert fragments[0]["원문"] == text
+    assert total == len(text)

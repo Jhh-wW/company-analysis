@@ -982,6 +982,46 @@ def _page_candidate_scope_is_complete(raw_html: str, total_chars: int) -> bool:
     return total_chars + len(text) <= MAX_TOTAL_CHARS
 
 
+def _cut_at_whitespace(text: str, limit: int) -> str:
+    """글자 수 상한을 낱말 경계에서 지키고 앞뒤 공백을 남기지 않는다.
+
+    글자 수로만 자르면 절단점이 공백이거나 낱말 중간일 수 있다. 공백에서
+    잘리면 원문 끝에 공백이 남아 근거 transport의 원문 형식 검사(``값 !=
+    값.strip()``이면 거절)에 걸려 조각이 typed 신원을 잃고, 낱말 중간에서
+    잘리면 사람이 읽을 수 없는 토막이 근거로 실린다. 그래서 자를 자리를
+    마지막 공백 경계까지 되감은 뒤 언제나 ``strip()``한다.
+
+    공백 판정과 ``strip()``은 같은 유니코드 기준(``str.isspace()``)을 쓰므로
+    전각 공백·줄바꿈도 경계로 인정된다.
+
+    Args:
+        text: 자를 원문.
+        limit: 남길 최대 글자 수. 0 이하면 빈 글자를 돌려준다.
+
+    Returns:
+        길이가 ``limit`` 이하이고 언제나 ``결과 == 결과.strip()``인 글자.
+        되감을 공백이 없는 한 덩어리면 페이지를 통째로 버리는 대신 글자 수
+        경계에서 자른다.
+    """
+
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text.strip()
+    head = text[:limit]
+    if text[limit].isspace():
+        # 절단점 «다음» 글자가 공백이면 마지막 낱말이 이미 온전히 끝났다.
+        return head.strip()
+    for index in range(len(head) - 1, -1, -1):
+        if not head[index].isspace():
+            continue
+        rewound = head[:index].strip()
+        if rewound:
+            return rewound
+        break
+    return head.strip()
+
+
 def _collect_page(
     page_url: str,
     raw_html: str,
@@ -999,14 +1039,16 @@ def _collect_page(
     Returns:
         갱신된 누적 글자 수.
     """
-    text = strip_html(raw_html)[:MAX_CHARS_PER_PAGE]
+    text = _cut_at_whitespace(strip_html(raw_html), MAX_CHARS_PER_PAGE)
     if len(text) < MIN_FRAGMENT_CHARS or text in seen_text:
         return total_chars  # 빈 페이지이거나 이미 넣은 것과 같은 내용
     seen_text.add(text)
     remaining = MAX_TOTAL_CHARS - total_chars
     if remaining < MIN_FRAGMENT_CHARS:
         return total_chars  # 전체 상한에 다 찼다
-    kept = text[:remaining]
+    kept = _cut_at_whitespace(text, remaining)
+    if len(kept) < MIN_FRAGMENT_CHARS:
+        return total_chars  # 낱말 경계로 되감다가 조각 하한 아래로 내려갔다
     fragment = {"종류": FRAGMENT_KIND, "원문": kept, "출처": page_url}
     published_at = _published_date_from_html(raw_html)
     newsroom_result = None
