@@ -500,7 +500,7 @@ def test_DART근거가_있으면_사업모델_웹장애도_부분보고서로_�
     assert preflight.detail_code == ""
 
 
-def test_robots_선택경로만_실패하면_DART_부분보고서를_허용한다() -> None:
+def test_robots실패와_웹신원불일치가_함께있으면_DART부분우회를_막는다() -> None:
     observed = _with_dart_evidence(_result())
     candidates = list(observed.candidates)
     target_index = next(
@@ -532,6 +532,10 @@ def test_robots_선택경로만_실패하면_DART_부분보고서를_허용한�
                 slot_ids=collector_slots_for("business_model"),
                 reason_code="robots_fetch_failed",
             ),
+            _identity_mismatch_attempt(
+                "web-identity:business-model",
+                collector_slots_for("business_model"),
+            ),
         ),
         candidate_readiness=EvidenceReadiness.UNKNOWN,
     )
@@ -544,9 +548,12 @@ def test_robots_선택경로만_실패하면_DART_부분보고서를_허용한�
     )
 
     assert preflight.decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE
-    assert preflight.dart_partial_fallback is True
-    assert preflight.can_call_ai is True
-    assert preflight.detail_code == ""
+    assert preflight.dart_partial_fallback is False
+    assert preflight.can_call_ai is False
+    assert (
+        preflight.detail_code
+        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT
+    )
 
 
 def test_INSUFFICIENT라도_DART근거와_READY_3장이상이면_부분보고서로_진행한다() -> None:
@@ -845,16 +852,15 @@ def test_REQUIRED_DART_실패는_INSUFFICIENT_구제를_막는다() -> None:
     )
 
 
-def test_신원대조_실패는_웹문서가_결속된_장에서만_INSUFFICIENT_구제를_막는다() -> None:
-    """차단 기준은 «신원 대조에 실패했나»가 아니라 «그 장에 웹 자료가 남았나»다.
+def test_신원대조_실패시도는_같은장에_검증된웹문서가_있어도_부분구제를_막지않는다() -> None:
+    """실패한 시도와 별도로 성공·검증된 문서를 장 단위 연좌제로 버리지 않는다.
 
     wide_collect의 신원 대조 실패 경로는 fail-closed다. 문서를 만드는 자리가
     ``match is not None`` 안에만 있어서 MISSING attempt만 남고 documents는 0건이
-    된다. 우리은행 실측도 그랬다 — 수집된 문서 12건이 전부 DART였고, 신원 불일치
-    시도가 남긴 문서·조각은 0건이었다. 그래서 그 사유만으로는 막지 않는다.
-    반대로 같은 장에 웹 문서가 이미 결속돼 있으면 어느 호스트에서 온 문장인지
-    이 계층이 구분할 수 없으므로 그때는 막는다. 두 경우를 한자리에서 대조한다 —
-    바뀌는 변수는 «불일치 attempt가 붙은 장에 웹 문서가 있는가» 하나뿐이다.
+    된다. 같은 장의 다른 성공 경로가 만든 문서·조각은 Writer 자격과 회사 결속을
+    독립적으로 통과한 자료다. 실패 attempt가 같은 장에 있다는 이유만으로 성공
+    문서까지 오염됐다고 보면, 어느 회사든 후보 URL 하나가 빗나간 순간 안전한
+    DART 부분 보고서가 닫히고 불가능한 FULL 경로로 들어간다.
     """
 
     # (가) 우리은행형: 불일치 attempt가 붙은 portfolio는 문서를 하나도 안 남겼다.
@@ -897,22 +903,61 @@ def test_신원대조_실패는_웹문서가_결속된_장에서만_INSUFFICIENT
         ),
     )
 
-    blocked = assess_official_evidence(
+    passed_with_verified_web = assess_official_evidence(
         OfficialEvidenceCollectionResult(
             company_id=unbound.company_id,
             candidates=tuple(candidates),
         )
     )
 
-    assert blocked.decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
-    assert len(blocked.decision.ready_section_ids) == 7
-    assert blocked.dart_partial_fallback is False
-    assert blocked.dart_partial_reason == ""
-    assert blocked.can_call_ai is False
     assert (
-        blocked.detail_code
-        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
+        passed_with_verified_web.decision.status
+        is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
     )
+    assert len(passed_with_verified_web.decision.ready_section_ids) == 7
+    assert passed_with_verified_web.dart_partial_fallback is True
+    assert (
+        passed_with_verified_web.dart_partial_reason
+        == "insufficient_with_ready_sections"
+    )
+    assert passed_with_verified_web.can_call_ai is True
+    assert passed_with_verified_web.detail_code == ""
+
+
+def test_READY_4문서에_실패한웹후보가_섞여도_DART부분보고서로_내린다() -> None:
+    """우리은행 운영 모양을 회사명 예외 없이 판정식의 입력으로 재현한다."""
+
+    observed = _with_dart_evidence(_result(document_count=4))
+    candidates = list(observed.candidates)
+    target_index = next(
+        index
+        for index, candidate in enumerate(candidates)
+        if candidate.section_id == "business_model"
+    )
+    target = candidates[target_index]
+    candidates[target_index] = replace(
+        target,
+        attempts=(
+            _identity_mismatch_attempt(
+                "web-identity:business-model",
+                collector_slots_for("business_model"),
+            ),
+        ),
+    )
+
+    preflight = assess_official_evidence(
+        OfficialEvidenceCollectionResult(
+            company_id=observed.company_id,
+            candidates=tuple(candidates),
+        )
+    )
+
+    assert preflight.decision.status is GenerationGateStatus.READY_FOR_GENERATION
+    assert preflight.independent_document_count == 4
+    assert preflight.dart_partial_fallback is True
+    assert preflight.dart_partial_reason == "too_few_documents_for_full"
+    assert preflight.can_call_ai is True
+    assert preflight.detail_code == ""
 
 
 def test_읽은원문을_분류못했으면_회사의_자료부족이_아니라_내부범위결함이다() -> None:

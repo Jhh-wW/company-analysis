@@ -133,39 +133,6 @@ def _has_usable_dart_evidence(result: OfficialEvidenceCollectionResult) -> bool:
     return False
 
 
-def _identity_rejected_web_evidence_is_bound(
-    result: OfficialEvidenceCollectionResult,
-) -> bool:
-    """신원 대조에 실패한 웹 시도가 실제 웹 자료를 남긴 장이 있는지 본다.
-
-    ``wide_collect``의 신원 대조 실패 경로는 fail-closed다. 두 사유를 붙이는
-    자리(``wide_collect.py:1084-1091``)가 속한 ``_collect_identity_verified_
-    candidate``에서 문서를 만드는 블록은 ``match is not None`` 안에만 있어서
-    (``wide_collect.py:1092``·append는 1165), 신원 대조에 실패한 시도는 MISSING
-    attempt만 남기고 documents를 하나도 내보내지 않는다. 은행 실측도 같았다
-    — 수집 문서 12건이 전부 DART였고 불일치 시도가 남긴 문서·조각은 0건이다.
-
-    그렇다고 «불일치가 있으면 웹 문서가 없다»는 아니다. 신원이 확인돼 결속된
-    host는 다른 함수(``_visit_page``의 1424, ``_run_ir_pdf_phase``의 1753)에서
-    계속 문서를 만든다. 그래서 전역이 아니라 장 단위로 본다 — 불일치 시도가
-    붙은 그 장에 웹 종류의 문서가 실제로 결속돼 있을 때만 막는다. 그때는 어느
-    호스트에서 온 문장인지 이 계층이 구분할 수 없기 때문이다.
-    """
-
-    for candidate in result.candidates:
-        if not any(
-            attempt.reason_code in _WEB_IDENTITY_REJECTION_REASON_CODES
-            for attempt in candidate.attempts
-        ):
-            continue
-        if any(
-            document.source_kind in OFFICIAL_WEB_SOURCE_KINDS
-            for document in candidate.documents
-        ):
-            return True
-    return False
-
-
 def _is_stable_legacy_document_identity(identity: str) -> bool:
     """옛 조각 중 생산 경계가 실제로 만들 수 있는 안정 ID만 인정한다."""
 
@@ -187,7 +154,6 @@ class OfficialEvidencePreflight:
     # 어느 갈래로 부분 보고서 전환을 허용했는지 남긴다. 값은
     # ``DART_PARTIAL_REASON_*`` 세 개뿐이고, 전환이 없으면 빈 문자열이다.
     dart_partial_reason: str = ""
-
     @property
     def can_call_ai(self) -> bool:
         return self.dart_partial_fallback or (
@@ -291,7 +257,7 @@ def assess_official_evidence(
         for attempt in candidate.attempts
         if attempt.state in _INCOMPLETE_COLLECTION_STATES
     )
-    # 두 갈래 모두 «내부 배선은 멀쩡하고, 필수 DART 확인이 끝났고, 실제 DART
+    # 세 갈래 모두 «내부 배선은 멀쩡하고, 필수 DART 확인이 끝났고, 실제 DART
     # 원문 조각이 결속돼 있다»를 전제로 한다. 이 셋 중 하나라도 깨지면 어떤
     # 부분 보고서도 만들지 않는다.
     dart_partial_prerequisites_hold = (
@@ -299,11 +265,24 @@ def assess_official_evidence(
         and not required_dart_collection_incomplete
         and _has_usable_dart_evidence(result)
     )
+    dart_partial_eligible = (
+        dart_partial_prerequisites_hold
+        and len(decision.ready_section_ids) >= MINIMUM_PUBLISHABLE_SECTION_COUNT
+    )
+    # 신원 대조에 실패한 웹 후보는 wide_collect에서 MISSING attempt만 남기고
+    # 문서·조각을 만들지 않는다. 반대로 여기에 도달한 웹 조각은 별도 Writer
+    # 자격과 회사 결속 검사를 이미 통과했다. 둘이 같은 장에 기록됐다는 이유로
+    # 성공 문서까지 연좌시키면, 후보 URL 하나가 빗나간 모든 회사의 안전한 DART
+    # 부분 출구가 닫힌다. 그러므로 확인이 끝난 아래 갈래 2·3에서는 실패 attempt
+    # 자체가 이 자격을 뒤집지 않는다.
     # (갈래 1) 회사 웹 경로가 «막혀서» 확인을 끝내지 못한 경우. 상장 엔터사 실측이
     # 이 모양이었다 — robots.txt 거부로 FAILED가 나 STOP_TRANSIENT_FAILURE로
     # 닫혔고, DART 근거로 SHADOW 부분 보고서가 정상 생성됐다.
     transient_partial_fallback = (
-        dart_partial_prerequisites_hold
+        dart_partial_eligible
+        # DART 기업개황이 가리킨 대표 홈페이지 자체가 다른 회사로 확인됐는데
+        # 조회까지 덜 끝난 상태라면, 오래된 회사 신원을 부분 보고서로 우회하지
+        # 않는다. 반면 아래 자료 부족·문서 하한 갈래는 이미 확인된 근거만 쓴다.
         and not web_identity_was_rejected
         and decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE
         and bool(incomplete_attempts)
@@ -320,10 +299,8 @@ def assess_official_evidence(
     # 자료이므로, FULL이 아니라 부분 보고서로 내보낸다. 하한은 부분 보고서
     # 출고 계약과 같은 정본(MINIMUM_PUBLISHABLE_SECTION_COUNT)을 쓴다.
     insufficient_partial_fallback = (
-        dart_partial_prerequisites_hold
-        and not _identity_rejected_web_evidence_is_bound(result)
+        dart_partial_eligible
         and decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
-        and len(decision.ready_section_ids) >= MINIMUM_PUBLISHABLE_SECTION_COUNT
     )
     # (갈래 3) 아홉 장을 다 확인했는데도 완성 보고서의 독립 문서 하한에 닿을
     # 길이 없는 경우. 은행 실측이 이 모양이다 — 사전검사는 9장 READY지만
@@ -333,17 +310,13 @@ def assess_official_evidence(
     # 확정된 회사는 유료 AI 호출 전에 무료로 부분 보고서 경로로 내리는 것이
     # 정직하다. 지금 막지 않으면 FULL로 들어가 packet 문서 검사에서 멈추고
     # 보고서가 0건 나온다.
-    document_floor_partial_fallback = (
-        dart_partial_prerequisites_hold
-        and not _identity_rejected_web_evidence_is_bound(result)
-        # READY_FOR_GENERATION은 오늘 «아홉 장 전부 READY»와 같은 뜻이라
-        # (``shared/report_evidence/logic.py``의 ``assess_generation_gate``)
-        # 이 조건은 현재 항상 참이다. 게이트가 나중에 일부만 READY인 상태를
-        # 통과시키더라도 공개 최소 장 수 아래로는 열리지 않게 남겨 둔다.
-        and len(decision.ready_section_ids) >= MINIMUM_PUBLISHABLE_SECTION_COUNT
+    full_document_floor_unreachable = (
+        decision.status is GenerationGateStatus.READY_FOR_GENERATION
         and result.independent_document_count + LATE_PACKET_DOCUMENT_SOURCES
         < MIN_DOCUMENT_SOURCES
-        and decision.status is GenerationGateStatus.READY_FOR_GENERATION
+    )
+    document_floor_partial_fallback = (
+        dart_partial_eligible and full_document_floor_unreachable
     )
     # 게이트 판정은 한 상태만 갖는다 — 세 갈래는 서로 다른 상태를 요구하므로
     # 동시에 참이 될 수 없다. 그래도 사유는 transient > insufficient >
@@ -390,8 +363,8 @@ def assess_official_evidence(
         # 내부 분류 범위 결함으로 닫아 선결제·AI 호출 전에 운영자에게 보낸다.
         #
         # 여기까지 왔다는 것은 갈래 2가 거짓이라는 뜻이다 — 즉 DART 근거가
-        # 결속되지 않았거나, READY 장이 공개 최소치보다 적거나, 신원 대조에
-        # 실패한 웹 자료가 실제로 섞여 있다. 그때만 이 두 사유로 닫는다.
+        # 결속되지 않았거나 READY 장이 공개 최소치보다 적다. 그때만 이 두
+        # 사유로 닫는다.
         detail_code = (
             FINAL_GATE_DETAIL_PREFLIGHT_CLASSIFIER_COVERAGE_GAP
             if result.unclassified_evidence is not None

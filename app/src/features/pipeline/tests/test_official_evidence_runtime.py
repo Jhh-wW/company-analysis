@@ -1449,8 +1449,9 @@ def _woori_owner_failure_shape() -> OfficialEvidenceCollectionResult:
     """우리은행 운영 실패와 같은 독립 문서·웹 실패 모양을 만든다.
 
     아홉 장은 모두 READY지만 독립 문서는 DART 3건과 공식 웹 1건뿐이다.
-    공식 웹과 IR의 선택 조회 실패도 함께 남겨, 표시용 부분 성공 판정이
-    출고 모드 사전검사를 가리거나 문서 수를 부풀리지 않는지 확인한다.
+    공식 웹과 IR의 선택 조회 실패, 별도 후보의 신원 불일치도 함께 남긴다.
+    실패한 후보와 같은 장에 검증된 웹 문서가 있다는 이유로 DART 부분 출구를
+    닫았던 운영 결함까지 재현한다.
     """
 
     base = _official_result(document_count=4, variant="우리은행운영재현")
@@ -1515,6 +1516,12 @@ def _woori_owner_failure_shape() -> OfficialEvidenceCollectionResult:
                 state=CollectionState.FAILED,
                 slot_ids=collector_slots_for(first.section_id),
                 reason_code="network_failed",
+            ),
+            _web_attempt(
+                "identity-woori-0001",
+                state=CollectionState.MISSING,
+                reason_code="root_identity_mismatch",
+                section_id=first.section_id,
             ),
         ),
     )
