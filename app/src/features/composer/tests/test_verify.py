@@ -33,6 +33,10 @@ from src.features.composer.port import (
     PerformanceTable,
 )
 from src.features.composer.verify import (
+    # ★ 앞의 밑줄은 «composer 밖에서 쓰지 말라»는 뜻이다. 연도·수치 잣대는
+    #   여기서 값 하나하나를 못 박아야 하므로 시험에서만 직접 부른다.
+    _evidence_number_pools,
+    _extract_numbers,
     NOTICE_ALL_SENTENCES_REJECTED,
     NOTICE_VERIFICATION_INTERNAL_ERROR,
     REWRITE_PROMPT_HEADER,
@@ -370,6 +374,86 @@ def test_근거_전체에_단위정보가_없으면_확인불가로_강등된다
     section = verified.sections[0]
     assert len(section.sentences) == 1  # 제거되지 않는다
     assert section.sentences[0].grade == GRADE_INTERPRETED  # 해석으로 강등
+
+
+# ── ② 개선: 연도는 근거의 «날짜 표기»로 근거 삼는다 (2026-09-07 운영 실측) ──
+#
+# ★ 무엇이 고장났었나 — 「2025년 매출 37.02% 점유」의 «2025»가 근거 원문에는
+#   「2025.12.31」·「제52기(2025.01.01~2025.12.31)」 같은 날짜로만 있었다.
+#   맨 숫자 대조는 「2025.12.31」을 소수 2025.12로 읽어 2025를 못 찾았고,
+#   그 한 수 때문에 문장은 강등, 도식 경로는 통째로 버려졌다(엔터사 4곳).
+
+_점유율_원문 = "제52기(2025.01.01~2025.12.31) 국내 시장 점유율은 37.02%였다."
+
+
+def test_연도는_날짜_토큰으로_금액은_금액으로_읽는다():
+    """(a) 「2025년」은 연도, 「37.02%」는 단위 붙은 수 — 두 잣대가 갈린다."""
+    numbers = _extract_numbers("2025년 매출 37.02% 점유")
+
+    assert [(str(n.token), n.is_year, n.unit_marked) for n in numbers] == [
+        ("2025", True, False),
+        ("37.02", False, True),
+    ]
+
+
+@pytest.mark.parametrize(
+    "표기",
+    ["2025.12.31 기준", "2025-12", "2025/12", "2025년", "제52기(2025.01.01~)"],
+)
+def test_근거의_날짜_표기는_모양이_달라도_같은_연도로_읽힌다(표기: str):
+    """(c) 네 표기 모두 근거 연도 집합에 들어가야 한 해를 같은 해로 본다."""
+    _raw, _absolute, _has_unit, years = _evidence_number_pools([표기])
+
+    assert 2025 in years
+
+
+def test_네_자리_금액을_연도로_오인하지_않는다():
+    """(d) 「1,172억 원」·「632억 원」은 금액이다 — 연도로 읽으면 금액 검사가
+    통째로 헐거워진다."""
+    numbers = _extract_numbers("1,172억 원과 632억 원")
+
+    assert [n.is_year for n in numbers] == [False, False]
+    assert all(n.unit_marked for n in numbers)
+    _raw, _absolute, _has_unit, years = _evidence_number_pools(["1,172억 원"])
+    assert years == frozenset()
+
+
+def test_근거가_날짜로만_적은_해는_문장에서도_근거_있는_수다():
+    """(b) 앞: 근거가 「제52기(2025.01.01~2025.12.31)」뿐이어도 「2025년」은
+    근거 있는 수다 — 이걸 못 읽어 멀쩡한 문장이 강등되던 것이 실측 결함이다."""
+    raw = {1: {"종류": "사업내용", "원문": _점유율_원문}}
+    report = _report((_sentence("2025년 매출 37.02% 점유율이다.", ("1",)),))
+    ask = _FakeVerifier([_all_true(1)])
+
+    verified = verify_report(report, raw, None, ask)
+
+    section = verified.sections[0]
+    assert len(section.sentences) == 1
+    assert section.sentences[0].grade == GRADE_CONFIRMED
+
+
+def test_근거가_말하지_않은_해를_쓰면_그대로_강등된다():
+    """(b) 뒤: 근거가 2024년 자료뿐인데 2025년이라 쓰면 여전히 «없는 수»다.
+    연도를 관대하게 통과시키는 것이 아니라, 날짜 표기를 읽을 뿐이다."""
+    raw = {
+        1: {"종류": "사업내용", "원문": "2024.12.31 기준 국내 시장 점유율은 37.02%였다."}
+    }
+    report = _report((_sentence("2025년 매출 37.02% 점유율이다.", ("1",)),))
+    ask = _FakeVerifier([_all_true(1)])
+
+    verified = verify_report(report, raw, None, ask)
+
+    section = verified.sections[0]
+    assert len(section.sentences) == 1  # 맨 수치 실패는 제거가 아니라 강등이다
+    assert section.sentences[0].grade == GRADE_INTERPRETED
+
+
+def test_실적표_머리글의_맨_연도도_근거로_인정된다():
+    """연도 머리글만 있는 실적표(「2022」·「2023」·「2024」)를 근거로 든 문장이
+    새 규칙 때문에 도리어 강등되면 안 된다 — 맨 네 자리 연도도 연도로 읽는다."""
+    _raw, _absolute, _has_unit, years = _evidence_number_pools(_table().headers)
+
+    assert {2022, 2023, 2024} <= years
 
 
 # ══════════════════════════════════════════════════════════
