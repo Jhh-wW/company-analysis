@@ -419,3 +419,169 @@ def test_corpCode_catalog은_후보정렬용_종목코드와_갱신일을_보존
         )
     finally:
         real._company_catalog.cache_clear()
+
+
+# ── 후보 AI 보조 재정렬 ask ────────────────────────────────
+
+
+class _RerankAskEngine:
+    """계량 껍데기 «안쪽»의 1판 엔진 자리에 들어가는 가짜. 네트워크를 쓰지 않는다."""
+
+    MODEL = "engine-default"
+
+    def __init__(self, payload, error: Exception | None = None):
+        self.payload = payload
+        self.error = error
+        self.loaded = 0
+        self.asked: list[dict] = []
+
+    def load_env(self):
+        self.loaded += 1
+
+    def _client(self):
+        # 계량 껍데기는 `client.messages` 경계를 요구한다. 가짜도 그 계약을 갖춰야
+        # 0원으로 새는 구멍을 숨기지 않는다.
+        engine = self
+
+        class _Messages:
+            @staticmethod
+            def create(*_args, **_kwargs):  # pragma: no cover - 부르면 실패다
+                raise AssertionError("가짜 _ask는 provider를 부르지 않는다")
+
+        class _Client:
+            messages = _Messages()
+
+        engine.client = _Client()
+        return engine.client
+
+    def _ask(self, client, prompt, schema, max_tokens):
+        self.asked.append(
+            {"prompt": prompt, "schema": schema, "max_tokens": max_tokens}
+        )
+        if self.error is not None:
+            raise self.error
+        return self.payload, {}
+
+
+def _record_spent(monkeypatch, amount: float) -> list[tuple[str, str]]:
+    """`_request_spent_krw`가 불릴 때의 모델·단계를 기록하고 고정 금액을 돌려준다."""
+
+    seen: list[tuple[str, str]] = []
+
+    def fake(metered):
+        seen.append((str(metered.MODEL), str(metered.current_stage)))
+        return amount
+
+    monkeypatch.setattr(real, "_request_spent_krw", fake)
+    return seen
+
+
+def test_후보재정렬_ask는_haiku로_짧은_JSON만_받고_비용을_모은다(monkeypatch):
+    engine = _RerankAskEngine({"order": [2, 0]})
+    monkeypatch.setattr(real, "_engine", lambda: engine)
+    seen = _record_spent(monkeypatch, 1.5)
+
+    ask = real.RealPipeline().make_candidate_rerank_ask()
+    answer = ask("후보 순서를 정해 주세요")
+
+    assert answer == '{"order":[2,0]}'
+    assert engine.loaded == 1
+    assert engine.asked[0]["prompt"] == "후보 순서를 정해 주세요"
+    assert engine.asked[0]["max_tokens"] == 200
+    assert engine.asked[0]["schema"]["required"] == ["order"]
+    assert engine.asked[0]["schema"]["additionalProperties"] is False
+    # 모델·단계는 provider에 나가는 경계에서 이 요청 로컬 값으로 확정돼야 한다.
+    assert seen == [("claude-haiku-4-5", "candidate_rerank")]
+    assert ask.spent_krw == 1.5
+    assert ask.calls == 1
+
+    ask("한 번 더")
+    assert ask.spent_krw == 3.0
+    assert ask.calls == 2
+
+
+def test_후보재정렬_ask는_payload가_없으면_빈문자열을_돌려준다(monkeypatch):
+    monkeypatch.setattr(real, "_engine", lambda: _RerankAskEngine(None))
+    _record_spent(monkeypatch, 0.0)
+
+    ask = real.RealPipeline().make_candidate_rerank_ask()
+
+    assert ask("후보 순서를 정해 주세요") == ""
+
+
+def test_후보재정렬_ask가_실패해도_이미_나간_호출의_비용은_남는다(monkeypatch):
+    engine = _RerankAskEngine(None, error=RuntimeError("provider 오류"))
+    monkeypatch.setattr(real, "_engine", lambda: engine)
+    _record_spent(monkeypatch, 0.9)
+
+    ask = real.RealPipeline().make_candidate_rerank_ask()
+    with pytest.raises(RuntimeError):
+        ask("후보 순서를 정해 주세요")
+
+    assert ask.spent_krw == 0.9
+    assert ask.calls == 1
+
+
+def test_재정렬_예약액은_후보_상한_프롬프트의_호출전_추정액을_덮는다():
+    """예약이 추정액보다 작으면 재정렬은 전송 전에 100% 거절된다.
+
+    추정액은 생산 경로(`estimate_request_tokens_exact` → `usage_cost_krw`)로
+    직접 잰다. 상수를 낮추거나 프롬프트가 커지면 이 시험이 먼저 깨진다.
+    """
+
+    from src.features.budget import provider_budget  # noqa: PLC0415
+    from src.features.business_candidate import ai_rerank  # noqa: PLC0415
+    from src.features.business_candidate.constants import (  # noqa: PLC0415
+        AI_RERANK_MAX_CANDIDATES,
+        AI_RERANK_RESERVE_KRW,
+    )
+    from src.features.business_candidate.logic import (  # noqa: PLC0415
+        BusinessCandidate,
+    )
+
+    def candidate(index: int) -> BusinessCandidate:
+        return BusinessCandidate(
+            candidate_name=f"주식회사가나다전자네트웍스코리아{index}",
+            address=f"서울특별시 강남구 테헤란로 {index}길 123 가나다빌딩 {index}층",
+            homepage="",
+            source_label="전자공시(DART) 기업개황",
+            source_url="https://opendart.fss.or.kr/",
+            provider_name="DART",
+            attributions=(),
+            score=0.44,
+            evidence=(),
+            candidate_ref=f"0000000{index}",
+            stock_code="123456",
+            modify_date="20250101",
+            english_name=f"GANADA ELECTRONICS NETWORKS KOREA {index} CO., LTD.",
+            name_match_kind="",
+            name_similarity=0.0,
+        )
+
+    prompt = ai_rerank.build_rerank_prompt(
+        query="가나다전자",
+        address_hint="서울 강남구",
+        candidates=[candidate(index) for index in range(AI_RERANK_MAX_CANDIDATES)],
+    )
+    call_kwargs = {
+        "model": "claude-haiku-4-5",
+        "max_tokens": 200,
+        "temperature": 0,
+        "messages": [{"role": "user", "content": prompt}],
+        "output_config": {
+            "format": {
+                "type": "json_schema",
+                "schema": real._CANDIDATE_RERANK_SCHEMA,
+            }
+        },
+    }
+    # provider가 입력 token을 세어 주지 못하는 최악의 경우(바이트 추정)를 잰다.
+    estimated_input = provider_budget.estimate_request_tokens_exact(
+        {"args": (), "kwargs": call_kwargs}, exact_input_tokens=None
+    )
+    estimate_krw = provider_budget.usage_cost_krw(
+        "claude-haiku-4-5", estimated_input, 200
+    )
+
+    # 2026-09-07 실측 13.78원(고정 여유 4,096 token만으로 5.74원).
+    assert 12.0 < estimate_krw <= AI_RERANK_RESERVE_KRW

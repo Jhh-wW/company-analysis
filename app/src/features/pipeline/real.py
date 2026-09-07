@@ -93,6 +93,11 @@ from src.features.company_comparison.stated_differentiator import (
     add_stated_differentiator_fragments,
     register_stated_differentiator_sentence_evidence,
 )
+from src.features.business_candidate.constants import (
+    AI_RERANK_MAX_CANDIDATES,
+    AI_RERANK_MAX_OUTPUT_TOKENS,
+    CANDIDATE_RERANK_MODEL,
+)
 from src.features.business_candidate.dart_identity import (
     DartCompanyRecord,
     build_dart_company_index,
@@ -1788,6 +1793,100 @@ def _request_billing_uncertain(metered: _MeteredEngine) -> bool:
     return metered.billing_uncertain
 
 
+#: 회사 후보 AI 재정렬 응답의 구조화 출력 계약. 정수 목록 하나 말고는 받지 않는다.
+_CANDIDATE_RERANK_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "order": {
+            "type": "array",
+            "maxItems": AI_RERANK_MAX_CANDIDATES,
+            "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": AI_RERANK_MAX_CANDIDATES - 1,
+            },
+        }
+    },
+    "required": ["order"],
+    "additionalProperties": False,
+}
+
+#: 비용 원장에 남길 단계 이름. 본조사 단계와 섞이지 않게 따로 둔다.
+CANDIDATE_RERANK_STAGE: Final[str] = "candidate_rerank"
+
+
+class MeteredCandidateRerankAsk:
+    """후보 재정렬 프롬프트 한 건을 계량 client로 보내고 그 원화 비용을 모은다.
+
+    ★ 이 호출은 본조사(run)가 시작되기 «전»이라 run_id가 없다. 그래서 여기서
+      원장에 직접 적지 않고, Google 후보 검색 비용과 «같은 자리»에서 web 호출부가
+      적을 수 있게 `spent_krw`만 알려 준다.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str = CANDIDATE_RERANK_MODEL,
+        max_output_tokens: int = AI_RERANK_MAX_OUTPUT_TOKENS,
+    ) -> None:
+        self._model = str(model)
+        self._max_output_tokens = int(max_output_tokens)
+        self._spent_krw = 0.0
+        self._calls = 0
+        self._billing_uncertain = False
+        self._lock = threading.Lock()
+
+    @property
+    def spent_krw(self) -> float:
+        """지금까지 이 ask가 만든 AI 비용(원). 실패한 호출도 잰 만큼 포함한다."""
+        with self._lock:
+            return round(self._spent_krw, 2)
+
+    @property
+    def billing_uncertain(self) -> bool:
+        """provider 예외로 «얼마 썼는지 모르는» 호출이 한 번이라도 있었는가.
+
+        이 값이 참이면 phase 정산이 보수적으로 닫혀야 한다. 비용을 0원이라고
+        말하지 않는다.
+        """
+        with self._lock:
+            return bool(self._billing_uncertain)
+
+    @property
+    def calls(self) -> int:
+        """실제로 보낸 호출 수. 운영에서 «부르지 않았다»를 확인할 때 쓴다."""
+        with self._lock:
+            return int(self._calls)
+
+    def __call__(self, prompt: str) -> str:
+        engine = _MeteredEngine(_engine())
+        engine.load_env()
+        client = _metered_client(engine, engine._client())
+        # ★ 1판 모듈 전역이 아니라 요청 로컬 값이다. 겹쳐 도는 다른 요청의 모델을
+        #   바꾸지 않는다(`_MeteredEngine` 주석 참조).
+        engine.MODEL = self._model
+        _set_meter_stage(engine, CANDIDATE_RERANK_STAGE)
+        with self._lock:
+            self._calls += 1
+        try:
+            payload, _usage = engine._ask(
+                client,
+                prompt,
+                _CANDIDATE_RERANK_SCHEMA,
+                max_tokens=self._max_output_tokens,
+            )
+        finally:
+            # 예외로 끝나도 이미 나간 호출의 비용은 원장에서 빠지면 안 된다.
+            spent = _request_spent_krw(engine)
+            uncertain = _request_billing_uncertain(engine)
+            with self._lock:
+                self._spent_krw += spent
+                self._billing_uncertain = self._billing_uncertain or uncertain
+        if not isinstance(payload, dict):
+            return ""
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
 def _first_fragment_cite(
     frags: dict[int, dict[str, str]],
     *,
@@ -2355,6 +2454,16 @@ class RealPipeline:
         self._news_search = news_search
         self._news_classify = news_classify
         self._news_fetch_text = news_fetch_text
+
+    def make_candidate_rerank_ask(self) -> "MeteredCandidateRerankAsk":
+        """후보 순서를 다시 매길 계량 AI ask를 만든다.
+
+        여기서는 키를 읽거나 provider를 부르지 않는다. 엔진·키가 없으면 첫 호출이
+        예외로 끝나고, 그 예외는 재정렬 경계가 «원래 순서 유지»로 삼킨다. 이
+        메서드가 없는 파이프라인(데모 등)은 재정렬 자체를 열지 않는다.
+        """
+
+        return MeteredCandidateRerankAsk()
 
     def search_business_candidates(
         self, *, company: str, address_hint: str, limit: int, timeout_sec: float
