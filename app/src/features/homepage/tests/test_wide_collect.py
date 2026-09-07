@@ -36,7 +36,10 @@ from src.features.homepage.wide_collect import collect_official_web_documents
 from src.features.homepage.wide_evidence_mapping import to_evidence_mappings
 from src.features.homepage.wide_fetch import WideRawResponse, WideTransportError
 from src.features.homepage.wide_fragments import build_fragments, build_fragments_for_collection
-from src.features.pipeline.evidence_transport import build_section_evidence_packet_set
+from src.features.pipeline.evidence_transport import (
+    build_section_evidence_packet_set,
+    typed_fragments_from_raw,
+)
 from src.features.pipeline.official_evidence_transport_adapter import (
     merge_official_evidence_fragments,
 )
@@ -47,6 +50,9 @@ from src.features.provenance.sources import (
     seal_collected_source,
 )
 from src.shared.report_evidence.legacy_fragment_kinds import LEGACY_FRAGMENT_KINDS
+from src.shared.report_evidence.profile_domain_attestation import (
+    REGISTERED_SUBDOMAIN_ATTESTATION_PREFIX,
+)
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
 from src.web.official_evidence_adapter import (
     provenance_documents_from_wide_envelope,
@@ -510,6 +516,121 @@ def test_DART_root의_채용하위도메인_조각은_낮은수준_Source계약�
             (forged_proof,),
             company_name="가나다전자",
         )
+
+
+def test_DART_root가_www여도_채용하위도메인_조각은_typed로_전달된다():
+    """DART 홈페이지가 ``www`` 별칭인 회사의 실제 자손 조각(N18).
+
+    수집기는 예전부터 ``www`` root의 자손을 «등록 apex» 기준으로 승인했지만,
+    영수증을 만드는 쪽은 ``www`` host 글자를 기준으로 삼아 자손 판정이 실패했다.
+    그래서 영수증이 비고, 부분 보고서 평면 변환이 그 조각을 typed로 못 싣고
+    「typed 공식 웹의 회사·도메인 proof가 비었습니다」로 원형 유지했다.
+    여기서는 수집부터 평면 변환까지 «운영 함수»만 태워 그 결과를 직접 본다.
+    """
+
+    root_url = "https://www.ganada-example.co.kr/"
+    recruit_url = "https://recruit.ganada-example.co.kr/jobs"
+    profile = {
+        "status": "000",
+        "corp_code": "00126380",
+        "corp_name": "가나다전자",
+        "hm_url": root_url,
+    }
+    attestation_id, attestation_evidence = dart_profile_attestation_material(
+        profile=profile,
+        corp_code="00126380",
+        company_name="가나다전자",
+    )
+    root_html = (
+        "<html><body><main><p>가나다전자는 반도체 검사 장비를 제조하고 "
+        "기업 고객에게 판매하여 매출을 얻습니다.</p>"
+        '<a href="' + recruit_url + '">채용</a>'
+        "</main><footer>가나다전자 · 사업자등록번호 123-45-67890</footer>"
+        "</body></html>"
+    )
+    recruit_html = (
+        "<html><body><main><p>가나다전자는 책임을 핵심가치와 일하는 방식으로 "
+        "정하고 협업 프로젝트 사례를 운영해 개선한 기록을 공개합니다. "
+        "가나다전자는 책임을 핵심가치와 일하는 방식으로 정합니다.</p>"
+        "</main></body></html>"
+    )
+    pages = {
+        "https://www.ganada-example.co.kr/robots.txt": _missing(
+            "https://www.ganada-example.co.kr/robots.txt"
+        ),
+        "https://www.ganada-example.co.kr/sitemap.xml": _missing(
+            "https://www.ganada-example.co.kr/sitemap.xml"
+        ),
+        root_url: _page(root_html, root_url),
+        "https://recruit.ganada-example.co.kr/robots.txt": _missing(
+            "https://recruit.ganada-example.co.kr/robots.txt"
+        ),
+        "https://recruit.ganada-example.co.kr/sitemap.xml": _missing(
+            "https://recruit.ganada-example.co.kr/sitemap.xml"
+        ),
+        recruit_url: _page(recruit_html, recruit_url),
+    }
+    result = collect_official_web_documents(
+        company_id="00126380",
+        company_name="가나다전자",
+        root_homepage_url=root_url,
+        company_registration_numbers=("123-45-67890",),
+        collected_at="2026-09-04",
+        domain_attestation_source_id=attestation_id,
+        domain_attestation_evidence=attestation_evidence,
+        transport=_FakeWideSite(pages).transport,
+        ir_html_fetch=_no_ir,
+        ir_pdf_fetch=_no_ir_pdf,
+    )
+
+    assert any(recruit_url == document.canonical_url for document in result.documents)
+
+    wide_fragments = build_fragments_for_collection(result)
+    envelope = to_evidence_mappings(result=result, fragments=wide_fragments)
+    candidates = produce_from_collection_envelopes(
+        company_id="00126380",
+        company_type=CompanyType.AUDIT_ONLY,
+        collection_envelopes=(envelope,),
+    )
+    official = OfficialEvidenceCollectionResult(
+        company_id="00126380",
+        candidates=candidates,
+    )
+    # 부분 보고서 갈래는 장별 packet을 못 만든다. legacy 조각 없이 공식 후보만
+    # 합쳐 «작성기에 실제로 넘어가는» 평면 변환을 그대로 태운다.
+    merged, _added = merge_official_evidence_fragments({}, official)
+    recruit_raws = [
+        raw
+        for raw in merged.values()
+        if str(raw.get("원문위치") or "").startswith(recruit_url)
+    ]
+    assert len(recruit_raws) == 1
+    assert str(
+        recruit_raws[0].get("_evidence_domain_attestation_evidence") or ""
+    ).startswith(REGISTERED_SUBDOMAIN_ATTESTATION_PREFIX)
+
+    conversion = typed_fragments_from_raw(
+        corp_id="00126380",
+        frags=merged,
+        filing_meta=filing_meta_from_raw(
+            {
+                "rcept_no": "20260315000123",
+                "report_nm": "사업보고서 (2025.12)",
+                "rcept_dt": "20260315",
+            }
+        ),
+    )
+
+    # 수정 전에는 채용 조각 하나가 원형 유지로 떨어져 carried_raw == 1 이었다
+    # (사유: 「official_recruit_page: typed 공식 웹의 회사·도메인 proof가
+    # 비었습니다」). 지금은 모든 조각이 typed 신원을 그대로 지킨다.
+    assert conversion.carried_raw_count == 0
+    assert conversion.carried_raw_reasons == ()
+    assert conversion.typed_count == len(merged)
+    assert any(
+        fragment.source_url.startswith(recruit_url)
+        for fragment in conversion.fragments
+    )
 
 
 def test_공식페이지의_외부_vendor_링크는_문서로_승격하거나_호출하지_않는다():

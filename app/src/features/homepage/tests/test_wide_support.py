@@ -24,6 +24,10 @@ from src.features.homepage.wide_domain import (
     slot_ids_for_url,
     www_apex_alternate,
 )
+from src.shared.registered_domain import is_actual_registered_subdomain
+from src.shared.report_evidence.profile_domain_attestation import (
+    registered_subdomain_root_basis,
+)
 from src.features.homepage.wide_extract import (
     extract_inline_spa_ranges,
     extract_json_ld_ranges,
@@ -68,6 +72,36 @@ def test_같은_등록도메인의_하위도메인은_참():
 
 def test_다른_등록도메인은_거짓():
     assert not is_registered_subdomain("company.com", "otherbrand.com")
+
+
+@pytest.mark.parametrize("root_host", ("company.example", "www.company.example"))
+def test_수집기가_결속한_자손은_영수증_기준host로도_자손이다(root_host: str) -> None:
+    """수집기와 영수증이 «같은 등록 apex 기준»을 쓰는지 두 생산 함수로 대조한다.
+
+    두 규칙이 갈라지면 수집은 고신뢰로 승인해 놓고 영수증은 비어, typed 신원이
+    조용히 사라진다(N18). 그래서 값을 베껴 적지 않고 양쪽 함수를 함께 부른다.
+    """
+
+    basis = registered_subdomain_root_basis(root_host)
+    assert basis == "company.example"
+    for candidate in ("recruit.company.example", "ir.company.example"):
+        assert bind_registered_subdomain(root_host, candidate) is not None
+        assert is_actual_registered_subdomain(basis, candidate)
+    # 형제 등록 도메인은 양쪽 다 거절한다.
+    assert bind_registered_subdomain(root_host, "recruit.other.example") is None
+    assert not is_actual_registered_subdomain(basis, "recruit.other.example")
+
+
+def test_수집기가_거절하는_공유플랫폼_root는_영수증도_기준을_넓히지_않는다() -> None:
+    """root가 등록 도메인 자체도 www 짝도 아니면 기준을 apex로 넓히지 않는다."""
+
+    assert (
+        bind_registered_subdomain("sites.company.example", "drive.company.example")
+        is None
+    )
+    basis = registered_subdomain_root_basis("sites.company.example")
+    assert basis == "sites.company.example"
+    assert not is_actual_registered_subdomain(basis, "drive.company.example")
 
 
 # ── 공격 시험: 등록 도메인 판정이 TLD를 무시하지 않는지 ──────────

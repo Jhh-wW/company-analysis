@@ -19,7 +19,10 @@ from src.shared.official_ir import (
     dart_homepage_exact_host,
     dart_www_redirect_is_valid,
 )
-from src.shared.registered_domain import is_actual_registered_subdomain
+from src.shared.registered_domain import (
+    is_actual_registered_subdomain,
+    registrable_domain,
+)
 from src.shared.report_evidence.identity_verified_web import (
     canonical_identity_verified_web_url,
     is_disallowed_identity_host,
@@ -49,6 +52,56 @@ class DartProfileAttestation:
     @property
     def is_registered_subdomain(self) -> bool:
         return bool(self.candidate_host)
+
+
+def registered_subdomain_root_basis(root_host: object) -> str:
+    """자손 host를 판정할 기준 host를 돌려준다.
+
+    DART 기업개황의 ``hm_url``은 같은 회사를 ``company.example``로도
+    ``www.company.example``로도 적는다. 두 값은 같은 등록 도메인의 두 이름일
+    뿐인데, ``www`` 쪽을 글자 그대로 기준으로 삼으면 ``recruit.company.example``
+    같은 «실제 자손»이 자손이 아니게 되어 영수증이 통째로 비었다.
+
+    그래서 root가 등록 도메인(eTLD+1) 자체이거나 그 정확한 ``www`` 짝일 때만
+    기준을 등록 도메인으로 모은다. 수집기
+    ``features/homepage/wide_domain.py``의 ``bind_registered_subdomain``이 쓰는
+    규칙과 같은 규칙이다(만드는 쪽과 되읽는 쪽이 다른 기준을 쓰면 안 된다).
+
+    그 밖의 root(예: 공유 플랫폼 하위호스트 ``sites.example.com``)는 회사가 그
+    등록 도메인을 소유한다고 볼 수 없으므로 **넓히지 않고** root host 글자
+    그대로를 기준으로 남긴다 — 기존 동작 그대로다.
+
+    Args:
+        root_host: DART 기업개황 홈페이지의 실제 host.
+
+    Returns:
+        자손 판정 기준 host(소문자). 판정 불가면 ``""``(fail-closed).
+    """
+
+    if type(root_host) is not str:
+        return ""
+    normalized = root_host.casefold().rstrip(".")
+    if not normalized:
+        return ""
+    root_core = registrable_domain(normalized)
+    if root_core and normalized in (root_core, f"www.{root_core}"):
+        return root_core
+    return normalized
+
+
+def _is_profile_registered_subdomain(root_host: str, candidate_host: str) -> bool:
+    """영수증을 만들 때와 되읽을 때가 반드시 같은 답을 내는 단일 판정.
+
+    ``candidate_host``가 root host 자신이면 자손이 아니다 — root 자체는 기본
+    기업개황 영수증이 이미 증명하므로 파생 proof를 만들지 않는다.
+    """
+
+    basis = registered_subdomain_root_basis(root_host)
+    return bool(
+        basis
+        and candidate_host != root_host
+        and is_actual_registered_subdomain(basis, candidate_host)
+    )
 
 
 def _canonical_json(value: object) -> str:
@@ -122,7 +175,7 @@ def parse_dart_profile_domain_attestation(
         or root_host != payload["root_host"]
         or is_disallowed_identity_host(root_host)
         or is_disallowed_identity_host(candidate_host)
-        or not is_actual_registered_subdomain(root_host, candidate_host)
+        or not _is_profile_registered_subdomain(root_host, candidate_host)
     ):
         return None
     return DartProfileAttestation(
@@ -152,7 +205,7 @@ def build_registered_subdomain_profile_attestation(
     if (
         is_disallowed_identity_host(profile.root_host)
         or is_disallowed_identity_host(candidate_host)
-        or not is_actual_registered_subdomain(profile.root_host, candidate_host)
+        or not _is_profile_registered_subdomain(profile.root_host, candidate_host)
     ):
         return ""
     payload = {
@@ -213,7 +266,7 @@ def dart_profile_attestation_allows_source_url(
         return bool(
             not any(item.strip() for item in redirect_values)
             and source_host == profile.candidate_host
-            and is_actual_registered_subdomain(
+            and _is_profile_registered_subdomain(
                 profile.root_host,
                 profile.candidate_host,
             )
