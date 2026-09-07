@@ -13,6 +13,7 @@ import pytest
 
 from src.core import deployment_identity
 from src.core.constants import MAX_AI_CALLS_PER_REQUEST
+from src.features.budget import spend_store
 from src.features.budget.constants import PAID_PHASE_LEASE_SEC
 from src.features.export_pdf import release_store as pdf_release_store
 from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC
@@ -41,6 +42,8 @@ from src.web import generation_singleflight, job_runtime, paid_runtime, runtime
 _RECEIPT = "20260828000123"
 _FINANCIAL_DIGEST = "b" * 64
 _COMMIT = "a" * 40
+#: 완료 봉인 회귀가 provider lease 만료까지 숨어 기다리지 않게 하는 시험 상한.
+_OWNER_RELEASE_TIMEOUT_SEC = 10.0
 _BUILD_IDENTITY = build_identity_contract.EngineBuildIdentity(
     deployment_revision=_COMMIT,
     build_id=f"{build_identity_contract.ENGINE_BUILD_ID_CONTRACT_VERSION}:{_COMMIT}",
@@ -263,9 +266,13 @@ def test_같은통장의_동시job은_provider한번만_쓰고_각자delivery를
 
     def finalize(job: job_runtime.Job) -> bool:
         delivered_at = dt.datetime.now(dt.timezone.utc)
+        # 동시 실행 자리는 방문자마다 갈릴 수 있지만, 보고서 원본과 캐시는
+        # 링크의 비용 통장에 결속된다. 운영 finalize와 같은 값을 써야 owner의
+        # 완료 봉인이 waiter에게 전달된다.
+        billing_bucket_id = spend_store.bucket_id(job.share_key)
         delivery = Delivery.issue(
             public_id=job.job_id,
-            billing_bucket_id=job.slot_bucket_id,
+            billing_bucket_id=billing_bucket_id,
             content=content,
             delivered_at=delivered_at,
             policy=DeliveryPolicy(dt.timedelta(days=60), dt.timedelta(days=60)),
@@ -281,7 +288,7 @@ def test_같은통장의_동시job은_provider한번만_쓰고_각자delivery를
             delivery_store.bind_cache_entry(
                 conn,
                 key=CacheLookupKey.from_preflight(
-                    billing_bucket_id=job.slot_bucket_id,
+                    billing_bucket_id=billing_bucket_id,
                     corp_id="00126380",
                     namespace=_NAMESPACE,
                     preflight_identity_digest=_source_digest(),
@@ -314,7 +321,7 @@ def test_같은통장의_동시job은_provider한번만_쓰고_각자delivery를
     monkeypatch.setattr(job_runtime, "_finalize_report_delivery", finalize)
     monkeypatch.setattr(job_runtime, "_release_run_slot", lambda _bucket: None)
 
-    def make_job(run_id: str) -> job_runtime.Job:
+    def make_job(run_id: str, slot_bucket_id: str) -> job_runtime.Job:
         return job_runtime.Job(
             job_id=run_id,
             user_input=UserInput(company="테스트전자", job="", region="서울"),
@@ -329,11 +336,12 @@ def test_같은통장의_동시job은_provider한번만_쓰고_각자delivery를
             share_key="same-share",
             is_paid=True,
             paid_cap_krw=900.0,
-            slot_bucket_id="bucket-a",
+            slot_bucket_id=slot_bucket_id,
         )
 
-    owner = make_job("singleflight-owner")
-    waiter = make_job("singleflight-waiter")
+    # 같은 링크의 방문자는 동시 실행 자리가 서로 달라도 비용 통장은 하나다.
+    owner = make_job("singleflight-owner", "visitor-slot-owner")
+    waiter = make_job("singleflight-waiter", "visitor-slot-waiter")
 
     async def scenario() -> None:
         first = asyncio.create_task(job_runtime._run_job(owner))
@@ -342,10 +350,19 @@ def test_같은통장의_동시job은_provider한번만_쓰고_각자delivery를
         await asyncio.sleep(0.1)
         assert not second.done(), "waiter가 owner content 확정 전에 독립 생성했습니다"
         release_owner.set()
-        await asyncio.gather(first, second)
+        # 완료 봉인이 깨져 waiter가 한 시간짜리 lease 만료까지 숨어 기다리는
+        # 회귀를 짧은 시간 안 명시적인 실패로 바꾼다.
+        await asyncio.wait_for(
+            asyncio.gather(first, second),
+            timeout=_OWNER_RELEASE_TIMEOUT_SEC,
+        )
 
     asyncio.run(scenario())
 
+    assert owner.slot_bucket_id != waiter.slot_bucket_id
+    expected_billing_bucket = spend_store.bucket_id(owner.share_key)
+    assert owner.generation_session.billing_bucket_id == expected_billing_bucket
+    assert waiter.generation_session.billing_bucket_id == expected_billing_bucket
     assert provider_calls == 1
     assert phase_begins == [owner.job_id]
     assert phase_settles == [owner.job_id]

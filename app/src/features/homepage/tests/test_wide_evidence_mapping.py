@@ -436,3 +436,16 @@ def test_report_evidence_스키마는_import하지_않고_정본정책만_공유
             assert stripped.startswith(
                 "from src.shared.report_evidence.source_kind_policy import"
             )
+
+def test_시도한_문서수는_등록한_문서수와_따로_직렬화된다():
+    """「문서 0개 시도 · 수십만 바이트 수신」 같은 모순 표시를 막는 칸이다."""
+
+    attempt = _attempt(documents_seen=1, documents_attempted=3)
+
+    envelope = to_evidence_mappings(
+        result=_result(attempts=(attempt,)), fragments=()
+    )
+    row = envelope["attempts"][0]
+
+    assert row["documents_seen"] == 1
+    assert row["documents_attempted"] == 3

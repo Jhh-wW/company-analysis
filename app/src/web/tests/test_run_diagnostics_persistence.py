@@ -136,3 +136,35 @@ def test_단계를_하나도_안_남긴_실행은_빈_행을_만들지_않는다
 
     with storage_db.connect() as conn:
         assert run_steps_store.load(conn, job.job_id) is None
+
+
+def test_pipeline예외는_메시지없이_안전한_실패경계로_저장된다(
+    isolated_paths: Path, monkeypatch: pytest.MonkeyPatch
+):
+    secret = "https://private.example/report?token=secret 원문"
+
+    class _BrokenPipeline:
+        @staticmethod
+        def run(*_args, **_kwargs) -> RunResult:
+            raise RuntimeError(secret)
+
+    job = _job("11112222333344445555666677778888")
+    monkeypatch.setattr(runtime, "_PIPELINE", _BrokenPipeline())
+    monkeypatch.setattr(job_runtime, "_release_run_slot", lambda _bucket: None)
+
+    asyncio.run(job_runtime._run_job(job))
+
+    with storage_db.connect() as conn:
+        saved = run_steps_store.load(conn, job.job_id)
+    assert saved is not None
+    assert saved.steps == [
+        {
+            "step": "runtime_failure",
+            "phase": "pipeline",
+            "state": "failed",
+            "role": "worker",
+            "exception_class": "RuntimeError",
+            "reason_code": "unexpected_pipeline_failure",
+        }
+    ]
+    assert secret not in repr(saved.steps)

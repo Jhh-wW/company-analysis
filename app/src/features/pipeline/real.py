@@ -168,6 +168,8 @@ from src.features.spanselect.constants import (
 )
 from src.shared.official_ir import verified_official_ir_fragment_is_usable
 from src.shared import engine_build_identity, generation_coordination
+from src.shared import runtime_failure_constants as failure_constants
+from src.shared import runtime_failure_diagnostic as runtime_failure
 from src.shared.company_identity import normalize_korean_registration_number
 from src.shared.generation_cache_identity import GenerationCacheNamespace
 from src.shared.report_source_identity import ReportSourceIdentity
@@ -180,6 +182,7 @@ from src.shared.report_evidence.constants import (
     SOURCE_KIND_OFFICIAL_IR_PDF,
     SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
     SOURCE_KIND_OFFICIAL_WEB_PAGE,
+    is_sitemap_attempt,
 )
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 from src.shared.report_evidence.date_normalization import (
@@ -2251,6 +2254,17 @@ def _sources_from(steps: list[dict[str, Any]]) -> list[SourceStatus]:
     elif home.get("오류"):
         # ⚠️ 우리 쪽 실패다. ❌(회사에 자료가 없음)와 섞으면 오거부가 된다.
         sources.append(SourceStatus("회사 홈페이지", "failed", str(home["오류"])))
+    elif home.get(STEP_FIELD_PARTIAL):
+        # 문서는 모았고 그대로 인용에 쓴다. 확인하지 못한 후보가 있다는 사실만
+        # 덧붙인다 — 여기서 「자료 없음」으로 떨어뜨리면 모은 문서가 화면에서
+        # 사라진다.
+        sources.append(
+            SourceStatus(
+                "회사 홈페이지",
+                "ok",
+                f"문서 {home.get('문서수', 0)}건 · {home[STEP_FIELD_PARTIAL]}",
+            )
+        )
     elif home.get("조각수"):
         sources.append(
             SourceStatus("회사 홈페이지", "ok", f"페이지에서 조각 {home['조각수']}개")
@@ -2263,6 +2277,14 @@ def _sources_from(steps: list[dict[str, Any]]) -> list[SourceStatus]:
         sources.append(SourceStatus("회사 공식 IR", "none", "여기까지 오지 못함"))
     elif ir.get("오류"):
         sources.append(SourceStatus("회사 공식 IR", "failed", str(ir["오류"])))
+    elif ir.get(STEP_FIELD_PARTIAL):
+        sources.append(
+            SourceStatus(
+                "회사 공식 IR",
+                "ok",
+                f"문서 {ir.get('문서수', 0)}건 · {ir[STEP_FIELD_PARTIAL]}",
+            )
+        )
     elif ir.get("조각수"):
         detail = f"PDF 조각 {ir['조각수']}개"
         if ir.get("문서시도") is not None:
@@ -2719,6 +2741,27 @@ class RealPipeline:
                 generation_mode=generation_mode,
             )
         except generation_coordination.GenerationCoordinationError as stopped:
+            owner_reason_code = (
+                str(getattr(stopped, "failure_code", "") or "")
+                if isinstance(stopped, generation_coordination.GenerationOwnerFailed)
+                else ""
+            )
+            runtime_failure.append_failure_once(
+                diagnostics.steps,
+                phase=failure_constants.PHASE_COORDINATION,
+                error=stopped,
+                reason_code=(
+                    failure_constants.REASON_GENERATION_OWNER_FAILED
+                    if owner_reason_code
+                    else failure_constants.REASON_GENERATION_COORDINATION_FAILED
+                ),
+                role=(
+                    failure_constants.ROLE_WAITER
+                    if owner_reason_code
+                    else failure_constants.ROLE_WORKER
+                ),
+                owner_reason_code=owner_reason_code,
+            )
             if type(stopped) is generation_coordination.GenerationCoordinationError:
                 # 이 pipeline 안에서 직접 올리는 기본형 예외는 재사용 저장본 계약
                 # 위반 같은 fail-closed 조건이다. 요청 전역 중단(초대 링크 닫힘·
@@ -2753,7 +2796,15 @@ class RealPipeline:
                     ),
                 )
                 raise
-        except Exception:  # noqa: BLE001 — AI 뒤 후속 코드가 터져도 쓴 돈은 0원이 아니다
+        except Exception as error:  # noqa: BLE001 — 이미 쓴 돈도 진단도 지우지 않는다
+            # 더 안쪽의 AI·조립 경계가 기록하지 못한 예외만 pipeline 미분류로
+            # 남긴다. 예외문·URL·입력 원문은 안전 단계 생성기가 읽지 않는다.
+            runtime_failure.append_failure_once(
+                diagnostics.steps,
+                phase=failure_constants.PHASE_PIPELINE,
+                error=error,
+                reason_code=failure_constants.REASON_UNEXPECTED_PIPELINE_FAILURE,
+            )
             logger.exception("본조사 중 예기치 않은 실패가 발생했습니다")
             result = RunResult(
                 outcome=Outcome.FAILED,
@@ -3459,11 +3510,35 @@ class RealPipeline:
             generation_mode,
             release_mode=requested_release_mode,
         )
-        reused_generation = generation_coordination.coordinate(
-            corp_id=corp_code,
-            cache_namespace=generation_namespace,
-            preflight_identity_digest=generation_source_identity_digest,
-        )
+        try:
+            reused_generation = generation_coordination.coordinate(
+                corp_id=corp_code,
+                cache_namespace=generation_namespace,
+                preflight_identity_digest=generation_source_identity_digest,
+            )
+        except generation_coordination.GenerationCoordinationError as error:
+            owner_reason_code = (
+                str(getattr(error, "failure_code", "") or "")
+                if isinstance(error, generation_coordination.GenerationOwnerFailed)
+                else ""
+            )
+            runtime_failure.append_failure_once(
+                steps,
+                phase=failure_constants.PHASE_COORDINATION,
+                error=error,
+                reason_code=(
+                    failure_constants.REASON_GENERATION_OWNER_FAILED
+                    if owner_reason_code
+                    else failure_constants.REASON_GENERATION_COORDINATION_FAILED
+                ),
+                role=(
+                    failure_constants.ROLE_WAITER
+                    if owner_reason_code
+                    else failure_constants.ROLE_WORKER
+                ),
+                owner_reason_code=owner_reason_code,
+            )
+            raise
         reused_release_mode = str(
             getattr(getattr(reused_generation, "report", None), "release_mode", "")
             or ""
@@ -4972,6 +5047,15 @@ def _v2_ask_via_provider(
             call_limited = isinstance(
                 error, provider_budget.RequestCallLimitReached
             )
+            if isinstance(error, provider_budget.ProviderBudgetUnavailable):
+                runtime_failure.append_failure_once(
+                    run_diagnostics.current_steps(),
+                    phase=failure_constants.PHASE_AI_CALL,
+                    error=error,
+                    reason_code=(
+                        failure_constants.REASON_PROVIDER_ADMISSION_FAILED
+                    ),
+                )
             raise AskFatalError(
                 error,
                 call_limit=call_limited,
@@ -4987,6 +5071,12 @@ def _v2_ask_via_provider(
             # 돌고 사유가 「품질 미달」로 뒤바뀐다(실측 결함).
             # 호출 «횟수» 상한이 아니라 요청 자체를 더 진행할 수 없는 상태이므로
             # 선택적 단계를 건너뛰고 이어가지 않는다.
+            runtime_failure.append_failure_once(
+                run_diagnostics.current_steps(),
+                phase=failure_constants.PHASE_COORDINATION,
+                error=error,
+                reason_code=failure_constants.REASON_GENERATION_COORDINATION_FAILED,
+            )
             raise AskFatalError(error, call_limit=False) from error
         blocks = getattr(response, "content", None) or []
         return "".join(str(getattr(block, "text", "") or "") for block in blocks)
@@ -5696,6 +5786,15 @@ def _run_v2_composer(
             model=model,
             final_gate_reason=gate_reason,
         )
+    except Exception as error:  # noqa: BLE001 — AI 밖 조립 결함은 상위에서 실패 처리
+        # provider 경계가 이미 더 정확한 실패를 남겼으면 그것을 보존한다.
+        runtime_failure.append_failure_once(
+            steps,
+            phase=failure_constants.PHASE_ASSEMBLY,
+            error=error,
+            reason_code=failure_constants.REASON_REPORT_ASSEMBLY_FAILED,
+        )
+        raise
 
     # composer는 본문·인용을 만들지만 수집 단계의 3상태(ok/none/failed)는
     # 알지 못한다. RunResult에만 두면 최초 worker가 사라진 뒤 캐시·재시작
@@ -6852,6 +6951,14 @@ def _merge_typed_dart_fragments(
     return merged, added
 
 
+#: 「문서는 모았는데 일부 후보를 확인하지 못한」 부분 성공 상태.
+#: 문서 0건 실패(「오류」)와도, 완전한 확인(「없음」/정상)과도 구별한다.
+FORMAL_COLLECTION_STATE_PARTIAL: Final[str] = "partial"
+#: 부분 성공을 단계 기록에 남길 때 쓰는 칸 이름과 사람이 읽는 문구.
+STEP_FIELD_PARTIAL: Final[str] = "부분"
+STEP_PARTIAL_DETAIL: Final[str] = "일부 후보를 확인하지 못했습니다"
+
+
 @dataclass(frozen=True)
 class _FormalOfficialSourceSummary:
     """정식 수집 결과를 옛 출처 현황 형식으로만 보여 주는 읽기 전용 요약."""
@@ -6863,6 +6970,20 @@ class _FormalOfficialSourceSummary:
     attempted_documents: int = 0
     downloaded_pdf_bytes: int = 0
     fragments: tuple[dict[str, str], ...] = ()
+    #: 이 출처로 실제 모아 둔 문서 수. 실패가 섞였어도 이 문서들은 그대로
+    #: 하류(``merge_official_evidence_fragments``)에서 인용에 쓰인다.
+    document_count: int = 0
+    #: 본문 페이지 조회가 실패한 수. sitemap 목록 조회 실패와 상한 절단은
+    #: 여기 들어가지 않는다 — 셋을 한 수로 합치면 sitemap만 막힌 회사가
+    #: 「자료 없음」에서 「오류」로 나빠진다.
+    body_failure_count: int = 0
+    #: sitemap 목록 조회가 실패·절단된 수. 후보를 찾는 보조 목록이라
+    #: 「오류」 판정에도, 후보 범위 완전성에도 넣지 않는다.
+    sitemap_failure_count: int = 0
+    #: 쪽수·바이트·시간 상한으로 조회를 일찍 끝낸 수(sitemap 제외).
+    truncation_count: int = 0
+    #: 근거 문서로 등록된 수. ``attempted_documents``(열어 보려 한 수)와 다르다.
+    registered_documents: int = 0
 
 
 def _formal_official_web_summaries(
@@ -6908,16 +7029,42 @@ def _formal_official_web_summaries(
             for attempt_id, attempt in attempts.items()
             if attempt.source_kind in source_kinds
         }
-        failed = any(
-            attempt.state in {CollectionState.FAILED, CollectionState.TRUNCATED}
-            for attempt in matching_attempts.values()
-        )
+        # 실패를 세 갈래로 나눈다. sitemap 목록 조회 실패는 «후보를 찾는 보조
+        # 목록»이 막힌 것이라 본문을 못 읽었다는 뜻이 아니고, 상한 절단은
+        # 「끝까지 못 봤다」이지 「열지 못했다」가 아니다. 셋을 한 수로 합치면
+        # 자바스크립트로 그리는 사이트처럼 sitemap만 403인 회사가 「자료 없음」
+        # 에서 「오류」로 나빠진다.
+        sitemap_failures = 0
+        truncations = 0
+        body_failures = 0
+        for attempt in matching_attempts.values():
+            if attempt.state not in {
+                CollectionState.FAILED,
+                CollectionState.TRUNCATED,
+            }:
+                continue
+            if is_sitemap_attempt(attempt.attempt_id):
+                sitemap_failures += 1
+            elif attempt.state is CollectionState.TRUNCATED:
+                truncations += 1
+            else:
+                body_failures += 1
         # 시도도 문서도 없으면 공식 URL 자체를 열지 못한 경우까지 "끝까지
         # 확인했다"고 단정할 수 없다. 성공/없음/실패를 캐시 판정에서 섞지 않는다.
-        scope_complete = bool(matching_attempts or matching_documents) and not failed
-        if failed:
+        scope_reduced = bool(body_failures or truncations)
+        scope_complete = (
+            bool(matching_attempts or matching_documents) and not scope_reduced
+        )
+        if scope_reduced and not matching_documents:
             state = "failed"
             detail = failed_detail
+        elif matching_documents and (scope_reduced or sitemap_failures):
+            # ★ 문서를 이미 모았는데 sitemap robots 차단·쪽수 상한 같은 일부
+            #   실패가 섞였다고 전체를 「오류」로 뒤집지 않는다. 뒤집으면 9건을
+            #   모아 놓고도 화면에는 「끝까지 마치지 못했습니다」만 남는다.
+            #   모은 문서는 이 상태에서도 그대로 하류 인용에 쓰인다.
+            state = FORMAL_COLLECTION_STATE_PARTIAL
+            detail = STEP_PARTIAL_DETAIL
         elif matching_fragments:
             state = "ok"
             detail = "정식 공식 자료 수집 결과를 사용했습니다"
@@ -6930,11 +7077,17 @@ def _formal_official_web_summaries(
             candidate_scope_complete=scope_complete,
             fragment_count=len(matching_fragments),
             attempted_documents=sum(
-                attempt.documents_seen for attempt in matching_attempts.values()
+                attempt.documents_attempted for attempt in matching_attempts.values()
             ),
             downloaded_pdf_bytes=sum(
                 attempt.bytes_downloaded for attempt in matching_attempts.values()
             ),
+            document_count=len(matching_documents),
+            body_failure_count=body_failures,
+            sitemap_failure_count=sitemap_failures,
+            truncation_count=truncations,
+            # 시도별 관측 수를 더하면 같은 문서 재시도까지 중복 집계된다.
+            registered_documents=len(matching_documents),
         )
 
     homepage = summarize(
@@ -6953,6 +7106,105 @@ def _formal_official_web_summaries(
         failed_detail="정식 공식 IR 자료 확인을 끝까지 마치지 못했습니다",
     )
     return homepage, official_ir
+
+
+def _partial_collection_step_fields(summary: Any) -> dict[str, Any]:
+    """부분 성공 단계가 공통으로 남기는 칸.
+
+    문서를 몇 건 모았는지와 몇 건을 확인하지 못했는지를 같이 남긴다. 둘 중
+    하나만 남기면 「부분」이 성공인지 실패인지 읽는 사람이 알 수 없다.
+    후보 범위는 정의상 완전하지 않으므로 항상 False다.
+    """
+
+    return {
+        STEP_FIELD_PARTIAL: STEP_PARTIAL_DETAIL,
+        "문서수": int(getattr(summary, "document_count", 0)),
+        "실패시도수": int(getattr(summary, "body_failure_count", 0)),
+        "후보범위완전": False,
+    }
+
+
+def _collection_failure_count_fields(summary: Any) -> dict[str, Any]:
+    """sitemap 목록 실패와 상한 절단을 본문 실패와 따로 남기는 칸.
+
+    라벨(오류/부분/없음)을 정하지 않는 값이지만 기록에서 지우지는 않는다.
+    지우면 「sitemap만 403이라 후보를 못 넓혔다」는 사실이 어디에도 안 남는다.
+    옛 수집 결과 객체는 이 값을 세지 않으므로 그때는 칸 자체를 만들지 않는다
+    (0으로 지어내지 않는다).
+    """
+
+    sitemap_failures = getattr(summary, "sitemap_failure_count", None)
+    truncations = getattr(summary, "truncation_count", None)
+    if sitemap_failures is None or truncations is None:
+        return {}
+    return {"sitemap실패": int(sitemap_failures), "절단": int(truncations)}
+
+
+def _official_web_collection_step(summary: Any) -> dict[str, Any]:
+    """홈페이지 수집 요약 하나를 「6_수집_홈페이지」 단계 기록으로 바꾼다.
+
+    ★ 실패를 「없음」과 섞지 않는다 — 섞으면 「이 회사는 자료가 없다」로 잘못
+      읽힌다. 여기에 더해, 문서를 이미 모았는데 일부 후보만 확인하지 못한
+      경우는 「오류」가 아니라 「부분」으로 남긴다.
+    정식 수집 요약과 옛 수집 결과 객체 양쪽에 같은 규칙으로 쓴다.
+    """
+
+    step: dict[str, Any] = {"step": "6_수집_홈페이지"}
+    if summary.state == "ok":
+        step["조각수"] = int(
+            getattr(summary, "fragment_count", len(summary.fragments))
+        )
+        step["후보범위완전"] = summary.candidate_scope_complete
+    elif summary.state == FORMAL_COLLECTION_STATE_PARTIAL:
+        step.update(_partial_collection_step_fields(summary))
+    elif summary.state == "failed":
+        step["오류"] = summary.detail
+        step["후보범위완전"] = False
+    else:
+        step["없음"] = summary.detail
+        step["후보범위완전"] = summary.candidate_scope_complete
+    step.update(_collection_failure_count_fields(summary))
+    return step
+
+
+def _official_ir_collection_step(summary: Any) -> dict[str, Any]:
+    """공식 IR 수집 요약 하나를 「6_수집_공식IR」 단계 기록으로 바꾼다.
+
+    ``문서시도``는 수집기가 실제로 열어 보려 한 문서 수다. 근거 문서로 등록된
+    수는 별도의 ``문서등록`` 칸에 적는다 — 둘을 한 칸에 적으면 「문서 0개 시도 ·
+    PDF 534,961바이트」 같은 모순 표시가 나온다. 옛 수집 결과 객체는 등록 수를
+    세지 않으므로 그때는 ``문서등록`` 칸 자체를 만들지 않는다(0으로 지어내지
+    않는다).
+    """
+
+    scope_complete = bool(getattr(summary, "candidate_scope_complete", False))
+    step: dict[str, Any] = {"step": "6_수집_공식IR"}
+    if summary.state == "ok":
+        step["조각수"] = int(
+            getattr(summary, "fragment_count", len(summary.fragments))
+        )
+    elif summary.state == FORMAL_COLLECTION_STATE_PARTIAL:
+        step.update(_partial_collection_step_fields(summary))
+    elif summary.state == "failed":
+        step["오류"] = summary.detail
+    else:
+        step["없음"] = summary.detail
+
+    step["문서시도"] = int(getattr(summary, "attempted_documents", 0))
+    registered_documents = getattr(summary, "registered_documents", None)
+    if registered_documents is not None:
+        step["문서등록"] = int(registered_documents)
+    step["PDF바이트"] = int(getattr(summary, "downloaded_pdf_bytes", 0))
+    if summary.state == "ok":
+        step["상세"] = summary.detail
+        step["후보범위완전"] = scope_complete
+    elif summary.state == "none":
+        step["후보범위완전"] = scope_complete
+    elif summary.state == "failed":
+        step["후보범위완전"] = False
+    # 부분 성공의 「후보범위완전」은 위 공통 칸에서 이미 False로 넣었다.
+    step.update(_collection_failure_count_fields(summary))
+    return step
 
 
 _URL_IN_MESSAGE_RE: Final[re.Pattern[str]] = re.compile(r"https?://\S+")
@@ -7246,32 +7498,7 @@ def _collect(
                 # 최종 URL 검증 표식·문서 위치 등 수집기가 만든 provenance 메타데이터를
                 # 버리지 않는다. build_citations가 닫힌 Source 필드만 골라 쓴다.
                 frags[max(frags, default=0) + 1] = dict(frag)
-            homepage_fragment_count = int(
-                getattr(homepage, "fragment_count", len(homepage.fragments))
-            )
-            steps.append(
-                {
-                    "step": "6_수집_홈페이지",
-                    "조각수": homepage_fragment_count,
-                    "후보범위완전": homepage.candidate_scope_complete,
-                }
-            )
-        elif homepage.state == "failed":
-            steps.append(
-                {
-                    "step": "6_수집_홈페이지",
-                    "오류": homepage.detail,
-                    "후보범위완전": False,
-                }
-            )
-        else:
-            steps.append(
-                {
-                    "step": "6_수집_홈페이지",
-                    "없음": homepage.detail,
-                    "후보범위완전": homepage.candidate_scope_complete,
-                }
-            )
+        steps.append(_official_web_collection_step(homepage))
 
         # DART 기업개황의 홈페이지와 정확히 같은 HTTPS host 안에서만 공식 IR
         # PDF를 찾는다. PDF 파싱은 별도 프로세스·바이트/페이지/글자 상한 안에서
@@ -7307,50 +7534,15 @@ def _collect(
                 }
             )
         else:
-            ir_scope_complete = bool(
-                getattr(official_ir, "candidate_scope_complete", False)
-            )
             if official_ir.state == "ok":
                 for fragment in official_ir.fragments:
                     frags[max(frags, default=0) + 1] = dict(fragment)
-                ir_fragment_count = int(
-                    getattr(official_ir, "fragment_count", len(official_ir.fragments))
-                )
-                steps.append(
-                    {
-                        "step": "6_수집_공식IR",
-                        "조각수": ir_fragment_count,
-                        "문서시도": official_ir.attempted_documents,
-                        "PDF바이트": official_ir.downloaded_pdf_bytes,
-                        "상세": official_ir.detail,
-                        "후보범위완전": ir_scope_complete,
-                    }
-                )
-            elif official_ir.state == "failed":
-                steps.append(
-                    {
-                        "step": "6_수집_공식IR",
-                        "오류": official_ir.detail,
-                        "문서시도": official_ir.attempted_documents,
-                        "PDF바이트": official_ir.downloaded_pdf_bytes,
-                        "후보범위완전": False,
-                    }
-                )
-            else:
-                steps.append(
-                    {
-                        "step": "6_수집_공식IR",
-                        "없음": official_ir.detail,
-                        "문서시도": official_ir.attempted_documents,
-                        "PDF바이트": official_ir.downloaded_pdf_bytes,
-                        "후보범위완전": ir_scope_complete,
-                    }
-                )
+            steps.append(_official_ir_collection_step(official_ir))
 
     # ★ 매출 구성 비중 표 — 사용자가 리포트 11건에서 고른 항목 ①.
     #   **11건이 «전부» 실은 유일한 만장일치 항목**이다.
     #   ⚠️ 지어낼 자리가 없다 — 공시가 비중을 이미 계산해 놓았고 우리는 베낄 뿐이다.
-    revenue_tables = revenuemix.build(filing_text)
+    revenue_tables, revenue_diagnostics = revenuemix.build_with_diagnostics(filing_text)
     typed_name_sources: tuple[dict[str, object], ...] = tuple(
         dict(raw) for raw in frags.values()
     )
@@ -7384,8 +7576,17 @@ def _collect(
         filing_text=filing_text,
     )
     dart_fragment_count += len(revenue_tables)
-    if revenue_tables:
-        steps.append({"step": "6_수집_매출구성", "표": len(revenue_tables)})
+    # ★★ 표가 0개여도 «반드시» 남긴다 (실측 2026-09-07) — 예전에는 표가 있을
+    #   때만 이 단계를 적어서, 표가 없는 회사는 「안 찾아봤다」와 「찾았지만
+    #   못 세웠다」가 로그에서 똑같이 «침묵»으로 보였다. 어느 쪽인지 모르면
+    #   고칠 수가 없다. 축별 탈락 사유는 닫힌 코드 목록이다.
+    구성표_단계: dict[str, Any] = {
+        "step": "6_수집_매출구성",
+        "표": len(revenue_tables),
+    }
+    if not revenue_tables:
+        구성표_단계["탈락사유"] = dict(revenue_diagnostics["축별_탈락사유"])
+    steps.append(구성표_단계)
     selected_years = sorted(
         {
             match.group(0)

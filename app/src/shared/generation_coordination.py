@@ -28,6 +28,22 @@ class GenerationCoordinationError(RuntimeError):
 class GenerationOwnerFailed(GenerationCoordinationError):
     """먼저 시작한 생성이 실패해 waiter에게도 같은 실패를 전파한다."""
 
+    def __init__(self, failure_code: str) -> None:
+        # 원 owner의 사람용 예외문은 가져오지 않는다. single-flight 저장소가
+        # 전달한 닫힌 코드만 별도 속성으로 두어 waiter 진단이 원인을 잃지 않는다.
+        code = str(failure_code or "").strip()
+        if (
+            not code
+            or len(code) > 80
+            or not code.isascii()
+            or not code.replace("_", "a").isalnum()
+        ):
+            code = "generation_failed"
+        self.failure_code = code
+        super().__init__(
+            f"먼저 시작한 보고서 생성이 실패했습니다: {self.failure_code}"
+        )
+
 
 class GenerationWaitCancelled(GenerationCoordinationError):
     """대기자의 요청이 취소됐고 owner의 작업은 건드리지 않는다."""

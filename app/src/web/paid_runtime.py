@@ -10,7 +10,7 @@ import threading
 import uuid
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, TypeVar
+from typing import Any, Callable, Final, Optional, TypeVar
 
 from src.core import clock
 from src.core.constants import MODEL_LABEL_SEPARATOR, REPLAY_MODEL_MARK
@@ -28,6 +28,7 @@ from src.features.budget.constants import (
     MAX_CONCURRENT_PER_LINK,
     MAX_CONCURRENT_PER_USER,
     MAX_CONCURRENT_RUNS,
+    MAX_CONCURRENT_VISITORS_PER_LINK,
     PAID_PHASE_LEASE_SEC,
     PAID_PHASE_PROVIDER_BUDGET_KRW,
     SPEND_PHASE_OCR,
@@ -210,42 +211,116 @@ def paid_phase(
             else:
                 handle.cancel()
 
+#: 링크 지문과 방문자 지문 사이에 넣는 글자.
+#: ★ 두 지문 모두 16진수라 이 글자는 지문 «안»에 절대 나타나지 않는다. 그래서
+#:   자리 이름만 보고 「이 자리가 어느 링크 것인가」를 되짚어 셀 수 있다.
+_VISITOR_SLOT_MARK: Final[str] = "#"
+
 def _bucket_concurrency_limit(track: share_tracks.Track) -> int:
-    """한 비용 통장이 동시에 차지할 수 있는 조사 자리 수."""
+    """한 «자리 이름»이 동시에 차지할 수 있는 조사 수.
+
+    ★ LINK의 자리 이름은 방문자마다 갈라지므로, 이 값은 링크 전체가 아니라
+      «방문자 한 사람»의 상한이다. 링크 전체 상한은
+      ``MAX_CONCURRENT_VISITORS_PER_LINK``가 따로 본다.
+    """
     if track is share_tracks.Track.LINK:
         return MAX_CONCURRENT_PER_LINK
     if track in (share_tracks.Track.ADMIN, share_tracks.Track.MEMBER):
         return MAX_CONCURRENT_PER_USER
     return MAX_CONCURRENT_RUNS
 
+def _slot_names(
+    track: share_tracks.Track, bucket: str, visitor_id: str
+) -> tuple[str, str]:
+    """(이 손님이 잡을 자리 이름, 링크 전체 자리를 셀 때 쓸 앞머리).
+
+    Args:
+        track: 손님의 갈래.
+        bucket: 비용 통장 이름.
+        visitor_id: 방문자 쿠키에 담긴 무작위 표. 없으면 빈 글자.
+
+    Returns:
+        두 이름. LINK가 아니거나 방문자 표가 없으면 둘 다 통장 지문 그대로다.
+
+    ★ **비용 통장은 나누지 않는다** — 나누는 것은 «동시 자리»뿐이다. 링크
+      하나의 하루·누적 상한은 방문자가 몇 명이든 그대로 한 통장에서 나간다.
+    ★ 쿠키가 없거나 모양이 틀리면 예전 규칙으로 떨어진다(링크 하나가 한 자리).
+      틀린 쿠키가 «새 자리»를 만들어 주면 링크 전체 상한이 무의미해진다.
+    """
+    link_slot = spend_store.bucket_id(bucket)
+    if track is share_tracks.Track.LINK and share_logic.is_valid_visitor_id(
+        visitor_id
+    ):
+        visitor_slot = (
+            f"{link_slot}{_VISITOR_SLOT_MARK}"
+            f"{share_logic.visitor_fingerprint(visitor_id)}"
+        )
+        return visitor_slot, link_slot
+    return link_slot, link_slot
+
+def _link_running_locked(link_slot: str) -> int:
+    """이 링크가 지금 쥔 자리를 방문자까지 합쳐 센다.
+
+    ★ 반드시 ``_SLOT_LOCK``을 이미 쥔 채로 부른다 — 세는 도중에 다른 요청이
+      자리를 잡으면 링크 상한을 넘긴다.
+    ★ 훑는 항목 수는 서버 전체 상한(``MAX_CONCURRENT_RUNS``)을 넘지 못한다.
+    """
+    prefix = f"{link_slot}{_VISITOR_SLOT_MARK}"
+    running = _RUNNING_BY_BUCKET.get(link_slot, 0)
+    for name, count in _RUNNING_BY_BUCKET.items():
+        if name.startswith(prefix):
+            running += count
+    return running
+
 def _slot_is_full(
-    track: share_tracks.Track, bucket: str, *, owns_slot: bool = False
+    track: share_tracks.Track,
+    bucket: str,
+    *,
+    owns_slot: bool = False,
+    visitor_id: str = "",
 ) -> bool:
-    """전역 자리나 이 통장의 자리가 꽉 찼는지 한 잠금 안에서 본다."""
-    stored_bucket = spend_store.bucket_id(bucket)
+    """전역·자리별·링크별 상한 중 하나라도 찼는지 한 잠금 안에서 본다."""
+    slot_name, link_slot = _slot_names(track, bucket, visitor_id)
     own = 1 if owns_slot else 0
     with _SLOT_LOCK:
-        running = max(0, _RUNNING - own)
-        bucket_running = max(0, _RUNNING_BY_BUCKET.get(stored_bucket, 0) - own)
-        return (
-            running >= MAX_CONCURRENT_RUNS
-            or bucket_running >= _bucket_concurrency_limit(track)
-        )
+        if max(0, _RUNNING - own) >= MAX_CONCURRENT_RUNS:
+            return True
+        slot_running = max(0, _RUNNING_BY_BUCKET.get(slot_name, 0) - own)
+        if slot_running >= _bucket_concurrency_limit(track):
+            return True
+        if track is not share_tracks.Track.LINK:
+            return False
+        link_running = max(0, _link_running_locked(link_slot) - own)
+        return link_running >= MAX_CONCURRENT_VISITORS_PER_LINK
 
-def _reserve_run_slot(track: share_tracks.Track, bucket: str) -> str | None:
-    """전역·통장별 상한을 다시 확인하고 한 자리를 원자적으로 잡는다."""
+def _reserve_run_slot(
+    track: share_tracks.Track, bucket: str, *, visitor_id: str = ""
+) -> str | None:
+    """전역·자리별·링크별 상한을 다시 확인하고 한 자리를 원자적으로 잡는다.
+
+    Returns:
+        잡은 자리 이름. 못 잡으면 ``None``.
+        ★ 이 이름은 «자리»의 이름이지 비용 통장 이름이 아니다. 원장에 쓸 때는
+          ``spend_store.bucket_id(share_key)``를 따로 계산해야 한다.
+    """
     global _RUNNING
-    stored_bucket = spend_store.bucket_id(bucket)
+    slot_name, link_slot = _slot_names(track, bucket, visitor_id)
     with _SLOT_LOCK:
-        bucket_running = _RUNNING_BY_BUCKET.get(stored_bucket, 0)
+        slot_running = _RUNNING_BY_BUCKET.get(slot_name, 0)
         if (
             _RUNNING >= MAX_CONCURRENT_RUNS
-            or bucket_running >= _bucket_concurrency_limit(track)
+            or slot_running >= _bucket_concurrency_limit(track)
+        ):
+            return None
+        if (
+            track is share_tracks.Track.LINK
+            and _link_running_locked(link_slot)
+            >= MAX_CONCURRENT_VISITORS_PER_LINK
         ):
             return None
         _RUNNING += 1
-        _RUNNING_BY_BUCKET[stored_bucket] = bucket_running + 1
-    return stored_bucket
+        _RUNNING_BY_BUCKET[slot_name] = slot_running + 1
+    return slot_name
 
 def _release_run_slot(stored_bucket: str) -> None:
     """성공·실패와 상관없이 잡았던 한 자리를 정확히 한 번 돌려준다."""

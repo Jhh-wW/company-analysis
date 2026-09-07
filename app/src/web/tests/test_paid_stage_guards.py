@@ -301,32 +301,39 @@ def test_로그인_사용자_다섯명은_함께_식별하고_여섯번째는_�
     assert paid_runtime._RUNNING_BY_BUCKET == {}
 
 
-def test_같은_로그인계정의_두번째_식별은_provider전에_기다린다(monkeypatch):
-    pipeline = BlockingLookupPipeline(target=1)
+def test_같은_로그인계정은_식별_두건까지_되고_세번째는_provider전에_기다린다(
+    monkeypatch,
+):
+    pipeline = BlockingLookupPipeline(target=2)
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
     monkeypatch.setattr(request_helpers, "RATE_MAX_RUNS", 100)
     first_client = TestClient(main.app)
     second_client = TestClient(main.app)
+    third_client = TestClient(main.app)
     email = "same-member@example.com"
     _초대하고_로그인(first_client, email)
     _로그인(second_client, email)
+    _로그인(third_client, email)
 
     try:
-        with ThreadPoolExecutor(max_workers=1) as pool:
+        with ThreadPoolExecutor(max_workers=2) as pool:
             first = pool.submit(_confirm, first_client)
+            second = pool.submit(_confirm, second_client)
             assert pipeline.all_entered.wait(timeout=10)
 
-            second = _confirm(second_client)
-            assert second.status_code == 429
-            assert "진행 중" in second.text
-            assert pipeline.lookup_calls == 1
+            third = _confirm(third_client)
+            assert third.status_code == 429
+            assert "진행 중" in third.text
+            assert pipeline.lookup_calls == 2
 
             pipeline.release.set()
             assert first.result(timeout=10).status_code == 200
+            assert second.result(timeout=10).status_code == 200
     finally:
         pipeline.release.set()
         first_client.close()
         second_client.close()
+        third_client.close()
 
     assert paid_runtime._RUNNING == 0
     assert paid_runtime._RUNNING_BY_BUCKET == {}
@@ -936,6 +943,7 @@ def test_to_thread_취소는_비용을_0원확정하지_않고_통장만_닫는�
         ),
         share_key=_LINK_A,
         paid_phase=ticket,
+        slot_bucket_id=slot,
     )
 
     with pytest.raises(asyncio.CancelledError):
@@ -1004,6 +1012,7 @@ def test_바깥요청이_취소돼도_실제_worker가_끝날때까지_동시자
         ),
         share_key=_LINK_A,
         paid_phase=ticket,
+        slot_bucket_id=slot,
     )
 
     async def scenario() -> None:
@@ -1097,6 +1106,7 @@ def test_본조사_계약밖결과도_active고아없이_미확정으로_마감�
         ),
         share_key=_LINK_A,
         paid_phase=ticket,
+        slot_bucket_id=slot,
     )
 
     asyncio.run(job_runtime._run_job(job))

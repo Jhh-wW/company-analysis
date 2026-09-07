@@ -73,6 +73,7 @@ from src.features.sharelink.constants import (
     LINK_TOTAL_BUDGET_EXHAUSTED_TITLE,
     LINK_TOTAL_BUDGET_KRW,
     PUBLIC_NOT_ALLOWED_MESSAGE,
+    VISITOR_COOKIE_NAME,
 )
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
 from src.features.report_standard.cover_metrics import cover_metrics
@@ -527,6 +528,28 @@ def _raw_share_key(request: Request) -> str:
         logger.exception("열쇠 링크를 확인하지 못해 공개 손님으로 봅니다")
         return ""
 
+def visitor_id_of(request: Request) -> str:
+    """이 브라우저의 «방문자 표»를 돌려준다. 없거나 모양이 틀리면 빈 글자.
+
+    Args:
+        request: 들어온 요청.
+
+    Returns:
+        방문자 표. 초대 링크(`/k/...`)를 눌러 들어온 브라우저만 이 값을 갖는다.
+
+    ★ 이 값은 **동시 자리를 나누는 데만** 쓴다. 돈이 나가는 통장도, 「누구인가」도
+      아니다. 안에는 무작위 글자뿐이라 IP·브라우저 종류·기기 정보가 들어 있지 않다.
+    ★ 모양이 틀리면 빈 글자로 떨어뜨린다 — 손으로 쿠키를 바꿔 «새 자리»를
+      무한히 만들지 못하게 한다.
+    """
+    # 직접 호출 단위시험·내부 어댑터는 Starlette Request의 일부 속성만 가진
+    # 가벼운 대역을 넘길 수 있다. 쿠키 표가 없으면 공개 호환 규칙(빈 값)으로
+    # 돌아가야지 AttributeError로 후보 검색 전체를 끊으면 안 된다.
+    cookies = getattr(request, "cookies", {})
+    visitor_id = cookies.get(VISITOR_COOKIE_NAME) or ""
+    return visitor_id if share_logic.is_valid_visitor_id(visitor_id) else ""
+
+
 def _track_of(request: Request) -> tuple[share_tracks.Track, str, float | None]:
     """이 손님이 «어느 갈래»이고, «어느 통장»에서, «얼마»까지 쓸 수 있는가.
 
@@ -817,7 +840,12 @@ def _guard_run(
         max_runs=RATE_MAX_RUNS,
     ):
         return _throttled(request, RATE_LIMITED_MESSAGE, "rate")
-    if paid_runtime._slot_is_full(track, bucket, owns_slot=owns_slot):
+    if paid_runtime._slot_is_full(
+        track,
+        bucket,
+        owns_slot=owns_slot,
+        visitor_id=visitor_id_of(request),
+    ):
         return _throttled(request, BUSY_MESSAGE, "busy")
     if costs_money and not paid_runtime._BUDGET_STORE_HEALTHY:
         # 원장이 고장 난 채 열어 두면 재시작 뒤 상한을 보장할 수 없다.

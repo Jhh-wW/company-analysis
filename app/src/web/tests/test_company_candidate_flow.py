@@ -327,7 +327,9 @@ def test_paid_candidate_worker_slot부족은_provider0회_phase취소_0원이다
     released: list[str] = []
     monkeypatch.setattr(candidate_logic, "_PROVIDER_WORKER_SLOTS", FullWorkerSlots())
     monkeypatch.setattr(
-        paid_runtime, "_reserve_run_slot", lambda _track, _bucket: "candidate-slot"
+        paid_runtime,
+        "_reserve_run_slot",
+        lambda _track, _bucket, **_slot_kwargs: "candidate-slot",
     )
     monkeypatch.setattr(
         paid_runtime, "_release_run_slot", lambda slot: released.append(slot)
@@ -1564,7 +1566,9 @@ def test_DART_cooldown중에는_실제후보provider를_부르지않고_관측�
     monkeypatch.setenv("STORAGE_DB_PATH", str(tmp_path / "storage.db"))
     monkeypatch.setattr(analysis_router.clock, "iso_now_kst", lambda: now_iso)
     monkeypatch.setattr(
-        paid_runtime, "_reserve_run_slot", lambda _track, _bucket: "dart-slot"
+        paid_runtime,
+        "_reserve_run_slot",
+        lambda _track, _bucket, **_slot_kwargs: "dart-slot",
     )
     released: list[str] = []
     monkeypatch.setattr(paid_runtime, "_release_run_slot", released.append)
@@ -1637,7 +1641,9 @@ def test_DART_local_rate제한이면_만료된_probe권한도_미리잡지않는
     )
     monkeypatch.setattr(candidate_logic, "_claim_rate", lambda *_args: False)
     monkeypatch.setattr(
-        paid_runtime, "_reserve_run_slot", lambda _track, _bucket: "dart-rate-slot"
+        paid_runtime,
+        "_reserve_run_slot",
+        lambda _track, _bucket, **_slot_kwargs: "dart-rate-slot",
     )
     monkeypatch.setattr(paid_runtime, "_release_run_slot", lambda _slot: None)
     with storage_db.connect() as conn:
@@ -1701,7 +1707,9 @@ def test_DART_cooldown뒤_탐색하나와_그결과관측하나만_기록한다(
         analysis_router.clock, "iso_now_kst", lambda: after_cooldown
     )
     monkeypatch.setattr(
-        paid_runtime, "_reserve_run_slot", lambda _track, _bucket: "dart-probe-slot"
+        paid_runtime,
+        "_reserve_run_slot",
+        lambda _track, _bucket, **_slot_kwargs: "dart-probe-slot",
     )
     released: list[str] = []
     monkeypatch.setattr(paid_runtime, "_release_run_slot", released.append)

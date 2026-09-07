@@ -30,6 +30,7 @@ from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.budget import provider_budget
 from src.features.composer import logic as composer_logic
+from src.features.composer import pipeline as composer_pipeline
 from src.features.composer import verify as composer_verify
 from src.features.composer.constants import GRADE_CONFIRMED, SECTION_IDS
 from src.features.composer.port import AskFatalError
@@ -310,6 +311,54 @@ def test_v2_작성은_두번째_호출의_중단에서_즉시_멈춘다(
     # 첫 장만 실제로 나갔고, 멈춘 뒤 새 provider 호출은 없다.
     assert 응답기.보낸_횟수 == 1
     assert [항목.get("step") for 항목 in 단계] == []
+
+
+def test_v2_조립예외는_원문없이_assembly경계로_기록된다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "https://private.example/composer?token=secret 원문"
+    monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.FULL.value)
+
+    def 조립실패(*_args: Any, **_kwargs: Any):
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(composer_pipeline, "run_v2", 조립실패)
+    가짜엔진 = FakeEngine()
+    engine, client = _계량_경계(가짜엔진)
+    단계: list[dict[str, Any]] = []
+    fragments, financials, filing = _full_생산입력(가짜엔진)
+
+    with pytest.raises(RuntimeError):
+        real._run_v2_composer(
+            engine=engine,
+            client=client,
+            company_name="가나다전자",
+            corp_type="상장사",
+            frags=fragments,
+            financials=financials,
+            filing=filing,
+            revenue_tables=[],
+            sources=[],
+            business_date=_기준일,
+            model="가짜모델",
+            steps=단계,
+            corp_id=_CORP_ID,
+            current_fiscal_year=2025,
+            source_identity_digest="a" * 64,
+            build_identity=_build_identity(),
+            generation_mode=_v2_모드(),
+            comparison_result=_v2_comparison_result(),
+        )
+
+    assert 단계[-1] == {
+        "step": "runtime_failure",
+        "phase": "assembly",
+        "state": "failed",
+        "role": "worker",
+        "exception_class": "RuntimeError",
+        "reason_code": "report_assembly_failed",
+    }
+    assert secret not in repr(단계)
 
 
 # ══════════════════════════════════════════════════════════

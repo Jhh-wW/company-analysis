@@ -76,6 +76,7 @@ from src.features.homepage.safe_http import (
     safe_urlopen,
     safe_urlopen_exact_https_host,
 )
+from src.shared.company_identity import official_uppercase_acronyms
 from src.shared.official_ir import (
     IR_ATTACHMENT_URL_FIELD,
     IR_DART_WWW_REDIRECT_FIELD,
@@ -256,10 +257,15 @@ class _ExtractedDocument:
 
 @dataclass(frozen=True)
 class _CompanyIdentityTerms:
-    """DART 법인명에서 만든 필수 항과 충분히 식별적인 공식 별칭."""
+    """DART 법인명에서 만든 필수 항과 충분히 식별적인 공식 별칭.
+
+    ``acronyms``는 공식 영문명에 글자 그대로 있던 대문자 약칭이다. 짧아서
+    부분열 대조로는 무관한 단어에 우연히 걸리므로 «독립 토큰»으로만 맞춘다.
+    """
 
     principal: frozenset[str]
     distinctive_aliases: frozenset[str]
+    acronyms: frozenset[str] = frozenset()
 
 
 def default_ir_html_fetch(
@@ -517,6 +523,13 @@ def _collect_official_ir_fragments_impl(
         company_name,
         company_aliases,
         homepage_hostname=exact_hostname,
+        # ★ 이 경로의 ``homepage_url``은 DART 기업개황이 등록한 홈페이지
+        #   주소(hm_url)이거나, 신원이 이미 확인된 공식 host의 root URL이다.
+        #   아래 수집은 그 exact HTTPS host 밖으로 나가지 않는다
+        #   (``_normalize_root_url`` + ``safe_urlopen_exact_https_host``).
+        #   즉 여기서 받는 PDF는 «회사 신원에 결속된 origin»의 것이므로
+        #   공식 영문명 약칭을 신원 증거로 인정한다.
+        origin_identity_bound=True,
     )
     if not identity_terms.principal:
         return OfficialIrCollectResult(
@@ -1510,8 +1523,16 @@ def _company_identity_terms(
     aliases: tuple[str, ...],
     *,
     homepage_hostname: str = "",
+    origin_identity_bound: bool = False,
 ) -> _CompanyIdentityTerms:
-    """DART 공식명과 충분히 식별적인 registry 별칭만 분리한다."""
+    """DART 공식명과 충분히 식별적인 registry 별칭만 분리한다.
+
+    ``origin_identity_bound``는 «이 PDF를 회사 신원에 결속된 공식 origin에서
+    받는다»는 호출자의 보증이다. 켜야만 공식 영문명의 대문자 약칭을 인정한다.
+    약칭은 두세 글자라 아무 문서에나 있을 수 있어서, 도메인 자체가 회사
+    것이라는 보증이 없으면 신원 증거가 되지 못한다. 기본값은 꺼짐이라 새
+    호출자가 모르고 넓히지 못한다.
+    """
 
     original_normalized_name = unicodedata.normalize(
         "NFKC", str(company_name or "")
@@ -1588,9 +1609,22 @@ def _company_identity_terms(
         ):
             if len(token) >= 4 and token not in _GENERIC_IDENTITY_ALIASES:
                 distinctive_aliases.add(token)
+
+    # 실제 IR PDF 표지는 공식 영문명 전체가 아니라 대문자 약칭만 싣는 경우가
+    # 많다(공식 사이트 IR 게시판에서 받은 PDF 실측). 약칭이 원문에 글자
+    # 그대로 있었다는 사실은 casefold된 별칭으로는 증명할 수 없으므로,
+    # shared의 공통 규칙으로 «원본 표기»에서만 뽑는다.
+    acronyms: set[str] = set()
+    if origin_identity_bound:
+        for alias in aliases:
+            for acronym in official_uppercase_acronyms(alias):
+                folded = acronym.casefold()
+                if folded and folded not in _GENERIC_IDENTITY_ALIASES:
+                    acronyms.add(folded)
     return _CompanyIdentityTerms(
         principal=frozenset(principal),
         distinctive_aliases=frozenset(distinctive_aliases),
+        acronyms=frozenset(acronyms),
     )
 
 
@@ -1614,12 +1648,18 @@ def _identity_matches(
             return term in words
         return term in compact
 
+    def acronym_matches(term: str) -> bool:
+        # 약칭은 길이와 무관하게 «독립 토큰»으로만 인정한다. 부분열로 보면
+        # 무관한 긴 단어 속에 우연히 들어간 글자까지 신원 증거가 된다.
+        return term in words
+
     if isinstance(identity_terms, _CompanyIdentityTerms):
         return bool(
             any(term_matches(term) for term in identity_terms.principal)
             or any(
                 term_matches(term) for term in identity_terms.distinctive_aliases
             )
+            or any(acronym_matches(term) for term in identity_terms.acronyms)
         )
     # 내부 parser 단위시험의 명시적 legacy 입력만 유지한다. 실제 수집 경로는
     # 위 구조화 계약을 거쳐 임의 사용자 별칭을 받을 수 없다.

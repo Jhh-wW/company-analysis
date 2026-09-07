@@ -75,7 +75,10 @@ from src.shared.official_ir import (
     extract_official_ir_cover_metadata,
     safe_https_attachment_url,
 )
-from src.shared.report_evidence.constants import SOURCE_KIND_ROBOTS_TXT
+from src.shared.report_evidence.constants import (
+    ATTEMPT_KIND_SITEMAP,
+    SOURCE_KIND_ROBOTS_TXT,
+)
 from src.shared.report_evidence.identity_verified_web import (
     build_verified_dart_filing_official_web_binding,
     build_verified_dart_filing_subdomain_binding,
@@ -248,6 +251,7 @@ class _CollectionState:
         elapsed_ms: int,
         bytes_downloaded: int,
         documents_seen: int,
+        documents_attempted: int = 0,
     ) -> None:
         self.attempts.append(
             WideCollectionAttempt(
@@ -266,6 +270,7 @@ class _CollectionState:
                 elapsed_ms=max(0, elapsed_ms),
                 bytes_downloaded=max(0, bytes_downloaded),
                 documents_seen=max(0, documents_seen),
+                documents_attempted=max(0, documents_attempted),
             )
         )
 
@@ -1838,7 +1843,7 @@ def _discover_sitemap(
         )
 
     state.add_attempt(
-        kind="sitemap",
+        kind=ATTEMPT_KIND_SITEMAP,
         source_kind=WIDE_SOURCE_KIND_WEB_PAGE,
         requirement=_BROAD_SLOT_REQUIREMENT,
         state=outcome_state,
@@ -2005,6 +2010,10 @@ def _run_ir_pdf_phase(
             elapsed_ms=elapsed_ms,
             bytes_downloaded=result.downloaded_pdf_bytes,
             documents_seen=documents_added,
+            # 수집기가 실제로 열어 본 PDF 수를 그대로 싣는다. 등록된 문서 수
+            # (``documents_added``)와 섞으면 「0건 시도 · 수십만 바이트 수신」
+            # 같은 모순 표시가 된다.
+            documents_attempted=int(getattr(result, "attempted_documents", 0) or 0),
         )
 
 

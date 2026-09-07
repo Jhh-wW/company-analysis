@@ -186,3 +186,89 @@ def test_이름단독_영수증은_이중검증_영수증과_절대_같지_않�
     assert dual.matched_name_sha256 == name_only.matched_name_sha256
     assert dual.registration_number_sha256 != ""
     assert name_only.registration_number_sha256 == ""
+
+
+# ── 영문 법인명의 접미사 생략 표기 ───────────────────────────────────────
+# DART 영문 법인명은 법적 접미사까지 등록돼 있지만, 회사 홈페이지는 대개
+# 접미사를 빼고 쓴다. 접미사가 붙은 행만 요구하면 실제 공식 홈페이지가 자기
+# 이름으로 결속되지 못한다(2026-09-07 상장사 실측: 문서 0건).
+
+_ENGLISH_NAME_PAGES = (
+    "<html><main><h1>GND Electronics</h1>"
+    "<p>반도체 검사 장비를 만듭니다</p></main>"
+    "<footer>사업자등록번호 123-45-67890</footer></html>",
+)
+
+
+def test_영문법인명의_접미사를_뺀_표기도_같은_회사로_인정한다() -> None:
+    """페이지에 ``GND Electronics``만 있어도 결속돼야 한다."""
+
+    identity = _identity(
+        legal_name="주식회사 가나다전자",
+        aliases=("GND Electronics Corporation",),
+    )
+
+    match = verify_official_company_identity_pages(_ENGLISH_NAME_PAGES, identity)
+
+    assert match is not None
+    assert match.registration_number_sha256 != ""
+
+
+def test_접미사를_떼면_한_단어만_남는_이름은_인정하지_않는다() -> None:
+    """``Electronics`` 한 단어는 무관한 페이지에도 흔하다."""
+
+    identity = _identity(
+        legal_name="주식회사 가나다전자",
+        aliases=("Electronics Corporation",),
+    )
+
+    assert verify_official_company_identity_pages(_ENGLISH_NAME_PAGES, identity) is None
+
+
+def test_접미사_생략_표기는_DART_root_묶음에서도_같게_동작한다() -> None:
+    identity = _identity(
+        legal_name="주식회사 가나다전자",
+        aliases=("GND Electronics Corporation",),
+    )
+
+    assert (
+        verify_dart_root_company_identity_pages(_ENGLISH_NAME_PAGES, identity)
+        is not None
+    )
+
+
+def test_접미사를_뗀_행으로_맞으면_영수증_이름해시도_그_행을_따른다() -> None:
+    """무엇이 맞았는지가 해시에 그대로 남아야 한다."""
+
+    suffixed = _identity(
+        legal_name="주식회사 가나다전자",
+        aliases=("GND Electronics Corporation",),
+    )
+    plain = _identity(
+        legal_name="주식회사 가나다전자",
+        aliases=("GND Electronics",),
+    )
+
+    matched_with_suffix = verify_official_company_identity_pages(
+        _ENGLISH_NAME_PAGES, suffixed
+    )
+    matched_without_suffix = verify_official_company_identity_pages(
+        _ENGLISH_NAME_PAGES, plain
+    )
+
+    assert matched_with_suffix is not None and matched_without_suffix is not None
+    assert (
+        matched_with_suffix.matched_name_sha256
+        == matched_without_suffix.matched_name_sha256
+    )
+
+
+def test_접미사_생략은_무관한_회사이름까지_넓히지_않는다() -> None:
+    """뗀 뒤 남은 토큰 행 전체가 페이지에 이어져 있어야 한다."""
+
+    identity = _identity(
+        legal_name="주식회사 가나다전자",
+        aliases=("GND Semiconductor Corporation",),
+    )
+
+    assert verify_official_company_identity_pages(_ENGLISH_NAME_PAGES, identity) is None

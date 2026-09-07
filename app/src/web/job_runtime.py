@@ -6,6 +6,7 @@ import asyncio
 import datetime as dt
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Optional, TypeVar
@@ -70,8 +71,11 @@ from src.features.storage import job_interruptions
 from src.features.storage import reports as report_store
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared import generation_coordination
+from src.shared import runtime_failure_constants as failure_constants
+from src.shared import runtime_failure_diagnostic as runtime_failure
 from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_START_BUDGET_RESERVATION_DENIED,
+    SAFE_FINAL_GATE_REASONS,
 )
 from src.shared.report_evidence.constants import ReleaseMode
 from src.web import (
@@ -148,6 +152,10 @@ START_BUDGET_RESERVATION_DENIED_MESSAGE = (
     "이 계정의 하루 조사 비용 한도에 도달해 조사를 시작하지 않았습니다. "
     "자정(한국 시간)이 지나면 다시 할 수 있습니다. "
     "이용 횟수는 차감되지 않았습니다."
+)
+OWNER_FINAL_GATE_STOPPED_MESSAGE = (
+    "먼저 시작한 같은 회사 조사도 같은 안전 기준에서 멈췄습니다. "
+    "확인되지 않은 내용을 보고서처럼 보여주지 않습니다."
 )
 _LINK_STOP_NOTICE_BY_REASON = {
     LINK_STOP_REASON_REVOKED: LINK_REVOKED_RUN_STOPPED_MESSAGE,
@@ -287,6 +295,15 @@ class Job:
     #: 예약한 동시 실행 자리. 작업과 종료 정리가 같은 자리를 두 번 풀지 않게 쓴다.
     slot_bucket_id: str = ""
     slot_released: bool = False
+    #: 정상 worker finally와 강제 종료 정리가 동시에 들어와도 ``slot_released``의
+    #: 확인·변경·실제 반환을 한 묶음으로 만든다. 이 잠금이 없으면 두 경로가 모두
+    #: False를 본 뒤 같은 이름을 두 번 반환해, 그 사이 자리를 잡은 다음 작업의
+    #: 슬롯까지 지우는 ABA 경쟁이 생길 수 있다.
+    slot_release_lock: Any = field(
+        default_factory=threading.Lock,
+        repr=False,
+        compare=False,
+    )
     paid_phase_settled: bool = False
     #: 보고서가 DB에 남았는지. None은 보고서가 없거나 아직 시도 전이다.
     report_persisted: Optional[bool] = None
@@ -437,8 +454,14 @@ def _reserved_work_admitted(slot_bucket_id: str) -> bool:
 
 def _job_work_admitted(job: Job) -> bool:
     """등록된 Job의 슬롯 표식까지 포함해 provider 시작 가능 여부를 본다."""
-    stored_bucket = job.slot_bucket_id or getattr(job.paid_phase, "bucket_id", "")
-    return _ACCEPTING_JOBS and not job.slot_released and bool(stored_bucket)
+    # 비용 phase의 bucket_id는 «돈 통장»이지 이 Job이 실제로 예약한 실행
+    # 자리의 소유 증거가 아니다. 둘이 우연히 같은 옛 LINK 요청도 있지만,
+    # 이를 fallback으로 인정하면 슬롯 없이 만든 Job이 provider를 시작할 수 있다.
+    return (
+        _ACCEPTING_JOBS
+        and not job.slot_released
+        and bool(job.slot_bucket_id)
+    )
 
 
 def _requires_public_report_grant(
@@ -828,9 +851,11 @@ def _prepare_generation_session(job: Job) -> None:
     job.generation_session = generation_singleflight.GenerationSession(
         run_id=job.job_id,
         share_key=job.share_key,
-        billing_bucket_id=(
-            job.slot_bucket_id or spend_store.bucket_id(job.share_key)
-        ),
+        # ★ 동시 자리 이름(``slot_bucket_id``)을 쓰지 않는다 — 초대 링크의 자리는
+        #   방문자마다 갈라지지만 **비용 통장은 링크 하나**다. 자리 이름을 그대로
+        #   쓰면 같은 링크의 두 사람이 서로 다른 통장으로 보여, 한 번만 만들면
+        #   되는 보고서를 각자 새로 만든다.
+        billing_bucket_id=spend_store.bucket_id(job.share_key),
         cap_krw=job.paid_cap_krw,
         on_paid_phase=lambda ticket: _install_job_paid_phase(job, ticket),
         build_identity=job.engine_build_identity,
@@ -978,6 +1003,74 @@ def _stopped_run_result(
     )
 
 
+def _singleflight_failure_code(job: Job) -> str:
+    """owner 종료 사유를 waiter에게 전할 닫힌 코드 하나로 고른다.
+
+    최종 게이트의 안전한 사유가 있으면 그것이 정본이다. 기술 실패는 더 안쪽
+    runtime 진단의 닫힌 사유를 쓰고, 둘 다 없을 때만 옛 일반 코드를 쓴다.
+    사람용 메시지·예외 문자열은 이 경계에 들어오지 않는다.
+    """
+
+    result = job.result
+    if isinstance(result, RunResult):
+        final_gate_reason = str(result.final_gate_reason or "")
+        if final_gate_reason in SAFE_FINAL_GATE_REASONS:
+            return final_gate_reason
+    if job.link_stop_reason in {
+        LINK_STOP_REASON_REVOKED,
+        LINK_STOP_REASON_EXPIRED,
+        LINK_STOP_REASON_UNKNOWN,
+    }:
+        return job.link_stop_reason
+    for step in reversed(job.diagnostic_steps):
+        if step.get("step") != failure_constants.RUNTIME_FAILURE_STEP:
+            continue
+        reason_code = str(step.get("reason_code") or "")
+        if reason_code in failure_constants.ALLOWED_REASON_CODES:
+            return reason_code
+    return "generation_failed"
+
+
+def _close_unfinished_generation_owner(job: Job) -> None:
+    """후처리 조기 예외에도 owner lease를 즉시 실패 또는 abandon으로 닫는다."""
+
+    session = job.generation_session
+    if session is None or job.generation_abandoned:
+        return
+    try:
+        if not session.owns_generation:
+            return
+        # 최외곽 finally의 마지막 방어선에는 await를 두지 않는다. 반복 취소가
+        # 이 지점에 꽂혀 진단 저장·LINK 종결·slot 반환까지 건너뛰면 안 된다.
+        session.fail(_singleflight_failure_code(job))
+    except Exception as error:  # noqa: BLE001 — waiter를 active lease에 묶어 두지 않는다
+        runtime_failure.append_job_failure(
+            job.diagnostic_steps,
+            phase=failure_constants.PHASE_COORDINATION,
+            error=error,
+            reason_code=failure_constants.REASON_GENERATION_FINALIZE_FAILED,
+        )
+        logger.exception(
+            "후처리 예외 뒤 보고서 single-flight owner를 닫지 못했습니다 job_id=%s",
+            job.job_id,
+        )
+        try:
+            session.abandon()
+        except Exception as abandon_error:  # noqa: BLE001 — 최종 정리를 절대 막지 않는다
+            runtime_failure.append_job_failure(
+                job.diagnostic_steps,
+                phase=failure_constants.PHASE_COORDINATION,
+                error=abandon_error,
+                reason_code=failure_constants.REASON_GENERATION_FINALIZE_FAILED,
+            )
+            logger.exception(
+                "보고서 single-flight owner abandon도 실패했습니다 job_id=%s",
+                job.job_id,
+            )
+        finally:
+            job.generation_abandoned = True
+
+
 async def _run_job(job: Job) -> None:
     """뒤에서 파이프라인을 돌리며 진행 상황을 갱신한다.
 
@@ -1061,6 +1154,41 @@ async def _run_job(job: Job) -> None:
                 billing_uncertain=job.paid_phase is not None,
             )
         raise
+    except generation_coordination.GenerationOwnerFailed as owner_failed:
+        # owner가 정상 최종 게이트에서 멈춘 경우까지 기술 실패로 바꾸면 waiter
+        # 화면·이력은 generation_failed가 된다. fan-out의 닫힌 원사유가 안전한
+        # 최종 게이트 코드면 같은 GATE_STOPPED 의미로 복원한다.
+        owner_reason_code = str(owner_failed.failure_code or "")
+        runtime_failure.append_failure_once(
+            job.diagnostic_steps,
+            phase=failure_constants.PHASE_COORDINATION,
+            error=owner_failed,
+            reason_code=failure_constants.REASON_GENERATION_OWNER_FAILED,
+            role=failure_constants.ROLE_WAITER,
+            owner_reason_code=(
+                owner_reason_code
+                if owner_reason_code in SAFE_FINAL_GATE_REASONS
+                else "generation_failed"
+            ),
+        )
+        if owner_reason_code in SAFE_FINAL_GATE_REASONS:
+            job.result = replace(
+                _stopped_run_result(
+                    job,
+                    owner_failed,
+                    message=OWNER_FINAL_GATE_STOPPED_MESSAGE,
+                ),
+                outcome=Outcome.GATE_STOPPED,
+                message=OWNER_FINAL_GATE_STOPPED_MESSAGE,
+                final_gate_reason=owner_reason_code,
+            )
+        else:
+            job.result = _stopped_run_result(
+                job,
+                owner_failed,
+                message=PIPELINE_FAILED_MESSAGE,
+            )
+        del owner_failed
     except generation_singleflight.PaidGenerationAdmissionUnavailable as denied:
         # provider 호출 전 비용 예약이 거절된 것은 기술 실패가 아니다. 그때까지
         # 실제로 쓴 값만 보존하되, 오늘 한도를 다 쓴 별도 결과로 닫아 같은 요청의
@@ -1090,6 +1218,12 @@ async def _run_job(job: Job) -> None:
         job.result = _stopped_run_result(job, closed, message=closed.notice)
     except Exception as exc:  # noqa: BLE001 — 어떤 실패든 화면은 살아 있어야 한다
         # ★ 사용자에게 내부 오류 내용을 보여주지 않는다 (경로·스택 노출 금지).
+        runtime_failure.append_failure_once(
+            job.diagnostic_steps,
+            phase=failure_constants.PHASE_PIPELINE,
+            error=exc,
+            reason_code=failure_constants.REASON_UNEXPECTED_PIPELINE_FAILURE,
+        )
         logger.exception("파이프라인 실패 job_id=%s", job.job_id)
         job.result = _stopped_run_result(job, exc, message=PIPELINE_FAILED_MESSAGE)
         del exc
@@ -1156,14 +1290,23 @@ async def _run_job(job: Job) -> None:
             # 내부 AI 원가는 실패·GATE_STOPPED에도 그대로 보존한다. 고객 청구는
             # 이 시점에는 항상 0이며, 해시 결속 자동출고 뒤 reports 경계에서만
             # 별도의 eligibility/청구 결정을 붙인다.
-            with storage_db.connect() as conn:
-                cost_store.record_run_costs(
-                    conn,
-                    run_id=job.job_id,
-                    outcome=job.result.outcome,
-                    internal_ai_cost_krw=job.result.cost_krw,
-                    events=job.result.ai_cost_events,
+            try:
+                with storage_db.connect() as conn:
+                    cost_store.record_run_costs(
+                        conn,
+                        run_id=job.job_id,
+                        outcome=job.result.outcome,
+                        internal_ai_cost_krw=job.result.cost_krw,
+                        events=job.result.ai_cost_events,
+                    )
+            except Exception as error:
+                runtime_failure.append_job_failure(
+                    job.diagnostic_steps,
+                    phase=failure_constants.PHASE_SAVE,
+                    error=error,
+                    reason_code=failure_constants.REASON_COST_PERSISTENCE_FAILED,
                 )
+                raise
             if any(
                 event.model_id.lower().startswith("claude")
                 for event in job.result.ai_cost_events
@@ -1217,8 +1360,14 @@ async def _run_job(job: Job) -> None:
                         _require_report_delivery,
                         job,
                     )
-                except Exception:  # noqa: BLE001 - 새 보고서를 legacy로 저장하지 않는다
+                except Exception as error:  # noqa: BLE001 - legacy 저장으로 내리지 않는다
                     job.delivery_persisted = False
+                    runtime_failure.append_job_failure(
+                        job.diagnostic_steps,
+                        phase=failure_constants.PHASE_DELIVERY,
+                        error=error,
+                        reason_code=failure_constants.REASON_DELIVERY_PREPARE_FAILED,
+                    )
                     logger.exception(
                         "불변 보고서 delivery 의무 표식 실패 job_id=%s",
                         job.job_id,
@@ -1266,8 +1415,14 @@ async def _run_job(job: Job) -> None:
                         if job.delivery_persisted is True
                         else ""
                     )
-                except Exception:  # noqa: BLE001 - 구형 보고서 저장과 다른 경계
+                except Exception as error:  # noqa: BLE001 - 구형 저장과 다른 경계
                     job.delivery_persisted = False
+                    runtime_failure.append_job_failure(
+                        job.diagnostic_steps,
+                        phase=failure_constants.PHASE_DELIVERY,
+                        error=error,
+                        reason_code=failure_constants.REASON_DELIVERY_FINALIZE_FAILED,
+                    )
                     logger.exception(
                         "불변 보고서 delivery 확정 실패 job_id=%s",
                         job.job_id,
@@ -1333,14 +1488,36 @@ async def _run_job(job: Job) -> None:
                     elif job.generation_session.owns_generation:
                         await asyncio.to_thread(
                             job.generation_session.fail,
-                            "generation_failed",
+                            _singleflight_failure_code(job),
                         )
-                except Exception:  # noqa: BLE001 - 새 delivery는 유지하고 lease는 만료로 회수
+                except Exception as error:  # noqa: BLE001 - delivery 유지, lease는 회수
+                    runtime_failure.append_job_failure(
+                        job.diagnostic_steps,
+                        phase=failure_constants.PHASE_COORDINATION,
+                        error=error,
+                        reason_code=failure_constants.REASON_GENERATION_FINALIZE_FAILED,
+                    )
                     logger.exception(
                         "보고서 single-flight 마감 실패 job_id=%s",
                         job.job_id,
                     )
-                    job.generation_session.abandon()
+                    try:
+                        job.generation_session.abandon()
+                    except Exception as abandon_error:  # noqa: BLE001 - 정리는 계속
+                        runtime_failure.append_job_failure(
+                            job.diagnostic_steps,
+                            phase=failure_constants.PHASE_COORDINATION,
+                            error=abandon_error,
+                            reason_code=(
+                                failure_constants.REASON_GENERATION_FINALIZE_FAILED
+                            ),
+                        )
+                        logger.exception(
+                            "보고서 single-flight abandon도 실패했습니다 job_id=%s",
+                            job.job_id,
+                        )
+                    finally:
+                        job.generation_abandoned = True
             report_available = (
                 job.result.outcome is Outcome.REPORT
                 and report_saved
@@ -1378,6 +1555,7 @@ async def _run_job(job: Job) -> None:
             # 예외가 나도 이 최외곽 finally는 실행되어 자리가 영구히 새지 않는다.
             # 화면의 ``finished``는 본문·PDF artifact 확정 시도보다 먼저
             # 열리지 않아야 최초 GET이 구형 재렌더 경로로 빠지지 않는다.
+            _close_unfinished_generation_owner(job)
             _log_failed_run(job)
             _persist_run_diagnostics(job)
             job.finished = True
@@ -1388,12 +1566,14 @@ async def _run_job(job: Job) -> None:
 
 def _release_job_slot(job: Job) -> None:
     """Job이 소유한 동시 실행 자리를 동기 경계에서 정확히 한 번 반환한다."""
-    if job.slot_released:
-        return
-    job.slot_released = True
-    _release_run_slot(
-        job.slot_bucket_id or spend_store.bucket_id(job.share_key)
-    )
+    with job.slot_release_lock:
+        if job.slot_released:
+            return
+        job.slot_released = True
+        # 빈 소유 표식을 비용 통장 지문으로 대신하지 않는다. 잘못 구성된 옛
+        # Job이 같은 링크의 새 작업과 겹치면 그 새 슬롯을 반환하는 ABA가 된다.
+        # 현재 생산 생성 경로는 예약 결과를 ``slot_bucket_id``로 반드시 넘긴다.
+        _release_run_slot(job.slot_bucket_id)
 
 
 def _link_stop_step(outcome: Outcome) -> str:
@@ -1601,9 +1781,10 @@ def _finalize_report_delivery(job: Job) -> bool:
     public_delivery = reports_router.finalize_new_report_delivery(
         report_id=job.job_id,
         corp_id=job.card.ref or job.card.legal_name,
-        billing_bucket_id=(
-            job.slot_bucket_id or spend_store.bucket_id(job.share_key)
-        ),
+        # ★ 여기도 자리 이름이 아니라 «비용 통장»이다. 이 값은 보고서 전달
+        #   권한 표에 그대로 저장돼 재사용 판정에 쓰이므로, 방문자마다 갈라지면
+        #   같은 링크의 다음 사람이 앞 사람의 결과를 다시 쓰지 못한다.
+        billing_bucket_id=spend_store.bucket_id(job.share_key),
         report=job.result.report,
         actual_models=models,
         # 옛 layer1은 Report 값만 돌려주고 불변 content ID는 운반하지 않는다.
@@ -1809,9 +1990,15 @@ def _save_report(job: Job) -> bool:
         job.report_persisted = True
         job.persistence_warning = ""
         return True
-    except Exception:  # noqa: BLE001 — 저장 실패가 사용자를 막으면 안 된다
+    except Exception as error:  # noqa: BLE001 — 저장 실패가 사용자를 막으면 안 된다
         job.report_persisted = False
         job.persistence_warning = _PERSISTENCE_WARNING
+        runtime_failure.append_job_failure(
+            job.diagnostic_steps,
+            phase=failure_constants.PHASE_SAVE,
+            error=error,
+            reason_code=failure_constants.REASON_REPORT_PERSISTENCE_FAILED,
+        )
         logger.exception("보고서 저장 실패 (현재 화면은 임시이며 재시작 복구 불가)")
         return False
 

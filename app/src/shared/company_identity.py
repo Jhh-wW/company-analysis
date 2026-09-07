@@ -26,11 +26,27 @@ KOREAN_CORPORATE_TOKENS: Final[frozenset[str]] = frozenset(
         "합명회사",
     }
 )
+ENGLISH_CORPORATE_TOKENS: Final[frozenset[str]] = frozenset(
+    {
+        "corporation",
+        "corp",
+        "incorporated",
+        "inc",
+        "company",
+        "co",
+        "limited",
+        "ltd",
+        "llc",
+    }
+)
 SUPPORTED_NAME_PUNCTUATION: Final[frozenset[str]] = frozenset(
     ".,&'\"’·()[]{}-_/+"
 )
 
 _TOKEN_RE = re.compile(r"[0-9a-zA-Z가-힣]+")
+_OFFICIAL_UPPER_ACRONYM_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:[A-Z](?:\.[A-Z]){1,4}\.?|[A-Z]{2,5})(?![A-Za-z0-9])"
+)
 _LATIN_ACRONYM_RE = re.compile(r"[A-Za-z]{2,5}")
 _DOTTED_LATIN_ACRONYM_RE = re.compile(r"[A-Za-z](?:\.[A-Za-z]){1,4}\.?")
 _OFFICIAL_MIXED_NAME_ACRONYM_RE = re.compile(r"^([A-Z]{2,5})(?=[가-힣])")
@@ -136,6 +152,31 @@ def normalized_latin_acronym(value: object) -> str:
     if _DOTTED_LATIN_ACRONYM_RE.fullmatch(normalized):
         return normalized.replace(".", "").upper()
     return ""
+
+
+def official_uppercase_acronyms(value: object) -> tuple[str, ...]:
+    """공식 원문에 글자 그대로 있는 대문자 약칭 토큰만 돌려준다.
+
+    casefold된 별칭은 그 짧은 토큰이 «약칭이었다»는 사실을 증명하지 못한다.
+    그래서 규칙을 좁게 둔다 — 앞뒤가 영문자·숫자가 아닌 독립 위치의, 점을
+    찍었을 수도 있는 2~5자 전부 대문자 토큰만 인정하고, 흔한 영문 법인
+    접미사(``Corp``·``Inc`` 등)는 제외한다.
+
+    여러 feature가 같은 규칙을 써야 해서 shared에 둔다. DART 후보 검색은
+    별칭 신원에, 공식 IR PDF 대조는 앞쪽 표지 약칭 인정에 이 규칙을 쓴다.
+    """
+
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    found: list[str] = []
+    for match in _OFFICIAL_UPPER_ACRONYM_TOKEN_RE.finditer(text):
+        acronym = normalized_latin_acronym(match.group(0))
+        if (
+            acronym
+            and acronym.casefold() not in ENGLISH_CORPORATE_TOKENS
+            and acronym not in found
+        ):
+            found.append(acronym)
+    return tuple(found)
 
 
 def latin_acronym_korean(value: object) -> str:

@@ -240,6 +240,24 @@ def test_매핑_시도를_계약형으로_바꾼다() -> None:
     assert attempt.elapsed_ms == 0
 
 
+def test_시도한_문서수와_등록한_문서수를_각각_복원한다() -> None:
+    mapping = make_attempt(
+        company_id="corp-1",
+        attempt_id="attempt-1",
+        source_kind="official_web_page",
+        slot_ids=("identity:corporate_identity",),
+        state=CollectionState.OK.value,
+        reason_code="page_ok",
+    )
+    mapping["documents_seen"] = 1
+    mapping["documents_attempted"] = 3
+
+    attempt = to_attempt(mapping)
+
+    assert attempt.documents_seen == 1
+    assert attempt.documents_attempted == 3
+
+
 def test_시도에_필수_항목이_빠지면_한국어_예외를_낸다() -> None:
     mapping = make_attempt(
         company_id="corp-1",

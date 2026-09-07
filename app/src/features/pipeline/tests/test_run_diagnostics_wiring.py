@@ -25,6 +25,7 @@ from src.features.observability import run_diagnostics
 from src.features.pipeline import real
 from src.features.pipeline.port import CompanyCard, Outcome, RunResult, UserInput
 from src.shared import engine_build_identity as build_identity_contract
+from src.shared import generation_coordination
 
 
 #: 파이프라인이 뉴스 수집 결과를 남길 때 쓰는 단계 이름.
@@ -130,6 +131,69 @@ def test_실행이_끝나면_단계기록_원본이_수집칸으로_넘어온다
         "5b_뉴스_수집",
         "6_수집_홈페이지",
     ]
+
+
+def test_waiter는_원owner의_닫힌사유를_실행진단에_남긴다(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """owner의 GATE 사유가 일반 generation_failed로 다시 뭉개지지 않는다."""
+
+    def stopped(_self, _user_input, _card, _on_step, **_kwargs):
+        run_diagnostics.current_steps().append(
+            {
+                "step": "6_수집_공식근거사전검사",
+                "판정": "READY_FOR_GENERATION",
+            }
+        )
+        raise generation_coordination.GenerationOwnerFailed(
+            "official_evidence_insufficient"
+        )
+
+    monkeypatch.setattr(real, "_engine", lambda: _FakeRawEngine())
+    monkeypatch.setattr(real.RealPipeline, "_run_metered", stopped)
+
+    with run_diagnostics.capture() as captured:
+        with pytest.raises(generation_coordination.GenerationOwnerFailed):
+            real.RealPipeline().run(_user_input(), _card())
+
+    failure = captured.steps[-1]
+    assert failure == {
+        "step": "runtime_failure",
+        "phase": "coordination",
+        "state": "failed",
+        "role": "waiter",
+        "exception_class": "GenerationOwnerFailed",
+        "reason_code": "generation_owner_failed",
+        "owner_reason_code": "official_evidence_insufficient",
+    }
+
+
+def test_예상밖_pipeline실패는_예외메시지없이_경계와_종류만_남긴다(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    secret = "https://private.example/report?token=secret 원문"
+
+    def failed(_self, _user_input, _card, _on_step, **_kwargs):
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(real, "_engine", lambda: _FakeRawEngine())
+    monkeypatch.setattr(real.RealPipeline, "_run_metered", failed)
+
+    with run_diagnostics.capture() as captured:
+        result = real.RealPipeline().run(_user_input(), _card())
+
+    assert result.outcome is Outcome.FAILED
+    assert captured.steps == [
+        {
+            "step": "runtime_failure",
+            "phase": "pipeline",
+            "state": "failed",
+            "role": "worker",
+            "exception_class": "RuntimeError",
+            "reason_code": "unexpected_pipeline_failure",
+        }
+    ]
+    assert secret not in repr(captured.steps)
 
 
 def test_실행이_끝나면_자리를_닫아_다음_실행과_섞이지_않는다(

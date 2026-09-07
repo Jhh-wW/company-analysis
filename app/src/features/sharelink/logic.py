@@ -10,8 +10,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import os
 import re
+import secrets
 import unicodedata
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
@@ -25,6 +27,12 @@ from src.features.sharelink import constants
 #:   그러면 링크당 상한이 아무 의미가 없어진다.
 _KEY_RE = re.compile(rf"^[0-9a-f]{{{constants.KEY_HEX_CHARS}}}$")
 _REPORT_ID_RE = re.compile(rf"^[0-9a-f]{{{REPORT_ID_HEX_CHARS}}}$")
+#: 방문자 표로 인정할 글자 모양. ``secrets.token_urlsafe()``가 쓰는 글자만,
+#: 그 길이 그대로 받는다.
+#: ⚠️ 브라우저 쿠키는 인증 수단이 아니다. 사용자가 같은 모양의 값을 새로 만들 수
+#:   있으므로 이 검사는 슬롯 키를 작고 일정하게 유지하는 입력 경계일 뿐이다.
+#:   실제 자원 보호는 서버가 잠금 안에서 집행하는 링크별·전역 상한이 맡는다.
+_VISITOR_ID_RE = re.compile(rf"^[A-Za-z0-9_-]{{{constants.VISITOR_ID_CHARS}}}$")
 # ``share_store.insert_new()``가 기록하는 확장 ISO 8601 시각만 받는다. Python의
 # ``fromisoformat``은 ``20260816`` 같은 축약형도 받아주므로, 저장 형식이 망가진
 # 값을 정상 발급 시각으로 오인하지 않게 앞부분 모양을 먼저 좁힌다.
@@ -49,6 +57,49 @@ def is_valid_key(key: str) -> bool:
       모양 검사를 먼저 하는 이유는, 이상한 글자가 DB 조회까지 가지 않게 하려는 것이다.
     """
     return bool(_KEY_RE.match((key or "").strip().lower()))
+
+
+def new_visitor_id() -> str:
+    """같은 링크를 나눠 쓰는 사람들을 구분할 «무작위 표»를 하나 만든다.
+
+    Returns:
+        URL에 그대로 실을 수 있는 무작위 글자.
+
+    ★ 이 값에는 **아무 뜻도 없다** — IP·브라우저 종류·기기 정보를 담지 않는다.
+      담는 순간 첫 화면의 「개인정보는 수집하지 않습니다」가 거짓말이 된다.
+    """
+    return secrets.token_urlsafe(constants.VISITOR_ID_BYTES)
+
+
+def is_valid_visitor_id(visitor_id: str) -> bool:
+    """방문자 표로 인정할 모양인가.
+
+    Args:
+        visitor_id: 쿠키에서 온 글자.
+
+    Returns:
+        발급 때와 같은 글자·같은 길이면 True.
+
+    ★ 대소문자를 구분한다 — 열쇠(16진수)와 달리 이 값은 base64라
+      ``aB``와 ``Ab``가 서로 다른 쿠키다. 이 값만으로 실제 사람의 신원을
+      증명하지 않으며, 변조돼도 링크별·전역 상한은 그대로 적용된다.
+    """
+    return bool(_VISITOR_ID_RE.match(visitor_id or ""))
+
+
+def visitor_fingerprint(visitor_id: str) -> str:
+    """방문자 표의 원문을 서버 메모리에 남기지 않는 안정적인 지문.
+
+    Args:
+        visitor_id: 방문자 표.
+
+    Returns:
+        16진수 지문. 같은 표는 늘 같은 지문이 된다.
+
+    ★ 통장 지문(`spend_store.bucket_id`)과 달리 소문자로 낮추지 않는다 —
+      낮추면 서로 다른 두 사람이 같은 자리를 쓰게 된다.
+    """
+    return hashlib.sha256((visitor_id or "").encode("utf-8")).hexdigest()
 
 
 def normalize_scope_value(value: str) -> str:

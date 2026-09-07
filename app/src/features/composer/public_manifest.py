@@ -96,6 +96,8 @@ from src.shared.report_quality.source_identity import (
 )
 from src.shared.revenue_table_provenance import (
     is_revenue_total_name,
+    is_revenue_total_name_v2,
+    revenue_amounts_sum_to_total,
     revenue_row_evidence_matches,
     revenue_table_section_id_from_caption,
     revenue_table_evidence_identity,
@@ -437,7 +439,43 @@ def _matching_evidence_record(
     return candidates[0]
 
 
-def _validate_composition_total(table: PerformanceTable) -> None:
+def _validate_amount_only_composition_total(table: PerformanceTable) -> None:
+    """비중 열이 «없는» 구성표는 금액 합이 합계 행과 맞는지로 검산한다.
+
+    ★★ 왜 필요한가 — 비중 열이 있는 표는 위에서 「비중 합 100%」로 다시 셈해
+      본다. 비중이 없으면 그 관문이 통째로 비어, 출고 경계에서 아무도 표를
+      다시 세지 않는 표가 생긴다. 생산자만 믿는 값은 근거가 아니다.
+    ⚠️ 비중 열이 하나라도 있으면 여기서 손대지 않는다 — 옛 표의 통과·거절이
+      달라지면 안 된다.
+    """
+
+    if any("%" in str(head) or "비중" in str(head) for head in table.headers):
+        return
+    if len(table.headers) != 2 or not table.rows:
+        return
+    tail = table.rows[-1]
+    if len(tail) != 2 or not is_revenue_total_name_v2(str(tail[0])):
+        return
+    body = tuple(
+        row
+        for row in table.rows[:-1]
+        if len(row) == 2 and re.sub(r"\s+", "", str(row[0])) != "소계"
+    )
+    if not body or not revenue_amounts_sum_to_total(
+        (row[1] for row in body), tail[1]
+    ):
+        raise PublicManifestError(
+            "비중 없는 구성표의 공개 금액 합이 합계 행과 다릅니다"
+        )
+
+
+def _validate_composition_total(
+    table: PerformanceTable, *, validate_amount_only: bool = False
+) -> None:
+    # 금액 전용 검산은 매출 구성 provenance 경로에서만 켠다. 모든 2열 프로그램
+    # 표에 적용하면 「항목·설명」 표의 마지막 '합계'도 숫자 합계로 오인한다.
+    if validate_amount_only:
+        _validate_amount_only_composition_total(table)
     for index, header in enumerate(table.headers):
         if "%" not in str(header) and "비중" not in str(header):
             continue
@@ -737,15 +775,22 @@ def _validated_program_bindings(
         and not (is_dart_table or is_audit_report_table)
     ):
         raise PublicManifestError("프로그램 재무 표가 canonical numeric 검증에 실패했습니다")
-    _validate_composition_total(table)
+    _validate_composition_total(
+        table, validate_amount_only=require_source_row_provenance
+    )
 
     bindings: list[dict[str, object]] = []
     strict_table_identity = ""
+    total_name_matches = (
+        is_revenue_total_name_v2
+        if require_source_row_provenance
+        else is_revenue_total_name
+    )
     strict_row_count = sum(
         1
         for row in table.rows
         if row
-        and not is_revenue_total_name(row[0])
+        and not total_name_matches(row[0])
         and re.sub(r"\s+", "", str(row[0])) != "소계"
     )
     for index, row in enumerate(table.rows):

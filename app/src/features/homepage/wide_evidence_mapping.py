@@ -278,4 +278,5 @@ def _attempt_mapping(attempt: WideCollectionAttempt) -> dict[str, object]:
         "elapsed_ms": attempt.elapsed_ms,
         "bytes_downloaded": attempt.bytes_downloaded,
         "documents_seen": attempt.documents_seen,
+        "documents_attempted": attempt.documents_attempted,
     }

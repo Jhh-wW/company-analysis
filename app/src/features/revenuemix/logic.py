@@ -12,10 +12,20 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Optional, TypedDict
+from typing import Final, Optional, TypedDict
 
 from src.core.revenue_table_switch import revenue_table_v2_enabled
 from src.features.revenuemix.constants import (
+    AMOUNT_ONLY_CAPTION_BY_AXIS,
+    AMOUNT_ONLY_HEADING_LOOKBACK,
+    AMOUNT_ONLY_HEADING_STOPS,
+    AMOUNT_ONLY_MIN_COLUMNS,
+    AMOUNT_ONLY_NON_REVENUE_WORDS,
+    AMOUNT_ONLY_PERIOD_TAIL_TOKENS,
+    AMOUNT_ONLY_REVENUE_WORDS,
+    AMOUNT_ONLY_ROW_LABEL_WORDS,
+    AMOUNT_ONLY_ROW_SCAN_CHARS,
+    FOOTNOTE_WITHOUT_RATIO,
     HEADERS,
     KNOWN_TABLE_HEADS,
     MAX_ROWS,
@@ -27,10 +37,26 @@ from src.features.revenuemix.constants import (
     RATIO_HEAD_RE,
     REGION_CAPTION,
     REGION_HEADS,
+    REJECT_AXIS_UNKNOWN,
+    REJECT_DUPLICATE_TABLE,
+    REJECT_HORIZONTAL_NAMES_UNMATCHED,
+    REJECT_HORIZONTAL_NO_TOTAL,
+    REJECT_NOT_REVENUE,
+    REJECT_NO_HEADING,
+    REJECT_NO_RATIO_COLUMN,
+    REJECT_NO_TOTAL_ROW,
+    REJECT_PERIODS_MISSING,
+    REJECT_RATIO_COLUMN_PRESENT,
+    REJECT_ROWS_BELOW_MIN,
+    REJECT_ROWS_OVERFLOW,
+    REJECT_SUM_MISMATCH,
+    REJECT_UNIT_CONFLICT,
+    REJECT_UNIT_UNKNOWN,
     ROW_RE,
     ROW_RE_V2,
     SCAN_CHARS,
     SUBTOTAL_WORDS,
+    V2_REASON_CODES,
     V2_FALLBACK_HEADER_CHARS,
     V2_HEADER_LOOKBACK,
     V2_HEADER_RUN_GAP,
@@ -44,19 +70,27 @@ from src.features.revenuemix.constants import (
     V2_ZONE_BOUNDARY_RE,
 )
 from src.shared.revenue_table_provenance import (
+    REVENUE_AMOUNT_RE,
+    REVENUE_AMOUNT_ONLY_ROW_RE,
     REVENUE_AXIS_PRODUCT,
     REVENUE_AXIS_REGION,
     REVENUE_HEADS_BY_AXIS,
+    REVENUE_SHAPE_AMOUNT_ONLY_HORIZONTAL,
+    REVENUE_SHAPE_AMOUNT_ONLY_VERTICAL,
     RevenueAxis,
+    build_revenue_amount_only_row_evidence,
     build_revenue_multi_year_row_evidence,
     build_revenue_row_evidence,
     displayed_percent_total_is_complete,
     is_revenue_total_name,
     is_revenue_total_name_v2,
     normalize_revenue_name,
+    revenue_amount_only_headers,
     revenue_amounts_sum_to_total,
+    revenue_names_are_region_only,
     revenue_percent_total_is_complete_v2,
     revenue_ratio_numeric_check,
+    revenue_region_names_in,
     revenue_row_pattern_v2,
     revenue_signed_decimal,
     revenue_table_headers,
@@ -443,12 +477,17 @@ class RevenueTableDiagnostics(TypedDict):
 
     ★ 예외를 던지지 않는다 — 표는 보고서의 «덤»이라 없다고 조사를 멈추면 안
       된다. 대신 후보가 몇 개였고 무엇 때문에 떨어졌는지를 남긴다.
+    ★ ``축별_탈락사유``는 축(제품/지역)마다 «닫힌 코드»만 담는다. 축을 읽기
+      «전»에 떨어진 후보의 코드는 두 축 모두에 들어간다 — 어느 축이 될 수
+      있었는지 알 수 없으므로 좁혀 말하지 않는다.
     """
 
     경로: str
     후보_표_수: int
+    단위표시_수: int
     채택_표_수: int
     탈락_사유: dict[str, int]
+    축별_탈락사유: dict[str, list[str]]
 
 
 class MultiYearRevenueTableDiagnostics(TypedDict):
@@ -853,6 +892,521 @@ def _multi_year_candidate(
     )
 
 
+# ══════════════════════════════════════════════════════════════════════
+# v3 — 비중 열이 «없는» 표 (금액만 세로형 · 가로형)
+# ══════════════════════════════════════════════════════════════════════
+#
+# 시작점이 다르다. v2는 「비중」 열 이름에서 출발하지만 여기는 그 열이 아예
+# 없으므로 **「(단위 : …)」 표시**에서 출발한다 — DART 서식이 표 바로 앞에
+# 1행짜리 단위 표를 따로 싣는 규칙(0단계 D-2)을 그대로 쓴다.
+
+
+@dataclass(frozen=True)
+class _AmountCell:
+    """금액 한 칸의 원문 표기와 절대 좌표."""
+
+    text: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class _AmountOnlyRow:
+    """비중 없는 표의 한 행 — 이름 한 칸과 기간별 금액 칸들."""
+
+    name: str
+    name_start: int
+    name_end: int
+    amounts: tuple[_AmountCell, ...]
+    source_index: int
+
+
+@dataclass(frozen=True)
+class _AmountOnlyCandidate:
+    axis: RevenueAxis
+    shape: str
+    unit: str
+    header_start: int
+    header_end: int
+    header: str
+    rows: tuple[_AmountOnlyRow, ...]
+    total: _AmountOnlyRow
+    fingerprint: str
+
+
+#: 가로형 금액 줄의 이름표 — 「수익(매출액)」처럼 괄호가 붙는 것도 받는다.
+_AMOUNT_ONLY_ROW_LABEL_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:"
+    + "|".join(
+        re.escape(word)
+        for word in sorted(AMOUNT_ONLY_ROW_LABEL_WORDS, key=len, reverse=True)
+    )
+    + r")(?:\([^)]{0,20}\))?"
+)
+#: 가로형 머리말에서 합계 열 이름을 찾는 모양.
+_AMOUNT_ONLY_TOTAL_HEAD_RE: Final[re.Pattern[str]] = re.compile(r"합\s*계|총\s*계")
+#: 두 갈래의 매출 관문이 모두 요구하는 말. 이것도 없으면 뒤 검산을 해 볼 필요가 없다.
+#: ⚠️ 반드시 둘보다 «넘게» 잡아야 한다 — 좀히면 진짜 표가 조용히 사라진다.
+_AMOUNT_ONLY_REVENUE_PREGATE: Final[re.Pattern[str]] = re.compile(r"매출|수익")
+
+#: 「(단위」 표시 — 비중 없는 표를 찾는 출발점.
+_UNIT_MARK_RE: Final[re.Pattern[str]] = re.compile(r"\(\s*단\s*위")
+
+
+def _amount_cells(block: str, block_start: int, run: str, run_start: int) -> tuple[_AmountCell, ...]:
+    """금액 묶음 문자열에서 칸마다 원문 좌표를 만든다."""
+
+    cells: list[_AmountCell] = []
+    for match in REVENUE_AMOUNT_RE.finditer(run):
+        start = block_start + run_start + match.start()
+        cells.append(_AmountCell(match.group(0), start, start + len(match.group(0))))
+    return tuple(cells)
+
+
+def _has_ratio_column(excerpt: str) -> bool:
+    """이 표에 비중 열이 «있는지» 본다.
+
+    ★★ 왜 있으면 물러나나 — 비중 열이 있는 표는 v2의 몫이다. v2가 비중 검산에
+      떨어뜨린 표를 여기서 금액만 다시 실으면, 잘못 잘린 표가 「비중이 없는
+      표」인 척 조용히 나간다. 공시에 비중이 «있는데» 안 실은 것도 거짓말이다.
+    """
+
+    return RATIO_HEAD_RE.search(excerpt) is not None or "%" in excerpt
+
+
+def _amount_only_heading_start(filing_text: str, unit_start: int) -> int:
+    """「(단위」 앞의 표제 시작 자리를 되짚는다. 숫자나 문장 끝을 만나면 멈춘다.
+
+    ★ 왜 숫자에서 멈추나 — 주석 표는 앞 표의 금액이 바로 붙어 온다(실측).
+      숫자를 넘어가면 앞 표의 단위까지 딸려 와 「단위 충돌」로 버려진다.
+    ★★ 왜 마침표에서도 멈추나 (실측 2건) — 표 «앞 문장»을 머리말로 끌어오면
+      두 가지 사고가 난다. ① 「…게임 사업부문의 분기손익을…」의 「부문」이
+      지역표를 제품표로 뒤집어 표가 통째로 버려졌다. ② 「기타영업수익의
+      내용은 다음과 같습니다」가 매출 관문을 통과시켜 «매출이 아닌» 은행
+      기타영업수익 명세가 제품별 매출표로 올라왔다. 표제는 문장이 아니다.
+    """
+
+    limit = max(0, unit_start - AMOUNT_ONLY_HEADING_LOOKBACK)
+    start = unit_start
+    while start > limit and filing_text[start - 1] not in AMOUNT_ONLY_HEADING_STOPS:
+        start -= 1
+    while start < unit_start and (
+        filing_text[start].isspace() or filing_text[start] in ")]}"
+    ):
+        start += 1
+    return start
+
+
+def _amount_only_rows(
+    block: str, block_start: int
+) -> tuple[tuple[_AmountOnlyRow, ...], Optional[_AmountOnlyRow], bool, int]:
+    """세로형 덩어리에서 「이름 + 금액들」 행과 첫 합계 행을 뽑는다.
+
+    Returns:
+        (구성 행, 합계 행, 넘침 여부, 기간 수). 기간 수는 첫 행이 정하고,
+        뒤 행의 금액 개수가 다르면 그 행에서 «멈춘다» — 다른 표가 이어진
+        것으로 보기 때문이다.
+    """
+
+    rows: list[_AmountOnlyRow] = []
+    total: Optional[_AmountOnlyRow] = None
+    overflow = False
+    periods = 0
+    for source_index, match in enumerate(REVENUE_AMOUNT_ONLY_ROW_RE.finditer(block)):
+        cells = _amount_cells(block, block_start, match.group(2), match.start(2))
+        if not cells:
+            continue
+        if periods == 0:
+            periods = len(cells)
+        elif len(cells) != periods:
+            break
+        raw_name = match.group(1)
+        # 첫 행 이름 앞에는 「제57기」의 꼬리(「기」)가 붙어 온다. 이름 캡처가
+        # 숫자를 물 수 없어 생기는 자국이라 «원문 좌표째» 잘라 낸다.
+        offset = _period_tail_offset(raw_name) if not rows and total is None else 0
+        # 둘째 행부터 정규식 탐색 시작점의 칸 구분 공백이 group(1)에 붙는다.
+        # 공개 이름에서는 사라지는 공백이므로 봉인 좌표도 실제 이름 글자에서
+        # 시작하게 옮긴다. 그래야 다른 생산자가 같은 shared 계약을 쓸 때도
+        # 「공백 포함 여부」가 행 신원처럼 굳지 않는다.
+        selected_name = raw_name[offset:]
+        offset += len(selected_name) - len(selected_name.lstrip())
+        name = clean_name(raw_name[offset:])
+        if not name or _is(name, SUBTOTAL_WORDS):
+            continue
+        row = _AmountOnlyRow(
+            name=name,
+            name_start=block_start + match.start(1) + offset,
+            name_end=block_start + match.end(1),
+            amounts=cells,
+            source_index=source_index,
+        )
+        if is_revenue_total_name_v2(name):
+            total = row
+            break
+        if len(rows) >= MAX_ROWS:
+            overflow = True
+            continue
+        rows.append(row)
+    return tuple(rows), total, overflow, periods
+
+
+def _amount_only_axis(header: str, names: tuple[str, ...], excerpt: str) -> Optional[RevenueAxis]:
+    """비중 없는 표의 축. 이름이 «전부» 지역 말이면 지역으로 못 박는다."""
+
+    if revenue_names_are_region_only(names):
+        return REVENUE_AXIS_REGION
+    axis = revenue_text_axis(excerpt)
+    header_axis = revenue_text_axis(header)
+    if axis is None or (header_axis is not None and header_axis != axis):
+        return None
+    return axis
+
+
+def _amount_only_fingerprint(
+    shape: str, rows: tuple[_AmountOnlyRow, ...], total: _AmountOnlyRow
+) -> str:
+    return sha256_text(
+        "|".join(
+            [shape]
+            + [
+                "\t".join((row.name, *(cell.text for cell in row.amounts)))
+                for row in (*rows, total)
+            ]
+        )
+    )
+
+
+def _vertical_amount_only_candidate(
+    filing_text: str,
+    unit_start: int,
+    unit_end: int,
+    block_end: int,
+    record: "_RejectRecorder",
+) -> Optional[_AmountOnlyCandidate]:
+    """금액만 있는 «세로형» 표 하나를 검산한다."""
+
+    header_start = _amount_only_heading_start(filing_text, unit_start)
+    block = filing_text[unit_end:block_end]
+    rows, total, overflow, periods = _amount_only_rows(block, unit_end)
+    if len(rows) < V2_MIN_ROWS:
+        record.reject(REJECT_ROWS_BELOW_MIN)
+        return None
+    if overflow:
+        record.reject(REJECT_ROWS_OVERFLOW)
+        return None
+    if total is None:
+        record.reject(REJECT_NO_TOTAL_ROW)
+        return None
+    if periods < 1 or len(total.amounts) != periods:
+        record.reject(REJECT_PERIODS_MISSING)
+        return None
+    header_end = rows[0].name_start
+    header = filing_text[header_start:header_end]
+    if header_end <= header_start:
+        record.reject(REJECT_NO_HEADING)
+        return None
+    excerpt = filing_text[header_start:total.amounts[-1].end]
+    if _has_ratio_column(excerpt):
+        record.reject(REJECT_RATIO_COLUMN_PRESENT)
+        return None
+    names = tuple(row.name for row in rows)
+    axis = _amount_only_axis(header, names, excerpt)
+    if axis is None:
+        record.reject(REJECT_AXIS_UNKNOWN)
+        return None
+    record.axis = axis
+    if not _amount_only_mentions_revenue(header, names + (total.name,)):
+        record.reject(REJECT_NOT_REVENUE)
+        return None
+    units = revenue_units_in(header)
+    if not units:
+        record.reject(REJECT_UNIT_UNKNOWN)
+        return None
+    if len(units) > 1:
+        record.reject(REJECT_UNIT_CONFLICT)
+        return None
+    # ★ 유일한 관문 — 첫 기간(당기) 금액의 합이 합계와 «글자 그대로» 맞아야 한다.
+    if not revenue_amounts_sum_to_total(
+        (row.amounts[0].text for row in rows), total.amounts[0].text
+    ):
+        record.reject(REJECT_SUM_MISMATCH)
+        return None
+    trimmed_rows = tuple(
+        _AmountOnlyRow(
+            name=row.name,
+            name_start=row.name_start,
+            name_end=row.name_end,
+            amounts=(row.amounts[0],),
+            source_index=row.source_index,
+        )
+        for row in rows
+    )
+    trimmed_total = _AmountOnlyRow(
+        name=total.name,
+        name_start=total.name_start,
+        name_end=total.name_end,
+        amounts=(total.amounts[0],),
+        source_index=total.source_index,
+    )
+    return _AmountOnlyCandidate(
+        axis=axis,
+        shape=REVENUE_SHAPE_AMOUNT_ONLY_VERTICAL,
+        unit=units[0],
+        header_start=header_start,
+        header_end=header_end,
+        header=header,
+        rows=trimmed_rows,
+        total=trimmed_total,
+        fingerprint=_amount_only_fingerprint(
+            REVENUE_SHAPE_AMOUNT_ONLY_VERTICAL, trimmed_rows, trimmed_total
+        ),
+    )
+
+
+def _horizontal_amount_only_candidate(
+    filing_text: str,
+    unit_start: int,
+    unit_end: int,
+    block_end: int,
+    record: "_RejectRecorder",
+) -> Optional[_AmountOnlyCandidate]:
+    """지역이 «열 머리말»에 있는 가로형 표 하나를 세로형 행으로 전치한다."""
+
+    header_start = _amount_only_heading_start(filing_text, unit_start)
+    zone = filing_text[unit_end:block_end]
+    label = _AMOUNT_ONLY_ROW_LABEL_RE.search(zone)
+    while label is not None:
+        run = re.match(rf"(?:\s+{REVENUE_AMOUNT_RE.pattern})+", zone[label.end():])
+        if run is not None:
+            break
+        label = _AMOUNT_ONLY_ROW_LABEL_RE.search(zone, label.end())
+    if label is None:
+        record.reject(REJECT_ROWS_BELOW_MIN)
+        return None
+    header_end = unit_end + label.end()
+    header = filing_text[header_start:header_end]
+    cells = _amount_cells(zone, unit_end, run.group(0), label.end())  # type: ignore[union-attr]
+    if len(cells) < AMOUNT_ONLY_MIN_COLUMNS + 1:
+        record.reject(REJECT_ROWS_BELOW_MIN)
+        return None
+    if len(cells) - 1 > MAX_ROWS:
+        record.reject(REJECT_ROWS_OVERFLOW)
+        return None
+    names = revenue_region_names_in(header)
+    if names:
+        # 지역 이름이 하나라도 잡히면 이 후보는 «지역 표가 될 뻔한» 것이다.
+        # 뒤에 떨어져도 그 사유를 지역 축에 적어야 진단이 좁혀진다.
+        record.axis = REVENUE_AXIS_REGION
+    total_heads = tuple(_AMOUNT_ONLY_TOTAL_HEAD_RE.finditer(header))
+    if not total_heads:
+        record.reject(REJECT_HORIZONTAL_NO_TOTAL)
+        return None
+    if len(names) != len(cells) - 1:
+        # 이름 수와 금액 수가 안 맞으면 «맞춰 보지 않는다». 한 칸만 밀려도
+        # 국내 매출이 「해외」 이름을 달고 나간다.
+        record.reject(REJECT_HORIZONTAL_NAMES_UNMATCHED)
+        return None
+    units = revenue_units_in(header)
+    if not units:
+        record.reject(REJECT_UNIT_UNKNOWN)
+        return None
+    if len(units) > 1:
+        record.reject(REJECT_UNIT_CONFLICT)
+        return None
+    if not revenue_amounts_sum_to_total(
+        (cell.text for cell in cells[:-1]), cells[-1].text
+    ):
+        record.reject(REJECT_SUM_MISMATCH)
+        return None
+    excerpt = filing_text[header_start:cells[-1].end]
+    if _has_ratio_column(excerpt):
+        record.reject(REJECT_RATIO_COLUMN_PRESENT)
+        return None
+    if revenue_text_axis(excerpt) != REVENUE_AXIS_REGION:
+        record.reject(REJECT_AXIS_UNKNOWN)
+        return None
+    rows = tuple(
+        _AmountOnlyRow(
+            name=clean_name(name.text),
+            name_start=header_start + name.start,
+            name_end=header_start + name.end,
+            amounts=(cell,),
+            source_index=index,
+        )
+        for index, (name, cell) in enumerate(zip(names, cells[:-1]))
+    )
+    if any(not row.name or is_revenue_total_name_v2(row.name) for row in rows):
+        record.reject(REJECT_HORIZONTAL_NAMES_UNMATCHED)
+        return None
+    total_head = total_heads[-1]
+    total = _AmountOnlyRow(
+        name=clean_name(total_head.group(0)),
+        name_start=header_start + total_head.start(),
+        name_end=header_start + total_head.end(),
+        amounts=(cells[-1],),
+        source_index=len(rows),
+    )
+    return _AmountOnlyCandidate(
+        axis=REVENUE_AXIS_REGION,
+        shape=REVENUE_SHAPE_AMOUNT_ONLY_HORIZONTAL,
+        unit=units[0],
+        header_start=header_start,
+        header_end=header_end,
+        header=header,
+        rows=rows,
+        total=total,
+        fingerprint=_amount_only_fingerprint(
+            REVENUE_SHAPE_AMOUNT_ONLY_HORIZONTAL, rows, total
+        ),
+    )
+
+
+def _amount_only_mentions_revenue(header: str, names: tuple[str, ...]) -> bool:
+    """비중 없는 표가 「매출」을 말하고 있는지 «좁은» 목록으로 묻는다."""
+
+    haystack = re.sub(r"\s+", "", f"{header} {' '.join(names)}")
+    return not any(
+        word in haystack for word in AMOUNT_ONLY_NON_REVENUE_WORDS
+    ) and any(word in haystack for word in AMOUNT_ONLY_REVENUE_WORDS)
+
+
+def _period_tail_offset(raw: str) -> int:
+    """첫 행 이름 앞의 기간 열 «꼬리»가 원문에서 차지하는 길이.
+
+    ★ 문자열만 다듬지 않고 «원문 좌표»를 옮긴다 — 공개 이름과 봉인된 원문
+      칸이 글자 하나까지 같아야 검증기가 그 행을 인정한다.
+    ★ 왜 첫 행만인가 — 둘째 행부터는 이름이 앞 행의 금액 뒤에서 시작하므로
+      꼬리가 붙지 않는다. 손대는 범위를 첫 행으로 못 박는다.
+    """
+
+    offset = 0
+    while True:
+        token = re.match(r"(\s*)(\S+)(\s+)(?=\S)", raw[offset:])
+        if token is None or token.group(2) not in AMOUNT_ONLY_PERIOD_TAIL_TOKENS:
+            return offset
+        offset += token.end(3)
+
+
+def _amount_only_payload(
+    filing_text: str, cite: str, candidate: _AmountOnlyCandidate
+) -> RevenueTablePayload:
+    """비중 없는 표를 「구분 · 금액」 두 열로 만들고 행마다 원문을 결속한다."""
+
+    headers = revenue_amount_only_headers(candidate.unit)
+    source_rows = candidate.rows + (candidate.total,)
+    rows = [[row.name, row.amounts[0].text] for row in source_rows]
+    excerpt_start = candidate.header_start
+    excerpt_end = candidate.total.amounts[0].end
+    evidence_rows = [
+        build_revenue_amount_only_row_evidence(
+            filing_text=filing_text,
+            header_start=candidate.header_start,
+            header_end=candidate.header_end,
+            excerpt_start=excerpt_start,
+            excerpt_end=excerpt_end,
+            shape=candidate.shape,
+            name_span=(row.name_start, row.name_end),
+            amount_span=(row.amounts[0].start, row.amounts[0].end),
+            total_name_span=(candidate.total.name_start, candidate.total.name_end),
+            total_amount_span=(
+                candidate.total.amounts[0].start,
+                candidate.total.amounts[0].end,
+            ),
+            source_index=row.source_index,
+            selected_index=index,
+            row_count=len(candidate.rows),
+            public_row=rows[index],
+            axis=candidate.axis,
+            headers=headers,
+        )
+        for index, row in enumerate(source_rows)
+    ]
+    해 = year_of(candidate.header)
+    caption = AMOUNT_ONLY_CAPTION_BY_AXIS[candidate.axis]
+    return {
+        "axis": candidate.axis,
+        "caption": (
+            f"{caption}{f' ({해}년)' if 해 else ''} · {FOOTNOTE_WITHOUT_RATIO}"
+        ),
+        "headers": list(headers),
+        "rows": rows,
+        "cite": cite,
+        "raw_rows": [list(row) for row in rows],
+        "evidence_rows": evidence_rows,
+    }
+
+
+class _RejectRecorder:
+    """한 후보가 왜 떨어졌는지를 «축이 알려진 만큼» 좁혀 적는다."""
+
+    def __init__(self, sink: dict[str, set[str]]) -> None:
+        self._sink = sink
+        self.axis: Optional[RevenueAxis] = None
+
+    def reject(self, code: str) -> None:
+        키 = self.axis if self.axis is not None else "축미상"
+        self._sink.setdefault(키, set()).add(code)
+
+
+def _axis_reject_reasons(sink: dict[str, set[str]]) -> dict[str, list[str]]:
+    """축별 코드에 「축을 못 읽고 떨어진」 코드를 더해 정리한다."""
+
+    common = sink.get("축미상", set())
+    return {
+        axis: sorted(sink.get(axis, set()) | common)
+        for axis in (REVENUE_AXIS_PRODUCT, REVENUE_AXIS_REGION)
+    }
+
+
+def _amount_only_candidates(
+    filing_text: str, sink: dict[str, set[str]]
+) -> tuple[list[_AmountOnlyCandidate], int]:
+    """비중 없는 표 후보를 「(단위」 표시마다 한 번씩 세워 본다."""
+
+    anchors = tuple(_UNIT_MARK_RE.finditer(filing_text))
+    candidates: list[_AmountOnlyCandidate] = []
+    seen: set[str] = set()
+    for index, anchor in enumerate(anchors):
+        following = (
+            anchors[index + 1].start() if index + 1 < len(anchors) else len(filing_text)
+        )
+        block_end = min(anchor.end() + AMOUNT_ONLY_ROW_SCAN_CHARS, following)
+        if block_end <= anchor.end():
+            continue
+        # ⚠️ 되짚는 표제까지 «포함해» 본다. 「주요 지역별 매출 현황」처럼
+        #   매출이라는 말이 단위 표시 «앞»에 있는 표가 많다 — 창을 좁게 잡으면
+        #   진짜 표가 조용히 사라진다(가공 시험에서 실제로 잡혔다).
+        if not _AMOUNT_ONLY_REVENUE_PREGATE.search(
+            re.sub(
+                r"\s+",
+                "",
+                filing_text[
+                    max(0, anchor.start() - AMOUNT_ONLY_HEADING_LOOKBACK):block_end
+                ],
+            )
+        ):
+            # 두 갈래의 매출 관문이 «모두» 요구하는 말이 구간 어디에도 없다.
+            # 어차피 떨어질 후보에 정규식 두 벌을 돌리지 않는다(판정은 그대로).
+            continue
+        for builder in (
+            _horizontal_amount_only_candidate,
+            _vertical_amount_only_candidate,
+        ):
+            record = _RejectRecorder(sink)
+            candidate = builder(
+                filing_text, anchor.start(), anchor.end(), block_end, record
+            )
+            if candidate is None:
+                continue
+            if candidate.fingerprint in seen:
+                record.reject(REJECT_DUPLICATE_TABLE)
+                continue
+            seen.add(candidate.fingerprint)
+            candidates.append(candidate)
+            break
+    return candidates, len(anchors)
+
+
 def _v2_payload(
     filing_text: str, cite: str, candidate: _V2Candidate
 ) -> RevenueTablePayload:
@@ -938,18 +1492,36 @@ def _build_v2(
         seen.add(candidate.fingerprint)
         candidates.append(candidate)
 
+    # 비중 열이 없는 표는 여기서 따로 찾는다. 비중 있는 표가 «이긴다» —
+    # 이미 나가던 표의 내용이 이 변경으로 달라지면 안 되기 때문이다.
+    axis_reasons: dict[str, set[str]] = {}
+    for 사유 in reasons:
+        axis_reasons.setdefault("축미상", set()).add(
+            V2_REASON_CODES.get(사유, REJECT_NO_RATIO_COLUMN)
+        )
+    amount_only, unit_anchor_count = _amount_only_candidates(filing_text, axis_reasons)
+
     tables: list[RevenueTablePayload] = []
     for axis in (REVENUE_AXIS_PRODUCT, REVENUE_AXIS_REGION):
         same_axis = [item for item in candidates if item.axis == axis]
-        if not same_axis:
+        if same_axis:
+            best = min(same_axis, key=lambda item: (-item.score, item.header_start))
+            tables.append(_v2_payload(filing_text, cite, best))
             continue
-        best = min(same_axis, key=lambda item: (-item.score, item.header_start))
-        tables.append(_v2_payload(filing_text, cite, best))
+        fallback = [item for item in amount_only if item.axis == axis]
+        if not fallback:
+            continue
+        # 같은 축 후보가 여럿이면 «먼저 나온» 것을 쓴다 — 주석의 당기 표가
+        # 전기 표보다 앞에 실리는 것이 DART 서식의 규칙이다.
+        chosen = min(fallback, key=lambda item: item.header_start)
+        tables.append(_amount_only_payload(filing_text, cite, chosen))
     diagnostics: RevenueTableDiagnostics = {
         "경로": "v2",
         "후보_표_수": len(runs),
+        "단위표시_수": unit_anchor_count,
         "채택_표_수": len(tables),
         "탈락_사유": reasons,
+        "축별_탈락사유": _axis_reject_reasons(axis_reasons),
     }
     return tables, diagnostics
 
@@ -1129,8 +1701,11 @@ def build_with_diagnostics(
     return tables, {
         "경로": "v1",
         "후보_표_수": len(tables),
+        "단위표시_수": 0,
         "채택_표_수": len(tables),
         "탈락_사유": {},
+        # v1은 표제 목록으로만 찾는다 — 후보를 세지 않으므로 축별 사유도 없다.
+        "축별_탈락사유": {REVENUE_AXIS_PRODUCT: [], REVENUE_AXIS_REGION: []},
     }
 
 

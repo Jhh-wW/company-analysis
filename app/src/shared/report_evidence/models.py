@@ -205,6 +205,10 @@ class CollectionAttempt:
     elapsed_ms: int = 0
     bytes_downloaded: int = 0
     documents_seen: int = 0
+    #: 열어 보려고 «시도한» 문서 수. ``documents_seen``은 그중 근거 문서로
+    #: 등록된 수라 둘은 다르다. 한 칸에 적으면 「0건 시도 · 수십만 바이트
+    #: 수신」 같은 모순 표시가 된다.
+    documents_attempted: int = 0
 
     def __post_init__(self) -> None:
         _require_text(self.company_id, label="회사 식별자")
@@ -216,7 +220,15 @@ class CollectionAttempt:
         _require_reason_codes(
             (self.reason_code,), label="수집 결과 사유 코드", allow_empty=False
         )
-        if min(self.elapsed_ms, self.bytes_downloaded, self.documents_seen) < 0:
+        if (
+            min(
+                self.elapsed_ms,
+                self.bytes_downloaded,
+                self.documents_seen,
+                self.documents_attempted,
+            )
+            < 0
+        ):
             raise ValueError("수집 시간·바이트·문서 수는 음수일 수 없습니다")
 
 

@@ -1897,7 +1897,12 @@ def _dns_answer(ip: str) -> list[tuple]:
     "redirect_url",
     [
         "https://cdn.example/ir/results.pdf",
-        "http://company.example/ir/results.pdf",
+        # 다른 host로의 http 강등은 그대로 거부한다. 같은 host의 http 강등만
+        # https 승격 대상이고(아래 승격 시험), 그 예외는 host를 넘지 않는다.
+        "http://cdn.example/ir/results.pdf",
+        # 같은 host라도 포트를 명시하면 승격하지 않는다 — https로 바꾸면
+        # 「명시된 다른 포트」로 접속하게 되기 때문이다.
+        "http://company.example:8080/ir/results.pdf",
     ],
 )
 def test_pdf리다이렉트는_다른호스트와_https강등을_연결전에_거부한다(
@@ -1980,3 +1985,103 @@ def test_pdf초기주소가_사설망이면_소켓을열기전에_거부한다()
             timeout=1,
             expected_hostname="127.0.0.1",
         )
+
+
+# ── 공식 영문명의 대문자 약칭 ────────────────────────────────────────────
+# 회사 공식 사이트 IR 게시판에서 받은 실제 PDF는 앞쪽 표지에 법인명 전체가
+# 아니라 대문자 약칭만 싣는 경우가 많다(2026-09-07 실측: 534,961바이트 PDF의
+# 앞 4쪽에 약칭만 존재해 파싱은 성공했는데 신원 대조에서 통째로 버려졌다).
+
+_ACRONYM_COMPANY_NAME = "주식회사 가나다전자"
+_ACRONYM_ALIASES = ("GND Electronics Corporation",)
+_ACRONYM_COVER_PAGES = (
+    "GND 2026 상반기 실적 발표 자료입니다. 투자자 여러분께 알려 드립니다.",
+)
+
+
+def _acronym_terms(
+    *,
+    aliases: tuple[str, ...] = _ACRONYM_ALIASES,
+    origin_identity_bound: bool,
+) -> ir_pdf._CompanyIdentityTerms:
+    return ir_pdf._company_identity_terms(
+        _ACRONYM_COMPANY_NAME,
+        aliases,
+        homepage_hostname="ganada-example.co.kr",
+        origin_identity_bound=origin_identity_bound,
+    )
+
+
+def test_결속된_공식origin의_PDF는_영문명_약칭만_있어도_신원을_인정한다():
+    terms = _acronym_terms(origin_identity_bound=True)
+
+    assert "gnd" in terms.acronyms
+    assert ir_pdf._identity_matches(_ACRONYM_COVER_PAGES, terms)
+
+
+def test_결속되지_않은_출처는_같은_약칭이라도_신원을_인정하지_않는다():
+    terms = _acronym_terms(origin_identity_bound=False)
+
+    assert terms.acronyms == frozenset()
+    assert not ir_pdf._identity_matches(_ACRONYM_COVER_PAGES, terms)
+
+
+def test_두글자_공식약칭도_인정한다():
+    terms = _acronym_terms(
+        aliases=("GD Chemicals Corporation",),
+        origin_identity_bound=True,
+    )
+
+    assert "gd" in terms.acronyms
+    assert ir_pdf._identity_matches(
+        ("GD 2026 상반기 실적 발표 자료입니다.",), terms
+    )
+
+
+def test_일반어는_공식약칭이어도_신원증거로_쓰지_않는다():
+    terms = _acronym_terms(
+        aliases=("GROUP Corporation",),
+        origin_identity_bound=True,
+    )
+
+    assert terms.acronyms == frozenset()
+    assert not ir_pdf._identity_matches(
+        ("GROUP 2026 상반기 실적 발표 자료입니다.",), terms
+    )
+
+
+def test_약칭은_독립_토큰일_때만_맞는다():
+    """긴 단어 속에 우연히 들어간 글자는 신원 증거가 아니다."""
+
+    terms = _acronym_terms(origin_identity_bound=True)
+
+    assert not ir_pdf._identity_matches(
+        ("GNDX 2026 상반기 실적 발표 자료입니다.",), terms
+    )
+
+
+def test_공식IR_수집경로는_약칭만_있는_PDF를_결속된_origin으로_받아_쓴다():
+    """운영 수집 함수를 그대로 불러 배선을 확인한다."""
+
+    pdf_url = "https://company.example/ir/2026-h1.pdf"
+    content = _pdf_bytes(
+        "GND 2026 investor relations briefing.\n"
+        "Alpha competes with Beta in memory products.",
+        "Gamma is a peer in the mobility market.",
+    )
+    site = _FakeSite(
+        html={ROOT: '<a href="/ir/2026-h1.pdf">2026 상반기 IR 자료</a>'},
+        pdf={pdf_url: FetchedIrPdf(content, pdf_url, "application/pdf")},
+    )
+
+    result = collect_official_ir_fragments(
+        ROOT,
+        company_name=_ACRONYM_COMPANY_NAME,
+        company_aliases=_ACRONYM_ALIASES,
+        html_fetch=site.fetch_html,
+        pdf_fetch=site.fetch_pdf,
+    )
+
+    assert result.state == "ok"
+    assert result.attempted_documents == 1
+    assert {fragment["출처"] for fragment in result.fragments} == {pdf_url}

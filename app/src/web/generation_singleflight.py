@@ -1077,9 +1077,18 @@ class GenerationSession:
                         with self._lock:
                             self._key = key
                             self._state = "failed"
+                        # DB에 오래되거나 손상된 값이 들어 있어도 예외·로그에 원문을
+                        # 옮기지 않는다. 현재 생산자가 쓰는 failure code 모양만 받는다.
+                        failure_code = str(acquired.failure_code or "").strip()
+                        if (
+                            not failure_code
+                            or len(failure_code) > 80
+                            or not failure_code.replace("_", "a").isalnum()
+                            or not failure_code.isascii()
+                        ):
+                            failure_code = "generation_failed"
                         raise generation_coordination.GenerationOwnerFailed(
-                            f"먼저 시작한 보고서 생성이 실패했습니다: "
-                            f"{acquired.failure_code or 'generation_failed'}"
+                            failure_code
                         )
             except generation_coordination.GenerationCoordinationError:
                 raise
@@ -1401,9 +1410,12 @@ class GenerationSession:
             raise GenerationSingleflightUnavailable(
                 "보고서 생성 실패 fan-out을 저장하지 못했습니다"
             ) from exc
-        if failed:
-            with self._lock:
-                self._state = "failed"
+        if not failed:
+            raise GenerationSingleflightUnavailable(
+                "보고서 생성 실패 fan-out의 owner lease를 확인하지 못했습니다"
+            )
+        with self._lock:
+            self._state = "failed"
 
     def cancel_waiter(self) -> None:
         """waiter만 깨우고 owner lease는 바꾸지 않는다."""

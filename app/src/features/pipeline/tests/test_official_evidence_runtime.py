@@ -59,6 +59,7 @@ from src.shared.report_evidence.constants import (
     EvidenceReadiness,
     ReleaseMode,
     SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_OFFICIAL_IR_PDF,
     SOURCE_KIND_OFFICIAL_WEB_PAGE,
     SourceRequirement,
     SourceTier,
@@ -659,13 +660,20 @@ def test_FULL_formal수집_뒤에는_legacy홈페이지와_IR을_다시_열거�
         "step": "6_수집_홈페이지",
         "조각수": len(REQUIRED_EVIDENCE_SECTION_IDS),
         "후보범위완전": True,
+        # sitemap 목록 실패와 상한 절단은 본문 실패와 따로 센다.
+        "sitemap실패": 0,
+        "절단": 0,
     }
     assert next(step for step in steps if step.get("step") == "6_수집_공식IR") == {
         "step": "6_수집_공식IR",
         "없음": "정식 공식 IR 수집에서 사용할 근거를 찾지 못했습니다",
+        # 「시도한 문서 수」와 「등록한 문서 수」를 따로 적는다.
         "문서시도": 0,
+        "문서등록": 0,
         "PDF바이트": 0,
         "후보범위완전": False,
+        "sitemap실패": 0,
+        "절단": 0,
     }
 
 
@@ -1354,3 +1362,489 @@ def test_FULL은_재무API_자료없음_비상장사도_snapshot결속_실패로
     assert any(
         step.get("step") == "6_수집_생성신원_재무자료없음" for step in steps
     ), [step.get("step") for step in steps]
+
+
+# ── 부분 성공과 실패의 분리 ─────────────────────────────────────────────
+# 2026-09-07 실측: 문서 9건을 모은 실행이 sitemap robots 차단 1건·쪽수 상한
+# 2건 때문에 통째로 「오류: 정식 공식 웹 자료 확인을 끝까지 마치지
+# 못했습니다」로 뒤집혔다. sitemap 목록 조회는 «후보를 찾는 보조 목록»이라
+# 막혀도 본문을 못 읽었다는 뜻이 아니고, 상한 절단은 「끝까지 못 봤다」이지
+# 「열지 못했다」가 아니다.
+#
+# 시도 식별자 접두어(sitemap-·page-·truncation-)는 생산부
+# wide_collect._CollectionState.next_attempt_id가 붙이는 실제 형식이다.
+
+_PARTIAL_SITEMAP_FAILURE_COUNT = 1
+_PARTIAL_TRUNCATION_COUNT = 2
+
+
+def _web_attempt(
+    attempt_id: str,
+    *,
+    state: CollectionState,
+    reason_code: str,
+    section_id: str,
+) -> CollectionAttempt:
+    return CollectionAttempt(
+        company_id=CORP_ID,
+        attempt_id=attempt_id,
+        source_kind=SOURCE_KIND_OFFICIAL_WEB_PAGE,
+        requirement=SourceRequirement.OPTIONAL,
+        state=state,
+        slot_ids=collector_slots_for(section_id),
+        reason_code=reason_code,
+    )
+
+
+def _official_result_with_attempts(
+    *,
+    attempt_specs: tuple[tuple[str, CollectionState, str], ...],
+    keep_documents: bool,
+) -> OfficialEvidenceCollectionResult:
+    """아홉 장 정식 결과에 조회 기록만 갈아 끼운다."""
+
+    base = _official_result()
+    first = base.candidates[0]
+    attempts = tuple(
+        _web_attempt(
+            attempt_id,
+            state=state,
+            reason_code=reason_code,
+            section_id=first.section_id,
+        )
+        for attempt_id, state, reason_code in attempt_specs
+    )
+    candidates = (replace(first, attempts=attempts),) + base.candidates[1:]
+    if not keep_documents:
+        candidates = tuple(
+            replace(
+                candidate,
+                documents=(),
+                fragments=(),
+                candidate_readiness=EvidenceReadiness.UNKNOWN,
+                estimated_tokens=0,
+            )
+            for candidate in candidates
+        )
+    return OfficialEvidenceCollectionResult(
+        company_id=base.company_id,
+        candidates=candidates,
+    )
+
+
+def _official_result_with_partial_failures() -> OfficialEvidenceCollectionResult:
+    """문서 9건 + sitemap robots 차단 1건 + 쪽수 상한 절단 2건."""
+
+    return _official_result_with_attempts(
+        attempt_specs=(
+            ("sitemap-0001", CollectionState.FAILED, "robots_disallowed"),
+            ("truncation-0001", CollectionState.TRUNCATED, "truncated_page_cap"),
+            ("truncation-0002", CollectionState.TRUNCATED, "truncated_page_cap"),
+        ),
+        keep_documents=True,
+    )
+
+
+def _woori_owner_failure_shape() -> OfficialEvidenceCollectionResult:
+    """우리은행 운영 실패와 같은 독립 문서·웹 실패 모양을 만든다.
+
+    아홉 장은 모두 READY지만 독립 문서는 DART 3건과 공식 웹 1건뿐이다.
+    공식 웹과 IR의 선택 조회 실패도 함께 남겨, 표시용 부분 성공 판정이
+    출고 모드 사전검사를 가리거나 문서 수를 부풀리지 않는지 확인한다.
+    """
+
+    base = _official_result(document_count=4, variant="우리은행운영재현")
+    replacements: dict[str, CollectedEvidenceDocument] = {}
+    candidates: list[ChapterEvidenceCandidates] = []
+    for candidate in base.candidates:
+        original = candidate.documents[0]
+        document_index = int(original.document_id.rsplit("-", 1)[-1])
+        replacement = replacements.get(original.document_id)
+        if replacement is None:
+            if document_index == 0:
+                replacement = original
+            else:
+                receipt = f"2026031500012{document_index}"
+                replacement = replace(
+                    original,
+                    document_id=(
+                        f"{SOURCE_KIND_DART_BUSINESS_REPORT}:{receipt}"
+                    ),
+                    canonical_url=(
+                        "https://dart.fss.or.kr/dsaf001/main.do?rcpNo="
+                        + receipt
+                    ),
+                    source_kind=SOURCE_KIND_DART_BUSINESS_REPORT,
+                    publisher="금융감독원 전자공시시스템",
+                    title=f"사업보고서 (운영 재현 {document_index})",
+                    identity_binding=(
+                        f"corp_code={CORP_ID};rcept_no={receipt};"
+                        "identity_check=verified"
+                    ),
+                    domain_attestation_source_id="",
+                    domain_attestation_evidence="",
+                )
+            replacements[original.document_id] = replacement
+        fragments = tuple(
+            replace(fragment, document_id=replacement.document_id)
+            for fragment in candidate.fragments
+        )
+        candidates.append(
+            replace(
+                candidate,
+                documents=(replacement,),
+                fragments=fragments,
+            )
+        )
+
+    first = candidates[0]
+    candidates[0] = replace(
+        first,
+        attempts=(
+            _web_attempt(
+                "page-woori-0001",
+                state=CollectionState.FAILED,
+                reason_code="network_failed",
+                section_id=first.section_id,
+            ),
+            CollectionAttempt(
+                company_id=CORP_ID,
+                attempt_id="ir-pdf-woori-0001",
+                source_kind=SOURCE_KIND_OFFICIAL_IR_PDF,
+                requirement=SourceRequirement.OPTIONAL,
+                state=CollectionState.FAILED,
+                slot_ids=collector_slots_for(first.section_id),
+                reason_code="network_failed",
+            ),
+        ),
+    )
+    return OfficialEvidenceCollectionResult(
+        company_id=base.company_id,
+        candidates=tuple(candidates),
+    )
+
+
+def test_우리은행_운영모양은_FULL패킷전에_문서하한_부분보고서로_전환된다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FULL 패킷의 5<8 실패를 더 이른 formal 4+최대3<8에서 피한다."""
+
+    official = _woori_owner_failure_shape()
+    homepage, official_ir = real._formal_official_web_summaries(official)
+    preflight = real.assess_official_evidence(official)
+
+    # 표시용 집계는 문서 1건을 실패 시도 때문에 잃거나 아홉 장만큼 중복해서
+    # 세지 않는다. IR은 실제 문서가 없으므로 실패 상태를 그대로 보존한다.
+    assert homepage.state == real.FORMAL_COLLECTION_STATE_PARTIAL
+    assert homepage.document_count == 1
+    assert homepage.registered_documents == 1
+    assert official_ir.state == "failed"
+    assert official_ir.document_count == 0
+    assert real._official_web_document_count(official) == 1
+
+    assert len(preflight.decision.ready_section_ids) == len(
+        REQUIRED_EVIDENCE_SECTION_IDS
+    )
+    assert preflight.decision.status.value == "READY_FOR_GENERATION"
+    assert preflight.independent_document_count == 4
+    assert preflight.dart_partial_fallback is True
+    assert preflight.dart_partial_reason == "too_few_documents_for_full"
+
+    _freeze_runtime(
+        monkeypatch,
+        mode=real.engine_mode.EngineMode.V2,
+        release_mode=ReleaseMode.FULL,
+    )
+    calls = _wire_runtime(monkeypatch, engine=FakeEngine())
+
+    result = _run(_Collector([official]))
+
+    assert result.outcome is Outcome.REPORT, result.message
+    assert calls.comparisons == []
+    assert len(calls.composers) == 1
+    assert calls.composers[0]["release_mode_override"] is ReleaseMode.SHADOW
+    steps = calls.composers[0]["steps"]
+    formal_step = next(
+        step
+        for step in steps
+        if step.get("step") == "6_수집_공식근거사전검사"
+    )
+    assert formal_step == {
+        "step": "6_수집_공식근거사전검사",
+        "후보장": len(REQUIRED_EVIDENCE_SECTION_IDS),
+        "준비장": len(REQUIRED_EVIDENCE_SECTION_IDS),
+        "독립문서수": 4,
+        "판정": "READY_FOR_GENERATION",
+        "사유코드": "",
+        "DART부분보고서전환": True,
+    }
+    assert {
+        "step": "6_수집_DART부분보고서전환",
+        "사유코드": "too_few_documents_for_full",
+    } in steps
+
+
+def test_문서를_모은_뒤_일부만_실패하면_오류가_아니라_부분으로_남는다() -> None:
+    homepage, _official_ir = real._formal_official_web_summaries(
+        _official_result_with_partial_failures()
+    )
+
+    assert homepage.state == real.FORMAL_COLLECTION_STATE_PARTIAL
+    assert homepage.document_count == len(REQUIRED_EVIDENCE_SECTION_IDS)
+    assert homepage.registered_documents == len(REQUIRED_EVIDENCE_SECTION_IDS)
+    # sitemap 실패와 절단은 「본문 페이지 실패」로 세지 않는다.
+    assert homepage.body_failure_count == 0
+    assert homepage.sitemap_failure_count == _PARTIAL_SITEMAP_FAILURE_COUNT
+    assert homepage.truncation_count == _PARTIAL_TRUNCATION_COUNT
+    assert real._official_web_collection_step(homepage) == {
+        "step": "6_수집_홈페이지",
+        "부분": "일부 후보를 확인하지 못했습니다",
+        "문서수": len(REQUIRED_EVIDENCE_SECTION_IDS),
+        "실패시도수": 0,
+        "sitemap실패": _PARTIAL_SITEMAP_FAILURE_COUNT,
+        "절단": _PARTIAL_TRUNCATION_COUNT,
+        "후보범위완전": False,
+    }
+
+
+def test_본문_페이지가_실패해도_문서를_모았으면_부분으로_남는다() -> None:
+    homepage, _official_ir = real._formal_official_web_summaries(
+        _official_result_with_attempts(
+            attempt_specs=(("page-0001", CollectionState.FAILED, "network_failed"),),
+            keep_documents=True,
+        )
+    )
+
+    assert homepage.state == real.FORMAL_COLLECTION_STATE_PARTIAL
+    assert real._official_web_collection_step(homepage)["실패시도수"] == 1
+
+
+def test_문서가_없고_본문_페이지가_실패하면_지금처럼_오류로_남는다() -> None:
+    homepage, _official_ir = real._formal_official_web_summaries(
+        _official_result_with_attempts(
+            attempt_specs=(("page-0001", CollectionState.FAILED, "network_failed"),),
+            keep_documents=False,
+        )
+    )
+
+    assert homepage.state == "failed"
+    assert homepage.document_count == 0
+    assert real._official_web_collection_step(homepage) == {
+        "step": "6_수집_홈페이지",
+        "오류": "정식 공식 웹 자료 확인을 끝까지 마치지 못했습니다",
+        "sitemap실패": 0,
+        "절단": 0,
+        "후보범위완전": False,
+    }
+
+
+def test_문서가_없고_본문_조회가_절단되면_자료없음이_아니라_오류다() -> None:
+    """상한 때문에 끝까지 못 본 실행을 완전한 「없음」으로 캐시하면 안 된다."""
+
+    homepage, _official_ir = real._formal_official_web_summaries(
+        _official_result_with_attempts(
+            attempt_specs=(
+                (
+                    "truncation-0001",
+                    CollectionState.TRUNCATED,
+                    "truncated_page_cap",
+                ),
+            ),
+            keep_documents=False,
+        )
+    )
+
+    assert homepage.state == "failed"
+    assert homepage.document_count == 0
+    assert homepage.truncation_count == 1
+    assert real._official_web_collection_step(homepage) == {
+        "step": "6_수집_홈페이지",
+        "오류": "정식 공식 웹 자료 확인을 끝까지 마치지 못했습니다",
+        "sitemap실패": 0,
+        "절단": 1,
+        "후보범위완전": False,
+    }
+
+
+def test_sitemap만_막힌_실행은_오류가_아니라_없음_완전으로_남는다() -> None:
+    """자바스크립트로 그리는 사이트는 sitemap이 403이어도 본문 실패가 아니다."""
+
+    homepage, _official_ir = real._formal_official_web_summaries(
+        _official_result_with_attempts(
+            attempt_specs=(("sitemap-0001", CollectionState.FAILED, "sitemap_failed"),),
+            keep_documents=False,
+        )
+    )
+
+    assert homepage.state == "none"
+    assert homepage.body_failure_count == 0
+    assert homepage.sitemap_failure_count == 1
+    assert real._official_web_collection_step(homepage) == {
+        "step": "6_수집_홈페이지",
+        "없음": "정식 공식 웹 수집에서 사용할 근거를 찾지 못했습니다",
+        "sitemap실패": 1,
+        "절단": 0,
+        # ★ sitemap은 후보를 찾는 보조 목록이라 후보 범위를 좁히지 않는다.
+        #   여기가 False로 돌아가면 「없음」이 다시 「오류」처럼 취급된다.
+        "후보범위완전": True,
+    }
+
+
+def test_부분_상태에서도_모은_문서가_모두_하류_조각으로_실린다() -> None:
+    """「부분」은 표시 문제일 뿐, 모은 근거를 버리는 상태가 아니다."""
+
+    result = _official_result_with_partial_failures()
+    homepage, _official_ir = real._formal_official_web_summaries(result)
+    assert homepage.state == real.FORMAL_COLLECTION_STATE_PARTIAL
+
+    merged, added = merge_official_evidence_fragments({}, result)
+
+    expected_documents = {
+        document.document_id
+        for candidate in result.candidates
+        for document in candidate.documents
+    }
+    assert added == len(expected_documents)
+    assert {str(raw["문서ID"]) for raw in merged.values()} == expected_documents
+
+
+def test_공식IR_단계는_시도한_문서수와_등록한_문서수를_따로_적는다() -> None:
+    """「문서 0개 시도 · PDF 534,961바이트」 같은 모순 표시를 막는다."""
+
+    summary = real._FormalOfficialSourceSummary(
+        state="ok",
+        detail="정식 공식 자료 수집 결과를 사용했습니다",
+        candidate_scope_complete=True,
+        fragment_count=4,
+        attempted_documents=3,
+        downloaded_pdf_bytes=534_961,
+        document_count=1,
+        registered_documents=1,
+    )
+
+    assert real._official_ir_collection_step(summary) == {
+        "step": "6_수집_공식IR",
+        "조각수": 4,
+        "문서시도": 3,
+        "문서등록": 1,
+        "PDF바이트": 534_961,
+        "상세": "정식 공식 자료 수집 결과를 사용했습니다",
+        "후보범위완전": True,
+        "sitemap실패": 0,
+        "절단": 0,
+    }
+
+
+def test_부분수집_요약은_운영_collect_배선에서_그대로_단계로_남는다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """단계 dict를 시험 안에서 따로 만들지 않고 운영 ``_collect``로 받는다."""
+
+    engine = FakeEngine()
+    official = _official_result_with_partial_failures()
+
+    def forbidden_legacy_collect(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("정식 수집 뒤 legacy 공식 웹 수집기를 다시 불렀습니다")
+
+    monkeypatch.setattr(real, "collect_homepage_fragments", forbidden_legacy_collect)
+    monkeypatch.setattr(
+        real, "collect_official_ir_fragments", forbidden_legacy_collect
+    )
+    monkeypatch.setattr(
+        real, "_typed_dart_collection_enabled", lambda _generation_mode: True
+    )
+    monkeypatch.setattr(real, "_collect_typed_dart", forbidden_legacy_collect)
+    counter = engine.UsageCounter()
+    financials, years = engine.fetch_financials(CORP_ID, counter)
+    steps: list[dict[str, Any]] = []
+    user_input, _card = _request()
+
+    real._collect(
+        engine,
+        engine._client(),
+        {
+            "status": "000",
+            "corp_code": CORP_ID,
+            "corp_name": "가나다전자",
+            "hm_url": "https://www.ganada.example",
+        },
+        user_input,
+        counter,
+        steps,
+        financials=financials,
+        fin_years=years,
+        filing=None,
+        generation_mode=real.engine_mode.EngineMode.V2,
+        corp_code=CORP_ID,
+        formal_official_evidence=official,
+    )
+
+    homepage_step = next(
+        step for step in steps if step.get("step") == "6_수집_홈페이지"
+    )
+    assert homepage_step == {
+        "step": "6_수집_홈페이지",
+        "부분": "일부 후보를 확인하지 못했습니다",
+        "문서수": len(REQUIRED_EVIDENCE_SECTION_IDS),
+        "실패시도수": 0,
+        "sitemap실패": _PARTIAL_SITEMAP_FAILURE_COUNT,
+        "절단": _PARTIAL_TRUNCATION_COUNT,
+        "후보범위완전": False,
+    }
+
+
+def test_부분_단계는_출처현황에서_자료없음으로_떨어지지_않는다() -> None:
+    """화면 한 줄까지 확인한다 — 모은 문서가 「자료 없음」이 되면 안 된다."""
+
+    steps = [
+        {
+            "step": "6_수집_홈페이지",
+            "부분": "일부 후보를 확인하지 못했습니다",
+            "문서수": 9,
+            "실패시도수": 0,
+            "sitemap실패": 1,
+            "절단": 2,
+            "후보범위완전": False,
+        },
+        {
+            "step": "6_수집_공식IR",
+            "부분": "일부 후보를 확인하지 못했습니다",
+            "문서수": 2,
+            "실패시도수": 1,
+            "sitemap실패": 0,
+            "절단": 0,
+            "후보범위완전": False,
+            "문서시도": 2,
+            "문서등록": 2,
+            "PDF바이트": 534_961,
+        },
+    ]
+
+    statuses = {status.name: status for status in real._sources_from(steps)}
+
+    assert statuses["회사 홈페이지"].state == "ok"
+    assert "문서 9건" in statuses["회사 홈페이지"].detail
+    assert statuses["회사 공식 IR"].state == "ok"
+    assert "문서 2건" in statuses["회사 공식 IR"].detail
+
+
+def test_부분_단계는_후보범위_완전이_아니므로_캐시로_굳지_않는다() -> None:
+    """「부분」은 실패를 감추는 라벨이 아니다 — 60일 캐시 자격은 그대로 막힌다."""
+
+    partial_steps = [
+        {
+            "step": "6_수집_홈페이지",
+            "부분": "일부 후보를 확인하지 못했습니다",
+            "문서수": 9,
+            "실패시도수": 0,
+            "sitemap실패": 1,
+            "절단": 2,
+            "후보범위완전": False,
+        },
+        {"step": "6_수집_공식IR", "없음": "없음", "후보범위완전": True},
+    ]
+
+    assert (
+        real._comparison_candidate_scope_complete(partial_steps, filing=None)
+        is False
+    )

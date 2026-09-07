@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from typing import Final, Literal, Optional, TypeAlias
@@ -42,10 +43,41 @@ REVENUE_HEADS_BY_AXIS: Final[dict[RevenueAxis, tuple[str, ...]]] = {
         "매출지역별",
     ),
 }
+#: 표제 목록을 «넓히기만» 하는 자리. ``REVENUE_HEADS_BY_AXIS``에 직접 넣지
+#: 않는 이유는 그 목록이 v1의 표 «경계»(``KNOWN_TABLE_HEADS``)를 정하기
+#: 때문이다 — 한 줄만 더해도 스위치를 끈 결과가 달라져 「v1 무변」을 더는
+#: 증명할 수 없다. 여기 있는 표제는 축을 읽고 후보에 가산점을 줄 때만 쓴다.
+#: ⚠️ 회사 이름은 넣지 않는다. 어느 회사 공시에나 나오는 서식 표제뿐이다.
+REVENUE_EXTRA_HEADS_BY_AXIS: Final[dict[RevenueAxis, tuple[str, ...]]] = {
+    REVENUE_AXIS_PRODUCT: (),
+    REVENUE_AXIS_REGION: (
+        "지역에 대한 공시",
+        "지역별 정보",
+        "주요 지역별 매출 현황",
+        "지역별 매출 현황",
+        "지역별 매출",
+    ),
+}
+#: 축을 읽을 때 쓰는 표제 전체(정본 + 넓힌 것). 순서는 정본이 먼저다.
+REVENUE_AXIS_HEADS_BY_AXIS: Final[dict[RevenueAxis, tuple[str, ...]]] = {
+    axis: tuple(
+        dict.fromkeys((*REVENUE_HEADS_BY_AXIS[axis], *REVENUE_EXTRA_HEADS_BY_AXIS[axis]))
+    )
+    for axis in (REVENUE_AXIS_PRODUCT, REVENUE_AXIS_REGION)
+}
 REVENUE_CAPTION_BY_AXIS: Final[dict[RevenueAxis, str]] = {
     REVENUE_AXIS_PRODUCT: "무엇을 팔아 번 돈인가 — 제품·서비스별 매출 비중",
     REVENUE_AXIS_REGION: "어디서 번 돈인가 — 지역별 매출 비중",
 }
+#: 비중 열이 «없는» 표의 캡션. 비중 표와 글자가 달라야 독자가 두 표를 혼동하지
+#: 않고, ``_caption_matches_axis``도 두 종류를 따로 알아본다.
+REVENUE_AMOUNT_ONLY_CAPTION_BY_AXIS: Final[dict[RevenueAxis, str]] = {
+    REVENUE_AXIS_PRODUCT: "무엇을 팔아 번 돈인가 — 제품·서비스별 매출액",
+    REVENUE_AXIS_REGION: "어디서 번 돈인가 — 지역별 매출액",
+}
+#: 비중 열이 없는 표에 붙이는 말. ★ 우리가 비중을 «계산해서» 채우지 않는다는
+#: 사실을 독자에게 그대로 말한다 (``revenuemix.constants.FOOTNOTE``의 짝).
+REVENUE_AMOUNT_ONLY_FOOTNOTE: Final[str] = "비중은 공시에 없어 적지 않았습니다"
 REVENUE_CHANGE_CAPTION_BY_AXIS: Final[dict[RevenueAxis, str]] = {
     REVENUE_AXIS_PRODUCT: "제품·서비스별 매출 비중 변화",
     REVENUE_AXIS_REGION: "지역별 매출 비중 변화",
@@ -148,6 +180,18 @@ def revenue_table_headers(unit: str) -> tuple[str, str, str]:
         raise ValueError("닫힌 목록에 없는 금액 단위입니다")
     return (REVENUE_HEADERS[0], revenue_amount_header(unit), REVENUE_HEADERS[2])
 
+
+def revenue_amount_only_headers(unit: str) -> tuple[str, str]:
+    """비중 열이 없는 표의 열 이름 두 개 — 「구분 · 매출액 (단위)」.
+
+    ★ 비어 있는 비중 열을 만들지 않는다. 없는 칸을 만들면 화면이 「비중을
+      못 읽었다」가 아니라 「비중이 0이다」로 보인다.
+    """
+
+    if unit not in REVENUE_UNIT_WORDS:
+        raise ValueError("닫힌 목록에 없는 금액 단위입니다")
+    return (REVENUE_HEADERS[0], revenue_amount_header(unit))
+
 #: 매출표 v2 — 「이름 + 금액 + 비중」 한 행의 모양. v1(``REVENUE_ROW_RE``)과
 #: **따로** 둔다. v1을 넓히면 스위치를 꺼도 옛 경로가 무는 행이 달라져
 #: 「스위치 OFF는 지금과 같다」를 더는 증명할 수 없기 때문이다.
@@ -197,6 +241,26 @@ REVENUE_ROW_RE_V2: Final[re.Pattern[str]] = re.compile(
 )
 REVENUE_MULTI_YEAR_SELECTION: Final[str] = "all-period-pairs"
 
+#: 비중 열이 «없는» 표의 행 선택 표시. 이 값이면 검증기가 이름·금액 두 좌표를
+#: 따로 확인하는 갈래로 간다 (비중 칸이 아예 없으므로 3칸 계약을 쓸 수 없다).
+REVENUE_AMOUNT_ONLY_SELECTION: Final[str] = "amount-only-cell"
+#: 비중 없는 표의 두 가지 «모양».
+#:   세로형 — 「이름 금액」이 한 줄에 이어진다(삼성전자 주요 지역별 매출 현황).
+#:   가로형 — 이름이 열 «머리말»에 있고 금액이 그 아래 한 줄에 이어진다.
+REVENUE_SHAPE_AMOUNT_ONLY_VERTICAL: Final[str] = "amount-only-vertical"
+REVENUE_SHAPE_AMOUNT_ONLY_HORIZONTAL: Final[str] = "amount-only-horizontal"
+REVENUE_AMOUNT_ONLY_SHAPES: Final[frozenset[str]] = frozenset(
+    {REVENUE_SHAPE_AMOUNT_ONLY_VERTICAL, REVENUE_SHAPE_AMOUNT_ONLY_HORIZONTAL}
+)
+#: 금액 한 칸의 모양. 행 정규식이 쓰는 것과 같은 조각이라 두 벌로 갈라지지 않는다.
+REVENUE_AMOUNT_RE: Final[re.Pattern[str]] = re.compile(_V2_AMOUNT)
+#: 비중 없는 세로형의 「이름 + 기간별 금액」 한 행. 생산자와 출고 검증기가
+#: 같은 패턴으로 행 번호·칸 경계를 다시 세야 ``selected_index``만 0으로 바꾼
+#: 다른 행이나 이름 앞부분을 자른 칸이 통과하지 않는다.
+REVENUE_AMOUNT_ONLY_ROW_RE: Final[re.Pattern[str]] = re.compile(
+    rf"([^\d%]{{2,80}}?)((?:\s+{REVENUE_AMOUNT_RE.pattern})+)(?=\s|$)"
+)
+
 #: 검증이 받아 주는 행 모양 후보. 생산자가 «어느 경로로 만들었든» 이 중
 #: 하나로 정확히 다시 잘려야 근거로 인정한다. 순서가 곧 우선순위다.
 REVENUE_ROW_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
@@ -239,6 +303,98 @@ REVENUE_AXIS_HINTS_BY_AXIS: Final[dict[RevenueAxis, tuple[str, ...]]] = {
 #: 축 어휘를 찾을 범위(글자). 머리말과 첫 행까지만 본다 — 표 전체를 훑으면
 #: 제품표 뒤쪽의 「국내」 한 단어에 지역표로 뒤집힌다.
 REVENUE_AXIS_HINT_WINDOW: Final[int] = 300
+
+# ══════════════════════════════════════════════════════════════════════
+# 가로형 표의 «지역 이름» 닫힌 어휘
+# ══════════════════════════════════════════════════════════════════════
+#
+# ★ 왜 닫힌 목록인가 — 가로형 표는 이름이 «열 머리말»에 있고, 태그를 지운
+#   평문에서는 열 경계가 사라진다. 실측(카카오 연결 주석)에서 머리말은
+#   「지역 지역 합계 국내(주1) 해외 아시아 북미 유럽 기타」인데 실제 열은
+#   국내(주1)·아시아·북미·유럽·기타 다섯이다. 「해외」는 네 열을 덮는 «묶음»
+#   이름이라 세면 안 된다. 띄어쓰기만 보고 이름을 세면 금액이 한 칸씩 밀려
+#   **국내 매출이 「해외」 이름을 달고 나간다.**
+# ⚠️ 회사 이름·업종 이름은 넣지 않는다. 어느 회사 공시에나 같은 말로 나오는
+#   지역 이름만 넣는다.
+
+#: 지역 «잎» 이름 — 실제로 한 열을 차지하는 이름. 긴 것을 먼저 적어야
+#: 「아시아 및 아프리카」 안의 「아시아」를 먼저 물지 않는다.
+REVENUE_REGION_LEAF_WORDS: Final[tuple[str, ...]] = (
+    "본사 소재지 국가",
+    "아시아 및 아프리카",
+    "아시아ㆍ아프리카",
+    "아시아·아프리카",
+    "기타 국가",
+    "아시아",
+    "아프리카",
+    "북미",
+    "남미",
+    "미주",
+    "유럽",
+    "중국",
+    "일본",
+    "미국",
+    "국내",
+    "내수",
+    "수출",
+    "기타",
+)
+
+#: 여러 열을 덮는 «묶음» 이름. 바로 뒤에 잎 이름이 이어지면 열이 아니다.
+REVENUE_REGION_GROUP_WORDS: Final[tuple[str, ...]] = ("해외", "외국", "국외")
+
+#: 잎·묶음을 한꺼번에 훑는 모양. 긴 이름이 먼저 오도록 목록 순서를 지킨다.
+_REGION_NAME_RE: Final[re.Pattern[str]] = re.compile(
+    "|".join(
+        re.escape(word)
+        for word in (*REVENUE_REGION_LEAF_WORDS, *REVENUE_REGION_GROUP_WORDS)
+    )
+)
+#: 「국내(주1)」처럼 이름 뒤에 붙는 주석 표시까지 이름으로 함께 문다.
+_REGION_NAME_SUFFIX_RE: Final[re.Pattern[str]] = re.compile(r"\(\s*주\s*\d*\s*\)")
+
+
+@dataclass(frozen=True)
+class RevenueRegionName:
+    """가로형 머리말에서 찾은 지역 이름 하나와 그 원문 좌표."""
+
+    text: str
+    start: int
+    end: int
+    is_group: bool
+
+
+def revenue_region_names_in(header: str) -> tuple[RevenueRegionName, ...]:
+    """머리말에서 «열이 되는» 지역 이름만 원문 좌표째 뽑는다.
+
+    묶음 이름(해외·외국·국외)은 **바로 뒤에 잎 이름이 이어질 때만** 버린다.
+    잎이 따로 없으면 그 묶음이 곧 한 열이다(실측: 「본사 소재지 국가 외국
+    지역 합계」는 두 열짜리 표다).
+    """
+
+    found: list[RevenueRegionName] = []
+    for match in _REGION_NAME_RE.finditer(str(header)):
+        if found and match.start() < found[-1].end:
+            continue                      # 앞 이름과 겹치면 건너뛴다
+        end = match.end()
+        suffix = _REGION_NAME_SUFFIX_RE.match(str(header), end)
+        if suffix is not None:
+            end = suffix.end()
+        found.append(
+            RevenueRegionName(
+                text=str(header)[match.start():end],
+                start=match.start(),
+                end=end,
+                is_group=match.group(0) in REVENUE_REGION_GROUP_WORDS,
+            )
+        )
+    kept: list[RevenueRegionName] = []
+    for index, name in enumerate(found):
+        following = found[index + 1] if index + 1 < len(found) else None
+        if name.is_group and following is not None and not following.is_group:
+            continue                      # 묶음 머리말 — 열이 아니다
+        kept.append(name)
+    return tuple(kept)
 
 _HEX_64_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _TOTAL_NAMES: Final[frozenset[str]] = frozenset({"합계", "총계", "계"})
@@ -460,11 +616,14 @@ def revenue_table_source_excerpt(evidence_rows: Sequence[str]) -> str:
 def _caption_matches_axis(axis: RevenueAxis, caption: str) -> bool:
     single_year = REVENUE_CAPTION_BY_AXIS[axis]
     change = REVENUE_CHANGE_CAPTION_BY_AXIS[axis]
+    amount_only = REVENUE_AMOUNT_ONLY_CAPTION_BY_AXIS[axis]
+    footnote = re.escape(f" · {REVENUE_AMOUNT_ONLY_FOOTNOTE}")
     return any(
         re.fullmatch(pattern, str(caption).strip()) is not None
         for pattern in (
             rf"{re.escape(single_year)}(?: \(20\d{{2}}년\))?",
             rf"{re.escape(change)} \(20\d{{2}}~20\d{{2}}\)",
+            rf"{re.escape(amount_only)}(?: \(20\d{{2}}년\))?{footnote}",
         )
     )
 
@@ -479,7 +638,7 @@ def _text_axis(value: str) -> RevenueAxis | None:
 
     matches = tuple(
         axis
-        for axis, heads in REVENUE_HEADS_BY_AXIS.items()
+        for axis, heads in REVENUE_AXIS_HEADS_BY_AXIS.items()
         if any(value.startswith(head) for head in heads)
     )
     if len(matches) == 1:
@@ -512,6 +671,27 @@ def _text_axis_by_hint(value: str) -> RevenueAxis | None:
     if len(found) > 1 and found[0][0] == found[1][0]:
         return None                      # 같은 자리에서 두 축이 겹치면 포기한다
     return found[0][1]
+
+
+def revenue_names_are_region_only(names: Iterable[str]) -> bool:
+    """행 이름이 «전부» 닫힌 지역 어휘로만 이뤄졌는지 본다.
+
+    ★ 왜 필요한가 — 「내수 국내 / 수출 미주 / 유럽 / 중국」처럼 이름만 보면
+      지역이 분명한데 머리말에 제품 어휘가 섞여 축이 뒤집히는 표가 있다.
+      이름이 «남김없이» 지역 말로만 이뤄질 때만 지역으로 못 박는다.
+    ⚠️ 합계 행은 넣지 않는다 — 「합계」는 지역이 아니다.
+    """
+
+    checked = 0
+    for raw in names:
+        name = _REGION_NAME_SUFFIX_RE.sub(" ", str(raw))
+        remainder = _REGION_NAME_RE.sub(" ", name)
+        if re.sub(r"[\sㆍ·,()/]+", "", remainder):
+            return False
+        if not _REGION_NAME_RE.search(name):
+            return False
+        checked += 1
+    return checked > 0
 
 
 def _header_axis_agrees(header: str, axis: RevenueAxis) -> bool:
@@ -827,6 +1007,104 @@ def build_revenue_multi_year_row_evidence(
                 zip(headers, (str(value) for value in raw_row))
             ),
             "numeric_checks": [str(value) for value in numeric_checks],
+        },
+        "public_fields": dict(zip(headers, (str(value) for value in public_row))),
+    }
+    return canonical_json(payload)
+
+
+def _absolute_span(
+    filing_text: str, excerpt_start: int, start: int, end: int
+) -> dict[str, object]:
+    """원문 한 조각의 «절대 좌표 + 인용 조각 안 좌표 + 지문»을 함께 봉인한다.
+
+    ★ 왜 두 좌표를 다 적나 — 가로형 표는 이름과 금액이 «떨어져» 있어 하나의
+      연속 문자열(raw_match)로 묶을 수가 없다. 그래서 칸마다 원문 좌표를 따로
+      남기고, 검증기가 인용 조각에서 같은 자리를 다시 잘라 대조한다.
+    """
+
+    value = filing_text[start:end]
+    return {
+        "value": value,
+        "start": start,
+        "end": end,
+        "excerpt_start": start - excerpt_start,
+        "excerpt_end": end - excerpt_start,
+        "sha256": sha256_text(value),
+    }
+
+
+def build_revenue_amount_only_row_evidence(
+    *,
+    filing_text: str,
+    header_start: int,
+    header_end: int,
+    excerpt_start: int,
+    excerpt_end: int,
+    shape: str,
+    name_span: tuple[int, int],
+    amount_span: tuple[int, int],
+    total_name_span: tuple[int, int],
+    total_amount_span: tuple[int, int],
+    source_index: int,
+    selected_index: int,
+    row_count: int,
+    public_row: Sequence[str],
+    axis: RevenueAxis,
+    headers: Sequence[str],
+) -> str:
+    """비중 열이 없는 표의 한 행에 이름·금액 두 원문 좌표를 붙인다.
+
+    비중 3칸 계약(``build_revenue_row_evidence``)은 손대지 않는다. 이미 발급된
+    봉인이 그 모양에 묶여 있어, 한 글자라도 바꾸면 저장본이 통째로 깨진다.
+    """
+
+    if shape not in REVENUE_AMOUNT_ONLY_SHAPES:
+        raise ValueError("비중 없는 매출표의 모양을 확인할 수 없습니다")
+    if len(headers) != 2 or len(public_row) != 2:
+        raise ValueError("비중 없는 매출표는 구분·금액 두 열이어야 합니다")
+
+    def span(bounds: tuple[int, int]) -> dict[str, object]:
+        return _absolute_span(filing_text, excerpt_start, bounds[0], bounds[1])
+
+    payload = {
+        "schema": REVENUE_ROW_PROVENANCE_SCHEMA,
+        "extractor": {
+            "name": REVENUE_EXTRACTOR_NAME,
+            "version": REVENUE_EXTRACTOR_VERSION,
+        },
+        "source": {
+            "filing_sha256": sha256_text(filing_text),
+            "excerpt": filing_text[excerpt_start:excerpt_end],
+            "start": excerpt_start,
+            "end": excerpt_end,
+            "sha256": sha256_text(filing_text[excerpt_start:excerpt_end]),
+        },
+        "table": {
+            "axis": axis,
+            "shape": shape,
+            "complete": True,
+            "row_count": row_count,
+            "max_rows": REVENUE_MAX_ROWS,
+            "header": {
+                "text": filing_text[header_start:header_end],
+                "start": header_start,
+                "end": header_end,
+                "excerpt_start": header_start - excerpt_start,
+                "excerpt_end": header_end - excerpt_start,
+                "sha256": sha256_text(filing_text[header_start:header_end]),
+            },
+            "total": {
+                "name": span(total_name_span),
+                "amount": span(total_amount_span),
+            },
+        },
+        "row": {
+            "name": span(name_span),
+            "amount": span(amount_span),
+            "selection": REVENUE_AMOUNT_ONLY_SELECTION,
+            "source_index": source_index,
+            "selected_index": selected_index,
         },
         "public_fields": dict(zip(headers, (str(value) for value in public_row))),
     }
@@ -1299,6 +1577,374 @@ def _multi_year_revenue_row_evidence_matches(
     )
 
 
+def _amount_only_span_value(
+    payload: object,
+    *,
+    excerpt: str,
+    excerpt_absolute_start: int,
+) -> str | None:
+    """봉인된 한 칸 좌표를 인용 조각에서 다시 잘라 글자까지 대조한다."""
+
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "value",
+        "start",
+        "end",
+        "excerpt_start",
+        "excerpt_end",
+        "sha256",
+    }:
+        return None
+    value = payload.get("value")
+    start, end = _integer(payload.get("start")), _integer(payload.get("end"))
+    local_start = _integer(payload.get("excerpt_start"))
+    local_end = _integer(payload.get("excerpt_end"))
+    if (
+        not isinstance(value, str)
+        or not value
+        or start is None
+        or end is None
+        or local_start is None
+        or local_end is None
+        or start != excerpt_absolute_start + local_start
+        or end != excerpt_absolute_start + local_end
+        or end - start != len(value)
+        or local_start < 0
+        or local_end > len(excerpt)
+        or excerpt[local_start:local_end] != value
+        or payload.get("sha256") != sha256_text(value)
+    ):
+        return None
+    return value
+
+
+def _amount_only_header_matches(
+    payload: object,
+    *,
+    excerpt: str,
+    excerpt_absolute_start: int,
+) -> bool:
+    """비중 열이 없는 표의 머리말 봉인. 「비중 열 이름」만 요구하지 않는다."""
+
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "text",
+        "start",
+        "end",
+        "excerpt_start",
+        "excerpt_end",
+        "sha256",
+    }:
+        return False
+    text = payload.get("text")
+    start, end = _integer(payload.get("start")), _integer(payload.get("end"))
+    local_start = _integer(payload.get("excerpt_start"))
+    local_end = _integer(payload.get("excerpt_end"))
+    return bool(
+        isinstance(text, str)
+        and text
+        and start is not None
+        and end is not None
+        and local_start is not None
+        and local_end is not None
+        and start == excerpt_absolute_start + local_start
+        and end == excerpt_absolute_start + local_end
+        and end - start == len(text)
+        and local_start == 0
+        and 0 <= local_end <= len(excerpt)
+        and excerpt[local_start:local_end] == text
+        and payload.get("sha256") == sha256_text(text)
+    )
+
+
+def _amount_only_revenue_row_evidence_matches(
+    payload: Mapping[str, object],
+    *,
+    excerpt: str,
+    source_start: int,
+    headers: Sequence[str],
+    public_row: Sequence[str],
+    raw_row: Sequence[str] | None,
+    expected_selected_index: int | None,
+    expected_row_count: int | None,
+) -> bool:
+    """비중 없는 표의 한 행이 인용 원문에서 그대로 나오는지 확인한다.
+
+    ★ 비중 칸이 없으므로 「합이 100%인가」를 물을 수 없다. 대신 이름·금액 두
+      칸을 원문 좌표로 각각 되짚고, 표 안의 자리(머리말 → 행 → 합계) 순서를
+      모양별로 확인한다. 금액 합 검산은 생산자와 출고 검증기가 «표 전체»를 볼
+      수 있는 자리에서 따로 한다 — 행 하나만으로는 셀 수 없기 때문이다.
+    """
+
+    row = payload.get("row")
+    table = payload.get("table")
+    if (
+        not isinstance(row, Mapping)
+        or set(row) != {"name", "amount", "selection", "source_index", "selected_index"}
+        or not isinstance(table, Mapping)
+        or set(table)
+        != {"axis", "shape", "complete", "row_count", "max_rows", "header", "total"}
+    ):
+        return False
+
+    def span(value: object) -> str | None:
+        return _amount_only_span_value(
+            value, excerpt=excerpt, excerpt_absolute_start=source_start
+        )
+
+    total = table.get("total")
+    if not isinstance(total, Mapping) or set(total) != {"name", "amount"}:
+        return False
+    name = span(row.get("name"))
+    amount = span(row.get("amount"))
+    total_name = span(total.get("name"))
+    total_amount = span(total.get("amount"))
+    if name is None or amount is None or total_name is None or total_amount is None:
+        return False
+    if (
+        REVENUE_AMOUNT_RE.fullmatch(amount) is None
+        or REVENUE_AMOUNT_RE.fullmatch(total_amount) is None
+    ):
+        return False
+
+    shape = table.get("shape")
+    axis = table.get("axis")
+    row_count = _integer(table.get("row_count"))
+    source_index = _integer(row.get("source_index"))
+    selected_index = _integer(row.get("selected_index"))
+    header_payload = table.get("header")
+    header_text = (
+        header_payload.get("text") if isinstance(header_payload, Mapping) else ""
+    )
+    if (
+        shape not in REVENUE_AMOUNT_ONLY_SHAPES
+        or axis not in REVENUE_AXES
+        or table.get("complete") is not True
+        or table.get("max_rows") != REVENUE_MAX_ROWS
+        or row_count is None
+        or not 2 <= row_count <= REVENUE_MAX_ROWS
+        or (expected_row_count is not None and row_count != expected_row_count)
+        or source_index is None
+        or selected_index is None
+        or source_index < 0
+        or selected_index < 0
+        or selected_index > row_count
+        or (
+            expected_selected_index is not None
+            and selected_index != expected_selected_index
+        )
+        or not _header_axis_agrees(str(header_text), axis)  # type: ignore[arg-type]
+        or _text_axis(excerpt) != axis
+        or not _amount_only_header_matches(
+            header_payload, excerpt=excerpt, excerpt_absolute_start=source_start
+        )
+    ):
+        return False
+
+    public_fields = payload.get("public_fields")
+    if not isinstance(public_fields, Mapping) or len(public_fields) != 2:
+        return False
+    amount_names = set(public_fields) - {REVENUE_HEADERS[0]}
+    if len(amount_names) != 1:
+        return False
+    amount_header = amount_names.pop()
+    # ⚠️ 여기서는 기본값(백만원)을 그냥 통과시키지 않는다. 비중 없는 표는 «새»
+    #   경로라 옛 봉인과의 호환을 지킬 필요가 없다 — 머리말이 스스로 밝힌
+    #   단위와 열 이름이 반드시 같아야 한다.
+    if (
+        amount_header not in REVENUE_AMOUNT_HEADERS
+        or revenue_units_in(str(header_text))
+        != (_UNIT_BY_AMOUNT_HEADER[amount_header],)
+    ):
+        return False
+    expected_fields = {
+        REVENUE_HEADERS[0]: normalize_revenue_name(name),
+        amount_header: amount,
+    }
+    normalized_headers = tuple(" ".join(str(value).split()) for value in headers)
+    if (
+        public_fields != expected_fields
+        or normalized_headers != (REVENUE_HEADERS[0], amount_header)
+        or tuple(str(value) for value in public_row)
+        != tuple(expected_fields[header] for header in normalized_headers)
+        or (
+            raw_row is not None
+            and tuple(str(value) for value in raw_row)
+            != tuple(str(value) for value in public_row)
+        )
+    ):
+        return False
+
+    def bound(field: object, edge: str) -> int | None:
+        return _integer(field.get(edge)) if isinstance(field, Mapping) else None
+
+    header_end = bound(header_payload, "end")
+    header_local_end = bound(header_payload, "excerpt_end")
+    name_start = bound(row.get("name"), "start")
+    name_end = bound(row.get("name"), "end")
+    amount_start = bound(row.get("amount"), "start")
+    amount_end = bound(row.get("amount"), "end")
+    total_amount_start = bound(total.get("amount"), "start")
+    if (
+        header_end is None
+        or header_local_end is None
+        or name_start is None
+        or name_end is None
+        or amount_start is None
+        or amount_end is None
+        or total_amount_start is None
+    ):
+        return False
+    if shape == REVENUE_SHAPE_AMOUNT_ONLY_VERTICAL:
+        # 세로형 — 머리말 뒤에 「이름 금액」이 이 순서로 이어진다.
+        if not header_end <= name_start < name_end <= amount_start:
+            return False
+        # 이름과 금액이 각각 원문 어딘가에 있다는 것만으로는 같은 행의 칸임을
+        # 증명하지 못한다. 둘 사이가 공백뿐이어야 바로 뒤 금액으로 결속된다.
+        name_local_end = name_end - source_start
+        amount_local_start = amount_start - source_start
+        if not (
+            0 <= name_local_end <= amount_local_start <= len(excerpt)
+            and not excerpt[name_local_end:amount_local_start].strip()
+        ):
+            return False
+        # 좌표가 원문 어딘가에 있다는 것만으로는 «몇 번째 행»인지 증명되지
+        # 않는다. 생산자와 같은 패턴으로 합계 앞 행을 다시 세고, 선택 번호와
+        # source 번호가 가리키는 정확한 이름·첫 금액 칸을 대조한다.
+        matches = tuple(
+            REVENUE_AMOUNT_ONLY_ROW_RE.finditer(
+                excerpt,
+                header_local_end,
+            )
+        )
+        total_match_index = next(
+            (
+                index
+                for index, match in enumerate(matches)
+                if is_revenue_total_name_v2(
+                    normalize_revenue_name(match.group(1))
+                )
+            ),
+            None,
+        )
+        if total_match_index is None or total_match_index != len(matches) - 1:
+            return False
+        total_match = matches[total_match_index]
+        total_match_amounts = tuple(
+            REVENUE_AMOUNT_RE.finditer(total_match.group(2))
+        )
+        total_raw_name = total_match.group(1)
+        total_leading_space = len(total_raw_name) - len(total_raw_name.lstrip())
+        if not total_match_amounts:
+            return False
+        expected_total_amount = total_match_amounts[0]
+        total_name_start = bound(total.get("name"), "start")
+        total_name_end = bound(total.get("name"), "end")
+        total_amount_end = bound(total.get("amount"), "end")
+        if (
+            total_name_start,
+            total_name_end,
+            total_amount_start,
+            total_amount_end,
+        ) != (
+            source_start + total_match.start(1) + total_leading_space,
+            source_start + total_match.end(1),
+            source_start
+            + total_match.start(2)
+            + expected_total_amount.start(),
+            source_start
+            + total_match.start(2)
+            + expected_total_amount.end(),
+        ):
+            return False
+        reconstructed: list[tuple[int, int, int, int, int]] = []
+        period_count = 0
+        for reconstructed_source_index, match in enumerate(
+            matches[:total_match_index]
+        ):
+            amount_cells = tuple(REVENUE_AMOUNT_RE.finditer(match.group(2)))
+            if not amount_cells:
+                return False
+            if period_count == 0:
+                period_count = len(amount_cells)
+            elif len(amount_cells) != period_count:
+                return False
+            normalized_name = normalize_revenue_name(match.group(1))
+            compact_name = re.sub(r"\s+", "", normalized_name)
+            if not normalized_name or compact_name == "소계":
+                continue
+            first_amount = amount_cells[0]
+            raw_name = match.group(1)
+            leading_name_space = len(raw_name) - len(raw_name.lstrip())
+            reconstructed.append(
+                (
+                    reconstructed_source_index,
+                    source_start + match.start(1) + leading_name_space,
+                    source_start + match.end(1),
+                    source_start + match.start(2) + first_amount.start(),
+                    source_start + match.start(2) + first_amount.end(),
+                )
+            )
+        if len(reconstructed) != row_count:
+            return False
+        if selected_index < row_count:
+            expected = reconstructed[selected_index]
+            if (
+                source_index,
+                name_start,
+                name_end,
+                amount_start,
+                amount_end,
+            ) != expected:
+                return False
+        elif source_index != total_match_index:
+            # 합계는 생산자 enumerate에서 합계 앞의 모든 정규식 행 다음이다.
+            return False
+    else:
+        # 가로형 — 이름은 «머리말 안»에 있고 금액은 그 뒤에 이어진다.
+        if not (name_end <= header_end and header_end <= amount_start):
+            return False
+        # 가로형은 이름·금액이 멀리 떨어져 있으므로 같은 열 번호를 독립적으로
+        # 재구성한다. 그렇지 않으면 「국내」 이름에 「아시아」 금액 좌표를
+        # 붙인 위조도 두 좌표가 모두 원문에 있다는 이유만으로 통과한다.
+        region_names = revenue_region_names_in(str(header_text))
+        if not 0 <= header_local_end <= len(excerpt):
+            return False
+        amount_tail = excerpt[header_local_end:]
+        amount_run = re.fullmatch(
+            rf"(?:\s+{REVENUE_AMOUNT_RE.pattern})+", amount_tail
+        )
+        amount_matches = (
+            tuple(REVENUE_AMOUNT_RE.finditer(amount_tail))
+            if amount_run is not None
+            else ()
+        )
+        if len(region_names) != row_count or len(amount_matches) != row_count + 1:
+            return False
+        expected_amount = amount_matches[selected_index]
+        expected_amount_start = source_start + header_local_end + expected_amount.start()
+        expected_amount_end = source_start + header_local_end + expected_amount.end()
+        if (amount_start, amount_end) != (expected_amount_start, expected_amount_end):
+            return False
+        if selected_index < row_count:
+            expected_name = region_names[selected_index]
+            if (name_start, name_end) != (
+                source_start + expected_name.start,
+                source_start + expected_name.end,
+            ):
+                return False
+    is_total_row = selected_index == row_count
+    if is_total_row:
+        return bool(
+            row.get("name") == total.get("name")
+            and row.get("amount") == total.get("amount")
+            and is_revenue_total_name_v2(normalize_revenue_name(total_name))
+        )
+    return bool(
+        selected_index < row_count
+        and amount_end <= total_amount_start
+        and not is_revenue_total_name_v2(normalize_revenue_name(name))
+    )
+
+
 def revenue_row_evidence_matches(
     evidence: str,
     *,
@@ -1365,6 +2011,21 @@ def revenue_row_evidence_matches(
     ):
         return False
     row = payload.get("row")
+    if (
+        isinstance(row, Mapping)
+        and row.get("selection") == REVENUE_AMOUNT_ONLY_SELECTION
+    ):
+        # 비중 없는 표는 이름·금액이 «떨어진» 두 칸이라 3칸 계약을 쓸 수 없다.
+        return _amount_only_revenue_row_evidence_matches(
+            payload,
+            excerpt=excerpt,
+            source_start=source_start,
+            headers=headers,
+            public_row=public_row,
+            raw_row=raw_row,
+            expected_selected_index=expected_selected_index,
+            expected_row_count=expected_row_count,
+        )
     row_match = _raw_span_matches(
         row,
         excerpt=excerpt,

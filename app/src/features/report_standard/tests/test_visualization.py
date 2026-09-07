@@ -85,6 +85,16 @@ def test_composition_rejects_bad_values_partial_totals_and_incomplete_categories
     assert table_visualization(_composition_table(rows)) is None
 
 
+def test_composition_rejects_amount_only_table_without_ratio_column() -> None:
+    """금액만 공시된 표를 100% 구성 도식으로 오인하지 않는다."""
+
+    assert table_visualization(
+        _composition_table(
+            [["제품", "44,000"], ["서비스", "36,000"], ["합계", "80,000"]]
+        )
+    ) is None
+
+
 def test_composition_accepts_six_categories() -> None:
     """★ 하이브 실측 — 6개 부문, 비중 합계 정확히 100.00%인데 도식이 안 나왔다.
 

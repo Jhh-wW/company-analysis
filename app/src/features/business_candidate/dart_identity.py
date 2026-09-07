@@ -17,6 +17,7 @@ from typing import Iterable, Mapping
 
 from src.shared.company_identity import (
     DART_CORP_CODE_RE as _CORP_CODE_RE,
+    ENGLISH_CORPORATE_TOKENS as _ENGLISH_CORPORATE_TOKENS,
     KOREAN_CORPORATE_MARKERS as _CORPORATE_MARKERS,
     KOREAN_CORPORATE_TOKENS as _KOREAN_CORPORATE_TOKENS,
     STOCK_CODE_RE as _STOCK_CODE_RE,
@@ -24,27 +25,12 @@ from src.shared.company_identity import (
     exact_company_name_key as _exact_company_name_key,
     latin_acronym_korean as _latin_acronym_korean,
     normalized_latin_acronym as _normalized_latin_acronym,
+    official_uppercase_acronyms as _official_uppercase_acronyms,
 )
 
 
 _TOKEN_RE = re.compile(r"[0-9a-zA-Z가-힣]+")
 _MODIFY_DATE_RE = re.compile(r"[0-9]{8}")
-_OFFICIAL_UPPER_ACRONYM_TOKEN_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?:[A-Z](?:\.[A-Z]){1,4}\.?|[A-Z]{2,5})(?![A-Za-z0-9])"
-)
-_ENGLISH_CORPORATE_TOKENS = frozenset(
-    {
-        "corporation",
-        "corp",
-        "incorporated",
-        "inc",
-        "company",
-        "co",
-        "limited",
-        "ltd",
-        "llc",
-    }
-)
 
 # DART 정식 상호는 "회사이름 + 공백 + 업종형 접미사"로 등록된 경우가 많아
 # 색인용 별칭 토큰은 대개 이미 분리돼 있다. 그런데 사용자가 입력을 붙여
@@ -210,26 +196,6 @@ def _has_disallowed_short_latin_mix(value: object) -> bool:
             continue
         return True
     return False
-
-
-def _official_uppercase_acronyms(value: object) -> tuple[str, ...]:
-    """Return only acronym tokens literally present in an official raw name.
-
-    Casefolded aliases cannot prove that a short token was an acronym.  Keep this
-    narrow: an independent all-uppercase 2--5 letter (optionally dotted) token,
-    excluding ordinary English corporate suffixes.
-    """
-    text = unicodedata.normalize("NFKC", str(value or ""))
-    found: list[str] = []
-    for match in _OFFICIAL_UPPER_ACRONYM_TOKEN_RE.finditer(text):
-        acronym = _normalized_latin_acronym(match.group(0))
-        if (
-            acronym
-            and acronym.casefold() not in _ENGLISH_CORPORATE_TOKENS
-            and acronym not in found
-        ):
-            found.append(acronym)
-    return tuple(found)
 
 
 def name_trigrams(normalized: str) -> frozenset[str]:

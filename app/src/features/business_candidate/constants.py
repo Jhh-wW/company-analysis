@@ -6,6 +6,8 @@
 
 from typing import Final
 
+from src.core.constants import MAX_CONCURRENT_RUNS
+
 ENV_PROVIDER: Final[str] = "BUSINESS_CANDIDATE_PROVIDER"
 PROVIDER_DISABLED: Final[str] = "disabled"
 PROVIDER_PIPELINE: Final[str] = "pipeline"
@@ -18,6 +20,14 @@ MAX_CANDIDATES: Final[int] = 3
 MAX_RAW_CANDIDATES: Final[int] = 15
 PROVIDER_CALLS_PER_RESOLUTION: Final[int] = 1
 PROVIDER_TIMEOUT_SEC: Final[float] = 8.0
+
+#: 회사 후보 검색을 동시에 몇 갈래까지 돌릴지.
+#: ★ 조사 자리 수(``MAX_CONCURRENT_RUNS``)와 **같은 값을 쓴다**. 검색은 조사의
+#:   앞단계라, 여기가 더 좁으면 조사 자리는 남았는데 검색부터 거절당한다.
+#:   실제로 3이던 시절에는 다섯 분이 동시에 검색하면 두 분이 곧바로 막혔다.
+#: ★ 값을 베껴 적지 않고 그 상수를 그대로 가리킨다 — 두 값이 조용히 어긋나면
+#:   증상이 「가끔 검색만 안 된다」로 나타나 원인을 찾기 어렵다.
+PROVIDER_WORKER_SLOTS: Final[int] = MAX_CONCURRENT_RUNS
 
 # 후보 선택 HMAC과 서버 메모리 attempt/grant가 공유하는 유효기간.
 CANDIDATE_ATTEMPT_TTL_SEC: Final[int] = 300

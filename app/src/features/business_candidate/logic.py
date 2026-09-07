@@ -43,6 +43,7 @@ from src.features.business_candidate.constants import (
     MIN_CANDIDATE_SCORE,
     PROVIDER_CALLS_PER_RESOLUTION,
     PROVIDER_TIMEOUT_SEC,
+    PROVIDER_WORKER_SLOTS,
     RATE_MAX_SEARCHES,
     RATE_WINDOW_SEC,
 )
@@ -80,7 +81,7 @@ _RATE_SECRET = secrets.token_bytes(32)
 _SELECTION_SECRET = secrets.token_bytes(32)
 _RATE_HISTORY = budget_logic.RateHistory()
 _RATE_LOCK = threading.Lock()
-_PROVIDER_WORKER_SLOTS = threading.BoundedSemaphore(3)
+_PROVIDER_WORKER_SLOTS = threading.BoundedSemaphore(PROVIDER_WORKER_SLOTS)
 class _TextExtractor(HTMLParser):
     """태그 속성·script 내용을 버리고 보이는 글자만 모은다."""
 
@@ -698,7 +699,11 @@ def _call_once(
     except (TypeError, ValueError, OverflowError):
         provider_timeout_sec = PROVIDER_TIMEOUT_SEC
 
-    if not _PROVIDER_WORKER_SLOTS.acquire(blocking=False):
+    # 콜백은 «지금 전역 이름이 가리키는 세마포어»가 아니라 실제로 획득한
+    # 인스턴스에 자리를 돌려줘야 한다. 시험 격리나 런타임 재설정 중 전역이
+    # 교체돼도 엉뚱한 세마포어를 풀어 상한을 훼손하지 않는다.
+    worker_slots = _PROVIDER_WORKER_SLOTS
+    if not worker_slots.acquire(blocking=False):
         raise ProviderWorkerUnavailable("회사 후보 worker가 모두 사용 중입니다")
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
@@ -718,12 +723,12 @@ def _call_once(
         future = executor.submit(request_context.run, invoke)
         # 완료·예외·시작 전 취소 모두 callback을 정확히 한 번 부른다. timeout 뒤
         # underlying thread가 계속 돌면 완료 때까지 슬롯을 붙잡아 thread 폭증을 막는다.
-        future.add_done_callback(lambda _future: _PROVIDER_WORKER_SLOTS.release())
+        future.add_done_callback(lambda _future: worker_slots.release())
         return future.result(timeout=provider_timeout_sec)
     except BaseException:
         # submit 자체가 실패했다면 invoke의 finally가 슬롯을 돌려줄 수 없다.
         if "future" not in locals():
-            _PROVIDER_WORKER_SLOTS.release()
+            worker_slots.release()
         raise
     finally:
         # timeout 뒤 공급자 구현이 멈추지 않더라도 HTTP 응답을 붙잡지 않는다. Python
@@ -739,7 +744,8 @@ def _timeboxed_rerank_ask(ask: ai_rerank.RerankAsk) -> ai_rerank.RerankAsk:
     """
 
     def bounded(prompt: str) -> str:
-        if not _PROVIDER_WORKER_SLOTS.acquire(blocking=False):
+        worker_slots = _PROVIDER_WORKER_SLOTS
+        if not worker_slots.acquire(blocking=False):
             raise ProviderWorkerUnavailable("회사 후보 재정렬 worker가 모두 사용 중입니다")
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
@@ -751,11 +757,11 @@ def _timeboxed_rerank_ask(ask: ai_rerank.RerankAsk) -> ai_rerank.RerankAsk:
             # attempt/예산 문맥을 명시적으로 복사해야 하위 gateway가 막지 않는다.
             request_context = contextvars.copy_context()
             future = executor.submit(request_context.run, invoke)
-            future.add_done_callback(lambda _future: _PROVIDER_WORKER_SLOTS.release())
+            future.add_done_callback(lambda _future: worker_slots.release())
             return future.result(timeout=AI_RERANK_TIMEOUT_SEC)
         except BaseException:
             if "future" not in locals():
-                _PROVIDER_WORKER_SLOTS.release()
+                worker_slots.release()
             raise
         finally:
             executor.shutdown(wait=False, cancel_futures=True)

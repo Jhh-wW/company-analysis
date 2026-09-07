@@ -30,6 +30,8 @@ import re
 from typing import Final
 
 from src.shared.revenue_table_provenance import (
+    REVENUE_AMOUNT_ONLY_CAPTION_BY_AXIS,
+    REVENUE_AMOUNT_ONLY_FOOTNOTE,
     REVENUE_AXIS_PRODUCT,
     REVENUE_AXIS_REGION,
     REVENUE_CAPTION_BY_AXIS,
@@ -178,3 +180,162 @@ V2_SCORE_LOOKBACK: Final[int] = 200
 V2_SCORE_KNOWN_HEAD: Final[int] = 2
 V2_SCORE_CONSOLIDATED: Final[int] = 1
 V2_SCORE_SEPARATE: Final[int] = -1
+
+
+# ══════════════════════════════════════════════════════════════════════
+# v3 — 비중 열이 «없는» 표 (스위치 ``REVENUE_TABLE_V2`` 가 켜졌을 때만)
+# ══════════════════════════════════════════════════════════════════════
+#
+# ★ 왜 더 넓히나 (2026-09-07 실측) — 검사판 23건 중 지역별 매출을 «공시한»
+#   회사가 15곳인데 표가 나온 것은 6곳뿐이었다. 나머지는 두 가지 모양이다.
+#     ① 금액만 세로형 — 「구 분 | 제57기 | 제56기 | 제55기」처럼 비중 열이
+#        아예 없다. v2는 비중 열 이름을 찾아 시작하므로 출발조차 못 한다.
+#     ② 가로형 — 지역이 «열 머리말»에 있고 금액이 그 아래 한 줄에 이어진다
+#        (연결재무제표 주석 「영업부문정보 → 지역에 대한 공시」).
+# ★ 검산은 그대로다. 비중이 없으니 「비중 합 100%」는 못 묻지만,
+#   **행 금액의 합 == 합계**는 여전히 묻는다. 합계가 없으면 싣지 않는다.
+# ⚠️ 비중을 «우리가» 계산해 채우지 않는다 — 계약(맨 위 ``FOOTNOTE``)은 그대로다.
+#   비중 열 없이 「구분 · 금액」 두 열로만 싣고 아래 문구를 붙인다.
+
+#: 비중 없는 표에 붙이는 말.
+FOOTNOTE_WITHOUT_RATIO: Final[str] = REVENUE_AMOUNT_ONLY_FOOTNOTE
+
+#: 비중 없는 표의 캡션.
+AMOUNT_ONLY_CAPTION_BY_AXIS: Final[dict[str, str]] = dict(
+    REVENUE_AMOUNT_ONLY_CAPTION_BY_AXIS
+)
+
+#: 표를 못 세운 이유 — **닫힌 목록**이다. 화면·로그에 나가는 값이라
+#: 자유 문장을 쓰면 같은 이유가 회사마다 다른 말로 흩어진다.
+REJECT_ROWS_BELOW_MIN: Final[str] = "rows_below_min"
+REJECT_ROWS_OVERFLOW: Final[str] = "rows_overflow"
+REJECT_NO_TOTAL_ROW: Final[str] = "no_total_row"
+REJECT_SUM_MISMATCH: Final[str] = "sum_mismatch"
+REJECT_NO_RATIO_COLUMN: Final[str] = "no_ratio_column"
+REJECT_RATIO_SUM_MISMATCH: Final[str] = "ratio_sum_mismatch"
+REJECT_NOT_REVENUE: Final[str] = "not_revenue"
+REJECT_UNIT_UNKNOWN: Final[str] = "unit_unknown"
+REJECT_UNIT_CONFLICT: Final[str] = "unit_conflict"
+REJECT_AXIS_UNKNOWN: Final[str] = "axis_unknown"
+REJECT_NO_HEADING: Final[str] = "no_heading"
+REJECT_HORIZONTAL_NO_TOTAL: Final[str] = "horizontal_no_total"
+REJECT_HORIZONTAL_NAMES_UNMATCHED: Final[str] = "horizontal_names_unmatched"
+REJECT_DUPLICATE_TABLE: Final[str] = "duplicate_table"
+REJECT_PERIODS_MISSING: Final[str] = "periods_missing"
+#: 비중 열이 «있는» 표는 이 경로가 건드리지 않는다. 비중 검산에 떨어진 표를
+#: 금액만 다시 실으면 「잘못 잘린 표」가 조용히 나간다 — 그건 더 나쁘다.
+REJECT_RATIO_COLUMN_PRESENT: Final[str] = "ratio_column_present"
+
+#: 위 코드 전부. 진단에 이 목록 밖의 값이 들어가면 시험이 깨진다.
+REJECT_REASON_CODES: Final[tuple[str, ...]] = (
+    REJECT_ROWS_BELOW_MIN,
+    REJECT_ROWS_OVERFLOW,
+    REJECT_NO_TOTAL_ROW,
+    REJECT_SUM_MISMATCH,
+    REJECT_NO_RATIO_COLUMN,
+    REJECT_RATIO_SUM_MISMATCH,
+    REJECT_NOT_REVENUE,
+    REJECT_UNIT_UNKNOWN,
+    REJECT_UNIT_CONFLICT,
+    REJECT_AXIS_UNKNOWN,
+    REJECT_NO_HEADING,
+    REJECT_HORIZONTAL_NO_TOTAL,
+    REJECT_HORIZONTAL_NAMES_UNMATCHED,
+    REJECT_DUPLICATE_TABLE,
+    REJECT_PERIODS_MISSING,
+    REJECT_RATIO_COLUMN_PRESENT,
+)
+
+#: 기존 v2가 세던 «한국어» 이유를 위 코드로 옮기는 표. 한국어 쪽은 그대로
+#: 둔다 — 이미 그 이름을 못 박은 시험이 있고, 기대값을 바꾸지 않기로 했다.
+V2_REASON_CODES: Final[dict[str, str]] = {
+    "행 부족": REJECT_ROWS_BELOW_MIN,
+    "행 넘침": REJECT_ROWS_OVERFLOW,
+    "합계 없음": REJECT_NO_TOTAL_ROW,
+    "금액 합 불일치": REJECT_SUM_MISMATCH,
+    "비중 합 불일치": REJECT_RATIO_SUM_MISMATCH,
+    "매출 표현 없음": REJECT_NOT_REVENUE,
+    "단위 미확인": REJECT_UNIT_UNKNOWN,
+    "단위 충돌": REJECT_UNIT_CONFLICT,
+    "축 불명": REJECT_AXIS_UNKNOWN,
+    "중복 표": REJECT_DUPLICATE_TABLE,
+    "비교 연도 부족": REJECT_PERIODS_MISSING,
+    "연도 열 초과": REJECT_PERIODS_MISSING,
+    "유효 연도 부족": REJECT_PERIODS_MISSING,
+    "연도 검산 실패": REJECT_SUM_MISMATCH,
+}
+
+#: 「(단위 : 천원)」 앞으로 되짚어 볼 «표제» 길이(글자).
+#: ⚠️ 숫자를 만나면 거기서 멈춘다 — 앞 표의 꼬리를 물면 단위가 둘이 되어
+#:   표 전체가 「단위 충돌」로 버려진다(실측: 카카오 주석은 앞 표 금액이 바로 붙는다).
+AMOUNT_ONLY_HEADING_LOOKBACK: Final[int] = 80
+
+#: 머리말 뒤에서 행을 찾을 범위(글자). v2와 같은 상한을 쓴다.
+AMOUNT_ONLY_ROW_SCAN_CHARS: Final[int] = V2_ROW_SCAN_CHARS
+
+#: 가로형에서 이름이 될 수 있는 최소 열 수(합계 제외).
+AMOUNT_ONLY_MIN_COLUMNS: Final[int] = V2_MIN_ROWS
+
+#: 가로형 금액 줄의 «이름표» — 이 말이 금액 바로 앞에 있어야 매출 줄이다.
+#: ⚠️ 같은 표에 「비유동자산」 줄이 나란히 있다(실측). 이름표를 안 보면
+#:   자산 금액이 매출표로 올라온다.
+AMOUNT_ONLY_ROW_LABEL_WORDS: Final[tuple[str, ...]] = (
+    "매출액",
+    "순매출액",
+    "매출",
+    "영업수익",
+    "수익",
+)
+
+#: 표제 되짚기를 멈추는 글자. 숫자(앞 표의 금액·절 번호)와 문장 끝이다.
+#: ⚠️ 이 목록이 짧아지면 표 앞 «문장»이 머리말로 딸려 들어와, 매출이 아닌
+#:   표가 매출 관문을 통과하거나 축이 뒤집힌다(실측 2건, 2026-09-07).
+AMOUNT_ONLY_HEADING_STOPS: Final[frozenset[str]] = frozenset(
+    "0123456789.!?;:※"
+)
+
+#: 첫 행 이름 앞에 붙어 오는 «기간 열 이름의 꼬리». 이름 캡처는 숫자를 물 수
+#: 없어서 「제57기」의 「기」만 남는다 — 그대로 두면 「기 내수 국내」가 된다.
+#: ⚠️ 닫힌 목록이다. 「전기」·「당기」처럼 사업부문 이름이 될 수 있는 말은
+#:   일부러 넣지 않았다 — 진짜 이름을 지우면 그게 더 큰 사고다.
+AMOUNT_ONLY_PERIOD_TAIL_TOKENS: Final[frozenset[str]] = frozenset(
+    {
+        "기",
+        "년",
+        "월",
+        "일",
+        "분기",
+        "반기",
+        "개월",
+        "누적",
+        "기말",
+        "말",
+        "차",
+        "기)",
+        ")기",
+        "전)기",
+        "당)기",
+        "전전)기",
+    }
+)
+
+#: 비중 열이 없는 표에서 「이 표가 매출인가」를 묻는 말. v2보다 «좁다».
+#: ★★ 왜 좁히나 (실측) — v2 목록의 「영업실적」은 카드사 「취급업무별 영업실적
+#:   (취급액 기준)」까지 통과시킨다. 그건 회사가 «번 돈»이 아니라 카드로
+#:   결제된 «금액»이다. 비중 열이 없으면 구조로 걸러낼 근거가 한 겹 적으므로
+#:   이름 관문을 더 좁게 잡는다.
+AMOUNT_ONLY_REVENUE_WORDS: Final[tuple[str, ...]] = (
+    "매출",
+    "영업수익",
+    "매출실적",
+    "수익합계",
+)
+
+#: 글자 「매출」은 있지만 회사가 번 돈의 구성이 아닌 2열 표제. 금액 전용
+#: 경로는 비중이라는 두 번째 구조 검산이 없으므로 이 표들을 매출액으로
+#: 바꾸어 부르지 않는다. 문장 전체의 일반 부정어가 아니라 실제 재무 표제의
+#: 닫힌 목록만 둬 정상 매출표를 넓게 막지 않는다.
+AMOUNT_ONLY_NON_REVENUE_WORDS: Final[tuple[str, ...]] = (
+    "매출채권",
+    "매출원가",
+)

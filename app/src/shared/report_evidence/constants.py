@@ -85,6 +85,29 @@ FORMAL_ATTEMPT_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
 )
 
 
+#: 수집 시도 식별자는 생산부가 ``<종류>-<일련번호>``로 만든다. 요약부는
+#: 「sitemap 목록 조회」와 「본문 페이지 조회」를 갈라야 하는데 둘 다 같은
+#: source_kind로 기록되므로, 이 접두어가 유일한 구분 근거다. 소비자가 문자열을
+#: 접두어로 «추측»하지 않게 생산자·소비자가 같은 상수를 참조한다.
+ATTEMPT_KIND_SITEMAP: Final[str] = "sitemap"
+ATTEMPT_ID_KIND_SEPARATOR: Final[str] = "-"
+
+
+def is_sitemap_attempt(attempt_id: object) -> bool:
+    """sitemap 목록 조회 시도인지 식별자 접두어로 판정한다.
+
+    sitemap은 «후보를 찾는 보조 목록»이다. robots가 막거나 403·404여도 본문
+    페이지를 못 읽었다는 뜻이 아니다. 그래서 「오류」 판정과 후보 범위 완전성
+    계산에서 본문 페이지 실패와 같이 세면 안 된다 — 같이 세면 자바스크립트로
+    그리는 사이트처럼 sitemap만 막힌 회사가 「자료 없음」에서 「오류」로
+    나빠진다.
+    """
+
+    return str(attempt_id or "").startswith(
+        f"{ATTEMPT_KIND_SITEMAP}{ATTEMPT_ID_KIND_SEPARATOR}"
+    )
+
+
 class CollectionState(str, Enum):
     """외부 자료 한 경로를 확인한 결과."""
 

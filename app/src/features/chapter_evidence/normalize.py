@@ -247,6 +247,9 @@ def to_attempt(
             documents_seen=_coerce_int(
                 value.get("documents_seen", 0), label="확인한 문서 수"
             ),
+            documents_attempted=_coerce_int(
+                value.get("documents_attempted", 0), label="시도한 문서 수"
+            ),
         )
     except KeyError as error:
         raise ValueError(f"수집 시도 기록에 필수 항목이 빠졌습니다: {error}") from error

@@ -2958,6 +2958,9 @@ def test_공식host_IR도_날짜와_기간이_없으면_provenance_only로_격�
                 }
             ],
             downloaded_pdf_bytes=100,
+            # 열어 보려고 시도한 문서 수. 실제로 등록되는 문서는 1건뿐이라
+            # 두 값이 서로 다른 칸으로 남는지 확인할 수 있다.
+            attempted_documents=3,
         )
 
     monkeypatch.setattr(wide_collect, "collect_official_ir_fragments", fake_collect_ir)
@@ -2997,6 +3000,9 @@ def test_공식host_IR도_날짜와_기간이_없으면_provenance_only로_격�
         if attempt.reason_code == "official_ir_writer_metadata_incomplete"
     )
     assert ir_attempt.documents_seen == 1
+    # 「문서 0개 시도 · 수십만 바이트 수신」 같은 모순 표시를 막는다 —
+    # 수집기가 실제로 시도한 수와 등록된 수를 각각 그대로 싣는다.
+    assert ir_attempt.documents_attempted == 3
 
     fragments = build_fragments_for_collection(result)
     envelope = to_evidence_mappings(result=result, fragments=fragments)

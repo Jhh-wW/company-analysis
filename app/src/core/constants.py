@@ -10,6 +10,12 @@ from __future__ import annotations
 import re
 from typing import Final
 
+# ── 서버 동시 실행 용량 ────────────────────
+#: 유료 조사와 그 앞단의 회사 후보 provider가 함께 따르는 서버 자원 상한.
+#: 서로 다른 feature가 실제로 공유하므로 어느 한 feature가 다른 feature의
+#: 상수를 직접 가져가지 않고 core의 정본을 참조한다.
+MAX_CONCURRENT_RUNS: Final[int] = 5
+
 # ── 문장 고르기에 쓸 모델 ────────────────
 # ★ 왜 따로 두나 — 1판 엔진의 기본 모델(haiku)은 후보 60~70줄 중 **2~3개만**
 #   고르고 지시문의 금지 조항도 어긴다. 실측(루트로닉·조건 고정,

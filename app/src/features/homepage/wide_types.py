@@ -174,6 +174,11 @@ class WideCollectionAttempt:
     elapsed_ms: int
     bytes_downloaded: int
     documents_seen: int
+    #: 이 조회가 «열어 보려고 시도한» 문서 수. ``documents_seen``은 그중
+    #: 실제로 근거 문서로 등록된 수라서 둘은 다르다 — 시도 3건 중 1건만
+    #: 등록되면 3과 1이다. 둘을 한 칸에 적으면 「문서 0건 시도 · PDF
+    #: 534,961바이트 받음」 같은 모순 표시가 나온다.
+    documents_attempted: int = 0
 
     def __post_init__(self) -> None:
         _require_nonblank(self.company_id, "company_id")
@@ -212,6 +217,8 @@ class WideCollectionAttempt:
             raise ValueError("bytes_downloaded는 0 이상이어야 합니다")
         if self.documents_seen < 0:
             raise ValueError("documents_seen는 0 이상이어야 합니다")
+        if self.documents_attempted < 0:
+            raise ValueError("documents_attempted는 0 이상이어야 합니다")
 
 
 @dataclass(frozen=True)

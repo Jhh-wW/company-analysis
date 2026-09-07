@@ -25,6 +25,7 @@ from html.parser import HTMLParser
 from typing import Optional
 
 from src.shared.company_identity import (
+    ENGLISH_CORPORATE_TOKENS,
     exact_company_name_key,
     normalize_korean_registration_number,
 )
@@ -44,6 +45,10 @@ _CORPORATE_NUMBER_MARKERS = (
     "법인 번호",
 )
 _NUMBER_CONTEXT_CHARS = 48
+# 영문 법인 접미사를 뗀 뒤 남아야 하는 최소 토큰 수. 「Global Corporation」의
+# ``global``처럼 한 단어만 남는 이름은 무관한 페이지에도 흔해서, 그런 이름으로는
+# 접미사 생략 표기를 인정하지 않는다.
+_MIN_SUFFIX_STRIPPED_NAME_TOKENS = 2
 # DART hm_url host의 이름-단독 영수증 재료 앞에 붙이는 표식. 같은 페이지
 # 묶음이라도 이중 검증 영수증과 해시가 겹치지 않게 하기 위한 접두어다.
 _DART_ROOT_NAME_ONLY_EVIDENCE_PREFIX = "dart-root-name-only"
@@ -153,15 +158,46 @@ def _name_token_rows(value: object) -> tuple[str, ...]:
     return tuple(part for part in key.split("\x1f") if part)
 
 
-def _contains_name_tokens(page_tokens: tuple[str, ...], name: object) -> bool:
+def _expected_token_rows(name: object) -> tuple[tuple[str, ...], ...]:
+    """대조에 쓸 기대 토큰 행 — 원본 행과, 영문 법인 접미사를 뗀 행.
+
+    DART 영문 법인명은 ``GND Electronics Corporation``처럼 법적 접미사까지
+    등록돼 있지만, 회사 홈페이지는 대개 ``GND Electronics``만 쓴다. 접미사가
+    붙은 행만 요구하면 실제 공식 홈페이지가 자기 이름으로 결속되지 못한다.
+    그래서 꼬리의 영문 법인 접미사를 뗀 행을 «추가로» 허용한다 — 원본 행은
+    그대로 남으므로 인정 범위가 좁아지지 않는다. 한글 법인명은 이 목록에
+    걸리는 토큰이 없어 영향받지 않는다.
+    """
+
     expected = _name_token_rows(name)
-    if not expected or len(expected) > len(page_tokens):
-        return False
-    width = len(expected)
-    return any(
-        page_tokens[index : index + width] == expected
-        for index in range(len(page_tokens) - width + 1)
-    )
+    if not expected:
+        return ()
+    trimmed = list(expected)
+    while trimmed and trimmed[-1] in ENGLISH_CORPORATE_TOKENS:
+        trimmed.pop()
+    if (
+        len(trimmed) < len(expected)
+        and len(trimmed) >= _MIN_SUFFIX_STRIPPED_NAME_TOKENS
+    ):
+        return (expected, tuple(trimmed))
+    return (expected,)
+
+
+def _matched_token_row(
+    page_tokens: tuple[str, ...], name: object
+) -> tuple[str, ...]:
+    """페이지 토큰 안에 끊기지 않고 이어진 기대 행이 있으면 그 행을 돌려준다."""
+
+    for expected in _expected_token_rows(name):
+        width = len(expected)
+        if width > len(page_tokens):
+            continue
+        if any(
+            page_tokens[index : index + width] == expected
+            for index in range(len(page_tokens) - width + 1)
+        ):
+            return expected
+    return ()
 
 
 def _registration_pattern(number: str) -> re.Pattern[str]:
@@ -213,24 +249,23 @@ def _identity_page_texts(raw_pages: tuple[str, ...]) -> tuple[str, ...] | None:
     return tuple(texts)
 
 
-def _matched_company_name(
+def _matched_company_name_key(
     texts: tuple[str, ...],
     identity: OfficialCompanyIdentity,
 ) -> str:
-    """어느 한 페이지에 법인명·별칭 토큰이 끊기지 않고 이어져 있는지 본다."""
+    """어느 한 페이지에 법인명·별칭 토큰이 끊기지 않고 이어져 있는지 본다.
+
+    영수증 해시에 쓸 이름 키는 «실제로 맞은 토큰 행»에서 만든다. 접미사를 뗀
+    행으로 맞았으면 그 행이 키가 되므로, 무엇이 맞았는지가 해시에 그대로
+    반영된다.
+    """
 
     for text in texts:
         page_tokens = _name_token_rows(text)
-        matched_name = next(
-            (
-                name
-                for name in (identity.legal_name, *identity.aliases)
-                if _contains_name_tokens(page_tokens, name)
-            ),
-            "",
-        )
-        if matched_name:
-            return matched_name
+        for name in (identity.legal_name, *identity.aliases):
+            matched_row = _matched_token_row(page_tokens, name)
+            if matched_row:
+                return "\x1f".join(matched_row)
     return ""
 
 
@@ -269,8 +304,8 @@ def verify_official_company_identity_pages(
     if not texts:
         return None
 
-    matched_name = _matched_company_name(texts, identity)
-    if not matched_name:
+    name_key = _matched_company_name_key(texts, identity)
+    if not name_key:
         return None
 
     matched_number = next(
@@ -284,7 +319,6 @@ def verify_official_company_identity_pages(
     if not matched_number:
         return None
 
-    name_key = exact_company_name_key(matched_name)
     material = "\0".join(
         (name_key, matched_number, "\0\0".join(texts))
     ).encode("utf-8")
@@ -318,11 +352,10 @@ def verify_dart_root_company_identity_pages(
     if not texts:
         return None
 
-    matched_name = _matched_company_name(texts, identity)
-    if not matched_name:
+    name_key = _matched_company_name_key(texts, identity)
+    if not name_key:
         return None
 
-    name_key = exact_company_name_key(matched_name)
     material = "\0".join(
         (_DART_ROOT_NAME_ONLY_EVIDENCE_PREFIX, name_key, "\0\0".join(texts))
     ).encode("utf-8")

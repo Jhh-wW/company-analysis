@@ -459,6 +459,9 @@ def safe_urlopen(
     if any(name.lower() == "host" for name, _value in request.header_items()):
         # Host는 반드시 검증한 URL에서 만들어야 한다.
         raise UnsafeHomepageUrlError("사용자 지정 Host 헤더는 허용하지 않습니다")
+    # redirect에만 호출자 경로 정책을 적용하면 최초 URL은 정책 밖이어도 한 번
+    # 연결된 뒤에야 잡힌다. 모든 hop에 같은 경계를 적용하되 DNS보다 먼저 닫는다.
+    _require_url_allowed(request.full_url, url_allowed)
     budget = _ACTIVE_DEADLINE.get() or _DeadlineBudget.after(timeout)
     budget.remaining()
     target = resolve_safe_target(request.full_url, deadline=budget)
@@ -717,20 +720,87 @@ def _normalize_exact_hostname(hostname: str) -> str:
 
 
 def _require_exact_https_hostname(url: str, expected_hostname: str) -> None:
-    """DNS 조회 전에 URL의 HTTPS 스킴과 정확한 호스트부터 비교한다."""
+    """DNS 조회 전에 기본 HTTPS origin과 정확한 호스트부터 비교한다."""
 
     try:
         parsed = urllib.parse.urlsplit(url)
         hostname = (parsed.hostname or "").rstrip(".").encode("idna").decode("ascii")
+        port = parsed.port
     except (TypeError, ValueError, UnicodeError) as exc:
         raise UnsafeHomepageUrlError("공식 IR 주소 형식이 올바르지 않습니다") from exc
     if (
         parsed.scheme.casefold() != "https"
         or hostname.casefold() != expected_hostname
+        or port not in (None, 443)
+        or parsed.username is not None
+        or parsed.password is not None
     ):
         raise UnsafeHomepageUrlError(
-            "공식 IR 주소는 같은 정확한 HTTPS 호스트여야 합니다"
+            "공식 IR 주소는 같은 정확한 기본 HTTPS origin이어야 합니다"
         )
+
+
+def _https_upgraded_same_host_url(current_url: str, new_url: str) -> str:
+    """같은 host의 http 리다이렉트를 평문으로 따라가지 않고 https로 승격한다.
+
+    실제 회사 홈페이지 중에는 ``https://회사.example/``가 기본 언어 경로로 갈 때
+    ``http://회사.example/en/main``으로 한 번 내려갔다가, 곧바로 같은 경로의
+    https로 다시 올리는 곳이 있다. 중간 hop 하나가 http라는 이유로 후보 전체를
+    버리면 https 200으로 열리는 공식 원문까지 통째로 못 읽는다.
+
+    그래서 «같은 host·기본 포트»의 http 목적지에 한해, http로는 요청하지 않고
+    같은 경로의 https 주소를 다음 hop으로 삼는다. 평문으로는 한 바이트도
+    주고받지 않으므로 도청·변조 경계는 그대로다. host가 다르거나, 포트가
+    명시돼 있거나, 계정 정보가 붙어 있으면 승격하지 않고 빈 문자열을 돌려준다
+    (호출자는 그대로 기존 거부 경로를 탄다).
+    """
+
+    try:
+        current = urllib.parse.urlsplit(str(current_url or ""))
+        target = urllib.parse.urlsplit(str(new_url or ""))
+        current_port = current.port
+        target_port = target.port
+    except (TypeError, ValueError):
+        return ""
+    if current.scheme.casefold() != "https" or target.scheme.casefold() != "http":
+        return ""
+    # 기본 포트로 열린 https 원본과, 포트를 명시하지 않은 http 목적지만 승격한다.
+    # ``:80``이 붙은 주소를 https로 바꾸면 «명시된 다른 포트»로 접속하게 된다.
+    if current_port is not None or target_port is not None:
+        return ""
+    if (
+        current.username is not None
+        or current.password is not None
+        or target.username is not None
+        or target.password is not None
+    ):
+        return ""
+    try:
+        current_host = (
+            (current.hostname or "").rstrip(".").encode("idna").decode("ascii")
+        ).casefold()
+        target_host = (
+            (target.hostname or "").rstrip(".").encode("idna").decode("ascii")
+        ).casefold()
+    except (UnicodeError, ValueError):
+        return ""
+    if not target_host or current_host != target_host:
+        return ""
+    return urllib.parse.urlunsplit(
+        ("https", target.netloc, target.path, target.query, target.fragment)
+    )
+
+
+def _require_no_https_downgrade(current_url: str, new_url: str) -> None:
+    """HTTPS 요청이 redirect에서 평문 HTTP로 내려가지 못하게 한다."""
+
+    try:
+        current_scheme = urllib.parse.urlsplit(current_url).scheme.casefold()
+        new_scheme = urllib.parse.urlsplit(new_url).scheme.casefold()
+    except (TypeError, ValueError) as exc:
+        raise UnsafeHomepageUrlError("리다이렉트 URL 형식이 올바르지 않습니다") from exc
+    if current_scheme == "https" and new_scheme == "http":
+        raise UnsafeHomepageUrlError("HTTPS 주소를 평문 HTTP로 내릴 수 없습니다")
 
 
 def _require_url_allowed(
@@ -867,6 +937,10 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         self._deadline = deadline
 
     def redirect_request(self, request, fp, code, msg, headers, newurl):
+        # 같은 host의 http Location은 평문으로 따라가지 않고 같은 경로의 https로
+        # 승격해 다음 hop으로 삼는다(hop 수에는 그대로 포함된다).
+        newurl = _https_upgraded_same_host_url(request.full_url, newurl) or newurl
+        _require_no_https_downgrade(request.full_url, newurl)
         # 다음 요청을 만들기 전에 모든 Location을 검사한다. 실제 연결 순간 프로토콜
         # 처리기가 한 번 더 검사·고정해 DNS 재바인딩의 시간차 틈을 닫는다.
         _require_url_allowed(newurl, self._url_allowed)
@@ -906,6 +980,10 @@ class _ExactHttpsHostRedirectHandler(_SafeRedirectHandler):
         self._url_allowed = url_allowed
 
     def redirect_request(self, request, fp, code, msg, headers, newurl):
+        # 같은 host의 http Location은 여기서도 https로 승격한다. 승격 뒤에도
+        # 정확한 HTTPS host 검사를 그대로 통과해야 하므로 경계는 좁아지지 않는다.
+        newurl = _https_upgraded_same_host_url(request.full_url, newurl) or newurl
+        _require_no_https_downgrade(request.full_url, newurl)
         _require_exact_https_hostname(newurl, self._expected_hostname)
         _require_url_allowed(newurl, self._url_allowed)
         if self._deadline is not None:

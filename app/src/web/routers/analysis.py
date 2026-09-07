@@ -76,6 +76,8 @@ from src.features.sharelink.constants import (
     LINK_TOTAL_BUDGET_KRW,
     PER_LINK_DAILY_BUDGET_KRW,
     PUBLIC_BUCKET,
+    VISITOR_COOKIE_MAX_AGE_SEC,
+    VISITOR_COOKIE_NAME,
 )
 from src.features.storage import db as storage_db
 from src.features.storage import job_interruptions
@@ -830,6 +832,22 @@ async def open_share_link(request: Request, key: str):
         samesite="lax",
         secure=request_helpers._cookie_secure(request),
     )
+    # ★ 같은 링크를 여러 분이 나눠 쓸 때 «동시 자리»를 각자에게 주려면 서로를
+    #   구분할 표가 있어야 한다. 이미 표가 있으면 그대로 두고 기한만 늘린다 —
+    #   올 때마다 새로 주면 창을 하나 더 열 때마다 다른 사람이 돼 버린다.
+    # ⚠️ 담는 것은 **무작위 글자뿐**이다. IP·브라우저 종류·기기 정보는 담지도
+    #   저장하지도 않는다 (첫 화면의 「개인정보는 수집하지 않습니다」 약속).
+    visitor_id = request_helpers.visitor_id_of(request) or (
+        share_logic.new_visitor_id()
+    )
+    response.set_cookie(
+        VISITOR_COOKIE_NAME,
+        visitor_id,
+        max_age=VISITOR_COOKIE_MAX_AGE_SEC,
+        httponly=True,
+        samesite="lax",
+        secure=request_helpers._cookie_secure(request),
+    )
     return response
 
 
@@ -912,7 +930,12 @@ async def _resolve_business_candidates(
 ) -> tuple[candidate_logic.CandidateResolution, float] | Response:
     """회사 후보 공급자 하나를 slot·rate·비용 경계 안에서 정확히 한 번 실행한다."""
     slot_bucket_id = (
-        paid_runtime._reserve_run_slot(resolved_track[0], resolved_track[1]) or ""
+        paid_runtime._reserve_run_slot(
+            resolved_track[0],
+            resolved_track[1],
+            visitor_id=request_helpers.visitor_id_of(request),
+        )
+        or ""
     )
     if not slot_bucket_id:
         return request_helpers._throttled(request, BUSY_MESSAGE, "candidate-busy")
@@ -1621,7 +1644,12 @@ async def confirm_page(
                 public_ids.release(run_id)
             return blocked
         slot_bucket_id = (
-            paid_runtime._reserve_run_slot(resolved_track[0], share_key) or ""
+            paid_runtime._reserve_run_slot(
+                resolved_track[0],
+                share_key,
+                visitor_id=request_helpers.visitor_id_of(request),
+            )
+            or ""
         )
         if not slot_bucket_id:
             if candidate_attempt is not None:
@@ -1948,7 +1976,12 @@ async def start_run(
 
     if is_paid:
         slot_bucket_id = (
-            paid_runtime._reserve_run_slot(resolved_track[0], share_key) or ""
+            paid_runtime._reserve_run_slot(
+                resolved_track[0],
+                share_key,
+                visitor_id=request_helpers.visitor_id_of(request),
+            )
+            or ""
         )
         if not slot_bucket_id:
             return request_helpers._throttled(
@@ -1968,7 +2001,12 @@ async def start_run(
         upfront_cost_events = attempt.cost_events
     else:
         slot_bucket_id = (
-            paid_runtime._reserve_run_slot(resolved_track[0], share_key) or ""
+            paid_runtime._reserve_run_slot(
+                resolved_track[0],
+                share_key,
+                visitor_id=request_helpers.visitor_id_of(request),
+            )
+            or ""
         )
         if not slot_bucket_id:
             return request_helpers._throttled(
