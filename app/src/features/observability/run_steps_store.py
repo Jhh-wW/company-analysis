@@ -61,6 +61,20 @@ class PersistedRunSteps:
         return self.omitted_count > 0
 
 
+@dataclass(frozen=True)
+class RecentRunSteps:
+    """최근 실행 목록에 쓰는 한 줄. **원본(steps)은 담지 않는다.**
+
+    ★ 목록에 원본을 실으면 관리자 첫 화면 한 번에 진단 원본 수십 건이 함께
+      만들어진다. 원본은 실행 하나를 골라 연 화면에서만 꺼낸다.
+    """
+
+    run_id: str
+    recorded_at: str
+    step_count: int
+    omitted_count: int
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     """표가 없으면 만든다. 있으면 그대로 둔다."""
 
@@ -132,6 +146,46 @@ def record_once(
         ),
     )
     return cursor.rowcount == 1
+
+
+def list_recent(conn: sqlite3.Connection, *, limit: int) -> list[RecentRunSteps]:
+    """최근에 기록한 실행 진단을 최신순으로 준다.
+
+    Args:
+        conn: 열린 SQLite 연결.
+        limit: 가져올 최대 건수. 1건 이상이어야 한다.
+
+    Returns:
+        기록 시각 내림차순(같으면 실행 번호 내림차순) 목록. 기록이 없으면 빈 목록.
+
+    Raises:
+        ValueError: ``limit``이 1보다 작을 때.
+
+    ★ 이 표는 어느 링크로 만들었는지와 무관하게 실행마다 쌓인다. 그래서 링크
+      이력에서 사라진 실행도 여기서는 찾을 수 있다.
+    """
+
+    if limit < 1:
+        raise ValueError("최근 실행 진단은 1건 이상을 요청해야 합니다")
+    ensure_schema(conn)
+    rows = conn.execute(
+        f"""
+        SELECT run_id, recorded_at, step_count, omitted_count
+          FROM {TABLE_RUN_STEPS}
+         ORDER BY recorded_at DESC, run_id DESC
+         LIMIT ?
+        """,
+        (int(limit),),
+    ).fetchall()
+    return [
+        RecentRunSteps(
+            run_id=str(row[0]),
+            recorded_at=str(row[1]),
+            step_count=int(row[2]),
+            omitted_count=int(row[3]),
+        )
+        for row in rows
+    ]
 
 
 def load(conn: sqlite3.Connection, run_id: str) -> PersistedRunSteps | None:

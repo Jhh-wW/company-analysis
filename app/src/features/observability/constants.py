@@ -261,3 +261,10 @@ RUN_STEPS_SCHEMA_VERSION: Final[int] = 1
 RUN_STEPS_MAX_BYTES: Final[int] = 256 * 1024
 #: 관리자 화면이 steps를 보기 좋게 펼칠 때 쓰는 들여쓰기 칸 수.
 RUN_STEPS_VIEW_INDENT: Final[int] = 2
+#: 「오늘 상태」 화면이 보여 주는 최근 실행 진단 건수 상한.
+#: 목록은 원본을 싣지 않으므로 건수만큼 링크 이력을 한 번씩 더 읽는다 — 첫 화면이
+#: 느려지지 않게 최근 것만 본다.
+RECENT_RUN_STEPS_LIMIT: Final[int] = 20
+#: 화면에 실행 번호를 줄여 적을 때 남기는 앞자리 수. 실행끼리 구분하기에 충분하고
+#: 표 한 칸을 넘지 않는 길이다.
+RUN_ID_SHORT_CHARS: Final[int] = 12
