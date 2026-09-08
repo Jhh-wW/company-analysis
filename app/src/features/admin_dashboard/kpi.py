@@ -17,6 +17,8 @@ from src.features.admin_dashboard import store
 TABLE_ATTEMPTS: Final[str] = "dashboard_report_kpi_attempts"
 TABLE_EVENTS: Final[str] = "dashboard_report_kpi_events"
 TARGET_SEC: Final[int] = 3 * 60
+MEASUREMENT_STATUS_PAUSED: Final[str] = "paused"
+CURRENT_MEASUREMENT_LABEL: Final[str] = "계측 중단 · 미측정"
 
 
 @dataclass(frozen=True)
@@ -27,8 +29,20 @@ class KpiMeasurement:
 
 @dataclass(frozen=True)
 class KpiSummary:
-    measured_responses: int
-    within_target: int
+    """현재 미측정 값과 과거 저장 기록을 구분하는 읽기 계약.
+
+    공개 GET이 첫 열람을 기록하지 않으므로 현재 측정치는 None이다.
+    과거 기록 0건은 실제 조회 결과이며, 과거 기록 None은 조회 불가다.
+    """
+
+    measured_responses: int | None = None
+    within_target: int | None = None
+    historical_measured_responses: int | None = None
+    historical_within_target: int | None = None
+
+    @property
+    def measurement_status(self) -> str:
+        return MEASUREMENT_STATUS_PAUSED
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -169,7 +183,7 @@ def record_first_survey(
 
 
 def summary(conn: sqlite3.Connection, *, start_day: str = "") -> KpiSummary:
-    """휴지통이 아닌 보고서의 측정 가능한 첫 설문만 집계한다."""
+    """휴지통이 아닌 보고서의 기존 기록만 집계하며 현재 측정으로 승격하지 않는다."""
     ensure_schema(conn)
     clean_start = str(start_day or "").strip()[:10]
     query = f"""SELECT COUNT(*) AS measured,
@@ -184,7 +198,10 @@ def summary(conn: sqlite3.Connection, *, start_day: str = "") -> KpiSummary:
         query += " AND substr(k.first_survey_at, 1, 10) >= ?"
         params.append(clean_start)
     row = conn.execute(query, tuple(params)).fetchone()
-    return KpiSummary(int(row["measured"]), int(row["within_target"]))
+    return KpiSummary(
+        historical_measured_responses=int(row["measured"]),
+        historical_within_target=int(row["within_target"]),
+    )
 
 
 def _required(value: str, *, maximum: int, label: str) -> str:

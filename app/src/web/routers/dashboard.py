@@ -502,6 +502,20 @@ def _recent_run_rows(conn: sqlite3.Connection) -> list[dict[str, object]]:
     return rows
 
 
+def _kpi_context(summary: dashboard_kpi.KpiSummary, *, history_available: bool) -> dict:
+    """계측 중단은 저장소 조회 성공·과거 기록 수와 독립적으로 표시한다."""
+    return {
+        "dashboard_three_minute_response": dashboard_kpi.CURRENT_MEASUREMENT_LABEL,
+        "dashboard_kpi_status": summary.measurement_status,
+        "dashboard_kpi_measured": summary.measured_responses,
+        "dashboard_kpi_within_target": summary.within_target,
+        "dashboard_kpi_available": False,
+        "dashboard_kpi_history_available": history_available,
+        "dashboard_kpi_history_measured": summary.historical_measured_responses,
+        "dashboard_kpi_history_within_target": summary.historical_within_target,
+    }
+
+
 def _dashboard_context(request: Request) -> dict:
     """오늘 화면과 조각 새로고침이 같은 정본을 사용한다."""
     service, service_available = _dashboard_read(
@@ -524,9 +538,9 @@ def _dashboard_context(request: Request) -> dict:
         "만족도", (0, 0), dashboard_store.survey_summary
     )
     surveys_total, helpful = survey_summary
-    kpi_summary, kpi_available = _dashboard_read(
-        "응답 시간",
-        dashboard_kpi.KpiSummary(measured_responses=0, within_target=0),
+    kpi_summary, kpi_history_available = _dashboard_read(
+        "과거 응답 시간",
+        dashboard_kpi.KpiSummary(),
         dashboard_kpi.summary,
     )
     members, members_available = _dashboard_read(
@@ -646,17 +660,6 @@ def _dashboard_context(request: Request) -> dict:
         if surveys_total < 5
         else f"{round(helpful * 100 / surveys_total)}% ({helpful}/{surveys_total})"
     )
-    three_minute_response = (
-        "확인 불가"
-        if not kpi_available
-        else
-        "자료 모으는 중"
-        if kpi_summary.measured_responses < 5
-        else (
-            f"{round(kpi_summary.within_target * 100 / kpi_summary.measured_responses)}% "
-            f"({kpi_summary.within_target}/{kpi_summary.measured_responses})"
-        )
-    )
     return request_helpers._ctx(
         request,
         dashboard_service=service_dict,
@@ -695,9 +698,7 @@ def _dashboard_context(request: Request) -> dict:
         dashboard_satisfaction=satisfaction,
         dashboard_survey_total=surveys_total,
         dashboard_survey_available=survey_available,
-        dashboard_three_minute_response=three_minute_response,
-        dashboard_kpi_measured=kpi_summary.measured_responses,
-        dashboard_kpi_available=kpi_available,
+        **_kpi_context(kpi_summary, history_available=kpi_history_available),
         dashboard_last_updated=clock.iso_now_kst(),
         dashboard_status_labels=_status_labels(),
         dashboard_company_labels=_company_labels(),
@@ -1160,8 +1161,11 @@ def member_page_context(request: Request) -> dict:
         period_survey_total, period_helpful = dashboard_store.survey_summary(
             conn, start_day=start_day
         )
-        period_kpi = dashboard_kpi.summary(conn, start_day=start_day)
         member_profiles = share_allow.list_profiles(conn)
+    period_kpi, period_kpi_available = _dashboard_read(
+        "과거 응답 시간", dashboard_kpi.KpiSummary(),
+        lambda conn: dashboard_kpi.summary(conn, start_day=start_day),
+    )
     member_names = {
         member.email: (member.display_name.strip() or "이름 미등록")
         for member in member_profiles
@@ -1182,13 +1186,7 @@ def member_page_context(request: Request) -> dict:
             else f"{round(period_helpful * 100 / period_survey_total)}% "
             f"({period_helpful}/{period_survey_total})"
         ),
-        dashboard_kpi_measured=period_kpi.measured_responses,
-        dashboard_three_minute_response=(
-            "자료 모으는 중"
-            if period_kpi.measured_responses < 5
-            else f"{round(period_kpi.within_target * 100 / period_kpi.measured_responses)}% "
-            f"({period_kpi.within_target}/{period_kpi.measured_responses})"
-        ),
+        **_kpi_context(period_kpi, history_available=period_kpi_available),
     )
     return context
 

@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import date, datetime
 from io import BytesIO
 
+import pytest
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
@@ -188,9 +189,11 @@ def test_survey_is_member_only_and_revision_is_visible_to_admin(monkeypatch, tmp
         # 공개 GET은 권한 판정뿐 아니라 KPI 사건도 쓰지 않는다. 첫 열람을
         # GET 부작용으로 재도입하지 않는 한 응답시간 KPI는 측정 불가다.
         assert dashboard_kpi.summary(conn) == dashboard_kpi.KpiSummary(
-            measured_responses=0,
-            within_target=0,
+            historical_measured_responses=0,
+            historical_within_target=0,
         )
+        assert conn.execute(f"SELECT COUNT(*) FROM {dashboard_kpi.TABLE_ATTEMPTS}").fetchone()[0] == 0
+        assert conn.execute(f"SELECT COUNT(*) FROM {dashboard_kpi.TABLE_EVENTS}").fetchone()[0] == 0
 
 
 def test_member_survey_prefills_saved_answer_and_keeps_browser_draft(monkeypatch, tmp_path):
@@ -551,6 +554,64 @@ def test_admin_real_contract_is_admin_only_and_disables_deferred_actions(
     assert "발급 불가" not in links.text and "초대 불가" not in members.text
     assert 'action="/admin/links/new"' not in links.text
     assert 'action="/admin/invite"' not in members.text
+
+
+@pytest.mark.parametrize("historical_count", [0, 5])
+def test_관리자_KPI는_누적기록이_있어도_현재_미측정으로_표시한다(
+    monkeypatch, tmp_path, historical_count
+):
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
+    runtime._PIPELINE = DemoPipeline()
+    with db.connect() as conn:
+        for index in range(historical_count):
+            dashboard_kpi.record_first_view(
+                conn, report_id=f"historical-{index}", report_version=1,
+                actor_email="historical@example.com", now_iso="2026-08-22T10:00:00+09:00",
+            )
+            dashboard_kpi.record_first_survey(
+                conn, report_id=f"historical-{index}", report_version=1,
+                actor_email="historical@example.com", now_iso="2026-08-22T10:04:00+09:00",
+            )
+    with TestClient(main.app) as client:
+        _session(client, email="admin@example.com", is_admin=True)
+        for path in ("/admin", "/admin/refresh/today", "/admin/members?period=all"):
+            response = client.get(path)
+            assert response.status_code == 200
+            context = response.context
+            assert context["dashboard_kpi_status"] == "paused"
+            assert context["dashboard_kpi_measured"] is None
+            assert context["dashboard_kpi_within_target"] is None
+            assert context["dashboard_kpi_available"] is False
+            assert context["dashboard_kpi_history_measured"] == historical_count
+            card = response.text.split('data-kpi="first-response"', 1)[1].split("</article>", 1)[0]
+            assert "계측 중단 · 미측정" in card
+            assert f"과거 측정 기록 {historical_count}건 · 3분 이내 0건" in card
+            assert "현재 집계가 아닙니다" in card
+            assert "자료 모으는 중" not in card and "%" not in card
+            assert "historical@example.com" not in card
+            # 별점 설문은 계속 수집하므로 미측정 응답시간과 다른 상태다.
+            assert context["dashboard_satisfaction"] == "자료 모으는 중"
+
+
+def test_KPI_과거자료_조회실패도_미측정상태와_자료부족을_혼동하지_않는다(monkeypatch, tmp_path):
+    monkeypatch.setenv(storage_constants.ENV_DB_PATH, str(tmp_path / "storage.db"))
+    runtime._PIPELINE = DemoPipeline()
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("시험용 저장소 조회 실패")
+
+    monkeypatch.setattr(dashboard_kpi, "summary", unavailable)
+    with TestClient(main.app) as client:
+        _session(client, email="admin@example.com", is_admin=True)
+        for path in ("/admin", "/admin/refresh/today", "/admin/members?period=7d"):
+            response = client.get(path)
+            assert response.status_code == 200
+            assert response.context["dashboard_kpi_measured"] is None
+            assert response.context["dashboard_kpi_history_measured"] is None
+            assert response.context["dashboard_kpi_history_available"] is False
+            card = response.text.split('data-kpi="first-response"', 1)[1].split("</article>", 1)[0]
+            assert "계측 중단 · 미측정" in card and "과거 측정 기록 확인 불가" in card
+            assert "자료 모으는 중" not in card and "%" not in card
 
 
 def test_admin_dashboard_labels_three_minute_metric_as_response_not_accuracy(

@@ -106,9 +106,35 @@ def test_휴지통_보고서는_KPI_요약에서_제외한다() -> None:
     )
 
     assert kpi.summary(conn) == kpi.KpiSummary(
-        measured_responses=1,
-        within_target=1,
+        historical_measured_responses=1,
+        historical_within_target=1,
     )
+
+
+def test_계측중단은_실제0건과_조회불가를_구분한다() -> None:
+    conn = _connection()
+    empty = kpi.summary(conn)
+    assert empty.measured_responses is None and empty.within_target is None
+    assert empty.measurement_status == kpi.MEASUREMENT_STATUS_PAUSED
+    assert empty.historical_measured_responses == empty.historical_within_target == 0
+    unavailable = kpi.KpiSummary()
+    assert unavailable.measured_responses is None and unavailable.within_target is None
+    assert unavailable.historical_measured_responses is None
+    assert unavailable.historical_within_target is None
+
+
+def test_최근기간_누적기록도_현재_측정으로_승격하지_않는다() -> None:
+    conn = _connection()
+    for day in ("2026-08-01", "2026-09-08"):
+        kpi.record_first_view(conn, report_id=day, report_version=1,
+                              actor_email="member@example.com", now_iso=f"{day}T10:00:00+09:00")
+        kpi.record_first_survey(conn, report_id=day, report_version=1,
+                                actor_email="member@example.com", now_iso=f"{day}T10:04:00+09:00")
+    assert kpi.summary(conn).historical_measured_responses == 2
+    recent = kpi.summary(conn, start_day="2026-09-01")
+    assert recent.historical_measured_responses == 1
+    assert recent.historical_within_target == 0
+    assert recent.measured_responses is None and recent.within_target is None
 
 
 def test_시간대_없는_시각은_측정하지_않는다() -> None:
