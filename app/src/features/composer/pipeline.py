@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Optional
@@ -71,6 +72,7 @@ from src.features.composer.constants import (
 )
 from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.news_usage import supplement_news_candidates, retain_verified_news, news_usage_diagnostics, append_research_notice, news_citation_ids
+from src.features.composer.review_outcomes import final_review_outcomes
 from src.features.composer.diagram_check import check_diagram_numbers, check_diagrams
 from src.features.composer.dup_detect import CONFIDENCE_CONFIRMED, find_numeric_duplicates
 from src.features.composer.extractive_summary import select_extractive_summary
@@ -234,6 +236,8 @@ class V2RunOutput:
     #: 보도표에서 «뺀 행»과 «못 붙인 장»의 사유별 수(`news_block.BLOCKED_*`).
     news_block_blocked_counts_by_reason: tuple[tuple[str, int], ...] = ()
     news_usage_diagnostics: dict[str, object] = field(default_factory=dict)
+    #: 원문을 저장하지 않는 검수 제외 진단. 본문·요약·도식에서 같은 계약을 쓴다.
+    review_diagnostics: tuple[dict[str, object], ...] = ()
 
 
 class _CallLedgerRecorder:
@@ -355,6 +359,7 @@ def _apply_generation_quality_label(
     rendered: Report,
     observation: GenerationQualityObservation,
     numeric_filtering: NumericSafetyFiltering,
+    review_diagnostics: Sequence[Mapping[str, object]] = (),
 ) -> Report:
     """새 생성물에만 PARTIAL 꼬리표와 사람이 읽을 이유를 붙인다.
 
@@ -389,6 +394,19 @@ def _apply_generation_quality_label(
         reasons.append(
             "핵심 요약에서도 같은 이유로 숫자 문장 "
             f"{numeric_filtering.removed_summary_count}개를 뺐습니다."
+        )
+
+    # 수치 후처리보다 앞선 의미 검수에서 제외된 문장도 사유를 잃지 않는다.
+    # 이는 계산이 틀렸다고 확정한 횟수가 아니라 근거를 결속하지 못한 횟수다.
+    review_counts: dict[str, int] = {}
+    for diagnostic in review_diagnostics:
+        kind = str(diagnostic.get("kind", ""))
+        review_counts[kind] = review_counts.get(kind, 0) + 1
+    if review_counts:
+        detail = ", ".join(f"{kind} {count}개" for kind, count in review_counts.items())
+        reasons.append(
+            "숫자·날짜 문장의 항목·기간·계산 관계를 원문과 맞춰 확인하지 못해 "
+            f"제외했습니다 ({detail}). 자료 자체가 없다는 뜻은 아닙니다."
         )
 
     contract = contract_for_generation(observation.contract_version)
@@ -492,6 +510,7 @@ def _legacy_summary_stage(
     writer_ask: AskFn,
     reviewer_ask: AskFn,
     body_numeric_filtering: NumericSafetyFiltering,
+    review_diagnostics: list[dict] | None = None,
 ) -> tuple[ComposedReport, int, NumericSafetyFiltering]:
     """기존 SHADOW 요약 경로를 글자·호출 순서까지 그대로 보존한다."""
 
@@ -515,7 +534,8 @@ def _legacy_summary_stage(
     if summary and not summary_ask_limited:
         try:
             summary = verify_sentences(
-                summary, fragments, performance_table, reviewer_ask
+                summary, fragments, performance_table, reviewer_ask,
+                diagnostics=review_diagnostics,
             )
         except AskFatalError as error:
             if not getattr(error, "degradable", False):
@@ -807,6 +827,7 @@ def run_v2(
     company_id: str = "",
     build_identity_sha256: str = "",
     research_diagnostics: dict[str, object] | None = None,
+    review_diagnostics_sink: list[dict] | None = None,
 ) -> V2RunOutput:
     """엔진 v2 전체 흐름을 한 번 돌려 최종 보고서를 만든다 (04장 3-4절).
 
@@ -844,6 +865,9 @@ def run_v2(
         release_mode: SHADOW는 기존 생성·요약·공개 동작을 그대로 쓴다.
             그 밖의 엄격 모드는 검증된 본문 사실을 글자 그대로 골라 요약하고,
             엄격 품질 계약을 통과하지 못하면 결과를 반환하지 않는다.
+        review_diagnostics_sink: 최종 출고 게이트가 예외를 내도 검수 중간 관측을
+            보존할 요청 로컬 목록. 성공 반환의 ``review_diagnostics``와 달리
+            보충 뒤 살아남은 후보를 아직 포함할 수 있다.
 
     Returns:
         V2RunOutput — 검증 끝난 Report와 초안·생존 문장 수.
@@ -856,6 +880,9 @@ def run_v2(
     if not isinstance(release_mode, ReleaseMode):
         raise TypeError("release_mode는 ReleaseMode 값이어야 합니다")
 
+    review_diagnostics = (
+        review_diagnostics_sink if review_diagnostics_sink is not None else []
+    )
     call_recorder: _CallLedgerRecorder | None = None
     writer_for_run = writer_ask
     reviewer_for_run = reviewer_ask
@@ -1065,7 +1092,8 @@ def run_v2(
     # ② 본문 검증 (검수 — 문장 단위 제거/강등만, 장 삭제 없음)
     if prepared_evidence is None:
         verified = verify_report(
-            draft, verification_fragments, performance_table, reviewer_for_run
+            draft, verification_fragments, performance_table, reviewer_for_run,
+            diagnostics=review_diagnostics,
         )
     else:
         verified = verify_report(
@@ -1076,6 +1104,7 @@ def run_v2(
             allowed_fragment_ids_by_section=(
                 prepared_evidence.allowed_fragment_ids_by_section
             ),
+            diagnostics=review_diagnostics,
         )
         _assert_composed_report_evidence_invariant(
             verified,
@@ -1116,6 +1145,7 @@ def run_v2(
             verified,
             _normalize_fragments(verification_fragments),
             diagram_ask or reviewer_ask,
+            diagnostics=review_diagnostics,
         )
     elif prepared_evidence is None:
         # ENFORCE_NO_PARTIAL은 이식기 호환 모드라 typed packet/장별 bundled
@@ -1226,6 +1256,7 @@ def run_v2(
             writer_ask=writer_ask,
             reviewer_ask=reviewer_for_run,
             body_numeric_filtering=body_numeric_filtering,
+            review_diagnostics=review_diagnostics,
         )
     else:
         body_rendered = render_report(
@@ -1470,6 +1501,7 @@ def run_v2(
                 allowed_fragment_ids_by_section=(
                     prepared_evidence.allowed_fragment_ids_by_section
                 ),
+                diagnostics=review_diagnostics,
             )
             supplement_verified, supplement_moved = drop_cross_section_duplicates(
                 retain_verified_news(
@@ -1718,11 +1750,13 @@ def run_v2(
             strict_problems,
             problem_codes=quality_observation.quality_problem_codes,
         )
+    final_review_diagnostics = final_review_outcomes(final, review_diagnostics)
     if release_mode is ReleaseMode.SHADOW:
         rendered = _apply_generation_quality_label(
             rendered,
             quality_observation,
             numeric_filtering,
+            final_review_diagnostics,
         )
     else:
         # 엄격 계약을 실제로 통과한 결과만 여기 온다. 입력 grade의 옛 기본값
@@ -1911,6 +1945,7 @@ def run_v2(
             review_candidates=news_review_candidates,
             review_rejections=news_review_rejections,
         ),
+        review_diagnostics=final_review_diagnostics,
     )
 
 

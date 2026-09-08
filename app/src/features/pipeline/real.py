@@ -5322,6 +5322,43 @@ def _unused_name_steps(output: Any) -> list[dict[str, Any]]:
     return steps
 
 
+def _review_diagnostics_step(
+    diagnostics: object, *, final_output: bool,
+) -> dict[str, Any] | None:
+    """검수 관측을 영속 가능한 한국어 닫힌 필드로 바꾼다."""
+    if not isinstance(diagnostics, (list, tuple)):
+        return None
+    from src.shared.report_quality.review_diagnostics import (  # noqa: PLC0415
+        observed_review_outcomes,
+    )
+
+    outcomes = observed_review_outcomes(diagnostics)
+    if not outcomes:
+        return None
+    return {
+        "step": "8_근거검수_제외",
+        "최종출력": final_output,
+        "항목": [
+            {
+                "장": outcome["section_id"],
+                "종류": outcome["kind"],
+                "사유코드": outcome["reason_code"],
+                "후보지문": outcome["candidate_sha256"],
+                "검증항목": list(outcome["verification_items"]),
+            }
+            for outcome in outcomes
+        ],
+    }
+
+
+def _append_review_diagnostics_step(
+    steps: list[dict[str, Any]], diagnostics: object, *, final_output: bool,
+) -> None:
+    step = _review_diagnostics_step(diagnostics, final_output=final_output)
+    if step is not None:
+        steps.append(step)
+
+
 def _run_v2_composer(
     *,
     engine: _MeteredEngine,
@@ -5644,6 +5681,7 @@ def _run_v2_composer(
     diagram_ask = _v2_ask_via_provider(
         engine, client, stage="v2_diagram", max_tokens=V2_DIAGRAM_MAX_TOKENS
     )
+    review_diagnostics_sink: list[dict] = []
     try:
         output = composer_pipeline.run_v2(
             company_name,
@@ -5679,6 +5717,7 @@ def _run_v2_composer(
             research_diagnostics=public_news_research_status(
                 steps, enabled=news_intake_switch.news_intake_enabled()
             ),
+            review_diagnostics_sink=review_diagnostics_sink,
         )
         news_usage = getattr(output, "news_usage_diagnostics", None)
         if isinstance(news_usage, dict) and news_usage:
@@ -5758,7 +5797,15 @@ def _run_v2_composer(
                             FINAL_GATE_DETAIL_EVIDENCE_MANIFEST_BINDING_INVALID,
                         ),
                     ) from error
+        _append_review_diagnostics_step(
+            steps,
+            getattr(output, "review_diagnostics", ()),
+            final_output=True,
+        )
     except AskFatalError as exc:
+        _append_review_diagnostics_step(
+            steps, review_diagnostics_sink, final_output=False,
+        )
         # ★ 요청 로컬 예약액 소진(ProviderBudgetExceeded — 횟수 상한 포함)만은
         #   «사유 없는 실패»로 끝내지 않는다. 예외로 나가면 run() 바깥 except가
         #   Outcome.FAILED로 접어 화면에 「보고서를 만들다 오류가 났습니다」만
@@ -5793,6 +5840,9 @@ def _run_v2_composer(
         # run()의 바깥 경계를 지나 실행기가 예외 종류에 맞는 중단 결과로 분류하게 한다.
         raise exc.cause from exc
     except PublicManifestError:
+        _append_review_diagnostics_step(
+            steps, review_diagnostics_sink, final_output=False,
+        )
         # 행 원문·표 변형·공개 manifest 결속이 깨진 것은 회사 자료 부족이
         # 아니라 우리 내부 배선 오류다. 예외문이나 원문은 영속 진단에 싣지 않는다.
         gate_reason = classify_v2_validation_final_gate_reason(
@@ -5820,6 +5870,9 @@ def _run_v2_composer(
             final_gate_reason=gate_reason,
         )
     except V2ValidationError as exc:
+        _append_review_diagnostics_step(
+            steps, review_diagnostics_sink, final_output=False,
+        )
         # v2 출고 3검사 실패 — 원문 없는 검증 사유만 운영 기록에 남긴다.
         # ★ 품질 하한(40건 실질 claim·8건 독립 문서·50% 검증 비율) 미달일
         #   때만 별도 사유로 구분한다 — 그 외 출고 검증 실패는 여전히
@@ -5849,6 +5902,9 @@ def _run_v2_composer(
             final_gate_reason=gate_reason,
         )
     except Exception as error:  # noqa: BLE001 — AI 밖 조립 결함은 상위에서 실패 처리
+        _append_review_diagnostics_step(
+            steps, review_diagnostics_sink, final_output=False,
+        )
         # provider 경계가 이미 더 정확한 실패를 남겼으면 그것을 보존한다.
         runtime_failure.append_failure_once(
             steps,
