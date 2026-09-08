@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 
 from src.shared.report_quality.review_diagnostic_constants import (
     CANDIDATE_FINGERPRINT_RE,
@@ -14,13 +14,15 @@ from src.shared.report_quality.review_diagnostic_constants import (
 
 
 def observed_review_outcomes(
-    diagnostics: Sequence[object],
+    diagnostics: object,
 ) -> tuple[dict[str, object], ...]:
     """최종 보고서가 없어도 호출하며 원문·응답·임의 필드를 저장하지 않는다.
 
     빈 검증항목은 추가 검증 대상이 없지만 응답 자체가 invalid였던 실제
     관측일 수 있으므로 보존한다. 회사 자료 부족 여부를 추론하지 않는다.
     """
+    if not isinstance(diagnostics, (list, tuple)):
+        return ()
     results: dict[tuple[str, str, str], dict[str, object]] = {}
     for diagnostic in diagnostics:
         if not isinstance(diagnostic, Mapping):

@@ -45,7 +45,7 @@ from src.features.sharelink import store as share_store
 from src.features.sharelink.constants import KEY_COOKIE_NAME
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
-from src.web import main, runtime
+from src.web import main, report_publication, runtime
 from src.web.tests import report_route_support
 from src.web.tests._visible_text import visible_text
 
@@ -338,7 +338,10 @@ def _골든(이름: str, 확장: str) -> str:
     ★ 다시 찍는 법 — 결과 화면을 일부러 바꾸는 변경에서만, 그 커밋의 코드로
       `_머리(_정규화(html))`와 `_글자줄만(...)`을 그대로 덮어쓴다.
     """
-    return (_스냅샷_폴더 / f"{이름}.{확장}").read_text(encoding="utf-8")
+    snapshot = (_스냅샷_폴더 / f"{이름}.{확장}").read_text(encoding="utf-8")
+    # `_머리`는 article 시작 태그의 마지막 글자에서 자르므로 파일 저장용 끝 LF는
+    # 비교 대상 HTML 바이트가 아니다. 내용 안쪽의 공백은 계속 한 글자도 허용하지 않는다.
+    return snapshot.removesuffix("\n") if 확장 == "head.html" else snapshot
 
 
 def _로그인(client: TestClient, email: str, *, is_admin: bool) -> None:
@@ -349,6 +352,10 @@ def _로그인(client: TestClient, email: str, *, is_admin: bool) -> None:
 def _골든_화면(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
     """골든을 찍을 때와 «같은» 보고서·같은 저장 갈래를 세운다."""
     report = build_demo_report()
+    # 이 fixture는 현재 FULL 보고서가 아니다. Delivery·공개 봉인이 생기기 전
+    # payload라는 점을 먼저 증명해야 아래 읽기 전용 경고의 골든이 정당하다.
+    assert report.public_projection is None
+    assert report_publication.report_payload_is_true_legacy(report)
     with storage_db.connect() as conn:
         report_store.save(conn, _골든_보고서번호, "demo-corp", report.job, report)
         발급 = report_access_store.issue_and_bind(
@@ -372,7 +379,9 @@ def test_PUBLIC_MEMBER_ADMIN_결과화면은_바뀌지_않는다(
     """★ 초대 링크 손님만 바꾼다. 나머지 세 손님의 결과 화면은 그대로다.
 
     표지 위 장식은 «바이트»로, 화면 전체는 «읽는 글자»로 대조한다. 새 띠나
-    버튼이 다른 손님에게 한 줄이라도 새면 여기서 걸린다.
+    버튼이 다른 손님에게 한 줄이라도 새면 여기서 걸린다. 다만 이 fixture는
+    과거 미봉인 저장본이므로 세 손님 모두 같은 읽기 전용 경고를 보는 것이
+    현재 보안 계약이다.
     """
     _골든_화면(monkeypatch, client)
     공개 = _본다(client)
@@ -401,6 +410,7 @@ def test_PUBLIC_MEMBER_ADMIN_결과화면은_바뀌지_않는다(
         assert "link-result" not in 화면, 이름
         assert _돌아가기 not in 화면, 이름
         assert _다른회사 not in 화면, 이름
+        assert "과거 방식으로 저장된 본문을 그대로 보여드립니다." in 화면, 이름
 
 
 # ══════════════════════════════════════════════════════════
