@@ -1095,9 +1095,10 @@ def _table_payload(
     source_cites: Sequence[str],
     row_fact_ids: Sequence[str],
     row_bindings: Sequence[Mapping[str, object]],
+    row_cites: Sequence[Sequence[str]] = (),
 ) -> dict[str, object]:
     binding_payloads = [dict(value) for value in row_bindings]
-    return {
+    payload = {
         "section_id": section_id,
         "table_index": table_index,
         "kind": kind,
@@ -1128,6 +1129,9 @@ def _table_payload(
         "row_bindings": binding_payloads,
         "numeric_tokens": _numeric_tokens(rows),
     }
+    if row_cites:
+        payload["row_cites"] = [list(row) for row in row_cites]
+    return payload
 
 
 def _citation_numbers_for_fragments(
@@ -1501,7 +1505,7 @@ def _expected_source(
 
 
 def _public_table_from_manifest(table: Mapping[str, object]) -> dict[str, object]:
-    return {
+    payload = {
         "caption": str(table.get("caption") or ""),
         "headers": [str(value) for value in table.get("headers", [])],
         "rows": [
@@ -1512,6 +1516,11 @@ def _public_table_from_manifest(table: Mapping[str, object]) -> dict[str, object
         "presentation": str(table.get("presentation") or "table"),
         "display_unit": str(table.get("display_unit") or ""),
     }
+    if table.get("row_cites"):
+        payload["row_cites"] = [
+            [str(cite) for cite in row] for row in table["row_cites"]
+        ]
+    return payload
 
 
 def _expected_public_content_projection(
@@ -1798,6 +1807,10 @@ def build_public_structure_seal(
                     source_cites=source_cites,
                     row_fact_ids=("",) * len(rows),
                     row_bindings=row_bindings,
+                    row_cites=[
+                        _normalized_source_cites(binding["source_fragment_ids"])
+                        for binding in row_bindings
+                    ],
                 )
             )
         # 3장 「회사가 공시한 대표 이름」 — renderer가 넣는 자리와 같은 순서
@@ -2160,6 +2173,7 @@ def _actual_table_payloads(report: Report) -> list[dict[str, object]]:
                 source_cites=table.source_cites,
                 row_fact_ids=table.row_fact_ids,
                 row_bindings=row_bindings,
+                row_cites=table.row_cites,
             )
             ref = _sha256_text(_canonical_json(payload))
             if ref != table.manifest_ref:

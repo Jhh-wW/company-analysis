@@ -21,6 +21,7 @@ import json
 import sqlite3
 from dataclasses import fields, replace
 from typing import Any, Optional
+from src.shared.report_generation.table_citations import validated_row_cites
 
 from src.core.constants import COUNTED_CELLS, HIDDEN_CELLS
 from src.core.persisted_json import validate_persisted_json_text
@@ -90,6 +91,9 @@ def _table_to_dict(table: ReportTable) -> dict[str, Any]:
         "scale_places": table.scale_places,
         "display_unit": table.display_unit,
     }
+    if table.row_cites:
+        payload["row_cites"] = [list(row) for row in validated_row_cites(table.rows, table.row_cites)]
+        payload["source_cites"] = list(table.source_cites)
     # FULL 구조 manifest는 원문 자체가 아니라 행/셀 typed ref·전체 출처·표
     # 참조만 저장한다. 원문 evidence_rows는 수집 경계 밖 장기 저장물이 아니다.
     if table.manifest_ref:
@@ -144,6 +148,7 @@ def _table_from_dict(data: dict[str, Any]) -> ReportTable:
             [str(value) for value in row]
             for row in data.get("cell_binding_refs", [])
         ],
+        row_cites=[list(row) for row in validated_row_cites(data["rows"], data.get("row_cites", []))],
     )
 
 

@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from src.core.citations import citation_marker, citation_number
@@ -40,6 +40,7 @@ from src.shared.report_generation.public_projection import (
     PublicSectionDisplay,
     PublicTableBlock,
 )
+from src.shared.report_generation.table_citations import validated_row_cites
 
 #: 노션 블록 하나를 표현하는 dict. Notion API의 block object 형태를 그대로 따른다.
 NotionBlock = dict[str, Any]
@@ -132,6 +133,32 @@ def _table_block(headers: list[str], rows: list[list[NotionCell]]) -> NotionBloc
     }
 
 
+def _rows_with_citations(
+    rows: Sequence[Sequence[str]], row_cites: object
+) -> list[list[str]]:
+    """행별 실제 인용을 각 행의 마지막 칸에 표시한다.
+
+    ``row_cites``가 비어 있으면 옛 표의 행 글자를 한 글자도 바꾸지 않는다.
+    값이 있으면 shared 검증 helper가 행 수·표식 모양·중복·순서를 닫고, 통과한
+    인용만 해당 행에 붙인다. 다른 행이나 표 대표 cite를 추측해 보충하지 않는다.
+    """
+
+    validated = validated_row_cites(rows, row_cites)
+    if not validated:
+        return [list(row) for row in rows]
+    rendered: list[list[str]] = []
+    for row, cites in zip(rows, validated, strict=True):
+        cells = list(row)
+        if not cells:
+            raise ValueError("행별 인용을 빈 표 행에 표시할 수 없습니다")
+        markers = " ".join(
+            marker for cite in cites if (marker := citation_marker(cite))
+        )
+        cells[-1] = f"{cells[-1]} {markers}" if cells[-1] else markers
+        rendered.append(cells)
+    return rendered
+
+
 # ══════════════════════════════════════════════════════════
 # 본문 — 회사명·부제 (result.html <h1>/<p class="lede">)
 # ══════════════════════════════════════════════════════════
@@ -179,9 +206,10 @@ def _table_blocks(table: ReportTable) -> list[NotionBlock]:
     """숫자·회계 표 하나. 문장으로 바꾸지 않고 «표 그대로» 낸다."""
     marker = citation_marker(table.cite)
     caption = f"{table.caption} {marker}" if marker else table.caption
+    rows = _rows_with_citations(table.rows, table.row_cites)
     blocks: list[NotionBlock] = [_paragraph(caption)]
     if table.headers:
-        blocks.append(_table_block(table.headers, table.rows))
+        blocks.append(_table_block(table.headers, rows))
     return blocks
 
 
@@ -332,11 +360,13 @@ def _v2_table_blocks(table: PublicTableBlock) -> list[NotionBlock]:
 
     marker = citation_marker(table.cite)
     caption = f"{table.caption} {marker}" if marker else table.caption
+    rows = _rows_with_citations(table.rows, table.row_cites)
     blocks: list[NotionBlock] = [_paragraph(caption)]
     if table.headers:
         blocks.append(
             _table_block(
-                list(table.headers), [list(row) for row in table.rows]
+                list(table.headers),
+                rows,
             )
         )
     return blocks

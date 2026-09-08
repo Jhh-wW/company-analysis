@@ -10,6 +10,8 @@ end-to-end로 확인한다.
 from __future__ import annotations
 
 import uuid
+import re
+from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -131,6 +133,52 @@ def test_relation_pairs_kind_renders_two_circle_pairs_without_a_table() -> None:
     assert body.count('class="relation-arrow" aria-hidden="true"') == 2
     for value in ("원가 부담", "공정 효율화", "고객 집중", "판매처 다변화"):
         assert value in body
+
+
+def test_relation_rows_keep_their_own_citations_in_the_web_output() -> None:
+    report = _v2_relation_report()
+    table = report.sections[0].tables[0]
+    cited_table = replace(
+        table,
+        source_cites=["[1]", "[2]"],
+        row_cites=[["[1]"], ["[2]"]],
+    )
+    cited_report = replace(
+        report,
+        sections=[replace(report.sections[0], tables=[cited_table])],
+        citations=[
+            *report.citations,
+            Source(number=2, kind=SourceKind.OTHER, label="two"),
+        ],
+    )
+
+    body = _render(cited_report)
+    rows = body.split('class="relation-pair"')[1:]
+
+    assert len(rows) == 2
+    assert 'class="row-cites"' in rows[0] and 'href="#src1"' in rows[0]
+    assert 'class="row-cites"' in rows[1] and 'href="#src2"' in rows[1]
+
+
+def test_plain_table_fallback_keeps_its_row_citations() -> None:
+    """도식이 아닌 일반 표에도 각 행의 실제 근거가 남아야 한다."""
+    report = _v2_relation_report()
+    table = replace(
+        report.sections[0].tables[0],
+        presentation="table", source_cites=["[1]", "[2]"],
+        row_cites=[["[1]"], ["[2]"]],
+    )
+    report = replace(
+        report, sections=[replace(report.sections[0], tables=[table])],
+        citations=[*report.citations, Source(number=2, kind=SourceKind.OTHER, label="두 번째 출처")],
+    )
+
+    body = _render(report)
+    rows = re.findall(r"<tr>\s*<td.*?</tr>", body, flags=re.DOTALL)
+    first = next(row for row in rows if "공정 효율화" in row)
+    second = next(row for row in rows if "판매처 다변화" in row)
+    assert 'href="#src1"' in first and 'href="#src2"' not in first
+    assert 'href="#src2"' in second and 'href="#src1"' not in second
 
 
 def _v2_portfolio_report() -> Report:

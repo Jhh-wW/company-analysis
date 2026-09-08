@@ -237,6 +237,7 @@ def _visual_from_block(block: PublicVisualBlock) -> TableVisualization:
             )
             for title, fields in block.cards
         ),
+        row_cites=block.row_cites,
     )
 
 
@@ -729,9 +730,11 @@ class _RelationGraphic(Flowable):
         self.width = width
         self.diameter = _RELATION_NODE_DIAMETER_MM * mm
         self.row_gap = _RELATION_ROW_GAP_MM * mm
-        self.height = (len(self.pairs) * self.diameter) + (
-            max(0, len(self.pairs) - 1) * self.row_gap
+        self._row_cite_texts = tuple(
+            _row_cited_text(cites) for cites in visual.row_cites
         )
+        if self._row_cite_texts and len(self._row_cite_texts) != len(self.pairs):
+            raise ValueError("관계 도식의 행별 인용 순서가 행과 다릅니다")
         self._text_style = ParagraphStyle(
             "RelationNode",
             fontName=constants.FONT_REGULAR,
@@ -740,6 +743,24 @@ class _RelationGraphic(Flowable):
             alignment=TA_CENTER,
             textColor=colors.HexColor(constants.COLOR_INK),
             wordWrap="CJK",
+        )
+        self._cite_style = ParagraphStyle(
+            "RelationRowCitation",
+            fontName=constants.FONT_REGULAR,
+            fontSize=constants.ROW_CITATION_FONT_SIZE_PT,
+            leading=constants.ROW_CITATION_LEADING_PT,
+            alignment=TA_RIGHT,
+            textColor=colors.HexColor(constants.COLOR_WEAK),
+        )
+        self._row_cite_heights = tuple(
+            _row_citation_height(text, self._cite_style, width)
+            for text in self._row_cite_texts
+        ) or (0.0,) * len(self.pairs)
+        self._row_heights = tuple(
+            self.diameter + cite_height for cite_height in self._row_cite_heights
+        )
+        self.height = sum(self._row_heights) + (
+            max(0, len(self.pairs) - 1) * self.row_gap
         )
 
     def wrap(self, avail_width: float, avail_height: float) -> tuple[float, float]:
@@ -793,12 +814,17 @@ class _RelationGraphic(Flowable):
         left_center = self.width * 0.25
         right_center = self.width * 0.75
         for index, pair in enumerate(self.pairs):
-            center_y = self.height - (self.diameter / 2) - (
-                index * (self.diameter + self.row_gap)
-            )
+            above = sum(self._row_heights[:index]) + (index * self.row_gap)
+            cite_height = self._row_cite_heights[index]
+            center_y = self.height - above - (self.diameter / 2)
             self._draw_node(canvas, left_center, center_y, pair.left, filled=False)
             self._draw_arrow(canvas, left_center, right_center, center_y)
             self._draw_node(canvas, right_center, center_y, pair.right, filled=True)
+            cite = self._row_cite_texts[index] if self._row_cite_texts else ""
+            if cite:
+                citation = Paragraph(_escape(cite), self._cite_style)
+                citation.wrap(self.width, cite_height)
+                citation.drawOn(canvas, 0, center_y - (self.diameter / 2) - cite_height)
 
 
 class _FlowGraphic(Flowable):
@@ -854,6 +880,19 @@ class _FlowGraphic(Flowable):
             wordWrap="CJK",
         )
         self._chevron_rows = [self._uses_chevrons(flow) for flow in visual.flows]
+        self._row_cite_texts = tuple(
+            _row_cited_text(cites) for cites in visual.row_cites
+        )
+        if self._row_cite_texts and len(self._row_cite_texts) != len(visual.flows):
+            raise ValueError("흐름 도식의 행별 인용 순서가 행과 다릅니다")
+        self._cite_style = ParagraphStyle(
+            "FlowRowCitation",
+            fontName=constants.FONT_REGULAR,
+            fontSize=constants.ROW_CITATION_FONT_SIZE_PT,
+            leading=constants.ROW_CITATION_LEADING_PT,
+            alignment=TA_RIGHT,
+            textColor=colors.HexColor(constants.COLOR_WEAK),
+        )
         # ★ 열 이름은 «첫 쉐브론 줄 위에만» 한 번 찍는다. 줄마다 다시 찍으면
         #   「핵심 자산 / 제품·서비스 / …」가 두세 번 반복돼 도표가 표처럼
         #   무거워진다(비상장 소프트웨어사 3쪽·상장 엔터사 3쪽 실측). 상자 줄은 라벨이 «칸 안»에
@@ -867,10 +906,20 @@ class _FlowGraphic(Flowable):
             uses and index == first_chevron
             for index, uses in enumerate(self._chevron_rows)
         ]
-        self._row_heights = [
+        self._content_heights = [
             self._measure_row_height(flow, chevrons=uses_chevrons, header=header)
             for flow, uses_chevrons, header in zip(
                 visual.flows, self._chevron_rows, self._header_rows, strict=True
+            )
+        ]
+        self._row_cite_heights = [
+            _row_citation_height(text, self._cite_style, width)
+            for text in self._row_cite_texts
+        ] or [0.0] * len(visual.flows)
+        self._row_heights = [
+            content_height + cite_height
+            for content_height, cite_height in zip(
+                self._content_heights, self._row_cite_heights, strict=True
             )
         ]
         self.height = sum(self._row_heights) + (
@@ -1045,16 +1094,25 @@ class _FlowGraphic(Flowable):
         for row_index, flow in enumerate(self.visual.flows):
             row_height = self._row_heights[row_index]
             y = self.height - sum(self._row_heights[: row_index + 1]) - (row_index * self.row_gap)
+            cite_height = self._row_cite_heights[row_index]
+            content_y = y + cite_height
             if self._chevron_rows[row_index]:
                 self._draw_chevron_row(
                     canvas,
                     flow,
-                    y,
-                    row_height,
+                    content_y,
+                    self._content_heights[row_index],
                     header_row=self._header_rows[row_index],
                 )
             else:
-                self._draw_box_row(canvas, flow, y, row_height)
+                self._draw_box_row(
+                    canvas, flow, content_y, self._content_heights[row_index]
+                )
+            cite = self._row_cite_texts[row_index] if self._row_cite_texts else ""
+            if cite:
+                citation = Paragraph(_escape(cite), self._cite_style)
+                citation.wrap(self.width, cite_height)
+                citation.drawOn(canvas, 0, y)
 
 
 #: 표지 실적 띠가 들어가는 영역 (상단에서 mm).
@@ -1752,6 +1810,22 @@ def _cited_text(text: str, cite: str) -> str:
     return f"{text} {marker}" if marker else text
 
 
+def _row_cited_text(cites: Sequence[str]) -> str:
+    """행에 결속된 실제 인용만 PDF 표식으로 바꾼다."""
+
+    return " ".join(
+        marker for cite in cites if (marker := citation_marker(str(cite)))
+    )
+
+
+def _row_citation_height(text: str, style: ParagraphStyle, width: float) -> float:
+    """출처가 여러 줄로 접혀도 도식의 배정 영역 안에 모두 들어가게 측정한다."""
+    if not text:
+        return 0.0
+    _, height = Paragraph(_escape(text), style).wrap(width, 0)
+    return height + constants.ROW_CITATION_GAP_PT
+
+
 #: 한 조각에 넣는 최대 열 수. 이보다 넓은 표는 첫 열을 반복하며 나눈다.
 _MAX_TABLE_COLUMNS: Final[int] = 5
 
@@ -1801,6 +1875,8 @@ def _split_wide_table(
                 display_unit=table.display_unit,
                 presentation="table",
                 evidence_rows=list(table.evidence_rows),
+                source_cites=list(table.source_cites),
+                row_cites=[list(row) for row in table.row_cites],
             )
         )
     return chunks
@@ -1880,11 +1956,20 @@ def _add_flow_card_visualization(
     # ★ 캡션은 «첫 카드와 한 묶음»이다. 예전엔 캡션만 따로 묶어 내보내서,
     #   쪽 끝에 캡션 한 줄만 남고 카드는 통째로 다음 쪽으로 넘어갔다
     #   (상장 엔터사 3쪽 실측 — 제목만 있고 내용이 없는 쪽이 만들어진다).
-    for card in visual.cards:
+    for index, card in enumerate(visual.cards):
         card_table = _flow_card_table(card, styles, width)
         if card_table is None:
             continue
-        story.append(KeepTogether([*head, card_table, Spacer(1, 8)]))
+        row_cites = visual.row_cites[index] if visual.row_cites else ()
+        cite = _row_cited_text(row_cites)
+        row_tail: list[Flowable] = [Spacer(1, 8)]
+        if cite:
+            row_tail = [
+                Spacer(1, 2),
+                Paragraph(_escape(cite), styles["small"]),
+                Spacer(1, 8),
+            ]
+        story.append(KeepTogether([*head, card_table, *row_tail]))
         head = []
     if head:
         # 그릴 카드가 하나도 없으면 캡션만이라도 남긴다 — 출처 번호가 붙은
@@ -1950,6 +2035,7 @@ def _add_report_table(
         headers=tuple(table.headers),
         rows=tuple(tuple(row) for row in table.rows),
         numeric=table.numeric,
+        row_cites=table.row_cites,
         styles=styles,
         width=width,
     )
@@ -1963,6 +2049,7 @@ def _add_grid_table(
     headers: Sequence[str],
     rows: Sequence[Sequence[str]],
     numeric: bool,
+    row_cites: Sequence[Sequence[str]] = (),
     styles: dict[str, ParagraphStyle],
     width: float,
 ) -> None:
@@ -2025,8 +2112,14 @@ def _add_grid_table(
         styles["table_numeric"] if numeric and index > 0 else styles["table"]
         for index in range(max_columns)
     ]
-    for row in rows:
-        data.extend(chunk_row(row, body_styles))
+    if row_cites and len(row_cites) != len(rows):
+        raise ValueError("표 분할 전후 행별 인용 개수가 다릅니다")
+    for row_index, row in enumerate(rows):
+        displayed_row = list(row)
+        cite = _row_cited_text(row_cites[row_index]) if row_cites else ""
+        if cite and displayed_row:
+            displayed_row[-1] = f"{displayed_row[-1]} {cite}"
+        data.extend(chunk_row(displayed_row, body_styles))
     if not data:
         return
 
@@ -2426,6 +2519,7 @@ def _add_projection_table(
             headers=headers,
             rows=rows,
             numeric=table.numeric,
+            row_cites=table.row_cites,
             styles=styles,
             width=width,
         )

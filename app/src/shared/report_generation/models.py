@@ -69,6 +69,11 @@ def canonical_value(value: Any) -> Any:
             item.name: canonical_value(getattr(value, item.name))
             for item in fields(value)
             if item.init
+            # 선택적 공개 필드의 빈 tuple은 옛 저장본의 바이트·지문을 보존한다.
+            and not (
+                item.metadata.get("canonical_omit_empty")
+                and getattr(value, item.name) == ()
+            )
         }
     if isinstance(value, Mapping):
         return {

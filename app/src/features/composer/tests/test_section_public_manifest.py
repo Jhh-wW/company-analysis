@@ -611,6 +611,7 @@ def test_full_packet은_작성9_묶음검수1_요약0_도식0이다():
     )
     assert flow.manifest_ref
     assert flow.source_cites == ["[2]", "[20]"]
+    assert flow.row_cites == [["[2]"], ["[20]"]]
     assert flow.evidence_rows == []
     assert len(flow.row_evidence_refs) == len(flow.rows) == 2
     assert len(flow.row_binding_refs) == len(flow.rows)
@@ -1842,6 +1843,7 @@ def test_storage는_evidence_source_cites_manifest를_왕복하고_누락은_닫
     assert restored.quality_observation == original.quality_observation
     assert restored_flow.evidence_rows == []
     assert restored_flow.source_cites == original_flow.source_cites
+    assert restored_flow.row_cites == original_flow.row_cites
     assert restored_flow.manifest_ref == original_flow.manifest_ref
     assert restored_flow.row_evidence_refs == original_flow.row_evidence_refs
     assert restored_flow.row_binding_refs == original_flow.row_binding_refs
@@ -1867,6 +1869,28 @@ def test_storage는_evidence_source_cites_manifest를_왕복하고_누락은_닫
     flow_payload.pop("row_binding_refs")
     with pytest.raises(ValueError, match="manifest|행 근거"):
         report_from_dict(missing_rows)
+
+    forged_row_cites = report_to_dict(original)
+    forged_flow_cites = next(
+        table
+        for section in forged_row_cites["sections"]
+        for table in section["tables"]
+        if table.get("presentation") == "flow"
+    )
+    forged_flow_cites["row_cites"] = [["[20]"], ["[2]"]]
+    with pytest.raises(PublicManifestError, match="행별 공개 인용|manifest"):
+        report_from_dict(forged_row_cites)
+
+    missing_row_cites = report_to_dict(original)
+    missing_flow_cites = next(
+        table
+        for section in missing_row_cites["sections"]
+        for table in section["tables"]
+        if table.get("presentation") == "flow"
+    )
+    missing_flow_cites.pop("row_cites")
+    with pytest.raises(PublicManifestError, match="manifest"):
+        report_from_dict(missing_row_cites)
 
     forged_cell = report_to_dict(original)
     forged_flow = next(

@@ -10,12 +10,15 @@
 from __future__ import annotations
 
 import io
+from dataclasses import replace
 
 import pdfplumber
 import pytest
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.platypus import Flowable, KeepTogether, SimpleDocTemplate, Table
+from reportlab.platypus import Paragraph
+from reportlab.pdfgen.canvas import Canvas
 
 from src.features.export_pdf.logic import (
     _FLOW_MIN_ROW_HEIGHT_MM,
@@ -118,6 +121,30 @@ def test_causal_flow_kind_still_uses_flow_graphic() -> None:
         "e2e 시험(test_e2e_offline.py)이 요구하는 class=\"flow-row\"와 대응하는 "
         "PDF 쪽 그림이 사라졌습니다"
     )
+
+
+def test_flow_pdf_keeps_each_row_citation_with_its_own_flow() -> None:
+    table = ReportTable(
+        caption="row citations",
+        headers=["from", "to"],
+        rows=[["first-source", "first-destination"], ["second-source", "second-destination"]],
+        cite="[101]",
+        presentation="flow",
+        source_cites=["[101]", "[202]"],
+        row_cites=[["[101]"], ["[202]"]],
+    )
+    story: list[Flowable] = []
+
+    assert _add_report_visualization(story, table, _styles(), _WIDTH) is True
+    pdf = _render(story)
+    with pdfplumber.open(io.BytesIO(pdf)) as document:
+        text = "\n".join(page.extract_text() or "" for page in document.pages)
+
+    first_row = text.index("first-source")
+    first_cite = text.index("〔101〕", first_row)
+    second_row = text.index("second-source")
+    second_cite = text.index("〔202〕", second_row)
+    assert first_row < first_cite < second_row < second_cite
 
 
 def test_relation_pairs_kind_uses_relation_graphic_and_prints_exact_cells() -> None:
@@ -272,3 +299,44 @@ def test_flow_graphic_keeps_the_old_minimum_height_for_short_content() -> None:
 
     graphic = _FlowGraphic(visual, table.headers, _WIDTH)
     assert graphic.height == pytest.approx(_FLOW_MIN_ROW_HEIGHT_MM * mm, abs=0.01)
+
+
+def test_relation_citations_stay_inside_the_reserved_graphic_height(monkeypatch) -> None:
+    """마지막 행 출처가 음수 y 좌표로 빠져 다음 내용과 겹치지 않는다."""
+    table = replace(_RELATION_TABLE, row_cites=[["[11]"], ["[22]"]])
+    visual = table_visualization(table)
+    assert visual is not None
+    graphic = _RelationGraphic(visual, _WIDTH)
+    positions = []
+    original = Paragraph.drawOn
+
+    def record(paragraph, canvas, x, y, *args, **kwargs):
+        if paragraph.getPlainText().startswith("〔"):
+            positions.append((y, paragraph.height))
+        return original(paragraph, canvas, x, y, *args, **kwargs)
+
+    monkeypatch.setattr(Paragraph, "drawOn", record)
+    graphic.canv = Canvas(io.BytesIO())
+    graphic.draw()
+
+    assert len(positions) == len(table.rows)
+    assert all(0 <= y and y + height <= graphic.height for y, height in positions)
+
+
+@pytest.mark.parametrize("kind", ("relation", "flow"))
+def test_multiple_lines_of_row_citations_are_measured_before_layout(kind) -> None:
+    """인용이 긴 경우에도 고정 한 줄 높이로 잘라 버리지 않는다."""
+    template = _RELATION_TABLE if kind == "relation" else _CAUSAL_FLOW_TABLE
+    cites = [f"[{number}]" for number in range(1, 101)]
+    table = replace(template, row_cites=[cites for _ in template.rows])
+    visual = table_visualization(table)
+    assert visual is not None
+    graphic = (
+        _RelationGraphic(visual, _WIDTH)
+        if kind == "relation"
+        else _FlowGraphic(visual, table.headers, _WIDTH)
+    )
+    for text, allocated in zip(graphic._row_cite_texts, graphic._row_cite_heights, strict=True):
+        _, actual_height = Paragraph(text, graphic._cite_style).wrap(_WIDTH, 0)
+        assert actual_height > graphic._cite_style.leading
+        assert allocated > actual_height

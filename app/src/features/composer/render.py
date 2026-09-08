@@ -598,6 +598,7 @@ def _flow_report_table(
         return None
     rows: list[list[str]] = []
     cited: list[int] = []
+    row_cites: list[list[str]] = []
     # ★ 「미확인」 채우기는 «화살표로 그려지는 장»(2·5·7장)에만 건다.
     #   카드로 그려지는 장(1·3·6·8장)은 빈 칸을 그대로 둔다 — 이유는
     #   constants.FLOW_ARROW_SECTION_IDS 주석(카드는 빈 칸을 «빼는» 렌더러다).
@@ -629,10 +630,10 @@ def _flow_report_table(
             ]
         )
         cited.extend(row_numbers)
+        row_cites.append([f"[{number}]" for number in sorted(set(row_numbers))])
     if not rows:
         return None
-    # 캡션 근거는 «표 전체»를 대표하는 첫 조각 하나만 단다. 행마다 번호를
-    # 흩뿌리면 기준일·출처 반복 방지 규칙에 어긋난다.
+    # 대표 번호와 별도로 실제 행별 인용을 보존한다. 행을 버릴 때 같이 버린다.
     return ReportTable(
         # 장마다 머리말·캡션이 다르다(5장 과제→대응, 7장 투입→하는 일→도달).
         # 그 대응은 constants 한 곳에서만 정한다.
@@ -642,6 +643,8 @@ def _flow_report_table(
         cite=f"[{min(cited)}]",
         numeric=False,
         presentation=FLOW_PRESENTATION,
+        source_cites=[f"[{number}]" for number in sorted(set(cited))],
+        row_cites=row_cites,
     )
 
 
@@ -1333,11 +1336,12 @@ def render_report(
         if section.section_id in FLOW_HEADERS_BY_SECTION:
             flow_table = _flow_report_table(section, numbers)
             if flow_table is not None:
-                flow_cite = citation_number(flow_table.cite)
-                if flow_cite and int(flow_cite) in meta_by_number:
-                    owners = used_sections.setdefault(int(flow_cite), [])
-                    if section.section_id not in owners:
-                        owners.append(section.section_id)
+                for raw_cite in flow_table.source_cites:
+                    flow_cite = citation_number(raw_cite)
+                    if flow_cite and int(flow_cite) in meta_by_number:
+                        owners = used_sections.setdefault(int(flow_cite), [])
+                        if section.section_id not in owners:
+                            owners.append(section.section_id)
                 tables.append(flow_table)
         # 3장 「회사가 공시한 대표 이름」 — 작가 카드 «바로 뒤», 구성표 앞.
         # 순서는 공개 봉인이 만드는 순서와 같아야 한다(어긋나면 봉인이 막는다).
@@ -1438,6 +1442,10 @@ def render_report(
                     cell_binding_refs=[
                         [str(value) for value in row]
                         for row in entry.get("cell_binding_refs", [])
+                    ],
+                    row_cites=[
+                        [str(value) for value in row]
+                        for row in entry.get("row_cites", [])
                     ],
                 )
                 for raw_cite in sealed.source_cites:

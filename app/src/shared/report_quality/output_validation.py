@@ -31,6 +31,7 @@ from collections.abc import Iterable, Iterator
 from typing import Final
 
 from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
+from src.shared.report_generation.table_citations import validated_row_cites
 from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
 from src.shared.report_quality.output_constants import SUMMARY_MIN_SENTENCES, SUMMARY_MAX_SENTENCES
 
@@ -194,6 +195,12 @@ def _citation_mapping_problems(report: object, source_numbers, citation_number) 
     problems: list[str] = []
     for section in report.sections:
         for index, table in enumerate(section.tables, start=1):
+            try:
+                row_cites = validated_row_cites(table.rows, getattr(table, "row_cites", ()))
+                if row_cites and {cite for row in row_cites for cite in row} != set(table.source_cites):
+                    problems.append(f"{section.cell} 표 {index}번의 행별 인용과 전체 출처가 다릅니다")
+            except ValueError as exc:
+                problems.append(f"{section.cell} 표 {index}번: {exc}")
             seen: set[int] = set()
             for raw_cite in table.source_cites:
                 number = citation_number(raw_cite)

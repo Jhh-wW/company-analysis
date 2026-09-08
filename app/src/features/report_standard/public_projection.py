@@ -364,6 +364,7 @@ def _table_block(table: ReportTable) -> PublicTableBlock:
         presentation=str(projected["presentation"]),
         display_unit=str(projected["display_unit"]),
         manifest_ref=manifest_ref,
+        row_cites=tuple(tuple(row) for row in projected.get("row_cites", ())),
     )
 
 
@@ -415,6 +416,7 @@ def _visual_block(table_index: int, chart: TableVisualization) -> PublicVisualBl
         series=tuple(_series_row(series) for series in chart.series),
         flows=chart.flows,
         cards=tuple(_card_row(card) for card in chart.cards),
+        row_cites=chart.row_cites,
     )
 
 

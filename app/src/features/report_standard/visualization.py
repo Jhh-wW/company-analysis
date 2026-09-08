@@ -11,6 +11,7 @@ import unicodedata
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Final
+from src.shared.report_generation.table_citations import validated_row_cites
 
 #: 구성 도식(100% 누적 막대)에 그릴 수 있는 분류 개수.
 #:
@@ -247,6 +248,8 @@ class TableVisualization:
     #: 그릇만 지원하므로 같은 두 문자열을 ``flows``에도 함께 싣는다. 새 공개
     #: manifest 항목을 만들지 않고 표의 투영이라는 기존 원칙을 지키기 위해서다.
     pairs: tuple[RelationPair, ...] = ()
+    #: 도식에 남은 행과 같은 순서의 공개 인용. 빈 행 제외 시 함께 이동한다.
+    row_cites: tuple[tuple[str, ...], ...] = ()
 
 
 def _composition_reading(items: "tuple[ChartPoint, ...]") -> str:
@@ -557,6 +560,7 @@ def _relation_pairs(table: ReportTable) -> TableVisualization | None:
         caption=table.caption,
         flows=flows,
         pairs=tuple(pairs),
+        row_cites=validated_row_cites(table.rows, table.row_cites),
     )
 
 
@@ -566,7 +570,9 @@ def _flow(table: ReportTable) -> TableVisualization | None:
     if not (2 <= len(table.headers) <= 4) or not (1 <= len(table.rows) <= 5):
         return None
     flows: list[tuple[str, ...]] = []
-    for row in table.rows:
+    citations = validated_row_cites(table.rows, table.row_cites)
+    kept_cites: list[tuple[str, ...]] = []
+    for index, row in enumerate(table.rows):
         if len(row) != len(table.headers):
             return None
         values = tuple(str(value).strip() for value in row)
@@ -576,6 +582,8 @@ def _flow(table: ReportTable) -> TableVisualization | None:
         if not any(values):
             continue
         flows.append(values)
+        if citations:
+            kept_cites.append(citations[index])
     if not flows:
         return None
     # ★ «화살표로 이을 수 없는» 흐름표는 카드로 낸다 — _CARD_HEADER_KEY_SETS 주석
@@ -586,12 +594,14 @@ def _flow(table: ReportTable) -> TableVisualization | None:
             kind="card",
             caption=table.caption,
             cards=_flow_cards(tuple(flows), list(table.headers)),
+            row_cites=tuple(kept_cites),
         )
     return TableVisualization(
         kind="flow",
         caption=table.caption,
         reading=_flow_reading(tuple(flows), list(table.headers)),
         flows=tuple(flows),
+        row_cites=tuple(kept_cites),
     )
 
 

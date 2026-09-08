@@ -27,6 +27,9 @@
     <a class="ref" href="#src{{ n }}" title="출처 {{ n }}번">{{ n }}</a>
   {%- endfor -%}
 {% endmacro %}
+{% macro row_refs(cites) %}
+  {%- for cite in cites -%}{{ ref(cite) }}{%- endfor -%}
+{% endmacro %}
 
 {# 표 하나를 화면에 낸다 — 도식으로 그릴 수 있으면 도식, 아니면 표.
    ★ v1·v2가 «같은» 매크로를 쓴다. 예전에는 v1 분기에만 이 로직이 있어서,
@@ -109,6 +112,7 @@
   <span class="relation-node relation-left">{{ pair.left }}</span>
   <span class="relation-arrow" aria-hidden="true"></span>
   <span class="relation-node relation-right">{{ pair.right }}</span>
+  {% if visual.row_cites %}<span class="row-cites">{{ row_refs(visual.row_cites[loop.index0]) }}</span>{% endif %}
   </li>
   {% endfor %}
   </ol>
@@ -131,6 +135,7 @@
   <div><dt>{{ field.label }}</dt><dd>{{ field.value }}</dd></div>
   {% endfor %}
   </dl>
+  {% if visual.row_cites %}<p class="row-cites">{{ row_refs(visual.row_cites[loop.index0]) }}</p>{% endif %}
   </article>
   {% endfor %}
   </div>
@@ -151,6 +156,7 @@
   <li{% if value == '미확인' %} data-flow-cell="unconfirmed"{% endif %}><small>{{ t.headers[loop.index0] }}</small><span>{{ value }}</span></li>
   {% endfor %}
   </ol>
+  {% if visual.row_cites %}<p class="row-cites">{{ row_refs(visual.row_cites[loop.index0]) }}</p>{% endif %}
   {% endfor %}
   </div>
   {% if visual.reading %}<p class="chart-reading">{{ visual.reading }}</p>{% endif %}
@@ -165,10 +171,10 @@
   <table class="{{ 'nums' if t.numeric else 'texts' }}" aria-labelledby="{{ table_id }}-caption">
   <thead class="report-table-head"><tr>{% for h in t.headers %}<th scope="col">{{ h }}</th>{% endfor %}</tr></thead>
   <tbody>
-  {% for row in t.rows %}
+  {% for row in t.rows %}{% set row_index = loop.index0 %}
   <tr>
   {% for cell in row %}
-  <td{% if t.numeric and not loop.first %} class="num"{% endif %}>{{ cell }}</td>
+  <td{% if t.numeric and not loop.first %} class="num"{% endif %}>{{ cell }}{% if loop.last and t.row_cites %}<span class="row-cites">{{ row_refs(t.row_cites[row_index]) }}</span>{% endif %}</td>
   {% endfor %}
   </tr>
   {% endfor %}
@@ -271,6 +277,7 @@
   <span class="relation-node relation-left">{{ pair[0] }}</span>
   <span class="relation-arrow" aria-hidden="true"></span>
   <span class="relation-node relation-right">{{ pair[1] }}</span>
+  {% if visual.row_cites %}<span class="row-cites">{{ row_refs(visual.row_cites[loop.index0]) }}</span>{% endif %}
   </li>
   {% endfor %}
   </ol>
@@ -290,6 +297,7 @@
   <div><dt>{{ field_label }}</dt><dd>{{ field_value }}</dd></div>
   {% endfor %}
   </dl>
+  {% if visual.row_cites %}<p class="row-cites">{{ row_refs(visual.row_cites[loop.index0]) }}</p>{% endif %}
   </article>
   {% endfor %}
   </div>
@@ -310,6 +318,7 @@
   <li{% if value == '미확인' %} data-flow-cell="unconfirmed"{% endif %}><small>{{ t.headers[loop.index0] }}</small><span>{{ value }}</span></li>
   {% endfor %}
   </ol>
+  {% if visual.row_cites %}<p class="row-cites">{{ row_refs(visual.row_cites[loop.index0]) }}</p>{% endif %}
   {% endfor %}
   </div>
   {% if visual.reading %}<p class="chart-reading">{{ visual.reading }}</p>{% endif %}
@@ -324,10 +333,10 @@
   <table class="{{ 'nums' if t.numeric else 'texts' }}" aria-labelledby="{{ table_id }}-caption">
   <thead class="report-table-head"><tr>{% for h in t.headers %}<th scope="col">{{ h }}</th>{% endfor %}</tr></thead>
   <tbody>
-  {% for row in t.rows %}
+  {% for row in t.rows %}{% set row_index = loop.index0 %}
   <tr>
   {% for cell in row %}
-  <td{% if t.numeric and not loop.first %} class="num"{% endif %}>{{ cell }}</td>
+  <td{% if t.numeric and not loop.first %} class="num"{% endif %}>{{ cell }}{% if loop.last and t.row_cites %}<span class="row-cites">{{ row_refs(t.row_cites[row_index]) }}</span>{% endif %}</td>
   {% endfor %}
   </tr>
   {% endfor %}

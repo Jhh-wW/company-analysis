@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
 from src.core.citations import citation_number
+from src.shared.report_generation.table_citations import validated_row_cites
 from src.shared.report_generation.models import (
     GenerationProducerEvidence,
     assert_canonical_producer_evidence,
@@ -77,7 +78,7 @@ def _numeric_tokens(rows: Sequence[Sequence[str]]) -> list[list[str]]:
 def table_public_projection(table: object) -> dict[str, object]:
     """manifest/producer 필드를 제외한 표의 명시적 공개 projection."""
 
-    return {
+    payload = {
         "caption": str(_value(table, "caption", "")),
         "headers": [str(value) for value in _value(table, "headers", ())],
         "rows": [
@@ -88,6 +89,10 @@ def table_public_projection(table: object) -> dict[str, object]:
         "presentation": str(_value(table, "presentation", "table")),
         "display_unit": str(_value(table, "display_unit", "")),
     }
+    row_cites = validated_row_cites(payload["rows"], _value(table, "row_cites", ()))
+    if row_cites:
+        payload["row_cites"] = [list(row) for row in row_cites]
+    return payload
 
 
 def section_public_projection(section: object) -> dict[str, object]:
@@ -376,7 +381,7 @@ def _actual_table_fields(
     rows = [
         [str(cell) for cell in row] for row in _value(table, "rows", ())
     ]
-    return {
+    payload = {
         "section_id": section_id,
         "table_index": table_index,
         "kind": (
@@ -418,6 +423,9 @@ def _actual_table_fields(
         ],
         "numeric_tokens": _numeric_tokens(rows),
     }
+    if _value(table, "row_cites", ()):
+        payload["row_cites"] = [list(row) for row in _value(table, "row_cites", ())]
+    return payload
 
 
 def _verify_row_bindings(
@@ -440,6 +448,10 @@ def _verify_row_bindings(
     ):
         raise PublicManifestError("manifest 행 typed binding 개수가 공개 행과 다릅니다")
     all_fragment_ids: list[str] = []
+    try:
+        row_cites = validated_row_cites(rows, table_entry.get("row_cites", ()))
+    except ValueError as exc:
+        raise PublicManifestError(str(exc)) from exc
     for row_index, (row, binding, row_ref, row_cell_refs, evidence_ref) in enumerate(
         zip(rows, row_bindings, row_refs, cell_refs, evidence_refs)
     ):
@@ -467,6 +479,12 @@ def _verify_row_bindings(
             or len(source_ids) != len(hashes)
         ):
             raise PublicManifestError("manifest 행 출처 결속이 불완전합니다")
+        if row_cites:
+            expected_row_cites = tuple(
+                f"[{number}]" for number in sorted({int(value) for value in source_ids})
+            )
+            if row_cites[row_index] != expected_row_cites:
+                raise PublicManifestError("manifest 행별 공개 인용이 원문 결속과 다릅니다")
         for fragment_id, identity, exact_hash in zip(source_ids, identities, hashes):
             if source_bindings.get(str(fragment_id)) != (
                 str(identity),

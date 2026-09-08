@@ -668,6 +668,23 @@ def test_genuinely_causal_headers_stay_as_arrow_flow(headers: list[str]) -> None
     assert visualization.cards == ()
 
 
+def test_flow_citations_follow_surviving_rows_when_a_blank_middle_row_is_removed() -> None:
+    visualization = table_visualization(
+        ReportTable(
+            caption="row citations",
+            headers=["from", "to"],
+            rows=[["first", "one"], ["", ""], ["last", "three"]],
+            presentation="flow",
+            row_cites=[["[11]"], ["[22]"], ["[33]"]],
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.kind == "flow"
+    assert visualization.flows == (("first", "one"), ("last", "three"))
+    assert visualization.row_cites == (("[11]",), ("[33]",))
+
+
 def test_card_drops_blank_cells_and_titles_multi_row_tables_blank() -> None:
     """줄이 여럿이면 카드도 여럿이다. 빈 칸은 그 카드에서만 빠지고,
     제목은 지어내지 않는다(빈 문자열 — 표 캡션이 이미 제목 역할)."""

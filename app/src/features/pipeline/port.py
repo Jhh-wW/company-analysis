@@ -240,6 +240,8 @@ class ReportTable:
     row_binding_refs: list[str] = field(default_factory=list)
     #: 머리글·열 위치·자료형·원값 필드까지 잠근 셀별 canonical SHA-256.
     cell_binding_refs: list[list[str]] = field(default_factory=list)
+    #: 공개 행과 같은 순서의 실제 인용. 빈 값은 행 정보가 없는 옛 표다.
+    row_cites: list[list[str]] = field(default_factory=list)
 
     @property
     def is_valid(self) -> bool:

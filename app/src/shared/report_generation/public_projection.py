@@ -38,6 +38,7 @@ from src.shared.report_evidence.policy import (
     REQUIRED_EVIDENCE_SECTION_IDS as SECTION_IDS,
 )
 from src.shared.report_generation.canonical import table_public_projection
+from src.shared.report_generation.table_citations import validated_row_cites
 from src.shared.report_generation.models import (
     canonical_sha256,
     canonical_value,
@@ -220,6 +221,9 @@ class PublicTableBlock:
     presentation: str
     display_unit: str
     manifest_ref: str
+    row_cites: tuple[tuple[str, ...], ...] = field(
+        default=(), metadata={"canonical_omit_empty": True}
+    )
 
     def __post_init__(self) -> None:
         _require_str(self.caption, label="공개 표 caption")
@@ -234,6 +238,12 @@ class PublicTableBlock:
         _require_str(self.presentation, label="공개 표 presentation")
         _require_str(self.display_unit, label="공개 표 display_unit")
         _require_sha256_hex(self.manifest_ref, label="공개 표 manifest_ref")
+        try:
+            if type(self.row_cites) is not tuple or any(type(row) is not tuple for row in self.row_cites):
+                raise ValueError("공개 표 행별 인용은 tuple의 tuple이어야 합니다")
+            validated_row_cites(self.rows, self.row_cites)
+        except ValueError as exc:
+            raise PublicProjectionError(str(exc)) from exc
         # I7 — 지문 A의 표 7필드 projection(canonical.py:77-90)과 정확히 같아야
         # 한다. 새로 만들지 않고 기존 table_public_projection을 그대로 재사용한다.
         projected = table_public_projection(self)
@@ -246,6 +256,8 @@ class PublicTableBlock:
             "presentation": self.presentation,
             "display_unit": self.display_unit,
         }
+        if self.row_cites:
+            expected["row_cites"] = [list(row) for row in self.row_cites]
         if projected != expected:
             raise PublicProjectionError(
                 "I7: 공개 표 7필드가 table_public_projection과 다릅니다"
@@ -272,7 +284,7 @@ def public_table_block_from_dict(data: Mapping[str, object]) -> PublicTableBlock
         "display_unit",
         "manifest_ref",
     }
-    if type(data) is not dict or set(data) != expected:
+    if type(data) is not dict or set(data) not in (expected, expected | {"row_cites"}):
         raise PublicProjectionError("공개 표 블록의 key 또는 객체 형식이 계약과 다릅니다")
     value = PublicTableBlock(
         caption=data["caption"],
@@ -283,6 +295,7 @@ def public_table_block_from_dict(data: Mapping[str, object]) -> PublicTableBlock
         presentation=data["presentation"],
         display_unit=data["display_unit"],
         manifest_ref=data["manifest_ref"],
+        row_cites=_tuple_of_str_tuples(data.get("row_cites", []), label="공개 표 row_cites"),
     )
     if public_table_block_to_dict(value) != data:
         raise PublicProjectionError("공개 표 블록이 canonical wire 왕복과 다릅니다")
@@ -327,6 +340,9 @@ class PublicVisualBlock:
     series: tuple[tuple[str, str, tuple[Mapping[str, object], ...]], ...]
     flows: tuple[tuple[str, ...], ...]
     cards: tuple[tuple[str, Mapping[str, object]], ...]
+    row_cites: tuple[tuple[str, ...], ...] = field(
+        default=(), metadata={"canonical_omit_empty": True}
+    )
 
     def __post_init__(self) -> None:
         _require_int(self.table_index, label="도식 table_index", minimum=0)
@@ -369,6 +385,12 @@ class PublicVisualBlock:
             for item in self.cards
         ):
             raise PublicProjectionError("도식 cards는 (title,fields) 2튜플이어야 합니다")
+        try:
+            if type(self.row_cites) is not tuple or any(type(row) is not tuple for row in self.row_cites):
+                raise ValueError("도식 행별 인용은 tuple의 tuple이어야 합니다")
+            validated_row_cites(self.cards if self.kind == "card" else self.flows, self.row_cites)
+        except ValueError as exc:
+            raise PublicProjectionError(str(exc)) from exc
         # I8 — ratio_text 등은 이미 str 타입 검사를 통과했지만, series의
         # points·cards의 fields는 느슨한 Mapping이라 그 안에 float가 숨을 수
         # 있다. canonical_value 재사용으로 깊게 한 번 더 막는다.
@@ -397,7 +419,7 @@ def public_visual_block_from_dict(data: Mapping[str, object]) -> PublicVisualBlo
         "flows",
         "cards",
     }
-    if type(data) is not dict or set(data) != expected:
+    if type(data) is not dict or set(data) not in (expected, expected | {"row_cites"}):
         raise PublicProjectionError("도식 블록의 key 또는 객체 형식이 계약과 다릅니다")
     series_raw = data["series"]
     cards_raw = data["cards"]
@@ -414,6 +436,7 @@ def public_visual_block_from_dict(data: Mapping[str, object]) -> PublicVisualBlo
         series=tuple(_series_row(item, label="도식 series") for item in series_raw),
         flows=_tuple_of_str_tuples(data["flows"], label="도식 flows"),
         cards=tuple(_cards_row(item, label="도식 cards") for item in cards_raw),
+        row_cites=_tuple_of_str_tuples(data.get("row_cites", []), label="도식 row_cites"),
     )
     if public_visual_block_to_dict(value) != data:
         raise PublicProjectionError("도식 블록이 canonical wire 왕복과 다릅니다")

@@ -368,6 +368,8 @@ def test_넓은_표는_첫열을_반복하고_5열_이하로_모든_셀을_보�
         display_unit="억원",
         presentation="table",
         evidence_rows=[f"원문-{index}" for index in range(1, 4)],
+        source_cites=["[1]", "[2]", "[3]"],
+        row_cites=[["[1]"], ["[2]"], ["[3]"]],
     )
 
     chunks = _split_wide_table(original)
@@ -376,6 +378,8 @@ def test_넓은_표는_첫열을_반복하고_5열_이하로_모든_셀을_보�
     assert all(len(chunk.headers) <= 5 for chunk in chunks)
     assert all(chunk.headers[0] == headers[0] for chunk in chunks)
     assert all(chunk.presentation == "table" for chunk in chunks)
+    assert all(chunk.row_cites == original.row_cites for chunk in chunks)
+    assert all(chunk.source_cites == original.source_cites for chunk in chunks)
     assert chunks[0].caption == original.caption
     assert chunks[-1].caption.endswith("(계속 3/3)")
 
