@@ -5,7 +5,9 @@ import io
 import json
 import os
 from pathlib import Path
+import socket
 import sqlite3
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -107,6 +109,128 @@ def test_preflight_never_posts(harness):
     build, calls, _, _, _ = harness
     assert build().operate()["paid_posts"] == 0
     assert calls == [("GET", "/")]
+
+
+@pytest.fixture
+def asgi_confirm_boundary(harness, monkeypatch):
+    """실제 앱의 CSRF·동의 경계까지만 통과하고 외부 전송은 금지한다."""
+    from fastapi.testclient import TestClient
+    from src.features.auth import constants as auth_constants
+    from src.web import deployment_mode, evaluation_mode, job_runtime, runtime
+    from src.web.main import app
+
+    _, _, _, manifest, settings = harness
+    external_calls = []
+
+    def forbidden_external_call(*args, **kwargs):
+        external_calls.append(True)
+        raise AssertionError("ASGI 경계 회귀에서 공급자나 실제 소켓을 호출했습니다")
+
+    monkeypatch.setenv(evaluation_mode.ENV_MODE, "1")
+    monkeypatch.setenv(evaluation_mode.ENV_PAID_PROVIDERS, "1")
+    monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "0")
+    monkeypatch.delenv(deployment_mode.ENV_DEPLOYMENT_RUNTIME_CONTRACT, raising=False)
+    monkeypatch.setattr(job_runtime, "_ACCEPTING_JOBS", True)
+    monkeypatch.setattr(runtime, "_PIPELINE", SimpleNamespace(
+        find_company_metered=forbidden_external_call,
+        run=forbidden_external_call,
+    ))
+    monkeypatch.setattr(socket, "create_connection", forbidden_external_call)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", forbidden_external_call)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", forbidden_external_call)
+    # lifespan을 시작하지 않아 실제 엔진·공급자 키·서버 시작 작업을 불러오지 않는다.
+    client = TestClient(app, base_url=ORIGIN, client=("127.0.0.1", 50123),
+                        follow_redirects=False)
+    calls = []
+    client.event_hooks["request"].append(
+        lambda request: calls.append((request.method, request.url.path))
+    )
+
+    def build():
+        runner = HttpEvaluation(origin=ORIGIN, storage=manifest.parent / "storage.db",
+                                settings=settings, manifest=manifest, client=client)
+        monkeypatch.setattr(runner.bridge, "_validate_storage", lambda: None)
+        monkeypatch.setattr(runner.bridge, "_lifecycle_ids", lambda: set())
+        return runner
+
+    try:
+        yield build, client, calls, external_calls
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("bad_origin", [None, "null", "http://localhost:8020"])
+def test_asgi_confirm_rejects_missing_or_wrong_origin_and_preserves_no_retry(
+    asgi_confirm_boundary, bad_origin,
+):
+    from src.features.pilot_evaluation.runner import PilotRunnerError
+
+    build, client, calls, external_calls = asgi_confirm_boundary
+    runner = build()
+    # 수정 전 요청을 재현한다. 화면 토큰·동의·workflow는 실제 실행기가 채운다.
+    if bad_origin is None:
+        del client.headers["Origin"]
+    else:
+        client.headers["Origin"] = bad_origin
+    with pytest.raises(PilotRunnerError):
+        runner.operate(execute=True)
+    row = json.loads(runner.checkpoint_path.read_text(encoding="utf-8"))["cases"]["CUSTOM"]
+    assert row["state"] == "identity_submission_uncertain"
+    assert row["last_http_response"] == {"method": "POST", "path": "/confirm", "status": 403}
+    # Origin을 수정해도 불확실한 이전 POST를 자동으로 반복하지 않는다.
+    with pytest.raises(EvaluationError, match="재전송"):
+        build().operate(execute=True)
+    assert calls.count(("POST", "/confirm")) == 1
+    assert ("POST", "/run") not in calls
+    assert external_calls == []
+
+
+@pytest.mark.parametrize("initial_origin", [None, "null", "http://localhost:8020"])
+def test_evaluator_sets_exact_origin_and_passes_real_asgi_csrf_boundary(
+    asgi_confirm_boundary, initial_origin,
+):
+    build, client, calls, external_calls = asgi_confirm_boundary
+    if initial_origin is not None:
+        client.headers["Origin"] = initial_origin
+    runner = build()
+    assert client.headers.get_list("Origin") == [ORIGIN]
+    workflow = runner.bridge._workflow_page()
+    data = {"company": "예제", "csrf_token": workflow.csrf_token,
+            "evaluation_workflow_id": workflow.workflow_id}
+    runner.state = {"cases": {"CUSTOM": {"state": "pending"}}}
+    # 실제 화면 토큰은 CSRF를 통과한다. 유료 동의를 보내지 않아 다음 경계에서 멈춘다.
+    response = runner.post("/confirm", data, "CUSTOM")
+    assert response.status_code == 422
+    assert "외부 호출 확인이 필요합니다" in response.text
+    forged = runner.post("/confirm", {**data, "csrf_token": "0" * 64}, "CUSTOM")
+    assert forged.status_code == 403
+    assert calls.count(("POST", "/confirm")) == 2
+    assert ("POST", "/run") not in calls
+    assert external_calls == []
+
+
+def test_http_status_is_durable_before_session_save_failure(harness, monkeypatch):
+    build, calls, _, _, _ = harness
+    runner = build()
+    save_session = runner.save_session
+
+    def fail_after_confirm():
+        if ("POST", "/confirm") in calls:
+            raise RuntimeError(TOKEN)
+        save_session()
+
+    monkeypatch.setattr(runner, "save_session", fail_after_confirm)
+    with pytest.raises(RuntimeError):
+        runner.operate(execute=True)
+    checkpoint = runner.checkpoint_path.read_text(encoding="utf-8")
+    row = json.loads(checkpoint)["cases"]["CUSTOM"]
+    assert row["state"] == "identity_submission_uncertain"
+    assert row["last_http_response"] == {"method": "POST", "path": "/confirm", "status": 200}
+    assert TOKEN not in checkpoint
+    with pytest.raises(EvaluationError, match="재전송"):
+        build().operate(execute=True)
+    assert calls.count(("POST", "/confirm")) == 1
+    assert ("POST", "/run") not in calls
 
 
 def test_confirmed_arbitrary_case_runs_official_http_and_respects_terminal_checkpoint(harness):

@@ -247,6 +247,9 @@ class HttpEvaluation:
         ):
             raise EvaluationError("유료 서버의 실제 커밋 신원이 검증되지 않았습니다; 커밋 후 새 런처로 재시작하세요")
         self.client = client
+        # 유료 로컬 서버는 화면 토큰과 함께 정확한 Origin을 요구한다.
+        # CLI뿐 아니라 이 실행기를 직접 쓰는 호출자도 같은 HTTP 계약을 따른다.
+        self.client.headers["Origin"] = self.origin
         self.poll_timeout = poll_timeout
         self.poll_interval = poll_interval
         self.checkpoint_path = self.root / f"http-evaluation-{batch_id}-checkpoint.json"
@@ -338,6 +341,12 @@ class HttpEvaluation:
 
     def post(self, path: str, data: dict, case_id: str):
         response = self.bridge._post_paid_boundary(path, data, case_id)
+        # 응답 내용·토큰은 저장하지 않는다. 후속 파싱/세션 보관 실패가 나도
+        # 실제로 받은 HTTP 상태를 잃어 원인 전체가 미확인으로 남지 않게 한다.
+        self.state["cases"][case_id]["last_http_response"] = {
+            "method": "POST", "path": path, "status": response.status_code,
+        }
+        self.save()
         self.save_session()
         return response
 
