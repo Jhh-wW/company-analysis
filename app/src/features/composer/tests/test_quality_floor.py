@@ -46,6 +46,10 @@ from src.features.composer.verify import (
     REVIEW_PROMPT_HEADER,
     REWRITE_PROMPT_HEADER,
 )
+from src.features.composer.tests.review_evidence_fixture import (
+    grounded_flow_response,
+    grounded_review_response,
+)
 from src.features.pipeline.port import Report, ReportSection
 from src.features.provenance.sources import visible_citations
 from src.shared.report_quality.assessment import has_public_numeric_token
@@ -172,16 +176,9 @@ class _AllTrueReviewer:
             return ""
         if FLOW_REVIEW_PROMPT_HEADER in prompt:
             numbers = [int(value) for value in _FLOW_NUMBER_RE.findall(prompt)]
-            return json.dumps(
-                {"판정": [{"번호": number, "결과": "참"} for number in numbers]},
-                ensure_ascii=False,
-            )
+            return grounded_flow_response(numbers)
         assert REVIEW_PROMPT_HEADER in prompt, "검수가 알 수 없는 프롬프트를 받았다"
-        numbers = [int(value) for value in _REVIEW_NUMBER_RE.findall(prompt)]
-        return json.dumps(
-            {"판정": [{"번호": number, "결과": "참"} for number in numbers]},
-            ensure_ascii=False,
-        )
+        return grounded_review_response(prompt)
 
 
 @pytest.fixture(scope="module")

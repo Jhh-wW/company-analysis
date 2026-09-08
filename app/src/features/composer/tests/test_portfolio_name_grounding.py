@@ -80,7 +80,7 @@ def test_인용_조각에_글자_그대로_있는_이름은_유지한다() -> No
     assert problems == ()
 
 
-def test_어느_인용_조각에도_없는_이름은_첫_칸만_비운다() -> None:
+def test_어느_인용_조각에도_없는_이름은_카드만_제외한다() -> None:
     cells = ("지어낸 이름", "공식 서비스 범위", "운영 확대", "주력")
     row = FlowRow(cells=cells, citations=("1",))
 
@@ -88,9 +88,8 @@ def test_어느_인용_조각에도_없는_이름은_첫_칸만_비운다() -> N
         _report(row), (_fragment("1", "공식 서비스 범위를 운영하고 있다."),)
     )
 
-    grounded = _portfolio_row(checked)
-    assert grounded.cells == ("", *cells[1:])
-    assert grounded.citations == row.citations
+    assert checked.sections[0].flow_rows == ()
+    assert checked.sections[0].sentences == _report(row).sections[0].sentences
     assert any(PORTFOLIO_NAME_NOT_IN_SOURCE_CODE in item for item in problems)
 
 
@@ -128,11 +127,11 @@ def test_서로_다른_인용_조각의_경계에_걸친_이름은_접지가_아
         (_fragment("1", "카카오"), _fragment("2", "T를 운영한다.")),
     )
 
-    assert _portfolio_row(checked).cells[0] == ""
+    assert checked.sections[0].flow_rows == ()
     assert any(PORTFOLIO_NAME_NOT_IN_SOURCE_CODE in item for item in problems)
 
 
-def test_빈_이름과_다른_장과_3장의_다른_칸은_동작이_같다() -> None:
+def test_빈_이름_카드는_제외하지만_다른_장은_보존한다() -> None:
     empty_name = FlowRow(
         cells=("", "공식 범위", "운영 확대", "주력"), citations=("1",)
     )
@@ -145,10 +144,23 @@ def test_빈_이름과_다른_장과_3장의_다른_칸은_동작이_같다() ->
         original, (_fragment("1", "공식 범위를 운영하며 고객에게 제공한다."),)
     )
 
-    assert checked == original
-    assert _portfolio_row(checked).cells[1:] == empty_name.cells[1:]
+    assert checked.sections[0].flow_rows == ()
+    assert checked.sections[0].sentences == original.sections[0].sentences
     assert checked.sections[1].flow_rows == (other_row,)
-    assert problems == ()
+    assert any(PORTFOLIO_NAME_NOT_IN_SOURCE_CODE in item for item in problems)
+
+
+def test_missing_name_keeps_other_grounded_product() -> None:
+    valid = FlowRow(cells=("공식 제품", "서비스", "운영", "주력"), citations=("1",))
+    invalid = FlowRow(cells=("", "서비스", "운영", "주력"), citations=("1",))
+    report = ComposedReport(sections=(ComposedSection(
+        section_id=PORTFOLIO_TABLE_SECTION_ID, sentences=(), flow_rows=(invalid, valid),
+    ),))
+    checked, problems = check_diagram_numbers(
+        report, (_fragment("1", "공식 제품 서비스를 운영한다."),),
+    )
+    assert checked.sections[0].flow_rows == (valid,)
+    assert len(problems) == 1
 
 
 def test_3장_새_안내문은_이름_접지_네_문장과_숫자_금지를_함께_둔다() -> None:

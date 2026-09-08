@@ -72,16 +72,23 @@ def _운영장(report: ComposedReport) -> ComposedSection:
     return next(s for s in report.sections if s.section_id == "operations_partners")
 
 
-def _검수(결과: dict[int, str]):
+def _검수(
+    결과: dict[int, str],
+    grounding_by_number: dict[int, dict[str, object]] | None = None,
+):
     """번호별 판정을 돌려주는 가짜 검수 AI. 프롬프트도 기록한다."""
     기록: list[str] = []
 
     def ask(prompt: str) -> str:
         기록.append(prompt)
-        return json.dumps(
-            {"판정": [{"번호": n, "결과": r} for n, r in 결과.items()]},
-            ensure_ascii=False,
-        )
+        entries: list[dict[str, object]] = []
+        for number, result in 결과.items():
+            entry: dict[str, object] = {"번호": number, "결과": result}
+            grounding = (grounding_by_number or {}).get(number)
+            if grounding is not None:
+                entry["검증근거"] = grounding
+            entries.append(entry)
+        return json.dumps({"판정": entries}, ensure_ascii=False)
 
     ask.기록 = 기록  # type: ignore[attr-defined]
     return ask
@@ -145,7 +152,19 @@ def test_원문에_있는_수는_표기가_달라도_통과한다():
     )
 
     report, problems = check_diagrams(
-        _report(경로), _fragments(), _검수({1: VERDICT_TRUE})
+        _report(경로),
+        _fragments(),
+        _검수(
+            {1: VERDICT_TRUE},
+            {1: {"수치": [{
+                "표현": "매출 8219억",
+                "항목": "매출",
+                "근거": "7",
+                "원문": "2025년 연결 매출액은 8,219억 원",
+                "원문항목": "매출액",
+                "원문값": "8,219억 원",
+            }]}},
+        ),
     )
 
     assert _운영장(report).flow_rows == 경로
@@ -500,7 +519,17 @@ def test_연도가_통과해도_금액이_어긋나면_경로를_뺀다():
 
 def test_연도만_문제였던_경로가_의미검수까지_지나_남는다():
     """숫자 검사 → 의미 검수 사슬 끝까지 살아남아야 화면에 그려진다."""
-    ask = _검수({1: VERDICT_TRUE})
+    ask = _검수(
+        {1: VERDICT_TRUE},
+        {1: {"수치": [{
+            "표현": "영업권 손상차손 인식(2025년 100억 5,910만원)",
+            "항목": "영업권 손상차손",
+            "근거": "7",
+            "원문": _손상차손_원문,
+            "원문항목": "영업권 손상차손",
+            "원문값": "100억 5,910만원",
+        }]}},
+    )
 
     report, problems = check_diagrams(
         _report(_손상차손_경로), _조각(_손상차손_원문), ask

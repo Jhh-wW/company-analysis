@@ -20,9 +20,8 @@
 ★ 어떤 입력에서도 예외로 전체가 죽지 않는다 — 검증기 내부 오류 시
   안전을 확인하지 못한 AI 문장은 공개 후보에서 빼고 정직한 안내문을
   남긴다. 라벨만 «해석»으로 바꿔 의미 검사를 통과한 척하지 않는다.
-★ 닫힌 정규식 게이트 금지 — 공개가 금지된 원 단위 전체 금액 표기 외에는
-  문장 내용을 어휘·마커·어미로 거르지 않는다. 나머지 정규식은
-  «숫자 토큰 추출» 전용이다.
+★ 회사·업종별 어휘 목록으로 내용을 판정하지 않는다. 숫자·기간·연속 비교
+  구문에는 실제 인용 원문에 결속한 근거와 검산을 추가로 요구한다.
 """
 
 from __future__ import annotations
@@ -31,6 +30,7 @@ from src.features.composer.news_constants import NEWS_REVIEW_GUIDE
 from src.features.composer.news_usage import attribution_prefix, news_metadata
 from src.features.composer.news_block import _is_news_fragment
 
+import hashlib
 import json
 import logging
 import re
@@ -44,6 +44,16 @@ from src.features.composer.constants import (
     GRADE_INTERPRETED,
     PARSE_RETRY_LIMIT,
     RETRY_REMINDER,
+)
+from src.features.composer.grounding import (
+    constrain_verdicts,
+    grounding_hint,
+    grounding_requirements,
+)
+from src.features.composer.grounding_constants import (
+    GROUNDING_GUIDE,
+    REVIEW_GROUNDING_REJECTED,
+    TABLE_SOURCE_ID,
 )
 from src.features.composer.logic import (
     AskFn,
@@ -87,6 +97,39 @@ REVIEW_EVIDENCE_IDS_KEY: Final[str] = "근거"
 REVIEW_KIND_SENTENCE: Final[str] = "문장"
 REVIEW_KIND_FLOW: Final[str] = "도식"
 REVIEW_SUMMARY_GROUP: Final[str] = "summary"
+DIAGNOSTIC_KIND_BODY: Final[str] = "본문"
+DIAGNOSTIC_KIND_SUMMARY: Final[str] = "요약"
+DIAGNOSTIC_KIND_FLOW: Final[str] = "도식"
+
+
+def _append_grounding_diagnostic(
+    diagnostics: Optional[list[dict]],
+    *,
+    section_id: str,
+    kind: str,
+    reason_code: str,
+    candidate_text: str,
+    sources: Mapping[str, str],
+    verification_text: Optional[str] = None,
+) -> None:
+    """원문 없이 의미 근거 결속의 최종 제외 사건만 구조화해 남긴다."""
+
+    if diagnostics is None:
+        return
+    diagnostics.append(
+        {
+            "section_id": section_id,
+            "kind": kind,
+            "reason_code": reason_code,
+            "candidate_sha256": hashlib.sha256(
+                candidate_text.encode("utf-8")
+            ).hexdigest(),
+            "verification_items": grounding_requirements(
+                verification_text if verification_text is not None else candidate_text,
+                tuple(sources.values()),
+            ),
+        }
+    )
 
 
 def _review_labelled_flow_cells(section_id: str, row: FlowRow) -> list[str]:
@@ -153,7 +196,9 @@ REVIEW_PROMPT_RULES: Final[str] = (
 )
 REVIEW_JSON_GUIDE: Final[str] = (
     "\n출력 형식 — 설명 없이 아래 모양의 JSON만 출력한다:\n"
-    '{"판정": [{"번호": <문장 번호>, "결과": "참" 또는 "거짓" 또는 "애매"}]}\n'
+    '{"판정": [{"번호": <문장 번호>, "결과": "참" 또는 "거짓" 또는 "애매", '
+    '"검증근거": {<위에서 요구한 수치·추세·시점 배열>}}]}\n'
+    "후보의 «추가 검증 필요»가 없음일 때만 검증근거를 생략할 수 있다.\n"
 )
 REVIEW_TABLE_HEAD: Final[str] = "\n■ 프로그램이 검증해 만든 실적표 (이것도 근거다)\n"
 REVIEW_EVIDENCE_HEAD: Final[str] = "\n■ 근거 자료 (인용된 조각만)\n"
@@ -663,6 +708,8 @@ class _ReviewItem:
 
     number: int
     sentence: ComposedSentence
+    section_id: str = ""
+    kind: str = DIAGNOSTIC_KIND_BODY
 
 
 @dataclass(frozen=True)
@@ -694,6 +741,7 @@ def _build_grouped_review_prompt(
         REVIEW_PROMPT_HEADER,
         REVIEW_PROMPT_RULES,
         NEWS_REVIEW_GUIDE,
+        GROUNDING_GUIDE,
         (
             "아래 자료는 장별 블록으로 격리했다. 각 후보는 반드시 같은 블록의 "
             "근거만으로 판정하고 다른 장 블록의 근거를 빌리지 마라.\n"
@@ -702,8 +750,9 @@ def _build_grouped_review_prompt(
         ),
         (
             '형식: 설명 없이 {"판정": [{"번호": 1, "장": "identity", '
-            '"근거": ["1"], "결과": "참"}]} JSON만 출력한다. 번호·장·'
-            "후보가 인용한 근거 id를 입력 그대로 되돌려라.\n"
+            '"근거": ["1"], "결과": "참", "검증근거": {}}]} JSON만 출력한다. '
+            "번호·장·후보가 인용한 근거 id를 입력 그대로 되돌리고, 추가 검증 "
+            "필요가 없음일 때만 검증근거를 생략하라.\n"
         ),
     ]
     section_order: list[str] = []
@@ -711,6 +760,7 @@ def _build_grouped_review_prompt(
         if item.section_id not in section_order:
             section_order.append(item.section_id)
     table_evidence = _render_table_evidence(table)
+    table_source = _table_grounding_source(table)
     for section_id in section_order:
         section_items = [item for item in items if item.section_id == section_id]
         cited_ids: list[str] = []
@@ -731,6 +781,11 @@ def _build_grouped_review_prompt(
         )
         if section_id == "past_changes" and table_evidence:
             parts.append(table_evidence)
+            parts.append(
+                f"[검증근거 {TABLE_SOURCE_ID}] 원문(JSON 문자열): "
+                + json.dumps(table_source, ensure_ascii=False)
+                + "\n"
+            )
         parts.append(REVIEW_EVIDENCE_HEAD)
         for fragment_id in cited_ids:
             evidence = json.dumps(
@@ -766,6 +821,12 @@ def _build_grouped_review_prompt(
                     )
                     + "\n"
                 )
+            candidate = _grouped_grounding_candidate(
+                item,
+                frag_by_id,
+                table_source if section_id == "past_changes" else "",
+            )
+            parts.append(grounding_hint(*candidate))
         parts.append("===== 장별 검수 블록 끝 =====\n")
     parts.append(REVIEW_TRUSTED_TAIL)
     return "".join(parts)
@@ -827,6 +888,8 @@ def _ask_grouped_verdicts(
     items: Sequence[_GroupedReviewItem],
     frag_by_id: Mapping[str, CollectedFragment],
     table: Optional[PerformanceTable],
+    *,
+    diagnostics: Optional[list[dict]] = None,
 ) -> Optional[dict[int, str]]:
     """packet 본문·도식을 정확히 한 번에 검수한다.
 
@@ -839,9 +902,124 @@ def _ask_grouped_verdicts(
     evidence_ids_by_number = {
         item.number: frozenset(item.citations) for item in items
     }
-    return _parse_grouped_verdicts(
-        _safe_ask(ask, prompt), owners, evidence_ids_by_number
+    raw = _safe_ask(ask, prompt)
+    verdicts = _parse_grouped_verdicts(raw, owners, evidence_ids_by_number)
+    if verdicts is None:
+        return None
+    table_source = _table_grounding_source(table)
+    candidates = {
+        item.number: _grouped_grounding_candidate(
+            item,
+            frag_by_id,
+            table_source if item.section_id == "past_changes" else "",
+        )
+        for item in items
+    }
+    contexts = {
+        item.number: (
+            item.section_id,
+            (
+                DIAGNOSTIC_KIND_SUMMARY
+                if item.section_id == REVIEW_SUMMARY_GROUP
+                else (
+                    DIAGNOSTIC_KIND_FLOW
+                    if item.kind == REVIEW_KIND_FLOW
+                    else DIAGNOSTIC_KIND_BODY
+                )
+            ),
+            (
+                item.sentence.text
+                if item.sentence is not None
+                else " ".join(item.flow_row.cells if item.flow_row else ())
+            ),
+        )
+        for item in items
+    }
+    return _apply_grounding(
+        raw,
+        verdicts,
+        candidates,
+        diagnostics=diagnostics,
+        diagnostic_contexts=contexts,
     )
+
+
+def _grounding_candidate(
+    text: str, citations: Sequence[str], frag_by_id: Mapping[str, CollectedFragment],
+    table_source: str = "",
+) -> tuple[str, dict[str, str]]:
+    sources = {fid: frag_by_id[fid].text for fid in citations if fid in frag_by_id}
+    if table_source:
+        sources[TABLE_SOURCE_ID] = table_source
+    # 공시 수치와 보도 발행일을 섞지 않는다. 보도 귀속 머리말만 별도 검수에 맡긴다.
+    for fid in citations:
+        fragment = frag_by_id.get(fid)
+        if fragment is not None and _is_news_fragment(fragment):
+            prefix = attribution_prefix(fragment)
+            if text.startswith(prefix):
+                text = text[len(prefix):]
+                break
+    return text, sources
+
+
+def _grouped_grounding_candidate(
+    item: _GroupedReviewItem, frag_by_id: Mapping[str, CollectedFragment],
+    table_source: str = "",
+) -> tuple[str, dict[str, str]]:
+    text = item.sentence.text if item.sentence else " ; ".join(item.flow_row.cells if item.flow_row else ())
+    return _grounding_candidate(text, item.citations, frag_by_id, table_source)
+
+
+def _apply_grounding(
+    raw,
+    verdicts,
+    candidates,
+    *,
+    diagnostics: Optional[list[dict]] = None,
+    diagnostic_contexts: Optional[Mapping[int, tuple[str, str, str]]] = None,
+) -> dict[int, str]:
+    constrained, problems = constrain_verdicts(raw, verdicts, candidates)
+    for number, problem in problems.items():
+        logger.warning("의미 근거 검증: %s, 후보 %d 공개 제외", problem, number)
+        if diagnostic_contexts is not None and number in diagnostic_contexts:
+            section_id, kind, exact_candidate_text = diagnostic_contexts[number]
+            verification_text, sources = candidates[number]
+            _append_grounding_diagnostic(
+                diagnostics,
+                section_id=section_id,
+                kind=kind,
+                reason_code=problem,
+                candidate_text=exact_candidate_text,
+                sources=sources,
+                verification_text=verification_text,
+            )
+    return constrained
+
+
+def _table_grounding_source(table: Optional[PerformanceTable]) -> str:
+    """행·기간·단위를 반복한 실적표 결속 원문을 결정론적으로 만든다."""
+
+    if table is None or not table.rows or len(table.headers) < 2:
+        return ""
+    lines: list[str] = []
+    for row in table.rows:
+        if not row:
+            continue
+        metric = str(row[0]).strip()
+        if not metric:
+            continue
+        for header, raw_value in zip(table.headers[1:], row[1:]):
+            period = str(header).strip()
+            value = str(raw_value).strip()
+            if not period or not value or not _extract_numbers(value):
+                continue
+            if period.isdigit() and len(period) == 4:
+                period += "년"
+            numbers = _extract_numbers(value)
+            if table.unit and numbers and not any(item.unit_marked for item in numbers):
+                value += str(table.unit).strip()
+            lines.append(f"{metric} | {period} | {value}")
+    return "\n".join(lines)
 
 
 def _render_table_evidence(table: Optional[PerformanceTable]) -> str:
@@ -861,6 +1039,7 @@ def _build_review_prompt(
     items: Sequence[_ReviewItem],
     frag_by_id: Mapping[str, CollectedFragment],
     table_evidence: str,
+    table_source: str = "",
 ) -> str:
     """문장과 근거를 «나란히» 놓는 대조 지시문 (writer/verify.py의 핵심 철학).
 
@@ -879,9 +1058,14 @@ def _build_review_prompt(
             if (fid not in cited_ids and not _is_news_fragment(fragment)
                 and any(slot.split(":", 1)[0] in sections for slot in fragment.supported_claim_slots)):
                 cited_ids.append(fid)
-    parts = [REVIEW_PROMPT_HEADER, REVIEW_PROMPT_RULES, NEWS_REVIEW_GUIDE, REVIEW_JSON_GUIDE]
+    parts = [REVIEW_PROMPT_HEADER, REVIEW_PROMPT_RULES, NEWS_REVIEW_GUIDE, GROUNDING_GUIDE, REVIEW_JSON_GUIDE]
     if table_evidence:
         parts.append(table_evidence)
+        parts.append(
+            f"[검증근거 {TABLE_SOURCE_ID}] 원문(JSON 문자열): "
+            + json.dumps(table_source, ensure_ascii=False)
+            + "\n"
+        )
     parts.append(REVIEW_EVIDENCE_HEAD)
     for fragment_id in cited_ids:
         evidence = json.dumps(frag_by_id[fragment_id].text, ensure_ascii=False)
@@ -898,6 +1082,9 @@ def _build_review_prompt(
             "  문장(JSON 문자열): "
             f"{json.dumps(item.sentence.text, ensure_ascii=False)}\n"
         )
+        parts.append(grounding_hint(*_grounding_candidate(
+            item.sentence.text, item.sentence.citations, frag_by_id, table_source,
+        )))
     parts.append(REVIEW_TRUSTED_TAIL)
     return "".join(parts)
 
@@ -947,15 +1134,34 @@ def _ask_verdicts(
     items: Sequence[_ReviewItem],
     frag_by_id: Mapping[str, CollectedFragment],
     table_evidence: str,
+    table_source: str = "",
+    *,
+    diagnostics: Optional[list[dict]] = None,
 ) -> Optional[dict[int, str]]:
     """검수 AI 1회 호출(+파싱 실패 시 1회 재요청). 그래도 실패면 None."""
-    prompt = _build_review_prompt(items, frag_by_id, table_evidence)
-    verdicts = _parse_verdicts(_safe_ask(ask, prompt))
+    prompt = _build_review_prompt(items, frag_by_id, table_evidence, table_source)
+    raw = _safe_ask(ask, prompt)
+    verdicts = _parse_verdicts(raw)
     retries = 0
     while verdicts is None and retries < PARSE_RETRY_LIMIT:
         retries += 1
-        verdicts = _parse_verdicts(_safe_ask(ask, prompt + RETRY_REMINDER))
-    return verdicts
+        raw = _safe_ask(ask, prompt + RETRY_REMINDER)
+        verdicts = _parse_verdicts(raw)
+    if verdicts is None:
+        return None
+    candidates = {item.number: _grounding_candidate(
+        item.sentence.text, item.sentence.citations, frag_by_id, table_source,
+    ) for item in items}
+    return _apply_grounding(
+        raw,
+        verdicts,
+        candidates,
+        diagnostics=diagnostics,
+        diagnostic_contexts={
+            item.number: (item.section_id, item.kind, item.sentence.text)
+            for item in items
+        },
+    )
 
 
 def _ask_rewrite(
@@ -1034,7 +1240,10 @@ def _rewrite_and_recheck(
     frag_by_id: Mapping[str, CollectedFragment],
     table_texts: Sequence[str],
     table_evidence: str,
+    table_source: str,
     final: dict[int, Optional[ComposedSentence]],
+    *,
+    diagnostics: Optional[list[dict]] = None,
 ) -> None:
     """«거짓» 판정 문장들: 재작성 1회 → 수치 재검증 → 재검수 → 최종 처분.
 
@@ -1078,7 +1287,14 @@ def _rewrite_and_recheck(
             recheck_items.append(replace(item, sentence=candidate))
     if not recheck_items:
         return
-    verdicts = _ask_verdicts(ask, recheck_items, frag_by_id, table_evidence)
+    verdicts = _ask_verdicts(
+        ask,
+        recheck_items,
+        frag_by_id,
+        table_evidence,
+        table_source,
+        diagnostics=diagnostics,
+    )
     for item in recheck_items:
         verdict = VERDICT_FALSE if verdicts is None else verdicts.get(item.number)
         if verdict == VERDICT_TRUE:
@@ -1097,6 +1313,9 @@ def _semantic_review(
     table_texts: Sequence[str],
     table: Optional[PerformanceTable],
     ask: AskFn,
+    *,
+    group_ids: Optional[Sequence[str]] = None,
+    diagnostics: Optional[list[dict]] = None,
 ) -> list[list[ComposedSentence]]:
     """인용 있는 «확인»·«해석» 문장을 같은 1회 검수 호출로 대조한다.
 
@@ -1116,13 +1335,37 @@ def _semantic_review(
                 continue
             number += 1
             position_numbers[(group_index, sentence_index)] = number
-            items.append(_ReviewItem(number=number, sentence=sentence))
+            section_id = (
+                group_ids[group_index]
+                if group_ids is not None
+                else str(group_index)
+            )
+            items.append(
+                _ReviewItem(
+                    number=number,
+                    sentence=sentence,
+                    section_id=section_id,
+                    kind=(
+                        DIAGNOSTIC_KIND_SUMMARY
+                        if section_id == REVIEW_SUMMARY_GROUP
+                        else DIAGNOSTIC_KIND_BODY
+                    ),
+                )
+            )
     if not items:
         return [list(group) for group in groups]
 
     table_evidence = _render_table_evidence(table)
+    table_source = _table_grounding_source(table)
     final: dict[int, Optional[ComposedSentence]] = {}
-    verdicts = _ask_verdicts(ask, items, frag_by_id, table_evidence)
+    verdicts = _ask_verdicts(
+        ask,
+        items,
+        frag_by_id,
+        table_evidence,
+        table_source,
+        diagnostics=diagnostics,
+    )
     if verdicts is None:
         logger.warning(
             "의미 검수 응답을 받지 못해 안전을 확인할 수 없는 문장 %d개를 "
@@ -1152,13 +1395,24 @@ def _semantic_review(
                     if item.sentence.grade == GRADE_CONFIRMED
                     else replace(item.sentence, verification_state="unverified")
                 )
+            elif verdict == REVIEW_GROUNDING_REJECTED:
+                # grounding sentinel은 판정 누락이 아니다. 결속 단계가 이미
+                # 구체 사유를 진단에 남겼으며 재작성·라벨 강등으로 우회하지 않는다.
+                final[item.number] = None
             else:
                 # 응답에 번호가 없는 것은 «애매» 판정이 아니라 검수
                 # 미완료다. 라벨 교체로 공개하지 않는다.
                 final[item.number] = None
         # ★ 여기가 «완전히 침묵»하고 있었다. 판정별 개수를 남긴다.
         #   ⚠️ 문장 본문은 넣지 않는다 — 개수와 판정 이름만.
-        _센다 = {"참": 0, "거짓_재작성": 0, "거짓_제거": 0, "애매_강등": 0, "번호없음_제거": 0}
+        _센다 = {
+            "참": 0,
+            "거짓_재작성": 0,
+            "거짓_제거": 0,
+            "애매_강등": 0,
+            "근거결속실패_제거": 0,
+            "번호없음_제거": 0,
+        }
         for item in items:
             v = verdicts.get(item.number)
             if v == VERDICT_TRUE:
@@ -1167,19 +1421,31 @@ def _semantic_review(
                 _센다["거짓_재작성" if item.sentence.grade == GRADE_CONFIRMED else "거짓_제거"] += 1
             elif v == VERDICT_UNCLEAR:
                 _센다["애매_강등"] += 1
+            elif v == REVIEW_GROUNDING_REJECTED:
+                _센다["근거결속실패_제거"] += 1
             else:
                 _센다["번호없음_제거"] += 1
         logger.info(
             "의미 검수 판정(문장 %d): 참 %d · 거짓→재작성 %d · 거짓→제거 %d"
-            " · 애매→해석강등 %d · 응답에 번호없음→제거 %d",
+            " · 애매→해석강등 %d · 근거결속실패→제거 %d"
+            " · 응답에 번호없음→제거 %d",
             len(items),
             _센다["참"], _센다["거짓_재작성"], _센다["거짓_제거"],
-            _센다["애매_강등"], _센다["번호없음_제거"],
+            _센다["애매_강등"],
+            _센다["근거결속실패_제거"],
+            _센다["번호없음_제거"],
         )
         if rewrite_targets:
             try:
                 _rewrite_and_recheck(
-                    ask, rewrite_targets, frag_by_id, table_texts, table_evidence, final
+                    ask,
+                    rewrite_targets,
+                    frag_by_id,
+                    table_texts,
+                    table_evidence,
+                    table_source,
+                    final,
+                    diagnostics=diagnostics,
                 )
             except AskFatalError as error:
                 # ★ 실측 — «이 요청에 허락된 몫을 다 썼다»는 한도만은 여기서
@@ -1229,6 +1495,8 @@ def _semantic_review_grouped(
     frag_by_id: Mapping[str, CollectedFragment],
     table: Optional[PerformanceTable],
     ask: AskFn,
+    *,
+    diagnostics: Optional[list[dict]] = None,
 ) -> tuple[list[list[ComposedSentence]], dict[str, tuple[FlowRow, ...]]]:
     """packet 문장과 도식을 장별 근거 블록으로 묶어 AI 1회 검수한다.
 
@@ -1296,12 +1564,16 @@ def _semantic_review_grouped(
     # 파싱 실패를 reviewer 0회로 축약하면 기본 영수증 9+1 계약과 provider 비용
     # 장부가 갈라진다. 빈 묶음은 어떤 항목도 되살리지 못하며, 응답도 버린다.
     if not items:
-        _ask_grouped_verdicts(ask, (), frag_by_id, table)
+        _ask_grouped_verdicts(
+            ask, (), frag_by_id, table, diagnostics=diagnostics
+        )
         return (
             [list(group) for group in groups],
             {section_id: () for section_id in flow_rows_by_section},
         )
-    verdicts = _ask_grouped_verdicts(ask, items, frag_by_id, table)
+    verdicts = _ask_grouped_verdicts(
+        ask, items, frag_by_id, table, diagnostics=diagnostics
+    )
     sentence_by_number: dict[int, Optional[ComposedSentence]] = {}
     flow_kept_numbers: set[int] = set()
     for item in items:
@@ -1417,6 +1689,7 @@ def _verify_report_inner(
     allowed_fragment_ids_by_section: Optional[
         Mapping[str, frozenset[str]]
     ] = None,
+    diagnostics: Optional[list[dict]] = None,
 ) -> ComposedReport:
     frag_by_id = {
         fragment.fragment_id: fragment
@@ -1444,9 +1717,23 @@ def _verify_report_inner(
     # 유지한다. packet 엄격 모드만 문장+도식을 장별 블록으로 한 번에 본다.
     reviewed_flow_rows: Optional[dict[str, tuple[FlowRow, ...]]] = None
     if allowed_fragment_ids_by_section is None:
-        reviewed_groups = _semantic_review(
-            checked_groups, frag_by_id, table_texts, performance_table, ask
-        )
+        if diagnostics is None:
+            reviewed_groups = _semantic_review(
+                checked_groups, frag_by_id, table_texts, performance_table, ask
+            )
+        else:
+            reviewed_groups = _semantic_review(
+                checked_groups,
+                frag_by_id,
+                table_texts,
+                performance_table,
+                ask,
+                group_ids=(
+                    *(section.section_id for section in report.sections),
+                    REVIEW_SUMMARY_GROUP,
+                ),
+                diagnostics=diagnostics,
+            )
     else:
         allowed_for_review = dict(allowed_fragment_ids_by_section)
         allowed_for_review[REVIEW_SUMMARY_GROUP] = frozenset(
@@ -1468,6 +1755,7 @@ def _verify_report_inner(
             frag_by_id,
             performance_table,
             ask,
+            diagnostics=diagnostics,
         )
     reviewed_summary = reviewed_groups.pop()
 
@@ -1508,6 +1796,7 @@ def verify_report(
     allowed_fragment_ids_by_section: Optional[
         Mapping[str, frozenset[str]]
     ] = None,
+    diagnostics: Optional[list[dict]] = None,
 ) -> ComposedReport:
     """진입 함수 — 규칙 ①~④를 보고서 전체에 문장 단위로 적용한다.
 
@@ -1517,13 +1806,14 @@ def verify_report(
         performance_table: 프로그램이 검증해 만든 실적표. 없으면 None.
         ask: 검수·재작성용 AI 호출 주입 함수 (작가와 «다른 호출» —
             Generator/Evaluator 분리는 부르는 쪽이 별도 클로저로 보장한다).
+        diagnostics: 의미 근거 결속으로 최종 제외된 후보의 비식별 진단 수집기.
 
     Returns:
         검증된 ComposedReport. 어떤 입력에서도 예외를 던지지 않으며,
         장 개수·순서는 입력 그대로다 (장 삭제 없음).
     """
     try:
-        if allowed_fragment_ids_by_section is None:
+        if allowed_fragment_ids_by_section is None and diagnostics is None:
             # legacy 호출 모양과 monkeypatch 경계를 그대로 보존한다.
             return _verify_report_inner(
                 report, fragments, performance_table, ask
@@ -1534,6 +1824,7 @@ def verify_report(
             performance_table,
             ask,
             allowed_fragment_ids_by_section=allowed_fragment_ids_by_section,
+            diagnostics=diagnostics,
         )
     except AskFatalError:
         # 요청 전역 장애 — «검증기 내부 오류»로 위장하지 않고 그대로 재전파한다.
@@ -1556,6 +1847,8 @@ def verify_sentences(
     fragments: FragmentsInput,
     performance_table: Optional[PerformanceTable],
     ask: AskFn,
+    *,
+    diagnostics: Optional[list[dict]] = None,
 ) -> tuple[ComposedSentence, ...]:
     """문장 묶음 하나에 같은 규칙 전부를 적용한다 — 3-3 요약 검증 재사용용."""
     try:
@@ -1565,9 +1858,20 @@ def verify_sentences(
         }
         table_texts = _table_texts(performance_table)
         checked = _machine_check(sentences, frag_by_id, table_texts)
-        reviewed = _semantic_review(
-            [checked], frag_by_id, table_texts, performance_table, ask
-        )
+        if diagnostics is None:
+            reviewed = _semantic_review(
+                [checked], frag_by_id, table_texts, performance_table, ask
+            )
+        else:
+            reviewed = _semantic_review(
+                [checked],
+                frag_by_id,
+                table_texts,
+                performance_table,
+                ask,
+                group_ids=(REVIEW_SUMMARY_GROUP,),
+                diagnostics=diagnostics,
+            )
         return tuple(reviewed[0])
     except AskFatalError:
         raise  # 요청 전역 장애 — 위 verify_report와 같은 이유로 재전파한다

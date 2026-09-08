@@ -230,8 +230,9 @@ def test_실측_원문에서_이름_표의_구분칸은_종류_라벨이다(
     table = _name_table(output.report)
     assert table is not None
     assert table.headers == list(NAME_TABLE_HEADERS)
-    # 작가 카드 표는 그대로 남고, 이름 표가 그 뒤에 따로 선다.
-    assert len(_portfolio_rows(output.report)) == 1
+    # 이 작가는 공시된 실제 이름 없이 부문 설명만 카드로 냈다. 이름 검증 뒤
+    # 빈 제품 카드를 남기지 않되, 원문에서 결정적으로 만든 이름 표는 보존한다.
+    assert _portfolio_rows(output.report) == []
 
     for 구분, 이름칸 in table.rows:
         # ★ 이 단언이 이번 수정의 핵심이다 — 「구분」 칸은 실측 원문의 종류

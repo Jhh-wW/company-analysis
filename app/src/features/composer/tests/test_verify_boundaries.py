@@ -34,6 +34,10 @@ from src.features.composer.verify import (
     REVIEW_PROMPT_HEADER,
     REWRITE_PROMPT_HEADER,
 )
+from src.features.composer.tests.review_evidence_fixture import (
+    grounded_flow_response,
+    grounded_review_response,
+)
 from src.features.pipeline.port import Report
 from src.shared.report_quality.assessment import has_public_numeric_token
 
@@ -140,27 +144,10 @@ class _ScriptedReviewer:
             #   «참»으로 대답해 문장 시험의 변수가 되지 않게 한다.
             self.flow_review_prompts.append(prompt)
             numbers = [int(value) for value in _FLOW_ITEM_RE.findall(prompt)]
-            return json.dumps(
-                {"판정": [{"번호": number, "결과": "참"} for number in numbers]},
-                ensure_ascii=False,
-            )
+            return grounded_flow_response(numbers)
         assert REVIEW_PROMPT_HEADER in prompt, "검수가 알 수 없는 프롬프트를 받았다"
         self.review_prompts.append(prompt)
-        verdicts = []
-        for number, encoded_text in _REVIEW_ITEM_RE.findall(prompt):
-            try:
-                text = json.loads(encoded_text)
-            except json.JSONDecodeError:
-                text = ""
-            verdicts.append(
-                {
-                    "번호": int(number),
-                    "결과": (
-                        "거짓" if str(text).strip() in self._false_texts else "참"
-                    ),
-                }
-            )
-        return json.dumps({"판정": verdicts}, ensure_ascii=False)
+        return grounded_review_response(prompt, false_texts=self._false_texts)
 
 
 class _DeadReviewer:

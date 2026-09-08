@@ -23,6 +23,7 @@ from src.features.composer.constants import (
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
 )
+from src.features.composer.grounding_constants import TABLE_SOURCE_ID
 from src.features.composer.port import (
     AskFatalError,
     CollectedFragment,
@@ -106,16 +107,42 @@ def _report(
     )
 
 
-def _verdict_json(results: dict[int, str]) -> str:
+def _verdict_json(
+    results: dict[int, str],
+    grounding_by_number: dict[int, dict[str, object]] | None = None,
+) -> str:
+    entries: list[dict[str, object]] = []
+    for number, result in results.items():
+        entry: dict[str, object] = {"번호": number, "결과": result}
+        grounding = (grounding_by_number or {}).get(number)
+        if grounding is not None:
+            entry["검증근거"] = grounding
+        entries.append(entry)
     return json.dumps(
-        {
-            "판정": [
-                {"번호": number, "결과": result}
-                for number, result in results.items()
-            ]
-        },
+        {"판정": entries},
         ensure_ascii=False,
     )
+
+
+def _numeric_grounding(
+    *,
+    expression: str,
+    metric: str,
+    source_id: str,
+    quote: str,
+    source_value: str,
+    source_metric: str | None = None,
+) -> dict[str, object]:
+    return {
+        "수치": [{
+            "표현": expression,
+            "항목": metric,
+            "근거": source_id,
+            "원문": quote,
+            "원문항목": source_metric or metric,
+            "원문값": source_value,
+        }]
+    }
 
 
 class _FakeVerifier:
@@ -222,7 +249,16 @@ def test_원화_억원_환산은_ROUND_HALF_UP으로_통과한다():
     report = _report(
         (_sentence("2024년 매출액은 약 1,683억원이다.", ("1",)),)
     )
-    ask = _FakeVerifier([_all_true(1)])
+    ask = _FakeVerifier([_verdict_json(
+        {1: VERDICT_TRUE},
+        {1: _numeric_grounding(
+            expression="2024년 매출액은 약 1,683억원",
+            metric="매출액",
+            source_id="1",
+            quote="2024년 매출액은 168,312,345,678원",
+            source_value="168,312,345,678원",
+        )},
+    )])
 
     verified = verify_report(report, _raw_fragments(), None, ask)
 
@@ -234,7 +270,16 @@ def test_비율_퍼센트_환산이_통과한다():
     report = _report(
         (_sentence("영업이익률은 12.5% 수준이다.", ("2",)),)
     )
-    ask = _FakeVerifier([_all_true(1)])
+    ask = _FakeVerifier([_verdict_json(
+        {1: VERDICT_TRUE},
+        {1: _numeric_grounding(
+            expression="영업이익률은 12.5%",
+            metric="영업이익률",
+            source_id="2",
+            quote="영업이익률은 0.125",
+            source_value="0.125",
+        )},
+    )])
 
     verified = verify_report(report, _raw_fragments(), _table(), ask)
 
@@ -246,7 +291,17 @@ def test_실적표_수치도_근거로_인정된다():
     report = _report(
         (_sentence("매출 규모는 1,683억원대다.", ("2",)),)
     )
-    ask = _FakeVerifier([_all_true(1)])
+    ask = _FakeVerifier([_verdict_json(
+        {1: VERDICT_TRUE},
+        {1: _numeric_grounding(
+            expression="매출 규모는 1,683억원",
+            metric="매출 규모",
+            source_metric="매출액",
+            source_id=TABLE_SOURCE_ID,
+            quote="매출액 | 2024년 | 1,683억원",
+            source_value="1,683억원",
+        )},
+    )])
 
     verified = verify_report(report, _raw_fragments(), _table(), ask)
 
@@ -288,7 +343,16 @@ def test_표_단위와_다른_단위를_우기면_숫자가_같아도_확인으�
 def test_표_단위와_같은_단위면_확인으로_남는다():
     table = _billion_won_table()
     report = _report((_sentence("2024년 매출액은 5,695억원이다.", ("1",)),))
-    ask = _FakeVerifier([_all_true(1)])
+    ask = _FakeVerifier([_verdict_json(
+        {1: VERDICT_TRUE},
+        {1: _numeric_grounding(
+            expression="2024년 매출액은 5,695억원",
+            metric="매출액",
+            source_id=TABLE_SOURCE_ID,
+            quote="매출액 | 2024년 | 5,695억원",
+            source_value="5,695억원",
+        )},
+    )])
 
     verified = verify_report(report, _raw_fragments(), table, ask)
 
@@ -362,18 +426,16 @@ def test_억원_조원_퍼센트_표시값은_원단위_금액_검사에_걸리�
     ]
 
 
-def test_근거_전체에_단위정보가_없으면_확인불가로_강등된다_제거아님():
-    """단위 붙은 문장 숫자인데 근거 «어디에도» 단위 정보가 없으면(표도 없고
-    조각 원문도 맨 숫자뿐) 확인도 반증도 못 한다 — 제거가 아니라 해석 강등."""
+def test_근거_전체에_단위정보가_없으면_의미결속도_못해_공개에서_제외된다():
+    """단위 추정을 해석으로 낮춰도 출처의 단위·항목을 증명하지는 못한다."""
     raw = {1: {"종류": "사업내용", "원문": "가나다전자는 매출로 5695를 기록했다."}}
     report = _report((_sentence("매출은 5,695억원이다.", ("1",)),))
     ask = _FakeVerifier([_verdict_json({1: VERDICT_UNCLEAR})])
 
     verified = verify_report(report, raw, None, ask)
 
-    section = verified.sections[0]
-    assert len(section.sentences) == 1  # 제거되지 않는다
-    assert section.sentences[0].grade == GRADE_INTERPRETED  # 해석으로 강등
+    assert verified.sections[0].sentences == ()
+    assert verified.sections[0].notice == NOTICE_ALL_SENTENCES_REJECTED
 
 
 # ── ② 개선: 연도는 근거의 «날짜 표기»로 근거 삼는다 (2026-09-07 운영 실측) ──
@@ -423,7 +485,16 @@ def test_근거가_날짜로만_적은_해는_문장에서도_근거_있는_수�
     근거 있는 수다 — 이걸 못 읽어 멀쩡한 문장이 강등되던 것이 실측 결함이다."""
     raw = {1: {"종류": "사업내용", "원문": _점유율_원문}}
     report = _report((_sentence("2025년 매출 37.02% 점유율이다.", ("1",)),))
-    ask = _FakeVerifier([_all_true(1)])
+    ask = _FakeVerifier([_verdict_json(
+        {1: VERDICT_TRUE},
+        {1: _numeric_grounding(
+            expression="2025년 매출 37.02% 점유율",
+            metric="점유율",
+            source_id="1",
+            quote=_점유율_원문,
+            source_value="37.02%",
+        )},
+    )])
 
     verified = verify_report(report, raw, None, ask)
 
@@ -432,7 +503,7 @@ def test_근거가_날짜로만_적은_해는_문장에서도_근거_있는_수�
     assert section.sentences[0].grade == GRADE_CONFIRMED
 
 
-def test_근거가_말하지_않은_해를_쓰면_그대로_강등된다():
+def test_근거가_말하지_않은_해를_쓰면_공개에서_제외된다():
     """(b) 뒤: 근거가 2024년 자료뿐인데 2025년이라 쓰면 여전히 «없는 수»다.
     연도를 관대하게 통과시키는 것이 아니라, 날짜 표기를 읽을 뿐이다."""
     raw = {
@@ -443,9 +514,8 @@ def test_근거가_말하지_않은_해를_쓰면_그대로_강등된다():
 
     verified = verify_report(report, raw, None, ask)
 
-    section = verified.sections[0]
-    assert len(section.sentences) == 1  # 맨 수치 실패는 제거가 아니라 강등이다
-    assert section.sentences[0].grade == GRADE_INTERPRETED
+    assert verified.sections[0].sentences == ()
+    assert verified.sections[0].notice == NOTICE_ALL_SENTENCES_REJECTED
 
 
 def test_실적표_머리글의_맨_연도도_근거로_인정된다():
@@ -726,7 +796,16 @@ def test_요약_문장도_같은_규칙으로_검증된다():
             _sentence("이 문장은 유령 조각을 인용했다.", ("77",)),
         ),
     )
-    ask = _FakeVerifier([_all_true(2)])  # 본문 1 + 요약 1 = 확인 2문장
+    ask = _FakeVerifier([_verdict_json(
+        {1: VERDICT_TRUE, 2: VERDICT_TRUE},
+        {2: _numeric_grounding(
+            expression="영업이익률은 12.5%",
+            metric="영업이익률",
+            source_id="2",
+            quote="영업이익률은 0.125",
+            source_value="0.125",
+        )},
+    )])  # 본문 1 + 요약 1 = 확인 2문장
 
     verified = verify_report(report, _raw_fragments(), _table(), ask)
 

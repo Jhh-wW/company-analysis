@@ -60,6 +60,7 @@ import logging
 import re
 import unicodedata
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Callable, Final, Optional
 
 from src.features.composer.constants import (
@@ -70,8 +71,11 @@ from src.features.composer.constants import (
     RETRY_REMINDER,
 )
 from src.features.composer.logic import extract_json_payload
+from src.features.composer.grounding import constrain_verdicts, grounding_hint
+from src.features.composer.grounding_constants import GROUNDING_GUIDE
 from src.features.composer.verify import (
     _SentenceNumber,
+    _append_grounding_diagnostic,
     _evidence_number_pools,
     _extract_numbers,
     _number_found,
@@ -247,25 +251,22 @@ def _source_text(row: FlowRow, texts: Mapping[str, str]) -> str:
 # ══════════════════════════════════════════════════════════
 
 
-def _clear_ungrounded_portfolio_names(
+def _drop_ungrounded_portfolio_rows(
     rows: Sequence[FlowRow], texts: Mapping[str, str]
 ) -> tuple[tuple[FlowRow, ...], list[str]]:
-    """인용 조각에 없는 3장 이름만 비우고 카드 줄은 유지한다."""
+    """대상을 식별할 이름이 없는 카드만 제외하고 정상 카드·본문은 보존한다."""
 
     grounded: list[FlowRow] = []
     rejected: list[str] = []
     for row in rows:
         name = row.cells[0] if row.cells else ""
-        if portfolio_name_is_grounded(name, _source_texts(row, texts)):
+        if name.strip() and portfolio_name_is_grounded(name, _source_texts(row, texts)):
             grounded.append(row)
             continue
-        grounded.append(
-            FlowRow(cells=("", *row.cells[1:]), citations=row.citations)
-        )
         rejected.append(
             f"{PORTFOLIO_NAME_NOT_IN_SOURCE_CODE}: 카드 «"
             + " → ".join(row.cells)
-            + "»: 제품·서비스명이 인용 원문에 없음 — 이름 칸만 비움"
+            + "»: 제품·서비스명이 비었거나 인용 원문에 없어 카드 제외"
         )
     return tuple(grounded), rejected
 
@@ -331,12 +332,16 @@ def _labelled_cells(section_id: str, row: FlowRow) -> list[str]:
     return labelled_flow_cells(section_id, row)
 
 
-def _review_prompt(items: Sequence[tuple[int, str, FlowRow, str]]) -> str:
+def _review_prompt(
+    items: Sequence[tuple[int, str, FlowRow, str]],
+    texts: Optional[Mapping[str, str]] = None,
+) -> str:
     has_card_rows = any(
         section_id not in FLOW_ARROW_SECTION_IDS for _n, section_id, _r, _s in items
     )
     lines = [
         FLOW_REVIEW_PROMPT_HEADER,
+        GROUNDING_GUIDE,
         "아래는 보고서에 실릴 «사업 경로 도식»의 각 줄이다.",
         "칸마다 «칸 이름: 값» 꼴로 준다. 칸 이름은 장마다 다르다 — 「무엇으로",
         "시작하나 → 회사가 하는 일 → 누구에게 닿나」인 장도 있고, 「지금 겪는",
@@ -392,6 +397,10 @@ def _review_prompt(items: Sequence[tuple[int, str, FlowRow, str]]) -> str:
         noun = flow_review_row_noun(section_id)
         lines.append(f"[{number}] {noun}(JSON 배열): {path_json}")
         lines.append(f"    근거 원문(JSON 문자열): {source_json}")
+        if texts is not None:
+            sources = {fid: texts[fid] for fid in row.citations if fid in texts}
+            lines.append("    인용 조각별 원문(JSON 객체): " + json.dumps(sources, ensure_ascii=False))
+            lines.append(grounding_hint(" ; ".join(row.cells), sources))
     lines.extend(
         (
             "",
@@ -458,6 +467,8 @@ def _review_rows(
     by_section: Sequence[tuple[str, tuple[FlowRow, ...]]],
     texts: Mapping[str, str],
     ask: Callable[[str], str],
+    *,
+    diagnostics: Optional[list[dict]] = None,
 ) -> tuple[dict[str, tuple[FlowRow, ...]], list[str]]:
     """모든 장의 경로를 «한 묶음»으로 검수한다 (AI 1회)."""
     items: list[tuple[int, str, FlowRow, str]] = []
@@ -484,8 +495,9 @@ def _review_rows(
             blank_dropped,
         )
 
-    prompt = _review_prompt(items)
-    verdicts = _parse_verdicts(_safe_ask(ask, prompt))
+    prompt = _review_prompt(items, texts)
+    raw = _safe_ask(ask, prompt)
+    verdicts = _parse_verdicts(raw)
     retries = 0
     # ★ 적대 검토가 잡은 결함 — AI 표기가 한 번 흔들리면(번호를 문자열로 쓰는
     #   등) 의미 검수가 통째로 무력화되는데, 그 사실이 「전부 남김」으로 덮여
@@ -493,7 +505,8 @@ def _review_rows(
     #   실패 시 1회 재요청한다. 같은 규칙을 쓴다.
     while not verdicts and retries < PARSE_RETRY_LIMIT:
         retries += 1
-        verdicts = _parse_verdicts(_safe_ask(ask, prompt + RETRY_REMINDER))
+        raw = _safe_ask(ask, prompt + RETRY_REMINDER)
+        verdicts = _parse_verdicts(raw)
 
     if not verdicts:
         # ★ 검수 불능 = 공개 안전 미확인. 관계를 입증할 다른 기계
@@ -512,11 +525,28 @@ def _review_rows(
             ],
         )
 
+    candidates = {number: (" ; ".join(row.cells), {
+        fid: texts[fid] for fid in row.citations if fid in texts
+    }) for number, _section, row, _source in items}
+    verdicts, grounding_problems = constrain_verdicts(raw, verdicts, candidates)
     kept: dict[str, list[FlowRow]] = {section_id: [] for section_id, _ in by_section}
     dropped: list[str] = list(blank_dropped)
     for index, (number, _section, row, _source) in enumerate(items):
         result = verdicts.get(number)
         section_id = owner[number]
+        if number in grounding_problems:
+            candidate_text, sources = candidates[number]
+            _append_grounding_diagnostic(
+                diagnostics,
+                section_id=section_id,
+                kind="도식",
+                reason_code=grounding_problems[number],
+                candidate_text=" ".join(row.cells),
+                sources=sources,
+                verification_text=candidate_text,
+            )
+            dropped.append(f"[{section_id}] {number}번 경로: {grounding_problems[number]} 의미 근거 검증 실패로 공개 제외")
+            continue
         if result == VERDICT_FALSE:
             dropped.append(
                 f"[{section_id}] 경로 «"
@@ -558,19 +588,14 @@ def check_diagram_numbers(
             continue
         rows = section.flow_rows
         if section.section_id == PORTFOLIO_TABLE_SECTION_ID:
-            rows, rejected = _clear_ungrounded_portfolio_names(rows, texts)
+            rows, rejected = _drop_ungrounded_portfolio_rows(rows, texts)
             problems.extend(
                 f"[{section.section_id}] {reason}" for reason in rejected
             )
         kept, dropped = _drop_invented_numbers(rows, texts)
         problems.extend(f"[{section.section_id}] {reason}" for reason in dropped)
         rebuilt.append(
-            ComposedSection(
-                section_id=section.section_id,
-                sentences=section.sentences,
-                notice=section.notice,
-                flow_rows=kept,
-            )
+            replace(section, flow_rows=kept)
         )
     if not problems:
         return report, ()
@@ -584,6 +609,8 @@ def check_diagrams(
     report: ComposedReport,
     fragments: Sequence[CollectedFragment],
     ask: Optional[Callable[[str], str]] = None,
+    *,
+    diagnostics: Optional[list[dict]] = None,
 ) -> tuple[ComposedReport, tuple[str, ...]]:
     """관계 도식의 각 줄이 근거에 맞는지 보고, 맞지 않는 줄을 뺀다.
 
@@ -612,7 +639,9 @@ def check_diagrams(
 
     # ② 의미 검수 — 관계는 글자로 알 수 없다
     if ask is not None and any(rows for _sid, rows in after_numbers):
-        reviewed, dropped = _review_rows(after_numbers, texts, ask)
+        reviewed, dropped = _review_rows(
+            after_numbers, texts, ask, diagnostics=diagnostics
+        )
         problems.extend(dropped)
     else:
         reviewed = {section_id: () for section_id, _rows in after_numbers}
@@ -626,12 +655,7 @@ def check_diagrams(
         return number_checked, ()
 
     rebuilt = tuple(
-        ComposedSection(
-            section_id=section.section_id,
-            sentences=section.sentences,
-            notice=section.notice,
-            flow_rows=reviewed.get(section.section_id, section.flow_rows),
-        )
+        replace(section, flow_rows=reviewed.get(section.section_id, section.flow_rows))
         for section in number_checked.sections
     )
     logger.info("도식 검증: 근거에 맞지 않는 경로 %d줄을 뺐습니다", len(problems))

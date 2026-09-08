@@ -59,6 +59,10 @@ from src.features.composer.render import (
     SECTION_DISPLAY_NUMBERS,
 )
 from src.features.composer.verify import REVIEW_PROMPT_HEADER, REWRITE_PROMPT_HEADER
+from src.features.composer.tests.review_evidence_fixture import (
+    grounded_flow_response,
+    grounded_review_response,
+)
 from src.features.export_pdf import release as pdf_release
 from src.features.pipeline import real
 from src.features.pipeline.port import CompanyCard, Grade, Outcome, RunResult, UserInput
@@ -209,17 +213,10 @@ class _JypFakeMessages(_FakeMessages):
         """v2 프롬프트면 fixture 응답 문자열을, 아니면 None을 돌려준다."""
         if FLOW_REVIEW_PROMPT_HEADER in prompt:
             numbers = [int(value) for value in _FLOW_NUMBER_RE.findall(prompt)]
-            return json.dumps(
-                {"판정": [{"번호": number, "결과": "참"} for number in numbers]},
-                ensure_ascii=False,
-            )
+            return grounded_flow_response(numbers)
         if REVIEW_PROMPT_HEADER in prompt:
             self.review_calls += 1
-            numbers = [int(value) for value in _REVIEW_NUMBER_RE.findall(prompt)]
-            return json.dumps(
-                {"판정": [{"번호": number, "결과": "참"} for number in numbers]},
-                ensure_ascii=False,
-            )
+            return grounded_review_response(prompt)
         if REWRITE_PROMPT_HEADER in prompt:
             self.rewrite_prompts.append(prompt)
             return ""
