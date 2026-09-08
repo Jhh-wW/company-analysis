@@ -60,6 +60,11 @@ from src.features.pilot_evaluation.schema import (
     PILOT_BINDING_SCHEMA_VERSION,
     PILOT_BINDING_TABLE,
 )
+from src.features.pilot_evaluation.spend_ledger import (
+    SpendLedger,
+    SpendLedgerError,
+    read_spend_ledger,
+)
 from src.features.pipeline.port import Outcome
 
 
@@ -2365,11 +2370,17 @@ class CanonicalPilotRunner:
         if not run_id:
             return None
         with self._connect_storage() as conn:
-            row = conn.execute(
-                "SELECT COALESCE(SUM(cost_krw), 0) FROM budget_spend_events WHERE run_id=?",
-                (run_id,),
-            ).fetchone()
-        return float(row[0]) if row is not None else None
+            conn.execute("BEGIN")
+            return self._read_spend_ledger(conn, run_id).known_cost_krw
+
+    def _read_spend_ledger(self, conn: sqlite3.Connection, run_id: str) -> SpendLedger:
+        try:
+            return read_spend_ledger(conn, run_id)
+        except SpendLedgerError as exc:
+            raise _LedgerConsistencyError(
+                "ledger_spend_invalid",
+                "비용 정본의 정산 기록이 올바르지 않아 다음 호출을 차단했습니다",
+            ) from exc
 
     def _read_ledger(self, run_id: str) -> LedgerResult | None:
         with self._connect_storage() as conn:
@@ -2397,17 +2408,6 @@ class CanonicalPilotRunner:
                 "FROM observability_run_lifecycle WHERE run_id=?",
                 (run_id,),
             ).fetchone()
-            spend_row = conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(cost_krw), 0) "
-                "FROM budget_spend_events WHERE run_id=?",
-                (run_id,),
-            ).fetchone()
-            inflight = int(
-                conn.execute(
-                    "SELECT COUNT(*) FROM budget_spend_inflight WHERE run_id=?",
-                    (run_id,),
-                ).fetchone()[0]
-            )
             report = conn.execute(
                 "SELECT report_id, corp_id FROM reports WHERE report_id=?",
                 (run_id,),
@@ -2424,6 +2424,7 @@ class CanonicalPilotRunner:
                     "ledger_lifecycle_invalid",
                     "실행 lifecycle 상태가 비용 원장 마감과 일치하지 않아 다음 호출을 차단했습니다",
                 )
+            spend = self._read_spend_ledger(conn, run_id)
             try:
                 lifecycle_record = json.loads(str(lifecycle_row[1]))
                 lifecycle_run_id = str(lifecycle_record.get("run_id", ""))
@@ -2445,7 +2446,7 @@ class CanonicalPilotRunner:
             outcome = str(row[0])
             try:
                 cost = float(row[1])
-                spend_cost = float(spend_row[1]) if spend_row is not None else 0.0
+                spend_cost = spend.known_cost_krw
             except (TypeError, ValueError, OverflowError) as exc:
                 raise _LedgerConsistencyError(
                     "ledger_cost_invalid",
@@ -2499,7 +2500,7 @@ class CanonicalPilotRunner:
             return LedgerResult(
                 outcome=outcome,
                 cost_krw=cost,
-                billing_uncertain=inflight > 0,
+                billing_uncertain=spend.billing_uncertain,
                 report_id=str(report[0]) if report is not None else "",
                 corp_id=str(report[1]) if report is not None else "",
                 automatic_release_sha256=str(row[2] or ""),

@@ -98,6 +98,245 @@ def _html(body: str, status: int = 200, **headers: str) -> httpx.Response:
     )
 
 
+def _seed_attempt_ledger(db: Path, *, cost: float = 712.57) -> None:
+    """실제 budget DDL로 전환 뒤 평가 원장을 재현한다. 외부 호출은 없다."""
+    with sqlite3.connect(db) as conn:
+        for sql in (
+            spend_store.CREATE_BUDGET_SCHEMA_MIGRATIONS_SQL,
+            spend_store.CREATE_BUDGET_PHASES_SQL,
+            spend_store.CREATE_BUDGET_ATTEMPTS_SQL,
+            spend_store.CREATE_BUDGET_ATTEMPT_EVENTS_SQL,
+        ):
+            conn.execute(sql)
+        conn.execute(
+            "INSERT INTO budget_schema_migrations VALUES (?, ?, 0, 0, 0)",
+            (spend_store.BUDGET_STATE_CUTOVER_VERSION, RUN_AT),
+        )
+        conn.execute(
+            "INSERT INTO budget_phase_accounts VALUES "
+            "(?, ?, '2026-08-22', 'test-bucket', 'SUCCEEDED', 0, NULL, NULL, ?, ?, 1)",
+            (RUN_ID, SPEND_PHASE_PIPELINE, RUN_AT, RUN_AT),
+        )
+        conn.execute(
+            "INSERT INTO budget_provider_attempts VALUES "
+            "('attempt:test', ?, ?, 0, 'anthropic', 'test', ?, ?)",
+            (RUN_ID, SPEND_PHASE_PIPELINE, cost, RUN_AT),
+        )
+        for sequence, transport, billing, reserved, known in (
+            (0, 'PLANNED', 'RESERVED', cost, 0),
+            (1, 'DISPATCH_INTENT_RECORDED', 'RESERVED', cost, 0),
+            (2, 'RESPONSE_RECEIVED', 'KNOWN_COST', 0, cost),
+        ):
+            conn.execute(
+                "INSERT INTO budget_provider_attempt_events "
+                "(attempt_id, event_seq, transport_state, billing_state, "
+                "reservation_krw, known_cost_krw, liability_krw, actor_id, "
+                "reason_code, occurred_at) VALUES ('attempt:test', ?, ?, ?, ?, ?, "
+                "0, 'system:budget', 'test', ?)",
+                (sequence, transport, billing, reserved, known, RUN_AT),
+            )
+        conn.execute(
+            "INSERT INTO report_cost_summaries VALUES (?, ?, ?, ?)",
+            (RUN_ID, Outcome.REPORT.value, cost, 'f' * 64),
+        )
+        conn.execute(
+            "INSERT INTO observability_run_lifecycle VALUES (?, 'final', ?)",
+            (RUN_ID, _final_lifecycle_record(cost)),
+        )
+        conn.execute(
+            "INSERT INTO reports VALUES (?, ?)",
+            (RUN_ID, CANONICAL_PILOT_CASES[0].corp_code),
+        )
+
+
+@pytest.mark.parametrize("legacy_cost", [None, 712.57, 999.0])
+def test_attempt_전환뒤에는_legacy를_중복합산하지않고_정본만_읽는다(tmp_path, legacy_cost):
+    runner, client, db, _checkpoint = _runner(tmp_path, _terminal_resume_handler)
+    try:
+        _seed_attempt_ledger(db)
+        if legacy_cost is not None:
+            with sqlite3.connect(db) as conn:
+                conn.execute("INSERT INTO budget_spend_events VALUES (?, ?)", (RUN_ID, legacy_cost))
+                conn.execute("INSERT INTO budget_spend_inflight VALUES (?)", (RUN_ID,))
+        before = db.read_bytes()
+        ledger = runner._read_ledger(RUN_ID)
+        assert ledger is not None
+        assert ledger.cost_krw == 712.57
+        assert ledger.billing_uncertain is False
+        assert runner._known_spend_cost(RUN_ID) == 712.57
+        assert db.read_bytes() == before
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("change", [
+    "DELETE FROM budget_schema_migrations",
+    "DROP TABLE budget_schema_migrations",
+    "DROP TABLE budget_provider_attempt_events",
+    "DROP TABLE budget_provider_attempts",
+    "DROP TABLE budget_phase_accounts",
+    "DELETE FROM budget_provider_attempt_events",
+    "DELETE FROM budget_phase_accounts",
+    "UPDATE budget_provider_attempt_events SET billing_state='invalid' WHERE event_seq=2",
+    "UPDATE budget_provider_attempt_events SET known_cost_krw=-1 WHERE event_seq=2",
+    "UPDATE budget_provider_attempt_events SET known_cost_krw=1e999 WHERE event_seq=2",
+    "UPDATE budget_provider_attempt_events SET known_cost_krw='broken' WHERE event_seq=2",
+    "UPDATE budget_provider_attempt_events SET billing_state='KNOWN_ZERO' WHERE event_seq=2",
+    "UPDATE budget_provider_attempt_events SET liability_krw=1 WHERE event_seq=2",
+    "UPDATE budget_phase_accounts SET reservation_krw=1",
+])
+def test_attempt_정본_손상은_legacy_합계가_맞아도_차단한다(tmp_path, change):
+    runner, client, db, _checkpoint = _runner(tmp_path, _terminal_resume_handler)
+    try:
+        _seed_attempt_ledger(db)
+        with sqlite3.connect(db) as conn:
+            conn.execute("INSERT INTO budget_spend_events VALUES (?, ?)", (RUN_ID, 712.57))
+            conn.execute("PRAGMA ignore_check_constraints=ON")
+            conn.execute(change)
+        with pytest.raises(PilotRunnerError) as caught:
+            runner._read_ledger(RUN_ID)
+        assert caught.value.code == "ledger_spend_invalid"
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("billing", [
+    'RESERVED', 'CONSERVATIVE_LIABILITY', 'UNKNOWN_LEGACY', 'LIABILITY_CONFIRMED',
+])
+def test_attempt_미정산은_legacy_inflight가_없어도_다음호출을_차단한다(tmp_path, billing):
+    runner, client, db, checkpoint = _runner(tmp_path, _terminal_resume_handler)
+    case = CANONICAL_PILOT_CASES[0]
+    try:
+        runner.operate(execute=False)
+        _seed_attempt_ledger(db)
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "INSERT INTO budget_provider_attempts VALUES "
+                "('attempt:unresolved', ?, ?, 1, 'anthropic', 'test', 1, ?)",
+                (RUN_ID, SPEND_PHASE_PIPELINE, RUN_AT),
+            )
+            conn.execute(
+                "INSERT INTO budget_provider_attempt_events "
+                "(attempt_id, event_seq, transport_state, billing_state, reservation_krw, "
+                "known_cost_krw, liability_krw, actor_id, reason_code, occurred_at) VALUES "
+                "('attempt:unresolved', 0, ?, ?, ?, 0, ?, 'system:budget', 'test', ?)",
+                ('DISPATCH_INTENT_RECORDED' if billing == 'RESERVED' else 'TRANSPORT_AMBIGUOUS',
+                 billing, 1 if billing == 'RESERVED' else 0,
+                 0 if billing == 'RESERVED' else 1, RUN_AT),
+            )
+        snapshot = checkpoint._load()
+        with checkpoint.exclusive():
+            runner._update_case(snapshot, case.case_id, state="running", run_id=RUN_ID,
+                                selected_corp_code=case.corp_code, billing_uncertain=False)
+        with pytest.raises(PilotBatchBlocked, match="미확정"):
+            runner.operate(execute=True, case_ids=(case.case_id,))
+        row = checkpoint._load()["cases"][case.case_id]
+        assert row["billing_uncertain"] is True
+        assert row["error_code"] == "ledger_inflight_remains"
+        assert row["internal_ai_cost_krw"] == 712.57
+        with pytest.raises(PilotBatchBlocked):
+            runner.operate(execute=True, case_ids=(case.case_id,))
+    finally:
+        client.close()
+
+
+def test_attempt_비용확정뒤_ACTIVE_phase가_0원이어도_미정산이다(tmp_path):
+    runner, client, db, _checkpoint = _runner(tmp_path, _terminal_resume_handler)
+    try:
+        _seed_attempt_ledger(db)
+        with sqlite3.connect(db) as conn:
+            conn.execute("UPDATE budget_phase_accounts SET state='ACTIVE', "
+                         "lease_owner_id='test', lease_expires_at=?", (RUN_AT,))
+        assert runner._read_ledger(RUN_ID).billing_uncertain is True
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("sql,code", [
+    ("UPDATE budget_provider_attempt_events SET known_cost_krw=712.56 WHERE event_seq=2",
+     "ledger_cost_mismatch"),
+    ("DELETE FROM budget_provider_attempts", "ledger_spend_invalid"),
+    ("UPDATE observability_run_lifecycle SET final_record_json=?", "ledger_lifecycle_cost_mismatch"),
+])
+def test_attempt_정본을_사용해도_누락과_금액불일치_허용오차를_완화하지않는다(tmp_path, sql, code):
+    runner, client, db, _checkpoint = _runner(tmp_path, _terminal_resume_handler)
+    try:
+        _seed_attempt_ledger(db)
+        with sqlite3.connect(db) as conn:
+            conn.execute(sql, (_final_lifecycle_record(712.56),) if '?' in sql else ())
+        with pytest.raises(PilotRunnerError) as caught:
+            runner._read_ledger(RUN_ID)
+        assert caught.value.code == code
+    finally:
+        client.close()
+
+
+def test_attempt_표만_준비하고_전환하지않은_DB는_legacy를_검증한다(tmp_path):
+    runner, client, db, _checkpoint = _runner(tmp_path, _terminal_resume_handler)
+    try:
+        _seed_attempt_ledger(db)
+        with sqlite3.connect(db) as conn:
+            for table in ('budget_provider_attempt_events', 'budget_provider_attempts',
+                          'budget_phase_accounts', 'budget_schema_migrations'):
+                conn.execute(f"DELETE FROM {table}")
+            conn.execute("INSERT INTO budget_spend_events VALUES (?, ?)", (RUN_ID, 712.57))
+        assert runner._read_ledger(RUN_ID).cost_krw == 712.57
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("known_zero", [False, True])
+def test_attempt_관리자정산뒤에는_최신event만_확정액과_미정산검사에_쓴다(tmp_path, known_zero):
+    runner, client, db, _checkpoint = _runner(tmp_path, _terminal_resume_handler)
+    try:
+        _seed_attempt_ledger(db)
+        with sqlite3.connect(db) as conn:
+            conn.execute("UPDATE budget_provider_attempt_events SET "
+                         "transport_state='UNKNOWN_LEGACY', billing_state='UNKNOWN_LEGACY', "
+                         "known_cost_krw=0, liability_krw=712.57 WHERE event_seq=2")
+            conn.execute("UPDATE budget_phase_accounts SET state='UNKNOWN_LEGACY'")
+            conn.execute(
+                "INSERT INTO budget_provider_attempt_events "
+                "(attempt_id, event_seq, transport_state, billing_state, reservation_krw, "
+                "known_cost_krw, liability_krw, actor_id, reason_code, occurred_at) VALUES "
+                "('attempt:test', 3, 'UNKNOWN_LEGACY', ?, 0, ?, 0, 'admin:test', 'test', ?)",
+                ('KNOWN_ZERO' if known_zero else 'KNOWN_COST', 0 if known_zero else 712.57, RUN_AT),
+            )
+            if known_zero:
+                conn.execute("UPDATE report_cost_summaries SET internal_ai_cost_krw=0")
+                conn.execute("UPDATE observability_run_lifecycle SET final_record_json=?",
+                             (_final_lifecycle_record(0),))
+        ledger = runner._read_ledger(RUN_ID)
+        assert ledger.billing_uncertain is False
+        assert ledger.cost_krw == (0 if known_zero else 712.57)
+    finally:
+        client.close()
+
+
+def test_attempt_정본도_lifecycle와_같은_읽기snapshot을_사용한다(tmp_path, monkeypatch):
+    runner, client, db, _checkpoint = _runner(tmp_path, _terminal_resume_handler)
+    try:
+        _seed_attempt_ledger(db)
+        original_connect = runner._connect_storage
+        statements = []
+        connections = []
+
+        def audited_connect():
+            conn = original_connect()
+            conn.set_trace_callback(statements.append)
+            connections.append(conn)
+            return conn
+
+        monkeypatch.setattr(runner, '_connect_storage', audited_connect)
+        assert runner._read_ledger(RUN_ID).billing_uncertain is False
+        assert len(connections) == 1
+        assert statements[0] == 'BEGIN'
+        assert all(sql.strip().split()[0].upper() in {'BEGIN', 'SELECT', 'COMMIT'}
+                   for sql in statements)
+    finally:
+        client.close()
+
+
 def _input_page(*, csrf: str = CSRF) -> str:
     return f"""
     <form method="post" action="/confirm">
