@@ -229,6 +229,15 @@ from src.features.pipeline.candidate_profile_constants import (
 from src.features.pipeline.candidate_profile_lookahead import (
     candidate_profile_lookahead,
 )
+from src.features.pipeline.supplementary_research_runtime import (
+    enforce_supplementary_research_release,
+)
+from src.features.pipeline.research_continuation_status import (
+    add_research_continuation_source_status,
+)
+from src.features.pipeline.supplementary_research_runtime_constants import (
+    SUPPLEMENTARY_RESEARCH_CONTINUE_STEP,
+)
 from src.features.pipeline.news_research_context import (
     news_generation_digest,
     official_news_context,
@@ -2311,7 +2320,7 @@ def _sources_from(steps: list[dict[str, Any]]) -> list[SourceStatus]:
         sources.append(
             SourceStatus("회사 공식 IR", "none", str(ir.get("없음", "자료 없음")))
         )
-    return sources
+    return add_research_continuation_source_status(sources, steps)
 
 
 def _comparison_candidate_scope_complete(
@@ -3066,6 +3075,7 @@ class RealPipeline:
         requested_release_mode = _requested_release_mode(generation_mode)
         official_evidence: OfficialEvidenceCollectionResult | None = None
         official_preflight: OfficialEvidencePreflight | None = None
+        supplementary_research_required = False
         v2_comparison_result: Any = None
         generation_source_identity_digest = source_identity.cache_digest
         if (
@@ -3236,7 +3246,11 @@ class RealPipeline:
                     ),
                 }
             )
-            if not official_preflight.can_call_ai:
+            supplementary_research_required = (
+                news_intake_switch.news_intake_enabled()
+                and official_preflight.supplementary_research_allowed
+            )
+            if not official_preflight.can_call_ai and not supplementary_research_required:
                 gate_reason = classify_v2_validation_final_gate_reason(
                     (official_preflight.detail_code,)
                 )
@@ -3279,6 +3293,18 @@ class RealPipeline:
                     dart_receipt_numbers=source_identity.dart_receipt_numbers,
                     financial_payload_digest=source_identity.financial_payload_digest,
                 )
+
+            if supplementary_research_required:
+                # 사전 분류 장 수는 공식 원문에 쓸 내용이 없다는 증명이 아니다.
+                # 원래 부족/분류 제한 관측을 보존하고, 보완조사 뒤 실제 검수 본문에
+                # 별도 최소 출고 검사를 적용한다. 이 갈래는 FULL 승격이 아니다.
+                requested_release_mode = ReleaseMode.SHADOW
+                steps.append({
+                    "step": SUPPLEMENTARY_RESEARCH_CONTINUE_STEP,
+                    "사전판정": official_preflight.decision.status.value,
+                    "사유코드": official_preflight.detail_code,
+                    "공식준비장": len(official_preflight.decision.ready_section_ids),
+                })
 
             if official_preflight.dart_partial_fallback:
                 # FULL은 아홉 장·독립 문서 8건을 모두 요구한다. 사전검사가 부분
@@ -3672,7 +3698,7 @@ class RealPipeline:
                     "엄격 재사용 보고서에 생성 당시의 품질 관측이 없습니다"
                 )
             tell("output")
-            return RunResult(
+            reused_result = RunResult(
                 outcome=Outcome.REPORT,
                 report=reused_report,
                 message=CACHE_HIT_MESSAGE.format(
@@ -3708,6 +3734,11 @@ class RealPipeline:
                 generation_metrics=metrics,
                 quality_observation=reused_report.quality_observation,
             )
+            if supplementary_research_required:
+                reused_result = enforce_supplementary_research_release(
+                    reused_result, official_evidence=official_evidence, steps=steps,
+                )
+            return reused_result
         # ★ v1 캐시와 v2 캐시는 «열쇠가 다르다» — 서로의 보고서를 못 꺼낸다.
         #   v2를 켠 요청에 v1 보고서를 돌려주는 것은 조용한 거짓말이고,
         #   그 반대도 마찬가지다.
@@ -3768,7 +3799,7 @@ class RealPipeline:
         if cached is not None:
             metrics = cached.generation_metrics
             tell("output")   # 6~10을 통째로 건너뛴다
-            return RunResult(
+            cached_result = RunResult(
                 outcome=Outcome.REPORT,
                 report=cached,
                 # ★ 「방금 조사한 것」처럼 보이면 안 된다. 언제 만든 것인지 밝힌다.
@@ -3803,6 +3834,11 @@ class RealPipeline:
                 generation_metrics=metrics,
                 quality_observation=cached.quality_observation,
             )
+            if supplementary_research_required:
+                cached_result = enforce_supplementary_research_release(
+                    cached_result, official_evidence=official_evidence, steps=steps,
+                )
+            return cached_result
 
         # ── 6 수집 (AI 0회) ──────────────────────────────
         tell("collect")
@@ -3951,6 +3987,10 @@ class RealPipeline:
                 comparison_result=v2_comparison_result,
                 release_mode_override=requested_release_mode,
                 prepared_performance_table=performance_table,
+                supplementary_research_required=supplementary_research_required,
+                supplementary_official_evidence=(
+                    official_evidence if supplementary_research_required else None
+                ),
             )
             return replace(
                 v2_result,
@@ -5386,6 +5426,8 @@ def _run_v2_composer(
     comparison_result: Any = None,
     release_mode_override: Optional[ReleaseMode] = None,
     prepared_performance_table: ReportTable | None = None,
+    supplementary_research_required: bool = False,
+    supplementary_official_evidence: OfficialEvidenceCollectionResult | None = None,
 ) -> RunResult:
     """엔진 v2: composer 경로로 보고서를 만든다.
 
@@ -5929,6 +5971,36 @@ def _run_v2_composer(
             "인용조각": len(report.citations),
         }
     )
+    result = RunResult(
+        outcome=Outcome.REPORT,
+        report=report,
+        sources=sources,
+        charged=True,
+        corp_type=corp_type,
+        # 최종 provenance와 같은 정본 생성 지표를 운반한다.
+        fragments_collected=(
+            output.generation_metrics.fragments_collected
+            if output.generation_metrics is not None else len(frags)
+        ),
+        fragments_cited=(
+            output.generation_metrics.fragments_cited
+            if output.generation_metrics is not None else len(report.citations)
+        ),
+        sentences_made=output.composed_sentences,
+        sentences_passed=output.verified_sentences,
+        cost_krw=_request_spent_krw(engine),
+        model=model,
+        generation_evidence=output.generation_evidence,
+        generation_metrics=output.generation_metrics,
+        quality_observation=output.quality_observation,
+    )
+    if supplementary_research_required:
+        # 검사 전 후보를 Report-only 캐시나 웹 owner의 결과로 내보내지 않는다.
+        result = enforce_supplementary_research_release(
+            result, official_evidence=supplementary_official_evidence, steps=steps,
+        )
+        if result.outcome is not Outcome.REPORT:
+            return result
     # ★ 출고 검증(validate_v2)을 이미 통과한 보고서만 여기 온다. 그것을
     #   «지금 코드 지문»과 함께 저장해 두면, 코드가 그대로일 때 같은 회사를
     #   다시 조사해도 900원이 안 나간다. 코드가 바뀌면 지문이 달라져 저절로
@@ -5967,34 +6039,7 @@ def _run_v2_composer(
             "유료 웹은 Report-only v2 1층 저장을 건너뜁니다 — corp_id=%s",
             corp_id,
         )
-    return RunResult(
-        outcome=Outcome.REPORT,
-        report=report,
-        sources=sources,
-        charged=True,  # 보고서가 나가면 1 차감 — v1과 같은 3분법
-        corp_type=corp_type,
-        # composer의 최종 provenance 등록부에는 직접 인용되지 않는 소유권
-        # attester도 남는다. raw frags/부록 길이를 다시 세지 않고, 프로그램
-        # 비교 조각까지 포함해 같은 번호 정본으로 계산한 생성 지표를 운반한다.
-        fragments_collected=(
-            output.generation_metrics.fragments_collected
-            if output.generation_metrics is not None
-            else len(frags)
-        ),
-        fragments_cited=(
-            output.generation_metrics.fragments_cited
-            if output.generation_metrics is not None
-            else len(report.citations)
-        ),
-        sentences_made=output.composed_sentences,
-        sentences_passed=output.verified_sentences,
-        cost_krw=_request_spent_krw(engine),
-        model=model,
-        generation_cache_eligible=cache_eligible,
-        generation_evidence=output.generation_evidence,
-        generation_metrics=output.generation_metrics,
-        quality_observation=output.quality_observation,
-    )
+    return replace(result, generation_cache_eligible=cache_eligible)
 
 
 def _write_prose(

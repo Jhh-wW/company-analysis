@@ -154,6 +154,9 @@ class OfficialEvidencePreflight:
     # 어느 갈래로 부분 보고서 전환을 허용했는지 남긴다. 값은
     # ``DART_PARTIAL_REASON_*`` 세 개뿐이고, 전환이 없으면 빈 문자열이다.
     dart_partial_reason: str = ""
+    # 공식 근거의 장 분류가 적어도 확인된 DART 원문은 있을 수 있다. 이것은
+    # 보완 조사만 허용하는 관측이며, can_call_ai나 최종 출고 허가가 아니다.
+    supplementary_research_allowed: bool = False
     @property
     def can_call_ai(self) -> bool:
         return self.dart_partial_fallback or (
@@ -326,6 +329,11 @@ def assess_official_evidence(
         or insufficient_partial_fallback
         or document_floor_partial_fallback
     )
+    supplementary_research_allowed = (
+        dart_partial_prerequisites_hold
+        and not dart_partial_fallback
+        and decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
+    )
     dart_partial_reason = next(
         (
             reason
@@ -379,6 +387,7 @@ def assess_official_evidence(
         detail_code=detail_code,
         dart_partial_fallback=dart_partial_fallback,
         dart_partial_reason=dart_partial_reason,
+        supplementary_research_allowed=supplementary_research_allowed,
     )
 
 

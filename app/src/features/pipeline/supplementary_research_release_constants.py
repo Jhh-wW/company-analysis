@@ -1,0 +1,80 @@
+"""보완조사 전용 최종 출고 guard의 닫힌 상수."""
+
+from __future__ import annotations
+
+from typing import Final
+
+from src.shared.report_evidence.constants import (
+    SOURCE_KIND_DART_AUDIT_REPORT,
+    SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT,
+    SOURCE_KIND_DART_QUARTERLY_REPORT,
+    SOURCE_KIND_DART_SEMIANNUAL_REPORT,
+)
+
+
+SUPPLEMENTARY_RELEASE_ALLOWED: Final[str] = "supplementary_release_allowed"
+SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO: Final[str] = (
+    "supplementary_release_invalid_report_dto"
+)
+SUPPLEMENTARY_RELEASE_INVALID_CITATION_REGISTRY: Final[str] = (
+    "supplementary_release_invalid_citation_registry"
+)
+SUPPLEMENTARY_RELEASE_INSUFFICIENT_BODY_SECTIONS: Final[str] = (
+    "supplementary_release_insufficient_body_sections"
+)
+SUPPLEMENTARY_RELEASE_IDENTITY_WITHOUT_OFFICIAL_BODY: Final[str] = (
+    "supplementary_release_identity_without_official_body"
+)
+SUPPLEMENTARY_RELEASE_BUSINESS_MODEL_WITHOUT_OFFICIAL_BODY: Final[str] = (
+    "supplementary_release_business_model_without_official_body"
+)
+SUPPLEMENTARY_RELEASE_WITHOUT_DART_BODY: Final[str] = (
+    "supplementary_release_without_dart_body"
+)
+
+SUPPLEMENTARY_RELEASE_CODES: Final[frozenset[str]] = frozenset(
+    {
+        SUPPLEMENTARY_RELEASE_ALLOWED,
+        SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO,
+        SUPPLEMENTARY_RELEASE_INVALID_CITATION_REGISTRY,
+        SUPPLEMENTARY_RELEASE_INSUFFICIENT_BODY_SECTIONS,
+        SUPPLEMENTARY_RELEASE_IDENTITY_WITHOUT_OFFICIAL_BODY,
+        SUPPLEMENTARY_RELEASE_BUSINESS_MODEL_WITHOUT_OFFICIAL_BODY,
+        SUPPLEMENTARY_RELEASE_WITHOUT_DART_BODY,
+    }
+)
+
+MINIMUM_SUPPLEMENTARY_BODY_SECTION_COUNT: Final[int] = 3
+SUPPLEMENTARY_CORE_OFFICIAL_SECTION_IDS: Final[tuple[str, str]] = (
+    "identity",
+    "business_model",
+)
+
+# 자료 이름이나 URL 문구를 추측하지 않고 shared typed source-kind 정본의
+# DART 다섯 종류를 명시적으로 고정한다. 차집합이면 미래의 새 공식 종류가
+# 검토 없이 DART 하한으로 승격될 수 있다.
+DART_FORMAL_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
+    {
+        SOURCE_KIND_DART_BUSINESS_REPORT,
+        SOURCE_KIND_DART_AUDIT_REPORT,
+        SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT,
+        SOURCE_KIND_DART_SEMIANNUAL_REPORT,
+        SOURCE_KIND_DART_QUARTERLY_REPORT,
+    }
+)
+
+
+__all__ = [
+    "DART_FORMAL_SOURCE_KINDS",
+    "MINIMUM_SUPPLEMENTARY_BODY_SECTION_COUNT",
+    "SUPPLEMENTARY_CORE_OFFICIAL_SECTION_IDS",
+    "SUPPLEMENTARY_RELEASE_ALLOWED",
+    "SUPPLEMENTARY_RELEASE_BUSINESS_MODEL_WITHOUT_OFFICIAL_BODY",
+    "SUPPLEMENTARY_RELEASE_CODES",
+    "SUPPLEMENTARY_RELEASE_IDENTITY_WITHOUT_OFFICIAL_BODY",
+    "SUPPLEMENTARY_RELEASE_INSUFFICIENT_BODY_SECTIONS",
+    "SUPPLEMENTARY_RELEASE_INVALID_CITATION_REGISTRY",
+    "SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO",
+    "SUPPLEMENTARY_RELEASE_WITHOUT_DART_BODY",
+]

@@ -1027,11 +1027,6 @@ def _fact_from_structured_sentence(
     )
     if document_identity(source) != claim.source_identity:
         return None
-    source_type = (
-        "공식 공시·재무 API"
-        if source.kind is SourceKind.FILING
-        else "회사 공식 자료"
-    )
     fact = FactRecord(
         fact_id=claim.fact_id,
         legal_entity=company_name,
@@ -1043,7 +1038,9 @@ def _fact_from_structured_sentence(
         time_state="past",
         as_of=as_of_date,
         source_id=source.source_id,
-        source_type=source_type,
+        # 출처 등록부의 정본 투영을 유지한다. 표시용 범주를 다시 만들면
+        # 수치가 맞아도 최종 사실·출처 결속 검사가 서로 다른 근거로 본다.
+        source_type=source.source_type,
         source_title=source.title or source.label,
         source_publisher=source.publisher,
         source_host=source.host,

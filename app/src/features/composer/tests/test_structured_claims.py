@@ -18,7 +18,10 @@ from src.features.composer.structured_claims import (
     build_past_changes_numeric_claims,
     enforce_public_numeric_safety,
 )
-from src.shared.report_quality.fact_binding import fact_evidence_binding
+from src.shared.report_quality.fact_binding import (
+    fact_evidence_binding,
+    fact_primary_source_metadata_mismatches,
+)
 from src.shared.report_quality.numeric_validation import (
     validate_versioned_numeric_record,
 )
@@ -295,6 +298,26 @@ def test_주장범주는_공유해도_서로_다른_수치사실의_ID는_충돌
             if sentence.structured_claim is not None
         }
     ) == 2
+
+
+def test_rendered_numeric_facts_preserve_canonical_source_metadata() -> None:
+    """수치 검증을 실제 통과한 사실도 출처 종류를 별도 문구로 바꾸지 않는다."""
+
+    composed = append_past_changes_numeric_claims(
+        ComposedReport(sections=(ComposedSection("past_changes", ()),)),
+        _table(), _fragments(), _filing(),
+    )
+    rendered = render_report(
+        "테스트 주식회사", composed, _fragments(), _table(),
+        as_of_date="2026-08-28", filing_meta=_filing(),
+    )
+    sources = {source.source_id: source for source in rendered.citations}
+
+    assert len(rendered.fact_records) == 2
+    for fact in rendered.fact_records:
+        assert validate_versioned_numeric_record(fact) == ()
+        assert fact_primary_source_metadata_mismatches(fact, sources[fact.source_id]) == ()
+        assert fact.evidence_binding == fact_evidence_binding(fact)
 
 
 def test_구조화실적_생산자는_정본이_맡긴_필수의미칸을_정확히_채운다() -> None:
