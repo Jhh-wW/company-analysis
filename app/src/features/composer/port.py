@@ -126,6 +126,8 @@ class ComposedSentence:
     #: 렌더가 만든 검증 FactRecord를 본문에서 글자 그대로 고른 요약에만
     #: 프로그램이 붙이는 ID. 작가 응답에서는 이 값을 읽지 않는다.
     verified_fact_id: str = ""
+    #: 검수 전 프로그램이 붙인 뉴스 원문 대체 후보. 승인 표시가 아니다.
+    news_source_alternative: bool = False
 
 
 @dataclass(frozen=True)

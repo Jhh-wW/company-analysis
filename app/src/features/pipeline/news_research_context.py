@@ -55,7 +55,24 @@ def public_news_research_status(
         status = "insufficient"
     else:
         status = "ok" if articles else "insufficient"
-    return {"상태": status, "독립기사": articles, "실패": bool(failure)}
+    # 내부 오류 원문이나 주소는 공개하지 않고, 실제 관측된 단계만 전달한다.
+    issues = []
+    if any(str(reason).startswith("news_search_") for reason in errors):
+        issues.append("검색")
+    if any(str(reason).startswith("fetch_") or reason == "article_body_unavailable"
+           for reason in errors):
+        issues.append("접속")
+    if any(str(reason) in {"grounded_analysis_failed", "grounded_response_incomplete"}
+           for reason in errors):
+        issues.append("분석")
+    if diagnostic.get("검증미완료"):
+        issues.append("검증")
+    search_status = diagnostic.get("검색상태")
+    return {
+        "상태": status, "독립기사": articles, "실패": bool(failure),
+        "검색완료": search_status == "success", "관측문제": tuple(issues),
+        "상한도달": bool(limited or diagnostic.get("상한사유")),
+    }
 
 
 def official_news_context(

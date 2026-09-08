@@ -56,8 +56,57 @@ def test_조사_미완료와_실제장애를_구분하고_뉴스0건의_반영�
     assert "관련 보도가 없다는 뜻은 아닙니다" in notice
 
 
+def test_뉴스확인범위가_검색완료_접속분석제한_상한을_따로_설명한다():
+    from src.features.composer.news_usage import append_research_notice
+
+    report = append_research_notice(_empty(), {
+        "상태": "partial", "독립기사": 1, "실패": True, "검색완료": True,
+        "관측문제": ("접속", "분석", "검증"), "상한도달": True,
+    })
+    notice = report.sections[0].notice
+    assert "뉴스 검색 요청은 완료했습니다" in notice
+    assert "일부 기사에 접속하거나 본문을 읽지 못했습니다" in notice
+    assert "본문 분석을 완료하지 못했습니다" in notice
+    assert "조사 상한에 도달" in notice
+    assert "뉴스 검색 일부를 완료하지 못했습니다" not in notice
+    assert "보강했습니다" not in notice
+    assert report == append_research_notice(report, {
+        "상태": "partial", "독립기사": 1, "실패": True, "검색완료": True,
+        "관측문제": ("접속", "분석", "검증"), "상한도달": True,
+    })
+
+
+def test_검수탈락안내는_해당장에만_두고_보충성공시_갱신한다():
+    from src.features.composer.news_constants import NEWS_BODY_REJECTION_NOTICE
+    from src.features.composer.news_usage import append_research_notice
+    from src.features.composer.port import ComposedSentence
+
+    fragments = _fragments()
+    rejections = [{"조각": "81", "장": "business_model", "사유코드": "review_removed"}]
+    first = append_research_notice(_empty(), None, fragments=fragments, review_rejections=rejections)
+    assert first.sections[0] == _empty().sections[0]
+    assert first.sections[1].notice == NEWS_BODY_REJECTION_NOTICE
+    recovered = replace(first, sections=tuple(
+        replace(section, sentences=(ComposedSentence(
+            "검수 통과 문장", ("81",), "확인", verification_state="verified"),))
+        if section.section_id == "business_model" else section for section in first.sections
+    ))
+    final = append_research_notice(recovered, None, fragments=fragments, review_rejections=rejections)
+    assert final.sections[1].notice == ""
+    assert all(before == after for before, after in zip(first.sections, final.sections)
+               if before.section_id != "business_model")
+
+
+def test_미확인_조사상태의_안내를_반복해_붙이지않는다():
+    from src.features.composer.news_usage import append_research_notice
+
+    first = append_research_notice(_empty(), {"상태": "unknown"})
+    assert append_research_notice(first, {"상태": "unknown"}) == first
+    assert append_research_notice(first, None) == first
+
+
 def _run(mode=ReleaseMode.FULL, *, verdict="참", exclude=False, diagnostics=None, fragments=None,
-         direct_news=False):
+         direct_news=False, news_transform=None, news_attribution=True):
     news = fragments or _fragments()
     base = _packets()
     packets = replace(base, packets=tuple(
@@ -71,7 +120,8 @@ def _run(mode=ReleaseMode.FULL, *, verdict="참", exclude=False, diagnostics=Non
         result = json.loads(writer(prompt))
         if direct_news and writer.calls == 2:
             result["문장들"].extend({
-                "글": f"{fragment.document_date} {fragment.source_publisher} 보도에 따르면, " + fragment.text,
+                "글": (f"{fragment.document_date} {fragment.source_publisher} 보도에 따르면, "
+                       if news_attribution else "") + (news_transform(fragment.text) if news_transform else fragment.text),
                 "인용": [fragment.fragment_id], "등급": "확인",
                 "주장슬롯": fragment.supported_claim_slots[0],
             } for fragment in news)
@@ -96,6 +146,79 @@ def _run(mode=ReleaseMode.FULL, *, verdict="참", exclude=False, diagnostics=Non
         research_diagnostics=diagnostics,
     )
     return output, writer, reviewer, packets
+
+
+def test_초안이_보도수치를_늘렸어도_같은_검수에서_통과한_원문후보만_남긴다():
+    output, writer, reviewer, _ = _run(
+        direct_news=True, news_transform=lambda text: text.replace("3건", "30건"),
+    )
+    body = " ".join(text for section in output.report.sections for text, _ in section.prose_lines)
+    assert "30건" not in body
+    assert "신규 설비 공급 계약을 3건 체결" in body
+    assert output.news_usage_diagnostics["본문사용기사수"] == 2
+    assert output.news_usage_diagnostics["목록기사수"] == 2
+    assert writer.calls == 9
+    assert len(reviewer.prompts) == 1
+
+
+def test_작가의_정상_보도문장이_통과하면_원문대체후보는_중복으로_싣지_않는다():
+    output, _, reviewer, _ = _run(
+        direct_news=True, news_transform=lambda text: text.replace("체결했다고 밝혔다.", "체결했다."),
+    )
+    body = " ".join(text for section in output.report.sections for text, _ in section.prose_lines)
+    assert body.count("신규 설비 공급 계약을 3건") == 1
+    assert "체결했다." in body
+    assert output.news_usage_diagnostics["본문사용기사수"] == 2
+    assert len(reviewer.prompts) == 1
+
+
+def test_원문대체후보도_검수에_실패하면_본문과_목록을_모두_제외한다():
+    output, _, reviewer, _ = _run(
+        direct_news=True, verdict="거짓",
+        news_transform=lambda text: text.replace("체결했다고 밝혔다.", "체결했다."),
+    )
+    assert output.news_usage_diagnostics["본문사용기사수"] == 0
+    assert output.news_usage_diagnostics["목록기사수"] == 0
+    assert len(reviewer.prompts) == 1
+    assert all(row["검증경과"] for row in output.news_usage_diagnostics["근거별판정"])
+    assert all(item["사유코드"] in {"review_removed", "not_verified"}
+               for row in output.news_usage_diagnostics["근거별판정"] for item in row["검증경과"])
+
+
+def test_뉴스출처표기를_모델이_생략해도_확인된메타데이터를_검수전에_붙인다():
+    output, writer, reviewer, _ = _run(direct_news=True, news_attribution=False)
+    body = " ".join(text for section in output.report.sections for text, _ in section.prose_lines)
+    assert "2026-09-01 가나다경제 보도에 따르면, 가나다전자는" in body
+    assert output.news_usage_diagnostics["본문사용기사수"] == 2
+    assert writer.calls == 9
+    assert len(reviewer.prompts) == 1
+
+
+@pytest.mark.parametrize("reason", ["not_verified", "mixed_sources", "attribution_invalid", "unsupported_number"])
+def test_뉴스_게시조건_탈락사유를_문장원문없이_구분해_기록한다(reason):
+    from src.features.composer.news_usage import attribution_prefix, retain_verified_news
+    from src.features.composer.port import ComposedSentence
+
+    fragment = _fragments()[0]
+    sentence = ComposedSentence(
+        attribution_prefix(fragment) + fragment.text, (fragment.fragment_id,), "확인",
+        verification_state="verified",
+    )
+    changes = {
+        "not_verified": {"verification_state": "unverified"},
+        "mixed_sources": {"citations": (fragment.fragment_id, "공식원문")},
+        "attribution_invalid": {"text": fragment.text},
+        "unsupported_number": {"text": sentence.text.replace("3건", "30건")},
+    }
+    sentence = replace(sentence, **changes[reason])
+    report = ComposedReport((ComposedSection("business_model", (sentence,)),))
+    diagnostics = []
+    retained = retain_verified_news(report, (fragment,), review_input=report, diagnostics=diagnostics)
+    assert retained.sections[0].sentences == ()
+    assert diagnostics[0]["사유코드"] == reason
+    assert diagnostics[0]["단계"] == "게시조건"
+    assert len(diagnostics[0]["후보지문"]) == 64
+    assert sentence.text not in json.dumps(diagnostics, ensure_ascii=False)
 
 
 def test_여러_유용근거를_본문에_쓰되_작성9_검수1_호출계약을_보존한다():

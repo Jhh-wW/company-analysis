@@ -42,6 +42,32 @@ def test_검색량_상한만_도달하면_접속장애로_표시하지_않는다
     result = public_news_research_status([step], enabled=True)
     assert result["실패"] is True
     assert result["상태"] == "failed"
+
+
+def test_검색완료와_접속분석검증제한과_상한을_동시에_보존한다():
+    from src.features.pipeline.news_research_context import public_news_research_status
+
+    result = public_news_research_status([{
+        "step": "5b_뉴스_수집", "독립기사": 1, "완전성": "partial",
+        "검색상태": "success", "실패": "fetch_robots_blocked",
+        "실패사유": ["fetch_robots_blocked", "grounded_response_incomplete"],
+        "검증미완료": ["grounded_missing_result"], "상한사유": ["window_body_budget"],
+    }], enabled=True)
+    assert result["검색완료"] is True
+    assert result["관측문제"] == ("접속", "분석", "검증")
+    assert result["상한도달"] is True
+    assert result["상태"] == "partial"
+
+
+def test_관측없는_과거진단은_검색성공이나_특정장애를_추정하지않는다():
+    from src.features.pipeline.news_research_context import public_news_research_status
+
+    result = public_news_research_status([{
+        "step": "5b_뉴스_수집", "독립기사": 0, "실패": "unknown_stage_error",
+    }], enabled=True)
+    assert result["검색완료"] is False
+    assert result["관측문제"] == ()
+    assert result["상한도달"] is False
 from src.shared.report_evidence.constants import OFFICIAL_WEB_SOURCE_KINDS
 
 

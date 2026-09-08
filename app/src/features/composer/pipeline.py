@@ -1027,6 +1027,7 @@ def run_v2(
         prepared_evidence.allowed_fragment_ids_by_section if prepared_evidence else None,
     )
     news_review_candidates = news_citation_ids(draft, _normalize_fragments(verification_fragments))
+    news_review_rejections = []
     if release_mode is not ReleaseMode.SHADOW:
         if prepared_evidence is not None:
             draft = _sanitize_report_to_section_evidence(
@@ -1086,7 +1087,10 @@ def run_v2(
     # ②-b 사실 단일 소유 강제 — 여러 장에 반복된 같은 사실을 소유 장 하나만
     #     남기고 뺀다. 요약 «앞»에 둔다 — 곧 사라질 문장을 요약 재료로 고르면
     #     본문에 없는 요약이 남는다.
-    verified = retain_verified_news(verified, _normalize_fragments(verification_fragments))
+    verified = retain_verified_news(
+        verified, _normalize_fragments(verification_fragments),
+        review_input=draft, diagnostics=news_review_rejections,
+    )
     verified, moved_sentences = drop_cross_section_duplicates(verified)
     if moved_sentences:
         logger.info("장 간 중복 %d문장을 소유 장으로 모았습니다", moved_sentences)
@@ -1188,7 +1192,11 @@ def run_v2(
         verified, verification_fragments, prepared_evidence,
         enabled=True, review_candidates=news_review_candidates,
     )
-    verified = append_research_notice(news_block.report, research_diagnostics)
+    verified = append_research_notice(
+        news_block.report, research_diagnostics,
+        fragments=_normalize_fragments(verification_fragments),
+        review_rejections=news_review_rejections,
+    )
     if prepared_evidence is not None:
         _assert_composed_report_evidence_invariant(
             verified,
@@ -1439,6 +1447,11 @@ def run_v2(
                 section_evidence_packets=section_evidence_packets,
                 section_ids=targets,
             )
+            supplement_draft, supplement_news = supplement_news_candidates(
+                supplement_draft, _normalize_fragments(verification_fragments),
+                prepared_evidence.allowed_fragment_ids_by_section,
+            )
+            news_supplemented = tuple(dict.fromkeys((*news_supplemented, *supplement_news)))
             news_review_candidates |= news_citation_ids(
                 supplement_draft, _normalize_fragments(verification_fragments),
             )
@@ -1459,7 +1472,10 @@ def run_v2(
                 ),
             )
             supplement_verified, supplement_moved = drop_cross_section_duplicates(
-                retain_verified_news(supplement_verified, _normalize_fragments(verification_fragments))
+                retain_verified_news(
+                    supplement_verified, _normalize_fragments(verification_fragments),
+                    review_input=supplement_draft, diagnostics=news_review_rejections,
+                )
             )
             if supplement_moved:
                 logger.info(
@@ -1482,7 +1498,6 @@ def run_v2(
                 supplement_verified,
                 targets,
             )
-            merged_body = append_research_notice(merged_body, research_diagnostics)
             # 병합 뒤 전역 수치 안전을 다시 계산한다. 비대상 장은 값뿐 아니라
             # ComposedSection 전체(본문·도식·structured fact)가 exact 동일해야 한다.
             merged_body, merged_numeric_filtering = enforce_public_numeric_safety(
@@ -1495,7 +1510,11 @@ def run_v2(
                 merged_body, verification_fragments, prepared_evidence,
                 enabled=True, review_candidates=news_review_candidates,
             )
-            merged_body = news_block.report
+            merged_body = append_research_notice(
+                news_block.report, research_diagnostics,
+                fragments=_normalize_fragments(verification_fragments),
+                review_rejections=news_review_rejections,
+            )
             base_by_id = {
                 section.section_id: section for section in base_body.sections
             }
@@ -1890,6 +1909,7 @@ def run_v2(
         news_usage_diagnostics=news_usage_diagnostics(
             verified, _normalize_fragments(verification_fragments), news_supplemented,
             review_candidates=news_review_candidates,
+            review_rejections=news_review_rejections,
         ),
     )
 
