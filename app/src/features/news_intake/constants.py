@@ -306,7 +306,7 @@ URL_VARIANT_ORDER: Final[tuple[str, ...]] = (
 MAX_URL_VARIANTS: Final[int] = 3
 
 # 새 수집 경로의 상한은 기사 수를 채우는 목표가 아니라 요청 비용의 경계다.
-COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v5"
+COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v6"
 NAME_ACRONYM_MIN_CHARS: Final[int] = 2
 NAME_ACRONYM_MAX_CHARS: Final[int] = 8
 NAME_RETAINED_SUFFIX_MIN_CHARS: Final[int] = 2
@@ -375,6 +375,7 @@ FINAL_FRAGMENT_CHARS_BUDGET: Final[int] = 12_000
 SUFFICIENT_DISTINCT_EVENTS: Final[int] = 6
 SUFFICIENT_DISTINCT_TOPICS: Final[int] = 3
 WINDOW_MONTHS: Final[tuple[int, ...]] = (12, 24, 36)
+# 기본 시도 배분이다. 후보가 없는 창의 몫은 전체 기사 상한 안에서 재사용한다.
 WINDOW_ARTICLE_BUDGETS: Final[tuple[int, ...]] = (16, 4, 4)
 CONTENT_DUPLICATE_SIMILARITY: Final[float] = 0.88
 EVENT_DUPLICATE_SIMILARITY: Final[float] = 0.84

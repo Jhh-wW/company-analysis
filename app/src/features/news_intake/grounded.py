@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import re
 from collections import Counter
+from copy import deepcopy
 from dataclasses import asdict
 from typing import Any
 
@@ -66,6 +67,15 @@ GROUNDED_ANALYSIS_SCHEMA: dict[str, Any] = {
 }
 
 
+def build_grounded_schema(articles: list[tuple[NewsCandidate, str]]) -> dict[str, Any]:
+    """배치의 기사 ID와 결과 수를 요청에 결속하고 공용 스키마는 보존한다."""
+    schema = deepcopy(GROUNDED_ANALYSIS_SCHEMA)
+    items = schema["properties"]["items"]
+    items["minItems"] = items["maxItems"] = len(articles)
+    items["items"]["properties"]["id"] = _enum([candidate.id for candidate, _ in articles])
+    return schema
+
+
 def build_grounded_prompt(company: NewsCompanyContext, articles: list[tuple[NewsCandidate, str]], as_of: dt.date) -> str:
     payload = {
         "company": asdict(company), "verified_company_names": company_query_names(company),
@@ -102,9 +112,15 @@ def build_grounded_prompt(company: NewsCompanyContext, articles: list[tuple[News
         "실행완료로 바꾸지 마세요. 5·6·8장의 발언은 대상 회사에 명시 귀속된 원문만 사용하세요. "
         "기사에 등장하는 다른 회사 대표의 말을 대상 회사 발언으로 삼지 마세요.\n"
         "5. topic은 의미상 주제, event_key는 동일 사건을 가리키는 간결한 설명입니다. 발행일은 사건일과 "
-        "다릅니다. event_on은 본문에 연월일이 명시된 경우만 YYYY-MM-DD로 반환하고 그 날짜가 있는 "
-        "원문 time_evidence를 함께 복사하세요. 상대 날짜/연도만 있거나 확인할 수 없으면 둘 다 빈 문자열입니다. "
-        "검색 날짜를 사건일로 추정하지 마세요. source_type은 실제 글의 종류입니다.\n"
+        "다릅니다. event_on은 선택한 text 안에 해당 사건의 연월일이 명시된 경우만 YYYY-MM-DD로 반환하고, "
+        "time_evidence는 그 날짜를 포함하는 text 내부의 연속 원문을 그대로 복사하세요. "
+        "기사의 다른 문단에만 날짜가 있거나 상대 날짜/연도만 있거나 확인할 수 없으면 "
+        "event_on과 time_evidence를 모두 빈 문자열로 두세요. 날짜를 text에 덧붙이거나 발행일·검색 날짜를 "
+        "사건일로 추정하지 마세요. 사건일을 모른다는 이유만으로 확인한 사업 사실을 버릴 필요는 없습니다. "
+        "source_type은 실제 글의 종류입니다.\n"
+        "6. articles의 모든 id마다 items에 정확히 한 결과를 반환하세요. "
+        "same_company=false, material=false 또는 excerpts가 빈 배열인 기사도 결과 객체를 생략하지 마세요. "
+        "입력에 없는 id를 만들거나 같은 id를 반복하지 마세요.\n"
         "주어진 스키마의 JSON 객체만 반환하세요. 자료 시작:\n"
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )

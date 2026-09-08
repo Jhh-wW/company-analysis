@@ -14,7 +14,7 @@ from src.features.news_intake import constants as c
 from src.features.news_intake.identity_names import derived_company_names
 from src.features.news_intake.fetch import body_fetch_urls, decode_looks_broken, normalize_body_result
 from src.features.news_intake.grounded import (
-    GROUNDED_ANALYSIS_SCHEMA, build_grounded_prompt, validate_grounded_response,
+    build_grounded_prompt, build_grounded_schema, validate_grounded_response,
 )
 from src.features.news_intake.grounded_mapping import (
     evidence_is_sufficient, select_diverse_excerpts, to_evidence_fragment,
@@ -63,6 +63,15 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     windows: list[int] = []
     window_counts: dict[str, dict[str, int]] = {}
     deferred: dict[int, list[tuple[NewsCandidate, str]]] = {}
+    candidates_by_window = {
+        months: [item for item in snapshot.candidates if candidate_window(item, as_of) == months]
+        for months in c.WINDOW_MONTHS
+    }
+    # 빈 창만 기본 몫을 반납한다. 과거 후보가 하나라도 있으면 그 창의 몫을 남긴다.
+    reusable_window_budget = sum(
+        budget for months, budget in zip(c.WINDOW_MONTHS, c.WINDOW_ARTICLE_BUDGETS)
+        if not candidates_by_window[months]
+    )
     deadline = time.monotonic() + policy.max_collection_seconds
     stopped = False
 
@@ -87,7 +96,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         analysis_calls += 1
         prompt_chars += len(prompt)
         try:
-            response = analyze_grounded(prompt, GROUNDED_ANALYSIS_SCHEMA, policy.analysis_max_tokens)
+            response = analyze_grounded(prompt, build_grounded_schema(batch), policy.analysis_max_tokens)
         except Exception:
             failures.append("grounded_analysis_failed")
             excluded["grounded_analysis_failed"] += len(batch)
@@ -132,18 +141,23 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             analyze_batch(batch)
             batch.clear()
 
-    for months, window_budget in zip(c.WINDOW_MONTHS, c.WINDOW_ARTICLE_BUDGETS):
+    for months, base_window_budget in zip(c.WINDOW_MONTHS, c.WINDOW_ARTICLE_BUDGETS):
         if stopped or evidence_is_sufficient(all_excerpts, policy):
             break
         windows.append(months)
-        candidates = [item for item in snapshot.candidates if candidate_window(item, as_of) == months]
+        candidates = candidates_by_window[months]
         carried = deferred.pop(months, [])
         carried_bodies = {candidate.id: body for candidate, body in carried}
         # 원문 날짜 보정으로 넘어온 기사도 같은 기간의 이름·주제 순위를 따른다.
         ranked_candidates = diverse_candidates(
             candidates + [candidate for candidate, _ in carried], len(candidates) + len(carried),
         )
-        window_counts[str(months)] = {"후보": len(candidates) + len(carried), "본문": len(carried), "검증기사": 0, "이월": 0}
+        window_budget = min(base_window_budget + reusable_window_budget,
+                            policy.max_body_articles - body_articles) if candidates else 0
+        window_counts[str(months)] = {
+            "후보": len(candidates) + len(carried), "본문": len(carried), "검증기사": 0, "이월": 0,
+            "시도상한": window_budget, "시도": 0, "미시도": len(candidates),
+        }
         batch: list[tuple[NewsCandidate, str]] = []
         examined = 0
         relevant_before = len(relevant_articles)
@@ -155,7 +169,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                 continue
             if examined >= window_budget:
                 if len(candidates) > examined:
-                    budget_codes.append("window_body_budget")
+                    budget_codes.append("body_budget_exhausted" if body_articles >= policy.max_body_articles
+                                        else "window_body_budget")
                 # 새 본문 요청은 멈추되 이미 읽어 이월한 본문은 재요청 없이 검증한다.
                 continue
             if (body_articles >= policy.max_body_articles or body_calls >= policy.max_body_calls
@@ -250,6 +265,9 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             if stopped:
                 break
         analyze_batch(batch)
+        reusable_window_budget -= max(0, examined - base_window_budget)
+        window_counts[str(months)]["시도"] = examined
+        window_counts[str(months)]["미시도"] = len(candidates) - examined
         window_counts[str(months)]["검증기사"] = len(relevant_articles) - relevant_before
 
     chosen, selection_exclusions = select_diverse_excerpts(all_excerpts, policy)
@@ -286,6 +304,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         "본문시도기사": body_articles, "본문호출": body_calls,
         "본문읽기": sum(stage_count for stage_count in stages.values()),
         "본문글자": body_chars, "분류AI호출": analysis_calls, "분석AI호출": analysis_calls,
+        "분석호출상한": policy.max_analysis_calls, "분석잔여호출": policy.max_analysis_calls - analysis_calls,
         "분류프롬프트글자": prompt_chars, "분석입력글자": prompt_chars, "분석응답글자": response_chars,
         "관련성통과": len(relevant_articles), "조각": len(fragments),
         "조각글자": sum(len(item.text) for item in fragments), "독립기사": len(articles),
@@ -293,6 +312,11 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         "발행처": dict(Counter(article.candidate.publisher for article in articles)),
         "발행일근거": dict(Counter(article.candidate.published_on_source for article in articles)),
         "미확인매체": dict(snapshot.unverified_publishers),
+        "출처정책": {
+            "방식": "확인도메인허용목록", "등록도메인수": len(policy.trusted_publisher_domains),
+            "미확인도메인수": len(snapshot.unverified_publishers),
+            "미확인검색반환행수": sum(snapshot.unverified_publishers.values()),
+        },
         "검증된이름변형": derived_company_names(company),
         "메타이름일치후보": sum(item.metadata_name_match for item in snapshot.candidates),
         "메타이름비일치후보": sum(not item.metadata_name_match for item in snapshot.candidates),
