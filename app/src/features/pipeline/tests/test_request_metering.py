@@ -248,8 +248,9 @@ def test_usage가_있는_실패를_반복해도_16번째는_전송전에_막힌�
     client = _client(metered)
 
     for _ in range(MAX_AI_CALLS_PER_REQUEST):
-        with pytest.raises(FailedWithUsage):
+        with pytest.raises(real.gateway.ProviderCallFailed) as captured:
             client.messages.create(model=_HAIKU, max_tokens=100)
+        assert isinstance(captured.value.__cause__, FailedWithUsage)
     with pytest.raises(
         provider_budget.ProviderBudgetExceeded,
         match="AI 호출 횟수 상한",
@@ -428,8 +429,9 @@ def test_usage가_있는_실패호출도_실제원가이벤트로_보존한다(
     )
     metered.MODEL = _SONNET
 
-    with pytest.raises(FailedWithUsage):
+    with pytest.raises(real.gateway.ProviderCallFailed) as captured:
         _client(metered).messages.create(model=_SONNET, max_tokens=100)
+    assert isinstance(captured.value.__cause__, FailedWithUsage)
 
     event = real._request_cost_events(metered)[0]
     assert event.failed_call is True
@@ -832,12 +834,13 @@ def test_usage없는_provider_예외뒤에는_같은요청의_추가호출을_�
     metered = real._MeteredEngine(FakeRawEngine(messages))
     client = _client(metered)
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(real.gateway.ProviderCallFailed) as captured:
         client.messages.create(
             model=_HAIKU,
             max_tokens=700,
             messages=[{"role": "user", "content": "first unknown call"}],
         )
+    assert isinstance(captured.value.__cause__, TimeoutError)
     with pytest.raises(provider_budget.ProviderBudgetUnavailable):
         client.messages.create(
             model=_HAIKU,

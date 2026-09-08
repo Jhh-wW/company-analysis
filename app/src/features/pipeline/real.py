@@ -37,6 +37,11 @@ from src.core import news_intake_switch, news_research_adapter, paths, typed_col
 from src.core.clock import subtract_years, today_kst
 from src.core.provider_gateway import attempt_context, gateway
 from src.core.provider_gateway.anthropic_adapter import AnthropicAdapter
+from src.core.provider_gateway.types import (
+    BillingDisposition,
+    ProviderObservation,
+    TransportState,
+)
 from src.core.constants import (
     AUDIT_WINDOW_YEARS,
     CACHE_HIT_LAYER1,
@@ -1160,6 +1165,7 @@ class _MeteredMessages:
                 raise provider_budget.ProviderBudgetUnavailable(
                     "provider 실패 원인을 확인할 수 없습니다"
                 ) from wrapped
+            observation = wrapped.observation
             failure_event = _anthropic_usage_event(
                 error,
                 fallback_model=fallback_model,
@@ -1168,21 +1174,20 @@ class _MeteredMessages:
             )
             if failure_event is not None:
                 self._usages.append(failure_event)
+            # persistent observation이 local 정산의 권위다. adapter가 usage를
+            # 확정한 경우에만 그 확정액을 반환하고, 보수부채를 기록한 경우에는
+            # status가 400이어도 예약을 0원으로 지우지 않는다.
+            if observation.billing_disposition is BillingDisposition.KNOWN_COST:
                 try:
                     provider_budget.current().settle_call(
                         call_reservation,
-                        actual_krw=float(failure_event["cost_krw"]),
+                        actual_krw=float(observation.known_cost_krw),
                     )
                 except provider_budget.ProviderCostInvariantError as invariant:
                     _log_billing_uncertain(stage, "settle_invariant_on_failure", invariant)
                     self._metered._billing_uncertain = True
-                raise error
-            # ★ 여기서 «모든» 실패를 미확정으로 접으면, 타임아웃 한 번에
-            #   보고서 전체가 날아간다(실측: 카드사 본조사가 1초 만에 죽었다).
-            #   provider 가 요청을 «받아들이지 않은» 것이 확실한 거절(400·401·403·404)은
-            #   토큰을 만들지 않았으므로 0원으로 «확정» 마감한다. 그러면 같은 요청의
-            #   다음 호출을 막을 이유가 없다.
-            if _is_determinate_zero_cost(error):
+                raise wrapped
+            if _is_determinate_zero_cost(error, observation=observation):
                 logger.warning(
                     "provider 가 요청을 거절했습니다(0원 확정) stage=%s kind=%s status=%s",
                     stage or "unknown",
@@ -1191,13 +1196,14 @@ class _MeteredMessages:
                     or getattr(getattr(error, "response", None), "status_code", None),
                 )
                 provider_budget.current().settle_call(call_reservation, actual_krw=0.0)
-                raise error
-            # 나머지(타임아웃·연결끊김·429·5xx)는 «서버가 받았는지» 알 수 없다.
-            # 0원으로 마감하지 않고 adapter가 기록한 보수부채와 예약을 함께 유지한다.
+                raise wrapped
+            # 전송 후 usage가 없거나 observation이 보수부채이면 status와 무관하게
+            # 예약을 유지한다. 원래 SDK 예외를 wrapper의 cause로 보존해 legacy
+            # _ask/APIError catch가 None payload로 바꾸지 못하게 한다.
             _log_billing_uncertain(stage, "sdk_error_without_usage", error)
             self._metered._billing_uncertain = True
             provider_budget.current().mark_unknown(call_reservation)
-            raise error
+            raise wrapped
 
         usage_event = _anthropic_usage_event(
             response,
@@ -1229,28 +1235,27 @@ class _MeteredMessages:
         return getattr(self._messages, name)
 
 
-#: provider 가 «요청을 받아들이지 않아» 토큰을 만들지 않은 것이 확실한 HTTP 상태.
-#: 이때는 0원으로 «확정» 마감한다 — 모호하지 않으므로 요청을 막을 이유가 없다.
-#:
-#: ⚠️ 좁게 잡는다. 애매하면 «모름»에 남긴다 — 돈을 적게 세는 쪽으로 기울면 안 된다.
-#:   429(한도)·5xx(서버 오류)는 요청이 서버까지 갔다 거절된 것이라 여전히 모호하다.
-#:   408·409 등도 넣지 않는다.
-#: ⚠️ 이 판정은 «스트리밍이 아닌» messages.create 에만 맞다. 스트리밍을 도입하면
-#:   중간에 400 이 날 수 있어 이미 만들어진 토큰이 생긴다 — 그때는 이 목록을 비워라.
-_DETERMINATE_ZERO_COST_STATUSES: Final[frozenset[int]] = frozenset({400, 401, 403, 404})
+#: provider observation이 status와 무관하게 ``KNOWN_ZERO``라고 확정한 경우만
+#: local reservation을 0원으로 마감한다. 전송 후 HTTP status만으로는 provider가
+#: 요청을 받았는지·청구했는지 알 수 없으므로 이 목록은 호환용 빈 집합으로 둔다.
+_DETERMINATE_ZERO_COST_STATUSES: Final[frozenset[int]] = frozenset()
 
 
-def _is_determinate_zero_cost(error: BaseException) -> bool:
-    """토큰을 만들지 않은 것이 «확실한» 거절인가.
+def _is_determinate_zero_cost(
+    error: BaseException, *, observation: ProviderObservation | None = None
+) -> bool:
+    """공통 observation이 dispatch 전 0원을 확정했는가.
 
-    anthropic 을 import 하지 않고 status_code 속성만 본다 — SDK 버전이 바뀌어도
-    깨지지 않고, 다른 provider 로 바뀌어도 같은 규약이면 그대로 동작한다.
+    ``error``의 status만 읽으면 adapter의 보수부채 정책과 local 정산이 갈라진다.
+    따라서 호출 후에는 gateway가 기록한 ``KNOWN_ZERO`` + ``LOCAL_FAILURE`` 조합만
+    허용한다. status-only 호출은 하위 호출자 호환을 위해 항상 false다.
     """
-    status = getattr(error, "status_code", None)
-    if not isinstance(status, int):
-        response = getattr(error, "response", None)
-        status = getattr(response, "status_code", None)
-    return isinstance(status, int) and status in _DETERMINATE_ZERO_COST_STATUSES
+    del error
+    return bool(
+        observation is not None
+        and observation.billing_disposition is BillingDisposition.KNOWN_ZERO
+        and observation.transport_state is TransportState.LOCAL_FAILURE
+    )
 
 
 def _log_billing_uncertain(stage: str, reason: str, error: BaseException | None) -> None:
@@ -2825,6 +2830,25 @@ class RealPipeline:
                     ),
                 )
                 raise
+        except gateway.ProviderCallFailed as error:
+            observation = error.observation
+            runtime_failure.append_failure_once(
+                diagnostics.steps,
+                phase=failure_constants.PHASE_AI_CALL,
+                error=error,
+                reason_code=failure_constants.REASON_PROVIDER_CALL_FAILED,
+            )
+            logger.warning(
+                "provider 호출 실패를 첫 원인으로 보존합니다 type=%s status=%s transport=%s billing=%s",
+                observation.error_type or "unknown",
+                observation.status_code if observation.status_code is not None else "none",
+                observation.transport_state.value,
+                observation.billing_disposition.value,
+            )
+            result = RunResult(
+                outcome=Outcome.FAILED,
+                message=_message(Outcome.FAILED),
+            )
         except Exception as error:  # noqa: BLE001 — 이미 쓴 돈도 진단도 지우지 않는다
             # 더 안쪽의 AI·조립 경계가 기록하지 못한 예외만 pipeline 미분류로
             # 남긴다. 예외문·URL·입력 원문은 안전 단계 생성기가 읽지 않는다.
@@ -6355,6 +6379,34 @@ def _collect_grounded_news(
             )
             steps.append(diagnostics)
             return raw_fragments
+        except gateway.ProviderCallFailed as error:
+            observation = error.observation
+            search_attempts = tuple(
+                getattr(getattr(session, "snapshot", None), "query_attempts", ())
+            )
+            steps.append(
+                {
+                    "step": "5b_뉴스_수집",
+                    "스위치": True,
+                    "공식웹문서수": official_web_documents,
+                    "상태": "failed",
+                    "완전성": "failed",
+                    "실패": failure_constants.REASON_PROVIDER_CALL_FAILED,
+                    "검색": sum(attempt.returned_count for attempt in search_attempts),
+                    "검색호출": len(search_attempts),
+                    "검색실제전송": None,
+                    "검색전송관측완료": False,
+                    "조각": 0,
+                    "자료부족": False,
+                    "캐시재사용가능": False,
+                    "provider_status": observation.status_code,
+                    "provider_error_type": observation.error_type,
+                    "provider_transport": observation.transport_state.value,
+                    "provider_billing": observation.billing_disposition.value,
+                    "provider_liability_krw": observation.liability_krw,
+                }
+            )
+            raise
         except Exception as error:
             logger.warning(
                 "뉴스 본문 근거 분석을 완료하지 못했습니다 code=%s kind=%s",

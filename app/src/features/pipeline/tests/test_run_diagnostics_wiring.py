@@ -292,7 +292,8 @@ def test_뉴스_단계를_남기는_모든_자리가_공식_웹_문서_수를_�
         if NEWS_INTAKE_STEP in step_values:
             news_step_dicts.append(names)
 
-    # 기존 호환 경로 3곳과 신규 본문 검증 경로의 성공·실패 2곳을 모두 검사한다.
-    assert len(news_step_dicts) == 5
+    # 기존 호환 경로 3곳과 신규 본문 검증 경로의 성공·일반실패·provider fatal
+    # 3곳을 모두 검사한다.
+    assert len(news_step_dicts) == 6
     missing = [names for names in news_step_dicts if "공식웹문서수" not in names]
     assert missing == []

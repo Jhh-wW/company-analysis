@@ -59,10 +59,10 @@ class _응답에상태있는오류(Exception):
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404])
-def test_요청_거절은_확정_실패다(status: int) -> None:
-    """★ 이게 참이어야 타임아웃 한 번에 보고서 전체가 날아가지 않는다."""
-    assert real._is_determinate_zero_cost(_상태있는오류(status)) is True
-    assert real._is_determinate_zero_cost(_응답에상태있는오류(status)) is True
+def test_http_status_only_is_not_determinate_failure(status: int) -> None:
+    """전송 뒤 status만으로는 persistent 보수부채와 갈라질 수 있다."""
+    assert real._is_determinate_zero_cost(_상태있는오류(status)) is False
+    assert real._is_determinate_zero_cost(_응답에상태있는오류(status)) is False
 
 
 # ══════════════════════════════════════════════════════════
@@ -107,7 +107,7 @@ def test_확정_목록이_좁게_유지된다() -> None:
     ⚠️ 이 판정은 «스트리밍이 아닌» 호출에만 맞다. 스트리밍을 도입하면
       중간에 400 이 날 수 있어 이미 만들어진 토큰이 생긴다 — 그때는 목록을 비워라.
     """
-    assert real._DETERMINATE_ZERO_COST_STATUSES == frozenset({400, 401, 403, 404})
+    assert real._DETERMINATE_ZERO_COST_STATUSES == frozenset()
 
 
 def test_미확정_사유_로그가_비밀을_안_흘린다(caplog) -> None:

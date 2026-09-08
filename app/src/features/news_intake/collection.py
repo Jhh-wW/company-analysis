@@ -10,6 +10,7 @@ from collections import Counter
 from dataclasses import replace
 from typing import Any, Callable
 
+from src.core.provider_gateway import gateway
 from src.features.news_intake import constants as c
 from src.features.news_intake.identity_names import derived_company_names
 from src.features.news_intake.fetch import body_fetch_urls, decode_looks_broken, normalize_body_result
@@ -97,6 +98,12 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         prompt_chars += len(prompt)
         try:
             response = analyze_grounded(prompt, build_grounded_schema(batch), policy.analysis_max_tokens)
+        except gateway.ProviderCallFailed:
+            # gateway가 이미 안전한 observation을 원장에 기록했다. provider
+            # fatal을 콘텐츠 무효로 접으면 첫 원인이 사라지고 다음 배치의
+            # ProviderBudgetUnavailable이 최종 원인처럼 보이므로 즉시 전파한다.
+            stopped = True
+            raise
         except Exception:
             failures.append("grounded_analysis_failed")
             excluded["grounded_analysis_failed"] += len(batch)
