@@ -9,7 +9,11 @@ from pathlib import Path
 import pytest
 
 from src.features.pipeline import real
+from src.features.pipeline.candidate_profile_constants import (
+    DART_PROFILE_ENRICHMENT_LIMIT,
+)
 from src.features.pipeline.port import UserInput
+from src.shared.company_identity import verified_official_company_names_equivalent
 
 
 class _CandidateEngine:
@@ -81,6 +85,93 @@ def test_DART_local후보는_deadline뒤_남은_profile을_계속_부르지_않�
 
     assert len(rows) == 1
     assert engine.calls == ["00000010"]
+
+
+def test_SM_실제공식목록충돌에서도_다른약어근거와_주소를_profile5회안에_비교한다(
+    monkeypatch,
+):
+    target_code = "00260930"
+    target_name = "(주)에스엠엔터테인먼트"
+    target_address = "서울특별시 성동구 왕십리로 83-21 아크로 서울포레스트 디타워"
+
+    # 2026-09-08 실제 CORPCODE 캐시에서 SM 정답 앞에 있던 공식 레코드다.
+    # 정답은 기존 전체 matcher 9위였고 단순 top-5 profile 절단에서는 조회되지 않았다.
+    catalog = (
+        ("01491917", "에스엠", "SM", "", "20200806"),
+        ("01101643", "에스엠", "SM", "", "20170630"),
+        ("00238977", "에스엠화진", "SM HWAJIN Co., Ltd.", "134780", "20260604"),
+        ("00783246", "글로벌에스엠", "Global SM Tech Limited", "900070", "20260416"),
+        ("00147860", "에스엠벡셀", "SM BEXEL CO.,LTD", "010580", "20260227"),
+        ("00185046", "SM C&C", "SM Culture & Contents Co., Ltd.", "048550", "20250326"),
+        ("00367604", "SM Life Design", "SM Life Design Group Co., Ltd.", "063440", "20250325"),
+        ("00577380", "신진에스엠", "SINJIN SM CO.,LTD.", "138070", "20241210"),
+        (target_code, "에스엠", "SM ENTERTAINMENT CO., Ltd.", "041510", "20240328"),
+    )
+
+    class SmCandidateEngine(_CandidateEngine):
+        def get_json(self, _path, params, _counter):
+            code = str(params["corp_code"])
+            self.calls.append(code)
+            if code == target_code:
+                return {
+                    "status": "000",
+                    "corp_name": target_name,
+                    "adres": target_address,
+                    "hm_url": "smentertainment.com",
+                }
+            names = {row[0]: row[1] for row in catalog}
+            return {
+                "status": "000",
+                "corp_name": names[code],
+                "adres": "",
+                "hm_url": "",
+            }
+
+    engine = SmCandidateEngine()
+    monkeypatch.setattr(real, "_engine", lambda: engine)
+    monkeypatch.setattr(real, "_company_catalog", lambda: catalog)
+
+    rows = real.RealPipeline().search_business_candidates(
+        company="SM", address_hint=target_address, limit=3, timeout_sec=8.0
+    )
+
+    assert engine.calls == [
+        "01491917",
+        "01101643",
+        "00238977",
+        target_code,
+        "00783246",
+    ]
+    assert len(engine.calls) == DART_PROFILE_ENRICHMENT_LIMIT
+    assert rows[0]["candidate_ref"] == target_code
+    assert rows[0]["candidate_name"] == target_name
+    assert rows[0]["name_match_kind"] == "acronym_reading"
+    assert verified_official_company_names_equivalent(
+        rows[0]["candidate_name"],
+        target_name,
+        observed_corp_code=rows[0]["candidate_ref"],
+        expected_corp_code=target_code,
+    )
+
+    # 사용자가 서명된 후보를 고른 뒤에는 같은 DART 코드를 한 번 다시 조회한다.
+    # 실제 확인 manifest의 법인명·코드 쌍은 기존 evaluator 등가 경계를 그대로 통과한다.
+    selected_engine = SmCandidateEngine()
+    monkeypatch.setattr(real, "_engine", lambda: selected_engine)
+    selected = real.RealPipeline().find_company_by_ref_metered(
+        UserInput(company="SM", job="엔터테인먼트", region=target_address),
+        target_code,
+    )
+    assert selected.failed is False
+    assert selected.card is not None
+    assert selected.card.ref == target_code
+    assert selected.card.legal_name == target_name
+    assert selected_engine.calls == [target_code]
+    assert verified_official_company_names_equivalent(
+        selected.card.legal_name,
+        target_name,
+        observed_corp_code=selected.card.ref,
+        expected_corp_code=target_code,
+    )
 
 
 def test_DART_local_profile_형식오류는_후보보강전용_표식으로_구분한다(monkeypatch):
@@ -294,14 +385,15 @@ def test_YG_전체목록형_동명후보에서도_rank4_상장법인을_최종3�
     )
 
     # 공식 전체 목록에서는 목표 법인이 이름-only 순위 4위다. profile 보강은
-    # 다섯 건에서 멈추고, 상장 여부까지 비교한 최종 화면 세 장에는 포함한다.
+    # 다섯 건에서 멈춘다. 정확명·법적접미사 근거를 먼저 지킨 뒤에도 목표 법인은
+    # 상장 여부까지 비교한 최종 화면 세 장에 포함된다.
     assert payload["expected_local_rank"] == 4
     assert engine.calls == [
         "01841468",
+        "00617086",
         "00249247",
         "00139719",
         "00613318",
-        "01931239",
     ]
     assert len(rows) == 3
     assert "00613318" in [str(row["candidate_ref"]) for row in rows]

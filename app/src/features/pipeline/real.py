@@ -223,6 +223,12 @@ from src.features.writer import verify as writer_verify
 from src.features.grading.logic import is_accounting_policy, is_table_dump
 from src.features.cost_tracking.store import AiCostEvent
 from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC, DART_SUCCESS_STATUS
+from src.features.pipeline.candidate_profile_constants import (
+    DART_PROFILE_ENRICHMENT_LIMIT,
+)
+from src.features.pipeline.candidate_profile_lookahead import (
+    candidate_profile_lookahead,
+)
 from src.features.pipeline.news_research_context import (
     news_generation_digest,
     official_news_context,
@@ -685,13 +691,6 @@ _COMPANY_CATALOG_RECORDS: tuple[DartCompanyRecord, ...] = ()
 _COMPANY_CANDIDATE_INDEX_SOURCE: object | None = None
 _COMPANY_CANDIDATE_INDEX = None
 _COMPANY_CANDIDATE_INDEX_LOCK = threading.Lock()
-
-# 후보 화면은 세 장으로 제한하지만, 로컬 이름 순위만 보고 같은 수의 DART
-# 기업개황을 잘라 버리면 주소·상장 여부를 점수에 반영하기 전에 정답이 탈락한다.
-# 표시 상한보다 두 건만 더 보강해 rank 4~5도 비교하되 요청 수와 deadline은
-# 계속 작게 묶는다. 이 값은 자동 확정 임계값이 아니라 후보 재정렬 탐색 폭이다.
-_DART_PROFILE_ENRICHMENT_LIMIT = 5
-
 
 #: 1판은 모듈 전역 `_spent_usd`에 비용을 더한다. 보통 `import run_pilot`은
 #: `sys.modules`의 같은 객체를 돌려주므로 서버가 살아 있는 내내 모든 요청이 그 값을
@@ -2523,22 +2522,20 @@ class RealPipeline:
         )
 
         # company.json은 후보마다 외부 DART 요청 한 번이다. 화면 표시 수와 profile
-        # 보강 수를 분리한다. 로컬 rank 4~5까지 주소·상장 여부를 비교해야 짧은 공식
-        # 약어의 동명 후보가 앞에 몰려도 관련 법인을 후보 카드에 남길 수 있다.
+        # 보강 수를 분리한다. 정확 식별 후보를 먼저 지키고, 남은 슬롯은 match kind별
+        # 대표에 배분해야 짧은 공식 약어의 동명 후보가 앞에 몰려도 다른 공식 별칭의
+        # 관련 법인이 주소 비교 전에 탈락하지 않는다.
         # 전체 resolver timeout 뒤 취소할 수 없는 thread가 계속 호출하지 않도록
         # 보강 폭은 다섯 건으로 고정하고, 매 호출 전에 deadline을 다시 확인한다.
         display_cap = max(1, min(int(limit), 3))
-        profile_cap = max(display_cap, _DART_PROFILE_ENRICHMENT_LIMIT)
+        profile_cap = max(display_cap, DART_PROFILE_ENRICHMENT_LIMIT)
         deadline = time.monotonic() + max(0.1, float(timeout_sec))
         all_matches = list(
             generate_dart_company_matches(
                 _company_candidate_index(), company, limit=max(15, profile_cap * 3)
             )
         )
-        # 이름 근거의 다양성만으로 낮은 local rank를 먼저 끌어올리면 더 관련성 높은
-        # 같은-kind 후보가 profile 조회 전에 잘릴 수 있다. matcher의 결정론적 순위를
-        # 그대로 보강한 뒤, 실제 profile 근거로 최종 표시 후보만 다시 정렬한다.
-        matched = all_matches[:profile_cap]
+        matched = candidate_profile_lookahead(all_matches, limit=profile_cap)
         if not matched:
             return []
 
