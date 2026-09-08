@@ -8,6 +8,19 @@ POLL_TIMEOUT_SECONDS = 35 * 60
 HTTP_TIMEOUT_SECONDS = 90.0
 MIN_DUPLICATE_LINE_CHARACTERS = 20
 NEWS_USAGE_STEP_NAMES = frozenset({"8_뉴스_본문활용", "뉴스_본문활용"})
+# ``pilot_evaluation.runner._LedgerConsistencyError``가 실제로 내는 닫힌 코드만
+# interruption 산출물로 운반한다. 예외문이나 임의 ``code`` 속성은 저장하지 않는다.
+LEDGER_CONSISTENCY_ERROR_CODES = frozenset({
+    "final_gate_evidence_invalid",
+    "ledger_cost_invalid",
+    "ledger_cost_mismatch",
+    "ledger_lifecycle_cost_mismatch",
+    "ledger_lifecycle_invalid",
+    "ledger_lifecycle_record_invalid",
+    "ledger_outcome_invalid",
+    "ledger_outcome_report_mismatch",
+    "ledger_spend_invalid",
+})
 FEATURE_KEYS = (
     "ENGINE_V2", "NEWS_INTAKE", "REVENUE_TABLE_V2", "TYPED_DART_COLLECTOR",
     "EVIDENCE_RECLASSIFY", "NEWSROOM_DATE_AI",

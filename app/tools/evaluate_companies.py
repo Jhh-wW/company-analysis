@@ -25,11 +25,16 @@ import httpx
 from src.features.pilot_evaluation.checkpoint import CheckpointStore
 from src.features.pilot_evaluation.contract import PilotCategory
 from src.features.pilot_evaluation.manifest import CanonicalPilotCase
-from src.features.pilot_evaluation.runner import CanonicalPilotRunner, canonical_loopback_origin
+from src.features.pilot_evaluation.runner import (
+    CanonicalPilotRunner,
+    _LedgerConsistencyError,
+    canonical_loopback_origin,
+)
 from src.features.report_access.constants import PUBLIC_GRANT_COOKIE_NAME
 from src.shared.company_identity import verified_official_company_names_equivalent
 from tools.evaluation_constants import (
     CHECKPOINT_SCHEMA, DIAGNOSTIC_EXPORTS, FEATURE_KEYS, HTTP_TIMEOUT_SECONDS,
+    LEDGER_CONSISTENCY_ERROR_CODES,
     MANIFEST_SCHEMA, MAX_CASES, MIN_DUPLICATE_LINE_CHARACTERS,
     NEWS_USAGE_STEP_NAMES,
     POLL_INTERVAL_SECONDS, POLL_TIMEOUT_SECONDS,
@@ -38,6 +43,14 @@ from tools.evaluation_constants import (
 
 class EvaluationError(RuntimeError):
     """민감한 HTTP 본문을 포함하지 않는 평가 중단 사유."""
+
+
+def interruption_error_code(exc: Exception) -> str | None:
+    """실제 원장 일관성 예외의 공식 닫힌 코드만 반환한다."""
+    if not isinstance(exc, _LedgerConsistencyError):
+        return None
+    code = exc.code
+    return code if type(code) is str and code in LEDGER_CONSISTENCY_ERROR_CODES else None
 
 
 def digest(data: bytes) -> str:
@@ -330,11 +343,15 @@ class HttpEvaluation:
                     if row.get("run_id"):
                         output = self.root / "http-evaluation-artifacts" / self.batch_id / case.case_id
                         output.mkdir(parents=True, exist_ok=True)
-                        write_json(output / "interruption.json", {
+                        interruption = {
                             "state": row["state"], "run_id": row["run_id"],
                             "error_type": type(exc).__name__, "human_quality_judgment": None,
                             "automatic_paid_retry_allowed": False,
-                        })
+                        }
+                        error_code = interruption_error_code(exc)
+                        if error_code is not None:
+                            interruption["error_code"] = error_code
+                        write_json(output / "interruption.json", interruption)
                         self.export_evidence(row["run_id"], output)
                     raise
             return {"mode": "실행 결과", "cases": self.state["cases"], "human_quality_judgment": None}

@@ -12,12 +12,20 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from src.features.pilot_evaluation.runner import LedgerResult, PilotBatchBlocked
+from src.features.pilot_evaluation.runner import (
+    LedgerResult,
+    PilotBatchBlocked,
+    _LedgerConsistencyError,
+)
 from tools.evaluate_companies import (
     EvaluationError, HttpEvaluation, diagnostic_metrics, digest, load_manifest,
     protect_session, text_metrics,
 )
-from tools.evaluation_constants import FEATURE_KEYS, MANIFEST_SCHEMA
+from tools.evaluation_constants import (
+    FEATURE_KEYS,
+    LEDGER_CONSISTENCY_ERROR_CODES,
+    MANIFEST_SCHEMA,
+)
 
 ORIGIN = "http://127.0.0.1:8020"
 RUN_ID = "a" * 32
@@ -354,6 +362,69 @@ def test_unsettled_cost_saves_evidence_and_blocks_completion(harness, monkeypatc
     assert json.loads((output / "ledger.json").read_text(encoding="utf-8"))["billing_uncertain"] is True
     assert (output / "interruption.json").is_file()
     assert runner.state["cases"]["CUSTOM"]["state"] == "running"
+
+
+def _interruption_for_error(harness, monkeypatch, error: Exception) -> dict:
+    build, _, _, _, _ = harness
+    runner = build()
+
+    def fail_after_run_id(_case, row):
+        row.update(state="running", run_id=RUN_ID)
+        runner.save()
+        raise error
+
+    monkeypatch.setattr(runner, "start", fail_after_run_id)
+    with pytest.raises(type(error)):
+        runner.operate(execute=True)
+    output = runner.root / "http-evaluation-artifacts" / "main" / "CUSTOM"
+    interruption = json.loads(
+        (output / "interruption.json").read_text(encoding="utf-8")
+    )
+    serialized = "".join(
+        path.read_text(encoding="utf-8") for path in output.glob("*.json")
+    )
+    assert TOKEN not in serialized
+    assert str(error) not in serialized
+    return interruption
+
+
+@pytest.mark.parametrize("error_code", sorted(LEDGER_CONSISTENCY_ERROR_CODES))
+def test_interruption_records_only_official_ledger_error_code(
+    harness, monkeypatch, error_code,
+):
+    error = _LedgerConsistencyError(
+        error_code,
+        f"원문·키·응답·쿠키를 포함할 수 있는 비밀 문구 {TOKEN}",
+    )
+
+    interruption = _interruption_for_error(harness, monkeypatch, error)
+
+    assert interruption == {
+        "state": "running",
+        "run_id": RUN_ID,
+        "error_type": "_LedgerConsistencyError",
+        "human_quality_judgment": None,
+        "automatic_paid_retry_allowed": False,
+        "error_code": error_code,
+    }
+
+
+@pytest.mark.parametrize("error_kind", ("unknown_ledger", "duck_typed"))
+def test_interruption_omits_unknown_or_nonledger_code(
+    harness, monkeypatch, error_kind,
+):
+    if error_kind == "unknown_ledger":
+        error = _LedgerConsistencyError(
+            "임의_코드",
+            f"알려지지 않은 원장 오류 문구 {TOKEN}",
+        )
+    else:
+        error = RuntimeError(f"외부 응답 문구 {TOKEN}")
+        error.code = "ledger_cost_mismatch"
+
+    interruption = _interruption_for_error(harness, monkeypatch, error)
+
+    assert "error_code" not in interruption
 
 
 @pytest.mark.parametrize("change", ["unconfirmed", "missing_code", "duplicate"])
