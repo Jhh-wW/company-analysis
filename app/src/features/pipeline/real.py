@@ -257,6 +257,9 @@ from src.features.pipeline.evidence_transport import (
 from src.features.pipeline.comparison_transport import (
     build_typed_comparison_candidate_inputs,
 )
+from src.features.pipeline.official_collection_diagnostics import (
+    official_collection_attempt_step,
+)
 from src.features.pipeline.official_evidence_preflight import (
     OfficialEvidencePreflight,
     assess_official_evidence,
@@ -3134,6 +3137,9 @@ class RealPipeline:
                         domain_attestation_evidence=profile_attestation_evidence,
                     )
                 )
+                # 수집기가 실제로 반환한 attempt만 원문 없이 즉시 남긴다.
+                # 재분류·사전게이트가 뒤에서 멈춰도 이 관측은 run별 steps에 남는다.
+                steps.append(official_collection_attempt_step(official_evidence))
                 # 결정론 승격(9장 자기 선언)을 먼저 하고, 그래도 빈 칸만 AI 재판정에 맡긴다.
                 # 승격은 보조 추가물이다 — 실패하면 9장이 비는 것으로 끝나야 하고,
                 # 보고서 전체를 내부 오류로 멈춰서는 안 된다(2026-09-06 운영 실측).
