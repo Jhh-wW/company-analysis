@@ -23,7 +23,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Optional
 
@@ -70,6 +70,7 @@ from src.features.composer.constants import (
     SECTION_TITLES,
 )
 from src.features.composer.dedupe import drop_cross_section_duplicates
+from src.features.composer.news_usage import supplement_news_candidates, retain_verified_news, news_usage_diagnostics, append_research_notice, news_citation_ids
 from src.features.composer.diagram_check import check_diagram_numbers, check_diagrams
 from src.features.composer.dup_detect import CONFIDENCE_CONFIRMED, find_numeric_duplicates
 from src.features.composer.extractive_summary import select_extractive_summary
@@ -232,6 +233,7 @@ class V2RunOutput:
     news_block_row_counts_by_section: tuple[tuple[str, int], ...] = ()
     #: 보도표에서 «뺀 행»과 «못 붙인 장»의 사유별 수(`news_block.BLOCKED_*`).
     news_block_blocked_counts_by_reason: tuple[tuple[str, int], ...] = ()
+    news_usage_diagnostics: dict[str, object] = field(default_factory=dict)
 
 
 class _CallLedgerRecorder:
@@ -556,13 +558,10 @@ def _merge_selected_sections(
     by_id = {section.section_id: section for section in replacements.sections}
     return ComposedReport(
         sections=tuple(
-            # ★ 보도표는 «다시 쓴 장»에도 그대로 남긴다. 이 표는 작가 응답이
-            #   아니라 조각에서만 나오므로, 보충 회차가 그 장을 새로 써도 값이
-            #   달라질 이유가 없다. 안 옮기면 3장·5장처럼 보충이 도는 장에서만
-            #   보도표가 조용히 사라져, 「어떤 실행에서는 있고 어떤 실행에서는
-            #   없다」가 된다 — 이 기능이 없애려던 바로 그 증상이다.
+            # 보도표는 병합 뒤 검수 결과를 반영해 다시 만든다. 이 복사는
+            # 병합 도중 표만 누락되는 것을 막으며 공개 승인으로 쓰지 않는다.
             replace(
-                by_id[section.section_id], news_rows=section.news_rows
+                by_id[section.section_id], news_rows=section.news_rows,
             )
             if section.section_id in by_id
             else section
@@ -696,6 +695,7 @@ def _augment_news_blocks(
     prepared_evidence: object,
     *,
     enabled: bool,
+    review_candidates: frozenset[str] = frozenset(),
 ) -> NewsBlockResult:
     """장 끝 보도표 보강을 «장별 근거 소유권 안에서» 부른다.
 
@@ -720,12 +720,21 @@ def _augment_news_blocks(
             경로이므로 조각의 의미 칸에서 소유권 표를 만든다.
         enabled: 이 실행이 공개 표를 «결속할 수 있는» 경로인가
             (`augment_news_blocks`의 같은 이름 인자 설명 참고).
+        review_candidates: 첫 작성과 보충 작성에서 본문 검수 대상으로 낸
+            뉴스 조각. 최종 본문에 남지 못한 후보는 목록에서도 제외한다.
 
     Returns:
-        보강 결과. 못 붙였으면 ``report``는 입력 그대로다.
+        최종 본문 기준으로 다시 만든 보도표와 제외 사유.
     """
 
     normalized = _normalize_fragments(fragments)
+    rejected = review_candidates - news_citation_ids(report, normalized)
+    normalized = tuple(fragment for fragment in normalized if fragment.fragment_id not in rejected)
+    # 재작성된 본문에서 탈락한 후보가 이전 회차의 표로 남지 않도록 재생성한다.
+    report = replace(report, sections=tuple(
+        replace(section, news_rows=()) if section.news_rows else section
+        for section in report.sections
+    ))
     if prepared_evidence is not None:
         allowed_by_section = getattr(
             prepared_evidence, "allowed_fragment_ids_by_section", None
@@ -738,6 +747,10 @@ def _augment_news_blocks(
         allowed_fragment_ids_by_section=allowed_by_section,
         enabled=enabled,
     )
+    if rejected:
+        result = replace(result, blocked_counts_by_reason=(
+            *result.blocked_counts_by_reason, ("body_review_rejected", len(rejected)),
+        ))
     if result.added:
         logger.info(
             "언론 보조 보도표를 %d개 장에 %d행 붙였습니다 (%s)",
@@ -793,6 +806,7 @@ def run_v2(
     section_evidence_packets: Optional[SectionEvidencePackets] = None,
     company_id: str = "",
     build_identity_sha256: str = "",
+    research_diagnostics: dict[str, object] | None = None,
 ) -> V2RunOutput:
     """엔진 v2 전체 흐름을 한 번 돌려 최종 보고서를 만든다 (04장 3-4절).
 
@@ -1008,6 +1022,11 @@ def run_v2(
         # 넘겨 작성 경계도 같은 계약을 보게 한다.
         section_evidence_packets=section_evidence_packets,
     )
+    draft, news_supplemented = supplement_news_candidates(
+        draft, _normalize_fragments(verification_fragments),
+        prepared_evidence.allowed_fragment_ids_by_section if prepared_evidence else None,
+    )
+    news_review_candidates = news_citation_ids(draft, _normalize_fragments(verification_fragments))
     if release_mode is not ReleaseMode.SHADOW:
         if prepared_evidence is not None:
             draft = _sanitize_report_to_section_evidence(
@@ -1067,6 +1086,7 @@ def run_v2(
     # ②-b 사실 단일 소유 강제 — 여러 장에 반복된 같은 사실을 소유 장 하나만
     #     남기고 뺀다. 요약 «앞»에 둔다 — 곧 사라질 문장을 요약 재료로 고르면
     #     본문에 없는 요약이 남는다.
+    verified = retain_verified_news(verified, _normalize_fragments(verification_fragments))
     verified, moved_sentences = drop_cross_section_duplicates(verified)
     if moved_sentences:
         logger.info("장 간 중복 %d문장을 소유 장으로 모았습니다", moved_sentences)
@@ -1137,23 +1157,6 @@ def run_v2(
     )
     name_table = name_table_result.table
 
-    # ②-c-3 언론 보조 보도표 — 뉴스 조각이 온 장 끝에 표 하나를 결정적으로
-    # 붙인다. 작가가 그 조각을 인용했는지와 무관하다(실측: 조각 6개가 갔는데
-    # 보고서·부록에 흔적 0건). 조각이 없으면 아무 장도 바뀌지 않는다.
-    #
-    # ★ ENFORCE_NO_PARTIAL에서는 «안» 붙인다 — 그 모드는 pre-render manifest를
-    #   만들지 않아 표를 결속하지 못한다. 붙이면 엄격 품질 계약이 그 장을
-    #   「fact_id와 결속되지 않은 공개 내용」으로 보고 보고서 «전체»를 막는다
-    #   (실측 재현: 그 모드는 이미 flow 행이 있는 장에서 같은 이유로 막힌다).
-    #   보조 표 하나 때문에 보고서를 잃지 않는다. 사유는 실행 기록에 남는다.
-    news_block = _augment_news_blocks(
-        verified,
-        verification_fragments,
-        prepared_evidence,
-        enabled=release_mode is not ReleaseMode.ENFORCE_NO_PARTIAL,
-    )
-    verified = news_block.report
-
     # ②-d 첫 구조화 claim 슬라이스 — 검증된 DART 3개년 표의 원값에서
     # 누적 증감률을 코드로 재계산한다. AI 산문에서 숫자를 역추출하지 않으며,
     # 표의 회계범위·원단위·원 payload가 하나라도 빠지면 아무것도 만들지 않는다.
@@ -1179,6 +1182,13 @@ def run_v2(
     # AI 수치 필터를 우회시키는 것이 아니라 그 필터가 끝난 뒤 packet에 이미
     # 봉인된 문장만 추가하고, 아래 품질 평가에서 다시 공식 재계산한다.
     verified = _append_verified_program_sentences(verified, prepared_evidence)
+    # 직접 인용·자동 보강 모두 최종 본문 검수와 수치 안전을 통과해야 한다.
+    # 검수 탈락 후보의 목록 우회 공개는 모든 모드에서 같은 기준으로 막는다.
+    news_block = _augment_news_blocks(
+        verified, verification_fragments, prepared_evidence,
+        enabled=True, review_candidates=news_review_candidates,
+    )
+    verified = append_research_notice(news_block.report, research_diagnostics)
     if prepared_evidence is not None:
         _assert_composed_report_evidence_invariant(
             verified,
@@ -1429,6 +1439,9 @@ def run_v2(
                 section_evidence_packets=section_evidence_packets,
                 section_ids=targets,
             )
+            news_review_candidates |= news_citation_ids(
+                supplement_draft, _normalize_fragments(verification_fragments),
+            )
             draft_body_count += _total_sentences(supplement_draft)
             supplement_draft, supplement_diagram_problems = check_diagram_numbers(
                 supplement_draft,
@@ -1446,7 +1459,7 @@ def run_v2(
                 ),
             )
             supplement_verified, supplement_moved = drop_cross_section_duplicates(
-                supplement_verified
+                retain_verified_news(supplement_verified, _normalize_fragments(verification_fragments))
             )
             if supplement_moved:
                 logger.info(
@@ -1469,6 +1482,7 @@ def run_v2(
                 supplement_verified,
                 targets,
             )
+            merged_body = append_research_notice(merged_body, research_diagnostics)
             # 병합 뒤 전역 수치 안전을 다시 계산한다. 비대상 장은 값뿐 아니라
             # ComposedSection 전체(본문·도식·structured fact)가 exact 동일해야 한다.
             merged_body, merged_numeric_filtering = enforce_public_numeric_safety(
@@ -1477,6 +1491,11 @@ def run_v2(
             merged_body = _append_verified_program_sentences(
                 merged_body, prepared_evidence
             )
+            news_block = _augment_news_blocks(
+                merged_body, verification_fragments, prepared_evidence,
+                enabled=True, review_candidates=news_review_candidates,
+            )
+            merged_body = news_block.report
             base_by_id = {
                 section.section_id: section for section in base_body.sections
             }
@@ -1868,6 +1887,10 @@ def run_v2(
         portfolio_name_table_blocked_reason=name_table_result.blocked_reason,
         news_block_row_counts_by_section=news_block.row_counts_by_section,
         news_block_blocked_counts_by_reason=news_block.blocked_counts_by_reason,
+        news_usage_diagnostics=news_usage_diagnostics(
+            verified, _normalize_fragments(verification_fragments), news_supplemented,
+            review_candidates=news_review_candidates,
+        ),
     )
 
 

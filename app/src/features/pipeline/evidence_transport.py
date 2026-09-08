@@ -671,6 +671,15 @@ def _collected_fragment_from_raw(
         counts_toward_document_floor=(
             formal_source_kind not in SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
         ),
+        news_grounded=(
+            formal_source_kind in SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS
+            and raw.get("news_grounded") is True
+        ),
+        news_claim_kind=_optional_text(raw, "news_claim_kind"),
+        news_temporal_status=_optional_text(raw, "news_temporal_status"),
+        news_event_on=_optional_text(raw, "news_event_on"),
+        news_event_key=_optional_text(raw, "news_event_key"),
+        news_source_category=_optional_text(raw, "news_source_category"),
     )
     return fragment, section_ids
 

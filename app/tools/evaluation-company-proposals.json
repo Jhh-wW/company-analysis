@@ -1,0 +1,15 @@
+{
+  "schema_version": "company-evaluation-manifest-v1",
+  "purpose": "실행 전 회사 신원·자료 가용성 확인이 필요한 제안 목록",
+  "instructions": "이 파일은 그대로 실행할 수 없습니다. 모든 회사의 실제 DART 후보 번호·법인명을 확인하고 identity_confirmed를 true로 바꾼 별도 파일을 격리 평가 폴더에 만드세요. 소규모·자료 빈약 여부도 공개 자료 확인 전에는 확정하지 않습니다.",
+  "cases": [
+    {"case_id": "WOORI", "input_name": "우리은행", "expected_legal_name": "우리은행", "corp_code": "00254045", "identity_confirmed": false, "industry_for_review": "은행", "availability_group": "미확인", "baseline_pdf": "C:/Users/jh-wo/Downloads/주-우리은행-company-analysis (2).pdf"},
+    {"case_id": "SM", "input_name": "SM", "expected_legal_name": "(주)에스엠엔터테인먼트", "corp_code": "00260930", "identity_confirmed": false, "industry_for_review": "엔터테인먼트", "availability_group": "미확인", "baseline_pdf": "C:/Users/jh-wo/Downloads/주-에스엠엔터테인먼트-company-analysis.pdf"},
+    {"case_id": "HYBE", "input_name": "HYBE", "expected_legal_name": "하이브", "corp_code": "01204056", "identity_confirmed": false, "industry_for_review": "엔터테인먼트", "availability_group": "미확인", "baseline_pdf": "C:/Users/jh-wo/Downloads/주-하이브-company-analysis (10).pdf"},
+    {"case_id": "YG", "input_name": "YG", "expected_legal_name": "와이지엔터테인먼트", "corp_code": "00613318", "identity_confirmed": false, "industry_for_review": "엔터테인먼트", "availability_group": "미확인", "baseline_pdf": "C:/Users/jh-wo/Downloads/주-와이지엔터테인먼트-company-analysis.pdf"},
+    {"case_id": "JYP", "input_name": "JYP", "expected_legal_name": "(주)제이와이피엔터테인먼트", "corp_code": "00258689", "identity_confirmed": false, "industry_for_review": "엔터테인먼트", "availability_group": "미확인", "baseline_pdf": "C:/Users/jh-wo/Downloads/주-제이와이피엔터테인먼트-company-analysis (1).pdf"},
+    {"case_id": "MULTICAMPUS", "input_name": "멀티캠퍼스", "expected_legal_name": "멀티캠퍼스", "corp_code": "00425351", "identity_confirmed": false, "industry_for_review": "교육", "availability_group": "미확인", "baseline_pdf": "C:/Users/jh-wo/Downloads/주-멀티캠퍼스-company-analysis.pdf"},
+    {"case_id": "SPARSE_COSMETICS", "input_name": "앱솔브랩", "expected_legal_name": "앱솔브랩", "corp_code": "01921621", "identity_confirmed": false, "address_hint": "서울 강남구", "industry_for_review": "화장품 제조(DART 업종 20423); 규모·전체 자료 부족 재확인 필요", "availability_group": "자료 빈약 비교군 후보"},
+    {"case_id": "SPARSE_AUTOMATION", "input_name": "인텍에프에이", "expected_legal_name": "인텍에프에이", "corp_code": "00674966", "identity_confirmed": false, "address_hint": "경기 용인시", "industry_for_review": "산업 자동화 후보; 업종·규모·자료 부족 재확인 필요", "availability_group": "자료 빈약 비교군 후보"}
+  ]
+}

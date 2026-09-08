@@ -33,7 +33,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Final, Iterable, Mapping, Optional
 
-from src.core import news_intake_switch, paths, typed_collector_switch
+from src.core import news_intake_switch, news_research_adapter, paths, typed_collector_switch
 from src.core.clock import subtract_years, today_kst
 from src.core.provider_gateway import attempt_context, gateway
 from src.core.provider_gateway.anthropic_adapter import AnthropicAdapter
@@ -168,6 +168,7 @@ from src.features.spanselect.constants import (
 )
 from src.shared.official_ir import verified_official_ir_fragment_is_usable
 from src.shared import engine_build_identity, generation_coordination
+from src.shared.report_recovery import MAX_TOTAL_AI_CALLS as COMPOSER_RUNTIME_CALL_RESERVE
 from src.shared import runtime_failure_constants as failure_constants
 from src.shared import runtime_failure_diagnostic as runtime_failure
 from src.shared.company_identity import normalize_korean_registration_number
@@ -222,6 +223,11 @@ from src.features.writer import verify as writer_verify
 from src.features.grading.logic import is_accounting_policy, is_table_dump
 from src.features.cost_tracking.store import AiCostEvent
 from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC, DART_SUCCESS_STATUS
+from src.features.pipeline.news_research_context import (
+    news_generation_digest,
+    official_news_context,
+    public_news_research_status,
+)
 from src.features.pipeline import engine_mode
 from src.features.pipeline.evidence_reclassify_step import (
     reclassify_official_evidence,
@@ -792,8 +798,8 @@ class _MeteredEngine:
         """요청 전체 AI 호출 상한을 실제 전송 경계에서 원자적으로 강제한다.
 
         성공 usage 목록의 길이를 세면 예외·usage 누락 호출이 빠진다. 호출을 보내기
-        전에 별도 계수를 올려 실패도 포함하고, 16번째부터는 원장·네트워크 전에
-        멈춘다.
+        전에 별도 계수를 올려 실패도 포함하고, MAX_AI_CALLS_PER_REQUEST를
+        초과하면 원장·네트워크 전에 멈춘다.
         """
 
         with self._provider_call_lock:
@@ -811,6 +817,13 @@ class _MeteredEngine:
                 self._provider_call_count + 1,
             )
             return int(self._provider_call_count)
+
+    def available_provider_calls(self, *, reserved_calls: int) -> int:
+        """기존 사용량과 뒤 단계의 보호 몫을 뺀 호출 여유만 돌려준다."""
+        if type(reserved_calls) is not int or reserved_calls < 0:
+            raise ValueError("보호할 AI 호출 수는 0 이상의 정수여야 합니다")
+        with self._provider_call_lock:
+            return max(0, MAX_AI_CALLS_PER_REQUEST - self._provider_call_count - reserved_calls)
 
     @contextmanager
     def stage_context(self, stage: str, *, prompt_cache: bool = False):
@@ -1024,7 +1037,7 @@ class _MeteredMessages:
             )
         # ``MAX_AI_CALLS_PER_REQUEST``가 문서와 시험에만 있으면 실패 응답처럼
         # usages에 안 쌓이는 호출은 무한히 반복될 수 있다. 실제 전송보다 먼저
-        # 요청 로컬 계수를 잡아 16번째 호출을 원장·네트워크 앞에서 닫는다.
+        # 요청 로컬 계수를 잡아 상한을 넘는 호출을 원장·네트워크 앞에서 닫는다.
         self._metered.reserve_provider_call()
         # 본조사는 DART snapshot과 single-flight owner가 확정된 뒤에만
         # phase를 연다. 이 호출은 누락된 새 provider 경로도 예산 문맥
@@ -2344,6 +2357,11 @@ def _generation_cache_eligibility(
     }.intersection(report.shortfall_reasons)
     eligible = not (
         _has_failed_source(sources)
+        or any(
+            item.get("step") in {"5b_뉴스_검색스냅샷", "5b_뉴스_수집"}
+            and item.get("캐시재사용가능") is False
+            for item in steps
+        )
         or not _comparison_candidate_scope_complete(steps, filing=filing)
         or missing_sections
         or content_shortfall_reasons
@@ -2466,6 +2484,7 @@ class RealPipeline:
         news_search: Callable[..., Any] | None = None,
         news_classify: Callable[[str], str] | None = None,
         news_fetch_text: Callable[[str], str | None] | None = None,
+        news_analyze: Callable[[str, dict[str, Any], int], Any] | None = None,
     ) -> None:
         # web 조립부는 production adapter를 주입한다. None은 v1·SHADOW와
         # 외부 I/O를 쓰지 않는 기존 단위시험의 호환 경로다. 요청별 자료는
@@ -2476,6 +2495,7 @@ class RealPipeline:
         self._news_search = news_search
         self._news_classify = news_classify
         self._news_fetch_text = news_fetch_text
+        self._news_analyze = news_analyze
 
     def make_candidate_rerank_ask(self) -> "MeteredCandidateRerankAsk":
         """후보 순서를 다시 매길 계량 AI ask를 만든다.
@@ -3498,6 +3518,65 @@ class RealPipeline:
                     dart_receipt_numbers=source_identity.dart_receipt_numbers,
                     financial_payload_digest=source_identity.financial_payload_digest,
                 )
+        # 뉴스는 공식 자료의 빈칸 여부와 무관한 현재성 입력이다. 검색은 AI 없이
+        # 먼저 고정하고, 본문 분석은 아래 owner 선정 뒤에만 실행한다. 이렇게 해야
+        # 공시가 같아도 새 보도가 나왔을 때 과거 PDF를 새 조사로 돌려주지 않는다.
+        news_session: news_research_adapter.NewsResearchSession | None = None
+        news_preparation_failed = False
+        if (
+            generation_mode is engine_mode.EngineMode.V2
+            and news_intake_switch.news_intake_enabled()
+        ):
+            verified_domain, identity_context = official_news_context(
+                profile, official_evidence
+            )
+            try:
+                # FULL의 기본 작성·검수와 허용된 보충 검수 몫을 먼저 보호한다.
+                # 부분 모드도 같은 여유를 남기되 기존 선택적 다듬기 한도 저하는
+                # 유지한다. 재시도가 많은 모든 입력의 성공을 보장하는 값은 아니다.
+                news_analysis_call_budget = engine.available_provider_calls(
+                    reserved_calls=COMPOSER_RUNTIME_CALL_RESERVE
+                )
+                news_session = news_research_adapter.prepare_news_research(
+                    search_news=self._news_search or getattr(engine, "search_news", None),
+                    company_name=company_name,
+                    aliases=_official_company_aliases(profile),
+                    domain=verified_domain,
+                    executive_names=tuple(
+                        name.strip()
+                        for name in re.split(r"[,/·ㆍ]", str(profile.get("ceo_nm") or ""))
+                        if name.strip()
+                    ),
+                    identity_context=identity_context,
+                    as_of=business_date,
+                    max_analysis_calls=news_analysis_call_budget,
+                )
+                news_digest = news_session.snapshot.digest
+                steps.append(
+                    {
+                        "step": "5b_뉴스_검색스냅샷",
+                        "상태": news_session.snapshot.status,
+                        "사유코드": list(news_session.snapshot.reason_codes),
+                        "캐시재사용가능": news_session.snapshot.cache_eligible,
+                        "AI분석호출상한": news_session.policy.max_analysis_calls,
+                        "본문작성예약호출": COMPOSER_RUNTIME_CALL_RESERVE,
+                        **news_session.snapshot.transport_diagnostics,
+                    }
+                )
+            except Exception as error:  # 뉴스 장애가 확인된 공식 사실을 폐기하지 않는다
+                news_preparation_failed = True
+                news_digest = NEWS_INTAKE_INTERNAL_ERROR_CODE
+                logger.warning(
+                    "뉴스 검색 입력을 준비하지 못했습니다 code=%s kind=%s",
+                    NEWS_INTAKE_INTERNAL_ERROR_CODE,
+                    type(error).__name__,
+                )
+            generation_source_identity_digest = news_generation_digest(
+                generation_source_identity_digest,
+                news_snapshot_digest=news_digest,
+                as_of=business_date.isoformat(),
+            )
+
         # 불변 content+PDF 캐시는 옛 layer1보다 먼저 본다. 새 계약의 hit이면
         # 최초 원본 ID를 그대로 운반하고, miss면 같은 열쇠로 owner lease를
         # 먼저 얻는다. 옛 layer1에는 생성 당시 배포·모델·설정 신원이 없으므로
@@ -3786,43 +3865,20 @@ class RealPipeline:
                     "전체조각수": len(frags),
                 }
             )
-        if (
-            news_intake_switch.news_intake_enabled()
-            and official_preflight is not None
-        ):
+        if news_session is not None or news_preparation_failed:
             # `_collect`의 OFF 호환 단계는 NEWS_INTAKE가 켜졌을 때만 새 진단으로
             # 바꾼다. OFF에서는 기존 steps와 출력 바이트를 그대로 보존한다.
             steps[:] = [
                 item for item in steps if item.get("step") != "6_수집_뉴스"
             ]
-            ready_ids = set(official_preflight.decision.ready_section_ids)
-            news_raw_fragments = _collect_news_intake(
-                search_news=self._news_search or engine.search_news,
-                classify=(
-                    self._news_classify
-                    or _news_default_classifier(engine, client)
-                ),
+            news_raw_fragments = _collect_grounded_news(
+                session=news_session,
+                analyze=(self._news_analyze or _news_grounded_analyzer(engine, client)),
                 fetch_text=self._news_fetch_text or _fetch_news_article_text,
-                company_name=company_name,
-                company_aliases=_official_company_aliases(profile),
-                company_domain=str(profile.get("hm_url") or ""),
-                executive_names=tuple(
-                    name.strip()
-                    for name in re.split(
-                        r"[,/·ㆍ]",
-                        str(profile.get("ceo_nm") or ""),
-                    )
-                    if name.strip()
-                ),
                 corp_id=corp_code,
-                section_ready={
-                    section_id: section_id in ready_ids
-                    for section_id in REQUIRED_EVIDENCE_SECTION_IDS
-                },
                 official_web_documents=_official_web_document_count(
                     official_evidence
                 ),
-                as_of=business_date,
                 collected_on=business_date.isoformat(),
                 steps=steps,
             )
@@ -5620,7 +5676,13 @@ def _run_v2_composer(
             # 이 값을 읽는다). corp_id를 확인하지 못했으면 예전처럼 빈 값이다.
             company_id=corp_id,
             build_identity_sha256=build_identity_sha256,
+            research_diagnostics=public_news_research_status(
+                steps, enabled=news_intake_switch.news_intake_enabled()
+            ),
         )
+        news_usage = getattr(output, "news_usage_diagnostics", None)
+        if isinstance(news_usage, dict) and news_usage:
+            steps.append({"step": "8_뉴스_본문활용", **news_usage})
         # 도식 검증이 뺀 줄의 사유를 실행 기록에도 남긴다. 3장 카드 0건 실측에서
         # 「작가가 안 냈다」와 「우리가 걸렀다」를 가를 표식이 서버 로그에만 있어
         # 저장된 실행 기록으로는 진단할 수 없었다.
@@ -6080,7 +6142,12 @@ def _fetch_news_article_once(article_url: str) -> NewsBodyFetchResult:
     )
     if not text:
         return NewsBodyFetchResult(reason_code=EXCLUDED_FETCH_EMPTY_BODY)
-    return NewsBodyFetchResult(text=text, stage=stage)
+    return NewsBodyFetchResult(
+        text=text,
+        stage=stage,
+        effective_url=response.effective_url,
+        published_on=news_research_adapter.article_published_on(response.text),
+    )
 
 
 def _fetch_news_article_text(source_url: str) -> NewsBodyFetchResult:
@@ -6125,6 +6192,97 @@ def _news_default_classifier(engine: Any, client: Any) -> Callable[[str], str]:
     return classify
 
 
+def _news_grounded_analyzer(
+    engine: Any, client: Any
+) -> Callable[[str, dict[str, Any], int], Any]:
+    """본문 관련성·원문 범위 분석도 기존 호출별 비용 원장을 거친다."""
+
+    def analyze(prompt: str, schema: dict[str, Any], max_tokens: int) -> Any:
+        _set_meter_stage(engine, "news_grounding")
+        payload, _usage = engine._ask(
+            client, prompt, schema, max_tokens=max_tokens
+        )
+        return payload
+
+    return analyze
+
+
+def _collect_grounded_news(
+    *,
+    session: news_research_adapter.NewsResearchSession | None,
+    analyze: Callable[[str, dict[str, Any], int], Any],
+    fetch_text: Callable[..., Any],
+    corp_id: str,
+    official_web_documents: int,
+    collected_on: str,
+    steps: list[dict[str, Any]],
+) -> list[dict[str, object]]:
+    """같은 검색 snapshot에서 검증된 뉴스만 보고서 입력으로 옮긴다."""
+
+    if session is not None:
+        try:
+            with collection_cache_scope():
+                result = session.collect(
+                    fetch_text=fetch_text, analyze_grounded=analyze
+                )
+            raw_fragments = [
+                _news_raw_fragment(
+                    fragment,
+                    corp_id=corp_id,
+                    collected_on=collected_on,
+                    document_content_sha256=result.document_hashes[fragment.document_id],
+                    grounded=True,
+                )
+                for fragment in result.fragments
+            ]
+            diagnostics = dict(result.diagnostics)
+            diagnostics.update(
+                {
+                    "step": "5b_뉴스_수집",
+                    "스위치": True,
+                    "공식웹문서수": official_web_documents,
+                    "조각": len(raw_fragments),
+                    "캐시재사용가능": bool(
+                        session.snapshot.cache_eligible
+                        and diagnostics.get("캐시재사용가능", True)
+                        and not diagnostics.get("실패")
+                    ),
+                }
+            )
+            steps.append(diagnostics)
+            return raw_fragments
+        except Exception as error:
+            logger.warning(
+                "뉴스 본문 근거 분석을 완료하지 못했습니다 code=%s kind=%s",
+                NEWS_INTAKE_INTERNAL_ERROR_CODE,
+                type(error).__name__,
+            )
+    snapshot = getattr(session, "snapshot", None)
+    search_attempts = tuple(getattr(snapshot, "query_attempts", ()))
+    transport_diagnostics = dict(getattr(snapshot, "transport_diagnostics", {}))
+    steps.append(
+        {
+            "step": "5b_뉴스_수집",
+            "스위치": True,
+            "공식웹문서수": official_web_documents,
+            "상태": "failed",
+            "완전성": "failed",
+            "실패": NEWS_INTAKE_INTERNAL_ERROR_CODE,
+            "검색": sum(attempt.returned_count for attempt in search_attempts) if snapshot is not None else None,
+            "검색호출": len(search_attempts) if snapshot is not None else None,
+            # 준비 자체가 실패하면 0회였다는 증거도 없다. 이미 검색한 기록이
+            # 있으면 본문 실패와 무관하게 실제 전송·재시도 관측을 보존한다.
+            "검색실제전송": None,
+            "검색전송관측완료": False,
+            **transport_diagnostics,
+            "조각": 0,
+            "자료부족": False,
+            "캐시재사용가능": False,
+        }
+    )
+    return []
+
+
 def _limit_news_mapping(mapping: NewsMappingResult) -> tuple[NewsMappingResult, int]:
     """문장 경계를 훼손하지 않고 뉴스 조각 수·총 글자 상한을 함께 지킨다."""
 
@@ -6162,6 +6320,7 @@ def _news_raw_fragment(
     corp_id: str,
     collected_on: str,
     document_content_sha256: str,
+    grounded: bool = False,
 ) -> dict[str, object]:
     """N6 뉴스 조각을 보조 typed transport의 정확한 raw 필드로 옮긴다."""
 
@@ -6182,6 +6341,12 @@ def _news_raw_fragment(
         "문서명": fragment.title,
         "문서일": fragment.published_on,
         "원문위치": f"기사 본문 · {fragment.fragment_id}",
+        "news_grounded": grounded,
+        "news_claim_kind": str(getattr(fragment, "claim_kind", "") or ""),
+        "news_temporal_status": str(getattr(fragment, "temporal_status", "") or ""),
+        "news_event_on": str(getattr(fragment, "event_on", "") or ""),
+        "news_event_key": str(getattr(fragment, "event_key", "") or ""),
+        "news_source_category": str(getattr(fragment, "source_category", "") or ""),
         RAW_EVIDENCE_COMPANY_ID_KEY: corp_id,
         RAW_EVIDENCE_SECTION_IDS_KEY: fragment.section_ids,
         RAW_EVIDENCE_SLOT_IDS_KEY: fragment.supported_claim_slots,
@@ -6300,7 +6465,10 @@ def _collect_news_intake(
     collected_on: str,
     steps: list[dict[str, Any]],
 ) -> list[dict[str, object]]:
-    """뉴스를 받을 수 있는 장이 있으면 보조 조각을 fail-open으로 더한다.
+    """구형 직접 호출 호환 전용 수집기. 현재 v2 조사 경로에서는 호출하지 않는다.
+
+    현재 v2는 `_collect_grounded_news`로 회사 신원·본문을 검증한다. 아래의
+    빈 장 발동·숫자 제외 규칙은 과거 호출과 시험을 읽는 호환 계약일 뿐이다.
 
     어느 장이 대상인지와 왜 열렸는지는 ``news_trigger``가 정한다 — 미달인 장,
     또는 미달이 없고 공식 웹 문서가 0건이면 5·6장을 뺀 모든 장이다(9장은 어느

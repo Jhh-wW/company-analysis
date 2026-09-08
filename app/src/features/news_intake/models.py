@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from src.features.news_intake import constants as c
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
@@ -53,8 +54,15 @@ class NewsCandidate:
     publisher: str
     priority: int
     source_url: str
+    topics: tuple[str, ...] = ()
+    source_category: str = ""
+    published_on_source: str = "search_index"
+    # 검색 메타의 이름 관측은 읽기 순위에만 쓴다. 본문 법인 검증 결과가 아니다.
+    metadata_name_match: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.metadata_name_match) is not bool:
+            raise TypeError("검색 메타 이름 일치는 불리언이어야 합니다")
         for value, label in (
             (self.id, "후보 식별자"),
             (self.title, "기사 제목"),
@@ -170,12 +178,16 @@ class NewsBodyFetchResult:
     text: str = ""
     reason_code: str = ""
     stage: str = ""
+    effective_url: str = ""
+    published_on: str = ""
 
     def __post_init__(self) -> None:
         for value, label in (
             (self.text, "기사 본문"),
             (self.reason_code, "본문 실패 사유"),
             (self.stage, "본문 추출 단계"),
+            (self.effective_url, "실제 본문 URL"),
+            (self.published_on, "본문 발행일"),
         ):
             if not isinstance(value, str):
                 raise TypeError(f"{label}은 문자열이어야 합니다")
@@ -254,6 +266,14 @@ class NewsEvidenceFragment:
     title: str
     url: str
     statement_on: str = ""
+    claim_kind: str = ""
+    temporal_status: str = ""
+    event_on: str = ""
+    topic: str = ""
+    event_key: str = ""
+    source_category: str = ""
+    span_start: int = -1
+    span_end: int = -1
 
     def __post_init__(self) -> None:
         for value, label in (
@@ -280,8 +300,11 @@ class NewsEvidenceFragment:
             raise ValueError("뉴스 조각의 origin은 news_intake여야 합니다")
         if exact_text_sha256(self.text) != self.text_sha256:
             raise ValueError("뉴스 조각 원문과 SHA-256이 일치하지 않습니다")
-        if "culture" in sections and self.statement_on != self.published_on:
-            raise ValueError("8장 뉴스 조각에는 기사 날짜와 같은 발언 시점이 필요합니다")
+        if self.statement_on:
+            try:
+                dt.date.fromisoformat(self.statement_on)
+            except ValueError as error:
+                raise ValueError("발언 시점은 확인한 YYYY-MM-DD 날짜여야 합니다") from error
         object.__setattr__(self, "section_ids", sections)
         object.__setattr__(self, "supported_claim_slots", slots)
 
@@ -383,3 +406,218 @@ def build_diagnostics(
         fragment_counts_by_section=mapping.fragment_counts_by_section,
         exclusion_counts=exclusions,
     )
+
+
+@dataclass(frozen=True)
+class NewsCompanyContext:
+    """호출자가 확인한 대상 법인 신원.
+
+    aliases는 DART 공식 영문명·종목명 또는 동일 법인임을 공식 원문에서 확인한
+    이름만 받는다. 사용자 입력·검색 제목의 추측 이름은 넣지 않는다.
+    domain도 확인된 공식 도메인만 받는다.
+    """
+
+    company_name: str
+    aliases: tuple[str, ...] = ()
+    domain: str = ""
+    executive_names: tuple[str, ...] = ()
+    identity_context: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "company_name", _text(self.company_name, label="회사명"))
+        object.__setattr__(self, "aliases", _unique(self.aliases, label="회사 별칭"))
+        object.__setattr__(self, "executive_names", _unique(self.executive_names, label="임원명"))
+        _text(self.domain, label="공식 도메인", allow_empty=True)
+        _text(self.identity_context, label="법인 정체성 문맥", allow_empty=True)
+        if len(self.identity_context) > c.COMPANY_CONTEXT_CHARS:
+            raise ValueError("법인 정체성 문맥이 글자 상한을 넘었습니다")
+
+
+@dataclass(frozen=True)
+class NewsCollectionPolicy:
+    """검색과 유료 본문 검수가 함께 결속하는 비용·출처 정책."""
+
+    max_search_calls: int = c.SEARCH_CALL_BUDGET
+    search_page_size: int = c.SEARCH_PAGE_SIZE
+    max_candidates: int = c.SEARCH_CANDIDATE_BUDGET
+    max_search_seconds: int = c.SEARCH_SECONDS_BUDGET
+    max_body_articles: int = c.BODY_ARTICLE_BUDGET
+    max_body_calls: int = c.BODY_CALL_BUDGET
+    max_body_chars: int = c.BODY_CHARS_PER_ARTICLE
+    max_total_body_chars: int = c.BODY_TOTAL_CHARS_BUDGET
+    max_collection_seconds: int = c.COLLECTION_SECONDS_BUDGET
+    batch_size: int = c.GROUNDED_BATCH_SIZE
+    max_analysis_calls: int = c.GROUNDED_CALL_BUDGET
+    analysis_max_tokens: int = c.GROUNDED_MAX_TOKENS
+    max_prompt_chars: int = c.GROUNDED_PROMPT_CHARS_BUDGET
+    max_articles: int = c.FINAL_ARTICLE_BUDGET
+    max_fragments: int = c.FINAL_FRAGMENT_BUDGET
+    max_fragment_chars: int = c.FINAL_FRAGMENT_CHARS_BUDGET
+    sufficient_events: int = c.SUFFICIENT_DISTINCT_EVENTS
+    sufficient_topics: int = c.SUFFICIENT_DISTINCT_TOPICS
+    trusted_publisher_domains: tuple[str, ...] = c.TRUSTED_PUBLISHER_DOMAINS
+    max_search_transport_attempts: int = c.SEARCH_TRANSPORT_ATTEMPT_BUDGET
+
+    def __post_init__(self) -> None:
+        for name in self.__dataclass_fields__:
+            value = getattr(self, name)
+            if name == "trusted_publisher_domains":
+                _unique(value, label="확인한 언론 도메인")
+            elif name == "max_analysis_calls":
+                if type(value) is not int or value < 0:
+                    raise ValueError("뉴스 분석 호출 상한은 0 이상의 정수여야 합니다")
+            elif type(value) is not int or value <= 0:
+                raise ValueError(f"{name} 상한은 양의 정수여야 합니다")
+        # 사용자가 조절하더라도 외부 요청·모델입력의 절대 경계는 남긴다.
+        ceilings = {
+            "max_search_calls": c.SEARCH_CALL_BUDGET,
+            "max_search_transport_attempts": c.SEARCH_TRANSPORT_ATTEMPT_BUDGET,
+            "search_page_size": c.SEARCH_PAGE_SIZE,
+            "max_candidates": c.SEARCH_CANDIDATE_BUDGET,
+            "max_search_seconds": c.SEARCH_SECONDS_BUDGET,
+            "max_body_articles": c.BODY_ARTICLE_BUDGET,
+            "max_body_calls": c.BODY_CALL_BUDGET,
+            "max_body_chars": c.BODY_CHARS_PER_ARTICLE,
+            "max_total_body_chars": c.BODY_TOTAL_CHARS_BUDGET,
+            "max_collection_seconds": c.COLLECTION_SECONDS_BUDGET,
+            "batch_size": c.GROUNDED_BATCH_SIZE,
+            "max_analysis_calls": c.GROUNDED_CALL_BUDGET,
+            "analysis_max_tokens": c.GROUNDED_MAX_TOKENS,
+            "max_prompt_chars": c.GROUNDED_PROMPT_CHARS_BUDGET,
+            "max_articles": c.FINAL_ARTICLE_BUDGET,
+            "max_fragments": c.FINAL_FRAGMENT_BUDGET,
+            "max_fragment_chars": c.FINAL_FRAGMENT_CHARS_BUDGET,
+        }
+        if any(getattr(self, name) > ceiling for name, ceiling in ceilings.items()):
+            raise ValueError("뉴스 정책이 절대 비용 상한을 넘었습니다")
+
+
+@dataclass(frozen=True)
+class NewsQueryAttempt:
+    """논리 검색의 옵션·응답 지문·전송 관측을 분리한다.
+
+    None은 관측 불가이며 전송 0회와 다르다. 구형 callback은 내부 상한을
+    강제할 수 없어 남은 예산 전체를 보수 차감하고 추가 검색을 중단한다.
+    """
+
+    query: str
+    sort: str
+    start: int
+    display: int
+    topic: str
+    window_months: int
+    state: str
+    reason_code: str
+    returned_count: int
+    item_fingerprints: tuple[str, ...] = ()
+    transport_attempts: int | None = None
+    retry_recovered: bool | None = None
+    attempt_reason_codes: tuple[str, ...] = ()
+    transport_budget_supported: bool = False
+    transport_budget_charged: int = 0
+    transport_diagnostic_codes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.transport_attempts is not None and (
+            type(self.transport_attempts) is not int or self.transport_attempts < 0
+        ):
+            raise ValueError("뉴스 전송 관측값은 0 이상의 정수 또는 미관측이어야 합니다")
+        if self.retry_recovered is not None and type(self.retry_recovered) is not bool:
+            raise ValueError("뉴스 재시도 복구 관측값이 올바르지 않습니다")
+        if type(self.transport_budget_charged) is not int or self.transport_budget_charged < 0:
+            raise ValueError("뉴스 전송 예산 차감은 0 이상의 정수여야 합니다")
+        if type(self.transport_budget_supported) is not bool:
+            raise ValueError("뉴스 전송 예산 지원 표시가 올바르지 않습니다")
+        if (not isinstance(self.attempt_reason_codes, tuple)
+                or any(code not in c.SEARCH_TRANSPORT_ATTEMPT_REASON_CODES for code in self.attempt_reason_codes)):
+            raise ValueError("뉴스 전송 시도 사유가 닫힌 목록 밖입니다")
+        if self.transport_attempts is not None and len(self.attempt_reason_codes) != self.transport_attempts:
+            raise ValueError("뉴스 실제 전송 수와 시도 사유 수가 다릅니다")
+
+
+@dataclass(frozen=True)
+class NewsSearchSnapshot:
+    """AI 호출 전에 고정한 후보 예비집합. 본문 단계에서는 검색하지 않는다."""
+
+    candidates: tuple[NewsCandidate, ...]
+    query_attempts: tuple[NewsQueryAttempt, ...]
+    company_digest: str
+    policy_digest: str
+    as_of: str
+    digest: str
+    status: str
+    reason_codes: tuple[str, ...]
+    cache_eligible: bool
+    exclusion_counts: Mapping[str, int] = field(default_factory=dict)
+    window_months: tuple[int, ...] = c.WINDOW_MONTHS
+    unverified_publishers: Mapping[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "exclusion_counts", MappingProxyType(dict(self.exclusion_counts)))
+        object.__setattr__(self, "unverified_publishers", MappingProxyType(dict(self.unverified_publishers)))
+
+    @property
+    def transport_diagnostics(self) -> dict[str, object]:
+        """검색 직후와 본문 실패 시에도 같은 관측 의미를 전달한다."""
+        attempts = self.query_attempts
+        observed = all(attempt.transport_attempts is not None for attempt in attempts)
+        known_count = sum(attempt.transport_attempts or 0 for attempt in attempts)
+        recovered = sum(attempt.retry_recovered is True for attempt in attempts)
+        codes = tuple(dict.fromkeys(code for attempt in attempts for code in attempt.transport_diagnostic_codes))
+        return {
+            "검색호출": len(attempts), "검색논리호출": len(attempts),
+            "검색실제전송": known_count if observed else None,
+            "검색관측전송": known_count, "검색전송관측완료": observed,
+            "검색전송예산차감": sum(attempt.transport_budget_charged for attempt in attempts),
+            "검색전송상한보장": observed and all(attempt.transport_budget_supported for attempt in attempts) and not codes,
+            "검색재시도복구": recovered if all(attempt.retry_recovered is not None for attempt in attempts) else None,
+            "검색전송진단": codes,
+            "검색전송시도": tuple({
+                "논리순번": index, "전송횟수": attempt.transport_attempts,
+                "재시도복구": attempt.retry_recovered, "시도사유": attempt.attempt_reason_codes,
+                "예산지원": attempt.transport_budget_supported,
+                "예산차감": attempt.transport_budget_charged,
+                "진단": attempt.transport_diagnostic_codes,
+            } for index, attempt in enumerate(attempts, start=1)),
+        }
+
+
+@dataclass(frozen=True)
+class GroundedNewsExcerpt:
+    """본문 분석과 원문/법인 검사를 통과한 연속 인용 범위."""
+
+    candidate: NewsCandidate
+    text: str
+    section_id: str
+    claim_slot: str
+    claim_kind: str
+    temporal_status: str
+    topic: str
+    event_key: str
+    event_on: str
+    span_start: int
+    span_end: int
+
+
+@dataclass(frozen=True)
+class GroundedNewsArticle:
+    """목록과 본문이 공동으로 참조하는 검증된 기사 정본."""
+
+    candidate: NewsCandidate
+    document_content_sha256: str
+    excerpts: tuple[GroundedNewsExcerpt, ...]
+
+
+@dataclass(frozen=True)
+class NewsCollectionResult:
+    """실질 자료와 부족/장애 진단을 함께 반환한다."""
+
+    fragments: tuple[NewsEvidenceFragment, ...]
+    document_hashes: Mapping[str, str]
+    diagnostics: Mapping[str, object]
+    snapshot_digest: str
+    articles: tuple[GroundedNewsArticle, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "document_hashes", MappingProxyType(dict(self.document_hashes)))
+        object.__setattr__(self, "diagnostics", MappingProxyType(dict(self.diagnostics)))

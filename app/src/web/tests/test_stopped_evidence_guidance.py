@@ -309,11 +309,21 @@ def test_서버_재시작으로_메모리가_비어도_저장된_내부사유를
     with TestClient(main.app, base_url="https://testserver") as client:
         bind_public_report_access(client, job_id)
         response = client.get(f"/result/{job_id}")
+        progress = client.get(f"/progress/{job_id}", follow_redirects=False)
+        state = client.get(f"/api/progress/{job_id}")
 
     assert response.status_code == 200
     assert _STATE_TITLES[0] in response.text
     assert "완성 보고서에 필요한 공식 근거가 부족합니다" not in response.text
     assert "어디까지 찾아봤나" not in response.text
+    assert progress.status_code == 303
+    assert progress.headers["location"] == f"/result/{job_id}"
+    assert state.status_code == 200
+    assert state.json() == {
+        "done": [], "current": "", "finished": True,
+        "next_url": f"/result/{job_id}", "recovered": True,
+    }
+    assert "우리엔" not in state.text
 
 
 def test_비용미확정_실패의_같은_진단을_게이트중단으로_잘못_복원하지_않는다() -> None:
@@ -334,6 +344,58 @@ def test_비용미확정_실패의_같은_진단을_게이트중단으로_잘못
     with TestClient(main.app, base_url="https://testserver") as client:
         bind_public_report_access(client, job_id)
         response = client.get(f"/result/{job_id}", follow_redirects=False)
+        state = client.get(f"/api/progress/{job_id}")
 
     assert response.status_code == 303
     assert response.headers["location"] == "/?report_status=unavailable"
+    assert state.status_code == 410
+    assert state.json()["code"] == "job_unavailable"
+
+
+def test_진행_API의_저장소_대기가_다른_coroutine을_멈추지_않는다(monkeypatch) -> None:
+    import asyncio
+    import threading
+    from starlette.requests import Request
+    from src.web.routers import analysis
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def delayed_read(_job_id):
+        entered.set()
+        if not release.wait(1.0):
+            raise RuntimeError("다른 coroutine이 저장소 대기를 해제하지 못했습니다")
+        return object()
+
+    monkeypatch.setattr(analysis.request_helpers, "require_report_access", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(job_runtime, "_load_saved_report", delayed_read)
+    request = Request({"type": "http", "method": "GET", "path": "/api/progress/test", "headers": []})
+
+    async def run():
+        task = asyncio.create_task(analysis.progress_api(request, "test"))
+        try:
+            assert await asyncio.to_thread(entered.wait, 1.0)
+            # event loop를 점유했다면 read timeout 뒤에야 여기 도달해 task가 끝나 있다.
+            assert not task.done()
+        finally:
+            release.set()
+        response = await task
+        assert response.status_code == 200
+
+    asyncio.run(run())
+
+
+def test_영속_게이트진단_DB장애는_미존재가_아닌_503으로_표시한다(monkeypatch) -> None:
+    from src.web.routers import analysis
+
+    job_id, _job = _stopped_job()
+    def broken(_job_id):
+        raise RuntimeError("저장소 장애 시험")
+    monkeypatch.setattr(analysis, "_has_stored_terminal_result", broken)
+    with TestClient(main.app, base_url="https://testserver") as client:
+        bind_public_report_access(client, job_id)
+        page = client.get(f"/progress/{job_id}", follow_redirects=False)
+        response = client.get(f"/api/progress/{job_id}")
+    assert page.status_code == 503
+    assert response.status_code == 503
+    assert response.json()["code"] == "progress_store_unavailable"

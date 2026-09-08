@@ -417,12 +417,18 @@ def test_조각_라벨은_운반_지문_대신_닫힌_출처_종류를_쓴다():
         kind="typed-evidence-v3:" + "0" * 64,
         text="가나다전자는 물류 자동화 제품군을 넓히고 있다.",
         formal_source_kind="news",
+        document_date="2026-09-01",
+        source_publisher="가나다경제",
+        news_claim_kind="reported_fact",
     )
 
     prompt = build_section_prompt("가나다전자", "past_changes", (typed,), None)
     line = next(line for line in prompt.splitlines() if "[조각 1]" in line)
 
-    assert "(news)" in line, line
+    assert "(news · 메타데이터" in line, line
+    assert '"기사날짜": "2026-09-01"' in line
+    assert '"발행처": "가나다경제"' in line
+    assert '"보도종류": "reported_fact"' in line
     assert "typed-evidence-v3" not in prompt
 
 

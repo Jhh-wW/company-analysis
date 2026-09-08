@@ -7,6 +7,8 @@ import하지 않고 검증을 마친 입력으로 기대 구조를 만들고, �
 
 from __future__ import annotations
 
+from src.features.composer.news_block import news_list_excerpt
+
 import hashlib
 import json
 import re
@@ -165,6 +167,11 @@ class _FragmentBinding:
     fragment_id: str
     document_identity: str
     exact_evidence_hash: str
+    text: str = ""
+    published_on: str = ""
+    publisher: str = ""
+    title: str = ""
+    is_news: bool = False
 
 
 def _canonical_json(value: object) -> str:
@@ -234,7 +241,11 @@ def _fragment_binding(
         raise PublicManifestError(
             f"조각 {fragment_id!r}의 문서 신원 또는 exact evidence hash가 없습니다"
         )
-    return _FragmentBinding(fragment_id, declared_identity, exact_hash)
+    return _FragmentBinding(
+        fragment_id, declared_identity, exact_hash, fragment.text,
+        fragment.document_date, fragment.source_publisher, fragment.document_title,
+        fragment.formal_source_kind == "news" or fragment.kind == "news",
+    )
 
 
 def _source_binding(source: Source) -> _FragmentBinding | None:
@@ -904,28 +915,40 @@ def _flow_binding(
 
 
 def _news_binding(
-    fragment_id: str,
+    fragment_ids: Sequence[str],
     fragments: Mapping[str, _FragmentBinding],
     *,
     headers: Sequence[str],
     row: Sequence[str],
+    body_text: str = "",
 ) -> dict[str, object]:
-    """보도표 한 행을 그 행이 옮겨 적은 조각 «하나»에 결속한다.
+    """보도표 한 행을 같은 기사의 모든 정확 원문 조각에 결속한다.
 
     ★ 흐름표 결속과 달리 ``semantic_review``에 「bundled:true」를 적지 않는다 —
       이 행은 검수 AI를 지나지 않는 결정적 줄이고, 지나지도 않은 판정을
       결속에 적으면 나중에 그 표식을 믿는 코드가 생겼을 때 거짓말이 된다.
     """
 
-    source = fragments.get(str(fragment_id).strip())
-    if source is None:
+    sources = tuple(fragments.get(str(fid).strip()) for fid in fragment_ids)
+    if not sources or any(source is None for source in sources):
         raise PublicManifestError("보도표 행이 검증된 출처 조각에 결속되지 않았습니다")
+    source = sources[0]
+    if (any(not item.is_news for item in sources)
+        or len({(item.document_identity, item.published_on, item.publisher, item.title) for item in sources}) != 1):
+        raise PublicManifestError("보도표 한 행의 기사 신원·메타데이터가 다릅니다")
+    expected = (
+        source.published_on.strip(),
+        " · ".join(value.strip() for value in (source.publisher, source.title) if value.strip()),
+        "\n".join(dict.fromkeys(news_list_excerpt(item.text, body_text) for item in sources)),
+    )
+    if tuple(row) != expected:
+        raise PublicManifestError("보도표 내용이 기사 메타데이터 또는 정확 원문과 다릅니다")
     return {
-        "source_fragment_ids": [source.fragment_id],
-        "document_identities": [source.document_identity],
-        "exact_evidence_hashes": [source.exact_evidence_hash],
+        "source_fragment_ids": [item.fragment_id for item in sources],
+        "document_identities": [item.document_identity for item in sources],
+        "exact_evidence_hashes": [item.exact_evidence_hash for item in sources],
         # 행 전체가 그 조각 원문 한 문장이라, 행 근거 지문이 곧 조각 지문이다.
-        "row_evidence_hash": source.exact_evidence_hash,
+        "row_evidence_hash": source.exact_evidence_hash if len(sources) == 1 else "",
         "injected_fact_id": "",
         "semantic_review": "deterministic:news-block",
         "typed_cells": [
@@ -1007,19 +1030,20 @@ def _news_table_payload(
         citations = tuple(
             str(value).strip() for value in row.citations if str(value).strip()
         )
-        if len(citations) != 1:
-            raise PublicManifestError("보도표 행은 조각 하나만 인용해야 합니다")
+        if not citations:
+            raise PublicManifestError("보도표 행의 인용 조각이 없습니다")
         public_row = [str(cell).strip() for cell in row.cells]
         row_bindings.append(
             _news_binding(
-                citations[0],
+                citations,
                 fragment_bindings,
                 headers=NEWS_BLOCK_HEADERS,
                 row=public_row,
+                body_text="\n".join(sentence.text for sentence in section.sentences),
             )
         )
         rows.append(public_row)
-        source_ids.append(citations[0])
+        source_ids.extend(citations)
     source_cites = _normalized_source_cites(tuple(source_ids))
     return _table_payload(
         section_id=str(getattr(section, "section_id", "")),

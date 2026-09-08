@@ -2047,24 +2047,40 @@ async def start_run(
     )
 
 
+def _has_stored_terminal_result(job_id: str) -> bool:
+    """결과 화면이 실제 복원하는 영속 중단만 진행 완료로 연결한다.
+
+    회사·원문·비용을 진행 응답에 넣지 않는다. 결과 라우트와 같은 판정기를 써서
+    비용 미확정 FAILED를 GATE_STOPPED로 바꾸거나 진행 중 원장을 완료로 만들지 않는다.
+    """
+    from src.web.routers import reports as reports_router  # noqa: PLC0415
+
+    return reports_router._stored_gate_stop_result(job_id) is not None
+
+
 @router.get("/progress/{job_id}", response_class=HTMLResponse)
 async def progress_page(request: Request, job_id: str):
     """단계별 진행을 보여주는 화면."""
     request_helpers.mark_public_get_readonly_existing(request)
-    access_blocked = request_helpers.require_report_access(request, job_id)
+    access_blocked = await asyncio.to_thread(
+        request_helpers.require_report_access, request, job_id
+    )
     if access_blocked is not None:
         return access_blocked
     job = job_runtime._JOBS.get(job_id)
     if job is None:
         # 작업 메모리만 사라지고 보고서가 저장된 경우에는 결과로 복구한다.
         try:
-            saved = job_runtime._load_saved_report(job_id)
-        except job_runtime.ReportStoreUnavailable:
+            saved = await asyncio.to_thread(job_runtime._load_saved_report, job_id)
+            terminal = saved is None and await asyncio.to_thread(
+                _has_stored_terminal_result, job_id
+            )
+        except Exception:  # noqa: BLE001 — 읽기 실패를 미존재로 바꾸지 않는다.
             return job_runtime._storage_unavailable_response(request)
-        if saved is not None:
+        if saved is not None or terminal:
             return RedirectResponse(f"/result/{job_id}", status_code=303)
         try:
-            interrupted = _was_interrupted(job_id)
+            interrupted = await asyncio.to_thread(_was_interrupted, job_id)
         except Exception:  # noqa: BLE001
             return job_runtime._storage_unavailable_response(request)
         if interrupted:
@@ -2105,16 +2121,19 @@ async def progress_page(request: Request, job_id: str):
 async def progress_api(request: Request, job_id: str):
     """진행 화면이 물어보는 곳. 끝났으면 어디로 갈지도 알려준다."""
     request_helpers.mark_public_get_readonly_existing(request)
-    access_blocked = request_helpers.require_report_access(
-        request, job_id, api=True
+    access_blocked = await asyncio.to_thread(
+        request_helpers.require_report_access, request, job_id, api=True
     )
     if access_blocked is not None:
         return access_blocked
     job = job_runtime._JOBS.get(job_id)
     if job is None:
         try:
-            saved = job_runtime._load_saved_report(job_id)
-        except job_runtime.ReportStoreUnavailable:
+            saved = await asyncio.to_thread(job_runtime._load_saved_report, job_id)
+            terminal = saved is None and await asyncio.to_thread(
+                _has_stored_terminal_result, job_id
+            )
+        except Exception:  # noqa: BLE001 — 영속 중단 진단의 장애도 재시도 안내로 닫는다.
             return job_runtime._retryable_response(
                 JSONResponse(
                     {
@@ -2129,7 +2148,7 @@ async def progress_api(request: Request, job_id: str):
                     status_code=503,
                 )
             )
-        if saved is not None:
+        if saved is not None or terminal:
             return JSONResponse(
                 {
                     "done": [],
@@ -2140,7 +2159,7 @@ async def progress_api(request: Request, job_id: str):
                 }
             )
         try:
-            interrupted = _was_interrupted(job_id)
+            interrupted = await asyncio.to_thread(_was_interrupted, job_id)
         except Exception:  # noqa: BLE001
             return job_runtime._retryable_response(
                 JSONResponse(
@@ -2182,7 +2201,7 @@ async def progress_api(request: Request, job_id: str):
         and live_result.report is not None
     ):
         try:
-            published = job_runtime._load_saved_report(job_id)
+            published = await asyncio.to_thread(job_runtime._load_saved_report, job_id)
         except job_runtime.ReportStoreUnavailable:
             return job_runtime._retryable_response(
                 JSONResponse(

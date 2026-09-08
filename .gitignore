@@ -56,6 +56,14 @@
 !/app/tools/run_canonical_pilot25.py
 !/app/tools/manage_pilot_quality.py
 !/app/tools/quality_observations.py
+!/app/tools/evaluate_companies.py
+!/app/tools/evaluation_constants.py
+!/app/tools/confirm_evaluation_manifest.py
+!/app/tools/evaluation-company-proposals.json
+!/app/tools/fixtures/
+/app/tools/fixtures/*
+!/app/tools/fixtures/evaluation-companies-confirmed-2026-09-08.json
+!/app/tools/fixtures/evaluation-baseline-metrics-2026-09-08.json
 !/app/tools/tests/
 
 # 현재 서비스에서 사용하지 않는 옛 기능

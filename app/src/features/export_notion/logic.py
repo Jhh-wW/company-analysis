@@ -14,7 +14,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from src.core.citations import citation_marker
+from src.core.citations import citation_marker, citation_number
+from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
+from src.shared.report_quality.output_validation import allows_unsealed_v2_output, validate_v2
 from src.core.constants import section_display_heading
 from src.features.export_notion import constants
 from src.features.pipeline.port import (
@@ -577,6 +579,12 @@ def build_blocks(report: Report, *, grade_note: str = "") -> list[NotionBlock]:
     if projection is not None:
         return _v2_blocks(report, projection)
 
+    if report.schema_version == ENGINE_V2_SCHEMA_VERSION:
+        if not allows_unsealed_v2_output(report):
+            raise ValueError("FULL 보고서의 공개 봉인이 없어 Notion으로 내보낼 수 없습니다")
+        validate_v2(report, visible_sources=tuple(visible_citations(report.citations)), citation_number=citation_number)
+        return _unsealed_v2_blocks(report)
+
     # Notion도 화면·PDF와 같은 canonical 공개본만 표현한다.
     report = build_published_report(report)
 
@@ -609,4 +617,30 @@ def build_blocks(report: Report, *, grade_note: str = "") -> list[NotionBlock]:
         blocks.append(_paragraph(constants.SOURCES_SUBTITLE))
         blocks.extend(source_blocks)
 
+    return blocks
+
+
+def _unsealed_v2_blocks(report: Report) -> list[NotionBlock]:
+    """웹·PDF가 검증한 SHADOW 객체의 문단·표를 그대로 배치한다. 봉인을 만들지 않는다."""
+    company, meta = masthead_lines(report)
+    blocks = [_heading_2(company), _paragraph(meta), _heading_1(report.company), _heading_1("분석 보고서")]
+    lede = _report_lede_text(report)
+    if lede:
+        blocks.append(_paragraph(lede))
+    blocks.extend(_summary_blocks(report))
+    for section in report.sections:
+        blocks.append(_heading_2(_section_heading(section)))
+        paragraphs = section.prose_paragraphs or [text for text, _cite in section.prose_lines]
+        blocks.extend(_paragraph(text) for text in paragraphs)
+        blocks.extend(_paragraph(text) for text in section.guidance_lines)
+        if not paragraphs and section.empty_reason:
+            blocks.append(_paragraph(section.empty_reason))
+        for table in section.tables:
+            blocks.extend(_table_blocks(table))
+            markers = " ".join(table.source_cites)
+            if markers:
+                blocks.append(_paragraph(markers))
+    source_blocks = _source_list_blocks(report)
+    if source_blocks:
+        blocks.extend([_heading_2(constants.SOURCES_HEADING), _paragraph(constants.SOURCES_SUBTITLE), *source_blocks])
     return blocks

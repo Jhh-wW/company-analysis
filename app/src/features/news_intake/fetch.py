@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import datetime as dt
 import re
 import urllib.parse
 from collections.abc import Callable, Iterable
@@ -198,24 +199,20 @@ class _JsonLdArticleBody(HTMLParser):
 
 
 def _json_ld_article_body(raw_html: str) -> str:
-    """JSON-LD 어디에 있든 ``articleBody`` 문자열만 뽑는다.
-
-    ``@graph``처럼 한 겹 더 감싼 꼴이 흔해서 열쇠 이름으로 재귀 탐색한다.
-    파싱에 실패한 블록은 조용히 건너뛴다 — 억지로 추측하지 않는다.
-    """
+    """기사 타입의 단일 articleBody만 받는다. 여러 기사 중 원문을 추측하지 않는다."""
 
     parser = _JsonLdArticleBody()
     parser.feed(raw_html)
-    best = ""
+    bodies: set[str] = set()
     for block in parser.blocks:
         try:
             payload = json.loads(block)
         except (json.JSONDecodeError, ValueError):
             continue
         for value in _iter_article_bodies(payload):
-            if len(value) > len(best):
-                best = value
-    return _collapse(best)
+            bodies.add(_collapse(value))
+    # 추천 기사 등 여러 문서의 본문이 있으면 길이로 원문을 추측하지 않는다.
+    return next(iter(bodies)) if len(bodies) == 1 else ""
 
 
 def _iter_article_bodies(node: object) -> Iterable[str]:
@@ -225,7 +222,10 @@ def _iter_article_bodies(node: object) -> Iterable[str]:
         current = stack.pop()
         if isinstance(current, dict):
             body = current.get(_JSON_LD_BODY_KEY)
-            if isinstance(body, str) and body.strip():
+            raw_types = current.get("@type", ())
+            types = (raw_types,) if isinstance(raw_types, str) else raw_types
+            article_type = isinstance(types, (tuple, list)) and any(value in c.JSON_LD_ARTICLE_TYPES for value in types if isinstance(value, str))
+            if article_type and isinstance(body, str) and body.strip():
                 found.append(body.strip())
             stack.extend(current.values())
         elif isinstance(current, list):
@@ -242,9 +242,14 @@ class _ArticleTagText(HTMLParser):
         self._skip_depth = 0
         self._boilerplate_depth = 0
         self._chunks: list[str] = []
+        self._article_blocks: list[str] = []
+        self.root_articles = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "article":
+            if self._article_depth == 0:
+                self.root_articles += 1
+                self._chunks = []
             self._article_depth += 1
             return
         if tag in _SKIP_TAGS:
@@ -256,6 +261,8 @@ class _ArticleTagText(HTMLParser):
         if tag == "article":
             if self._article_depth > 0:
                 self._article_depth -= 1
+                if self._article_depth == 0:
+                    self._article_blocks.append(_collapse(" ".join(self._chunks)))
             return
         if tag in _SKIP_TAGS and self._skip_depth > 0:
             self._skip_depth -= 1
@@ -271,7 +278,10 @@ class _ArticleTagText(HTMLParser):
 
     @property
     def text(self) -> str:
-        return _collapse(" ".join(self._chunks))
+        blocks = {block for block in self._article_blocks if block}
+        if self._article_depth:
+            blocks.add(_collapse(" ".join(self._chunks)))
+        return next(iter(blocks)) if len(blocks) == 1 else ""
 
 
 def _article_tag_text(raw_html: str) -> str:
@@ -342,8 +352,12 @@ def extract_article_text(
         (본문, 단계 코드). 어느 겹에서도 못 얻으면 ``("", "")``.
     """
 
+    article_parser = _ArticleTagText()
+    article_parser.feed(raw_html)
     extractors: dict[str, PrimaryExtract] = {
-        c.BODY_STAGE_USABLE_RANGES: primary_extract,
+        c.BODY_STAGE_USABLE_RANGES: lambda value: (
+            primary_extract(_without_page_chrome(value)) if article_parser.root_articles <= 1 else ""
+        ),
         c.BODY_STAGE_JSON_LD: _json_ld_article_body,
         c.BODY_STAGE_ARTICLE_TAG: _article_tag_text,
         c.BODY_STAGE_META_DESCRIPTION: _meta_description,
@@ -359,6 +373,107 @@ def extract_article_text(
         if len(text) >= c.BODY_MIN_CHARS:
             return text, stage
     return "", ""
+
+
+class _WithoutPageChrome(HTMLParser):
+    """범용 추출기로 넘기기 전에 제목·양식·탐색 구역을 제거한다."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.depth = 0
+        self.blocked: list[str] = []
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self.blocked:
+            if tag == self.blocked[-1]:
+                self.depth += 1
+            return
+        if tag in {"title", "nav", "header", "footer", "aside", "form", "script", "style", "noscript"}:
+            self.blocked.append(tag)
+            self.depth = 1
+            return
+        self.parts.append(self.get_starttag_text() or "")
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.blocked:
+            if tag == self.blocked[-1]:
+                self.depth -= 1
+                if not self.depth:
+                    self.blocked.pop()
+            return
+        self.parts.append(f"</{tag}>")
+
+    def handle_data(self, data: str) -> None:
+        if not self.blocked:
+            self.parts.append(data)
+
+    def handle_entityref(self, name: str) -> None:
+        if not self.blocked:
+            self.parts.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        if not self.blocked:
+            self.parts.append(f"&#{name};")
+
+
+def _without_page_chrome(raw_html: str) -> str:
+    parser = _WithoutPageChrome()
+    parser.feed(raw_html)
+    return "".join(parser.parts)
+
+
+class _PublishedMeta(HTMLParser):
+    """발행일로 명시한 메타만 읽는다. 수정일·검색등록일은 섞지 않는다."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.values: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "meta":
+            return
+        fields = {name.casefold(): (value or "") for name, value in attrs}
+        key = (fields.get("property") or fields.get("name") or fields.get("itemprop") or "").casefold()
+        if key in c.ARTICLE_PUBLISHED_META_KEYS:
+            self.values.append(fields.get("content", ""))
+
+
+def extract_article_published_on(raw_html: str) -> str:
+    """기사 HTML의 발행일만 반환한다. 여러 발행일이 충돌하면 추정하지 않는다."""
+
+    parser = _PublishedMeta()
+    parser.feed(raw_html)
+    ld = _JsonLdArticleBody()
+    ld.feed(raw_html)
+    values = list(parser.values)
+    for block in ld.blocks:
+        try:
+            stack: list[object] = [json.loads(block)]
+        except (ValueError, TypeError):
+            continue
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                raw_types = node.get("@type", ())
+                types = (raw_types,) if isinstance(raw_types, str) else raw_types
+                if isinstance(types, (tuple, list)) and any(isinstance(value, str) and value in c.JSON_LD_ARTICLE_TYPES for value in types):
+                    published = node.get("datePublished")
+                    if isinstance(published, str):
+                        values.append(published)
+                stack.extend(node.values())
+            elif isinstance(node, list):
+                stack.extend(node)
+    dates: set[str] = set()
+    for value in values:
+        match = re.match(r"^(\d{4}-\d{2}-\d{2})(?:$|T|\s)", value.strip())
+        if not match:
+            continue
+        try:
+            dates.add(dt.date.fromisoformat(match.group(1)).isoformat())
+        except ValueError:
+            continue
+    return next(iter(dates)) if len(dates) == 1 else ""
 
 
 # --------------------------------------------------- 사유 코드와 결과 정규화

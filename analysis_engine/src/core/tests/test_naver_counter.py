@@ -43,6 +43,11 @@ def _reset_client(monkeypatch):
     monkeypatch.setattr(naver_client, "_daily_counter_day", None)
     monkeypatch.setattr(naver_client, "_daily_counter_count", 0)
 
+    def reject_network(*_args, **_kwargs):
+        pytest.fail("단위시험에서 실제 NAVER 전송을 허용하지 않습니다")
+
+    monkeypatch.setattr(naver_client, "_urlopen", reject_network)
+
 
 def _response(request, body: bytes = b'{"items":[]}') -> _Response:
     return _Response(body, request.full_url)
@@ -107,6 +112,8 @@ def test_HTTP오류를_비밀값없는_결과로_정규화한다(
     assert result.reason_code == reason_code
     assert result.items == []
     assert calls == expected_calls
+    assert result.transport_attempts == calls
+    assert len(result.attempt_reason_codes) == calls
     assert secret not in repr(result)
 
 
@@ -126,6 +133,7 @@ def test_timeout을_비밀값없는_일시장애_결과로_정규화한다(monke
     assert result.reason_code == c.NEWS_SEARCH_TEMPORARILY_UNAVAILABLE
     assert result.items == []
     assert calls == 2
+    assert result.transport_attempts == calls
     assert secret not in repr(result)
 
 

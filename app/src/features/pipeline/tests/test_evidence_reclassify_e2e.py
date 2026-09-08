@@ -560,7 +560,7 @@ def test_스위치ON이면_재판정뒤_3장이_READY이고_SHADOW로_끝까지_
     assert _REVENUE_SENTENCES[0] in portfolio_text
 
 
-def test_스위치OFF면_3장_부족과_최종결과_바이트골든을_그대로_유지한다(
+def test_스위치OFF면_3장_부족과_뉴스미조사_안내를_포함한_바이트골든을_유지한다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _engine, observations = _wire_pipeline(
@@ -585,6 +585,7 @@ def test_스위치OFF면_3장_부족과_최종결과_바이트골든을_그대�
     measured = observations.reclassify[-1]
     assert measured["after"] == measured["before"]
     assert measured["step"] is None
+    # 2026-09-08: 회사 사실은 그대로 두고 뉴스 미조사 안내 한 줄만 골든에 추가했다.
     actual = _stable_result_bytes(result)
     golden = json.loads(_GOLDEN_FIXTURE.read_text(encoding="utf-8"))
     assert golden["byte_count"] == len(actual)

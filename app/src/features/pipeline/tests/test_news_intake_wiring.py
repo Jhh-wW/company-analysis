@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -653,6 +654,49 @@ def test_body_failure_is_recorded_after_one_classification() -> None:
     assert steps[0]["실패"] == real.NEWS_BODY_FETCH_FAILED_CODE
 
 
+
+def _grounded_runtime_result(items):
+    """실제 검색 경계와 같은 단일 전송 관측을 반환하는 주입 대역."""
+    result = _result(items=items)
+    result.transport_attempts = 1
+    result.retry_recovered = False
+    result.attempt_reason_codes = ("news_search_ok",)
+    return result
+
+
+def _grounded_runtime_item():
+    return SimpleNamespace(
+        title="가나다전자 새 제품군 공급",
+        originallink="https://www.newsis.com/view/example",
+        link="",
+        description="가나다전자가 새 제품군을 공급했다.",
+        pubDate="2026-09-01",
+    )
+
+
+def _grounded_runtime_analysis(prompt, schema, max_tokens):
+    payload = json.loads(prompt.split("자료 시작:\n", 1)[1])
+    return {"items": [
+        {
+            "id": article["id"], "same_company": True, "material": True,
+            "entity_evidence": article["body"], "source_type": "news_report",
+            "excerpts": [{
+                "text": article["body"], "section_id": "portfolio",
+                "claim_slot": "portfolio:product_role", "claim_kind": "reported_fact",
+                "temporal_status": "completed", "topic": "products",
+                "event_key": "새 제품군 공급", "event_on": "", "time_evidence": "",
+                "subject": "", "subject_evidence": "",
+            }],
+        } for article in payload["articles"]
+    ]}
+
+
+GROUNDED_RUNTIME_BODY = (
+    "가나다전자는 구체적인 사업으로 고객 업무를 잇는 새 제품군을 운영하며 "
+    "자동화 설비 120대를 공급했다."
+)
+
+
 def test_full_runtime_adds_news_after_official_preflight_before_composer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -695,21 +739,18 @@ def test_full_runtime_adds_news_after_official_preflight_before_composer(
     def search_news(_query: str, **kwargs: object) -> SimpleNamespace:
         nonlocal search_calls
         search_calls += 1
-        return _result(items=[_item()] if kwargs["start"] == 1 else [])
+        return _grounded_runtime_result([_grounded_runtime_item()] if search_calls == 1 else [])
 
     user_input, card = _request()
     result = real.RealPipeline(
         official_evidence_collector=collector,
         news_search=search_news,
-        news_classify=lambda _prompt: (
-            '{"items":[{"id":"news-001","sections":["portfolio"],'
-            '"kind":"press_release"}]}'
-        ),
-        news_fetch_text=lambda _url: ARTICLE_BODY,
+        news_analyze=_grounded_runtime_analysis,
+        news_fetch_text=lambda _url: GROUNDED_RUNTIME_BODY,
     ).run(user_input, card)
 
     assert result.outcome is real.Outcome.REPORT
-    assert search_calls == 2
+    assert 2 < search_calls <= news_constants.SEARCH_CALL_BUDGET
     assert len(calls.composers) == 1
     composer = calls.composers[0]
     news_fragments = [
@@ -718,7 +759,7 @@ def test_full_runtime_adds_news_after_official_preflight_before_composer(
         if fragment.get("종류") == "news"
     ]
     assert len(news_fragments) == 1
-    assert news_fragments[0]["발행처"] == "media.example"
+    assert news_fragments[0]["발행처"] == "newsis.com"
     packets = real._full_section_evidence_packets(
         corp_id=composer["corp_id"],
         source_identity_digest=composer["source_identity_digest"],
@@ -733,7 +774,10 @@ def test_full_runtime_adds_news_after_official_preflight_before_composer(
     ]
     assert len(transported_news) == 1
     assert transported_news[0].counts_toward_document_floor is False
-    assert transported_news[0].source_publisher == "media.example"
+    assert transported_news[0].news_grounded is True
+    assert "120대" in transported_news[0].text
+    assert transported_news[0].news_claim_kind == "reported_fact"
+    assert transported_news[0].source_publisher == "newsis.com"
     assert transported_news[0].document_date == "2026-09-01"
     news_step = next(
         step for step in composer["steps"] if step.get("step") == "5b_뉴스_수집"
@@ -765,26 +809,23 @@ def test_full_runtime_opens_news_when_official_web_documents_are_zero(
     def search_news(_query: str, **kwargs: object) -> SimpleNamespace:
         nonlocal search_calls
         search_calls += 1
-        return _result(items=[_item()] if kwargs["start"] == 1 else [])
+        return _grounded_runtime_result([_grounded_runtime_item()] if search_calls == 1 else [])
 
     user_input, card = _request()
     result = real.RealPipeline(
         official_evidence_collector=collector,
         news_search=search_news,
-        news_classify=lambda _prompt: (
-            '{"items":[{"id":"news-001","sections":["portfolio"],'
-            '"kind":"press_release"}]}'
-        ),
-        news_fetch_text=lambda _url: ARTICLE_BODY,
+        news_analyze=_grounded_runtime_analysis,
+        news_fetch_text=lambda _url: GROUNDED_RUNTIME_BODY,
     ).run(user_input, card)
 
     assert result.outcome is real.Outcome.REPORT
-    assert search_calls == real.NEWS_SEARCH_CALL_LIMIT
+    assert 2 < search_calls <= news_constants.SEARCH_CALL_BUDGET
     composer = calls.composers[0]
     news_step = next(
         step for step in composer["steps"] if step.get("step") == "5b_뉴스_수집"
     )
-    assert news_step["창"] == real.NEWS_WINDOW_LABEL_WEB_ZERO
+    assert news_step["기간개월"][0] == 12
     assert news_step["분류AI호출"] == 1
     assert [
         fragment
@@ -793,10 +834,10 @@ def test_full_runtime_opens_news_when_official_web_documents_are_zero(
     ]
 
 
-def test_full_runtime_keeps_web_documents_from_opening_news(
+def test_full_runtime_researches_news_even_with_ready_sections_and_web_documents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """공식 웹 문서가 있고 모든 장이 READY면 예전처럼 검색을 하지 않는다."""
+    """공시가 충분한 회사도 동일하게 뉴스 현재성을 조사한다."""
 
     monkeypatch.setenv(news_intake_switch.NEWS_INTAKE_ENV_NAME, "1")
     _freeze_runtime(
@@ -808,15 +849,19 @@ def test_full_runtime_keeps_web_documents_from_opening_news(
     collector = _Collector([_official_result()])
     calls = _wire_runtime(monkeypatch, engine=engine)
 
-    def unexpected(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("공식 웹 문서가 있으면 뉴스를 찾지 않습니다")
+    search_calls = 0
+
+    def search_news(_query, **kwargs):
+        nonlocal search_calls
+        search_calls += 1
+        return _grounded_runtime_result([_grounded_runtime_item()] if search_calls == 1 else [])
 
     user_input, card = _request()
     result = real.RealPipeline(
         official_evidence_collector=collector,
-        news_search=unexpected,
-        news_classify=unexpected,
-        news_fetch_text=unexpected,
+        news_search=search_news,
+        news_analyze=_grounded_runtime_analysis,
+        news_fetch_text=lambda _url: GROUNDED_RUNTIME_BODY,
     ).run(user_input, card)
 
     assert result.outcome is real.Outcome.REPORT
@@ -824,9 +869,12 @@ def test_full_runtime_keeps_web_documents_from_opening_news(
     news_step = next(
         step for step in composer["steps"] if step.get("step") == "5b_뉴스_수집"
     )
-    assert news_step["창"] == real.NEWS_WINDOW_LABEL_DEFAULT
-    assert news_step["검색호출"] == 0
-    assert not any(
+    assert news_step["기간개월"][0] == 12
+    assert news_step["검색호출"] == search_calls > 0
+    assert news_step["검색실제전송"] == search_calls
+    snapshot_step = next(step for step in composer["steps"] if step.get("step") == "5b_뉴스_검색스냅샷")
+    assert snapshot_step["검색실제전송"] == search_calls
+    assert any(
         fragment.get("종류") == "news"
         for fragment in composer["frags"].values()
     )

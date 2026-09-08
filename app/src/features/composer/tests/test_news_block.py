@@ -19,7 +19,6 @@ from src.features.composer.news_block import (
     BLOCKED_TEXT_MISMATCH,
     NEWS_BLOCK_BLOCKED_STEP,
     NEWS_BLOCK_HEADERS,
-    NEWS_BLOCK_MAX_ROWS,
     NEWS_BLOCK_STEP,
     augment_news_blocks,
     news_block_caption,
@@ -64,7 +63,7 @@ def _news(
         fragment_id=fragment_id,
         kind=kind,
         text=text,
-        source_url="https://media.example/news/one",
+        source_url=f"https://media.example/news/{fragment_id}",
         document_title="가나다전자 물류 자동화",
         location=f"기사 본문 · news-fragment-{fragment_id}",
         document_date=published_on,
@@ -121,10 +120,10 @@ def test_조각을_받은_장마다_보도표가_붙는다() -> None:
     assert result.added
     assert dict(result.row_counts_by_section) == {"identity": 1, "portfolio": 1}
     assert _table_rows(result, "identity") == [
-        ("2026-09-01", _PUBLISHER, _SENTENCE)
+        ("2026-09-01", _PUBLISHER + " · 가나다전자 물류 자동화", _SENTENCE)
     ]
     assert _table_rows(result, "portfolio") == [
-        ("2026-09-01", _PUBLISHER, _SENTENCE)
+        ("2026-09-01", _PUBLISHER + " · 가나다전자 물류 자동화", _SENTENCE)
     ]
     # 조각이 안 온 장은 «객체가 그대로»여야 한다.
     assert all(
@@ -144,7 +143,7 @@ def test_보도_문장은_조각_원문_그대로다() -> None:
     )
 
     rows = _table_rows(result, "current_challenges")
-    assert rows == [("2026-09-01", _PUBLISHER, _QUOTED)]
+    assert rows == [("2026-09-01", _PUBLISHER + " · 가나다전자 물류 자동화", _QUOTED)]
     # 따옴표 자체가 남았는지 별도로 못 박는다(따옴표를 떼면 발언이 기자의
     # 서술로 읽힌다 — 5·6장이 인용문만 받는 이유가 사라진다).
     assert '"고객 곁에서 배우는 문화를 지키겠다"' in rows[0][2]
@@ -167,11 +166,11 @@ def test_행은_최신_발행일부터_실린다() -> None:
         "2025-12-31",
         "2025-01-02",
     ]
-    assert _table_rows(result, "identity")[0][1] == _OTHER_PUBLISHER
+    assert _table_rows(result, "identity")[0][1] == _OTHER_PUBLISHER + " · 가나다전자 물류 자동화"
 
 
-def test_장당_행_수는_상한을_넘지_않는다() -> None:
-    ids = tuple(str(70 + offset) for offset in range(NEWS_BLOCK_MAX_ROWS + 2))
+def test_수집한_기사에_추가_출력상한을_적용하지_않는다() -> None:
+    ids = tuple(str(70 + offset) for offset in range(8))
     fragments = tuple(
         # 두 자리로 적는다 — 상한이 여덟을 넘으면 «2026-09-010» 같은 값이 나와
         # 정렬이 조용히 뒤집힌다.
@@ -184,60 +183,9 @@ def test_장당_행_수는_상한을_넘지_않는다() -> None:
         allowed_fragment_ids_by_section=_owned(identity=ids),
     )
 
-    assert len(_table_rows(result, "identity")) == NEWS_BLOCK_MAX_ROWS
-    assert dict(result.blocked_counts_by_reason)[BLOCKED_ROW_LIMIT] == (
-        len(ids) - NEWS_BLOCK_MAX_ROWS
-    )
-
-
-def test_장당_상한은_뉴스_수집_전체_상한과_같다() -> None:
-    """장당 행 상한 == 회사 하나에서 모으는 뉴스 조각 전체 상한.
-
-    ★ 왜 같아야 하나 — 수집이 한 회사에서 만드는 보조 조각은 최대
-      ``NEWS_FRAGMENT_COUNT_LIMIT``개다. 장당 상한이 그보다 «작으면», 모은
-      조각이 한 장에 몰렸을 때 나머지가 ``row_limit``으로 빠진다. 우리가
-      돈을 들여 모아 놓고 표에서 숨기는 조각이 생기는 것이다
-      (2026-09-07 운영 실측: 조각 여섯이 전부 3장에 배정됐는데 옛 상한
-      셋 때문에 절반이 사라졌다). 반대로 «크면» 상한이 아무 일도 하지
-      않는다 — 어차피 그만큼 오지 않는다.
-
-    ★ 두 상수를 견주기만 하면 둘이 «같이» 내려갈 때도 통과한다. 그래서 값
-      자체도 한 번 못 박는다 — 어느 한쪽만 고쳐도, 둘 다 고쳐도 걸린다.
-    """
-
-    from src.features.pipeline.real import NEWS_FRAGMENT_COUNT_LIMIT
-
-    assert NEWS_BLOCK_MAX_ROWS == NEWS_FRAGMENT_COUNT_LIMIT
-    assert NEWS_BLOCK_MAX_ROWS == 6
-
-
-def test_수집_상한만큼_온_조각은_한_장에_몰려도_한_행도_안_빠진다() -> None:
-    """위 시험의 «뜻»을 동작으로 다시 잰다 — 상수 대조만으로는 부족하다.
-
-    ★ 상수 두 개가 같아도 상한을 «세는 자리»가 바뀌면 행이 또 빠질 수 있다.
-      수집 상한만큼(여섯) 조각을 한 장에 몰아넣고 ``row_limit``이 0인지 본다.
-    """
-
-    from src.features.pipeline.real import NEWS_FRAGMENT_COUNT_LIMIT
-
-    # 표본 크기를 생산 상수에서 가져오므로, 상한이 내려가면 표본도 같이
-    # 줄어 이 시험만으로는 회귀를 못 잡는다. 위 시험의 리터럴 단정이 그
-    # 구멍을 막는다.
-    assert NEWS_FRAGMENT_COUNT_LIMIT == 6
-    ids = tuple(str(80 + offset) for offset in range(NEWS_FRAGMENT_COUNT_LIMIT))
-    fragments = tuple(
-        _news(fragment_id, published_on=f"2026-09-{index + 1:02d}")
-        for index, fragment_id in enumerate(ids)
-    )
-
-    result = augment_news_blocks(
-        _report(),
-        fragments,
-        allowed_fragment_ids_by_section=_owned(identity=ids),
-    )
-
-    assert len(_table_rows(result, "identity")) == NEWS_FRAGMENT_COUNT_LIMIT
+    assert len(_table_rows(result, "identity")) == len(ids)
     assert BLOCKED_ROW_LIMIT not in dict(result.blocked_counts_by_reason)
+
 
 
 def test_작가가_이미_인용한_조각도_표에_실린다() -> None:
@@ -274,7 +222,7 @@ def test_작가가_이미_인용한_조각도_표에_실린다() -> None:
     )
 
     assert _table_rows(result, "identity") == [
-        ("2026-09-01", _PUBLISHER, _SENTENCE)
+        ("2026-09-01", _PUBLISHER + " · 가나다전자 물류 자동화", _SENTENCE)
     ]
 
 
@@ -525,7 +473,7 @@ def test_되찾은_소유권으로_선언한_장에만_보도표가_붙는다() 
 
     assert dict(result.row_counts_by_section) == {"identity": 1, "portfolio": 1}
     assert _table_rows(result, "identity") == [
-        ("2026-09-01", _PUBLISHER, _SENTENCE)
+        ("2026-09-01", _PUBLISHER + " · 가나다전자 물류 자동화", _SENTENCE)
     ]
     assert _table_rows(result, "business_model") == []
     # 의미 칸 없는 조각은 소유 밖이라 «그 행만» 빠진다.
@@ -601,8 +549,8 @@ def test_이_필드를_모르는_옛_결과는_아무_줄도_안_남긴다() -> 
 
 
 def test_표_머리글과_캡션은_한_곳에서만_나온다() -> None:
-    assert NEWS_BLOCK_HEADERS == ("발행일", "매체", "보도 문장")
-    assert news_block_caption(2) == "최근 보도 (보조, 2)"
+    assert NEWS_BLOCK_HEADERS == ("발행일", "매체 · 기사", "보도 내용")
+    assert news_block_caption(2) == "최근 보도 (보조, 2기사)"
 
 
 def test_9장_제외_목록은_수집과_싣기가_같은_객체를_쓴다() -> None:

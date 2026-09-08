@@ -13,8 +13,9 @@ from dataclasses import replace
 
 from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
 from src.features.composer.port import ComposedReport, ComposedSentence
+from src.features.composer.news_block import NEWS_BLOCK_HEADERS, news_block_caption, news_list_excerpt
 from src.features.pipeline.port import FactRecord, Report
-from src.features.provenance.sources import Source
+from src.features.provenance.sources import Source, SourceKind, exact_evidence_text_hash
 from src.shared.report_quality.dto import (
     ClaimFact,
     ReportCandidate,
@@ -38,6 +39,43 @@ from src.shared.report_quality.constants import (
 
 def _normalized_text(value: object) -> str:
     return " ".join(str(value or "").split())
+
+
+def _only_bound_news_tables(section, rendered_section, sources) -> bool:
+    """봉인 없는 모드의 결정적 뉴스 표만 원본 행·출처와 대조한다. FULL 승인 대신 쓰지 않는다."""
+    if section.flow_rows or not section.news_rows or rendered_section is None:
+        return False
+    if len(rendered_section.tables) != 1:
+        return False
+    table = rendered_section.tables[0]
+    source_by_number = {str(source.number): source for source in sources if isinstance(source, Source)}
+    ids = {citation for row in section.news_rows for citation in row.citations}
+    if any(fid not in source_by_number or source_by_number[fid].kind is not SourceKind.NEWS for fid in ids):
+        return False
+    for row in section.news_rows:
+        if not row.citations or len(row.citations) != len(row.evidence_texts):
+            return False
+        cited = tuple(source_by_number[fid] for fid in row.citations)
+        if any(exact_evidence_text_hash(text) not in source.exact_evidence_hashes
+            for text, source in zip(row.evidence_texts, cited)):
+            return False
+        first = cited[0]
+        if len({(document_identity(source), source.published_at, source.publisher, source.title) for source in cited}) != 1:
+            return False
+        expected = (
+            first.published_at.strip(),
+            " · ".join(value.strip() for value in (first.publisher, first.title) if value.strip()),
+            "\n".join(dict.fromkeys(news_list_excerpt(text, "\n".join(sentence.text for sentence in section.sentences)) for text in row.evidence_texts)),
+        )
+        if row.cells != expected:
+            return False
+    return (
+        table.caption == news_block_caption(len(section.news_rows))
+        and tuple(table.headers) == NEWS_BLOCK_HEADERS
+        and table.rows == [list(row.cells) for row in section.news_rows]
+        and set(table.source_cites) == {f"[{fid}]" for fid in ids}
+        and not table.numeric and table.presentation == "table"
+    )
 
 
 def _fact_key(
@@ -354,6 +392,7 @@ def build_generation_quality_candidate(
         )
         has_unbound_structures = (
             has_public_structures and not structures_manifest_bound
+            and not _only_bound_news_tables(section, rendered_section, rendered.citations)
         )
         sections.append(
             ReportSectionCandidate(
@@ -382,6 +421,9 @@ def build_generation_quality_candidate(
             # 부풀리지 못하게 한다.
             document_content_sha256=source.document_content_sha256,
             publisher=source.publisher,
+            counts_toward_document_floor=source.kind is not SourceKind.NEWS,
+            source_kind="news" if source.kind is SourceKind.NEWS else source.formal_source_kind,
+            published_on=source.published_at or source.disclosed_at,
         )
         for source in rendered.citations
         if isinstance(source, Source)

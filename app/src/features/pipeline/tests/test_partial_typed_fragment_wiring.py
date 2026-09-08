@@ -146,7 +146,8 @@ def test_부분보고서_뉴스조각에_매체와_발행일과_의미칸이_실
     ]
     assert news, "작성기가 받은 조각에 뉴스가 하나도 없습니다"
     for fragment in news:
-        assert fragment.source_publisher == "media.example"
+        assert fragment.source_publisher == "newsis.com"
+        assert fragment.news_grounded is True
         assert fragment.document_date == "2026-09-01"
         assert fragment.supported_claim_slots
         assert fragment.counts_toward_document_floor is False
@@ -226,7 +227,8 @@ def test_미등록_종류가_섞여도_typed조각과_원형조각이_함께_넘
     ]
     assert news, "모르는 종류 하나가 뉴스의 typed 신원까지 지웠습니다"
     for fragment in news:
-        assert fragment.source_publisher == "media.example"
+        assert fragment.source_publisher == "newsis.com"
+        assert fragment.news_grounded is True
         assert fragment.document_date == "2026-09-01"
         assert fragment.supported_claim_slots
 

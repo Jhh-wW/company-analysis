@@ -1,0 +1,77 @@
+{
+  "metric_scope": "PDF 문자 추출 관측값이며 사람의 품질 판정이 아님",
+  "cases": {
+    "WOORI": {
+      "characters": 17527,
+      "nonempty_lines": 878,
+      "date_mentions": 77,
+      "distinct_date_strings": 5,
+      "repeated_line_occurrences": 113,
+      "foreign_company_term_hits_for_review": {},
+      "human_quality_judgment": null,
+      "interpretation": "문자 패턴 계수이며 날짜 정확성·기사 독립성·회사 혼입의 확정 판정이 아님",
+      "pages": 11,
+      "sha256": "8f7b46bbc7ae5d5af40adeb57da74613fca3c08ddd0a9169a451b59e8cffafe4"
+    },
+    "SM": {
+      "characters": 14142,
+      "nonempty_lines": 693,
+      "date_mentions": 54,
+      "distinct_date_strings": 7,
+      "repeated_line_occurrences": 66,
+      "foreign_company_term_hits_for_review": {},
+      "human_quality_judgment": null,
+      "interpretation": "문자 패턴 계수이며 날짜 정확성·기사 독립성·회사 혼입의 확정 판정이 아님",
+      "pages": 9,
+      "sha256": "fd9a38e19f9d42080757e98f1abeb52581b50406a08c4cab2af673bb69f02797"
+    },
+    "HYBE": {
+      "characters": 15890,
+      "nonempty_lines": 832,
+      "date_mentions": 71,
+      "distinct_date_strings": 8,
+      "repeated_line_occurrences": 74,
+      "foreign_company_term_hits_for_review": {},
+      "human_quality_judgment": null,
+      "interpretation": "문자 패턴 계수이며 날짜 정확성·기사 독립성·회사 혼입의 확정 판정이 아님",
+      "pages": 12,
+      "sha256": "341c724797a80d1ff8a483ab7633293414ec38620d142c9ec83ef6e3ed765e1b"
+    },
+    "YG": {
+      "characters": 13456,
+      "nonempty_lines": 705,
+      "date_mentions": 59,
+      "distinct_date_strings": 9,
+      "repeated_line_occurrences": 71,
+      "foreign_company_term_hits_for_review": {},
+      "human_quality_judgment": null,
+      "interpretation": "문자 패턴 계수이며 날짜 정확성·기사 독립성·회사 혼입의 확정 판정이 아님",
+      "pages": 9,
+      "sha256": "5fc752b37ba329ec94ac9323e951d42b9da8c9f8ca5ac27f3c54ad7f1ddf22f4"
+    },
+    "JYP": {
+      "characters": 13944,
+      "nonempty_lines": 722,
+      "date_mentions": 55,
+      "distinct_date_strings": 6,
+      "repeated_line_occurrences": 76,
+      "foreign_company_term_hits_for_review": {},
+      "human_quality_judgment": null,
+      "interpretation": "문자 패턴 계수이며 날짜 정확성·기사 독립성·회사 혼입의 확정 판정이 아님",
+      "pages": 10,
+      "sha256": "d191fb4de5fd62d6d3c3fb351cb6c45db73f3426c448a4596008fe40f7af293d"
+    },
+    "MULTICAMPUS": {
+      "characters": 12965,
+      "nonempty_lines": 692,
+      "date_mentions": 68,
+      "distinct_date_strings": 11,
+      "repeated_line_occurrences": 87,
+      "foreign_company_term_hits_for_review": {},
+      "human_quality_judgment": null,
+      "interpretation": "문자 패턴 계수이며 날짜 정확성·기사 독립성·회사 혼입의 확정 판정이 아님",
+      "pages": 9,
+      "sha256": "f141bb638c59305af68a2087f0cbb694993408f4285513606cc6b8c7d54b9eda"
+    }
+  }
+}

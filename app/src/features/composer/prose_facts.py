@@ -17,7 +17,7 @@ from typing import Final, Optional, Sequence
 from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
 from src.features.composer.port import ComposedSentence
 from src.features.pipeline.port import FactRecord
-from src.features.provenance.sources import Source, exact_evidence_text_hash
+from src.features.provenance.sources import Source, SourceKind, exact_evidence_text_hash
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_quality.evidence_support import prose_evidence_support_ready
 from src.shared.report_quality.fact_binding import fact_evidence_binding
@@ -144,6 +144,10 @@ def build_verified_prose_fact(
                 "exact_sha256": evidence_hash,
             }
         )
+        if source.kind is SourceKind.NEWS:
+            # 보도 수치는 계산값이 아니다. 최종 품질 검사가 날짜·출처와 함께
+            # 실제 숫자·단위를 재대조할 정확 원문을 사실 결속 안에 남긴다.
+            manifest[-1]["news_exact_text"] = item.exact_text
 
     support_terms = _support_terms(claim, evidence)
     if not prose_evidence_support_ready(

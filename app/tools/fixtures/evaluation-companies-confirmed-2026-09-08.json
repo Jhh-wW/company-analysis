@@ -1,0 +1,317 @@
+{
+  "schema_version": "company-evaluation-manifest-v1",
+  "cases": [
+    {
+      "case_id": "WOORI",
+      "input_name": "우리은행",
+      "expected_legal_name": "(주)우리은행",
+      "corp_code": "00254045",
+      "identity_confirmed": true,
+      "industry_for_review": "은행",
+      "availability_group": "미확인",
+      "baseline_pdf": "C:/Users/jh-wo/Downloads/주-우리은행-company-analysis (2).pdf",
+      "address_hint": "서울특별시 중구 소공로 51",
+      "identity_evidence": {
+        "checked_at": "2026-09-08T04:32:20.054820+00:00",
+        "corporation_list_name": "우리은행",
+        "corporation_list_modified_on": "20250107",
+        "corp_class": "E",
+        "industry_code": "64121",
+        "stock_code": "000030",
+        "homepage": "www.wooribank.com",
+        "official_address": "서울특별시 중구 소공로 51",
+        "source": "https://opendart.fss.or.kr/api/company.json",
+        "source_guide": "https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019002",
+        "availability_assessed": false,
+        "disclosure_availability": {
+          "begin_date": "2023-09-09",
+          "end_date": "2026-09-08",
+          "source": "https://opendart.fss.or.kr/api/list.json",
+          "periodic_reports": {
+            "status": "000",
+            "http_status": 200,
+            "count": 13
+          },
+          "external_audit_related": {
+            "status": "013",
+            "http_status": 200,
+            "count": 0
+          }
+        }
+      }
+    },
+    {
+      "case_id": "SM",
+      "input_name": "SM",
+      "expected_legal_name": "(주)에스엠엔터테인먼트",
+      "corp_code": "00260930",
+      "identity_confirmed": true,
+      "industry_for_review": "엔터테인먼트",
+      "availability_group": "미확인",
+      "baseline_pdf": "C:/Users/jh-wo/Downloads/주-에스엠엔터테인먼트-company-analysis.pdf",
+      "address_hint": "서울특별시 성동구 왕십리로 83-21 아크로 서울포레스트 디타워",
+      "identity_evidence": {
+        "checked_at": "2026-09-08T04:32:20.178448+00:00",
+        "corporation_list_name": "에스엠",
+        "corporation_list_modified_on": "20240328",
+        "corp_class": "K",
+        "industry_code": "59201",
+        "stock_code": "041510",
+        "homepage": "smentertainment.com",
+        "official_address": "서울특별시 성동구 왕십리로 83-21 아크로 서울포레스트 디타워",
+        "source": "https://opendart.fss.or.kr/api/company.json",
+        "source_guide": "https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019002",
+        "availability_assessed": false,
+        "disclosure_availability": {
+          "begin_date": "2023-09-09",
+          "end_date": "2026-09-08",
+          "source": "https://opendart.fss.or.kr/api/list.json",
+          "periodic_reports": {
+            "status": "000",
+            "http_status": 200,
+            "count": 15
+          },
+          "external_audit_related": {
+            "status": "013",
+            "http_status": 200,
+            "count": 0
+          }
+        }
+      }
+    },
+    {
+      "case_id": "HYBE",
+      "input_name": "HYBE",
+      "expected_legal_name": "(주)하이브",
+      "corp_code": "01204056",
+      "identity_confirmed": true,
+      "industry_for_review": "엔터테인먼트",
+      "availability_group": "미확인",
+      "baseline_pdf": "C:/Users/jh-wo/Downloads/주-하이브-company-analysis (10).pdf",
+      "address_hint": "서울특별시 용산구 한강대로 42 용산트레이드센터",
+      "identity_evidence": {
+        "checked_at": "2026-09-08T04:32:20.266977+00:00",
+        "corporation_list_name": "하이브",
+        "corporation_list_modified_on": "20240913",
+        "corp_class": "Y",
+        "industry_code": "592",
+        "stock_code": "352820",
+        "homepage": "hybecorp.com",
+        "official_address": "서울특별시 용산구 한강대로 42 용산트레이드센터",
+        "source": "https://opendart.fss.or.kr/api/company.json",
+        "source_guide": "https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019002",
+        "availability_assessed": false,
+        "disclosure_availability": {
+          "begin_date": "2023-09-09",
+          "end_date": "2026-09-08",
+          "source": "https://opendart.fss.or.kr/api/list.json",
+          "periodic_reports": {
+            "status": "000",
+            "http_status": 200,
+            "count": 18
+          },
+          "external_audit_related": {
+            "status": "013",
+            "http_status": 200,
+            "count": 0
+          }
+        }
+      }
+    },
+    {
+      "case_id": "YG",
+      "input_name": "YG",
+      "expected_legal_name": "(주)와이지엔터테인먼트",
+      "corp_code": "00613318",
+      "identity_confirmed": true,
+      "industry_for_review": "엔터테인먼트",
+      "availability_group": "미확인",
+      "baseline_pdf": "C:/Users/jh-wo/Downloads/주-와이지엔터테인먼트-company-analysis.pdf",
+      "address_hint": "서울특별시 마포구 희우정로1길 7 -",
+      "identity_evidence": {
+        "checked_at": "2026-09-08T04:32:20.357901+00:00",
+        "corporation_list_name": "와이지엔터테인먼트",
+        "corporation_list_modified_on": "20240401",
+        "corp_class": "K",
+        "industry_code": "59201",
+        "stock_code": "122870",
+        "homepage": "www.ygfamily.com",
+        "official_address": "서울특별시 마포구 희우정로1길 7 -",
+        "source": "https://opendart.fss.or.kr/api/company.json",
+        "source_guide": "https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019002",
+        "availability_assessed": false,
+        "disclosure_availability": {
+          "begin_date": "2023-09-09",
+          "end_date": "2026-09-08",
+          "source": "https://opendart.fss.or.kr/api/list.json",
+          "periodic_reports": {
+            "status": "000",
+            "http_status": 200,
+            "count": 14
+          },
+          "external_audit_related": {
+            "status": "013",
+            "http_status": 200,
+            "count": 0
+          }
+        }
+      }
+    },
+    {
+      "case_id": "JYP",
+      "input_name": "JYP",
+      "expected_legal_name": "(주)제이와이피엔터테인먼트",
+      "corp_code": "00258689",
+      "identity_confirmed": true,
+      "industry_for_review": "엔터테인먼트",
+      "availability_group": "미확인",
+      "baseline_pdf": "C:/Users/jh-wo/Downloads/주-제이와이피엔터테인먼트-company-analysis (1).pdf",
+      "address_hint": "서울특별시 강동구 강동대로 205 (성내동, JYP Center 빌딩)",
+      "identity_evidence": {
+        "checked_at": "2026-09-08T04:32:20.473146+00:00",
+        "corporation_list_name": "JYP Ent.",
+        "corporation_list_modified_on": "20221206",
+        "corp_class": "K",
+        "industry_code": "59201",
+        "stock_code": "035900",
+        "homepage": "www.jype.com",
+        "official_address": "서울특별시 강동구 강동대로 205 (성내동, JYP Center 빌딩)",
+        "source": "https://opendart.fss.or.kr/api/company.json",
+        "source_guide": "https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019002",
+        "availability_assessed": false,
+        "disclosure_availability": {
+          "begin_date": "2023-09-09",
+          "end_date": "2026-09-08",
+          "source": "https://opendart.fss.or.kr/api/list.json",
+          "periodic_reports": {
+            "status": "000",
+            "http_status": 200,
+            "count": 12
+          },
+          "external_audit_related": {
+            "status": "013",
+            "http_status": 200,
+            "count": 0
+          }
+        }
+      }
+    },
+    {
+      "case_id": "MULTICAMPUS",
+      "input_name": "멀티캠퍼스",
+      "expected_legal_name": "(주)멀티캠퍼스",
+      "corp_code": "00425351",
+      "identity_confirmed": true,
+      "industry_for_review": "교육",
+      "availability_group": "미확인",
+      "baseline_pdf": "C:/Users/jh-wo/Downloads/주-멀티캠퍼스-company-analysis.pdf",
+      "address_hint": "서울특별시 강남구 언주로 508 서울상록회관 17층",
+      "identity_evidence": {
+        "checked_at": "2026-09-08T04:32:20.694719+00:00",
+        "corporation_list_name": "멀티캠퍼스",
+        "corporation_list_modified_on": "20260401",
+        "corp_class": "K",
+        "industry_code": "85650",
+        "stock_code": "067280",
+        "homepage": "www.multicampus.com",
+        "official_address": "서울특별시 강남구 언주로 508 서울상록회관 17층",
+        "source": "https://opendart.fss.or.kr/api/company.json",
+        "source_guide": "https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019002",
+        "availability_assessed": false,
+        "disclosure_availability": {
+          "begin_date": "2023-09-09",
+          "end_date": "2026-09-08",
+          "source": "https://opendart.fss.or.kr/api/list.json",
+          "periodic_reports": {
+            "status": "000",
+            "http_status": 200,
+            "count": 13
+          },
+          "external_audit_related": {
+            "status": "013",
+            "http_status": 200,
+            "count": 0
+          }
+        }
+      }
+    },
+    {
+      "case_id": "SPARSE_COSMETICS",
+      "input_name": "앱솔브랩",
+      "expected_legal_name": "(주)앱솔브랩",
+      "corp_code": "01921621",
+      "identity_confirmed": true,
+      "address_hint": "서울특별시 강남구 삼성로85길 26 (대치동, V&S) 11층",
+      "industry_for_review": "화장품 제조(DART 업종 20423); 규모·전체 자료 부족 재확인 필요",
+      "availability_group": "자료 빈약 비교군 후보",
+      "identity_evidence": {
+        "checked_at": "2026-09-08T04:32:20.875838+00:00",
+        "corporation_list_name": "앱솔브랩",
+        "corporation_list_modified_on": "20250512",
+        "corp_class": "E",
+        "industry_code": "20423",
+        "stock_code": "",
+        "homepage": "celimax.co.kr",
+        "official_address": "서울특별시 강남구 삼성로85길 26 (대치동, V&S) 11층",
+        "source": "https://opendart.fss.or.kr/api/company.json",
+        "source_guide": "https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019002",
+        "availability_assessed": false,
+        "disclosure_availability": {
+          "begin_date": "2023-09-09",
+          "end_date": "2026-09-08",
+          "source": "https://opendart.fss.or.kr/api/list.json",
+          "periodic_reports": {
+            "status": "013",
+            "http_status": 200,
+            "count": 0
+          },
+          "external_audit_related": {
+            "status": "000",
+            "http_status": 200,
+            "count": 1
+          }
+        }
+      }
+    },
+    {
+      "case_id": "SPARSE_AUTOMATION",
+      "input_name": "인텍에프에이",
+      "expected_legal_name": "주식회사 인텍에프에이",
+      "corp_code": "00674966",
+      "identity_confirmed": true,
+      "address_hint": "경기도 용인시 기흥구 탑실로35번길 63 (공세동)",
+      "industry_for_review": "산업 자동화 후보; 업종·규모·자료 부족 재확인 필요",
+      "availability_group": "자료 빈약 비교군 후보",
+      "identity_evidence": {
+        "checked_at": "2026-09-08T04:32:21.144562+00:00",
+        "corporation_list_name": "인텍에프에이",
+        "corporation_list_modified_on": "20230223",
+        "corp_class": "E",
+        "industry_code": "2812",
+        "stock_code": "",
+        "homepage": "intech-fa.co.kr",
+        "official_address": "경기도 용인시 기흥구 탑실로35번길 63 (공세동)",
+        "source": "https://opendart.fss.or.kr/api/company.json",
+        "source_guide": "https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019002",
+        "availability_assessed": false,
+        "disclosure_availability": {
+          "begin_date": "2023-09-09",
+          "end_date": "2026-09-08",
+          "source": "https://opendart.fss.or.kr/api/list.json",
+          "periodic_reports": {
+            "status": "013",
+            "http_status": 200,
+            "count": 0
+          },
+          "external_audit_related": {
+            "status": "000",
+            "http_status": 200,
+            "count": 3
+          }
+        }
+      }
+    }
+  ],
+  "held_cases": [],
+  "confirmation_scope": "DART 법인 신원만 확인; 규모·자료 가용성·품질 평가는 별도"
+}

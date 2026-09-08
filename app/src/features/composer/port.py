@@ -183,6 +183,8 @@ class NewsRow:
     cells: tuple[str, ...]
     #: 이 줄이 옮겨 적은 조각 id 하나. 비면 근거 없는 줄이라 싣지 않는다.
     citations: tuple[str, ...] = ()
+    #: 각 인용의 정확 원문. 봉인 없는 엄격 모드에서도 Source 해시와 대조한다.
+    evidence_texts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -201,6 +203,8 @@ class ComposedSection:
     #: ★ 기본값이 빈 튜플이라 이 필드를 모르는 기존 생성·저장 경로는 그대로
     #:   돈다(새 칸 추가만, 읽기 호환 유지).
     news_rows: tuple[NewsRow, ...] = ()
+    #: 작가가 뉴스 본문 활용에서 제외한 구체적인 사유. 공개 사실 장부와 구분한다.
+    news_decisions: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -256,6 +260,12 @@ class CollectedFragment:
     #: typed 문서가 선언한 원자료 발행자와 회사 결속 proof. 공개 발행 법인명은
     #: 보고서 대상 회사로 다시 검산하되, 이 두 값은 packet·Source 도장까지 간다.
     source_publisher: str = ""
+    news_claim_kind: str = ""
+    news_temporal_status: str = ""
+    news_event_on: str = ""
+    news_event_key: str = ""
+    news_source_category: str = ""
+    news_grounded: bool = False
     identity_binding: str = ""
     source_collected_on: str = ""
     domain_attestation_source_id: str = ""
@@ -301,7 +311,8 @@ class VerifiedProgramEvidence:
             is_canonical_official_with_registry,
             is_publishable_supplementary,
         )
-        from src.features.composer.verify import _extract_numbers  # noqa: PLC0415
+        from src.features.composer.verify import _numeric_disposal, NUMERIC_PASS  # noqa: PLC0415
+        from src.shared.report_quality.supplementary_prose import NEWS_PROTECTED_SECTIONS
         from src.shared.report_generation.models import canonical_value  # noqa: PLC0415
         from src.shared.report_quality.fact_binding import (  # noqa: PLC0415
             fact_evidence_binding,
@@ -449,14 +460,13 @@ class VerifiedProgramEvidence:
                     for fragment_id, source_id in source_id_by_fragment.items()
                     if source_id == source.source_id
                 }
-                if any(
-                    source_fragment_ids & set(sentence.citations)
-                    and _extract_numbers(sentence.text)
-                    for sentence in self.sentences
-                ):
-                    raise ValueError(
-                        "프로그램 보조 언론 Source는 수치 문장을 인용할 수 없습니다"
-                    )
+                for sentence in self.sentences:
+                    if not source_fragment_ids & set(sentence.citations):
+                        continue
+                    if self.section_id in NEWS_PROTECTED_SECTIONS or sentence.structured_claim is not None:
+                        raise ValueError("보조 언론은 법인 정체·공식 비교·공식 수치 계산을 대체할 수 없습니다")
+                    if _numeric_disposal(sentence, fragments_by_id, ()) != NUMERIC_PASS:
+                        raise ValueError("프로그램 보조 언론 문장의 수치가 정확 원문과 다릅니다")
             if source.provenance_role == "attestation_only" and (
                 source.kind is not SourceKind.FILING
                 or not is_canonical_official_with_registry(source, registry_tuple)
@@ -508,6 +518,11 @@ class VerifiedProgramEvidence:
                 "프로그램 FactRecord가 ID만 바꾼 같은 의미 사실을 중복했습니다"
             )
         for fact in self.facts:
+            news_source_ids = {source.source_id for source in self.registry_sources if source.kind is SourceKind.NEWS}
+            if news_source_ids.intersection(fact.supporting_source_ids or (fact.source_id,)) and (
+                fact.metric or fact.numeric_checks or fact.raw_value or fact.calculation
+            ):
+                raise ValueError("보조 언론을 공식 수치 계산 근거로 사용할 수 없습니다")
             if (
                 fact.section_owner != self.section_id
                 or fact.status != "verified"
@@ -878,6 +893,13 @@ class SectionEvidencePacket:
                 raise TypeError("section packet 지원 claim slot은 문자열 tuple이어야 합니다")
             if type(fragment.counts_toward_document_floor) is not bool:
                 raise TypeError("section packet 독립 문서 계수 표식은 bool이어야 합니다")
+            if type(fragment.news_grounded) is not bool:
+                raise TypeError("section packet 뉴스 본문 검증 표식은 bool이어야 합니다")
+            if any(type(value) is not str for value in (
+                fragment.news_claim_kind, fragment.news_temporal_status,
+                fragment.news_event_on, fragment.news_event_key, fragment.news_source_category,
+            )):
+                raise TypeError("section packet 뉴스 시점·종류 메타데이터는 문자열이어야 합니다")
             if len(fragment.supported_claim_slots) != len(
                 set(fragment.supported_claim_slots)
             ):
@@ -1024,6 +1046,12 @@ class SectionEvidencePacket:
                     "formal_source_kind": fragment.formal_source_kind,
                     "source_document_id": fragment.source_document_id,
                     "source_publisher": fragment.source_publisher,
+                    "news_claim_kind": fragment.news_claim_kind,
+                    "news_temporal_status": fragment.news_temporal_status,
+                    "news_event_on": fragment.news_event_on,
+                    "news_event_key": fragment.news_event_key,
+                    "news_source_category": fragment.news_source_category,
+                    "news_grounded": fragment.news_grounded,
                     "identity_binding": fragment.identity_binding,
                     "source_collected_on": fragment.source_collected_on,
                     "domain_attestation_source_id": (

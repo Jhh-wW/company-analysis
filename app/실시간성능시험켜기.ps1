@@ -15,7 +15,16 @@ param(
 
     [string]$ProviderEnvFile = "",
 
-    # 엔진 v2(composer 생성 경로)로 보고서를 만든다. 끄면 기존 v1 경로 그대로.
+    # 저장소 Blueprint를 기본으로 읽되 실제 Render 설정을 확인했다는 뜻은 아니다.
+    [ValidateSet("RepositoryContract", "Explicit", "ProductionObserved20260908")]
+    [string]$ConfigurationProfile = "RepositoryContract",
+    [string]$NewsIntake = "",
+    [string]$RevenueTableV2 = "",
+    [string]$TypedDartCollector = "",
+    [string]$EvidenceReclassify = "",
+    [string]$NewsroomDateAI = "",
+
+    # 엔진을 명시적으로 덮어쓴다. 생략하면 선택한 profile의 값을 사용한다.
     [switch]$EngineV2,
 
     # -EngineV2를 켰을 때 보고서를 «어느 출시 모드로» 만들지. 이 값이 비면 v2
@@ -60,14 +69,14 @@ $safeChildOsEnvironmentNames = @(
 $paidProviderEnvironmentNames = @(
     "DART_API_KEY",
     "ANTHROPIC_API_KEY",
-    "NAVER_CLIENT_ID",
-    "NAVER_CLIENT_SECRET"
+    "NCP_APIGW_API_KEY_ID",
+    "NCP_APIGW_API_KEY"
 )
 $providerStatusEnvironmentNames = @(
     "DART_API_KEY",
     "ANTHROPIC_API_KEY",
-    "NAVER_CLIENT_ID",
-    "NAVER_CLIENT_SECRET",
+    "NCP_APIGW_API_KEY_ID",
+    "NCP_APIGW_API_KEY",
     "GOOGLE_PLACES_API_KEY",
     "GOOGLE_PLACES_TERMS_ACK"
 )
@@ -190,6 +199,137 @@ function New-CryptographicRunSuffix {
     return ([System.BitConverter]::ToString($bytes) -replace "-", "").ToLowerInvariant()
 }
 
+function Get-Utf8Sha256 {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString(
+            $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Text))
+        )).Replace("-", "").ToLowerInvariant()
+    }
+    finally { $sha.Dispose() }
+}
+
+function Get-EvaluationFeatureSettings {
+    param([Parameter(Mandatory = $true)][string]$RepositoryRoot)
+    $settings = [ordered]@{
+        ENGINE_V2 = "0"
+        REPORT_RELEASE_MODE = $ReleaseMode
+        NEWS_INTAKE = "0"
+        REVENUE_TABLE_V2 = "0"
+        TYPED_DART_COLLECTOR = "0"
+        EVIDENCE_RECLASSIFY = "0"
+        NEWSROOM_DATE_AI = "0"
+    }
+    $contractSha256 = ""
+    if ($ConfigurationProfile -eq "ProductionObserved20260908") {
+        # 2026-09-08 코디네이터가 Render 환경 페이지에서 관측한 비밀 아닌 스위치.
+        # 나머지 네 키는 페이지에 없었고 앱 기본값 0을 사용한다.
+        $settings["ENGINE_V2"] = "1"
+        $settings["NEWS_INTAKE"] = "1"
+        $settings["REPORT_RELEASE_MODE"] = "FULL"
+    }
+    if ($ConfigurationProfile -eq "RepositoryContract") {
+        $contractPath = Join-Path $RepositoryRoot "render.yaml"
+        if (-not (Test-Path -LiteralPath $contractPath -PathType Leaf)) {
+            throw "저장소 profile에 필요한 render.yaml이 없습니다. 명시 설정은 -ConfigurationProfile Explicit를 사용하세요."
+        }
+        $contract = [System.IO.File]::ReadAllText($contractPath, [System.Text.Encoding]::UTF8)
+        $contractSha256 = Get-Utf8Sha256 -Text $contract
+        foreach ($name in @($settings.Keys)) {
+            # 닫힌 설정 이름의 바로 다음 value만 읽는다. 환경 전체나 비밀을 읽지 않는다.
+            $pattern = '(?m)^\s*- key:\s*' + [regex]::Escape($name) + '\s*\r?\n\s*value:\s*([^\r\n]+)'
+            $matches = [regex]::Matches($contract, $pattern)
+            if ($matches.Count -gt 1) { throw "저장소 설정이 중복되었습니다: $name" }
+            if ($matches.Count -eq 1) {
+                $settings[$name] = $matches[0].Groups[1].Value.Trim().Trim([char]34, [char]39)
+            }
+        }
+    }
+    $overrides = [ordered]@{
+        NEWS_INTAKE = $NewsIntake
+        REVENUE_TABLE_V2 = $RevenueTableV2
+        TYPED_DART_COLLECTOR = $TypedDartCollector
+        EVIDENCE_RECLASSIFY = $EvidenceReclassify
+        NEWSROOM_DATE_AI = $NewsroomDateAI
+    }
+    foreach ($name in @($overrides.Keys)) {
+        if ($overrides[$name] -ne "") { $settings[$name] = $overrides[$name] }
+    }
+    if ($script:PSBoundParameters.ContainsKey("EngineV2")) {
+        $settings["ENGINE_V2"] = $(if ($EngineV2) { "1" } else { "0" })
+    }
+    if ($script:PSBoundParameters.ContainsKey("ReleaseMode")) {
+        $settings["REPORT_RELEASE_MODE"] = $ReleaseMode
+    }
+    foreach ($name in @($settings.Keys)) {
+        if ($name -eq "REPORT_RELEASE_MODE") {
+            if ($allowedReleaseModes -cnotcontains $settings[$name]) {
+                throw "설정 profile의 출시 모드가 올바르지 않습니다."
+            }
+        }
+        elseif (@("0", "1") -cnotcontains $settings[$name]) {
+            throw "기능 스위치는 정확히 0 또는 1이어야 합니다: $name"
+        }
+    }
+    return @{ Settings = $settings; ContractSha256 = $contractSha256 }
+}
+
+function Invoke-EvaluationGitRead {
+    param([string]$Executable, [string]$RepositoryRoot, [string]$Arguments)
+    $gitProcess = New-Object System.Diagnostics.Process
+    $gitProcess.StartInfo.FileName = $Executable
+    $gitProcess.StartInfo.Arguments = '-C "' + $RepositoryRoot + '" ' + $Arguments
+    $gitProcess.StartInfo.UseShellExecute = $false
+    $gitProcess.StartInfo.CreateNoWindow = $true
+    $gitProcess.StartInfo.RedirectStandardOutput = $true
+    $gitProcess.StartInfo.RedirectStandardError = $true
+    $gitProcess.StartInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $gitProcess.StartInfo.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    try {
+        if (-not $gitProcess.Start()) { throw "Git 읽기 검사를 시작하지 못했습니다." }
+        $output = $gitProcess.StandardOutput.ReadToEnd()
+        $null = $gitProcess.StandardError.ReadToEnd()
+        $gitProcess.WaitForExit()
+        if ($gitProcess.ExitCode -ne 0) { throw "Git 읽기 검사를 완료하지 못했습니다." }
+        return $output.Trim()
+    }
+    finally { $gitProcess.Dispose() }
+}
+
+function Get-EvaluationCodeReceipt {
+    param([Parameter(Mandatory = $true)][string]$RepositoryRoot)
+    $receipt = @{ Commit = ""; Clean = $false; Verified = $false }
+    try {
+        $gitCommand = @(Get-Command "git" -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
+        if ($null -eq $gitCommand) { throw "Git을 찾지 못했습니다." }
+        $root = Invoke-EvaluationGitRead -Executable $gitCommand.Source -RepositoryRoot $RepositoryRoot -Arguments "rev-parse --show-toplevel"
+        if ([System.IO.Path]::GetFullPath($root).TrimEnd('\') -ine [System.IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\')) {
+            throw "실행 폴더의 Git 저장소 경계가 일치하지 않습니다."
+        }
+        $commit = Invoke-EvaluationGitRead -Executable $gitCommand.Source -RepositoryRoot $RepositoryRoot -Arguments "rev-parse --verify HEAD"
+        if ($commit -cnotmatch '^[0-9a-f]{40}$') { throw "실제 Git 커밋 40자리를 확인하지 못했습니다." }
+        # 실행 소스·템플릿·런처·의존성 계약을 검사한다. 키·DB·결과 자료는 대상이 아니다.
+        $statusArguments = 'status --porcelain=v1 --untracked-files=all -- app/src analysis_engine/src analysis_engine/tools/run_pilot.py analysis_engine/tools/survey_audit_reports.py analysis_engine/tools/build_goldenset_answer.py app/requirements.txt app/Dockerfile "app/실시간성능시험켜기.ps1" render.yaml'
+        $changes = Invoke-EvaluationGitRead -Executable $gitCommand.Source -RepositoryRoot $RepositoryRoot -Arguments $statusArguments
+        $receipt.Commit = $commit
+        $receipt.Clean = [string]::IsNullOrWhiteSpace($changes)
+        $receipt.Verified = $receipt.Clean
+    }
+    catch {
+        # Git 환경이나 원격 설정 등 원본 오류는 출력하지 않는다.
+        if ($EnablePaidProviders) {
+            Write-Host "실행 소스의 실제 Git 신원을 검증하지 못했습니다. 저장소 커밋과 Git 설치를 확인하세요." -ForegroundColor Red
+            exit 2
+        }
+    }
+    if ($EnablePaidProviders -and -not $receipt.Clean) {
+        Write-Host "유료 시험 실행 소스에 미커밋 변경 또는 미추적 파일이 있습니다. 검토 후 커밋하고 다시 시작하세요." -ForegroundColor Red
+        exit 2
+    }
+    return $receipt
+}
+
 function Assert-SafeEvaluationDirectory {
     param(
         [Parameter(Mandatory = $true)][string]$Candidate,
@@ -238,6 +378,8 @@ if ($PerRunExpectedCostCapKrw -gt $DailyExpectedCostCapKrw) {
 }
 
 $appRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
+$featureProfile = Get-EvaluationFeatureSettings -RepositoryRoot (Split-Path -Parent $appRoot)
+$codeReceipt = Get-EvaluationCodeReceipt -RepositoryRoot (Split-Path -Parent $appRoot)
 $python = Join-Path $appRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     # 이 저장소는 venv를 저장소 루트에 둔다 (app\.venv가 아님) — 부모 폴더도 확인한다.
@@ -262,6 +404,7 @@ $startInfo = New-Object System.Diagnostics.ProcessStartInfo
 $startInfo.FileName = $python
 $startInfo.WorkingDirectory = $appRoot
 $startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
 $startInfo.Arguments = "-m uvicorn src.web.main:app --host 127.0.0.1 --port $Port --workers 1 --no-access-log"
 
 $childEnvironment = Get-CompatibleChildEnvironment -StartInfo $startInfo
@@ -338,6 +481,9 @@ if ($EnablePaidProviders) {
 $childEnvironment = Reset-ChildEnvironmentToAllowlist `
     -Environment $childEnvironment `
     -AllowedNames $allowedParentNames
+if ($codeReceipt.Verified) {
+    $childEnvironment["APP_GIT_COMMIT"] = $codeReceipt.Commit
+}
 
 $evaluationRunsRoot = Join-Path $appRoot ".local_evaluation_runs"
 New-Item -ItemType Directory -Force -Path $evaluationRunsRoot | Out-Null
@@ -405,11 +551,54 @@ $childEnvironment["GOOGLE_PLACES_BILLING_ACK"] = "0"
 $childEnvironment["GOOGLE_PLACES_TERMS_ACK"] = "no"
 $childEnvironment["BUSINESS_CANDIDATE_PROVIDER"] = "disabled"
 # 엔진 v2 스위치: 값이 정확히 "1"일 때만 real.py가 composer 경로로 분기한다.
-if ($EngineV2) {
+if ($featureProfile.Settings["ENGINE_V2"] -eq "1") {
     $childEnvironment["ENGINE_V2"] = "1"
     # ★ 이 값이 없으면 조사가 AI 호출 전에 멈춰 성능시험이 아무것도 재지 못한다.
-    $childEnvironment["REPORT_RELEASE_MODE"] = $ReleaseMode
+    $childEnvironment["REPORT_RELEASE_MODE"] = $featureProfile.Settings["REPORT_RELEASE_MODE"]
 }
+foreach ($name in @("NEWS_INTAKE", "REVENUE_TABLE_V2", "TYPED_DART_COLLECTOR", "EVIDENCE_RECLASSIFY", "NEWSROOM_DATE_AI")) {
+    $childEnvironment[$name] = $featureProfile.Settings[$name]
+}
+
+# 비밀이나 부모 환경 전체를 직렬화하지 않는다. 관측값은 스위치 범위만 뜻한다.
+$observedProductionSwitches = [ordered]@{
+    ENGINE_V2 = "1"; REPORT_RELEASE_MODE = "FULL"; NEWS_INTAKE = "1"
+    REVENUE_TABLE_V2 = "0"; TYPED_DART_COLLECTOR = "0"
+    EVIDENCE_RECLASSIFY = "0"; NEWSROOM_DATE_AI = "0"
+}
+$matchesObservedSwitches = $true
+foreach ($name in @($observedProductionSwitches.Keys)) {
+    if ($featureProfile.Settings[$name] -cne $observedProductionSwitches[$name]) {
+        $matchesObservedSwitches = $false
+    }
+}
+$snapshot = [ordered]@{
+    schema_version = "company-evaluation-settings-v1"
+    configuration_profile = $ConfigurationProfile
+    app_git_commit = $codeReceipt.Commit
+    execution_source_clean = $codeReceipt.Clean
+    code_identity_verified = $codeReceipt.Verified
+    production_parity = "not_verified"
+    observed_production_switches_date = "2026-09-08"
+    matches_observed_production_switches = $matchesObservedSwitches
+    repository_contract_sha256 = $featureProfile.ContractSha256
+    origin = "http://127.0.0.1:$Port"
+    settings = $featureProfile.Settings
+    paid_providers_enabled = [bool]$EnablePaidProviders
+    per_run_expected_cost_cap_krw = $PerRunExpectedCostCapKrw
+    daily_expected_cost_cap_krw = $DailyExpectedCostCapKrw
+}
+$snapshotJson = $snapshot | ConvertTo-Json -Depth 5 -Compress
+$snapshotDigest = Get-Utf8Sha256 -Text $snapshotJson
+$snapshotPath = Join-Path $evaluationRoot "evaluation-settings.json"
+[System.IO.File]::WriteAllText($snapshotPath, $snapshotJson, [System.Text.UTF8Encoding]::new($false))
+[System.IO.File]::WriteAllText(
+    (Join-Path $evaluationRoot "evaluation-settings.sha256"),
+    $snapshotDigest, [System.Text.UTF8Encoding]::new($false)
+)
+Write-Host "비밀 제외 실행설정: $snapshotPath"
+Write-Host "설정 SHA-256: $snapshotDigest / 운영 실측 일치 여부: 미확인"
+Write-Host "2026-09-08 관측한 운영 스위치 일치: $matchesObservedSwitches (전체 배포·모델·데이터 일치 증명 아님)"
 
 $allowedChildEnvironmentNames = $allowedParentNames + @(
     "PYTHONUTF8", "PYTHONIOENCODING", "PYTHONUNBUFFERED", "PIPELINE",
@@ -420,7 +609,9 @@ $allowedChildEnvironmentNames = $allowedParentNames + @(
     "PROVENANCE_SEAL_SECRET",
     "ANALYSIS_ENGINE_DISABLE_DOTENV", "GOOGLE_PLACES_BILLING_ACK",
     "GOOGLE_PLACES_TERMS_ACK", "BUSINESS_CANDIDATE_PROVIDER", "ENGINE_V2",
-    "REPORT_RELEASE_MODE"
+    "REPORT_RELEASE_MODE", "NEWS_INTAKE", "REVENUE_TABLE_V2", "TYPED_DART_COLLECTOR",
+    "EVIDENCE_RECLASSIFY", "NEWSROOM_DATE_AI",
+    "APP_GIT_COMMIT"
 )
 foreach ($name in @($childEnvironment.Keys)) {
     if ($allowedChildEnvironmentNames -notcontains [string]$name) {

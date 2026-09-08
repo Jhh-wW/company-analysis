@@ -2456,7 +2456,10 @@ async def send_to_notion(
         getattr(report, "schema_version", "") == ENGINE_V2_SCHEMA_VERSION
         and getattr(report, "public_projection", None) is None
     ):
-        return _notion_unsealed_v2_response(request)
+        from src.shared.report_quality.output_validation import allows_unsealed_v2_output
+
+        if not allows_unsealed_v2_output(report):
+            return _notion_unsealed_v2_response(request)
 
     if stored_delivery is None:
         # Delivery 이전 보고서만 과거 동적 승인 호환 경로를 쓴다. 새 Delivery는

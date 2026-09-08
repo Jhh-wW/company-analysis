@@ -27,6 +27,10 @@
 
 from __future__ import annotations
 
+from src.features.composer.news_constants import NEWS_REVIEW_GUIDE
+from src.features.composer.news_usage import attribution_prefix, news_metadata
+from src.features.composer.news_block import _is_news_fragment
+
 import json
 import logging
 import re
@@ -535,7 +539,15 @@ def _numeric_disposal(
         해를 쓴 문장은 지금까지처럼 해석 강등이다 — 처분은 그대로고,
         날짜 표기를 못 읽어 억울하게 강등되던 것만 없앤다.
     """
-    numbers = _extract_numbers(sentence.text)
+    numeric_text = sentence.text
+    for citation in sentence.citations:
+        fragment = frag_by_id.get(citation)
+        if fragment is not None and _is_news_fragment(fragment):
+            prefix = attribution_prefix(fragment)
+            if numeric_text.startswith(prefix):
+                numeric_text = numeric_text[len(prefix):]
+                break
+    numbers = _extract_numbers(numeric_text)
     if not numbers:
         return NUMERIC_PASS
     cited_texts = [
@@ -681,6 +693,7 @@ def _build_grouped_review_prompt(
     parts = [
         REVIEW_PROMPT_HEADER,
         REVIEW_PROMPT_RULES,
+        NEWS_REVIEW_GUIDE,
         (
             "아래 자료는 장별 블록으로 격리했다. 각 후보는 반드시 같은 블록의 "
             "근거만으로 판정하고 다른 장 블록의 근거를 빌리지 마라.\n"
@@ -705,6 +718,12 @@ def _build_grouped_review_prompt(
             for citation in item.citations:
                 if citation in frag_by_id and citation not in cited_ids:
                     cited_ids.append(citation)
+        if any(_is_news_fragment(frag_by_id[fid]) for fid in cited_ids):
+            # 인용하지 않은 같은 장의 공식 근거도 모순·시점 검수에 제공한다.
+            for fid, fragment in frag_by_id.items():
+                if (not _is_news_fragment(fragment) and fid not in cited_ids
+                    and any(slot.startswith(section_id + ":") for slot in fragment.supported_claim_slots)):
+                    cited_ids.append(fid)
         parts.append(
             "\n===== 장별 검수 블록 시작: "
             + json.dumps(section_id, ensure_ascii=False)
@@ -720,6 +739,8 @@ def _build_grouped_review_prompt(
             parts.append(
                 f"[조각 {fragment_id}] 원문(JSON 문자열): {evidence}\n"
             )
+            if _is_news_fragment(frag_by_id[fragment_id]):
+                parts.append("보도 메타데이터: " + news_metadata(frag_by_id[fragment_id]) + "\n")
         parts.append(REVIEW_LIST_HEAD)
         for item in section_items:
             citation_label = (
@@ -852,13 +873,21 @@ def _build_review_prompt(
         for citation in item.sentence.citations:
             if citation in frag_by_id and citation not in cited_ids:
                 cited_ids.append(citation)
-    parts = [REVIEW_PROMPT_HEADER, REVIEW_PROMPT_RULES, REVIEW_JSON_GUIDE]
+    if any(_is_news_fragment(frag_by_id[fid]) for fid in cited_ids):
+        sections = {item.sentence.planned_claim_slot.split(":", 1)[0] for item in items}
+        for fid, fragment in frag_by_id.items():
+            if (fid not in cited_ids and not _is_news_fragment(fragment)
+                and any(slot.split(":", 1)[0] in sections for slot in fragment.supported_claim_slots)):
+                cited_ids.append(fid)
+    parts = [REVIEW_PROMPT_HEADER, REVIEW_PROMPT_RULES, NEWS_REVIEW_GUIDE, REVIEW_JSON_GUIDE]
     if table_evidence:
         parts.append(table_evidence)
     parts.append(REVIEW_EVIDENCE_HEAD)
     for fragment_id in cited_ids:
         evidence = json.dumps(frag_by_id[fragment_id].text, ensure_ascii=False)
         parts.append(f"[조각 {fragment_id}] 원문(JSON 문자열): {evidence}\n")
+        if _is_news_fragment(frag_by_id[fragment_id]):
+            parts.append("보도 메타데이터: " + news_metadata(frag_by_id[fragment_id]) + "\n")
     parts.append(REVIEW_LIST_HEAD)
     for item in items:
         citation_label = (
@@ -1372,6 +1401,7 @@ def _fail_closed_report(
             #   진짜 원인이었다. packet 엄격 경로는 같은 bundled 검수 자체가
             #   실패한 경우라 관계도 안전 미확인이고, 그때만 행을 비운다.
             flow_rows=section.flow_rows if preserve_flow_rows else (),
+            news_decisions=section.news_decisions,
         )
         for section in report.sections
     )
@@ -1454,6 +1484,7 @@ def _verify_report_inner(
                 section_id=section.section_id,
                 sentences=tuple(kept),
                 notice=notice,
+                news_decisions=section.news_decisions,
                 # legacy 문장 검수는 도식을 건드리지 않는다. packet 엄격
                 # 경로에서는 같은 bundled 판정에서 참인 행만 남긴다.
                 flow_rows=(

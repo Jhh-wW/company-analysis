@@ -119,6 +119,12 @@ def test_봉인된_언론_Source는_산문_인용_게이트를_통과한다() ->
     assert evidence.registry_sources[0].kind is SourceKind.NEWS
 
 
-def test_언론_Source가_인용한_수치_문장은_거절한다() -> None:
-    with pytest.raises(ValueError, match="수치 문장"):
-        _program_evidence("회사는 신규 사업 계약을 3건 체결했다고 밝혔다.")
+def test_언론_Source의_정확원문_수치는_허용한다() -> None:
+    evidence = _program_evidence("회사는 신규 사업 계약을 3건 체결했다고 밝혔다.")
+    assert evidence.sentences[0].verification_state == "verified"
+
+
+def test_언론_Source의_수치를_변조하면_거절한다() -> None:
+    evidence = _program_evidence("회사는 신규 사업 계약을 3건 체결했다고 밝혔다.")
+    with pytest.raises(ValueError, match="수치"):
+        replace(evidence, sentences=(replace(evidence.sentences[0], text="회사는 신규 사업 계약을 30건 체결했다고 밝혔다."),))

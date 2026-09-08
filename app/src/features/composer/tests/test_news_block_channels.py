@@ -25,7 +25,6 @@ from src.core import news_intake_switch
 from src.features.composer.constants import SECTION_IDS
 from src.features.composer.news_block import (
     NEWS_BLOCK_HEADERS,
-    NEWS_BLOCK_MAX_ROWS,
     news_block_caption,
 )
 from src.features.composer.port import CollectedFragment
@@ -48,8 +47,8 @@ _COLLECTED_ON = "2026-09-06"
 #:   상한보다 많이 와야 한다. 상한과 같으면 상한을 0으로 만들어도 이 파일의
 #:   시험이 전부 통과한다.
 #: ★ 1장의 «적는 순서»는 (발행일 순서가 아니라) 「실리는 조각 먼저, 빠지는
-#:   조각 맨 뒤」다. 그래야 화면 시험이 `[:NEWS_BLOCK_MAX_ROWS]`를 실린 행으로,
-#:   `[NEWS_BLOCK_MAX_ROWS]`를 빠진 행으로 읽을 수 있다. 맨 뒤 조각(49)의
+#:   조각 맨 뒤」다. 그래야 화면 시험이 `[:len(_NEWS_BY_SECTION["identity"])]`를 실린 행으로,
+#:   `[len(_NEWS_BY_SECTION["identity"])]`를 빠진 행으로 읽을 수 있다. 맨 뒤 조각(49)의
 #:   발행일이 나머지 어느 것보다도 오래되어야 이 성질이 유지된다.
 _NEWS_BY_SECTION: dict[str, tuple[tuple[str, str, str], ...]] = {
     "identity": (
@@ -92,10 +91,11 @@ def _news_fragment(
     경로에서는 이 칸이 «장 소유권의 유일한 근거»가 된다.
     """
 
+    article_url = _ARTICLE_URL + "/" + fragment_id
     identity = document_identity_from_parts(
-        document_id=_ARTICLE_URL,
+        document_id=article_url,
         host="media.example",
-        url=_ARTICLE_URL,
+        url=article_url,
     )
     assert identity, "시험 조각의 문서 신원을 만들지 못했습니다"
     return CollectedFragment(
@@ -104,7 +104,7 @@ def _news_fragment(
         # ``formal_source_kind``에만 선언된다 — 운영과 같은 모양을 쓴다.
         kind="typed-evidence-v1:" + "0" * 8,
         text=text,
-        source_url=_ARTICLE_URL,
+        source_url=article_url,
         document_title=_ARTICLE_TITLE,
         location=f"기사 본문 · news-fragment-{fragment_id}",
         document_date=published_on,
@@ -112,9 +112,11 @@ def _news_fragment(
         document_content_sha256=exact_text_sha256(text),
         counts_toward_document_floor=False,
         formal_source_kind=SOURCE_KIND_NEWS,
-        source_document_id=_ARTICLE_URL,
+        source_document_id=article_url,
         source_publisher=_PUBLISHER,
         source_collected_on=_COLLECTED_ON,
+        news_grounded=True,
+        news_event_key=fragment_id,
         supported_claim_slots=(
             CLAIM_SLOTS_BY_SECTION[section_id] if section_id else ()
         ),
@@ -215,7 +217,7 @@ def test_조각을_받은_세_장에_보도표가_붙는다(보고서) -> None:
     assert 붙은_장 == list(_NEWS_SECTIONS)
 
 
-def test_작가는_뉴스를_한_문장도_인용하지_않았다(보고서) -> None:
+def test_작가가_뉴스를_누락해도_검수한_유용근거는_본문에_반영한다(보고서) -> None:
     """이 시험이 없으면 「작가가 인용해서 실린 것」과 구분이 안 된다."""
 
     본문_인용 = {
@@ -230,20 +232,19 @@ def test_작가는_뉴스를_한_문장도_인용하지_않았다(보고서) -> 
         for fragment_id, _published_on, _text in rows
     }
 
-    assert not (본문_인용 & 뉴스_번호)
     본문 = " ".join(
         text for section in 보고서.sections for text, _cite in section.prose_lines
     )
-    for _rows in _NEWS_BY_SECTION.values():
-        for _fragment_id, _published_on, text in _rows:
-            assert text not in 본문
+    for section_id in ("business_model", "current_challenges"):
+        for _fragment_id, published_on, text in _NEWS_BY_SECTION[section_id]:
+            assert f"{published_on} {_PUBLISHER} 보도에 따르면, {text}" in 본문
 
 
 def test_행은_최신순으로_상한까지만_실린다(보고서) -> None:
     table = _news_table(보고서, "identity")
 
-    assert table.caption == news_block_caption(NEWS_BLOCK_MAX_ROWS)
-    # 최신순으로 상한까지. 맨 오래된 2026-05-10(조각 49)이 빠진 행이다.
+    assert table.caption == news_block_caption(len(_NEWS_BY_SECTION["identity"]))
+    # 최신순으로 모든 기사를 보존하며 오래된 조각 49도 행 상한으로 빼지 않는다.
     assert [row[0] for row in table.rows] == [
         "2026-09-02",
         "2026-08-25",
@@ -251,8 +252,9 @@ def test_행은_최신순으로_상한까지만_실린다(보고서) -> None:
         "2026-07-20",
         "2026-07-05",
         "2026-06-01",
+        "2026-05-10",
     ]
-    assert {row[1] for row in table.rows} == {_PUBLISHER}
+    assert {row[1] for row in table.rows} == {_PUBLISHER + " · " + _ARTICLE_TITLE}
 
 
 def test_보도_문장은_조각_원문_그대로다(보고서) -> None:
@@ -292,7 +294,7 @@ def test_9장에는_보도표가_없다(보고서) -> None:
 
 def test_실행_기록용_수치가_결과에_실린다(FULL_실행결과) -> None:
     assert dict(FULL_실행결과.news_block_row_counts_by_section) == {
-        "identity": NEWS_BLOCK_MAX_ROWS,
+        "identity": len(_NEWS_BY_SECTION["identity"]),
         "business_model": 1,
         "current_challenges": 1,
     }
@@ -394,7 +396,7 @@ def test_화면이_보도표를_일반_표로_그린다(보고서) -> None:
 
     assert response.status_code == 200, response.text[:400]
     body = response.text
-    assert news_block_caption(NEWS_BLOCK_MAX_ROWS) in body
+    assert news_block_caption(len(_NEWS_BY_SECTION["identity"])) in body
     # ★ 도식이 아니라 «표»로 떨어졌는가 — 머리글 셀 태그까지 본다.
     #   글자만 찾으면 본문 산문에 우연히 같은 낱말이 있어도 통과한다.
     머리글줄 = "".join(f'<th scope="col">{header}</th>' for header in NEWS_BLOCK_HEADERS)
@@ -403,13 +405,11 @@ def test_화면이_보도표를_일반_표로_그린다(보고서) -> None:
     assert 'class="texts"' in body
     # fixture는 「실리는 조각 먼저, 빠지는 조각 맨 뒤」 순서다(맨 위 주석).
     for _fragment_id, published_on, text in _NEWS_BY_SECTION["identity"][
-        :NEWS_BLOCK_MAX_ROWS
+        :len(_NEWS_BY_SECTION["identity"])
     ]:
         assert f"<td>{published_on}</td>" in body
         assert f"<td>{text}</td>" in body
-    # 상한을 넘겨 뺀 행은 화면에도 없어야 한다.
-    빠진_행 = _NEWS_BY_SECTION["identity"][NEWS_BLOCK_MAX_ROWS]
-    assert 빠진_행[2] not in body
+    assert _NEWS_BY_SECTION["identity"][-1][2] in body
 
 
 # ══════════════════════════════════════════════════════════
@@ -521,24 +521,23 @@ def test_봉인_없는_SHADOW에서도_보도표가_출고검증을_통과한다
         int(number)
         for number in re.findall(r"\[(\d+)\]", " ".join(table.source_cites))
     }
-    assert len(실린) == NEWS_BLOCK_MAX_ROWS, table.source_cites
+    assert len(실린) == len(_NEWS_BY_SECTION["identity"]), table.source_cites
     # 표가 가리킨 번호가 부록에 있고, 그 번호를 표가 «본문처럼» 들고 있어야
     # 출고 검증의 인용-부록 1:1이 성립한다.
     assert 실린 <= 부록
 
 
-def test_결속_못하는_모드에서는_표를_안_붙이고_사유만_남긴다() -> None:
+def test_ENFORCE도_정확원문에_결속한_뉴스표를_공개한다() -> None:
     from src.shared.report_evidence.constants import ReleaseMode
 
     output = _run_mode(ReleaseMode.ENFORCE_NO_PARTIAL, flow=False)
 
     assert all(
-        _news_table(output.report, section_id) is None
+        _news_table(output.report, section_id) is not None
         for section_id in _NEWS_SECTIONS
     )
-    assert output.news_block_row_counts_by_section == ()
-    사유 = dict(output.news_block_blocked_counts_by_reason)
-    assert list(사유) == ["release_mode_cannot_bind_structures"], 사유
+    assert output.news_block_row_counts_by_section
+    assert "release_mode_cannot_bind_structures" not in dict(output.news_block_blocked_counts_by_reason)
 
 
 # ══════════════════════════════════════════════════════════
@@ -659,7 +658,7 @@ def test_packet_없는_부분_경로에서도_보도표가_붙고_출고검증�
 
     # ② 실행 기록 수치가 채워지고 「소유권 없음」 사유가 사라졌다.
     assert dict(output.news_block_row_counts_by_section) == {
-        "identity": NEWS_BLOCK_MAX_ROWS,
+        "identity": len(_NEWS_BY_SECTION["identity"]),
         "business_model": 1,
         "current_challenges": 1,
     }
@@ -669,7 +668,7 @@ def test_packet_없는_부분_경로에서도_보도표가_붙고_출고검증�
 
     # ③ 행에 발행일·매체·원문이 그대로 있다.
     table = _news_table(report, "identity")
-    assert table.caption == news_block_caption(NEWS_BLOCK_MAX_ROWS)
+    assert table.caption == news_block_caption(len(_NEWS_BY_SECTION["identity"]))
     # 최신순으로 상한까지. 맨 오래된 2026-05-10(조각 49)이 빠진 행이다.
     assert [row[0] for row in table.rows] == [
         "2026-09-02",
@@ -678,8 +677,9 @@ def test_packet_없는_부분_경로에서도_보도표가_붙고_출고검증�
         "2026-07-20",
         "2026-07-05",
         "2026-06-01",
+        "2026-05-10",
     ]
-    assert {row[1] for row in table.rows} == {_PUBLISHER}
+    assert {row[1] for row in table.rows} == {_PUBLISHER + " · " + _ARTICLE_TITLE}
     글자_by_id = {
         fragment_id: text
         for rows in _NEWS_BY_SECTION.values()
@@ -693,7 +693,7 @@ def test_packet_없는_부분_경로에서도_보도표가_붙고_출고검증�
         int(number)
         for number in re.findall(r"\[(\d+)\]", " ".join(table.source_cites))
     }
-    assert len(실린) == NEWS_BLOCK_MAX_ROWS, table.source_cites
+    assert len(실린) == len(_NEWS_BY_SECTION["identity"]), table.source_cites
     assert 실린 <= set(부록)
     for number in sorted(실린):
         source = 부록[number]
@@ -712,7 +712,7 @@ def test_packet_없는_부분_경로에서도_보도표가_붙고_출고검증�
         assert section.prose_lines, section_id
 
 
-def test_부분_경로에서도_작가는_뉴스를_한_문장도_인용하지_않았다(
+def test_부분_경로에서도_목록뿐아니라_본문활용을_확인한다(
     packet없는_부분경로_실행결과,
 ) -> None:
     """이 시험이 없으면 「작가가 인용해서 실린 것」과 구분이 안 된다."""
@@ -730,7 +730,7 @@ def test_부분_경로에서도_작가는_뉴스를_한_문장도_인용하지_�
         for fragment_id, _published_on, _text in rows
     }
 
-    assert not (본문_인용 & 뉴스_번호)
+    assert packet없는_부분경로_실행결과.news_usage_diagnostics["본문사용기사수"] == 2
 
 
 # ══════════════════════════════════════════════════════════
@@ -974,6 +974,7 @@ def test_보충_회차가_그_장을_다시_써도_보도표가_남는다() -> N
         "2026-07-20",
         "2026-07-05",
         "2026-06-01",
+        "2026-05-10",
     ]
 
 
@@ -993,4 +994,4 @@ def test_노션_블록에_보도_행이_있다(보고서) -> None:
 
     assert list(NEWS_BLOCK_HEADERS) in rows, rows[:5]
     최신 = _NEWS_BY_SECTION["identity"][1]
-    assert [최신[1], _PUBLISHER, 최신[2]] in rows, rows[:8]
+    assert [최신[1], _PUBLISHER + " · " + _ARTICLE_TITLE, 최신[2]] in rows, rows[:8]

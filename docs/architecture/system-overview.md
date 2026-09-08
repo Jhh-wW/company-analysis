@@ -31,7 +31,7 @@ render.yaml
   -> business_candidate: 후보 제시, 사람이 법인 확정
   -> pipeline
        |-- demo: 코드 내장 canonical 표본
-       `-- real: analysis_engine + 공식 공시·IR·홈페이지 수집 + 생성 모델(뉴스 검색·AI 선별 생략)
+       `-- real: analysis_engine + 공식 공시·IR·홈페이지 + 뉴스 본문 검증(NEWS_INTAKE=1) + 생성 모델
   -> canonical_report: 1~8장 비공개 초안
   -> company_comparison: 양사 공식 원문으로 9장(출시 모드 필수)
   -> report_summary: Writer 검수 완료 FactRecord에서 3~5개 문장을 글자 변경 없이 선택(요약 AI·Reviewer 0회, 상태 verified_fact_reuse)
@@ -40,12 +40,16 @@ render.yaml
   -> web / PDF / Notion: 같은 해시 결속 자동출고 정본을 채널별로 렌더
 ```
 
-출시 모드(`REPORT_RELEASE_MODE=FULL`)의 필수 1~9장이나 원문·법인·시점·상태·숫자·중복
-조건이 하나라도 맞지 않으면 결과를 공개하지 않고 `GATE_STOPPED`한다. 동일 조건 비교가
-성립하지 않으면 9장을 한 번만 보충하고, 그래도 미달이면 9장을 뺀 보고서를 내는 대신
-전체를 멈추며 이용 건수도 차감하지 않는다. 9장을 생략하고 표준 부족 사유를 가진
-`Grade.PARTIAL` 기본 보고서를 같은 출고 게이트로 검사하는 것은 연습 모드
-(`REPORT_RELEASE_MODE=SHADOW`)뿐이다.
+실제로 FULL로 생성하는 보고서는 필수 1~9장과 원문·법인·시점·상태·숫자·중복 조건을
+모두 통과해야 한다. 동일 조건 비교가 성립하지 않으면 9장을 한 번만 보충하고, 그래도
+미달이면 `GATE_STOPPED`하며 이용 건수도 차감하지 않는다.
+
+단, FULL 요청이라도 **작성 전 공식 근거 사전검사**에서 검증된 DART 자료와 공개 가능한
+최소 장 수를 확보했으나 웹 일시 장애·일부 장의 자료 부족·독립 문서 하한 미달이 확인되면
+기존 SHADOW 부분 제공 계약으로 전환할 수 있다. 원문 무결성과 필수 DART 수집이 깨진
+경우에는 전환하지 않는다. 전환 사유를 기록하고 `Grade.PARTIAL`로 최종 출고 검사를
+받으며, 완성 FULL 보고서로 가장하거나 뉴스로 공식 문서 하한을 채우지 않는다. 비교시험은
+요청 모드와 실제 적용 모드·전환 사유를 따로 읽어야 한다.
 
 ## 내부 정기 작업 경계
 

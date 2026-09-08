@@ -24,6 +24,10 @@ class SourceDocument:
     # 공식 비교 사실의 comparison_target을 실제 comparator Source 법인과
     # 맞추기 위한 수집 당시 발행자. URL이나 본문 단어로 법인명을 추측하지 않는다.
     publisher: str = ""
+    #: 보조 언론은 본문 근거로 쓰더라도 공식 독립 문서 하한을 채우지 않는다.
+    counts_toward_document_floor: bool = True
+    source_kind: str = ""
+    published_on: str = ""
 
 
 @dataclass(frozen=True)

@@ -85,6 +85,20 @@ def test_공개_웹_주소가_아니면_origin_denied로_남는다() -> None:
     assert 결과.reason_code == "fetch_origin_denied"
 
 
+def test_실제_읽은_주소와_기사_발행일을_근거_수집에_전달한다(monkeypatch):
+    html = ARTICLE_HTML.replace(
+        "</head>",
+        '<meta property="article:published_time" content="2026-09-07T09:00:00+09:00"></head>',
+    )
+    _wire(monkeypatch, transport=lambda _url: _response(text=html))
+
+    result = real._fetch_news_article_text(ARTICLE_URL)
+
+    assert result.succeeded
+    assert result.effective_url == ARTICLE_URL
+    assert result.published_on == "2026-09-07"
+
+
 def test_robots가_막으면_요청조차_하지_않고_robots_blocked로_남는다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

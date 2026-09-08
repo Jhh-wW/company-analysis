@@ -1,28 +1,9 @@
-"""뉴스 보조 조각을 장 끝의 결정적 표 「최근 보도 (보조)」로 올린다.
+"""검증된 뉴스 조각을 기사별로 묶어 장 끝의 보조 목록으로 공개한다.
 
-★ 왜 필요한가 (2026-09-06 운영 실측) — 뉴스 조각 6개가 작가 프롬프트까지
-  갔는데 작가가 한 문장도 인용하지 않아, 보고서에도 부록에도 흔적이 0건이었다.
-  조각을 «주는 일»과 조각이 «보고서에 실리는 일»은 다른 사건이다. 작가의
-  인용에 맡기면 실릴지 안 실릴지가 실행마다 갈린다. 그래서 조각을 받은 장의
-  끝에 표 하나를 «결정적으로» 붙인다 — 작가가 이미 본문에 인용했더라도
-  붙인다(예측 가능성 우선. 「어떤 실행에서는 있고 어떤 실행에서는 없다」가
-  이 기능에서 가장 나쁜 결과다).
-
-★ 이 모듈은 아무것도 «지어내지» 않는다. 조각의 글자와 메타만 투영한다:
-  · 「발행일」 = 조각이 운반한 기사 날짜 그대로.
-  · 「매체」   = 조각이 운반한 발행처 그대로.
-  · 「보도 문장」 = 조각 원문 그대로. 줄이거나 바꾸거나 따옴표를 떼지 않는다
-    (5·6장에는 인용문 조각만 오므로 따옴표까지 원문 그대로 실린다).
-  요약·해석·이어붙이기를 하지 않으므로 검수 AI를 다시 부를 이유가 없다.
-
-★ 스스로 네 가지를 다시 검사하고, 하나라도 어긋나면 «그 행만» 뺀다
-  (`_row_problem` 참고). 결정적으로 만든 줄은 검수 AI를 지나지 않으므로,
-  상류가 언젠가 보장을 잃으면 여기 말고는 잡을 자리가 없다.
-
-★ 9장은 대상이 아니다. 수집하는 쪽이 이미 9장을 빼지만, 그 규칙이 바뀌면 이
-  표가 조용히 9장에 붙는다. 그래서 shared의 «정본 목록»
-  (`report_evidence.constants.NEWS_EXCLUDED_SECTION_IDS`)을 여기서도 읽어 다시
-  막는다 — 목록을 베껴 적으면 한쪽만 바뀔 때 어긋난다.
+같은 기사와 원문은 반복하지 않으며, 제목·날짜·발행처·본문과 출처 결속을
+유지한다. 본문 활용은 news_usage에서 별도로 검수하고 진단한다. 목록이
+존재하는 것만으로 본문 반영을 인정하지 않는다. 기사 목록에 별도 수량
+상한을 두지 않으며 9장 공식 비교에는 뉴스를 싣지 않는다.
 """
 
 from __future__ import annotations
@@ -32,6 +13,7 @@ from dataclasses import dataclass, replace
 from typing import Final, Mapping, Optional, Sequence
 
 from src.features.composer.constants import SECTION_IDS
+from src.features.composer.news_constants import NEWS_BODY_DUPLICATE_PREVIEW_CHARS, NEWS_BODY_REFERENCE_SUFFIX
 from src.features.composer.port import (
     ComposedReport,
     ComposedSection,
@@ -66,23 +48,11 @@ _SECTION_OF_SLOT: Final[dict[str, str]] = {
 
 
 # ── 표 모양 ──────────────────────────────────────────────────────────
-#: 한 장에 실을 보도 행의 최대 개수.
-#:
-#: ★ 왜 6인가 — 수집이 모은 보조 조각은 회사당 최대 6개(파이프라인의
-#:   `NEWS_FRAGMENT_COUNT_LIMIT`, 시험이 두 값의 일치를 지킨다)이고 기사
-#:   하나가 내는 조각은 최대 2개(기사당 상한)다. 장당 상한을 그 전체 상한과
-#:   같게 두면 «모아 놓고 표에서 숨기는» 조각이 없다.
-#:   2026-09-07 운영 실측: 조각 6개가 전부 한 장(3장)에 배정됐는데 옛 상한
-#:   3 때문에 절반이 `row_limit`으로 빠졌다. 표 길이는 수집 상한이 이미
-#:   묶고 있어(6행 이하, 같은 기사는 2행까지) 본문보다 길어지지 않는다.
-NEWS_BLOCK_MAX_ROWS: Final[int] = 6
-
 #: 표 머리글. 「보도 문장」이 마지막이라 긴 글이 오른쪽으로 흐른다.
-NEWS_BLOCK_HEADERS: Final[tuple[str, ...]] = ("발행일", "매체", "보도 문장")
+NEWS_BLOCK_HEADERS: Final[tuple[str, ...]] = ("발행일", "매체 · 기사", "보도 내용")
 
-#: 표 캡션 틀. 「(보조, N)」의 N은 실제로 실린 행 수다 — 몇 건을 보고 있는지
-#: 독자가 표를 세지 않아도 알게 한다.
-NEWS_BLOCK_CAPTION_TEMPLATE: Final[str] = "최근 보도 (보조, {count})"
+#: 조각 수와 혼동하지 않도록 기사 단위를 표시한다.
+NEWS_BLOCK_CAPTION_TEMPLATE: Final[str] = "최근 보도 (보조, {count}기사)"
 
 #: 공개 표현. 도식이 아니라 «그냥 표»다 — 세 칸이 흐름으로 이어지지 않으므로
 #: 화살표·카드로 그리면 뜻이 없는 그림이 된다(`report_standard.visualization`은
@@ -116,6 +86,8 @@ BLOCKED_EXCLUDED_SECTION: Final[str] = "excluded_section"
 BLOCKED_ROW_LIMIT: Final[str] = "row_limit"
 #: 이 실행 모드는 공개 구조를 결속하지 못해, 표를 붙이면 보고서 전체가 막힌다.
 BLOCKED_UNBINDABLE_MODE: Final[str] = "release_mode_cannot_bind_structures"
+BLOCKED_DUPLICATE_ARTICLE: Final[str] = "article_listed_in_another_section"
+BLOCKED_ARTICLE_META: Final[str] = "inconsistent_article_metadata"
 
 
 def news_block_caption(row_count: int) -> str:
@@ -229,10 +201,40 @@ def _news_row(fragment: CollectedFragment) -> NewsRow:
     return NewsRow(
         cells=(
             str(getattr(fragment, "document_date", "") or "").strip(),
-            str(getattr(fragment, "source_publisher", "") or "").strip(),
+            article_label(fragment),
             str(fragment.text or "").strip(),
         ),
         citations=(str(fragment.fragment_id).strip(),),
+        evidence_texts=(fragment.text,),
+    )
+
+
+def article_label(fragment: CollectedFragment) -> str:
+    """제목·발행처는 같은 칸에, 실제 링크는 행 출처 번호로 제공한다."""
+    return " · ".join(value.strip() for value in (
+        fragment.source_publisher, fragment.document_title,
+    ) if value.strip())
+
+
+def news_list_excerpt(text: str, body_text: str) -> str:
+    """긴 원문이 본문에 이미 실렸으면 목록에는 원문 앞부분과 본문 위치를 표시한다."""
+    text = text.strip()
+    if len(text) <= NEWS_BODY_DUPLICATE_PREVIEW_CHARS or text not in body_text:
+        return text
+    end = text.rfind(" ", 0, NEWS_BODY_DUPLICATE_PREVIEW_CHARS)
+    if end <= 0:
+        end = NEWS_BODY_DUPLICATE_PREVIEW_CHARS
+    return text[:end] + NEWS_BODY_REFERENCE_SUFFIX
+
+
+def article_row(fragments: Sequence[CollectedFragment], body_text: str = "") -> NewsRow:
+    """기사 하나의 서로 다른 정확 원문을 한 행에 묶는다."""
+    first = fragments[0]
+    unique = tuple(dict.fromkeys(news_list_excerpt(f.text, body_text) for f in fragments))
+    return NewsRow(
+        cells=(first.document_date.strip(), article_label(first), "\n".join(unique)),
+        citations=tuple(dict.fromkeys(f.fragment_id for f in fragments)),
+        evidence_texts=tuple(f.text for f in fragments),
     )
 
 
@@ -241,8 +243,8 @@ def _ordered_candidates(
 ) -> list[tuple[int, CollectedFragment]]:
     """최신 발행일이 먼저 오도록 세우고, 같은 날은 수집 순서를 지킨다.
 
-    발행일이 비어 있으면 맨 뒤로 보낸다 — 어차피 ``_row_problem``이 그 행을
-    빼지만, 정렬에서부터 뒤로 밀어 두면 상한 자리를 먹지 않는다.
+    발행일이 비어 있으면 맨 뒤로 보낸다. 해당 행은 ``_row_problem``이
+    필수 메타데이터 누락으로 제외한다.
     """
 
     indexed = list(enumerate(fragments))
@@ -347,6 +349,7 @@ def augment_news_blocks(
     rebuilt: list[ComposedSection] = []
     row_counts: list[tuple[str, int]] = []
     changed = False
+    listed_articles: set[str] = set()
     for section in report.sections:
         allowed = allowed_fragment_ids_by_section.get(section.section_id)
         owned = [
@@ -362,16 +365,28 @@ def augment_news_blocks(
             rebuilt.append(section)
             continue
         rows: list[NewsRow] = []
+        grouped: dict[str, list[CollectedFragment]] = {}
         for fragment in owned:
-            if len(rows) >= NEWS_BLOCK_MAX_ROWS:
-                blocked[BLOCKED_ROW_LIMIT] += 1
-                continue
             row = _news_row(fragment)
             problem = _row_problem(row, fragment, allowed_fragment_ids=allowed)
+            if not fragment.source_publisher.strip():
+                problem = BLOCKED_MISSING_META
+            if not fragment.document_title.strip() or not fragment.source_url.strip():
+                problem = BLOCKED_ARTICLE_META
             if problem:
                 blocked[problem] += 1
                 continue
-            rows.append(row)
+            key = fragment.document_identity or fragment.source_url or fragment.fragment_id
+            grouped.setdefault(key, []).append(fragment)
+        for key, article in grouped.items():
+            if key in listed_articles:
+                blocked[BLOCKED_DUPLICATE_ARTICLE] += len(article)
+                continue
+            if len({(f.document_date, f.source_publisher, f.document_title) for f in article}) != 1:
+                blocked[BLOCKED_ARTICLE_META] += len(article)
+                continue
+            rows.append(article_row(article, "\n".join(sentence.text for sentence in section.sentences)))
+            listed_articles.add(key)
         if not rows:
             rebuilt.append(section)
             continue
@@ -458,7 +473,6 @@ __all__ = [
     "NEWS_BLOCK_BLOCKED_STEP",
     "NEWS_BLOCK_CAPTION_TEMPLATE",
     "NEWS_BLOCK_HEADERS",
-    "NEWS_BLOCK_MAX_ROWS",
     "NEWS_BLOCK_PRESENTATION",
     "NEWS_BLOCK_STEP",
     "NewsBlockResult",

@@ -18,6 +18,7 @@ APP_ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = APP_ROOT / "실시간성능시험켜기.ps1"
 SCRIPT = LAUNCHER.read_text(encoding="utf-8-sig")
 WINDOWS_POWERSHELL = shutil.which("powershell.exe") if os.name == "nt" else None
+GIT_EXECUTABLE = shutil.which("git")
 #: 계약 밖 -ReleaseMode를 만났을 때 실행기가 «스스로» 끝내는 코드. 파라미터 특성만으로
 #: 막았을 때 PowerShell 바인더가 대신 내는 1과 달라야, 부르는 쪽이 「실행기가 판단해서
 #: 막았다」와 「값을 넘기다 실패했다」를 구분할 수 있다.
@@ -25,8 +26,8 @@ REFUSED_RELEASE_MODE_EXIT_CODE = 2
 PAID_PROVIDER_NAMES = (
     "DART_API_KEY",
     "ANTHROPIC_API_KEY",
-    "NAVER_CLIENT_ID",
-    "NAVER_CLIENT_SECRET",
+    "NCP_APIGW_API_KEY_ID",
+    "NCP_APIGW_API_KEY",
 )
 PROVIDER_STATUS_NAMES = PAID_PROVIDER_NAMES + (
     "GOOGLE_PLACES_API_KEY",
@@ -105,7 +106,8 @@ def _environment(tmp_path: Path) -> dict[str, str]:
         "SystemDrive": drive,
         "ComSpec": str(system_root / "System32" / "cmd.exe"),
         "PATH": os.pathsep.join(
-            (str(python_home), str(ps_home), str(system_root / "System32"))
+            (str(python_home), str(ps_home), str(system_root / "System32"),
+             str(Path(GIT_EXECUTABLE).parent) if GIT_EXECUTABLE else "")
         ),
         "PATHEXT": ".COM;.EXE;.BAT;.CMD",
         "PSModulePath": str(ps_home / "Modules"),
@@ -129,6 +131,8 @@ def _environment(tmp_path: Path) -> dict[str, str]:
         "PYTHONUTF8": "1",
         "PYTHONIOENCODING": "utf-8",
         "PYTHONPATH": str(tmp_path / "must-not-inherit-pythonpath"),
+        "APP_GIT_COMMIT": "0" * 40,
+        "RENDER_GIT_COMMIT": "0" * 40,
         "EVALUATION_TEST_COMPANY": "JYP-sensitive-test-input",
         "EVALUATION_TEST_ADDRESS": "Seoul-Gangdong-sensitive-test-input",
         "EVALUATION_TEST_POSTING": "posting-sensitive-test-input",
@@ -142,6 +146,7 @@ def _copy_fake_app(tmp_path: Path) -> Path:
     app_copy = tmp_path / "한글 공백 평가 실행" / "app"
     app_copy.mkdir(parents=True)
     shutil.copy2(LAUNCHER, app_copy / LAUNCHER.name)
+    shutil.copy2(APP_ROOT.parent / "render.yaml", app_copy.parent / "render.yaml")
     (app_copy / "uvicorn.py").write_text(
         """
 import json
@@ -150,8 +155,8 @@ import pathlib
 import sys
 
 provider_names = (
-    "DART_API_KEY", "ANTHROPIC_API_KEY", "NAVER_CLIENT_ID",
-    "NAVER_CLIENT_SECRET", "GOOGLE_PLACES_API_KEY",
+    "DART_API_KEY", "ANTHROPIC_API_KEY", "NCP_APIGW_API_KEY_ID",
+    "NCP_APIGW_API_KEY", "GOOGLE_PLACES_API_KEY",
 )
 root = pathlib.Path(os.environ["APP_DATA_ROOT"]).resolve()
 root.mkdir(parents=True, exist_ok=True)
@@ -163,7 +168,16 @@ payload = {
     "terms_ack": os.environ.get("GOOGLE_PLACES_TERMS_ACK"),
     "pipeline": os.environ.get("PIPELINE"),
     "engine_v2": os.environ.get("ENGINE_V2"),
+    "app_git_commit": os.environ.get("APP_GIT_COMMIT"),
+    "render_git_commit_absent": "RENDER_GIT_COMMIT" not in os.environ,
     "release_mode": os.environ.get("REPORT_RELEASE_MODE"),
+    "feature_settings": {name: os.environ.get(name) for name in (
+        "NEWS_INTAKE", "REVENUE_TABLE_V2", "TYPED_DART_COLLECTOR",
+        "EVIDENCE_RECLASSIFY", "NEWSROOM_DATE_AI",
+    )},
+    "legacy_naver_keys_absent": all(name not in os.environ for name in (
+        "NAVER_CLIENT_ID", "NAVER_CLIENT_SECRET",
+    )),
     "dotenv_disabled": os.environ.get("ANALYSIS_ENGINE_DISABLE_DOTENV"),
     "loopback_flags": all(value in sys.argv for value in (
         "--host", "127.0.0.1", "--workers", "1", "--no-access-log",
@@ -190,6 +204,13 @@ payload = {
         + "\n",
         encoding="utf-8",
     )
+    assert GIT_EXECUTABLE is not None
+    for arguments in (
+        ["init", "--quiet"], ["config", "core.autocrlf", "false"], ["add", "."],
+        ["-c", "user.name=평가 시험", "-c", "user.email=evaluation@example.test", "commit", "--quiet", "-m", "평가 실행기 시험"],
+    ):
+        subprocess.run([GIT_EXECUTABLE, "-C", str(app_copy.parent), *arguments],
+                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return app_copy
 
 
@@ -202,10 +223,15 @@ def _run_fake(
     engine_v2: bool = False,
     release_mode: str | None = None,
     delete_data_on_exit: bool = False,
+    configuration_profile: str | None = None,
+    feature_arguments: str = "",
 ) -> tuple[subprocess.CompletedProcess[bytes], list[Path]]:
     assert WINDOWS_POWERSHELL is not None
     launcher = app_copy / LAUNCHER.name
     switch = " -EnablePaidProviders" if paid else ""
+    if configuration_profile is not None:
+        switch += f" -ConfigurationProfile {_ps_literal(configuration_profile)}"
+    switch += feature_arguments
     if engine_v2:
         switch += " -EngineV2"
     if release_mode is not None:
@@ -412,7 +438,7 @@ def test_engine_v2_child_always_gets_the_report_release_mode() -> None:
     assert "exit 2" in SCRIPT, "계약 밖 값을 거부하고도 성공으로 끝나면 안 된다"
     assert '[string]$ReleaseMode = "FULL"' in SCRIPT
     v2_branch = SCRIPT.split('$childEnvironment["ENGINE_V2"] = "1"')[1]
-    assert '$childEnvironment["REPORT_RELEASE_MODE"] = $ReleaseMode' in v2_branch, (
+    assert '$childEnvironment["REPORT_RELEASE_MODE"] = $featureProfile.Settings["REPORT_RELEASE_MODE"]' in v2_branch, (
         "ENGINE_V2=1을 켜는 갈래가 REPORT_RELEASE_MODE를 함께 넘겨야 한다"
     )
     child_allowlist = SCRIPT.split("$allowedChildEnvironmentNames")[1]
@@ -448,13 +474,109 @@ def test_engine_v1_child_gets_no_release_mode(tmp_path: Path) -> None:
     app_copy = _copy_fake_app(tmp_path)
     environment = _environment(tmp_path)
 
-    result, records = _run_fake(app_copy, environment, paid=False)
+    result, records = _run_fake(
+        app_copy, environment, paid=False, configuration_profile="Explicit"
+    )
 
     assert result.returncode == 0, result.stderr.decode(errors="replace")
     assert len(records) == 1
     payload = json.loads(records[0].read_text(encoding="utf-8"))
     assert payload["engine_v2"] is None
     assert payload["release_mode"] is None
+
+
+@pytest.mark.skipif(WINDOWS_POWERSHELL is None, reason="Windows PowerShell 5.1 실제 자식 환경 시험")
+def test_repository_profile_and_explicit_switches_have_secret_free_receipt(tmp_path: Path) -> None:
+    import hashlib
+
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+    environment["NAVER_CLIENT_ID"] = "legacy-secret-must-not-leak"
+    environment["NEWS_INTAKE"] = "1"  # 부모의 미확인 설정을 몰래 상속하지 않는다.
+    result, records = _run_fake(
+        app_copy, environment, paid=True,
+        feature_arguments=" -NewsIntake 0 -EvidenceReclassify 1 -TypedDartCollector 1 -NewsroomDateAI 1",
+    )
+    assert result.returncode == 0
+    assert len(records) == 1
+    payload = json.loads(records[0].read_text(encoding="utf-8"))
+    assert payload["feature_settings"] == {
+        "NEWS_INTAKE": "0", "REVENUE_TABLE_V2": "1", "TYPED_DART_COLLECTOR": "1",
+        "EVIDENCE_RECLASSIFY": "1", "NEWSROOM_DATE_AI": "1",
+    }
+    assert payload["engine_v2"] == "1"
+    assert payload["legacy_naver_keys_absent"] is True
+    root = records[0].parent
+    raw = (root / "evaluation-settings.json").read_bytes()
+    snapshot = json.loads(raw)
+    assert snapshot["production_parity"] == "not_verified"
+    assert snapshot["configuration_profile"] == "RepositoryContract"
+    assert snapshot["settings"]["REVENUE_TABLE_V2"] == "1"
+    assert hashlib.sha256(raw).hexdigest() == (root / "evaluation-settings.sha256").read_text()
+    for sentinel in (b"secret-sentinel", b"legacy-secret", b"JYP-sensitive"):
+        assert sentinel not in raw and sentinel not in result.stdout and sentinel not in result.stderr
+
+
+def test_launcher_provider_names_match_current_startup_contract() -> None:
+    from src.web.evaluation_mode import REQUIRED_PROVIDER_ENV_NAMES
+
+    assert set(PAID_PROVIDER_NAMES) == set(REQUIRED_PROVIDER_ENV_NAMES)
+
+
+@pytest.mark.skipif(WINDOWS_POWERSHELL is None, reason="Windows 실제 커밋 전달 시험")
+def test_actual_git_commit_replaces_parent_claim_and_is_recorded(tmp_path: Path) -> None:
+    app_copy = _copy_fake_app(tmp_path)
+    result, records = _run_fake(app_copy, _environment(tmp_path), paid=True)
+    assert result.returncode == 0
+    actual = subprocess.check_output([GIT_EXECUTABLE, "-C", str(app_copy.parent), "rev-parse", "HEAD"], text=True).strip()
+    payload = json.loads(records[0].read_bytes())
+    snapshot = json.loads((records[0].parent / "evaluation-settings.json").read_bytes())
+    assert payload["app_git_commit"] == snapshot["app_git_commit"] == actual
+    assert actual != "0" * 40
+    assert payload["render_git_commit_absent"] is True
+    assert snapshot["code_identity_verified"] is True
+    assert snapshot["execution_source_clean"] is True
+
+
+@pytest.mark.parametrize("change", ["tracked", "untracked"])
+@pytest.mark.skipif(WINDOWS_POWERSHELL is None, reason="Windows 미커밋 소스 유료 차단 시험")
+def test_paid_launch_requires_committed_execution_source(tmp_path: Path, change: str) -> None:
+    app_copy = _copy_fake_app(tmp_path)
+    if change == "tracked":
+        with (app_copy / LAUNCHER.name).open("a", encoding="utf-8") as stream:
+            stream.write("\n# 실행 소스 미커밋 변경\n")
+    else:
+        (app_copy / "src").mkdir()
+        (app_copy / "src" / "untracked.py").write_text("VALUE = 1\n", encoding="utf-8")
+    result, records = _run_fake(app_copy, _environment(tmp_path), paid=True)
+    assert result.returncode != 0
+    assert not records
+
+
+@pytest.mark.skipif(WINDOWS_POWERSHELL is None, reason="Windows PowerShell 실제 운영 스위치 전달 시험")
+def test_observed_production_profile_does_not_enable_blueprint_only_revenue_table(tmp_path: Path) -> None:
+    app_copy = _copy_fake_app(tmp_path)
+    result, records = _run_fake(
+        app_copy, _environment(tmp_path), paid=False,
+        configuration_profile="ProductionObserved20260908",
+    )
+    assert result.returncode == 0
+    snapshot = json.loads((records[0].parent / "evaluation-settings.json").read_bytes())
+    assert snapshot["settings"]["ENGINE_V2"] == "1"
+    assert snapshot["settings"]["NEWS_INTAKE"] == "1"
+    assert snapshot["settings"]["REVENUE_TABLE_V2"] == "0"
+    assert snapshot["matches_observed_production_switches"] is True
+    assert snapshot["production_parity"] == "not_verified"
+
+
+@pytest.mark.skipif(WINDOWS_POWERSHELL is None, reason="Windows PowerShell 5.1 실제 자식 환경 시험")
+def test_unknown_feature_switch_is_rejected_before_child_creation(tmp_path: Path) -> None:
+    app_copy = _copy_fake_app(tmp_path)
+    result, records = _run_fake(
+        app_copy, _environment(tmp_path), paid=False, feature_arguments=" -NewsIntake true"
+    )
+    assert not records
+    assert b"NEWS_INTAKE" in result.stdout
 
 
 def test_launcher_is_utf8_with_bom_so_powershell_5_1_shows_korean() -> None:

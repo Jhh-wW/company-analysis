@@ -84,8 +84,9 @@ app/
 **코드 기본값은 `PIPELINE=demo`·`BETA_ADMIN_ONLY=1`**입니다 — 로컬에서 실수로 비용이
 나가지 않게 하기 위해서입니다. 운영 배포(Render)만 `render.yaml`에서 `real`로 올립니다.
 
-자동 배포는 꺼져 있어(`render.yaml`의 `autoDeployTrigger: off`) 커밋을 올려도 사람이
-Manual Deploy를 누르기 전에는 반영되지 않습니다.
+저장소의 `render.yaml`은 `autoDeployTrigger: commit`을 선언합니다. 실제 서비스에도
+적용돼 있으면 main 푸시로 배포가 시작될 수 있습니다. Render 대시보드 설정과 배포된
+커밋을 따로 확인해야 하며, 푸시나 로컬 시험만으로 운영 반영을 확정하지 않습니다.
 
 ## 로컬 데모
 

@@ -50,12 +50,21 @@ class NewsItem:
 
 @dataclass(frozen=True)
 class NewsSearchResult:
-    """뉴스 실패가 전체 보고서 생성을 중단하지 않게 하는 반환 계약."""
+    """논리 검색 결과와 실제 전송 이력을 함께 제공한다.
+
+    추가 필드의 기본값은 기존 네 인자 생성자를 보존한다. 실제 클라이언트가
+    반환할 때는 전송마다 사유 코드 하나를 기록하며 URL·검색어·키는 담지 않는다.
+    transport_observed는 실제 전송 0회와 구형 생성자의 기본값 0을 구별한다.
+    """
 
     state: str
     reason_code: str
     items: list[NewsItem]
     elapsed_ms: int
+    transport_attempts: int = 0
+    retry_recovered: bool = False
+    attempt_reason_codes: tuple[str, ...] = ()
+    transport_observed: bool = False
 
     @property
     def ok(self) -> bool:
@@ -94,12 +103,21 @@ def _result(
     state: str,
     reason_code: str,
     items: list[NewsItem] | None = None,
+    transport_attempts: int = 0,
+    attempt_reason_codes: tuple[str, ...] = (),
 ) -> NewsSearchResult:
     return NewsSearchResult(
         state=state,
         reason_code=reason_code,
         items=[] if items is None else items,
         elapsed_ms=_elapsed_ms(started_ns),
+        transport_attempts=transport_attempts,
+        transport_observed=True,
+        retry_recovered=(
+            state == c.NAVER_NEWS_STATE_SUCCESS
+            and c.NEWS_SEARCH_TEMPORARILY_UNAVAILABLE in attempt_reason_codes[:-1]
+        ),
+        attempt_reason_codes=attempt_reason_codes,
     )
 
 
@@ -227,16 +245,39 @@ def search_news(
     display: int = c.NAVER_NEWS_DEFAULT_DISPLAY,
     start: int = c.NAVER_NEWS_DEFAULT_START,
     sort: str = c.NAVER_NEWS_DEFAULT_SORT,
+    *,
+    remaining_transport_budget: int | None = None,
 ) -> NewsSearchResult:
-    """NAVER API HUB 뉴스를 검색하고 모든 실패를 결과 객체로 돌려준다."""
+    """실제 전송 예산 안에서 검색하며 재시도와 실패를 결과 객체로 돌려준다.
+
+    예산은 이번 논리 호출이 쓸 수 있는 전송 수이고 None은 기존 동작이다.
+    호출자는 다음 검색 전에 반환된 transport_attempts만 남은 예산에서 뺀다.
+    기존 네 위치 인자와 _read_payload(request) 테스트 대역 계약은 유지한다.
+    """
 
     started_ns = time.perf_counter_ns()
+    transport_attempts = 0
+    attempt_reason_codes: list[str] = []
+
+    def finish(*, state: str, reason_code: str, items: list[NewsItem] | None = None):
+        return _result(
+            started_ns, state=state, reason_code=reason_code, items=items,
+            transport_attempts=transport_attempts,
+            attempt_reason_codes=tuple(attempt_reason_codes),
+        )
+
     credentials = _credentials()
     if credentials is None:
-        return _result(
-            started_ns,
+        return finish(
             state=c.NAVER_NEWS_STATE_SKIPPED,
             reason_code=c.NEWS_SEARCH_NOT_CONFIGURED,
+        )
+    if remaining_transport_budget is not None and (
+        type(remaining_transport_budget) is not int or remaining_transport_budget < 0
+    ):
+        return finish(
+            state=c.NAVER_NEWS_STATE_FAILED,
+            reason_code=c.NEWS_SEARCH_INVALID_REQUEST,
         )
 
     key_id, api_key = credentials
@@ -250,64 +291,61 @@ def search_news(
             api_key=api_key,
         )
     except Exception:
-        return _result(
-            started_ns,
+        return finish(
             state=c.NAVER_NEWS_STATE_FAILED,
             reason_code=c.NEWS_SEARCH_INVALID_RESPONSE,
         )
     attempts = c.NAVER_NEWS_MAX_RETRIES + 1
 
     for attempt in range(attempts):
+        if (
+            remaining_transport_budget is not None
+            and transport_attempts >= remaining_transport_budget
+        ):
+            return finish(
+                state=c.NAVER_NEWS_STATE_SKIPPED,
+                reason_code=c.NEWS_SEARCH_TRANSPORT_BUDGET_EXHAUSTED,
+            )
         if not _reserve_daily_call():
-            return _result(
-                started_ns,
+            return finish(
                 state=c.NAVER_NEWS_STATE_SKIPPED,
                 reason_code=c.NEWS_SEARCH_DAILY_CAP,
             )
+        # 요청 구성과 두 상한 검사를 마친 뒤, 실제 읽기 경계에서만 차감한다.
+        transport_attempts += 1
         try:
             items = _normalize_items(_read_payload(request))
         except _AuthenticationNewsError:
-            return _result(
-                started_ns,
-                state=c.NAVER_NEWS_STATE_FAILED,
-                reason_code=c.NEWS_SEARCH_AUTHENTICATION_FAILED,
-            )
+            reason_code = c.NEWS_SEARCH_AUTHENTICATION_FAILED
         except _RateLimitedNewsError:
-            return _result(
-                started_ns,
-                state=c.NAVER_NEWS_STATE_FAILED,
-                reason_code=c.NEWS_SEARCH_RATE_LIMITED,
-            )
+            reason_code = c.NEWS_SEARCH_RATE_LIMITED
         except _InvalidNewsResponse:
-            return _result(
-                started_ns,
-                state=c.NAVER_NEWS_STATE_FAILED,
-                reason_code=c.NEWS_SEARCH_INVALID_RESPONSE,
-            )
+            reason_code = c.NEWS_SEARCH_INVALID_RESPONSE
         except _TransientNewsError:
+            attempt_reason_codes.append(c.NEWS_SEARCH_TEMPORARILY_UNAVAILABLE)
             if attempt < c.NAVER_NEWS_MAX_RETRIES:
                 continue
-            return _result(
-                started_ns,
+            return finish(
                 state=c.NAVER_NEWS_STATE_FAILED,
                 reason_code=c.NEWS_SEARCH_TEMPORARILY_UNAVAILABLE,
             )
         except Exception:
             # 뉴스는 보조 근거라 예상 밖 어댑터 실패도 전체 보고서를 막지 않는다.
-            return _result(
-                started_ns,
-                state=c.NAVER_NEWS_STATE_FAILED,
-                reason_code=c.NEWS_SEARCH_INVALID_RESPONSE,
+            reason_code = c.NEWS_SEARCH_INVALID_RESPONSE
+        else:
+            attempt_reason_codes.append(c.NEWS_SEARCH_OK)
+            return finish(
+                state=c.NAVER_NEWS_STATE_SUCCESS,
+                reason_code=c.NEWS_SEARCH_OK,
+                items=items,
             )
-        return _result(
-            started_ns,
-            state=c.NAVER_NEWS_STATE_SUCCESS,
-            reason_code=c.NEWS_SEARCH_OK,
-            items=items,
+        attempt_reason_codes.append(reason_code)
+        return finish(
+            state=c.NAVER_NEWS_STATE_FAILED,
+            reason_code=reason_code,
         )
 
-    return _result(
-        started_ns,
+    return finish(
         state=c.NAVER_NEWS_STATE_FAILED,
         reason_code=c.NEWS_SEARCH_TEMPORARILY_UNAVAILABLE,
     )

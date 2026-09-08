@@ -265,9 +265,9 @@ BODY_STAGE_PROVIDED: Final[str] = "provided_text"
 #: 본문 폴백을 시도하는 순서. **이 tuple이 폴백 사다리의 정본이다** —
 #: 항목을 빼면 그 겹이 실제로 꺼진다(음성 대조가 이 성질을 쓴다).
 BODY_EXTRACTION_STAGE_ORDER: Final[tuple[str, ...]] = (
-    BODY_STAGE_USABLE_RANGES,
     BODY_STAGE_JSON_LD,
     BODY_STAGE_ARTICLE_TAG,
+    BODY_STAGE_USABLE_RANGES,
     BODY_STAGE_META_DESCRIPTION,
 )
 #: 본문으로 인정하는 최소 글자 수. 메타 설명 한 문장(보통 80~160자)은 넘고,
@@ -304,3 +304,172 @@ URL_VARIANT_ORDER: Final[tuple[str, ...]] = (
 #: 주소 변형 상한. 변형마다 robots.txt 확인이 한 번 더 붙으므로 늘리면
 #: 요청 수가 그대로 늘어난다.
 MAX_URL_VARIANTS: Final[int] = 3
+
+# 새 수집 경로의 상한은 기사 수를 채우는 목표가 아니라 요청 비용의 경계다.
+COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v5"
+NAME_ACRONYM_MIN_CHARS: Final[int] = 2
+NAME_ACRONYM_MAX_CHARS: Final[int] = 8
+NAME_RETAINED_SUFFIX_MIN_CHARS: Final[int] = 2
+NAME_DERIVED_VARIANT_BUDGET: Final[int] = 8
+NAME_READING_VARIANT_BUDGET: Final[int] = 16
+# 공식 한글 상호의 알파벳 독음과 공식 영문 표기가 함께 맞을 때만 사용한다.
+# 접두만 떼어 별칭을 만들지 않고 상호의 나머지 글자를 모두 보존한다.
+LATIN_LETTER_KOREAN_READINGS: Final[dict[str, tuple[str, ...]]] = {
+    "A": ("에이",), "B": ("비",), "C": ("씨", "시"), "D": ("디",),
+    "E": ("이",), "F": ("에프",), "G": ("지",), "H": ("에이치",),
+    "I": ("아이",), "J": ("제이",), "K": ("케이",), "L": ("엘",),
+    "M": ("엠",), "N": ("엔",), "O": ("오",), "P": ("피",),
+    "Q": ("큐",), "R": ("알", "아르"), "S": ("에스",), "T": ("티",),
+    "U": ("유",), "V": ("브이",), "W": ("더블유", "더블류"),
+    "X": ("엑스",), "Y": ("와이",), "Z": ("제트", "지"),
+}
+ENGLISH_CORPORATE_SUFFIX_PATTERN: Final[str] = (
+    r"(?:[,\s]+(?:co\.?\s*,?\s*ltd\.?|inc(?:orporated)?\.?|corp(?:oration)?\.?|limited|ltd\.?))+$"
+)
+NAME_PARTICLE_PATTERN: Final[str] = r"(?:은|는|이|가|을|를|의|와|과|에서|에게|관계자|대표|측)"
+NAME_SEPARATOR_PATTERN: Final[str] = r"[\s.,·ㆍ'’\"()\[\]_-]*"
+NAME_RESOLUTION_PENDING: Final[str] = "name_resolution_pending"
+SEARCH_CALL_BUDGET: Final[int] = 12
+# 논리 검색 하나가 재시도하더라도 실제 전송은 이 경계를 함께 나눠 쓴다.
+SEARCH_TRANSPORT_ATTEMPT_BUDGET: Final[int] = 12
+SEARCH_TRANSPORT_UNOBSERVED: Final[str] = "news_search_transport_unobserved"
+SEARCH_TRANSPORT_METADATA_INVALID: Final[str] = "news_search_transport_metadata_invalid"
+SEARCH_TRANSPORT_BUDGET_UNENFORCED: Final[str] = "news_search_transport_budget_unenforced"
+SEARCH_TRANSPORT_BUDGET_EXHAUSTED: Final[str] = "news_search_transport_budget_exhausted"
+SEARCH_TRANSPORT_BUDGET_EXCEEDED: Final[str] = "news_search_transport_budget_exceeded"
+SEARCH_TRANSPORT_OBSERVATION_PENDING: Final[str] = "transport_observation_pending"
+SEARCH_PAGE_SIZE: Final[int] = 20
+SEARCH_CANDIDATE_BUDGET: Final[int] = 80
+SEARCH_SECONDS_BUDGET: Final[int] = 90
+SEARCH_ALIAS_BUDGET: Final[int] = 2
+SEARCH_TITLE_CHARS: Final[int] = 500
+SEARCH_DESCRIPTION_CHARS: Final[int] = 2_000
+SEARCH_URL_CHARS: Final[int] = 2_000
+COMPANY_CONTEXT_CHARS: Final[int] = 4_000
+BODY_ARTICLE_BUDGET: Final[int] = 24
+BODY_CALL_BUDGET: Final[int] = 48
+BODY_CHARS_PER_ARTICLE: Final[int] = 12_000
+BODY_TOTAL_CHARS_BUDGET: Final[int] = 200_000
+COLLECTION_SECONDS_BUDGET: Final[int] = 180
+GROUNDED_BATCH_SIZE: Final[int] = 4
+GROUNDED_CALL_BUDGET: Final[int] = 8
+GROUNDED_MAX_TOKENS: Final[int] = 5_000
+GROUNDED_PROMPT_CHARS_BUDGET: Final[int] = 60_000
+GROUNDED_RESPONSE_CHARS_BUDGET: Final[int] = 60_000
+GROUNDED_MIN_EXCERPT_CHARS: Final[int] = 25
+GROUNDED_MAX_EXCERPT_CHARS: Final[int] = 1_000
+GROUNDED_EXCERPTS_PER_ARTICLE: Final[int] = 2
+GROUNDED_SUBJECT_CHARS: Final[int] = 100
+SUBJECT_GENERIC_TERMS: Final[frozenset[str]] = frozenset({
+    "그", "그녀", "그룹", "가수", "배우", "제품", "서비스", "브랜드", "고객",
+    "회사", "기업", "관계자", "대표", "사장", "회장", "사업", "계약", "이번",
+})
+SUBJECT_RELATION_MARKERS: Final[tuple[str, ...]] = (
+    "소속", "브랜드", "제품", "서비스", "개발", "제조", "공급", "판매", "출시",
+    "운영", "제작", "배급", "고객", "계약", "협력", "파트너", "매니지먼트",
+    "대표", "임원", "직원", "사업부", "사업장", "공장",
+)
+FINAL_ARTICLE_BUDGET: Final[int] = 12
+FINAL_FRAGMENT_BUDGET: Final[int] = 16
+FINAL_FRAGMENT_CHARS_BUDGET: Final[int] = 12_000
+SUFFICIENT_DISTINCT_EVENTS: Final[int] = 6
+SUFFICIENT_DISTINCT_TOPICS: Final[int] = 3
+WINDOW_MONTHS: Final[tuple[int, ...]] = (12, 24, 36)
+WINDOW_ARTICLE_BUDGETS: Final[tuple[int, ...]] = (16, 4, 4)
+CONTENT_DUPLICATE_SIMILARITY: Final[float] = 0.88
+EVENT_DUPLICATE_SIMILARITY: Final[float] = 0.84
+NEWS_TRIGGER_REFRESH: Final[str] = "recent_news_refresh"
+SEARCH_TOPICS: Final[tuple[tuple[str, str], ...]] = (
+    ("products", "사업"),
+    ("partnerships", "협력"),
+    ("strategy", "전략"),
+    ("official", "발표"),
+)
+GROUNDED_TOPICS: Final[tuple[str, ...]] = (
+    "business", "products", "partnerships", "strategy", "operations", "people", "risk",
+)
+GROUNDED_CLAIM_KINDS: Final[tuple[str, ...]] = (
+    "reported_fact", "company_statement", "company_plan",
+)
+GROUNDED_TEMPORAL_STATES: Final[tuple[str, ...]] = ("completed", "ongoing", "planned")
+GROUNDED_SOURCE_TYPES: Final[tuple[str, ...]] = (
+    "official_release", "news_report", "opinion", "blog", "community", "unknown",
+)
+# 매체 도메인은 회사별 예외가 아니다. 확인된 전문 매체는 정책의 추가 목록으로
+# 확장하되 검색 결과에 URL이 있다는 이유만으로 자동 승격하지 않는다.
+TRUSTED_PUBLISHER_DOMAINS: Final[tuple[str, ...]] = (
+    "yna.co.kr", "yonhapnews.co.kr", "newsis.com", "news1.kr", "reuters.com",
+    "apnews.com", "bloomberg.com", "ft.com", "wsj.com", "hankyung.com",
+    "mk.co.kr", "edaily.co.kr", "mt.co.kr", "sedaily.com", "fnnews.com",
+    "heraldcorp.com", "asiae.co.kr", "chosun.com", "joongang.co.kr", "donga.com",
+    "hani.co.kr", "khan.co.kr", "hankookilbo.com", "kbs.co.kr", "imbc.com",
+    "sbs.co.kr", "jtbc.co.kr", "ytn.co.kr", "etnews.com", "zdnet.co.kr",
+    "bloter.net", "byline.network", "thebell.co.kr", "dnews.co.kr", "dt.co.kr",
+    "newstomato.com", "businesspost.co.kr", "ebn.co.kr", "dailypharm.com",
+    "hitnews.co.kr", "medipana.com", "thelec.kr", "medigatenews.com",
+    "newsway.co.kr", "businesswatch.co.kr", "sisajournal-e.com",
+    "sportschosun.com", "osen.co.kr", "xportsnews.com", "hangyo.com",
+    "fashionbiz.co.kr", "klnews.co.kr",
+)
+# 전문 매체 확장 근거. 발행자 확인은 본문 정확성 보증이 아니므로 모든 기사가
+# 같은 법인·실질내용·원문범위 검수를 거친다. 미확인 도메인은 진단에 보류한다.
+SPECIALIST_PUBLISHER_REFERENCES: Final[tuple[tuple[str, str, str], ...]] = (
+    ("sportschosun.com", "스포츠·엔터", "https://www.sportschosun.com/company/"),
+    ("osen.co.kr", "스포츠·엔터", "https://www.osen.co.kr/"),
+    ("xportsnews.com", "스포츠·게임", "https://www.xportsnews.com/"),
+    ("hangyo.com", "교육", "https://www.hangyo.com/"),
+    ("fashionbiz.co.kr", "패션", "https://fashionbiz.co.kr/about"),
+    ("klnews.co.kr", "물류", "https://www.klnews.co.kr/rssIndex.html"),
+)
+BLOCKED_PUBLISHER_DOMAINS: Final[tuple[str, ...]] = (
+    "blog.naver.com", "cafe.naver.com", "tistory.com", "blog.daum.net",
+    "cafe.daum.net", "brunch.co.kr", "medium.com", "dcinside.com", "fmkorea.com",
+    "clien.net", "ppomppu.co.kr", "theqoo.net", "instiz.net", "youtube.com",
+    "facebook.com", "instagram.com", "x.com", "twitter.com", "reddit.com",
+)
+NEWS_PORTAL_DOMAINS: Final[tuple[str, ...]] = ("news.naver.com", "n.news.naver.com")
+NON_ARTICLE_TEXT_MARKERS: Final[tuple[str, ...]] = (
+    "개인정보처리방침", "쿠키 정책", "회원가입", "무단전재", "재배포 금지",
+    "본문 바로가기", "기사 공유", "기사를 공유", "관련기사 더보기", "로그인하세요",
+)
+MARKET_COMMENTARY_MARKERS: Final[tuple[str, ...]] = (
+    "목표주가", "투자의견", "주가 상승", "주가 하락", "주가가", "주가는",
+    "투자심리", "수혜주", "테마주", "관련주", "종목 추천", "매수 추천",
+)
+IDENTITY_STOP_WORDS: Final[frozenset[str]] = frozenset({
+    "회사", "기업", "법인", "주식회사", "대한민국", "한국", "사업", "주요",
+    "서비스", "제공", "운영", "관련", "대상", "중심", "활동", "업체", "기타",
+    "대표", "대표이사", "영위", "하는", "있다", "위한", "통해", "분야",
+})
+SEARCH_REASON_CODES: Final[frozenset[str]] = frozenset({
+    "news_search_ok", "news_search_not_configured", "news_search_authentication_failed",
+    "news_search_rate_limited", "news_search_temporarily_unavailable", "news_search_invalid_response",
+    "news_search_daily_cap", "news_search_internal_error", "news_search_response_limit",
+    "news_search_invalid_request", SEARCH_TRANSPORT_BUDGET_EXHAUSTED,
+})
+SEARCH_TRANSPORT_ATTEMPT_REASON_CODES: Final[frozenset[str]] = frozenset({
+    "news_search_ok", "news_search_authentication_failed", "news_search_rate_limited",
+    "news_search_temporarily_unavailable", "news_search_invalid_response",
+})
+SEARCH_ZERO_TRANSPORT_REASON_CODES: Final[frozenset[str]] = frozenset({
+    "news_search_not_configured", "news_search_daily_cap", "news_search_invalid_request",
+    "news_search_invalid_response", SEARCH_TRANSPORT_BUDGET_EXHAUSTED,
+})
+SEARCH_BUDGET_REASON_CODES: Final[frozenset[str]] = frozenset({
+    "search_budget_exhausted", SEARCH_TRANSPORT_BUDGET_EXHAUSTED,
+})
+JSON_LD_ARTICLE_TYPES: Final[frozenset[str]] = frozenset({
+    "Article", "NewsArticle", "ReportageNewsArticle", "AnalysisNewsArticle", "PressRelease",
+})
+BODY_FAILURE_CODES: Final[frozenset[str]] = frozenset({
+    EXCLUDED_FETCH_FAILED, EXCLUDED_FETCH_ORIGIN_DENIED, EXCLUDED_FETCH_ROBOTS_BLOCKED,
+    EXCLUDED_FETCH_EMPTY_BODY, EXCLUDED_FETCH_DECODE_ERROR, EXCLUDED_FETCH_TIMEOUT,
+    EXCLUDED_FETCH_TRANSPORT_ERROR,
+})
+ARTICLE_PUBLISHED_META_KEYS: Final[frozenset[str]] = frozenset({
+    "article:published_time", "datepublished", "pubdate", "publication_date",
+})
+ATTRIBUTED_STATEMENT_MARKERS: Final[tuple[str, ...]] = (
+    "밝혔다", "말했다", "설명했다", "전했다", "발표했다", "강조했다", "계획", "예정", "방침",
+)
+FUTURE_PLAN_PATTERN: Final[str] = r"(?:할|될|할\s*수\s*있도록)\s*(?:계획|예정)|하기로\s*(?:했다|계획)|목표로\s*(?:한다|하고|추진)"

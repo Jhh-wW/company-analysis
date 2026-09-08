@@ -23,7 +23,6 @@ import pytest
 from src.core import news_intake_switch
 from src.features.composer.constants import SECTION_IDS
 from src.features.composer.news_block import (
-    NEWS_BLOCK_MAX_ROWS,
     NEWS_BLOCK_STEP,
     augment_news_blocks,
     news_block_steps,
@@ -35,7 +34,9 @@ from src.features.composer.port import (
 )
 from src.features.pipeline import real
 from src.features.pipeline.tests.test_news_intake_wiring import (
-    _item,
+    _grounded_runtime_item,
+    _grounded_runtime_analysis,
+    GROUNDED_RUNTIME_BODY,
     _official_result,
     _result,
 )
@@ -54,23 +55,10 @@ from src.shared.report_evidence.constants import (
 )
 
 
-#: 조건에 걸리지 않는 문장 네 개 — 숫자·미확인 표현이 없어야 조각이 된다.
-#: 기사당 조각 상한(2)을 넘겨 「상한을 넘긴 문장은 조각이 안 된다」도 함께 본다.
-_ARTICLE_BODY = "\n".join(
-    (
-        "가나다전자는 고객 업무를 잇는 새 제품군을 중심 사업으로 운영한다.",
-        "가나다전자는 물류 제품군을 현장에 적용한다.",
-        "가나다전자는 상담 제품군을 함께 공급한다.",
-        "가나다전자는 설비 제품군도 운영한다.",
-    )
-)
-#: 분류기가 한 기사를 세 장에 배정한다(장당 상한 3).
-_SECTIONS = ("portfolio", "business_model", "identity")
-_CLASSIFY_RESPONSE = (
-    '{"items":[{"id":"news-001","sections":'
-    f'{list(_SECTIONS)!r}'.replace("'", '"')
-    + ',"kind":"press_release"}]}'
-)
+#: 법인·사업 사실·숫자의 정확 원문 검증을 통과하는 현재 수집 fixture.
+_ARTICLE_BODY = GROUNDED_RUNTIME_BODY
+#: 각 근거 조각은 한 장에서 소유한다.
+_SECTIONS = ("portfolio",)
 
 
 @pytest.fixture(autouse=True)
@@ -126,14 +114,18 @@ def _partial_path_calls(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(real, "assess_official_evidence", assess_with_portfolio_gap)
 
+    search_calls = 0
+
     def search_news(_query: str, **kwargs: object) -> SimpleNamespace:
-        return _result(items=[_item()] if kwargs["start"] == 1 else [])
+        nonlocal search_calls
+        search_calls += 1
+        return _result(items=[_grounded_runtime_item()] if search_calls == 1 else [])
 
     user_input, card = _request()
     result = real.RealPipeline(
         official_evidence_collector=collector,
         news_search=search_news,
-        news_classify=lambda _prompt: _CLASSIFY_RESPONSE,
+        news_analyze=_grounded_runtime_analysis,
         news_fetch_text=lambda _url: _ARTICLE_BODY,
     ).run(user_input, card)
     assert result.outcome is real.Outcome.REPORT, result.message
@@ -187,13 +179,15 @@ def test_실제_수집_조각에_매체와_발행일이_실려_온다(
 
     assert news, "뉴스 조각이 하나도 transport를 통과하지 못했습니다"
     for fragment in news:
-        assert fragment.source_publisher == "media.example"
+        assert fragment.source_publisher == "newsis.com"
+        assert fragment.news_grounded is True
+        assert fragment.news_claim_kind == "reported_fact"
         assert fragment.document_date == "2026-09-01"
         assert fragment.counts_toward_document_floor is False
         assert fragment.location.startswith("기사 본문 · news-fragment-")
 
 
-def test_한_기사가_세_장에_들어가면_세_장에_표가_붙는다(
+def test_본문검증_기사의_단일_소유_장에_기사한개로_표시한다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     packets = _typed_news_fragments(monkeypatch)
@@ -214,20 +208,18 @@ def test_한_기사가_세_장에_들어가면_세_장에_표가_붙는다(
 
     by_section = dict(result.row_counts_by_section)
     assert set(by_section) == set(_SECTIONS), by_section
-    # 기사 하나가 내는 조각은 상한(2)까지다 — 장마다 그 조각 수만큼 실린다.
-    assert set(by_section.values()) == {2}, by_section
-    assert all(count <= NEWS_BLOCK_MAX_ROWS for count in by_section.values())
+    assert set(by_section.values()) == {1}, by_section
 
     section = next(
         section
         for section in result.report.sections
-        if section.section_id == "identity"
+        if section.section_id == "portfolio"
     )
     글자 = [row.cells[2] for row in section.news_rows]
     본문_문장 = _ARTICLE_BODY.splitlines()
     assert 글자 == 본문_문장[: len(글자)], 글자
     assert all(row.cells[0] == "2026-09-01" for row in section.news_rows)
-    assert all(row.cells[1] == "media.example" for row in section.news_rows)
+    assert all(row.cells[1] == "newsis.com · 가나다전자 새 제품군 공급" for row in section.news_rows)
 
 
 def test_뉴스가_안_붙는_장에는_표가_없다(monkeypatch: pytest.MonkeyPatch) -> None:

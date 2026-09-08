@@ -77,6 +77,10 @@ from src.features.composer.port import (
     fragments_from_raw,
 )
 from src.shared.report_evidence.policy import required_slots_for
+from src.features.composer.news_constants import NEWS_WRITER_GUIDE
+from src.features.composer.news_usage import news_metadata, parse_news_decisions
+from src.features.composer.news_block import _is_news_fragment
+from src.shared.report_quality.output_constants import SUMMARY_MIN_SENTENCES, SUMMARY_MAX_SENTENCES
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +251,8 @@ def _render_fragments(
         #   그 필드가 비어 있고 ``kind``가 곧 「종류」라 옛 프롬프트와 글자가
         #   같다 — 지문이 라벨로 새는 경우만 고친다.
         label = fragment.formal_source_kind or fragment.kind or "자료"
+        if _is_news_fragment(fragment):
+            label += " · 메타데이터 " + news_metadata(fragment)
         if fragment.document_title:
             label = f"{label}·{fragment.document_title}"
         if fragment.location:
@@ -258,7 +264,8 @@ def _render_fragments(
         if show_supported_claim_slots:
             supported = ", ".join(fragment.supported_claim_slots) or "없음"
             label = f"{label} · 지원 주장슬롯: {supported}"
-        lines.append(f"[조각 {fragment.fragment_id}] ({label}) {fragment.text}\n")
+        evidence_text = json.dumps(fragment.text, ensure_ascii=False) if _is_news_fragment(fragment) else fragment.text
+        lines.append(f"[조각 {fragment.fragment_id}] ({label}) {evidence_text}\n")
     return "".join(lines)
 
 
@@ -398,6 +405,7 @@ def build_section_prompt(
         ),
         "\n\n",
         CITATION_RULES_GUIDE,
+        NEWS_WRITER_GUIDE if any(_is_news_fragment(f) for f in fragments) else "",
         FORBIDDEN_TOPICS_GUIDE,
         SENTENCE_RANGE_GUIDE.format(
             minimum=minimum,
@@ -829,12 +837,14 @@ def _compose_one_section(
             sentences=(),
             notice=NOTICE_INSUFFICIENT_EVIDENCE,
             flow_rows=flow_rows,
+            news_decisions=parse_news_decisions(extract_json_payload(raw)),
         )
     return ComposedSection(
         section_id=section_id,
         sentences=sentences,
         notice="",
         flow_rows=flow_rows,
+        news_decisions=parse_news_decisions(extract_json_payload(raw)),
     )
 
 
@@ -1197,6 +1207,8 @@ def _sanitize_report_to_section_evidence(
                 sentences=sentences,
                 notice=notice,
                 flow_rows=flow_rows,
+                news_decisions=tuple(decision for decision in section.news_decisions
+                    if decision[0] in allowed_fragment_ids_by_section[section.section_id]),
             )
         )
     return ComposedReport(sections=tuple(sections), summary=report.summary)
@@ -1475,12 +1487,6 @@ def compose_selected_sections(
 # ══════════════════════════════════════════════════════════
 # 핵심 요약 (소단계 3-3) — 본문 완성 «후» 새로 쓴다 (기준문서 3절)
 # ══════════════════════════════════════════════════════════
-# ★ 아래 상수는 3-3 소유 범위(logic.py) 안에 둔다 — constants.py는 다른
-#   소단계와의 병행 수정 충돌을 피하기 위해 여기서 건드리지 않는다.
-
-#: 핵심 요약 목표 문장 수 — 기준문서 3절: 3~5문장
-SUMMARY_MIN_SENTENCES: Final[int] = 3
-SUMMARY_MAX_SENTENCES: Final[int] = 5
 
 SUMMARY_PROMPT_HEADER: Final[str] = (
     "당신은 «공식 근거 기반 기업분석 보고서»의 본문을 모두 읽고, "

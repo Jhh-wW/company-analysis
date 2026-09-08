@@ -49,6 +49,8 @@ NEWS_SEARCH_RATE_LIMITED: Final[str] = "news_search_rate_limited"
 NEWS_SEARCH_TEMPORARILY_UNAVAILABLE: Final[str] = "news_search_temporarily_unavailable"
 NEWS_SEARCH_INVALID_RESPONSE: Final[str] = "news_search_invalid_response"
 NEWS_SEARCH_DAILY_CAP: Final[str] = "news_search_daily_cap"
+NEWS_SEARCH_TRANSPORT_BUDGET_EXHAUSTED: Final[str] = "news_search_transport_budget_exhausted"
+NEWS_SEARCH_INVALID_REQUEST: Final[str] = "news_search_invalid_request"
 
 # 단계 로그와 이름이 겹치지 않는지 확인하는 기존 검수 계약에서 쓴다.
 NAVER_USAGE_COUNTER_FILENAME: Final[str] = "naver_usage.json"

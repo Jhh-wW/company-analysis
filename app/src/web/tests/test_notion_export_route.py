@@ -597,7 +597,31 @@ def test_v2_Notion_POST는_409가_아니라_블록으로_전송한다(monkeypatc
     assert record.page_id == "v2-sealed-page"
 
 
-def test_공개블록이_없는_옛_v2_저장본은_전송결과모름_대신_사실대로_닫힌다(
+def test_SHADOW_Notion은_검증한_동일객체를_기존승인경로로_보낸다(monkeypatch):
+    report = replace(_sealed_v2_report(), public_projection=None, release_mode="SHADOW")
+    job_id = f"notion-v2-shadow-{uuid.uuid4().hex}"
+    _stub_legacy_report(monkeypatch, report)
+    monkeypatch.setattr(job_runtime, "_link_expired", lambda _report: False)
+    sent = []
+
+    def capture(target, *_args, **_kwargs):
+        sent.append(target)
+        assert target.public_projection is None
+        return NotionExportResult(success=True, page_id="shadow-page", page_url="https://notion.example/shadow-page")
+
+    monkeypatch.setattr(reports_router, "send_report_to_notion", capture)
+    session = auth_logic.create_session("admin@example.com", True)
+    csrf = auth_logic.csrf_token_for_session(session.token)
+    with TestClient(app) as client:
+        client.cookies.set(auth_constants.SESSION_COOKIE_NAME, session.token)
+        response = client.post(f"/notion/{job_id}", data={"csrf_token": csrf})
+    assert response.status_code == 200
+    assert sent == [report]
+    original_paragraphs = {text for section in report.sections for text in section.prose_paragraphs}
+    assert original_paragraphs <= set(_paragraph_texts(notion_logic.build_blocks(sent[0])))
+
+
+def test_FULL의_공개블록이_없으면_전송전에_닫힌다(
     monkeypatch,
 ):
     """409를 «전부» 푸는 것이 아니다 — 옮길 수 없는 저장본은 그렇다고 말한다.
@@ -608,7 +632,7 @@ def test_공개블록이_없는_옛_v2_저장본은_전송결과모름_대신_�
       없는 전송이 «결과 모름»으로 남는다 — 409보다 나쁜 거짓말이다.
     """
 
-    report = replace(_sealed_v2_report(), public_projection=None)
+    report = replace(_sealed_v2_report(), public_projection=None, release_mode="FULL")
     job_id = f"notion-v2-unsealed-{uuid.uuid4().hex}"
     job_runtime._JOBS.pop(job_id, None)
     _stub_legacy_report(monkeypatch, report)

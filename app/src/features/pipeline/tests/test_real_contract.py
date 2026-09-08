@@ -57,6 +57,15 @@ def used_names() -> set[str]:
     return used
 
 
+def metered_names() -> set[str]:
+    """요청별 계량 래퍼가 직접 제공하는 공개 메서드도 실제 호출 계약이다."""
+    return {
+        name
+        for name, member in vars(real._MeteredEngine).items()
+        if not name.startswith("_") and callable(member)
+    }
+
+
 # ── 엔진 파일이 있는가 ──────────────────────────────────
 
 def test_엔진_파일이_제자리에_있다():
@@ -64,7 +73,9 @@ def test_엔진_파일이_제자리에_있다():
 
 
 def test_부르는_이름이_하나도_빠짐없이_엔진에_있다():
-    missing = sorted(used_names() - engine_names())
+    # engine 변수는 저수준 모듈뿐 아니라 _MeteredEngine 인스턴스도 가리킨다.
+    # 하드코딩한 예외 이름 대신 실제 래퍼가 선언한 API만 추가로 인정한다.
+    missing = sorted(used_names() - engine_names() - metered_names())
     assert not missing, (
         f"엔진에 없는 이름을 부르고 있습니다: {missing}\n"
         f"엔진 파일: {ENGINE_PATH}"
