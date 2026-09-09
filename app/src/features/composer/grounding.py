@@ -6,6 +6,10 @@
 
 from __future__ import annotations
 
+from src.features.composer.direct_support import claims_cause, direct_support_problem, support_entries_by_number
+from src.features.composer.direct_support_constants import RELATION_KEY
+from src.features.composer.grounding_constants import REVIEW_SUPPORT_CANDIDATE_VERDICTS
+
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -574,6 +578,12 @@ def grounding_problem(text: str, sources: Mapping[str, str], entry: Mapping) -> 
         if kind not in evidence:
             return GROUNDING_MISSING
     for kind, payload in evidence.items():
+        # 관계 근거는 아래 constrain_verdicts가 번호 중복을 함께 확인한 뒤
+        # 자기 인용에 결속한다. 기존 수치·추세·시점 검증은 전부 유지한다.
+        if kind == RELATION_KEY:
+            if not isinstance(payload, list) or any(not isinstance(item, Mapping) for item in payload):
+                return GROUNDING_INVALID
+            continue
         if kind not in required and payload == []:
             continue
         if kind not in validators:
@@ -586,6 +596,8 @@ def grounding_problem(text: str, sources: Mapping[str, str], entry: Mapping) -> 
 
 def grounding_hint(text: str, sources: Mapping[str, str]) -> str:
     required = grounding_requirements(text, tuple(sources.values()))
+    if claims_cause(text):
+        required += (RELATION_KEY,)
     return "  추가 검증 필요: " + (", ".join(required) or "없음") + "\n"
 
 
@@ -593,6 +605,8 @@ def constrain_verdicts(
     raw: str | None,
     verdicts: Mapping[int, str],
     candidates: Mapping[int, tuple[str, Mapping[str, str]]],
+    *,
+    cells_by_number: Mapping[int, Sequence[str]] | None = None,
 ) -> tuple[dict[int, str], dict[int, str]]:
     """같은 검수 응답의 근거를 실제 입력에 결속한다. 추가 AI 호출은 없다.
 
@@ -615,6 +629,19 @@ def constrain_verdicts(
             continue
         text, sources = candidates[number]
         problem = grounding_problem(text, sources, entry)
+        if problem:
+            result[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = problem
+    relation_evidence = support_entries_by_number(raw)
+    for number, (text, sources) in candidates.items():
+        if result.get(number) not in REVIEW_SUPPORT_CANDIDATE_VERDICTS or number in problems:
+            continue
+        # 도식 후보만 칸 경계를 함께 준다. 본문·요약은 None 이므로 한 문장
+        # 안에서 절을 넘는 연결이 새로 허용되지 않는다.
+        problem = direct_support_problem(
+            text, sources, relation_evidence.get(number),
+            (cells_by_number or {}).get(number),
+        )
         if problem:
             result[number] = REVIEW_GROUNDING_REJECTED
             problems[number] = problem

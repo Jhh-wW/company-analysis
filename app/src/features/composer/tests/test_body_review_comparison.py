@@ -146,8 +146,16 @@ def test_controlled_true_preserves_explicit_hr_cause_condition_and_development(s
 
     def ask(prompt):
         calls.append(prompt)
-        return json.dumps({"판정": [_entry(item, "참", "1: 해당 주체·관계 직접 명시")
-                                  for item in _items(prompt)]}, ensure_ascii=False)
+        entries = [_entry(item, "참", "1: 해당 주체·관계 직접 명시") for item in _items(prompt)]
+        if section == "past_changes":
+            # 정상 인과 보존 사례도 실제로 새 검수 요청이 요구한 근거를 낸다.
+            # 비교 설명 한 줄로 관계 근거를 대신하지 않는다.
+            for entry in entries:
+                entry["검증근거"] = {"관계": [{
+                    "유형": "인과", "근거": "1", "원문": text,
+                    "원인": "공급 차질", "결과": "납기 지연",
+                }]}
+        return json.dumps({"판정": entries}, ensure_ascii=False)
 
     result = _run(section, (ComposedSentence(text, ("1",), "확인"),),
                   (CollectedFragment("1", "공식자료", text),), ask, grouped)

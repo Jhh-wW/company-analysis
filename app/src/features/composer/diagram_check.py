@@ -81,6 +81,9 @@ from src.features.composer.diagram_review_constants import (
 )
 from src.features.composer.grounding import constrain_verdicts, grounding_hint
 from src.features.composer.grounding_constants import GROUNDING_GUIDE
+from src.features.composer.direct_support_constants import (
+    FLOW_CELL_JOIN, RELATION_REVIEW_GUIDE,
+)
 from src.features.composer.scope_guard import flow_scope_problem
 from src.features.composer.culture_guard import culture_flow_problem, culture_problem
 from src.features.composer.verify import (
@@ -359,6 +362,7 @@ def _review_prompt(
     lines = [
         FLOW_REVIEW_PROMPT_HEADER,
         GROUNDING_GUIDE,
+        RELATION_REVIEW_GUIDE,
         "아래는 보고서에 실릴 «사업 경로 도식»의 각 줄이다.",
         "칸마다 «칸 이름: 값» 꼴로 준다. 칸 이름은 장마다 다르다 — 「무엇으로",
         "시작하나 → 회사가 하는 일 → 누구에게 닿나」인 장도 있고, 「지금 겪는",
@@ -417,7 +421,7 @@ def _review_prompt(
         lines.append(f"[{number}] {noun}(JSON 배열): {path_json}")
         lines.append(DIAGRAM_CITATIONS_PREFIX + json.dumps(row.citations, ensure_ascii=False))
         sources = {fid: texts[fid] for fid in row.citations if fid in texts}
-        lines.append(grounding_hint(" ; ".join(row.cells), sources))
+        lines.append(grounding_hint(FLOW_CELL_JOIN.join(row.cells), sources))
     lines.extend(
         (
             "",
@@ -542,10 +546,14 @@ def _review_rows(
             ],
         )
 
-    candidates = {number: (" ; ".join(row.cells), {
+    candidates = {number: (FLOW_CELL_JOIN.join(row.cells), {
         fid: texts[fid] for fid in row.citations if fid in texts
     }) for number, _section, row in items}
-    verdicts, grounding_problems = constrain_verdicts(raw, verdicts, candidates)
+    # 도식은 칸이 실제 구조다 — 이어 붙인 문자열과 «함께» 칸 경계를 넘긴다.
+    verdicts, grounding_problems = constrain_verdicts(
+        raw, verdicts, candidates,
+        cells_by_number={number: row.cells for number, _section, row in items},
+    )
     kept: dict[str, list[FlowRow]] = {section_id: [] for section_id, _ in by_section}
     dropped: list[str] = list(blank_dropped)
     for number, _section, row in items:

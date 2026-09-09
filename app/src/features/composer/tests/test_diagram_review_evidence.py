@@ -69,7 +69,15 @@ def test_shared_sources_preserve_exact_text_ids_order_cells_and_requirements():
     # 동일 내용의 다른 ID를 합치지 않되 한 ID의 원문은 재출력하지 않는다.
     assert prompt.count(json.dumps(long_text, ensure_ascii=False)) == 2
     assert prompt.rfind("■ 신뢰할 지시 재확인") > prompt.find("\\n[999]")
-    assert prompt.index(f'"{DIAGRAM_REASON_KEY}"') < prompt.index('"결과"')
+    # ★ 프롬프트에는 이제 RELATION_REVIEW_GUIDE(인과 관계 항목의 "원인"/"결과"
+    #   설명)도 앞쪽에 섞여 있어, 전체 프롬프트에서 "결과"를 그냥 찾으면 그
+    #   무관한 자리를 먼저 잡는다. 그래서 모델에게 실제로 제시하는 «판정
+    #   응답 JSON 형식» 그 한 줄만 골라, 그 줄 «안»에서 대조근거가 결과보다
+    #   먼저 오는지를 본다 — 이 한 줄이 실제 응답 스키마 예시다.
+    schema_example_lines = [line for line in prompt.splitlines() if line.startswith('{"판정"')]
+    assert len(schema_example_lines) == 1, "판정 응답 JSON 형식 예시 줄을 정확히 하나 찾아야 한다"
+    schema_example = schema_example_lines[0]
+    assert schema_example.index(f'"{DIAGRAM_REASON_KEY}"') < schema_example.index('"결과"')
 
 
 @pytest.mark.parametrize("quote_id,include_grounding,kept", [

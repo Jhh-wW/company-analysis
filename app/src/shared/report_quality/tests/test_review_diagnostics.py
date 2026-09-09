@@ -8,6 +8,7 @@ from src.shared.report_quality.review_diagnostics import observed_review_outcome
 
 
 def test_transport_contract_matches_the_actual_producer():
+    from src.features.composer.direct_support_constants import DIRECT_SUPPORT_REASON_TEXTS
     from src.features.composer.constants import SECTION_IDS
     from src.features.composer.grounding_constants import (
         GROUNDING_INVALID, GROUNDING_MISSING, NUMERIC_KEY, TIME_KEY, TREND_KEY,
@@ -17,10 +18,13 @@ def test_transport_contract_matches_the_actual_producer():
     )
     from src.features.composer.modality_constants import MODALITY_PLAN_ASSERTED
     from src.features.composer.scope_constants import SCOPE_CONDITION_UNBOUND
-    from src.features.composer.culture_constants import CULTURE_EVIDENCE_SCOPE_MISMATCH
+    from src.features.composer.culture_constants import (
+        CULTURE_ACCOUNTING_POLICY_MISPLACED, CULTURE_EVIDENCE_SCOPE_MISMATCH,
+    )
 
     assert set(REVIEW_SCOPE_ITEMS) == {
         MODALITY_PLAN_ASSERTED, SCOPE_CONDITION_UNBOUND, CULTURE_EVIDENCE_SCOPE_MISMATCH,
+        CULTURE_ACCOUNTING_POLICY_MISPLACED, *DIRECT_SUPPORT_REASON_TEXTS,
     }
     assert set(REVIEW_ITEMS) == {NUMERIC_KEY, TIME_KEY, TREND_KEY, *REVIEW_SCOPE_ITEMS.values()}
     assert set(REVIEW_REASONS) == {GROUNDING_INVALID, GROUNDING_MISSING, *REVIEW_SCOPE_ITEMS}

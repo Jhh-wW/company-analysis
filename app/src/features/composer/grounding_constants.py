@@ -87,6 +87,7 @@ REVIEW_ENTRIES_KEY = "판정"
 REVIEW_NUMBER_KEY = "번호"
 REVIEW_RESULT_KEY = "결과"
 REVIEW_REJECTED = "거짓"
+REVIEW_SUPPORT_CANDIDATE_VERDICTS = frozenset({"참", "애매"})
 REVIEW_GROUNDING_REJECTED = "근거결속실패"
 TREND_DIRECTIONS = frozenset({"지속증가", "지속감소", "증가", "감소"})
 

@@ -29,8 +29,13 @@ from __future__ import annotations
 from src.features.composer.news_constants import NEWS_REVIEW_GUIDE
 from src.features.composer.news_usage import attribution_prefix, news_metadata
 from src.features.composer.news_block import _is_news_fragment
-from src.features.composer.culture_guard import culture_flow_problem, culture_problem
+from src.features.composer.culture_guard import (
+    culture_accounting_policy_problem, culture_flow_problem, culture_problem,
+)
 from src.features.composer.scope_guard import flow_scope_problem
+from src.features.composer.direct_support_constants import (
+    FLOW_CELL_JOIN, RELATION_REVIEW_GUIDE,
+)
 from src.features.composer.body_review_constants import (
     BODY_REVIEW_COMPARISON_GUIDE,
     BODY_REVIEW_COMPARISON_KEY,
@@ -784,6 +789,7 @@ def _build_grouped_review_prompt(
         FLOW_RELATION_REVIEW_GUIDE,
         NEWS_REVIEW_GUIDE,
         GROUNDING_GUIDE,
+        RELATION_REVIEW_GUIDE,
         (
             "아래 자료는 장별 블록으로 격리했다. 각 후보는 반드시 같은 블록의 "
             "근거만으로 판정하고 다른 장 블록의 근거를 빌리지 마라.\n"
@@ -1024,7 +1030,10 @@ def _grouped_grounding_candidate(
     item: _GroupedReviewItem, frag_by_id: Mapping[str, CollectedFragment],
     table_source: str = "",
 ) -> tuple[str, dict[str, str]]:
-    text = item.sentence.text if item.sentence else " ; ".join(item.flow_row.cells if item.flow_row else ())
+    text = (
+        item.sentence.text if item.sentence
+        else FLOW_CELL_JOIN.join(item.flow_row.cells if item.flow_row else ())
+    )
     return _grounding_candidate(text, item.citations, frag_by_id, table_source)
 
 
@@ -1038,11 +1047,21 @@ def _apply_grounding(
     culture_candidate_numbers: frozenset[int] = frozenset(),
     flow_cells_by_number: Optional[Mapping[int, Sequence[str]]] = None,
 ) -> dict[int, str]:
-    constrained, problems = constrain_verdicts(raw, verdicts, candidates)
+    constrained, problems = constrain_verdicts(
+        raw, verdicts, candidates, cells_by_number=flow_cells_by_number,
+    )
     for number, (text, sources) in candidates.items():
         if constrained.get(number) not in (VERDICT_TRUE, VERDICT_UNCLEAR):
             continue
         context = (diagnostic_contexts or {}).get(number)
+        # 실제 소유 장을 따른다. 오래된 주장 슬롯만으로 요약이나 다른 장의
+        # 정상 회계 설명까지 문화 장의 배치 제한에 넣지 않는다.
+        if context and context[:2] == ("culture", DIAGNOSTIC_KIND_BODY):
+            problem = culture_accounting_policy_problem(text)
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
         if flow_cells_by_number is not None and number in flow_cells_by_number:
             cells = flow_cells_by_number[number]
             problem = flow_scope_problem(cells, sources)
@@ -1170,7 +1189,7 @@ def _build_review_prompt(
                 cited_ids.append(fid)
     parts = [
         REVIEW_PROMPT_HEADER, REVIEW_PROMPT_RULES, BODY_REVIEW_COMPARISON_GUIDE,
-        NEWS_REVIEW_GUIDE, GROUNDING_GUIDE, REVIEW_JSON_GUIDE,
+        NEWS_REVIEW_GUIDE, GROUNDING_GUIDE, RELATION_REVIEW_GUIDE, REVIEW_JSON_GUIDE,
     ]
     # 단건·재검수 경로에도 실제 후보의 소유 장만 전달한다.
     section_ids = dict.fromkeys(_review_item_section(item) for item in items)
