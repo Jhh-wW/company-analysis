@@ -89,6 +89,41 @@ def write_json(path: Path, value: object) -> None:
     os.replace(temporary, path)
 
 
+def _preserve_existing_artifact(path: Path) -> None:
+    """다시 쓰기 전에 있던 파일을 고유한 prior 경로로 복사해 둔다.
+
+    원본은 그대로 두고 복사만 하며, 실제 교체는 뒤이은 쓰기(write_json 또는
+    write_bytes)에 맡긴다 — 그 쓰기 자체가 원자적인지는 호출부마다 다르다.
+    prior 파일은 "xb"(이미 있으면 실패)로 만든다. 최근 prior가 지금 내용과
+    같으면 새로 만드는 대신 그 prior를 다시 fsync해 실제로 디스크에 반영됐는지
+    재확인한다 — 예전 fsync가 실패해 바이트만 완전하고 미확정으로 남은 prior를
+    "이미 끝났다"고 조용히 넘기지 않기 위해서다. 복사·fsync 어느 쪽이 실패해도
+    예외가 그대로 올라가 다음 줄의 쓰기가 실행되지 않는다.
+    """
+    if not path.exists():
+        return
+    def _revision(candidate: Path) -> int:
+        marker = f"{path.stem}.prior-"
+        return int(candidate.name[len(marker):-len(path.suffix)])
+    existing = sorted(
+        path.parent.glob(f"{path.stem}.prior-*{path.suffix}"), key=_revision,
+    )
+    current_bytes = path.read_bytes()
+    if existing and existing[-1].read_bytes() == current_bytes:
+        # ★ 읽기 전용("rb")으로 연 fd는 Windows에서 os.fsync가 OSError(Bad file
+        #   descriptor)로 실패한다(실측 확인). 내용은 안 바꾸되 fsync가 가능한
+        #   "r+b"(있는 파일을 읽기·쓰기로, 자르지 않고)로 연다.
+        with existing[-1].open("r+b") as stream:
+            os.fsync(stream.fileno())
+        return
+    revision = (_revision(existing[-1]) if existing else 0) + 1
+    prior_path = path.with_name(f"{path.stem}.prior-{revision}{path.suffix}")
+    with prior_path.open("xb") as stream:
+        stream.write(current_bytes)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def load_manifest(path: Path) -> tuple[dict, tuple[CanonicalPilotCase, ...]]:
     value = json.loads(path.read_text(encoding="utf-8-sig"))
     rows = value.get("cases", [])
@@ -351,6 +386,7 @@ class HttpEvaluation:
                         error_code = interruption_error_code(exc)
                         if error_code is not None:
                             interruption["error_code"] = error_code
+                        _preserve_existing_artifact(output / "interruption.json")
                         write_json(output / "interruption.json", interruption)
                         self.export_evidence(row["run_id"], output)
                     raise
@@ -431,6 +467,7 @@ class HttpEvaluation:
             raise EvaluationError("최종 비용 원장 정합성을 아직 확인하지 못했습니다")
         output = self.root / "http-evaluation-artifacts" / self.batch_id / case.case_id
         output.mkdir(parents=True, exist_ok=True)
+        _preserve_existing_artifact(output / "ledger.json")
         write_json(output / "ledger.json", asdict(ledger))
         diagnostics = self.export_evidence(run_id, output)
         if ledger.billing_uncertain:
@@ -450,6 +487,7 @@ class HttpEvaluation:
             response = self.client.get(f"/download/pdf/{run_id}")
             if response.status_code != 200 or not response.content.startswith(b"%PDF-"):
                 raise EvaluationError("공식 PDF 내려받기가 완료되지 않았습니다")
+            _preserve_existing_artifact(output / "report.pdf")
             (output / "report.pdf").write_bytes(response.content)
             manifest_row = next(item for item in self.manifest["cases"] if item["case_id"] == case.case_id)
             terms = tuple(manifest_row.get("foreign_company_terms", ()))
@@ -463,6 +501,7 @@ class HttpEvaluation:
                                     "prose_lines": len(section.get("prose_lines", [])),
                                     "tables": len(section.get("tables", []))}
                                    for section in report.get("sections", [])]
+        _preserve_existing_artifact(output / "metrics.json")
         write_json(output / "metrics.json", metrics)
         row.update(state="complete", outcome=ledger.outcome, internal_ai_cost_krw=ledger.cost_krw,
                    artifacts=str(output), result_http_status=result.status_code)
@@ -483,11 +522,14 @@ class HttpEvaluation:
                 exports[table] = [dict(zip(usable, row)) for row in rows]
             report = connection.execute("SELECT payload_json FROM reports WHERE report_id=?", (run_id,)).fetchone()
             if report:
+                _preserve_existing_artifact(output / "report.json")
                 write_json(output / "report.json", json.loads(report[0]))
             if "report_public_projections" in tables:
                 projection = connection.execute("SELECT projection_json FROM report_public_projections WHERE report_id=?", (run_id,)).fetchone()
                 if projection:
+                    _preserve_existing_artifact(output / "public-projection.json")
                     write_json(output / "public-projection.json", json.loads(projection[0]))
+        _preserve_existing_artifact(output / "diagnostics.json")
         write_json(output / "diagnostics.json", exports)
         return exports
 
