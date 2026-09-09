@@ -83,15 +83,17 @@ def test_diagram_cap_reaches_real_metered_boundary_without_changing_budget_or_mo
     assert engine.MODEL == "claude-haiku-4-5"
     assert engine.current_stage == "unspecified" and not engine.prompt_cache_enabled
     assert MAX_AI_CALLS_PER_REQUEST == 18
-    assert real.V2_WRITER_MAX_TOKENS == 4000 and real.V2_REVIEWER_MAX_TOKENS == 12000
+    assert real.V2_WRITER_MAX_TOKENS == 4000 and real.V2_REVIEWER_MAX_TOKENS == 16000
     if should_send:
         request, = messages.requests
         assert request["model"] == messages.counts[0]["model"] == "claude-haiku-4-5"
-        assert request["max_tokens"] == 2048
+        assert request["max_tokens"] == 4096
         assert request["messages"] == messages.counts[0]["messages"]
         assert isinstance(request["messages"][0]["content"], str)
+        # 예약액은 «실제 출력»이 아니라 상한으로 잡힌다 — 상한을 올리면 이 값이
+        # 출력 token 단가만큼 확실히 커진다는 계약을 그대로 못 박는다.
         assert reservations == [("anthropic", "v2_diagram", usage_cost_krw(
-            "claude-haiku-4-5", 1234 + provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS, 2048))]
+            "claude-haiku-4-5", 1234 + provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS, 4096))]
         assert engine.usages[0]["stage"] == "v2_diagram"
         assert engine.usages[0]["out"] == 1200
         assert engine.usages[0]["model"] == "claude-haiku-4-5-20251001"
@@ -140,7 +142,7 @@ def test_observation_failure_does_not_change_success_or_metering(monkeypatch, at
 
 
 @pytest.mark.parametrize("output_tokens,prior_state", [
-    (8357, "none"), (10680, "none"), (12000, "none"),
+    (8357, "none"), (10680, "none"), (16000, "none"),
     (8357, "settled"), (8357, "held"),
 ])
 def test_body_cap_reaches_reservation_and_request_with_actual_only_settlement(
@@ -183,11 +185,11 @@ def test_body_cap_reaches_reservation_and_request_with_actual_only_settlement(
             assert engine.usages[0]["cost_krw"] == actual_cost
             assert engine.usages[0]["out"] == output_tokens
             request, = messages.requests
-            assert request["max_tokens"] == 12000
+            assert request["max_tokens"] == 16000
             assert request["model"] == messages.counts[0]["model"] == model
             assert request["messages"] == messages.counts[0]["messages"]
             expected_reserve = usage_cost_krw(
-                model, input_tokens + provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS, 12000,
+                model, input_tokens + provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS, 16000,
             )
             assert reservations == [("anthropic", "v2_review", expected_reserve)]
             assert budget.accounted_krw < expected_reserve
@@ -201,9 +203,9 @@ def test_body_cap_reaches_reservation_and_request_with_actual_only_settlement(
             assert messages.requests == reservations == observations == engine.usages == []
         assert reserve_inputs == [{"model": model,
                                    "input_tokens_upper": input_tokens + provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS,
-                                   "max_tokens": 12000}]
+                                   "max_tokens": 16000}]
         assert len(messages.counts) == 1
     assert engine.MODEL == model and engine.current_stage == "unspecified"
     assert not engine.prompt_cache_enabled
-    assert real.V2_WRITER_MAX_TOKENS == 4000 and real.V2_DIAGRAM_MAX_TOKENS == 2048
+    assert real.V2_WRITER_MAX_TOKENS == 4000 and real.V2_DIAGRAM_MAX_TOKENS == 4096
     assert MAX_AI_CALLS_PER_REQUEST == 18

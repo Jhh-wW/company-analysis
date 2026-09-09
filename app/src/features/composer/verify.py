@@ -1118,6 +1118,20 @@ def _render_table_evidence(table: Optional[PerformanceTable]) -> str:
     return REVIEW_TABLE_HEAD + json.dumps(payload, ensure_ascii=False) + "\n"
 
 
+def _review_item_section(item: _ReviewItem) -> str:
+    """flat 경로 후보의 «실제 소유 장» — 장별 안내와 근거 범위가 같은 값을 쓴다.
+
+    ★ 이 경로의 ``section_id`` 는 요약 묶음이나 그룹 번호 문자열일 수 있어서
+      장으로 쓸 수 없는 경우가 있다. 그때만 계획된 주장 범주의 앞부분으로
+      물러선다. 예전에는 장별 안내만 이 규칙을 쓰고 보조근거 범위는 곧바로
+      slot 앞부분을 써서, 같은 함수 안에서 「이 후보의 장」이 둘로 갈렸다.
+    """
+
+    if item.section_id in SECTION_GUIDES:
+        return item.section_id
+    return item.sentence.planned_claim_slot.split(":", 1)[0]
+
+
 def _build_review_prompt(
     items: Sequence[_ReviewItem],
     frag_by_id: Mapping[str, CollectedFragment],
@@ -1135,22 +1149,31 @@ def _build_review_prompt(
         for citation in item.sentence.citations:
             if citation in frag_by_id and citation not in cited_ids:
                 cited_ids.append(citation)
-    if any(_is_news_fragment(frag_by_id[fid]) for fid in cited_ids):
-        sections = {item.sentence.planned_claim_slot.split(":", 1)[0] for item in items}
+    # ★ 뉴스 판정과 보조근거 범위는 «후보 하나»가 아니라 «그 후보의 장» 단위다.
+    #   예전에는 묶음에 뉴스가 하나라도 있으면 묶음 전체 장의 합집합을 만들어,
+    #   뉴스가 없는 장의 «인용하지 않은» 공식 조각까지 같은 문맥에 실었다.
+    #   그러면 검수기가 자기 인용이 아닌 근거를 빌려 「참」을 줄 여지가 생기고
+    #   프롬프트도 불필요하게 길어진다. 장별(grouped) 경로는 처음부터 자기 장만
+    #   봤으므로 이 경로를 거기에 맞춘다.
+    news_sections = {
+        _review_item_section(item) for item in items
+        if any(citation in frag_by_id and _is_news_fragment(frag_by_id[citation])
+               for citation in item.sentence.citations)
+    }
+    if news_sections:
+        # ⚠️ 자기 장 판정은 기존 slot 앞부분 비교를 그대로 쓴다. grouped 처럼
+        #   `startswith(장 + ":")` 로 바꾸면 콜론이 없는 slot 이 탈락해 지금
+        #   들어가던 «자기 장» 모순·시점 근거가 오히려 빠진다.
         for fid, fragment in frag_by_id.items():
             if (fid not in cited_ids and not _is_news_fragment(fragment)
-                and any(slot.split(":", 1)[0] in sections for slot in fragment.supported_claim_slots)):
+                and any(slot.split(":", 1)[0] in news_sections for slot in fragment.supported_claim_slots)):
                 cited_ids.append(fid)
     parts = [
         REVIEW_PROMPT_HEADER, REVIEW_PROMPT_RULES, BODY_REVIEW_COMPARISON_GUIDE,
         NEWS_REVIEW_GUIDE, GROUNDING_GUIDE, REVIEW_JSON_GUIDE,
     ]
     # 단건·재검수 경로에도 실제 후보의 소유 장만 전달한다.
-    section_ids = dict.fromkeys(
-        item.section_id if item.section_id in SECTION_GUIDES
-        else item.sentence.planned_claim_slot.split(":", 1)[0]
-        for item in items
-    )
+    section_ids = dict.fromkeys(_review_item_section(item) for item in items)
     for section_id in section_ids:
         if section_id in SECTION_GUIDES:
             parts.append("장별 작성 범위: " + SECTION_GUIDES[section_id] + "\n")

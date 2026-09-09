@@ -14,6 +14,7 @@ import re
 import unicodedata
 
 from src.features.composer.modality_guard import modality_problem
+from src.features.composer.numeric_quote_refs import resolve_numeric_quote_refs
 from src.features.composer.scope_guard import scope_problem
 
 from src.features.composer.grounding_constants import (
@@ -557,9 +558,16 @@ def grounding_problem(text: str, sources: Mapping[str, str], entry: Mapping) -> 
         return ""
     if not isinstance(evidence, Mapping):
         return GROUNDING_MISSING
+    # 같은 판정 번호의 수치 배열 안에서만 원문참조를 원문으로 되돌린다 — 다른
+    # 배열(추세·시점)이나 다른 판정 번호는 이 함수가 한 번에 한 후보만 받으므로
+    # 애초에 섞이지 않는다. 입력 evidence는 바꾸지 않고 되돌린 사본만 쓴다.
+    numeric_entries = (
+        resolve_numeric_quote_refs(evidence[NUMERIC_KEY])
+        if NUMERIC_KEY in evidence else None
+    )
     if (TREND_KEY in required and NUMERIC_KEY in evidence
-        and _numeric_valid(text, evidence[NUMERIC_KEY], sources)
-        and _reported_comparison_valid(text, evidence[NUMERIC_KEY], sources)):
+        and _numeric_valid(text, numeric_entries, sources)
+        and _reported_comparison_valid(text, numeric_entries, sources)):
         required = tuple(kind for kind in required if kind != TREND_KEY)
     validators = {NUMERIC_KEY: _numeric_valid, TREND_KEY: _trend_valid, TIME_KEY: _time_valid}
     for kind in required:
@@ -568,7 +576,10 @@ def grounding_problem(text: str, sources: Mapping[str, str], entry: Mapping) -> 
     for kind, payload in evidence.items():
         if kind not in required and payload == []:
             continue
-        if kind not in validators or not validators[kind](text, payload, sources):
+        if kind not in validators:
+            return GROUNDING_INVALID
+        effective_payload = numeric_entries if kind == NUMERIC_KEY else payload
+        if not validators[kind](text, effective_payload, sources):
             return GROUNDING_INVALID
     return ""
 

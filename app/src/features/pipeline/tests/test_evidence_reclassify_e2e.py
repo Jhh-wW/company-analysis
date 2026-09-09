@@ -25,7 +25,6 @@ from src.core import evidence_reclassify_switch as reclassify_switch
 from src.core.provider_gateway import attempt_context
 from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.features.budget import provider_budget
-from src.features.composer.constants import SECTION_GUIDES
 from src.features.composer.tests.test_e2e_offline import (
     COMPANY_NAME,
     _JypFakeClient,
@@ -148,9 +147,21 @@ class _FixtureMessages(_JypFakeMessages):
         return json.dumps({"문장들": sentences}, ensure_ascii=False)
 
     def _route(self, prompt: str) -> str | None:
-        if SECTION_GUIDES["portfolio"] in prompt:
+        """부모가 «3장 작가 프롬프트»로 가른 경우에만 픽스처 응답으로 바꾼다.
+
+        ★ 검수 프롬프트에도 «장별 작성 범위»가 모든 장 몫으로 실린다 — 검수
+          규칙 11이 그 범위를 판정 기준으로 삼기 때문이다. 그래서 장 안내가
+          들어 있는지만 보고 작가 응답을 돌려주면, 검수 호출이 작가 JSON을
+          받아 판정을 하나도 읽지 못하고 재요청까지 같은 답을 받아 모든 문장이
+          «응답 없음»으로 떨어진다. 부모의 헤더 판별(검수·재작성·요약·도식)을
+          먼저 거친 뒤, 부모가 실제로 3장 작가 호출로 «센» 경우에만 가로챈다.
+        """
+
+        before = self.section_calls.get("portfolio", 0)
+        routed = super()._route(prompt)
+        if self.section_calls.get("portfolio", 0) > before:
             return self._portfolio_response(prompt)
-        return super()._route(prompt)
+        return routed
 
     def _reclassify_payload(self, prompt: str) -> dict[str, object]:
         # 9장 재정의 뒤에는 자기 선언 차별점이 없는 회사의 9장도 재판정 대상이 된다.

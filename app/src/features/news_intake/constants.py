@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Final
 
 from src.shared.report_evidence.constants import NEWS_EXCLUDED_SECTION_IDS
@@ -415,6 +416,25 @@ WINDOW_MONTHS: Final[tuple[int, ...]] = (12, 24, 36)
 WINDOW_ARTICLE_BUDGETS: Final[tuple[int, ...]] = (16, 4, 4)
 CONTENT_DUPLICATE_SIMILARITY: Final[float] = 0.88
 EVENT_DUPLICATE_SIMILARITY: Final[float] = 0.84
+#: 사건 중복 판정에서 «새 사실일 수 있는 숫자»를 찾는 정규식. 소수점·천단위
+#: 구분자(.,)가 붙은 숫자까지 하나로 묶어 읽는다 — ``grounded_mapping.same_event``
+#: 전용이며 다른 용도로 쓰지 않는다. 숫자 배열 비교는 순서를 살린 리스트로
+#: 한다(``re.findall`` 결과 그대로) — Counter로 바꿔 순서를 잃지 않는다.
+NEWS_EVENT_NUMBER_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"\d+(?:[.,]\d+)*")
+#: 사건 중복의 «순수 부분 인용» 경로에서만 쓰는 문장 분리 기준. 한글 종결
+#: 어미(다/요) 뒤 마침표·물음표·느낌표 «다음의 공백»에서만 자른다(구두점
+#: 자체는 앞 문장에 남긴다 — 문장 끝 종결형 비교에 구두점이 필요하다).
+#: 숫자 안의 소수점(예: "3.5")은 그 앞이 한글이 아니므로 자르지 않는다.
+NEWS_SENTENCE_SPLIT_RE: Final[re.Pattern[str]] = re.compile(r"(?<=[다요][.!?])\s+")
+#: 숫자+단위 뒤 문장 끝에서 «실제로 같은 뜻»인 통계 서술 종결형만 좁게 인정한다
+#: (좌: 표준형, 우: 표준형과 같다고 보는 형). 이 목록에 없는 표현은 절대
+#: 같다고 보지 않는다 — 대상명·부정·계획/현재·숫자·단위·기간·중간 문구는
+#: 이 정규화가 전혀 건드리지 않는다. 다른 단위·다른 종결형은 실제로 필요할
+#: 때만 이 목록에 추가한다(미리 일반화하지 않는다). 2026-09-09 WOORI
+#: 실제 사례(우리은행 ATM 대수 기사 두 건)에서 확인한 것만 담았다.
+NEWS_STAT_SENTENCE_ENDING_EQUIVALENTS: Final[tuple[tuple[str, str], ...]] = (
+    ("대였다.", "대로 집계됐다."),
+)
 NEWS_TRIGGER_REFRESH: Final[str] = "recent_news_refresh"
 SEARCH_TOPICS: Final[tuple[tuple[str, str], ...]] = (
     ("products", "사업"),
