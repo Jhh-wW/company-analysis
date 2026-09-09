@@ -25,6 +25,7 @@ from src.features.composer.scope_guard import scope_problem
 
 from src.features.composer.grounding_constants import (
     COMPARATIVE_RE, CONTINUOUS_RE, DOWN_RE, GROUNDING_INVALID, GROUNDING_KEY,
+    GROUNDING_SOURCE_FIELD,
     GROUNDING_MISSING,
     MIN_CONTINUOUS_POINTS, MIN_TREND_POINTS, NUMERIC_KEY, PARENTHETICAL_RE,
     PARTICLE_RE, PLANNED_END_RE, RETROSPECTIVE_RE, SENTENCE_SPLIT_RE, TIME_KEY,
@@ -152,7 +153,7 @@ def grounding_requirements(text: str, sources: Sequence[str]) -> tuple[str, ...]
 
 
 def _quote(entry: Mapping, sources: Mapping[str, str]) -> str | None:
-    fragment_id, quote = entry.get("근거"), entry.get("원문")
+    fragment_id, quote = entry.get(GROUNDING_SOURCE_FIELD), entry.get("원문")
     if not isinstance(fragment_id, str) or not isinstance(quote, str) or not quote.strip():
         return None
     source = sources.get(fragment_id)

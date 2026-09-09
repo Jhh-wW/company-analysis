@@ -79,6 +79,8 @@ from src.features.composer.grounding import (
 from src.features.composer.grounding_constants import (
     GROUNDING_GUIDE,
     REVIEW_GROUNDING_REJECTED,
+    GROUNDING_SOURCE_FIELD,
+    NUMERIC_KEY,
     TABLE_SOURCE_ID,
 )
 from src.features.composer.logic import (
@@ -1062,6 +1064,35 @@ def _grouped_grounding_candidate(
     return _grounding_candidate(text, item.citations, frag_by_id, table_source)
 
 
+def _numeric_binding_uses_table(evidence: object) -> bool:
+    """이 후보의 «수치» 결속이 실적표 원문에 실제로 걸렸는가.
+
+    ★ 왜 «수치» 배열만 보는가 — `grounding_problem` 은 배열마다 취급이 다르다.
+      수치·추세·시점은 실제 검증기(`_numeric_valid` 등)가 원문에 결속하지만,
+      «미래근거»와 «관계»는 «모양만» 보고 넘긴다(각자 다른 가드가 따로 결속한다).
+      그래서 「미래근거: [{근거: 실적표}]」 같은 «선언»은 아무것도 증명하지 않는다.
+      실측 반례(root): 그 한 줄만 붙이면 실제 SM F1·F3·F4 가 평문·묶음·요약 ×
+      표 유무 18가지에서 전부 그대로 공개됐다.
+    ★ 여기까지 온 후보는 `constrain_verdicts` 를 «참»으로 통과한 것이다. 수치
+      배열이 있으면 그 시점에 `_numeric_valid` 가 이미 원문에 결속했다는 뜻이다 —
+      그래서 이 확인은 «검증된 수치 결속»만 골라낸다.
+    ⚠️ 후보의 «자기 인용»에 실적표를 적는 길은 없다. 실적표는 수집 조각 id 가
+      아니므로 그런 인용이 달린 문장은 `_machine_check` 규칙 ①이 검수 전에 뺀다.
+      그래서 인용 쪽 예외는 두지 않는다.
+    """
+
+    if not isinstance(evidence, Mapping):
+        return False
+    entries = evidence.get(NUMERIC_KEY)
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+        return False
+    return any(
+        isinstance(entry, Mapping)
+        and str(entry.get(GROUNDING_SOURCE_FIELD) or "").strip() == TABLE_SOURCE_ID
+        for entry in entries
+    )
+
+
 def _apply_grounding(
     raw,
     verdicts,
@@ -1077,16 +1108,33 @@ def _apply_grounding(
         raw, verdicts, candidates, cells_by_number=flow_cells_by_number,
     )
     # 같은 파서로 미래 근거를 읽고, 중복 번호는 근거 없음으로 처리한다.
-    future_evidence = future_plan_entries_by_number(raw)
+    # 같은 값이 «이 후보가 어느 인용을 근거로 들었는가»도 담고 있어 함께 쓴다.
+    review_evidence = future_plan_entries_by_number(raw)
+    future_evidence = review_evidence
     for number, (text, sources) in candidates.items():
         if constrained.get(number) not in (VERDICT_TRUE, VERDICT_UNCLEAR):
             continue
         context = (diagnostic_contexts or {}).get(number)
         # ★ «확인» 산문은 본문이든 요약이든 자기 인용 원문에 걸린다. 여기서
         #   걸러야 본문·요약·부록·빈 장 안내가 «같은 판정»을 보게 된다.
-        # 실적표가 근거인 문장은 낱말 겹침이 아니라 «수치 결속 계약»이 본다.
-        if number in confirmed_prose_numbers and TABLE_SOURCE_ID not in sources:
-            problem = prose_own_source_problem(text, sources)
+        #
+        # ⚠️ 실적표 결속 원문은 «후보가 인용해서» 들어오는 값이 아니라 이 보고서에
+        #   표가 있으면 모든 후보에 함께 실리는 값이다(_grounding_candidate).
+        #   그래서 「표가 sources 에 있으면 건너뛴다」로 적으면, 표가 있는 보고서의
+        #   평문·요약·재작성 경로에서 이 검사가 «통째로» 꺼진다(실측 반례).
+        #   숫자 결속 계약의 예외는 «검증된 수치 결속이 표 원문에 걸린»
+        #   후보에만 준다 — 선언만으로는 주지 않는다(_numeric_binding_uses_table).
+        # ⚠️ «애매»는 아래에서 해석으로 강등된다. 해석 등급은 이 낱말 계약의
+        #   대상이 아니므로, 강등될 후보에 확인 등급의 잣대를 먼저 대지 않는다.
+        if (number in confirmed_prose_numbers
+                and constrained.get(number) == VERDICT_TRUE
+                and not _numeric_binding_uses_table(review_evidence.get(number))):
+            own_sources = {
+                source_id: source_text
+                for source_id, source_text in sources.items()
+                if source_id != TABLE_SOURCE_ID
+            }
+            problem = prose_own_source_problem(text, own_sources)
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem

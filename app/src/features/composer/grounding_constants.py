@@ -5,6 +5,9 @@ from __future__ import annotations
 import re
 
 GROUNDING_KEY = "검증근거"
+#: 결속 항목 하나가 «어느 인용»을 근거로 들었는지 적는 칸.
+#: 값이 TABLE_SOURCE_ID 이면 그 후보는 실적표를 근거로 든 것이다.
+GROUNDING_SOURCE_FIELD = "근거"
 NUMERIC_KEY = "수치"
 TREND_KEY = "추세"
 TIME_KEY = "시점"

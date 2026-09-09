@@ -38,6 +38,10 @@ from collections.abc import Iterable, Mapping, Sequence
 
 from src.features.composer.prose_own_source_constants import (
     CLAUSE_SPLIT_RE,
+    GENERIC_ORG_UNIT_HEAD_SUFFIXES,
+    GENERIC_SUPPORT_STEMS,
+    MIN_SUPPORT_STEM_CHARS,
+    SUPPORT_TERM_TAIL_RE,
     PROSE_OWN_SOURCE_UNSUPPORTED,
     PROSE_REVENUE_PRIMACY_FROM_RECOGNITION_ONLY,
     RECOGNITION_CLAUSE_RE,
@@ -54,18 +58,70 @@ def _surface(value: object) -> str:
     return "".join(unicodedata.normalize("NFKC", str(value or "")).casefold().split())
 
 
+def _support_stem(token: str) -> str:
+    """근거어 하나에서 «끝에 붙은 조사·어미 한 벌»만 벗긴다.
+
+    ★ 닫힌 목록으로 «한 번만» 벗긴다. 임의 접미사를 벗기지 않으므로
+      「마케팅」이 「마케팅화」와 같은 낱말이 되지 않는다.
+    ⚠️ 벗긴 결과가 최소 길이에 못 미치면 벗기지 않는다 — 조사 조각만 남은
+      글자를 근거어로 세지 않기 위해서다.
+    """
+
+    stripped = SUPPORT_TERM_TAIL_RE.sub("", token, count=1)
+    if len(stripped) < MIN_SUPPORT_STEM_CHARS:
+        return token
+    return stripped
+
+
+def _is_generic_org_unit_stem(word: str) -> bool:
+    """벗겨서 새로 얻은 낱말이 «조직단위 머리명사»로 끝나는가.
+
+    ★ 「영업부문」처럼 수식어(「기업금융」/「개인금융」)가 공백으로 갈린 별도
+      낱말이라 이 비교에 들어오지 않는 조직단위 복합어는, 머리명사만 같아도
+      «어느 부문»인지 아무것도 뒷받침하지 않는다(실측 [14][240]).
+    ⚠️ 특정 회사·부문 이름을 나열하지 않는다 — 구조(머리명사가 끝에 오는가)만
+      본다. `GENERIC_ORG_UNIT_HEAD_SUFFIXES` 참고.
+    """
+
+    return any(word.endswith(suffix) for suffix in GENERIC_ORG_UNIT_HEAD_SUFFIXES)
+
+
 def own_source_support_terms(claim: str, source_texts: Iterable[object]) -> list[str]:
     """주장과 «자기 인용 원문» 양쪽에 있는 낱말.
 
     ★ 결속(`prose_facts`)과 공개(이 파일)가 «같은» 계산을 보게 하려고 여기 한
       곳에만 둔다. 두 곳이 각자 세면 이번 결함이 다시 난다.
+    ★ 글자 그대로 찾지 못하면 «양쪽에 같은 꼬리 규칙»을 적용한 낱말끼리
+      맞춰 본다. 원문 「가람은 음반을 제작합니다」가 그대로 뒷받침하는
+      「가람이 음반을 제작한다」가 근거어 1개로 세어져 사라지던 자리다(실측).
+    ⚠️ 두 번째 단계는 «부분 문자열이 아니라 낱말 대 낱말»이다. 후보의 「제작」이
+      원문의 「제작비」에 걸리지 않는다 — 꼬리를 뗀 뒤 서로 «같아야» 센다.
+    ⚠️ 첫 단계(글자 그대로 포함)는 예전 그대로 둔다. 그래서 지금 세어지던 낱말은
+      계속 세어지고, 이 변경으로 «새로 막히는» 문장은 없다.
     """
 
     evidence_text = " ".join(str(text or "") for text in source_texts).casefold()
+    # 원문 쪽도 «같은» 꼬리 규칙으로 낱말을 만든다. 한쪽만 벗기면 비교가 성립하지 않는다.
+    evidence_stems = {
+        _support_stem(token.casefold())
+        for token in SUPPORT_WORD_RE.findall(evidence_text)
+    }
     out: list[str] = []
     for token in SUPPORT_WORD_RE.findall(str(claim or "")):
         normalized = token.casefold()
-        if normalized in evidence_text and normalized not in out:
+        if normalized not in evidence_text:
+            normalized = _support_stem(normalized)
+            if normalized in GENERIC_SUPPORT_STEMS:
+                # 「회사는」→「회사」처럼 아무것도 뒷받침하지 않는 일반 주어는
+                # 벗겨서 새로 얻었을 때 세지 않는다(실측 F3 이 이 자리로 샜다).
+                continue
+            if _is_generic_org_unit_stem(normalized):
+                # 「영업부문은」→「영업부문」처럼 조직단위 머리명사만 같고
+                # 수식어(부문 이름)가 다른 경우도 세지 않는다(실측 [14][240]).
+                continue
+            if normalized not in evidence_stems:
+                continue
+        if normalized not in out:
             out.append(normalized)
     return out[:SUPPORT_TERM_LOG_LIMIT]
 
