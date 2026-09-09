@@ -291,6 +291,14 @@ BODY_COMPONENT_ATTRIBUTES: Final[frozenset[str]] = frozenset({
 BODY_AUXILIARY_LABELS: Final[frozenset[str]] = frozenset({
     "기사 속 종목 이야기", "ai 요약", "ai 해설", "ai 종목 해설", "추천 기사", "관련 기사",
 })
+# 인라인 시세는 회사명을 남기고 명시적 컴포넌트 안의 가격 자식만 제외한다.
+# 일반 price class나 기자가 쓴 숫자 모양은 시세 컴포넌트의 증거가 아니다.
+BODY_INLINE_QUOTE_TAG: Final[str] = "a"
+BODY_INLINE_QUOTE_CLASS: Final[str] = "stock"
+BODY_INLINE_QUOTE_ATTRIBUTE: Final[str] = "data-testid"
+BODY_INLINE_QUOTE_ATTRIBUTE_VALUE: Final[str] = "stock"
+BODY_INLINE_QUOTE_PRICE_TAG: Final[str] = "span"
+BODY_INLINE_QUOTE_PRICE_CLASS: Final[str] = "price"
 BODY_NON_TEXT_TAGS: Final[frozenset[str]] = frozenset({
     "script", "style", "noscript", "template", "form",
 })

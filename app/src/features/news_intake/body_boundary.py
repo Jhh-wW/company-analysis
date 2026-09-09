@@ -29,6 +29,8 @@ class _Frame:
     blocked: bool
     auxiliary: bool
     text_start: int
+    quote_start: int | None
+    quote_price: bool
 
 
 class BodyBoundaryParser(HTMLParser):
@@ -41,6 +43,19 @@ class BodyBoundaryParser(HTMLParser):
         self.visible_chunks: list[str] = []
         self.excluded_text: set[str] = set()
         self.auxiliary_chunks: list[str] = []
+        self.quote_chunks: list[tuple[str, bool]] = []
+
+    def _remember_quote(self, frame: _Frame) -> None:
+        if frame.quote_start is None:
+            return
+        chunks = self.quote_chunks[frame.quote_start:]
+        # 가격만 기억하면 기자가 직접 쓴 같은 숫자까지 막게 된다. 이름 등
+        # 비가격 글자와 가격이 함께 관측된 컴포넌트 전체만 복사본과 대조한다.
+        if not any(text.strip() for text, price in chunks if price):
+            return
+        if not any(text.strip() for text, price in chunks if not price):
+            return
+        self.excluded_text.add("".join(unescape("".join(text for text, _ in chunks)).split()))
 
     def _remember(self, value: str) -> None:
         normalized = " ".join(unescape(value).split())
@@ -51,7 +66,19 @@ class BodyBoundaryParser(HTMLParser):
     def _start(self, tag: str, attrs: list[tuple[str, str | None]], *, closed: bool) -> None:
         parent = self.stack[-1] if self.stack else None
         auxiliary = bool(parent and parent.auxiliary) or _auxiliary(attrs)
-        blocked = bool(parent and parent.blocked) or auxiliary or tag in self.excluded_tags
+        values = dict(attrs)
+        classes = (values.get("class") or "").split()
+        quote = (
+            tag == c.BODY_INLINE_QUOTE_TAG
+            and c.BODY_INLINE_QUOTE_CLASS in classes
+            and values.get(c.BODY_INLINE_QUOTE_ATTRIBUTE) == c.BODY_INLINE_QUOTE_ATTRIBUTE_VALUE
+        )
+        quote_price = bool(parent and parent.quote_price) or (
+            tag == c.BODY_INLINE_QUOTE_PRICE_TAG
+            and c.BODY_INLINE_QUOTE_PRICE_CLASS in classes
+            and any(frame.quote_start is not None for frame in self.stack)
+        )
+        blocked = bool(parent and parent.blocked) or auxiliary or quote_price or tag in self.excluded_tags
         if not blocked:
             self.parts.append(self.get_starttag_text() or "")
             if tag in c.BODY_TEXT_BLOCK_TAGS:
@@ -60,7 +87,10 @@ class BodyBoundaryParser(HTMLParser):
             # 양옆 본문이 하나의 단어로 붙지 않게 제외 구획의 경계를 남긴다.
             self.parts.append(" ")
         if not closed and tag not in c.BODY_VOID_TAGS:
-            self.stack.append(_Frame(tag, blocked, auxiliary, len(self.auxiliary_chunks)))
+            self.stack.append(_Frame(
+                tag, blocked, auxiliary, len(self.auxiliary_chunks),
+                len(self.quote_chunks) if quote and not blocked else None, quote_price,
+            ))
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self._start(tag, attrs, closed=False)
@@ -76,6 +106,7 @@ class BodyBoundaryParser(HTMLParser):
             for closed in self.stack[index:]:
                 if closed.auxiliary:
                     self._remember(" ".join(self.auxiliary_chunks[closed.text_start:]))
+                self._remember_quote(closed)
             del self.stack[index:]
             if not frame.blocked:
                 self.parts.append(f"</{tag}>")
@@ -85,6 +116,10 @@ class BodyBoundaryParser(HTMLParser):
 
     def _data(self, raw: str, visible: str) -> None:
         parent = self.stack[-1] if self.stack else None
+        if (parent and not parent.auxiliary
+                and any(frame.quote_start is not None for frame in self.stack)
+                and not any(frame.tag in c.BODY_NON_TEXT_TAGS for frame in self.stack)):
+            self.quote_chunks.append((visible, parent.quote_price))
         if parent and parent.blocked:
             if parent.auxiliary and not any(frame.tag in c.BODY_NON_TEXT_TAGS for frame in self.stack):
                 self.auxiliary_chunks.append(visible)
@@ -110,6 +145,7 @@ class BodyBoundaryParser(HTMLParser):
         for frame in self.stack:
             if frame.auxiliary:
                 self._remember(" ".join(self.auxiliary_chunks[frame.text_start:]))
+            self._remember_quote(frame)
 
     @property
     def html(self) -> str:

@@ -652,6 +652,7 @@ def _collected_fragment_from_raw(
         document_title=_optional_text(raw, "문서명"),
         location=_optional_text(raw, "원문위치"),
         document_date=_optional_text(raw, "문서일"),
+        financial_api_disclosed_at=_optional_text(raw, "financial_api_disclosed_at"),
         document_identity=document_identity,
         document_content_sha256=document_content_sha256,
         supported_claim_slots=supported_claim_slots,

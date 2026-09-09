@@ -636,7 +636,9 @@
             장 번호를 문단마다 되풀이할 이유가 없다. PDF도 같은 커밋에서 함께 바꿨다
             (export_pdf/logic.py::_paragraph_number_markup) — 한쪽만 고치면
             「3-2 문단 보세요」가 다시 어긋난다. #}
-      {% if s.prose_paragraphs %}
+      {% set empty_notice = empty_section_notice(report, s) if report.release_mode != 'FULL' else '' %}{% if empty_notice %}
+      <p class="muted section-note">{{ empty_notice }}</p>
+      {% elif s.prose_paragraphs %}
         {% for paragraph in s.prose_paragraphs %}
         <p class="prose"><span class="pno" aria-hidden="true">{{ loop.index }}.</span><span class="prose-text">{{ inline_refs(paragraph) }}</span></p>
         {% endfor %}

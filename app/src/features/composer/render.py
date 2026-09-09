@@ -172,6 +172,8 @@ class _FragmentMeta:
     #: 홈페이지 조각의 «문서일» — CollectedFragment 어댑터에는 없는 필드라
     #: 원시 dict를 받았을 때만 채워진다 (port.py는 3-1 소유라 손대지 않는다).
     document_date: str = ""
+    #: 같은 API 응답·공시로 검증된 제출일. 문서일/조회일로 대체하지 않는다.
+    financial_api_disclosed_at: str = ""
     #: FULL packet이 봉인한 문서 신원. 공식 웹은 URL, DART는 접수번호와
     #: URL을 함께 검산한 document identity다.
     document_identity: str = ""
@@ -227,6 +229,7 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
                     document_title=str(item.get("문서명") or "").strip(),
                     location=str(item.get("원문위치") or "").strip(),
                     document_date=str(item.get("문서일") or "").strip(),
+                    financial_api_disclosed_at=str(item.get("financial_api_disclosed_at") or ""),
                     from_filing=not source_url,
                     from_financial_api=text.startswith(DART_FINANCIAL_API_PREFIX),
                 )
@@ -241,6 +244,7 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
             document_title=str(getattr(fragment, "document_title", "") or ""),
             location=str(getattr(fragment, "location", "") or ""),
             document_date=str(getattr(fragment, "document_date", "") or ""),
+            financial_api_disclosed_at=fragment.financial_api_disclosed_at,
             document_identity=str(
                 getattr(fragment, "document_identity", "") or ""
             ).strip(),
@@ -854,7 +858,8 @@ def _build_source(
             number=number,
             kind=SourceKind.FILING,
             label=DART_FINANCIAL_API_LABEL,
-            collected_at=meta.document_date,
+            disclosed_at=meta.financial_api_disclosed_at,
+            collected_at=meta.source_collected_on or meta.document_date,
             source_id=f"{V2_SOURCE_ID_PREFIX}{meta.fragment_id}",
             title=DART_FINANCIAL_API_LABEL,
             # API 운영 주체가 아니라 이 재무 수치를 공시한 회사를 표시한다.

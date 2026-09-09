@@ -915,6 +915,7 @@ def _normalize_packet_fragments(
             document_title=fragment.document_title,
             location=fragment.location,
             document_date=document_dates.get(fragment.fragment_id, ""),
+            financial_api_disclosed_at=fragment.financial_api_disclosed_at,
             document_identity=fragment.document_identity,
             document_content_sha256=fragment.document_content_sha256,
             supported_claim_slots=fragment.supported_claim_slots,

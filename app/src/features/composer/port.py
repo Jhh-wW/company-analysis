@@ -14,9 +14,14 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, Final, Optional
 
 from src.features.composer.constants import RCEPT_DT_LENGTH, SECTION_IDS
+from src.features.composer.financial_source_constants import (
+    FINANCIAL_DATE_PACKET_VERSION,
+    LEGACY_PACKET_VERSION,
+)
 from src.features.provenance.sources import (
     evidence_text_hash,
     exact_evidence_text_hash,
@@ -283,6 +288,19 @@ class CollectedFragment:
     #: Source를 다시 만들면 비교사 발행자가 자사로 바뀌므로 원본 Source를
     #: packet 안에서 그대로 운반한다.
     bound_source: object | None = field(default=None, repr=False, compare=True)
+    #: 수집 어댑터가 API 회사·기간·접수에 결속한 공시일. 수집일과 별개다.
+    financial_api_disclosed_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.financial_api_disclosed_at, str):
+            raise TypeError("재무 API 공시일은 문자열이어야 합니다")
+        if self.financial_api_disclosed_at:
+            try:
+                canonical = date.fromisoformat(self.financial_api_disclosed_at).isoformat()
+            except ValueError as exc:
+                raise ValueError("재무 API 공시일은 유효한 날짜여야 합니다") from exc
+            if canonical != self.financial_api_disclosed_at:
+                raise ValueError("재무 API 공시일은 YYYY-MM-DD여야 합니다")
 
 
 @dataclass(frozen=True)
@@ -868,6 +886,7 @@ class SectionEvidencePacket:
                     fragment.document_title,
                     fragment.location,
                     fragment.document_date,
+                    fragment.financial_api_disclosed_at,
                     fragment.document_identity,
                     fragment.document_content_sha256,
                     fragment.formal_source_kind,
@@ -1024,7 +1043,13 @@ class SectionEvidencePacket:
             # 문서 전체 hash와 지원 claim slot이 봉인 대상에 추가된 두 번째
             # 계약이다. 필드를 바꾸고 이전 version을 유지하면 같은 버전 이름이
             # 배포 시점마다 다른 바이트를 뜻하게 된다.
-            "version": 4,
+            # 새 날짜가 없는 옛 packet의 지문은 유지한다. 날짜가 있으면
+            # 새 계약 버전에서 공시일도 원문과 함께 봉인한다.
+            "version": (
+                FINANCIAL_DATE_PACKET_VERSION
+                if any(fragment.financial_api_disclosed_at for fragment in self.fragments)
+                else LEGACY_PACKET_VERSION
+            ),
             "company_id": company_id,
             "evidence_generation_sha256": generation,
             "section_id": self.section_id,
@@ -1037,6 +1062,10 @@ class SectionEvidencePacket:
                     "document_title": fragment.document_title,
                     "location": fragment.location,
                     "document_date": fragment.document_date,
+                    **(
+                        {"financial_api_disclosed_at": fragment.financial_api_disclosed_at}
+                        if fragment.financial_api_disclosed_at else {}
+                    ),
                     "document_identity": fragment.document_identity,
                     "document_content_sha256": fragment.document_content_sha256,
                     **(
@@ -1156,6 +1185,7 @@ def fragments_from_raw(
                 source_url=str(item.get("출처") or "").strip(),
                 document_title=str(item.get("문서명") or "").strip(),
                 location=str(item.get("원문위치") or "").strip(),
+                financial_api_disclosed_at=str(item.get("financial_api_disclosed_at") or ""),
             )
         )
     return tuple(out)

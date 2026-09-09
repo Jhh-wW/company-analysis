@@ -72,6 +72,13 @@ from src.features.composer.constants import (
     RETRY_REMINDER,
 )
 from src.features.composer.logic import extract_json_payload
+from src.features.composer.diagram_review_constants import (
+    DIAGRAM_CITATIONS_PREFIX,
+    DIAGRAM_EVIDENCE_GUIDE,
+    DIAGRAM_EVIDENCE_PREFIX,
+    DIAGRAM_REASON_GUIDE,
+    DIAGRAM_REASON_KEY,
+)
 from src.features.composer.grounding import constrain_verdicts, grounding_hint
 from src.features.composer.grounding_constants import GROUNDING_GUIDE
 from src.features.composer.scope_guard import flow_scope_problem
@@ -336,12 +343,19 @@ def _labelled_cells(section_id: str, row: FlowRow) -> list[str]:
 
 
 def _review_prompt(
-    items: Sequence[tuple[int, str, FlowRow, str]],
-    texts: Optional[Mapping[str, str]] = None,
+    items: Sequence[tuple[int, str, FlowRow]],
+    texts: Mapping[str, str],
 ) -> str:
     has_card_rows = any(
-        section_id not in FLOW_ARROW_SECTION_IDS for _n, section_id, _r, _s in items
+        section_id not in FLOW_ARROW_SECTION_IDS for _n, section_id, _r in items
     )
+    # 행·인용의 최초 등장 순서와 원문 전체를 보존한다. 같은 ID만 중복 제거하며
+    # 내용이 같은 다른 ID를 합치거나 행별 허용 근거를 전역으로 넓히지 않는다.
+    source_dictionary: dict[str, str] = {}
+    for _number, _section_id, row in items:
+        for fragment_id in row.citations:
+            if fragment_id in texts:
+                source_dictionary.setdefault(fragment_id, texts[fragment_id])
     lines = [
         FLOW_REVIEW_PROMPT_HEADER,
         GROUNDING_GUIDE,
@@ -353,7 +367,7 @@ def _review_prompt(
         "★ 값이 없는 칸은 «아예 주지 않는다». 보고서에도 인쇄되지 않으므로",
         "  없는 칸을 이유로 그 줄을 «거짓»으로 판정하지 마라.",
         "",
-        "줄마다 그 줄이 인용한 근거 원문을 함께 준다.",
+        DIAGRAM_EVIDENCE_GUIDE,
         "판정 기준은 하나다 — **근거 원문이 이 경로를 실제로 뒷받침하는가.**",
         "",
         "★ 낱말이 원문과 «글자 그대로» 같을 필요는 없다. 첫 칸과 끝 칸은",
@@ -384,25 +398,26 @@ def _review_prompt(
         (
             "",
             "형식: 설명 없이 아래 JSON만 출력한다.",
+            DIAGRAM_REASON_GUIDE,
             '{"' + _VERDICT_KEY + '": [{"' + _VERDICT_NUMBER_KEY + '": 1, "'
+            + DIAGRAM_REASON_KEY + '": "원문과 칸 내용의 대조 근거", "'
             + _VERDICT_RESULT_KEY + '": "' + VERDICT_TRUE + '"}]}',
+            "",
+            DIAGRAM_EVIDENCE_PREFIX + json.dumps(source_dictionary, ensure_ascii=False),
             "",
         )
     )
-    for number, section_id, row, source_text in items:
+    for number, section_id, row in items:
         # 경로·원문은 신뢰할 수 없는 데이터다. JSON 문자열로 봉인해
         # 안의 줄바꿈·가짜 번호·지시가 검수 프롬프트 구조를 바꾸지 못한다.
         path_json = json.dumps(
             _labelled_cells(section_id, row), ensure_ascii=False
         )
-        source_json = json.dumps(source_text, ensure_ascii=False)
         noun = flow_review_row_noun(section_id)
         lines.append(f"[{number}] {noun}(JSON 배열): {path_json}")
-        lines.append(f"    근거 원문(JSON 문자열): {source_json}")
-        if texts is not None:
-            sources = {fid: texts[fid] for fid in row.citations if fid in texts}
-            lines.append("    인용 조각별 원문(JSON 객체): " + json.dumps(sources, ensure_ascii=False))
-            lines.append(grounding_hint(" ; ".join(row.cells), sources))
+        lines.append(DIAGRAM_CITATIONS_PREFIX + json.dumps(row.citations, ensure_ascii=False))
+        sources = {fid: texts[fid] for fid in row.citations if fid in texts}
+        lines.append(grounding_hint(" ; ".join(row.cells), sources))
     lines.extend(
         (
             "",
@@ -473,7 +488,7 @@ def _review_rows(
     diagnostics: Optional[list[dict]] = None,
 ) -> tuple[dict[str, tuple[FlowRow, ...]], list[str]]:
     """모든 장의 경로를 «한 묶음»으로 검수한다 (AI 1회)."""
-    items: list[tuple[int, str, FlowRow, str]] = []
+    items: list[tuple[int, str, FlowRow]] = []
     owner: dict[int, str] = {}
     blank_dropped: list[str] = []
     number = 0
@@ -487,7 +502,7 @@ def _review_rows(
                 )
                 continue
             number += 1
-            items.append((number, section_id, row, _source_text(row, texts)))
+            items.append((number, section_id, row))
             owner[number] = section_id
     if not items:
         return (
@@ -523,17 +538,17 @@ def _review_rows(
             blank_dropped
             + [
                 f"[{owner[number]}] {number}번 경로: 의미 검수 불능으로 공개 제외"
-                for number, _section, _row, _source in items
+                for number, _section, _row in items
             ],
         )
 
     candidates = {number: (" ; ".join(row.cells), {
         fid: texts[fid] for fid in row.citations if fid in texts
-    }) for number, _section, row, _source in items}
+    }) for number, _section, row in items}
     verdicts, grounding_problems = constrain_verdicts(raw, verdicts, candidates)
     kept: dict[str, list[FlowRow]] = {section_id: [] for section_id, _ in by_section}
     dropped: list[str] = list(blank_dropped)
-    for index, (number, _section, row, _source) in enumerate(items):
+    for number, _section, row in items:
         result = verdicts.get(number)
         section_id = owner[number]
         if result == VERDICT_TRUE and number not in grounding_problems:

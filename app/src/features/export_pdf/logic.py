@@ -57,6 +57,7 @@ from reportlab.platypus import (
 from src.core import clock
 from src.core.citations import citation_marker
 from src.core.constants import section_display_heading
+from src.core.report_display import empty_section_notice
 from src.features.composer.constants import FLOW_UNCONFIRMED_CELL
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.composer.validate import validate_v2
@@ -2327,6 +2328,18 @@ def _add_section(
         _HorizontalRule(width),
         Spacer(1, 10),
     ]
+    empty_notice = (
+        empty_section_notice(report, section)
+        if report.schema_version == ENGINE_V2_SCHEMA_VERSION
+        and report.public_projection is None
+        and report.release_mode != "FULL"
+        else ""
+    )
+    if empty_notice:
+        story.extend(_lead_with_heading(
+            heading_flowables, [Paragraph(_escape(empty_notice), styles["body"])]
+        ))
+        return
     if not section.is_filled:
         story.extend(heading_flowables)
         return
