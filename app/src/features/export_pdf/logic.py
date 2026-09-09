@@ -294,6 +294,21 @@ class _BrandedCanvas(Canvas):
         페이지 시작 콜백에서 미리 그리면 같은 페이지에서 장이 바뀔 때 낡은 제목과
         새 제목이 PDF 텍스트에 함께 남는다. 페이지를 닫기 직전에 그리면 첫 장
         제목이 기록된 뒤라 한 번의 정확한 머리말만 남는다.
+
+        ★ 규칙(같은 쪽에 장이 여럿일 때) — 두 값을 따로 둔다:
+          · ``_current_section_name`` = «이 쪽 자체의» 머리말. 이 쪽에서
+            «처음» 그려진 장 제목으로 고정한다(기존 표시 그대로 보존 —
+            장이 여럿인 혼합 쪽 자체는 각 장 제목이 본문에 그대로 보이므로
+            머리말이 그중 하나와 달라도 읽는 사람이 본문에서 확인할 수 있다).
+          · ``_carry_section_name`` = «다음 쪽에 물려줄» 값. 이 쪽에서
+            «마지막»으로 그려진 장 제목으로 매번 갱신한다.
+          다음 쪽이 시작될 때(바로 아래) ``_current_section_name``을
+          ``_carry_section_name``으로 미리 채운다 — 그 쪽에 새 장 제목이
+          있으면 그 제목이 다시 덮어쓰고(그 쪽 자체 규칙 그대로), 없으면
+          (순수 이어짐 쪽) 이 값이 그대로 남는다. 실측: 8장 「인재상과
+          일하는 방식」·9장 「회사가 밝힌 차별점」이 한 쪽에 같이 실리면, 그
+          쪽 자체는 여전히 8장을 보여주되(기존과 동일) 9장 본문만 이어지는
+          다음 쪽은 이제 9장을 정확히 물려받는다(예전엔 8장에 멈춰 있었다).
         """
 
         if self.getPageNumber() > 1:
@@ -305,6 +320,10 @@ class _BrandedCanvas(Canvas):
             )
         super().showPage()
         self._page_section_seen = False
+        # 다음 쪽의 시작 머리말을 «이 쪽까지 실제로 시작한 마지막 장»으로
+        # 미리 채운다. 다음 쪽에 그 쪽만의 첫 장이 있으면 draw()가 다시
+        # 덮어쓴다 — 순수 이어짐 쪽에서만 이 값이 그대로 쓰인다.
+        self._current_section_name = getattr(self, "_carry_section_name", "")
 
 
 class _OutlineAnchor(Flowable):
@@ -381,6 +400,10 @@ class _SectionHeading(Flowable):
 
     def draw(self) -> None:
         canvas = cast(Canvas, self.canv)
+        # 규칙은 _BrandedCanvas.showPage()의 docstring에 있다: 이 쪽 자체의
+        # 머리말(_current_section_name)은 이 쪽의 «첫» 장만 반영하고, 다음
+        # 쪽에 물려줄 값(_carry_section_name)은 매번(마지막 장까지) 갱신한다.
+        setattr(canvas, "_carry_section_name", self.section_name)
         if not bool(getattr(canvas, "_page_section_seen", False)):
             setattr(canvas, "_current_section_name", self.section_name)
             setattr(canvas, "_page_section_seen", True)

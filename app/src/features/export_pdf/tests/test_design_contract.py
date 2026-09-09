@@ -512,8 +512,17 @@ def test_표_머리행은_검정_바탕과_흰_semibold_글자를_쓴다(
     assert ink_fills
 
 
-def test_상단띠는_페이지의_첫_장제목_하나를_보여준다(demo_pdf: bytes) -> None:
-    current = ""
+def test_top_band_shows_own_first_heading_but_continuation_inherits_last(demo_pdf: bytes) -> None:
+    """장이 실제로 시작하는 쪽 «자체»의 머리말은 그 쪽의 첫 장(기존 표시
+    그대로) — 장이 여럿이어도 각 장 제목이 본문에 그대로 보이므로, 머리말이
+    그중 하나와 달라도 읽는 사람이 본문에서 확인할 수 있다. 반면 장 제목이
+    전혀 없는 «순수 이어짐» 쪽은, 지금까지 실제로 시작한 «마지막» 장을
+    물려받아야 한다 — 실측 근거:
+    `.local-artifacts/resume-20260909-pdf-running-header-fix/`. 이 규칙은
+    `_BrandedCanvas.showPage()`/`_SectionHeading.draw()`의 docstring에도 있다.
+    """
+    current = ""  # 이 쪽 자체의 머리말(첫 장, 또는 이어짐 쪽이면 물려받은 값).
+    carry = ""  # 지금까지 실제로 시작한 마지막 장 — 다음 이어짐 쪽에 물려줄 값.
     with pdfplumber.open(io.BytesIO(demo_pdf)) as document:
         for page in document.pages[1:]:
             top = page.crop((0, 0, float(page.width), constants.PAGE_HEADER_HEIGHT_PT))
@@ -537,7 +546,10 @@ def test_상단띠는_페이지의_첫_장제목_하나를_보여준다(demo_pdf
                     (body_text.index("부록. 출처와 검증 상태"), "출처와 검증 상태")
                 )
             if candidates:
-                current = min(candidates)[1]
+                current = min(candidates)[1]  # 그 쪽 자체는 «첫» 장.
+                carry = max(candidates)[1]  # 다음 이어짐 쪽에 물려줄 «마지막» 장.
+            else:
+                current = carry  # 장 제목이 없는 순수 이어짐 쪽 — 마지막 장을 물려받는다.
             assert current
             assert current in top_text
 
