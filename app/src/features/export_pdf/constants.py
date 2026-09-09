@@ -82,6 +82,8 @@ TITLE_FONT_SIZE_PT: Final[float] = 34.0
 HEADING_FONT_SIZE_PT: Final[float] = 20.0
 TABLE_FONT_SIZE_PT: Final[float] = 7.7
 BODY_LEADING_PT: Final[float] = 14.1
+# 짧은 글 전용 장은 제목과 함께 묶어 마지막 문단만 다음 쪽에 남지 않게 한다.
+SHORT_TEXT_SECTION_MAX_HEIGHT_PT: Final[float] = 200.0
 CARD_LEADING_PT: Final[float] = 11.8
 TABLE_LEADING_PT: Final[float] = 10.0
 META_FONT_SIZE_PT: Final[float] = 6.8

@@ -273,6 +273,34 @@ BODY_EXTRACTION_STAGE_ORDER: Final[tuple[str, ...]] = (
 #: 본문으로 인정하는 최소 글자 수. 메타 설명 한 문장(보통 80~160자)은 넘고,
 #: 「더보기」 같은 조각 글자는 넘지 못하는 자리에 둔다.
 BODY_MIN_CHARS: Final[int] = 20
+#: 닫는 태그를 기다리지 않는 HTML 요소.
+BODY_VOID_TAGS: Final[frozenset[str]] = frozenset({
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+    "param", "source", "track", "wbr",
+})
+#: 단어가 아니라 별도 컴포넌트의 명시적 식별자만 제외한다.
+#: stock_story는 실제 기사 밖 증시 AI 해설 구획에서 확인했다.
+BODY_AUXILIARY_COMPONENTS: Final[frozenset[str]] = frozenset({
+    "stock-story", "ai-summary", "ai-summary-widget", "ai-commentary",
+    "ai-stock-analysis", "stock-commentary", "recommended-articles",
+    "related-articles", "related-news", "recommendation-widget",
+})
+BODY_COMPONENT_ATTRIBUTES: Final[frozenset[str]] = frozenset({
+    "id", "class", "data-component", "data-widget", "data-module",
+})
+BODY_AUXILIARY_LABELS: Final[frozenset[str]] = frozenset({
+    "기사 속 종목 이야기", "ai 요약", "ai 해설", "ai 종목 해설", "추천 기사", "관련 기사",
+})
+BODY_NON_TEXT_TAGS: Final[frozenset[str]] = frozenset({
+    "script", "style", "noscript", "template", "form",
+})
+BODY_PAGE_CHROME_TAGS: Final[frozenset[str]] = BODY_NON_TEXT_TAGS | frozenset({
+    "title", "nav", "header", "footer", "aside",
+})
+BODY_TEXT_BLOCK_TAGS: Final[frozenset[str]] = frozenset({
+    "article", "div", "section", "p", "br", "li", "ul", "ol", "blockquote",
+    "h1", "h2", "h3", "h4", "h5", "h6", "table", "tr", "td", "th",
+})
 #: 해독이 깨졌다고 볼 대체문자 비율. 정상 문서에도 U+FFFD가 한두 개 섞일 수
 #: 있으므로 개수가 아니라 비율로 본다.
 DECODE_REPLACEMENT_RATIO_LIMIT: Final[float] = 0.02

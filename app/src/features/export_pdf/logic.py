@@ -2284,6 +2284,28 @@ def _lead_with_heading(
     ]
 
 
+def _paragraphs_with_heading(
+    heading: Sequence[Flowable],
+    paragraphs: Sequence[Flowable],
+    width: float,
+    *,
+    text_only: bool,
+) -> list[Flowable]:
+    """짧은 글 전용 장은 한 쪽에, 긴 장은 기존 문단 경계대로 배치한다."""
+    if text_only:
+        flowables = [*heading, *paragraphs]
+        height_limit = constants.SHORT_TEXT_SECTION_MAX_HEIGHT_PT
+        section_height = sum(
+            item.wrap(width, height_limit)[1]
+            + item.getSpaceBefore()
+            + item.getSpaceAfter()
+            for item in flowables
+        )
+        if section_height <= height_limit:
+            return [KeepTogether(flowables)]
+    return [KeepTogether([*heading, paragraphs[0]]), *paragraphs[1:]]
+
+
 def _add_section(
     story: list[Flowable],
     report: Report,
@@ -2331,15 +2353,14 @@ def _add_section(
         for block in detail_blocks[1:]:
             _add_section_content_block(story, block, styles, width)
     elif section.prose_paragraphs:
-        # ★ 문단 단위로 낸다 — 예전에는 한 장의 문장을 전부 이어 붙여 한
-        #   덩어리로 냈다. 첫 문단만 제목과 함께 묶어 쪽 넘김에서 떨어지지
-        #   않게 하고, 나머지는 이어서 흘린다.
+        # 긴 장은 문단 단위로 흘리고, 짧은 글 전용 장은 제목과 함께 놓는다.
         paragraphs = [
             _numbered_paragraph(position, text, styles, width)
             for position, text in enumerate(section.prose_paragraphs, start=1)
         ]
-        story.append(KeepTogether([*heading_flowables, paragraphs[0]]))
-        story.extend(paragraphs[1:])
+        story.extend(_paragraphs_with_heading(
+            heading_flowables, paragraphs, width, text_only=not section.tables
+        ))
     elif section.prose_lines:
         prose = " ".join(_cited_text(text, cite) for text, cite in section.prose_lines)
         story.append(
@@ -2640,8 +2661,10 @@ def _add_projection_section(
             _numbered_paragraph(position, text, styles, width, number_text=ordinal)
             for position, (ordinal, text) in enumerate(display.paragraphs, start=1)
         ]
-        story.append(KeepTogether([*heading_flowables, paragraphs[0]]))
-        story.extend(paragraphs[1:])
+        story.extend(_paragraphs_with_heading(
+            heading_flowables, paragraphs, width,
+            text_only=not display.tables and not band,
+        ))
         story.extend(band)
         table_start = 0
     else:

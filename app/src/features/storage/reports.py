@@ -94,6 +94,10 @@ def _table_to_dict(table: ReportTable) -> dict[str, Any]:
     if table.row_cites:
         payload["row_cites"] = [list(row) for row in validated_row_cites(table.rows, table.row_cites)]
         payload["source_cites"] = list(table.source_cites)
+    # 이름·뉴스 표는 행별 인용 없이도 전체 출처를 갖는다. 이를 빼면
+    # 저장 직후 재조회에서 캡션 외 출처가 사라져 같은 보고서의 출고가 막힌다.
+    if table.source_cites:
+        payload["source_cites"] = list(table.source_cites)
     # FULL 구조 manifest는 원문 자체가 아니라 행/셀 typed ref·전체 출처·표
     # 참조만 저장한다. 원문 evidence_rows는 수집 경계 밖 장기 저장물이 아니다.
     if table.manifest_ref:
