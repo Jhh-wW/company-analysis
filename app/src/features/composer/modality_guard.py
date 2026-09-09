@@ -41,7 +41,10 @@ def _activity(clause: str, match) -> _Activity | None:
     anchor = c.PARTICLE_RE.sub("", words[-1]).casefold()
     if len(anchor) < c.MIN_ACTIVITY_ANCHOR_CHARS:
         return None
-    topic = c.TOPIC_RE.search(prefix)
+    topic = next((
+        candidate for candidate in c.TOPIC_RE.finditer(prefix)
+        if not c.RELATIVE_TOPIC_STEM_RE.fullmatch(candidate.group(1))
+    ), None)
     subject = topic.group(1) if topic else ""
     if subject in c.GENERIC_SUBJECTS:
         # 명시된 보고 대상 주어를 주어 생략과 구별한다. 이를 빈 값으로
