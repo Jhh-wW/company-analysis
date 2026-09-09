@@ -89,6 +89,22 @@ def culture_accounting_policy_problem(text: str) -> str:
     차단하지 않는다 — 인식 어휘와 측정 기준 어휘가 같은 절에 함께 있을
     때만 차단 대상이 되고, 그 절에 결속된 절차가 있으면 다시 보존한다.
     """
+    return (CULTURE_ACCOUNTING_POLICY_MISPLACED
+            if _pure_accounting_measurement_clauses(text) else "")
+
+
+def _pure_accounting_measurement_clauses(text: str) -> tuple[str, ...]:
+    """«순수 회계 인식·측정»인 절만 표면형으로 모아 준다.
+
+    한 절이 인식 어휘와 측정 기준 어휘(신용위험 특성·연체일)를 모두 담고 있으면
+    회계 서술이고, 같은 절 안에 부정되지 않은 검토·승인·감독이 결속돼 있으면
+    그 절차 서술이 우선하므로 «순수»가 아니다 — 그 절은 여기서 빠진다.
+
+    ★ 판단 경계는 «같은 절»이다. 뒤 문장의 이사회 언급이나 부정된 승인으로는
+      면제가 만들어지지 않는다. 이 규칙은 산문·도식이 똑같이 쓴다.
+    """
+
+    found: list[str] = []
     for clause in SOURCE_CLAUSE_SPLIT_RE.split(text):
         surface_clause = _surface(clause)
         if not surface_clause:
@@ -103,7 +119,53 @@ def culture_accounting_policy_problem(text: str) -> str:
         )
         if governance_bound:
             continue
-        return CULTURE_ACCOUNTING_POLICY_MISPLACED
+        found.append(surface_clause)
+    return tuple(found)
+
+
+def _recognition_terms(surface_text: str) -> frozenset[str]:
+    """그 문자열이 실제로 쓴 회계 인식 표현만 모은다."""
+
+    return frozenset(match.group(0) for match
+                     in CULTURE_ACCOUNTING_RECOGNITION_RE.finditer(surface_text))
+
+
+def culture_accounting_flow_problem(
+    cells: Sequence[str], sources_mapping: Mapping[str, str]
+) -> str:
+    """축약된 culture 행이 «자기 인용»의 순수 회계 측정 정책을 옮겨 적었을 때만 막는다.
+
+    ★ 왜 산문 검사만으로는 못 잡나 — 칸은 원문을 줄여 적는다. 실제 반례의 세 칸
+      「신용위험 관리 / 전체기간 기대신용손실 간편법 적용 / (빈칸)」에는 「신용위험
+      특성」도 「연체일」도 없어서, 칸만 보는 세 표지 결합 조건이 성립하지 않는다.
+      그래서 «칸»이 아니라 «그 행이 인용한 원문»에서 순수 회계 절을 찾고, 칸이 바로
+      그 절의 인식 표현을 옮겼을 때만 막는다(source-aware).
+
+    ★ 면제는 «원문 쪽»에서만 만들어진다. 그 절 안에 부정되지 않은 검토·승인·감독이
+      결속돼 있으면 애초에 순수 회계 절이 아니어서 여기까지 오지 않는다. 반대로
+      후보가 원문에 없는 검토·승인을 칸에 덧붙여도 면제되지 않는다 — 칸의 낱말은
+      면제 근거가 아니다. 다른 절의 절차나 부정된 승인으로도 면제되지 않는다.
+
+    ★ 결속 조건: 칸이 쓴 인식 표현이 «그 절»에도 있어야 한다. 다른 회계 문장을
+      가져다 붙인 행이 우연히 걸리지 않게 하는 좁힘이다.
+
+    ★ 회사명·조각 id·원문 전체 부분문자열 면제·글자수 기준을 쓰지 않는다.
+      다른 장의 정상 회계 설명은 이 함수를 지나가지 않는다 — 호출자가 culture
+      행일 때만 부른다. 빈 문자열은 그 행이 옳다는 뜻이 아니다.
+    """
+
+    if isinstance(cells, (str, bytes)) or len(cells) != CULTURE_FLOW_CELL_COUNT:
+        return ""  # 형식 검사는 기존 도식 검증기가 담당한다.
+    stated = _surface(" ".join(cells))
+    stated_terms = _recognition_terms(stated)
+    if not stated_terms:
+        # 인식 표현이 없으면 회계 측정 정책을 옮긴 행이 아니다. 「재무」라는
+        # 낱말이나 위험 관리 절차만 적은 행은 여기서 그대로 지나간다.
+        return ""
+    for source in sources_mapping.values():
+        for clause in _pure_accounting_measurement_clauses(source):
+            if stated_terms & _recognition_terms(clause):
+                return CULTURE_ACCOUNTING_POLICY_MISPLACED
     return ""
 
 

@@ -30,7 +30,8 @@ from src.features.composer.news_constants import NEWS_REVIEW_GUIDE
 from src.features.composer.news_usage import attribution_prefix, news_metadata
 from src.features.composer.news_block import _is_news_fragment
 from src.features.composer.culture_guard import (
-    culture_accounting_policy_problem, culture_flow_problem, culture_problem,
+    culture_accounting_flow_problem, culture_accounting_policy_problem,
+    culture_flow_problem, culture_problem,
 )
 from src.features.composer.scope_guard import flow_scope_problem
 from src.features.composer.constants import STRATEGY_TABLE_SECTION_ID
@@ -39,6 +40,7 @@ from src.features.composer.future_plan_constants import (
 )
 from src.features.composer.future_plan_guard import (
     future_plan_entries_by_number, future_plan_problem,
+    future_plan_prose_problem,
 )
 from src.features.composer.direct_support_constants import (
     FLOW_CELL_JOIN, RELATION_REVIEW_GUIDE,
@@ -1077,11 +1079,26 @@ def _apply_grounding(
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
                 continue
+        # 6장 «성장 전략» 본문 문장이 회사의 계획·전망을 명시하면 표와 같은
+        # 미래 근거를 요구한다. 칸이 있는 후보(표)는 아래 기존 경로가 그대로 맡고
+        # 표 계약은 바뀌지 않는다. 다른 장의 산문은 이 조건에 들어오지 않는다.
+        if (context and context[:2] == (STRATEGY_TABLE_SECTION_ID, DIAGNOSTIC_KIND_BODY)
+                and not (flow_cells_by_number and number in flow_cells_by_number)):
+            problem = future_plan_prose_problem(
+                text, sources, future_evidence.get(number)
+            )
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
         if flow_cells_by_number is not None and number in flow_cells_by_number:
             cells = flow_cells_by_number[number]
             problem = flow_scope_problem(cells, sources)
             if not problem and context and context[0] == "culture":
-                problem = culture_flow_problem(cells, sources)
+                # 축약된 칸은 원문을 줄여 적어 산문 검사의 세 표지 결합에 걸리지
+                # 않는다. 그 행이 «인용한 원문»의 순수 회계 절과 결속됐을 때만 막는다.
+                problem = (culture_flow_problem(cells, sources)
+                           or culture_accounting_flow_problem(cells, sources))
             # 6장 성장 계획 표만 미래 근거를 결속한다. 다른 장의 도식과 이 장의
             # 산문 문장(칸이 없다)은 이 검사를 지나가지 않는다.
             if not problem and context and context[0] == STRATEGY_TABLE_SECTION_ID:

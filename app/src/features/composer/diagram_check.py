@@ -93,7 +93,9 @@ from src.features.composer.direct_support_constants import (
 )
 from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
 from src.features.composer.scope_guard import flow_scope_problem
-from src.features.composer.culture_guard import culture_flow_problem, culture_problem
+from src.features.composer.culture_guard import (
+    culture_accounting_flow_problem, culture_flow_problem, culture_problem,
+)
 from src.features.composer.verify import (
     _SentenceNumber,
     _append_grounding_diagnostic,
@@ -575,8 +577,11 @@ def _review_rows(
             sources = candidates[number][1]
             flow_problem = flow_scope_problem(row.cells, sources)
             if not flow_problem and section_id == "culture":
+                # 축약된 칸은 원문을 줄여 적어 산문 검사의 세 표지 결합에 걸리지
+                # 않는다. 그 행이 «인용한 원문»의 순수 회계 절과 결속됐을 때만 막는다.
                 flow_problem = (
                     culture_flow_problem(row.cells, sources)
+                    or culture_accounting_flow_problem(row.cells, sources)
                     or culture_problem(" ; ".join(row.cells), sources)
                 )
             # 6장 성장 계획 표만 미래 근거를 결속한다 — 이 장의 산문과 다른 장의

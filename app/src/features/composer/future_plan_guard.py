@@ -22,7 +22,9 @@
     양태가 원문에서 실제로 확인되는 것과 다르면 그 자체가 실패다.
   · 빈 문자열은 «이 검사에서 반례를 찾지 못했다»는 뜻이지 그 줄의 승인이 아니다.
     나머지 판정은 기존 수치·추세·시점·범위·인과·문화 검수가 그대로 한다.
-  · 이 표가 «아닌» 후보(6장 산문 문장 포함)에는 아무 판정도 하지 않는다.
+  · 표 계약은 그대로다. 6장 «본문 문장»은 회사를 주어로 세운 계획·전망 주장이
+    있을 때만 같은 근거를 요구한다(`future_plan_prose_problem`). 그 밖의 후보에는
+    아무 판정도 하지 않는다.
 """
 
 from __future__ import annotations
@@ -81,6 +83,7 @@ from src.features.composer.future_plan_constants import (
     MIN_QUOTE_CHARS,
     MIN_TARGET_CHARS,
     MODALITY_FUTURE_KINDS,
+    PROSE_SUBJECT_RE,
     MEANS_BRIDGE_RE,
     MODALITY_RE,
     CANDIDATE_NEGATION_RE,
@@ -608,6 +611,267 @@ def future_plan_problem(
     if any(index not in covered for index in range(len(_segments(claim_cell)))):
         return FUTURE_SECOND_CLAIM_UNPROVEN
     return ""
+
+
+def _prose_plan_claims(text: str) -> tuple[tuple[int, str, int, int], ...]:
+    """산문에서 «회사를 주어로 세운 계획·전망 주장»의 자리만 돌려준다.
+
+    돌려주는 값: (문장 번호, 그 문장, 표지 시작, 표지 끝). 하나도 없으면 이 검사는 아무 판정도
+    하지 않는다 — 산업·시장의 현재 서술, 회사의 진행·완료 서술, 배경 설명은 여기서
+    걸러져 원래대로 기존 검수의 몫으로 남는다.
+
+    ★ 문 두 개가 «같은 문장»에서 함께 열려야 한다.
+      ① 명시된 주어가 일반 주어(회사·당사·당행…)다. 고유명사를 알아보지 않는다.
+      ② 그 문장에 계획 또는 전망 표지가 있다(진행·완료는 아니다).
+    ⚠️ 주어가 생략된 문장은 발동하지 않는다. 6장 본문에는 산업 서술이 함께 오는데,
+       주어 없는 문장까지 회사 계획으로 보면 정상 배경 설명이 대량으로 걸린다.
+    """
+
+    claims: list[tuple[int, str, int, int]] = []
+    for index, sentence in enumerate(_sentences(_normalized(text))):
+        subjects = [match.group(1) for match in PROSE_SUBJECT_RE.finditer(sentence)]
+        if not any(subject in GENERIC_SUBJECTS for subject in subjects):
+            continue
+        markers = [match for match in MODALITY_RE.finditer(sentence)
+                   if _modality_kind(match) in MODALITY_FUTURE_KINDS]
+        # ★ 「향후·내년·앞으로」처럼 시점만 말하는 부사는 그 자체가 «별도의 계획
+        #   주장»이 아니다. 그 주장은 같은 문장의 서술어 표지(「…할 계획이다」)가
+        #   진다. 부사를 주장 자리로 세우면 활동이 언제나 그 «뒤»에 오므로,
+        #   원문이 완벽히 뒷받침하는 정상 문장까지 영영 증명될 수 없게 된다.
+        predicates = [match for match in markers
+                      if FUTURE_TEMPORAL_RE.fullmatch(match.group()) is None]
+        # 서술어 표지가 하나도 없으면 그 부사가 문장 전체의 미래성을 진다. 이때는
+        # 문장 어디에 있는 활동으로도 증명할 수 있도록 자리를 문장 끝에 둔다.
+        for match in (predicates or markers[-1:]):
+            start = match.start() if predicates else len(sentence)
+            claims.append((index, sentence, start, match.end()))
+    return tuple(claims)
+
+
+def _one_prose_item_problem(
+    item: Mapping,
+    sentences: Sequence[str],
+    sources_mapping: Mapping[str, str],
+) -> tuple[str, tuple[tuple[int, int], ...]]:
+    """미래근거 항목 하나를 «본문 문장»에 결속한다. 표 항목 검사와 같은 잣대다.
+
+    통과하면 (빈 문자열, 결속된 자리 전부)를 돌려준다. 자리는 (문장 번호, 그
+    문장에서 활동이 놓인 시작 위치)다.
+
+    ★ 표와 다른 점은 후보 쪽이 «칸»이 아니라 «문장»이라는 것뿐이다. 원문 쪽 검사
+      (구절이 자기 인용 하나의 연속 부분인가 · 대상과 활동이 한 문장에 결속됐나 ·
+      활동 바로 뒤 표지가 미래인가 · 주어가 남이 아닌가 · 전망을 굳히지 않았나 ·
+      부정 방향이 같은가)는 표와 «같은 함수»를 그대로 쓴다.
+    ⚠️ 주체 검사에 후보 문장을 넘기지 않는다. 표에서는 「주어가 이 줄의 칸에 적혀
+       있으면 통과」가 안전한 완화였지만, 산문은 문장이 길어 원문의 «남의 주어»가
+       후보 문장 어딘가에 우연히 들어 있기 쉽다. 실측 반례에서 원문 주어 「구조」가
+       후보의 「산업의 구조 변화」에 그대로 있어 그 완화가 그대로 구멍이 된다.
+    """
+
+    for key in FUTURE_FIELD_KEYS:
+        if key in item and not isinstance(item[key], str):
+            return FUTURE_FIELD_TYPE_INVALID, ()
+    target = _normalized(item.get(FUTURE_TARGET_KEY))
+    activity = _normalized(item.get(FUTURE_ACTIVITY_KEY))
+    slot_problem = _slot_problem(target, activity)
+    if slot_problem:
+        return slot_problem, ()
+
+    holders = [
+        (index, sentence, spans)
+        for index, sentence in enumerate(sentences)
+        if _has_bounded(sentence, target)
+        and (spans := _bounded_spans(sentence, activity, verbal=True))
+    ]
+    if not holders:
+        if not any(_has_bounded(sentence, target) for sentence in sentences):
+            return FUTURE_TARGET_NOT_IN_CANDIDATE, ()
+        return FUTURE_ACTIVITY_NOT_IN_CANDIDATE, ()
+
+    source_id = str(item.get(FUTURE_SOURCE_KEY) or "").strip()
+    if not source_id:
+        return FUTURE_SOURCE_ID_EMPTY, ()
+    if not isinstance(sources_mapping, Mapping) or source_id not in sources_mapping:
+        return FUTURE_SOURCE_NOT_CITED, ()
+    source = sources_mapping[source_id]
+
+    quote = str(item.get(FUTURE_QUOTE_KEY) or "")
+    if not quote.strip():
+        return FUTURE_QUOTE_MISSING, ()
+    quote_compact = _compact(quote)
+    if len(quote_compact) < MIN_QUOTE_CHARS:
+        return FUTURE_QUOTE_TOO_SHORT, ()
+    if quote_compact not in _compact(source):
+        return FUTURE_QUOTE_NOT_IN_SOURCE, ()
+
+    quote_text = _normalized(quote)
+    if not _has_bounded(quote_text, target):
+        return FUTURE_TARGET_NOT_IN_QUOTE, ()
+    if not _has_bounded(quote_text, activity, verbal=True):
+        return FUTURE_ACTIVITY_NOT_IN_QUOTE, ()
+
+    declared = str(item.get(FUTURE_MODE_KEY) or "").strip()
+    if declared not in FUTURE_MODES:
+        return FUTURE_MODE_INVALID, ()
+
+    source_sentences = _covering_sentences(source, quote_text) or _sentences(quote_text)
+    problems: list[str] = []
+    positions: list[tuple[int, int]] = []
+    # ★ 같은 대상·활동이 여러 자리에 되풀이될 수 있다. 한 자리만 보고 끝내면
+    #   「앞 문장은 현재 서술, 뒤 문장이 계획」처럼 흔한 글에서 정상 근거가 앞
+    #   자리에만 묶여, 정작 증명해야 할 계획 자리가 미증명으로 몰린다.
+    #   그래서 «결속되는 자리를 모두» 모은다. 자리를 나눠 배정하는 일은 부르는
+    #   쪽이 맡는다 — 한 항목이 두 주장을 겹쳐 덮지 못하게 하는 것도 거기서 한다.
+    for sentence_index, candidate_sentence, candidate_spans in holders:
+        for candidate_span in candidate_spans:
+            if _bind_prose_position(
+                source_sentences, candidate_sentence, candidate_span,
+                target, activity, declared, problems,
+            ):
+                positions.append((sentence_index, candidate_span[0]))
+    if positions:
+        return "", tuple(positions)
+    if problems:
+        return problems[0], ()
+    return FUTURE_TARGET_NOT_BOUND, ()
+
+
+def _bind_prose_position(
+    source_sentences: Sequence[str],
+    candidate_sentence: str,
+    candidate_span: tuple[int, int],
+    target: str,
+    activity: str,
+    declared: str,
+    problems: list[str],
+) -> bool:
+    """후보 문장의 «이 자리 하나»가 원문으로 결속되는지 본다. 잣대는 표와 같다.
+
+    막힌 사유는 `problems` 에 쌓아 둔다 — 어느 자리도 결속되지 않았을 때 처음
+    사유를 그대로 돌려주기 위해서다(사유 코드는 새로 만들지 않는다).
+    """
+
+    for source_sentence in source_sentences:
+        for activity_span in _bounded_spans(source_sentence, activity, verbal=True):
+            kind = _target_bound_to_activity(source_sentence, target, activity_span)
+            if not kind:
+                problems.append(FUTURE_TARGET_NOT_BOUND)
+                continue
+            if kind in ("adjacent", "means") and (
+                _pair_bridge_kind(candidate_sentence, target, candidate_span) != kind
+            ):
+                problems.append(FUTURE_TARGET_NOT_BOUND)
+                continue
+            subject_problem = _subject_problem(
+                source_sentence, target, activity_span[0], ()
+            )
+            if subject_problem:
+                problems.append(subject_problem)
+                continue
+            mode, modality_problem, negation = _source_modality(
+                source_sentence, activity_span)
+            if modality_problem:
+                problems.append(modality_problem)
+                continue
+            if mode != declared:
+                problems.append(FUTURE_MODE_MISDECLARED)
+                continue
+            # ★ 전망을 확정 계획으로 굳히지 못한다. 한정은 후보 문장에서도 그 활동
+            #   «뒤»에 남아야 한다 — 문장 앞쪽의 무관한 「기대」를 빌려 오지 않는다.
+            if mode == FUTURE_MODE_OUTLOOK and not CANDIDATE_OUTLOOK_RE.search(
+                candidate_sentence, candidate_span[1]
+            ):
+                problems.append(FUTURE_OUTLOOK_HARDENED)
+                continue
+            if bool(negation) != _candidate_polarity(candidate_sentence, activity):
+                problems.append(FUTURE_POLARITY_FLIPPED)
+                continue
+            return True
+    return False
+
+
+def future_plan_prose_problem(
+    text: str,
+    sources_mapping: Mapping[str, str],
+    evidence: object,
+) -> str:
+    """성장 전략 본문 문장이 «회사의 계획·전망»을 명시했을 때만 미래 근거를 결속한다.
+
+    ★ 부르는 쪽이 «6장 성장 전략의 본문 문장일 때만» 부른다. 표는 기존
+      `future_plan_problem` 이 그대로 맡고 계약이 바뀌지 않는다.
+    ★ 발동은 좁다 — 그 문장이 회사를 주어로 세우고 계획·전망 표지를 함께 쓸 때만이다.
+      산업·시장의 현재 변화, 회사가 이미 하고 있는 일, 배경 설명은 발동하지 않는다.
+    ★ 발동한 «주장 자리마다» 증명이 있어야 한다. 한 자리를 증명하고 나머지를 얹지
+      못한다. 항목마다 자기 인용 하나의 연속 구절이어야 하는 것도 표와 같다.
+    ⚠️ 빈 문자열은 승인이 아니라 «이 검사가 반례를 찾지 못했다»는 뜻이다.
+    """
+
+    claims = _prose_plan_claims(text)
+    if not claims:
+        return ""
+    items = _entries(evidence)
+    if items is None:
+        return FUTURE_EVIDENCE_MISSING
+    if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
+        return FUTURE_FIELD_TYPE_INVALID
+    entries = [item for item in items if isinstance(item, Mapping)]
+    if len(entries) != len(items):
+        return FUTURE_FIELD_TYPE_INVALID
+    if not entries:
+        return FUTURE_EVIDENCE_MISSING
+
+    sentences = _sentences(_normalized(text))
+    proofs: list[tuple[tuple[int, int], ...]] = []
+    for item in entries:
+        problem, positions = _one_prose_item_problem(item, sentences, sources_mapping)
+        if problem:
+            return problem
+        proofs.append(positions)
+    # ★ 표지마다 «그 표지에 딸린» 활동이 증명돼야 한다. 앞 표지가 이미 쓴 활동으로
+    #   뒤 표지를 덮지 못한다 — 「A를 확대할 계획이며, B도 늘릴 방침」에서 A 하나만
+    #   증명하고 B 를 얹는 우회를 막는다. 표 쪽 조각별 증명 요구와 같은 취지다.
+    # ★ 문장 번호는 주장을 찾을 때 «그 자리에서» 받아 둔다. 같은 문장이 두 번
+    #   나오면 문자열로 되찾는 방식은 언제나 앞 자리를 가리켜, 뒤 주장이 증명돼도
+    #   미증명으로 몰린다.
+    choices: list[set[int]] = []
+    previous_end: dict[int, int] = {}
+    for index, _sentence, marker_start, marker_end in claims:
+        low = previous_end.get(index, 0)
+        choices.append({
+            item_index
+            for item_index, positions in enumerate(proofs)
+            if any(sentence_index == index and low <= start <= marker_start
+                   for sentence_index, start in positions)
+        })
+        previous_end[index] = marker_end
+    if not _every_claim_has_its_own_item(choices):
+        return FUTURE_SECOND_CLAIM_UNPROVEN
+    return ""
+
+
+def _every_claim_has_its_own_item(choices: Sequence[set[int]]) -> bool:
+    """주장 자리마다 «서로 다른» 근거 항목을 하나씩 배정할 수 있는지 본다.
+
+    ★ 항목 하나가 여러 자리에 결속될 수 있으므로(같은 대상·활동의 되풀이),
+      앞에서부터 아무거나 집으면 배정이 가능한데도 실패로 볼 수 있다. 그래서
+      이미 배정된 항목을 «밀어내며» 다시 시도한다(증가 경로 탐색).
+    ⚠️ 이것은 완화가 아니다. 항목 하나가 두 주장을 겹쳐 덮는 것은 여전히 막힌다 —
+      배정은 «일대일»이다.
+    """
+
+    owner: dict[int, int] = {}
+
+    def assign(claim_index: int, tried: set[int]) -> bool:
+        for item_index in sorted(choices[claim_index]):
+            if item_index in tried:
+                continue
+            tried.add(item_index)
+            if item_index not in owner or assign(owner[item_index], tried):
+                owner[item_index] = claim_index
+                return True
+        return False
+
+    return all(assign(claim_index, set()) for claim_index in range(len(choices)))
 
 
 def future_plan_entries_by_number(raw: str | None) -> dict[int, object]:

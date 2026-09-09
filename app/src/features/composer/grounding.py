@@ -586,8 +586,9 @@ def grounding_problem(text: str, sources: Mapping[str, str], entry: Mapping) -> 
             if not isinstance(payload, list) or any(not isinstance(item, Mapping) for item in payload):
                 return GROUNDING_INVALID
             continue
-        # 미래 근거는 6장 성장 계획 표에서만 쓰이며, future_plan_guard 가 그 줄의
-        # 칸·인용에 따로 결속한다. 여기서는 모양만 보고 넘긴다 — 관계 근거와 같다.
+        # 미래 근거는 6장 성장 계획 표와 그 장의 본문 계획 문장에서 쓰이며,
+        # future_plan_guard 가 그 줄의 칸·인용 또는 그 문장·인용에 따로 결속한다.
+        # 여기서는 모양만 보고 넘긴다 — 관계 근거와 같다.
         if kind == FUTURE_KEY:
             if not isinstance(payload, list) or any(not isinstance(item, Mapping) for item in payload):
                 return GROUNDING_INVALID

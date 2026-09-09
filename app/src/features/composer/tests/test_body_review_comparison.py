@@ -119,11 +119,22 @@ def test_controlled_false_removes_addition_and_true_keeps_supported_peer(case, g
         if REWRITE_PROMPT_HEADER in prompt:
             return ""
         assert BODY_REVIEW_COMPARISON_GUIDE in prompt
-        return json.dumps({"판정": [
+        entries = [
             _entry(item, "거짓" if item.text == bad else "참",
                    comparison if item.text == bad else "1: 같은 대상·관계 일치")
             for item in _items(prompt)
-        ]}, ensure_ascii=False)
+        ]
+        if section == "future_strategy":
+            # 6장 본문의 회사 계획 문장도 표와 같은 미래 근거를 댄다. 정상 계획은
+            # 자기 원문이 그대로 뒷받침하므로 그 구절을 그대로 적는다.
+            for entry, item in zip(entries, _items(prompt)):
+                if entry["결과"] != "참":
+                    continue
+                entry["검증근거"] = {"미래근거": [{
+                    "근거": "1", "대상": "새로운 수익원", "활동": "발굴",
+                    "원문": source, "양태": "계획",
+                }]}
+        return json.dumps({"판정": entries}, ensure_ascii=False)
 
     result = _run(section, (
         ComposedSentence(bad, ("1",), grade), ComposedSentence(good, ("1",), "확인"),
