@@ -176,6 +176,7 @@ from src.shared import engine_build_identity, generation_coordination
 from src.shared.report_recovery import MAX_TOTAL_AI_CALLS as COMPOSER_RUNTIME_CALL_RESERVE
 from src.shared import runtime_failure_constants as failure_constants
 from src.shared import runtime_failure_diagnostic as runtime_failure
+from src.features.pipeline.provider_error_diagnostics import safe_provider_error_metadata
 from src.shared.company_identity import normalize_korean_registration_number
 from src.shared.generation_cache_identity import GenerationCacheNamespace
 from src.shared.report_source_identity import ReportSourceIdentity
@@ -6401,6 +6402,7 @@ def _collect_grounded_news(
                     "캐시재사용가능": False,
                     "provider_status": observation.status_code,
                     "provider_error_type": observation.error_type,
+                    **safe_provider_error_metadata(error.__cause__),
                     "provider_transport": observation.transport_state.value,
                     "provider_billing": observation.billing_disposition.value,
                     "provider_liability_krw": observation.liability_krw,
