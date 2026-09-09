@@ -322,17 +322,22 @@ def _kind_answers_role(kind: str, role_key: str) -> bool:
 
 def _candidate_binding(
     units: Sequence[_Unit], target_key: str, role_key: str, is_flow: bool
-) -> tuple[str, tuple[int, int, int] | None]:
-    """후보 안에서 «그 대상에 걸린 그 역할»의 자리를 확정한다.
+) -> tuple[str, tuple[tuple[int, int, int], ...]]:
+    """후보 안에서 «그 대상에 걸린 그 역할»의 자리를 모두 모은다.
 
     ★ 역할 낱말만 보면 「가람 개발」·「나래 제작」을 가람 근거 하나로 둘 다 덮는다.
       그래서 자리마다 주체를 확인한다. 같은 칸에 대상이 있으면 끊기지 않아야 하고,
       대상이 다른 칸에 있으면 그 역할 앞에 다른 주체가 없어야 한다(도식만).
     돌려주는 자리는 «역할 표현이 놓인 자리»뿐이다 — 칸 전체가 아니다.
+
+    ★ 직결된 자리와 허용된 칸-경계 자리를 «합쳐» 돌려준다. 한쪽이라도 있으면 거기서
+      멈추던 예전 방식은, 같은 칸에 직결이 있으면 다른 칸의 정상 자리를 놓쳐서
+      그 자리가 영영 덮이지 않았다. 다른 주체가 앞에 붙은 자리는 여전히 넣지 않는다.
     """
 
     target_seen = False
     role_seen = False
+    spans: list[tuple[int, int, int]] = []
     for position, unit in enumerate(units):
         target_spots = _occurrences(unit.surface, target_key)
         role_spots = _occurrences(unit.surface, role_key)
@@ -345,19 +350,22 @@ def _candidate_binding(
                 if target_span[0] < role_span[1] and role_span[0] < target_span[1]:
                     continue
                 if _bound(unit, target_span, role_span, target_key):
-                    return "", (position, role_span[0], role_span[1])
+                    spans.append((position, role_span[0], role_span[1]))
+                    break
     if not target_seen:
-        return ROLE_BINDING_TARGET_NOT_IN_CANDIDATE, None
+        return ROLE_BINDING_TARGET_NOT_IN_CANDIDATE, ()
     if not role_seen:
-        return ROLE_BINDING_ROLE_NOT_IN_CANDIDATE, None
+        return ROLE_BINDING_ROLE_NOT_IN_CANDIDATE, ()
     if is_flow:
         for position, unit in enumerate(units):
             if target_key in unit.surface:
                 continue
             for role_start in _occurrences(unit.surface, role_key):
                 if _local_prefix_blank(unit, role_start):
-                    return "", (position, role_start, role_start + len(role_key))
-    return ROLE_BINDING_ACTOR_BOUNDARY, None
+                    spans.append((position, role_start, role_start + len(role_key)))
+    if spans:
+        return "", tuple(sorted(set(spans)))
+    return ROLE_BINDING_ACTOR_BOUNDARY, ()
 
 
 def _quote_window(clause: _Unit, quote_key: str) -> tuple[int, int] | None:
@@ -429,45 +437,80 @@ def _binding_problem(
     units: Sequence[_Unit],
     own_sources: Mapping[str, str],
     is_flow: bool,
-) -> tuple[str, tuple[int, int, int] | None, str]:
-    """결속 항목 하나를 대조한다. 통과하면 «후보 쪽 역할 자리»와 유형을 함께 준다."""
+) -> tuple[str, tuple[tuple[int, int, int], ...], str,
+           dict[tuple[int, int, int], str]]:
+    """결속 항목 하나를 대조한다. 통과하면 «이 근거가 실제로 증명한 자리»만 준다.
+
+    ★ 자리마다 따로 본다. 한 자리가 어긋나도 다른 자리의 유효한 증명을 지우지 않는다.
+      대신 한 자리도 증명하지 못한 근거는 그 사유를 그대로 돌려준다.
+    ★ 증명하지 못한 자리의 사유는 넷째 값으로 함께 준다. 그 자리가 끝내 덮이지
+      않으면 부르는 쪽이 «조건을 뺐다»처럼 구체적인 사유를 그대로 쓴다.
+    """
 
     kind = str(item.get(RELATION_TYPE_KEY) or "").strip()
     for key in ROLE_BINDING_FIELDS:
         if key in item and not isinstance(item[key], str):
-            return ROLE_BINDING_FIELD_TYPE_INVALID, None, kind
+            return ROLE_BINDING_FIELD_TYPE_INVALID, (), kind, {}
     target = _text_field(item, RELATION_TARGET_KEY).strip()
     role = _text_field(item, RELATION_ROLE_KEY).strip()
     source_id = _text_field(item, RELATION_SOURCE_KEY).strip()
     quote = _text_field(item, RELATION_QUOTE_KEY).strip()
     if not target or not role:
-        return ROLE_BINDING_PAIR_MISSING, None, kind
+        return ROLE_BINDING_PAIR_MISSING, (), kind, {}
     target_key, role_key = _surface(target), _surface(role)
     if not target_key or not role_key:
-        return ROLE_BINDING_PAIR_MISSING, None, kind
+        return ROLE_BINDING_PAIR_MISSING, (), kind, {}
     # ① 대상과 역할값은 서로 구별되어야 한다. 한쪽이 다른 쪽의 일부면 「광고」·
     #    「광고 제작」처럼 슬롯을 겹쳐 통과시키는 우회가 된다.
     if (target_key == role_key
             or target_key in role_key or role_key in target_key):
-        return ROLE_BINDING_PAIR_DEGENERATE, None, kind
+        return ROLE_BINDING_PAIR_DEGENERATE, (), kind, {}
     # ② 그 유형이 후보가 실제로 한 주장에 답해야 한다. 「과금」이라며 역할 낱말만
     #    대거나 그 반대로 적으면 다른 주장의 증명으로 쓰인다.
     if not _kind_answers_role(kind, role_key):
-        return ROLE_BINDING_KIND_MISMATCH, None, kind
+        return ROLE_BINDING_KIND_MISMATCH, (), kind, {}
     # ③ 대조 대상은 «그 후보가 인용한» 조각 하나뿐이다. 다른 장의 근거를 빌릴 수 없다.
     if not source_id or source_id not in own_sources:
-        return ROLE_BINDING_NOT_OWN_CITE, None, kind
+        return ROLE_BINDING_NOT_OWN_CITE, (), kind, {}
     source = own_sources[source_id]
     quote_key = _surface(quote)
     if not quote_key or quote_key not in _surface(source):
-        return ROLE_BINDING_QUOTE_NOT_IN_SOURCE, None, kind
+        return ROLE_BINDING_QUOTE_NOT_IN_SOURCE, (), kind, {}
     # ④ 후보 쪽에서 «그 대상에 걸린 그 역할»의 자리를 확정한다.
-    claim_problem, claim_span = _candidate_binding(units, target_key, role_key, is_flow)
-    if claim_problem or claim_span is None:
+    claim_problem, claim_spans = _candidate_binding(units, target_key, role_key, is_flow)
+    if claim_problem or not claim_spans:
         # 자리를 확정하지 못하면 «통과»가 아니라 거절이다. assert 로 두면 -O 실행에서
         # 검사 자체가 사라져 조용히 승인될 수 있다.
-        return claim_problem or ROLE_BINDING_ACTOR_BOUNDARY, None, kind
+        return claim_problem or ROLE_BINDING_ACTOR_BOUNDARY, (), kind, {}
     # ⑤ 원문 쪽: 그 구절이 걸린 «한 절» 안에서 대상과 역할이 끊기지 않아야 한다.
+    #    자리마다 따로 본다 — 조건·부정이 자리마다 다를 수 있기 때문이다.
+    proven: list[tuple[int, int, int]] = []
+    span_reasons: dict[tuple[int, int, int], str] = {}
+    for claim_span in claim_spans:
+        reason = _span_problem(
+            claim_span, units, source, quote_key, target_key, role_key, kind,
+        )
+        if reason:
+            span_reasons[claim_span] = reason
+        else:
+            proven.append(claim_span)
+    if proven:
+        return "", tuple(proven), kind, span_reasons
+    first = next(iter(span_reasons.values()), ROLE_BINDING_UNBOUND_IN_SOURCE)
+    return first, (), kind, span_reasons
+
+
+def _span_problem(
+    claim_span: tuple[int, int, int],
+    units: Sequence[_Unit],
+    source: str,
+    quote_key: str,
+    target_key: str,
+    role_key: str,
+    kind: str,
+) -> str:
+    """후보의 자리 하나를 원문에 대조한다. 빈 문자열이면 그 자리는 증명됐다."""
+
     candidate_tail = _candidate_tail(units, claim_span)
     outside_quote = False
     unbound = False
@@ -499,17 +542,17 @@ def _binding_problem(
                 or _condition_mismatch(clause.surface, units[claim_span[0]].surface)
             )
             if mismatch:
-                return mismatch, None, kind
+                return mismatch
             if kind == RELATION_FEE and _fee_direction_reversed(
                 units[claim_span[0]].surface, clause.surface, target_key, role_key
             ):
-                return ROLE_BINDING_DIRECTION_REVERSED, None, kind
-            return "", claim_span, kind
+                return ROLE_BINDING_DIRECTION_REVERSED
+            return ""
     if outside_quote:
-        return ROLE_BINDING_ROLE_OUTSIDE_QUOTE, None, kind
+        return ROLE_BINDING_ROLE_OUTSIDE_QUOTE
     if unbound:
-        return ROLE_BINDING_UNBOUND_IN_SOURCE, None, kind
-    return ROLE_BINDING_UNBOUND_IN_SOURCE, None, kind
+        return ROLE_BINDING_UNBOUND_IN_SOURCE
+    return ROLE_BINDING_UNBOUND_IN_SOURCE
 
 
 def role_binding_problem(
@@ -524,8 +567,8 @@ def role_binding_problem(
       결속 항목으로 «어느 인용의 어느 구절이 그 대상에 그 역할을 주는지» 대야 하고,
       그 구절은 해당 인용 원문에 이어진 그대로 있어야 하며, 그 구절이 걸린 절 안에서
       대상과 역할이 끊기지 않고 묶여야 한다.
-    ★ 한 후보에 단언이 여럿이면 «자리마다» 뒷받침이 있어야 한다. 항목을 더 넣거나
-      같은 쌍을 되풀이해도 «같은 자리»만 다시 덮을 뿐 다른 자리는 덮이지 않는다 —
+    ★ 한 후보에 단언이 여럿이면 «자리마다» 뒷받침이 있어야 한다. 같은 대상·역할의
+      반복은 한 근거가 자리마다 검증해 덮지만, 다른 주장은 덮지 못한다 —
       「수수료, 로열티」는 수수료 근거 하나로 로열티까지 승인되지 않는다.
     ★ cells 는 «도식 후보일 때만» 준다. 행은 칸이 실제 구조라 칸을 넘는 결속을
       허용하지만, 그 칸이 자기 주체를 데리고 있으면 허용하지 않는다. 산문은 한
@@ -540,11 +583,15 @@ def role_binding_problem(
     if not bindings:
         return ROLE_BINDING_MISSING
     proven: list[tuple[int, int, int, str]] = []
+    span_reasons: dict[tuple[int, int, int], str] = {}
     for item in bindings:
-        problem, span, kind = _binding_problem(item, units, own_sources, cells is not None)
+        problem, spans, kind, reasons = _binding_problem(
+            item, units, own_sources, cells is not None,
+        )
         if problem:
             return problem
-        if span is not None:
+        span_reasons.update(reasons)
+        for span in spans:
             proven.append((span[0], span[1], span[2], kind))
     # ★ 후보의 «각 단언 자리»가 그 자리를 덮는 결속을 가져야 한다. 역할 낱말·칸
     #   전체·첫 대가 근거로 다른 자리를 덮지 못한다.
@@ -552,5 +599,11 @@ def role_binding_problem(
         if not any(unit == position and low <= start and end <= high
                    and proven_kind == kind
                    for unit, low, high, proven_kind in proven):
-            return ROLE_BINDING_CLAIM_UNCOVERED
+            # 그 자리를 증명하려다 어긋난 사유가 있으면 그대로 쓴다. 「조건을 뺐다」가
+            # 「덮이지 않았다」로 뭉뚱그려지면 어디를 고쳐야 할지 알 수 없다.
+            return next(
+                (reason for span, reason in span_reasons.items()
+                 if span[0] == position and span[1] <= start and end <= span[2]),
+                ROLE_BINDING_CLAIM_UNCOVERED,
+            )
     return ""
