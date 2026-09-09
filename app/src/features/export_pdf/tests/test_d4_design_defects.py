@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import io
+from dataclasses import replace
 from typing import Any, Sequence
 
 import pdfplumber
@@ -45,6 +46,10 @@ from src.features.report_standard.visualization import (
 _PAGE_WIDTH = 420.0
 _PAGE_HEIGHT = 260.0
 _TOLERANCE = 0.02
+_BOUNDARY_MARGIN_PT = 62
+_BOUNDARY_TIGHT_LEAD_PT = 640
+_BOUNDARY_ROOMY_LEAD_PT = 600
+_OVERSIZED_PARAGRAPH_REPETITIONS = 2000
 
 
 @pytest.fixture(autouse=True)
@@ -422,6 +427,102 @@ def test_카드로_시작하는_장은_앞_쪽의_남은_자리를_그대로_쓴
     assert pages == 1, (
         f"카드로 시작하는 장이 남은 자리를 안 쓰고 새 쪽으로 넘어갑니다 ({pages}쪽)"
     )
+
+
+#: 아래 세 시험이 공유하는 경계 fixture — 제목 뒤 첫 문단이 표(번호+본문 2열)로
+#: 조립되는 실제 경로(prose_paragraphs + tables 모두 있음)를 그대로 태운다.
+def _boundary_section():
+    table = ReportTable(
+        caption="표", headers=["a", "b"], rows=[["1", "2"]], cite="[2]", presentation="flow"
+    )
+    return replace(
+        build_demo_report().sections[0],
+        cell="identity", title="경계 시험 장", display_number="1",
+        prose_paragraphs=[
+            "첫 문단입니다. 조금 길게 써서 표 한 줄 분량으로 만듭니다. 조금 더 길게 씁니다.",
+            "둘째 문단",
+        ],
+        tables=[table], lines=[("근거", "[2]")],
+        empty_reason="", prose_lines=[], guidance_lines=[], tag="", fact_ids=[],
+    )
+
+
+def _render_boundary_story(leading_spacer_pt: float) -> bytes:
+    """앞에 정확한 높이의 Spacer만 두어 장 진입 시 남은 자리를 통제한다."""
+    from reportlab.lib.pagesizes import A4  # noqa: PLC0415
+    from reportlab.platypus import SimpleDocTemplate  # noqa: PLC0415
+
+    from src.features.export_pdf.logic import _add_section, _OutlineAnchor  # noqa: PLC0415
+
+    styles = _styles()
+    width = A4[0] - _BOUNDARY_MARGIN_PT * 2
+    report = build_demo_report()
+    story: list[Flowable] = [
+        _OutlineAnchor("root", "분석 본문", level=0), Spacer(1, leading_spacer_pt),
+    ]
+    _add_section(story, report, _boundary_section(), styles, width, "sec")
+    buffer = io.BytesIO()
+    SimpleDocTemplate(
+        buffer, pagesize=A4, leftMargin=_BOUNDARY_MARGIN_PT, rightMargin=_BOUNDARY_MARGIN_PT,
+        topMargin=_BOUNDARY_MARGIN_PT, bottomMargin=_BOUNDARY_MARGIN_PT,
+    ).build(story)
+    return buffer.getvalue()
+
+
+def test_heading_keeps_first_paragraph_when_only_heading_fits() -> None:
+    """실측 경계값(leading_spacer_pt=640) — 고아 제목이 실제로 재현되는 자리다.
+
+    되돌아가면 무엇이 보이나 — 제목만 이번 쪽 맨 아래 혼자 남고 첫 문단(번호+
+    본문 표 1행)은 다음 쪽 맨 위에서 시작한다(WOORI PDF 5쪽 실측과 같은 모양).
+    """
+    with pdfplumber.open(io.BytesIO(_render_boundary_story(_BOUNDARY_TIGHT_LEAD_PT))) as document:
+        pages = [page.extract_text() or "" for page in document.pages]
+    heading_pages = [i for i, text in enumerate(pages) if "경계 시험 장" in text]
+    body_pages = [i for i, text in enumerate(pages) if "첫 문단입니다" in text]
+    assert heading_pages and body_pages, "제목·첫 문단 중 하나가 어느 쪽에도 없습니다"
+    assert heading_pages == body_pages, (
+        f"제목과 첫 문단이 서로 다른 쪽에 있습니다(제목={heading_pages}, 첫 문단={body_pages}) "
+        "— 제목만 남는 고아 제목입니다"
+    )
+
+
+def test_heading_stays_on_page_when_first_paragraph_also_fits() -> None:
+    """여유 있는 자리(leading_spacer_pt=600)에서 불필요하게 다음 쪽으로 넘기지 않는다."""
+    with pdfplumber.open(io.BytesIO(_render_boundary_story(_BOUNDARY_ROOMY_LEAD_PT))) as document:
+        first_page_text = document.pages[0].extract_text() or ""
+    assert "경계 시험 장" in first_page_text and "첫 문단입니다" in first_page_text, (
+        "여유가 있는데도 제목·첫 문단이 첫 쪽에 함께 놓이지 않았습니다"
+    )
+
+
+def test_oversized_first_paragraph_still_fails_with_layout_error() -> None:
+    """CondPageBreak 요구 높이가 한 쪽 전체보다 커도 무한 FrameBreak로 멈추지 않는다.
+
+    이 조건은 이번 수정 이전에도 같은 예외(LayoutError)로 끝났다 — 이번 수정이
+    새로 만든 실패가 아니라 기존 «너무 큰 flowable은 명확히 실패한다» 계약을
+    그대로 유지한다는 것만 못 박는다.
+    """
+    from reportlab.platypus.doctemplate import LayoutError  # noqa: PLC0415
+
+    from src.features.export_pdf.logic import _add_section, _OutlineAnchor  # noqa: PLC0415
+    from reportlab.lib.pagesizes import A4  # noqa: PLC0415
+    from reportlab.platypus import SimpleDocTemplate  # noqa: PLC0415
+
+    styles = _styles()
+    width = A4[0] - _BOUNDARY_MARGIN_PT * 2
+    report = build_demo_report()
+    oversized_section = replace(
+        _boundary_section(),
+        prose_paragraphs=["이 문장은 아주 깁니다. " * _OVERSIZED_PARAGRAPH_REPETITIONS, "둘째 문단"],
+    )
+    story: list[Flowable] = [_OutlineAnchor("root", "분석 본문", level=0)]
+    _add_section(story, report, oversized_section, styles, width, "sec")
+    buffer = io.BytesIO()
+    with pytest.raises(LayoutError):
+        SimpleDocTemplate(
+            buffer, pagesize=A4, leftMargin=_BOUNDARY_MARGIN_PT, rightMargin=_BOUNDARY_MARGIN_PT,
+            topMargin=_BOUNDARY_MARGIN_PT, bottomMargin=_BOUNDARY_MARGIN_PT,
+        ).build(story)
 
 
 def test_KeepTogether_내용_읽기가_ReportLab_판올림에도_살아_있다() -> None:

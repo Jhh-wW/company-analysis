@@ -44,6 +44,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
+    CondPageBreak,
     Flowable,
     KeepTogether,
     PageBreak,
@@ -2327,7 +2328,14 @@ def _paragraphs_with_heading(
         )
         if section_height <= height_limit:
             return [KeepTogether(flowables)]
-    return [KeepTogether([*heading, paragraphs[0]]), *paragraphs[1:]]
+    first_group = [*heading, paragraphs[0]]
+    # 묶음의 사전 높이 추정과 실제 배치 사이에 여백 차이가 생길 수 있다.
+    # 제목만 남지 않도록 첫 문단까지의 여백을 포함해 먼저 자리를 확보한다.
+    required_height = sum(
+        item.wrap(width, A4[1])[1] + item.getSpaceBefore() + item.getSpaceAfter()
+        for item in first_group
+    )
+    return [CondPageBreak(required_height), KeepTogether(first_group), *paragraphs[1:]]
 
 
 def _add_section(
