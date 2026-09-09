@@ -147,6 +147,14 @@ def test_controlled_true_preserves_explicit_hr_cause_condition_and_development(s
     def ask(prompt):
         calls.append(prompt)
         entries = [_entry(item, "참", "1: 해당 주체·관계 직접 명시") for item in _items(prompt)]
+        if section == "operations_partners":
+            # 역할 결속 가드도 같은 «관계» 배열을 읽는다. 정상 개발 주장도 그 원문
+            # 구절을 실제로 댄다 — 비교 설명 한 줄로 결속을 대신하지 않는다.
+            for entry in entries:
+                entry["검증근거"] = {"관계": [{
+                    "유형": "역할", "근거": "1", "원문": text,
+                    "대상": "여행 예약 플랫폼", "역할값": "개발",
+                }]}
         if section == "past_changes":
             # 정상 인과 보존 사례도 실제로 새 검수 요청이 요구한 근거를 낸다.
             # 비교 설명 한 줄로 관계 근거를 대신하지 않는다.

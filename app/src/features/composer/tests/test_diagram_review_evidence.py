@@ -65,7 +65,8 @@ def test_shared_sources_preserve_exact_text_ids_order_cells_and_requirements():
         expected_cells = labelled_flow_cells("operations_partners", row)
         assert json_lines(prompt, f"[{number}] 경로(JSON 배열): ") == [expected_cells]
         own_sources = {key: sources[key] for key in row.citations}
-        assert grounding_hint(" ; ".join(row.cells), own_sources) in prompt
+        # 도식은 칸 경계를 함께 넘긴다 — 역할·과금 요구가 칸 낱말로 정해진다.
+        assert grounding_hint(" ; ".join(row.cells), own_sources, row.cells) in prompt
     # 동일 내용의 다른 ID를 합치지 않되 한 ID의 원문은 재출력하지 않는다.
     assert prompt.count(json.dumps(long_text, ensure_ascii=False)) == 2
     assert prompt.rfind("■ 신뢰할 지시 재확인") > prompt.find("\\n[999]")

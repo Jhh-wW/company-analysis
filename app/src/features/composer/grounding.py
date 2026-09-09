@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from src.features.composer.direct_support import claims_cause, direct_support_problem, support_entries_by_number
 from src.features.composer.direct_support_constants import RELATION_KEY
+from src.features.composer.future_plan_constants import FUTURE_KEY
 from src.features.composer.grounding_constants import REVIEW_SUPPORT_CANDIDATE_VERDICTS
 
 from collections import Counter
@@ -18,6 +19,7 @@ import re
 import unicodedata
 
 from src.features.composer.modality_guard import modality_problem
+from src.features.composer.role_binding import claims_role_or_fee, role_binding_problem
 from src.features.composer.numeric_quote_refs import resolve_numeric_quote_refs
 from src.features.composer.scope_guard import scope_problem
 
@@ -584,6 +586,12 @@ def grounding_problem(text: str, sources: Mapping[str, str], entry: Mapping) -> 
             if not isinstance(payload, list) or any(not isinstance(item, Mapping) for item in payload):
                 return GROUNDING_INVALID
             continue
+        # 미래 근거는 6장 성장 계획 표에서만 쓰이며, future_plan_guard 가 그 줄의
+        # 칸·인용에 따로 결속한다. 여기서는 모양만 보고 넘긴다 — 관계 근거와 같다.
+        if kind == FUTURE_KEY:
+            if not isinstance(payload, list) or any(not isinstance(item, Mapping) for item in payload):
+                return GROUNDING_INVALID
+            continue
         if kind not in required and payload == []:
             continue
         if kind not in validators:
@@ -594,9 +602,19 @@ def grounding_problem(text: str, sources: Mapping[str, str], entry: Mapping) -> 
     return ""
 
 
-def grounding_hint(text: str, sources: Mapping[str, str]) -> str:
+def grounding_hint(
+    text: str, sources: Mapping[str, str], cells: Sequence[str] | None = None,
+) -> str:
+    """그 후보에 어떤 추가 근거가 필요한지 검수 프롬프트에 한 줄로 적는다.
+
+    ★ 인과와 역할·과금은 같은 «관계» 배열을 쓴다. 요구 항목 이름을 나누지 않아야
+      파서·프롬프트·가드가 한 이름으로 맞물린다.
+    ★ cells 는 도식 후보일 때만 준다 — 칸은 낱말만으로도 주장이지만, 산문은 그
+      낱말이 서술어로 쓰였을 때만 주장이다.
+    """
+
     required = grounding_requirements(text, tuple(sources.values()))
-    if claims_cause(text):
+    if claims_cause(text) or claims_role_or_fee(text, cells):
         required += (RELATION_KEY,)
     return "  추가 검증 필요: " + (", ".join(required) or "없음") + "\n"
 
@@ -638,9 +656,16 @@ def constrain_verdicts(
             continue
         # 도식 후보만 칸 경계를 함께 준다. 본문·요약은 None 이므로 한 문장
         # 안에서 절을 넘는 연결이 새로 허용되지 않는다.
-        problem = direct_support_problem(
-            text, sources, relation_evidence.get(number),
-            (cells_by_number or {}).get(number),
+        cells = (cells_by_number or {}).get(number)
+        # 인과 결속과 역할·과금 결속은 같은 «관계» 배열을 읽는다. 어느 쪽이든 첫
+        # 사유를 그대로 돌려 참·애매가 근거 없이 공개로 새지 않게 한다.
+        problem = (
+            direct_support_problem(
+                text, sources, relation_evidence.get(number), cells,
+            )
+            or role_binding_problem(
+                text, sources, relation_evidence.get(number), cells,
+            )
         )
         if problem:
             result[number] = REVIEW_GROUNDING_REJECTED

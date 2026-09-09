@@ -21,10 +21,15 @@ def test_transport_contract_matches_the_actual_producer():
     from src.features.composer.culture_constants import (
         CULTURE_ACCOUNTING_POLICY_MISPLACED, CULTURE_EVIDENCE_SCOPE_MISMATCH,
     )
+    from src.features.composer.future_plan_constants import FUTURE_REASON_CODES
+
+    from src.features.composer.role_binding_constants import ROLE_BINDING_REASON_TEXTS
 
     assert set(REVIEW_SCOPE_ITEMS) == {
         MODALITY_PLAN_ASSERTED, SCOPE_CONDITION_UNBOUND, CULTURE_EVIDENCE_SCOPE_MISMATCH,
         CULTURE_ACCOUNTING_POLICY_MISPLACED, *DIRECT_SUPPORT_REASON_TEXTS,
+        *ROLE_BINDING_REASON_TEXTS,
+        *FUTURE_REASON_CODES,
     }
     assert set(REVIEW_ITEMS) == {NUMERIC_KEY, TIME_KEY, TREND_KEY, *REVIEW_SCOPE_ITEMS.values()}
     assert set(REVIEW_REASONS) == {GROUNDING_INVALID, GROUNDING_MISSING, *REVIEW_SCOPE_ITEMS}

@@ -368,7 +368,10 @@ class _CompletePacketWriter:
         rows: list[dict[str, object]] = []
         if self.flow and section_id == "business_model":
             headers = FLOW_HEADERS_BY_SECTION[section_id]
-            first = ["핵심 자산", "핵심 제품", "기업 고객 과금", "반복 수익"][
+            # 자리표시 칸이다. 「반복」은 이 시험이 확인하려는 것(공개 manifest
+            # 왕복)과 무관한데 역할·과금 결속 근거를 요구해 행을 떨어뜨린다.
+            # 합성 조각이 그 낱말을 밝힌 적이 없으므로 자리표시를 바꾼다.
+            first = ["핵심 자산", "핵심 제품", "기업 고객 과금", "부문 수익"][
                 : len(headers)
             ]
             second = ["보조 자산", "보조 제품", "소비자 과금", "확장 수익"][
@@ -1958,7 +1961,8 @@ def test_ENFORCE_NO_PARTIAL_packetless는_도식_AI_0회이고_flow를_미공개
             if section_id == "business_model":
                 rows = [
                     {
-                        "칸": ["핵심 자산", "핵심 제품", "기업 고객", "반복 수익"],
+                        # 위와 같은 이유로 자리표시에서 「반복」을 뺀다.
+                        "칸": ["핵심 자산", "핵심 제품", "기업 고객", "부문 수익"],
                         "인용": [fragment_id],
                     }
                 ]

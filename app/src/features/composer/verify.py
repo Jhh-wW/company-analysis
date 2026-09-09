@@ -33,9 +33,17 @@ from src.features.composer.culture_guard import (
     culture_accounting_policy_problem, culture_flow_problem, culture_problem,
 )
 from src.features.composer.scope_guard import flow_scope_problem
+from src.features.composer.constants import STRATEGY_TABLE_SECTION_ID
+from src.features.composer.future_plan_constants import (
+    FUTURE_PLAN_REVIEW_GUIDE,
+)
+from src.features.composer.future_plan_guard import (
+    future_plan_entries_by_number, future_plan_problem,
+)
 from src.features.composer.direct_support_constants import (
     FLOW_CELL_JOIN, RELATION_REVIEW_GUIDE,
 )
+from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
 from src.features.composer.body_review_constants import (
     BODY_REVIEW_COMPARISON_GUIDE,
     BODY_REVIEW_COMPARISON_KEY,
@@ -790,6 +798,8 @@ def _build_grouped_review_prompt(
         NEWS_REVIEW_GUIDE,
         GROUNDING_GUIDE,
         RELATION_REVIEW_GUIDE,
+        ROLE_BINDING_REVIEW_GUIDE,
+        FUTURE_PLAN_REVIEW_GUIDE,
         (
             "아래 자료는 장별 블록으로 격리했다. 각 후보는 반드시 같은 블록의 "
             "근거만으로 판정하고 다른 장 블록의 근거를 빌리지 마라.\n"
@@ -881,7 +891,10 @@ def _build_grouped_review_prompt(
                 frag_by_id,
                 table_source if section_id == "past_changes" else "",
             )
-            parts.append(grounding_hint(*candidate))
+            parts.append(grounding_hint(
+                *candidate,
+                cells=item.flow_row.cells if item.flow_row is not None else None,
+            ))
         parts.append("===== 장별 검수 블록 끝 =====\n")
     parts.append(REVIEW_TRUSTED_TAIL)
     return "".join(parts)
@@ -1050,6 +1063,8 @@ def _apply_grounding(
     constrained, problems = constrain_verdicts(
         raw, verdicts, candidates, cells_by_number=flow_cells_by_number,
     )
+    # 같은 파서로 미래 근거를 읽고, 중복 번호는 근거 없음으로 처리한다.
+    future_evidence = future_plan_entries_by_number(raw)
     for number, (text, sources) in candidates.items():
         if constrained.get(number) not in (VERDICT_TRUE, VERDICT_UNCLEAR):
             continue
@@ -1067,6 +1082,12 @@ def _apply_grounding(
             problem = flow_scope_problem(cells, sources)
             if not problem and context and context[0] == "culture":
                 problem = culture_flow_problem(cells, sources)
+            # 6장 성장 계획 표만 미래 근거를 결속한다. 다른 장의 도식과 이 장의
+            # 산문 문장(칸이 없다)은 이 검사를 지나가지 않는다.
+            if not problem and context and context[0] == STRATEGY_TABLE_SECTION_ID:
+                problem = future_plan_problem(
+                    cells, sources, future_evidence.get(number)
+                )
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
@@ -1189,7 +1210,8 @@ def _build_review_prompt(
                 cited_ids.append(fid)
     parts = [
         REVIEW_PROMPT_HEADER, REVIEW_PROMPT_RULES, BODY_REVIEW_COMPARISON_GUIDE,
-        NEWS_REVIEW_GUIDE, GROUNDING_GUIDE, RELATION_REVIEW_GUIDE, REVIEW_JSON_GUIDE,
+        NEWS_REVIEW_GUIDE, GROUNDING_GUIDE, RELATION_REVIEW_GUIDE,
+        ROLE_BINDING_REVIEW_GUIDE, FUTURE_PLAN_REVIEW_GUIDE, REVIEW_JSON_GUIDE,
     ]
     # 단건·재검수 경로에도 실제 후보의 소유 장만 전달한다.
     section_ids = dict.fromkeys(_review_item_section(item) for item in items)

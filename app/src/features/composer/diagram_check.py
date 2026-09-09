@@ -70,6 +70,7 @@ from src.features.composer.constants import (
     PARSE_RETRY_LIMIT,
     PORTFOLIO_TABLE_SECTION_ID,
     RETRY_REMINDER,
+    STRATEGY_TABLE_SECTION_ID,
 )
 from src.features.composer.logic import extract_json_payload
 from src.features.composer.diagram_review_constants import (
@@ -81,9 +82,16 @@ from src.features.composer.diagram_review_constants import (
 )
 from src.features.composer.grounding import constrain_verdicts, grounding_hint
 from src.features.composer.grounding_constants import GROUNDING_GUIDE
+from src.features.composer.future_plan_constants import (
+    FUTURE_PLAN_REVIEW_GUIDE,
+)
+from src.features.composer.future_plan_guard import (
+    future_plan_entries_by_number, future_plan_problem,
+)
 from src.features.composer.direct_support_constants import (
     FLOW_CELL_JOIN, RELATION_REVIEW_GUIDE,
 )
+from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
 from src.features.composer.scope_guard import flow_scope_problem
 from src.features.composer.culture_guard import culture_flow_problem, culture_problem
 from src.features.composer.verify import (
@@ -363,6 +371,8 @@ def _review_prompt(
         FLOW_REVIEW_PROMPT_HEADER,
         GROUNDING_GUIDE,
         RELATION_REVIEW_GUIDE,
+        ROLE_BINDING_REVIEW_GUIDE,
+        FUTURE_PLAN_REVIEW_GUIDE,
         "아래는 보고서에 실릴 «사업 경로 도식»의 각 줄이다.",
         "칸마다 «칸 이름: 값» 꼴로 준다. 칸 이름은 장마다 다르다 — 「무엇으로",
         "시작하나 → 회사가 하는 일 → 누구에게 닿나」인 장도 있고, 「지금 겪는",
@@ -421,7 +431,7 @@ def _review_prompt(
         lines.append(f"[{number}] {noun}(JSON 배열): {path_json}")
         lines.append(DIAGRAM_CITATIONS_PREFIX + json.dumps(row.citations, ensure_ascii=False))
         sources = {fid: texts[fid] for fid in row.citations if fid in texts}
-        lines.append(grounding_hint(FLOW_CELL_JOIN.join(row.cells), sources))
+        lines.append(grounding_hint(FLOW_CELL_JOIN.join(row.cells), sources, row.cells))
     lines.extend(
         (
             "",
@@ -554,6 +564,8 @@ def _review_rows(
         raw, verdicts, candidates,
         cells_by_number={number: row.cells for number, _section, row in items},
     )
+    # 같은 파서로 미래 근거를 읽고, 중복 번호는 근거 없음으로 처리한다.
+    future_evidence = future_plan_entries_by_number(raw)
     kept: dict[str, list[FlowRow]] = {section_id: [] for section_id, _ in by_section}
     dropped: list[str] = list(blank_dropped)
     for number, _section, row in items:
@@ -566,6 +578,12 @@ def _review_rows(
                 flow_problem = (
                     culture_flow_problem(row.cells, sources)
                     or culture_problem(" ; ".join(row.cells), sources)
+                )
+            # 6장 성장 계획 표만 미래 근거를 결속한다 — 이 장의 산문과 다른 장의
+            # 도식은 그대로 기존 검수만 거친다.
+            if not flow_problem and section_id == STRATEGY_TABLE_SECTION_ID:
+                flow_problem = future_plan_problem(
+                    row.cells, sources, future_evidence.get(number)
                 )
             if flow_problem:
                 grounding_problems[number] = flow_problem
