@@ -279,9 +279,9 @@ def test_prose_in_the_same_section_is_not_asked_for_future_evidence():
     """flat 문장 경로에는 칸이 없다 — 6장의 정확한 «현재 전략» 산문은 대상이 아니다."""
 
     sentence = ComposedSentence(
-        text="당사는 현재 국내 물류센터를 운영하고 있다.",
+        text="K컬처 여행 상품을 런칭하여 매출 증대가 이뤄지고 있습니다.",
         grade="확인",
-        citations=("woori-8",),
+        citations=("sm-63",),
     )
     draft = ComposedReport(
         (ComposedSection(STRATEGY_TABLE_SECTION_ID, (sentence,)),)

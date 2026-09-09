@@ -159,7 +159,7 @@ def _section_json(mark: str) -> str:
         {
             "문장들": [
                 {
-                    "글": f"{mark} 장의 확인 사실 서술이다.",
+                    "글": f"{mark} 장: 가나다전자는 반도체 검사 장비 전문기업이다.",
                     "인용": ["1"],
                     "등급": GRADE_CONFIRMED,
                 },
@@ -174,7 +174,12 @@ def _section_json(mark: str) -> str:
     )
 
 
-_SUMMARY_TEXTS = ["요약 첫 문장이다.", "요약 둘째 문장이다.", "요약 셋째 문장이다."]
+#: 배선 시험의 요약도 실제 조각 1에서 확인할 수 있는 내용으로 작성한다.
+_SUMMARY_TEXTS = [
+    "가나다전자는 반도체 검사 장비 전문기업이다.",
+    "가나다전자의 전문 분야는 반도체 검사 장비다.",
+    "반도체 검사 장비는 가나다전자의 사업 분야다.",
+]
 
 
 def _summary_json() -> str:
@@ -617,7 +622,7 @@ def test_인라인_대괄호_인용_흉내는_출고검증을_막지_않는다()
             {
                 "문장들": [
                     {
-                        "글": f"{mark} 장은 자료 [2]에서 밝힌 대로 성장했다.",
+                        "글": f"{mark} 장: 가나다전자는 반도체 [2] 검사 장비 전문기업이다.",
                         "인용": ["1"],
                         "등급": GRADE_CONFIRMED,
                     }
@@ -657,9 +662,13 @@ def test_초안과_생존_문장_수를_그대로_센다():
         reviewer_ask=reviewer,
     )
 
-    # 초안: 9장 × 2문장 + 요약 3문장 = 21. 전부 통과했으므로 생존도 21.
+    # 초안: 9장 × 2문장 + 요약 3문장 = 21.
+    # 같은 전문기업 사실을 반복한 확인 문장은 소유 장 하나로 모이므로
+    # 확인 본문 1 + 해석 본문 9 + 요약 3 = 13문장이 남는다.
     assert output.composed_sentences == 21
-    assert output.verified_sentences == 21
+    assert output.verified_sentences == 13
+    assert sum(len(section.prose_lines) for section in output.report.sections) == 10
+    assert len(output.report.summary_items) == 3
 
 
 # ══════════════════════════════════════════════════════════
@@ -940,7 +949,7 @@ def test_한문장_장이_있으면_COMPLETE가_아니라_PARTIAL과_이유가_�
                 {
                     "문장들": [
                         {
-                            "글": f"{mark} 장에서 확인한 회사의 고유 사실이다.",
+                            "글": f"{mark} 장: 가나다전자는 반도체 검사 장비 전문기업이다.",
                             "인용": ["1"],
                             "등급": GRADE_CONFIRMED,
                         }
