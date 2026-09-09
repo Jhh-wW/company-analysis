@@ -46,6 +46,7 @@ from src.shared.report_quality.generation import (
 )
 from src.shared.report_quality.models import PublicationPolicy
 from src.shared.report_quality.contract import contract_for_generation
+from src.shared.report_quality.review_diagnostic_constants import REVIEW_SCOPE_ITEMS
 from src.features.composer.logic import (
     AskFn,
     FragmentsInput,
@@ -399,14 +400,25 @@ def _apply_generation_quality_label(
     # 수치 후처리보다 앞선 의미 검수에서 제외된 문장도 사유를 잃지 않는다.
     # 이는 계산이 틀렸다고 확정한 횟수가 아니라 근거를 결속하지 못한 횟수다.
     review_counts: dict[str, int] = {}
+    scope_review_counts: dict[str, int] = {}
     for diagnostic in review_diagnostics:
         kind = str(diagnostic.get("kind", ""))
-        review_counts[kind] = review_counts.get(kind, 0) + 1
+        counts_for_reason = (
+            scope_review_counts
+            if diagnostic.get("reason_code") in REVIEW_SCOPE_ITEMS else review_counts
+        )
+        counts_for_reason[kind] = counts_for_reason.get(kind, 0) + 1
     if review_counts:
         detail = ", ".join(f"{kind} {count}개" for kind, count in review_counts.items())
         reasons.append(
             "숫자·날짜 문장의 항목·기간·계산 관계를 원문과 맞춰 확인하지 못해 "
             f"제외했습니다 ({detail}). 자료 자체가 없다는 뜻은 아닙니다."
+        )
+    if scope_review_counts:
+        detail = ", ".join(f"{kind} {count}개" for kind, count in scope_review_counts.items())
+        reasons.append(
+            "원문과 계획·조건·공식 설명의 범위가 일치하는지 확인하지 못한 "
+            f"문장을 제외했습니다 ({detail}). 자료 자체가 없다는 뜻은 아닙니다."
         )
 
     contract = contract_for_generation(observation.contract_version)

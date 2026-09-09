@@ -13,11 +13,17 @@ def test_transport_contract_matches_the_actual_producer():
         GROUNDING_INVALID, GROUNDING_MISSING, NUMERIC_KEY, TIME_KEY, TREND_KEY,
     )
     from src.shared.report_quality.review_diagnostic_constants import (
-        REVIEW_ITEMS, REVIEW_REASONS, REVIEW_SECTION_IDS,
+        REVIEW_ITEMS, REVIEW_REASONS, REVIEW_SECTION_IDS, REVIEW_SCOPE_ITEMS,
     )
+    from src.features.composer.modality_constants import MODALITY_PLAN_ASSERTED
+    from src.features.composer.scope_constants import SCOPE_CONDITION_UNBOUND
+    from src.features.composer.culture_constants import CULTURE_EVIDENCE_SCOPE_MISMATCH
 
-    assert set(REVIEW_ITEMS) == {NUMERIC_KEY, TIME_KEY, TREND_KEY}
-    assert set(REVIEW_REASONS) == {GROUNDING_INVALID, GROUNDING_MISSING}
+    assert set(REVIEW_SCOPE_ITEMS) == {
+        MODALITY_PLAN_ASSERTED, SCOPE_CONDITION_UNBOUND, CULTURE_EVIDENCE_SCOPE_MISMATCH,
+    }
+    assert set(REVIEW_ITEMS) == {NUMERIC_KEY, TIME_KEY, TREND_KEY, *REVIEW_SCOPE_ITEMS.values()}
+    assert set(REVIEW_REASONS) == {GROUNDING_INVALID, GROUNDING_MISSING, *REVIEW_SCOPE_ITEMS}
     assert REVIEW_SECTION_IDS == set(SECTION_IDS) | {"summary"}
 
 

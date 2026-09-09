@@ -73,6 +73,7 @@ from src.features.composer.constants import (
 from src.features.composer.logic import extract_json_payload
 from src.features.composer.grounding import constrain_verdicts, grounding_hint
 from src.features.composer.grounding_constants import GROUNDING_GUIDE
+from src.features.composer.scope_guard import flow_scope_problem
 from src.features.composer.verify import (
     _SentenceNumber,
     _append_grounding_diagnostic,
@@ -534,6 +535,10 @@ def _review_rows(
     for index, (number, _section, row, _source) in enumerate(items):
         result = verdicts.get(number)
         section_id = owner[number]
+        if result == VERDICT_TRUE and number not in grounding_problems:
+            flow_problem = flow_scope_problem(row.cells, candidates[number][1])
+            if flow_problem:
+                grounding_problems[number] = flow_problem
         if number in grounding_problems:
             candidate_text, sources = candidates[number]
             _append_grounding_diagnostic(

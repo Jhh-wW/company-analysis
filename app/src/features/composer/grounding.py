@@ -13,6 +13,9 @@ from decimal import Decimal
 import re
 import unicodedata
 
+from src.features.composer.modality_guard import modality_problem
+from src.features.composer.scope_guard import scope_problem
+
 from src.features.composer.grounding_constants import (
     COMPARATIVE_RE, CONTINUOUS_RE, DOWN_RE, GROUNDING_INVALID, GROUNDING_KEY,
     GROUNDING_MISSING,
@@ -543,6 +546,11 @@ def _reported_comparison_valid(text: str, entries: object, sources: Mapping[str,
 
 def grounding_problem(text: str, sources: Mapping[str, str], entry: Mapping) -> str:
     """필요 근거 누락과 결속·연산 실패를 구분하며 호출이나 저장을 하지 않는다."""
+    # 원문 한정이 사라진 후보는 검수 모델의 참·애매나 추가 근거 JSON으로
+    # 승인하지 않는다. 다른 문장과 기존 수치·시점 검증 경로는 그대로 둔다.
+    scope_issue = modality_problem(text, sources) or scope_problem(text, sources)
+    if scope_issue:
+        return scope_issue
     required = grounding_requirements(text, tuple(sources.values()))
     evidence = entry.get(GROUNDING_KEY)
     if not required and evidence is None:
