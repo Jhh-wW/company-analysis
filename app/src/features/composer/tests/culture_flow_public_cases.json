@@ -1,0 +1,101 @@
+{
+  "run_id": "1f4f203fe666df3cfb06ad09dd30e763",
+  "source_evidence_sha256": "7567f8270c6253fa2bd16799ad33f23eb5f3e700ce4ef4e884caa9b84f020036",
+  "sources": {
+    "219": {
+      "text": "우리은행은 핵심사업 확장, 미래금융 가속, 고객신뢰 확립을 경영목표로 하여 고객만족을 최우선으로 하는 미래 성장동력을 발굴할 계획입니다. 특히, 세분화된 고객 세그먼트별 맞춤형 마케팅을 확대하고, 금융 취약층을 지원하는 상생금융을 적극 추진하여 금융의 사회적 책임을 다하고자 합니다. 또한, 통신업, 부동산 등 이종산업과의 제휴를 통해 新수익원을 발굴하고, 디지털 금융환경에 대응한 고객 맞춤형 종합금융솔루션을 제공하고자 합니다. 또한, 당행은 대외시스템과의 연계를 기반으로 기업상품 취급에 필요한 데이터를 수집, 관리하는 자체개발 B2B 전용 MP(Market Place) 서비스인 「원비즈 e-MP 서비스」를 2025년 6월 출시하였습니다. 이를 통해, 수수료 없는 비대면 서비스 등 차별화된 고객 경험을 제공하고 공급망금융시장을 선도해나가고자 합니다. 특히, 2025년 10월 「삼성월렛머니 서비스」를 출시하고, 삼성월렛 이용자 대상 간편 결제·송금 서비스를 제공하여 고객 편의성과 만족도를 높이고 있습니다. 「삼성월렛머니 서비스」는 고객 만족을 위해 다양한 서비스 연계 금융상품 출시 및 리워드 제공 등 서비스를 고도화할 예정입니다. 우리은행은 AX혁신을 주도적으로 이끌며 로보어드바이저, AI청약상담원을 통해 고객이 실제로 체감할 수 있는 금융 편의성을 이끌어 내고 있습니다. 향후 자산관리 서비스 등 기술 적용 범위를 확대하여 AX혁신을 지속할 계획입니다.",
+      "exact_sha256": "e3c90d9fa08388e2cbd88794fd583e9dc86f1b43e5dd167131b6ff3855da3e57",
+      "metadata": {
+        "document_id": "20260313000815",
+        "url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260313000815",
+        "publisher": "(주)우리은행",
+        "location": "57755-58464",
+        "disclosed_at": "2026-03-13",
+        "source_type": "공식 공시",
+        "fact_status": "공시 실제값",
+        "identity_binding": "corp_code=00254045;rcept_no=20260313000815;source_kind=dart_business_report;identity_check=unverifiable_no_fetcher_metadata"
+      }
+    },
+    "110": {
+      "text": "ㅇ 설치목적 및 권한사항 - 내부통제의 기본방침 및 전략 수립 - 임직원의 직업윤리와 준법정신을 중시하는 조직문화의 정착방안 마련 - 지배구조내부규범의 마련 및 변경 - 내부통제기준의 제정 및 개정",
+      "exact_sha256": "d0a55d26d8c6a5ea0ad899890465a487ab7597cf3b41b80cefbd32e87ec0f649",
+      "metadata": {
+        "document_id": "20260313000815",
+        "url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260313000815",
+        "publisher": "(주)우리은행",
+        "location": "570600-570710",
+        "disclosed_at": "2026-03-13",
+        "source_type": "공식 공시",
+        "fact_status": "공시 실제값",
+        "identity_binding": "corp_code=00254045;rcept_no=20260313000815;source_kind=dart_business_report;identity_check=unverifiable_no_fetcher_metadata"
+      }
+    },
+    "93": {
+      "text": "은행의 파생상품거래는 기본적으로 보유자산의 손실위험을 회피하고자 행하는 거래이나 그 거래내용이 다소 복잡하고 위험이 발생할 소지가 있으므로 이에 당행은 거래한도 및 손실한도를 규정화하여 이를 준수토록 함으로써 거래금액을 제한하고 과다한 손실발생을 미연에 방지하고 있습니다. 또한 필요에 의해 비정형거래(복합파생상품) 또는 신종파생상품을 거래할 경우 발생위험에 대한 사전점검을 위해 위험관리 전담부서인 리스크총괄부의 검토를 거쳐 리스크관리심의회의 심의를 받아 거래를 실행할 수 있도록 하고 있습니다. 또한 거래부문 (Front office), 리스크관리부문 (Middle office), 사후관리부문 (Back office)의 직무분리를 통해 상호견제기능을 유지함으로써 손실발생가능성을 최소화하고 있습니다.",
+      "exact_sha256": "654653baa86e836b4954f26c70ff8457960052f8e44dd19d5ac0de28bf11165d",
+      "metadata": {
+        "document_id": "20260313000815",
+        "url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260313000815",
+        "publisher": "(주)우리은행",
+        "location": "547515-547909",
+        "disclosed_at": "2026-03-13",
+        "source_type": "공식 공시",
+        "fact_status": "공시 실제값",
+        "identity_binding": "corp_code=00254045;rcept_no=20260313000815;source_kind=dart_business_report;identity_check=unverifiable_no_fetcher_metadata"
+      }
+    },
+    "246": {
+      "text": "연결회사는 금융상품의 과도한 위험을 제거하고 적정수준의 위험을 관리하여 위험 대비 수익을 극대화하는 전략을 취하고 있으며, 이를 위해 위험의 인식, 위험의 측정 및 평가, 위험의 통제 및 감시와 보고 절차를 운영하고 있습니다.위험은 의결된 정책을 기준으로 관리되며, 리스크관리위원회는 위험관리의 최고 의사결정기구로서 내부자본의 배분 및 한도설정 등 위험 전략에 대한 의사결정을 하고 있습니다.",
+      "exact_sha256": "3e0b67e937c5a52e93e93df8b1d4e9672e88c289981bf243f7bca674511b1d54",
+      "metadata": {
+        "document_id": "20260313000815",
+        "url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260313000815",
+        "publisher": "(주)우리은행",
+        "location": "142514-142733",
+        "disclosed_at": "2026-03-13",
+        "source_type": "공식 공시",
+        "fact_status": "공시 실제값",
+        "identity_binding": "corp_code=00254045;rcept_no=20260313000815;source_kind=dart_business_report;identity_check=unverifiable_no_fetcher_metadata"
+      }
+    }
+  },
+  "cases": [
+    {
+      "row": 1,
+      "cells": [
+        "직업윤리와 준법정신",
+        "내부통제 기본방침 수립, 조직문화 정착",
+        ""
+      ],
+      "citations": [
+        "110"
+      ],
+      "expected_problem": ""
+    },
+    {
+      "row": 2,
+      "cells": [
+        "위험 대비 수익 극대화",
+        "위험의 인식·측정·통제·보고 절차 운영",
+        "리스크관리위원회 의사결정, 직무분리 운영"
+      ],
+      "citations": [
+        "93",
+        "246"
+      ],
+      "expected_problem": ""
+    },
+    {
+      "row": 3,
+      "cells": [
+        "금융의 사회적 책임",
+        "금융 취약층 지원 상생금융 추진",
+        ""
+      ],
+      "citations": [
+        "219"
+      ],
+      "expected_problem": "culture_evidence_scope_mismatch"
+    }
+  ]
+}

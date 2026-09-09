@@ -29,7 +29,7 @@ from __future__ import annotations
 from src.features.composer.news_constants import NEWS_REVIEW_GUIDE
 from src.features.composer.news_usage import attribution_prefix, news_metadata
 from src.features.composer.news_block import _is_news_fragment
-from src.features.composer.culture_guard import culture_problem
+from src.features.composer.culture_guard import culture_flow_problem, culture_problem
 from src.features.composer.scope_guard import flow_scope_problem
 
 import hashlib
@@ -47,6 +47,7 @@ from src.features.composer.constants import (
     PARSE_RETRY_LIMIT,
     RETRY_REMINDER,
     SECTION_GUIDES,
+    FLOW_RELATION_REVIEW_GUIDE,
 )
 from src.features.composer.grounding import (
     constrain_verdicts,
@@ -772,6 +773,7 @@ def _build_grouped_review_prompt(
     parts = [
         REVIEW_PROMPT_HEADER,
         REVIEW_PROMPT_RULES,
+        FLOW_RELATION_REVIEW_GUIDE,
         NEWS_REVIEW_GUIDE,
         GROUNDING_GUIDE,
         (
@@ -1030,13 +1032,16 @@ def _apply_grounding(
     for number, (text, sources) in candidates.items():
         if constrained.get(number) not in (VERDICT_TRUE, VERDICT_UNCLEAR):
             continue
+        context = (diagnostic_contexts or {}).get(number)
         if flow_cells_by_number is not None and number in flow_cells_by_number:
-            problem = flow_scope_problem(flow_cells_by_number[number], sources)
+            cells = flow_cells_by_number[number]
+            problem = flow_scope_problem(cells, sources)
+            if not problem and context and context[0] == "culture":
+                problem = culture_flow_problem(cells, sources)
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
                 continue
-        context = (diagnostic_contexts or {}).get(number)
         # 구형 요약은 원래 장/슬롯을 보존하지 않는다. 요약에서도 명시적
         # 문화 추론을 검사하되 가드 자체가 평범한 사업 문장은 그대로 둔다.
         if number not in culture_candidate_numbers and (

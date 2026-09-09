@@ -728,8 +728,8 @@ def test_card_drops_blank_cells_and_titles_multi_row_tables_blank() -> None:
 #   (좋다/나쁘다/위험 등)은 한 글자도 안 쓴다(v1도 13건 전수에서 0건이었다).
 
 
-def test_culture_card_gets_the_v1_precedent_phrase() -> None:
-    """8장은 v1(_culture_blocks)이 실제로 쓰던 라벨·문구를 그대로 쓴다."""
+def test_culture_card_does_not_assert_company_wide_scope() -> None:
+    """문화 표라는 이유만으로 특정 자료를 전사 공통 기준으로 격상하지 않는다."""
     visualization = table_visualization(
         ReportTable(
             caption="무엇을 내걸고 어떻게 일하나",
@@ -741,7 +741,7 @@ def test_culture_card_gets_the_v1_precedent_phrase() -> None:
 
     assert visualization is not None
     assert visualization.cards[0].fields[-1] == CardField(
-        label=_CARD_LIMITATION_LABEL, value="전사 공통 공식 기준입니다"
+        label=_CARD_LIMITATION_LABEL, value="인용 자료에 나타난 범위로 한정합니다"
     )
 
 

@@ -24,6 +24,7 @@ from src.features.pipeline.section567_contract import (
 from src.features.provenance.sources import Source
 from src.features.report_standard.constants import (
     COMPARISON_JUDGMENT_LABELS,
+    CULTURE_SCOPE_LIMITATION_TEXT,
     RELATIONSHIP_KEY_FALLBACK_LABEL,
     RELATIONSHIP_KEY_LABELS,
 )
@@ -563,7 +564,7 @@ def _culture_blocks(
                 _field(
                     "범위·한계",
                     fact.limitations or fact.limitation,
-                    "전사 공통 공식 기준",
+                    CULTURE_SCOPE_LIMITATION_TEXT,
                 ),
             ),
             fact_ids=(fact.fact_id,),

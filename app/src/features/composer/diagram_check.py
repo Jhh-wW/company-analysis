@@ -66,6 +66,7 @@ from typing import Callable, Final, Optional
 from src.features.composer.constants import (
     FLOW_ARROW_SECTION_IDS,
     FLOW_HEADERS_BY_SECTION,
+    FLOW_RELATION_REVIEW_GUIDE,
     PARSE_RETRY_LIMIT,
     PORTFOLIO_TABLE_SECTION_ID,
     RETRY_REMINDER,
@@ -74,6 +75,7 @@ from src.features.composer.logic import extract_json_payload
 from src.features.composer.grounding import constrain_verdicts, grounding_hint
 from src.features.composer.grounding_constants import GROUNDING_GUIDE
 from src.features.composer.scope_guard import flow_scope_problem
+from src.features.composer.culture_guard import culture_flow_problem, culture_problem
 from src.features.composer.verify import (
     _SentenceNumber,
     _append_grounding_diagnostic,
@@ -104,8 +106,8 @@ FLOW_REVIEW_PROMPT_HEADER: Final[str] = "[도식 검수]"
 #:   거짓이다」라고 판정 기준을 줬다. 카드에는 이을 상대가 없으므로 검수
 #:   AI가 찾을 수 없는 것을 찾다가 「거짓」을 낼 수 있다. 어휘를 갈라
 #:   카드에는 «칸마다 근거가 있나»를 묻는다.
-#: ★ 화살표 장 문구는 한 글자도 바꾸지 않는다 — 6개 흐름표는 지금 잘
-#:   나오고 있다. 카드 안내는 «카드 줄이 실제로 있을 때만» 덧붙인다.
+#: 카드 안내는 «카드 줄이 실제로 있을 때만» 덧붙인다. 공통 검수에서는
+#: 상대뿐 아니라 각 칸이 주장하는 과금·수익·적용 범위도 함께 확인한다.
 FLOW_REVIEW_ARROW_ROW_NOUN: Final[str] = "경로"
 FLOW_REVIEW_CARD_ROW_NOUN: Final[str] = "카드"
 
@@ -357,15 +359,14 @@ def _review_prompt(
         "★ 낱말이 원문과 «글자 그대로» 같을 필요는 없다. 첫 칸과 끝 칸은",
         "  원래 요약해 붙이는 이름이다(원문 「음반 유통은 A사와 협력」 →",
         "  칸 「음악 소비자」는 «참»이다). 글자가 아니라 «관계»를 보라.",
-        "★ 원문이 말하지 않은 상대에게 화살표를 그은 줄만 «거짓»이다",
-        "  (원문은 제조를 돕는 기술 협력이라고만 했는데 「고객」에게 닿는다고",
-        "  그린 경우).",
+        "★ 원문이 말하지 않은 상대나 내용을 넣거나, 원문에 없는 관계를",
+        "  붙인 줄은 «거짓»이다. 제조를 돕는 기술 협력을 고객 판매로 그리는",
+        "  경우와 서비스 출시를 유료 과금으로 바꾸는 경우 모두 해당한다.",
+        FLOW_RELATION_REVIEW_GUIDE,
     ]
     if has_card_rows:
-        # ★ 카드 장(3장 제품·서비스 등)은 화살표가 없다. 줄머리에 「카드」라
-        #   적어 두고, 카드에는 «칸마다 근거가 있나»를 묻는다. 이 안내는
-        #   카드 줄이 실제로 있을 때만 붙는다 — 화살표만 있는 검수의
-        #   프롬프트는 예전과 «글자 그대로» 같다.
+        # 카드 장은 화살표가 없다. 공통 주장 검수에 더해 카드의 각 칸이
+        # 한 대상을 설명하는지 확인하며 존재하지 않는 이동은 요구하지 않는다.
         lines.extend(
             (
                 "",
@@ -536,7 +537,13 @@ def _review_rows(
         result = verdicts.get(number)
         section_id = owner[number]
         if result == VERDICT_TRUE and number not in grounding_problems:
-            flow_problem = flow_scope_problem(row.cells, candidates[number][1])
+            sources = candidates[number][1]
+            flow_problem = flow_scope_problem(row.cells, sources)
+            if not flow_problem and section_id == "culture":
+                flow_problem = (
+                    culture_flow_problem(row.cells, sources)
+                    or culture_problem(" ; ".join(row.cells), sources)
+                )
             if flow_problem:
                 grounding_problems[number] = flow_problem
         if number in grounding_problems:

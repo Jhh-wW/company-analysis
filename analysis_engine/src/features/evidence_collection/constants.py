@@ -312,6 +312,14 @@ ALLOWED_HOST_ALLOWLIST: Final[frozenset[str]] = frozenset({
 # ══════════════════════════════════════════════════════════
 
 MIN_FRAGMENT_CHARS: Final[int] = 20
+
+# 번호 매긴 명시적 제목. 본문 안 번호 목록도 제목으로 볼 수 있는 휴리스틱이다.
+DOCUMENT_HEADING_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(?:[IVXLCDM]{1,6}\.|[0-9]{1,3}\.|제\s?[0-9]{1,3}\s?장|[가나다라마바사아자차카타파하]\.)\s*\S"
+)
+# 하위 번호 제목은 직후 문단의 문맥으로만 추적한다. 별도 section 객체를
+# 늘리면 기존 대형 공시가 제목 개수 상한에 닿아 뒷부분을 잃을 수 있다.
+PARAGRAPH_SUBHEADING_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[0-9]{1,3}\)\s*\S")
 # 일반 장문 차선도 입력 바이트 상한만으로는 안전하지 않다. 8MiB 안에
 # ``20자 문단+빈 줄``을 반복하면 수십만 Python 객체와 슬롯 채점 호출이
 # 생길 수 있으므로 문서별 객체 수·실제 보존 문자 합을 함께 제한한다.

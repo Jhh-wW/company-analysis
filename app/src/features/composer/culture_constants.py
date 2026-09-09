@@ -28,3 +28,17 @@ SOURCE_UNAVAILABLE_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:공개|공시|확인)(?:하지않|되지않|할수없)|미공시|자료(?:가)?없"
 )
 SOURCE_CLAUSE_SPLIT_RE: Final[re.Pattern[str]] = re.compile(r"[.!?。\n]+")
+
+# culture flow의 열 순서는 호출 계약이다. 회사명·상품·연도는 검사하지 않는다.
+CULTURE_FLOW_CELL_COUNT: Final[int] = 3
+SOURCE_GOAL_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:할|될|시킬)(?:계획|예정)|고자(?:하|한|합|했)|(?:사업|경영)목표"
+)
+FLOW_GOAL_QUALIFIER_RE: Final[re.Pattern[str]] = re.compile(r"계획|목표|예정|향후|앞으로")
+GOAL_NEGATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:계획|목표|예정)(?:이|가|은|는|을|하지)?(?:아니|않|없)"
+)
+CURRENT_CULTURE_DENIAL_RE: Final[re.Pattern[str]] = re.compile(
+    r"하지않|하지못|(?:이|가)아니|미시행|미도입"
+)
+OTHER_ORGANIZATION_RE: Final[re.Pattern[str]] = re.compile(r"타사|타회사|다른회사|경쟁사|고객사")
