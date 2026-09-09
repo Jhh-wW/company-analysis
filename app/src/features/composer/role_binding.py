@@ -222,6 +222,41 @@ def _local_prefix_blank(unit: _Unit, start: int) -> bool:
     return not QUOTE_STRIP_RE.sub("", tail).strip()
 
 
+def _link_only_cell(unit: _Unit, target_key: str, role_key: str) -> bool:
+    """그 칸이 대상·역할 말고 «다른 내용»을 담고 있지 않은가.
+
+    빈 칸(시점 칸처럼 비워 두는 자리)과, 대상·역할만 되풀이한 칸만 참이다.
+    """
+
+    return not unit.surface.replace(target_key, "").replace(role_key, "")
+
+
+def _target_linked(
+    units: Sequence[_Unit], position: int, target_key: str, role_key: str
+) -> bool:
+    """역할만 있는 칸이 «대상을 적은 칸»과 이어져 있는가.
+
+    ★ 행이 칸을 묶는다는 이유로 칸을 넘는 결속을 허용하지만, 그 허용은 «이어져
+      있을 때»까지다. 사이에 다른 내용을 담은 칸이 끼면 그 칸이 자기 주체를
+      데려온 것이라, 그 칸을 건너뛰어 다른 칸의 대상을 빌려올 수 없다.
+      「가람이 신제품을 개발 | 나래 | 개발 위탁」의 위탁은 가람 근거로 덮이지 않는다.
+    ★ 이름 목록을 두지 않는다. 대상도 역할도 아닌 내용이면 «무엇이든» 끊는다 —
+      회사 이름이든 시점이든 같다. 빈 칸은 내용이 아니므로 끊지 않는다.
+    ⚠️ 잇는 범위만 좁힌다. 그 칸 «안»의 주체 판정은 `_local_prefix_blank` 가
+      그대로 한다 — 관형형·공백을 세는 닫힌 규칙을 여기서 바꾸지 않는다.
+    """
+
+    for anchor, unit in enumerate(units):
+        if target_key not in unit.surface:
+            continue
+        low, high = ((position + 1, anchor) if anchor > position
+                     else (anchor + 1, position))
+        if all(_link_only_cell(units[between], target_key, role_key)
+               for between in range(low, high)):
+            return True
+    return False
+
+
 def _units(text: str, cells: Sequence[str] | None) -> tuple[_Unit, ...]:
     """후보를 주장 자리로 나눈다. 도식은 칸, 산문은 원문이 스스로 끊은 절이다."""
 
@@ -333,6 +368,9 @@ def _candidate_binding(
     ★ 직결된 자리와 허용된 칸-경계 자리를 «합쳐» 돌려준다. 한쪽이라도 있으면 거기서
       멈추던 예전 방식은, 같은 칸에 직결이 있으면 다른 칸의 정상 자리를 놓쳐서
       그 자리가 영영 덮이지 않았다. 다른 주체가 앞에 붙은 자리는 여전히 넣지 않는다.
+    ★ 칸-경계 자리는 «대상을 적은 칸과 이어진» 자리만 넣는다(`_target_linked`).
+      합치기 전에는 첫 자리 하나만 돌려줘 이 구멍이 드러나지 않았다 — 합치고 나니
+      다른 내용을 담은 칸을 건너뛴 자리까지 덮였다.
     """
 
     target_seen = False
@@ -359,6 +397,10 @@ def _candidate_binding(
     if is_flow:
         for position, unit in enumerate(units):
             if target_key in unit.surface:
+                continue
+            # 대상을 적은 칸과 «이어진» 칸만 본다. 다른 내용을 담은 칸을 건너뛰면
+            # 그 칸의 주체가 아니라 남의 대상을 빌려 쓰게 된다.
+            if not _target_linked(units, position, target_key, role_key):
                 continue
             for role_start in _occurrences(unit.surface, role_key):
                 if _local_prefix_blank(unit, role_start):
