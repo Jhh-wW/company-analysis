@@ -56,7 +56,7 @@ from reportlab.platypus import (
 )
 
 from src.core import clock
-from src.core.citations import citation_marker
+from src.core.citations import citation_marker, location_display
 from src.core.constants import section_display_heading
 from src.core.report_display import empty_section_notice
 from src.features.composer.constants import FLOW_UNCONFIRMED_CELL
@@ -1843,6 +1843,28 @@ def _row_cited_text(cites: Sequence[str]) -> str:
     )
 
 
+def _extra_source_markers(cite: str, source_cites: Sequence[str]) -> str:
+    """캡션 대표 인용 외에 표가 실제로 가진 나머지 출처 번호를 마저 붙인다.
+
+    ★ 표시 전달만 고친다(F-4 — 실측: 3쪽 「회사가 공시한 대표 이름」 표는
+      source_cites 4개 중 캡션에 1개만 찍혔다). 행마다 어느 출처인지는 새로
+      추정하지 않는다 — row_cites가 있는 표는 이미 행별 표식을 쓰므로
+      호출부에서 이 함수를 부르지 않는다.
+    """
+
+    seen = {cite}
+    markers: list[str] = []
+    for candidate in source_cites:
+        candidate = str(candidate)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        marker = citation_marker(candidate)
+        if marker:
+            markers.append(marker)
+    return "".join(markers)
+
+
 def _row_citation_height(text: str, style: ParagraphStyle, width: float) -> float:
     """출처가 여러 줄로 접혀도 도식의 배정 영역 안에 모두 들어가게 측정한다."""
     if not text:
@@ -2061,6 +2083,7 @@ def _add_report_table(
         rows=tuple(tuple(row) for row in table.rows),
         numeric=table.numeric,
         row_cites=table.row_cites,
+        source_cites=table.source_cites,
         styles=styles,
         width=width,
     )
@@ -2075,6 +2098,7 @@ def _add_grid_table(
     rows: Sequence[Sequence[str]],
     numeric: bool,
     row_cites: Sequence[Sequence[str]] = (),
+    source_cites: Sequence[str] = (),
     styles: dict[str, ParagraphStyle],
     width: float,
 ) -> None:
@@ -2082,9 +2106,16 @@ def _add_grid_table(
 
     값을 만들지 않는다. 넘겨받은 글자만 배치하므로 봉인 블록도 canonical 표도
     «같은 코드»로 그려진다 — 두 벌로 갈라지면 채널이 조용히 어긋난다.
+
+    ``source_cites``: 대표 ``cite`` 외에 표가 실제로 가진 나머지 출처(F-4).
+    ``row_cites``가 있는 표는 이미 행별로 출처를 보여 주므로 캡션에 다시
+    붙이지 않는다 — 두 표시를 겹치면 같은 번호가 두 번 보인다.
     """
 
-    story.append(Paragraph(_escape(_cited_text(caption, cite)), styles["small_bold"]))
+    caption_text = _cited_text(caption, cite)
+    if not row_cites:
+        caption_text += _extra_source_markers(cite, source_cites)
+    story.append(Paragraph(_escape(caption_text), styles["small_bold"]))
 
     max_columns = max(
         [len(headers), *(len(row) for row in rows)],
@@ -2788,7 +2819,7 @@ def _add_citations(
                 _link_markup(row.label_display, row.url),
                 row.status_display,
                 row.verification_label,
-                row.location,
+                location_display(row.location),
                 row.used_in_display,
             )
             for row in projection.citations
@@ -2800,7 +2831,7 @@ def _add_citations(
                 _source_label_markup(source),
                 _source_status(source),
                 source_verification_label(report, source.source_id),
-                source.location.strip() or "—",
+                location_display(source.location.strip()) or "—",
                 _source_used_sections(source),
             )
             for source in _citations(report)

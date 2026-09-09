@@ -18,6 +18,9 @@ def test_transport_contract_matches_the_actual_producer():
     )
     from src.features.composer.modality_constants import MODALITY_PLAN_ASSERTED
     from src.features.composer.scope_constants import SCOPE_CONDITION_UNBOUND
+    from src.features.composer.prose_own_source_constants import (
+        PROSE_OWN_SOURCE_REASON_CODES,
+    )
     from src.features.composer.culture_constants import (
         CULTURE_ACCOUNTING_POLICY_MISPLACED, CULTURE_EVIDENCE_SCOPE_MISMATCH,
     )
@@ -30,6 +33,7 @@ def test_transport_contract_matches_the_actual_producer():
         CULTURE_ACCOUNTING_POLICY_MISPLACED, *DIRECT_SUPPORT_REASON_TEXTS,
         *ROLE_BINDING_REASON_TEXTS,
         *FUTURE_REASON_CODES,
+        *PROSE_OWN_SOURCE_REASON_CODES,
     }
     assert set(REVIEW_ITEMS) == {NUMERIC_KEY, TIME_KEY, TREND_KEY, *REVIEW_SCOPE_ITEMS.values()}
     assert set(REVIEW_REASONS) == {GROUNDING_INVALID, GROUNDING_MISSING, *REVIEW_SCOPE_ITEMS}

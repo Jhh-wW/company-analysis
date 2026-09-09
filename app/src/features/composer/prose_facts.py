@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from dataclasses import dataclass, replace
 from typing import Final, Optional, Sequence
 
 from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
 from src.features.composer.port import ComposedSentence
+from src.features.composer.prose_own_source import own_source_support_terms
 from src.features.pipeline.port import FactRecord
 from src.features.provenance.sources import Source, SourceKind, exact_evidence_text_hash
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
@@ -30,7 +30,6 @@ from src.shared.report_quality.source_identity import document_identity
 
 PROSE_FACT_BINDING_VERSION: Final[str] = "verified-prose-binding-v1"
 PROSE_FACT_ID_PREFIX: Final[str] = "v2-prose-"
-_WORD_RE: Final[re.Pattern[str]] = re.compile(r"[0-9A-Za-z가-힣]{2,}")
 _TIME_STATE_BY_SECTION: Final[dict[str, str]] = {
     "past_changes": "past",
     "current_challenges": "present",
@@ -56,15 +55,13 @@ def _ordered_unique(values: Sequence[str]) -> tuple[str, ...]:
 
 
 def _support_terms(claim: str, evidence: Sequence[ProseEvidence]) -> list[str]:
-    """주장과 실제 원문 양쪽에 있는 낱말만 감사용으로 남긴다."""
+    """주장과 실제 원문 양쪽에 있는 낱말만 감사용으로 남긴다.
 
-    evidence_text = " ".join(item.exact_text for item in evidence).casefold()
-    out: list[str] = []
-    for token in _WORD_RE.findall(claim):
-        normalized = token.casefold()
-        if normalized in evidence_text and normalized not in out:
-            out.append(normalized)
-    return out[:12]
+    ★ 계산은 `prose_own_source.own_source_support_terms` 한 곳에만 둔다 —
+      결속과 공개가 각자 세면 「사실 없음인데 본문엔 있음」이 다시 생긴다.
+    """
+
+    return own_source_support_terms(claim, [item.exact_text for item in evidence])
 
 
 def _fact_id(

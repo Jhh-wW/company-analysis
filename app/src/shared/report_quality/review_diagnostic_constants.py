@@ -11,6 +11,10 @@ REVIEW_SCOPE_ITEMS = {
     "scope_condition_unbound": "조건·적용대상",
     "culture_evidence_scope_mismatch": "공식 조직설명",
     "culture_accounting_policy_misplaced": "장별 작성범위",
+    # ★ «확인» 산문의 자기 원문 근거(composer.prose_own_source_constants).
+    #   코드 문자열은 그 모듈의 상수와 «반드시 같은 값»이어야 한다.
+    "prose_own_source_unsupported": "자기 근거 부족",
+    "prose_revenue_primacy_from_recognition_only": "자기 근거 부족",
     "superlative_attribution_without_source": "회사 직접표현",
     "causal_relation_evidence_missing": "인과 관계",
     "causal_relation_quote_not_in_source": "인과 관계",

@@ -33,6 +33,9 @@ from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_accounting_policy_problem,
     culture_flow_problem, culture_problem,
 )
+from src.features.composer.prose_own_source import (
+    prose_own_source_problem,
+)
 from src.features.composer.scope_guard import flow_scope_problem
 from src.features.composer.constants import STRATEGY_TABLE_SECTION_ID
 from src.features.composer.future_plan_constants import (
@@ -1020,6 +1023,13 @@ def _ask_grouped_verdicts(
             item.number: item.flow_row.cells
             for item in items if item.flow_row is not None
         },
+        confirmed_prose_numbers=frozenset(
+            item.number for item in items
+            if item.sentence is not None
+            and item.sentence.structured_claim is None
+            and item.sentence.grade == GRADE_CONFIRMED
+            and item.citations
+        ),
     )
 
 
@@ -1061,6 +1071,7 @@ def _apply_grounding(
     diagnostic_contexts: Optional[Mapping[int, tuple[str, str, str]]] = None,
     culture_candidate_numbers: frozenset[int] = frozenset(),
     flow_cells_by_number: Optional[Mapping[int, Sequence[str]]] = None,
+    confirmed_prose_numbers: frozenset[int] = frozenset(),
 ) -> dict[int, str]:
     constrained, problems = constrain_verdicts(
         raw, verdicts, candidates, cells_by_number=flow_cells_by_number,
@@ -1071,6 +1082,15 @@ def _apply_grounding(
         if constrained.get(number) not in (VERDICT_TRUE, VERDICT_UNCLEAR):
             continue
         context = (diagnostic_contexts or {}).get(number)
+        # ★ «확인» 산문은 본문이든 요약이든 자기 인용 원문에 걸린다. 여기서
+        #   걸러야 본문·요약·부록·빈 장 안내가 «같은 판정»을 보게 된다.
+        # 실적표가 근거인 문장은 낱말 겹침이 아니라 «수치 결속 계약»이 본다.
+        if number in confirmed_prose_numbers and TABLE_SOURCE_ID not in sources:
+            problem = prose_own_source_problem(text, sources)
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
         # 실제 소유 장을 따른다. 오래된 주장 슬롯만으로 요약이나 다른 장의
         # 정상 회계 설명까지 문화 장의 배치 제한에 넣지 않는다.
         if context and context[:2] == ("culture", DIAGNOSTIC_KIND_BODY):
@@ -1345,6 +1365,12 @@ def _ask_verdicts(
         culture_candidate_numbers=frozenset(
             item.number for item in items
             if item.sentence.planned_claim_slot.startswith("culture:")
+        ),
+        confirmed_prose_numbers=frozenset(
+            item.number for item in items
+            if item.sentence.structured_claim is None
+            and item.sentence.grade == GRADE_CONFIRMED
+            and item.sentence.citations
         ),
     )
 

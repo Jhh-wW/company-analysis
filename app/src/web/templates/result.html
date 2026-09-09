@@ -30,6 +30,18 @@
 {% macro row_refs(cites) %}
   {%- for cite in cites -%}{{ ref(cite) }}{%- endfor -%}
 {% endmacro %}
+{# 표 캡션이 대표 인용 하나만 달고 있어도, 표 자체가 가진 나머지 출처는
+   전부 화면에서 갈 수 있게 마저 붙인다(F-4 — 실측: 3쪽 「회사가 공시한
+   대표 이름」 표는 source_cites 4개 중 캡션에 1개만 찍혔다).
+   ★ 행마다 어느 출처인지는 새로 추정하지 않는다 — row_cites가 있는 표는
+     이미 row_refs로 행별 표시를 하므로 여기서 건드리지 않는다. #}
+{% macro extra_source_refs(t) %}
+  {%- if not t.row_cites -%}
+    {%- for c in t.source_cites -%}
+      {%- if c != t.cite -%}{{ ref(c) }}{%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+{% endmacro %}
 
 {# 표 하나를 화면에 낸다 — 도식으로 그릴 수 있으면 도식, 아니면 표.
    ★ v1·v2가 «같은» 매크로를 쓴다. 예전에는 v1 분기에만 이 로직이 있어서,
@@ -165,7 +177,7 @@
   {% else %}
   <div class="numtable">
   <div class="cap" id="{{ table_id }}-caption">
-  {{ t.caption }}{{ ref(t.cite) }}
+  {{ t.caption }}{{ ref(t.cite) }}{{ extra_source_refs(t) }}
   </div>
   <div class="scroll" tabindex="0" role="region" aria-labelledby="{{ table_id }}-caption">
   <table class="{{ 'nums' if t.numeric else 'texts' }}" aria-labelledby="{{ table_id }}-caption">
@@ -599,7 +611,7 @@
             </td>
             <td>{{ c.status_display }}</td>
             <td>{{ c.verification_label }}</td>
-            <td>{{ c.location }}</td>
+            <td>{{ location_display(c.location) }}</td>
             <td>{{ c.used_in_display }}</td>
           </tr>
           {% endfor %}
@@ -694,7 +706,7 @@
               {%- if c.domain %} · {{ c.domain }}{% endif %}
               {%- if c.source_type %} · {{ c.source_type }}{% endif %}
             </td>
-            <td>{{ c.location or '—' }}</td>
+            <td>{{ location_display(c.location) or '—' }}</td>
             <td>
               {%- set usage = namespace(first=true) -%}
               {%- for section in report.sections -%}
@@ -799,7 +811,7 @@
               {%- if c.fact_status %} · {{ c.fact_status }}{% endif %}
             </td>
             <td>{{ source_verification_label(report, c.source_id) }}</td>
-            <td>{{ c.location or '—' }}</td>
+            <td>{{ location_display(c.location) or '—' }}</td>
             <td>
               {%- set usage = namespace(first=true) -%}
               {%- for section in report.sections -%}

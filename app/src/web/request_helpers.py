@@ -27,6 +27,7 @@ from src.core import clock, paths
 from src.core.citations import (
     INTERPRETATION_LABEL,
     citation_number,
+    location_display,
     split_citation_markers,
     split_interpretation_marker,
 )
@@ -188,6 +189,9 @@ def _ctx(request: Request, **kwargs) -> dict:
         "engine_v2_schema_version": ENGINE_V2_SCHEMA_VERSION,
         # 내부 ``조각 N·종류``를 템플릿에서 직접 자르면 다른 출력과 다시 갈린다.
         "citation_number": citation_number,
+        # 부록 「원문 위치」 칸의 뉴스 내부 조각 id를 화면에서 지운다(F-3).
+        # location 값 자체는 바꾸지 않고 인쇄 직전 문구만 변환한다.
+        "location_display": location_display,
         # 본문에 박힌 [n]을 작은 위첨자 링크로 바꿔 인쇄하기 위한 분해기.
         # v1은 이미 .ref 위첨자를 쓰는데 v2만 평문 대괄호였다(사용자 신고).
         "split_citation_markers": split_citation_markers,
