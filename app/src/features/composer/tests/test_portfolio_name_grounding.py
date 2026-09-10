@@ -503,6 +503,52 @@ def test_근거_원문의_괄호를_사이에_둔_앞뒤를_이어_붙이지_않
     assert any(PORTFOLIO_NAME_NOT_IN_SOURCE_CODE in item for item in problems)
 
 
+@pytest.mark.parametrize("name", ("제(전기전자 제품)", "1(장비)"))
+def test_한_글자_머리는_괄호_안에_실물이_있어도_막는다(name: str) -> None:
+    """★ `PORTFOLIO_NAME_MIN_PART_CHARS`를 1로 낮추면 이 시험이 빨간불이 된다.
+
+    머리 「제」·「1」은 인용 조각에 실제로 있고(「2.제품매출」·「1.상품매출」)
+    괄호 안 「전기전자 제품」·「장비」도 같은 문서에 있다. 그래도 한 글자 머리는
+    회사를 못 가리므로 이름으로 인정하지 않는다.
+    """
+
+    row = FlowRow(
+        cells=(name, "전력전자 제품 제조·판매", "매출 확대", "주력"),
+        citations=("45",),
+    )
+
+    checked, problems = check_diagram_numbers(
+        _report(row), _same_document_fragments()
+    )
+
+    assert checked.sections[0].flow_rows == ()
+    assert any(PORTFOLIO_NAME_NOT_IN_SOURCE_CODE in item for item in problems)
+
+
+def test_한_글자_머리라도_이름_전체가_원문에_있으면_통과한다() -> None:
+    """★ 하한은 «빠른 길 뒤»에 온다 — 순서가 뒤바뀌면 이 시험이 빨간불이 된다.
+
+    원문이 「A(고급)」이라고 적어 둔 등급 이름은 통짜로 근거가 있으므로 머리
+    길이를 따질 이유가 없다.
+    """
+
+    row = FlowRow(
+        cells=("A(고급)", "제품 등급", "운영 확대", "주력"), citations=("71",)
+    )
+
+    checked, problems = check_diagram_numbers(
+        _report(row),
+        (
+            _fragment(
+                "71", "제품 | A(고급) | 국내", document_identity=_ENTITY_DOCUMENT
+            ),
+        ),
+    )
+
+    assert _portfolio_row(checked) == row
+    assert problems == ()
+
+
 def test_이름_전체가_인용_조각에_있으면_괄호_안이_한_글자여도_통과한다() -> None:
     """★ 빠른 길 — 원문에 «글자 그대로» 있는 이름은 하한으로 막지 않는다.
 
