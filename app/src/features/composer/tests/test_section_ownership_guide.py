@@ -155,3 +155,43 @@ def test_지침이_말한_어투가_실제로_6장_배치검사를_통과한다(
         assert future_section_prose_problem(문장) == (
             "future_section_no_forward_statement"
         ), 문장
+
+
+# ══════════════════════════════════════════════════════════
+# 미래 표지 «있다/없다»는 배치 판정의 빈 문자열과 다르다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 갈라 두나 — `future_section_prose_problem`의 빈 문자열은 «반례를 못
+#   찾았다»는 뜻이지 «미래 표지가 있다»가 아니다. 양태 표지가 아예 없는 문장도
+#   빈 문자열을 받는다. 장 간 중복의 소유권을 시제로 가르는 자리(dedupe)는
+#   그 차이를 구별해야 한다 — 못 하면 시제가 없는 문장까지 6장으로 넘어간다.
+
+
+def test_양태가_없는_문장은_배치는_통과해도_미래표지는_없다():
+    from src.features.composer.future_plan_guard import (
+        future_section_prose_problem,
+        has_forward_marker,
+    )
+
+    양태_없는_문장 = "회사의 교육서비스 부문은 온라인과 집합교육 서비스로 구성된다."
+
+    assert future_section_prose_problem(양태_없는_문장) == ""
+    assert has_forward_marker(양태_없는_문장) is False
+
+
+def test_지침이_말한_어투는_미래표지로도_읽힌다():
+    """지침·배치 관문·소유권 가르기가 «같은 목록»을 쓰는지 행동으로 묶는다."""
+    from src.features.composer.future_plan_guard import has_forward_marker
+
+    for 문장 in (
+        "회사는 2026년에 AI 교육 체계를 고도화할 계획이다.",
+        "회사는 새로운 시장으로 사업 영역을 확장하겠다고 밝혔다.",
+        "회사는 진단 기반 리더십 교육을 강화하는 것을 목표로 한다.",
+        "회사는 외국어평가 시장이 지속적으로 성장할 것으로 전망한다.",
+    ):
+        assert has_forward_marker(문장) is True, 문장
+    for 문장 in (
+        "회사는 AI 교육 체계를 고도화하고 리더십 교육을 강화하고 있다.",
+        "회사는 합숙형 어학 교육 모델을 글로벌 기업 대상으로 확대하였다.",
+    ):
+        assert has_forward_marker(문장) is False, 문장

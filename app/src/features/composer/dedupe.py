@@ -32,9 +32,13 @@ from collections.abc import Sequence
 from typing import Final, Optional
 
 from src.features.composer.constants import (
+    CHALLENGE_FLOW_SECTION_ID,
     NOTICE_DUPLICATE_MOVED,
+    NOTICE_DUPLICATE_MOVED_TABLE_KEPT,
     SECTION_IDS,
+    STRATEGY_TABLE_SECTION_ID,
 )
+from src.features.composer.future_plan_guard import has_forward_marker
 from src.features.composer.port import (
     CollectedFragment,
     ComposedReport,
@@ -81,6 +85,29 @@ _SAME_DOCUMENT_OVERLAP_THRESHOLD: Final[float] = 0.85
 
 #: 이 길이 미만의 문장은 비교하지 않는다. 짧은 문장은 우연히 많이 겹친다.
 _MIN_COMPARE_CHARS: Final[int] = 20
+
+#: 소유권을 «정본 순서» 대신 «시제»로 가르는 장 쌍 — 5장(당면 과제와 대응)과
+#: 6장(성장 전략).
+#:
+#: ★ 왜 이 쌍만인가 — 이 두 장은 주제가 아니라 «시점»으로 갈린다. 5장은 지금
+#:   겪는 과제와 그 대응, 6장은 아직 하지 않은 계획이다(SECTION_GUIDES 원문).
+#:   회사가 「…해 나가겠습니다」라고 적은 한 문장을 작가가 두 장에 각각 옮기면,
+#:   6장에는 「…하겠다는 계획」으로, 5장에는 「…하려 하고 있다」로 어투만 달리
+#:   실린다. 근거가 같으니 중복 제거가 하나를 뺀다.
+#: ★ 왜 순서로는 안 되는가 (실측 — 4차 유료 실행 멀티캠퍼스) — 두 장이 각각
+#:   한 문장씩이라 «깊이»가 동점이고, 동점이면 정본 목차에서 앞선 5장이 이긴다.
+#:   미래 계획은 현재 과제와 같은 근거를 쓰는 일이 잦아 6장이 «구조적으로»
+#:   진다. 그 결과 6장이 세 실행 중 두 번 통째로 비었다.
+#: ★ 그래서 이 쌍에서는 «어느 장이 앞이냐»가 아니라 «그 문장이 앞일을 말하나»로
+#:   가른다. 미래 표지를 한쪽만 달고 있으면 그 장이 소유한다. 둘 다 달고
+#:   있거나 둘 다 없으면 판단 근거가 없으므로 기존 규칙(정본 순서)에 맡긴다 —
+#:   억지로 한쪽에 몰면 이번에는 반대 장이 통째로 빈다.
+#: ★ «깊이»보다 앞세우지 않는다. 이 파일의 중심 규칙(그 사실을 가장 많이 다룬
+#:   장이 소유한다)은 실측으로 세운 것이고, 여기서 고치는 것은 그 뒤에 오던
+#:   «동점 처리»뿐이다.
+_TENSE_OWNED_PAIR: Final[frozenset[str]] = frozenset(
+    {CHALLENGE_FLOW_SECTION_ID, STRATEGY_TABLE_SECTION_ID}
+)
 
 #: 글자만 남긴다 — 한글·영문·숫자. 공백·문장부호는 표기 차이라 무시한다.
 _KEEP_CHARS_RE: Final[re.Pattern[str]] = re.compile(r"[^0-9A-Za-z가-힣]+")
@@ -190,6 +217,58 @@ def _tight_groups(similar: dict[int, set[int]], size: int) -> list[list[int]]:
         grouped.update(group)
         groups.append(group)
     return groups
+
+
+def _future_section_owner(
+    tied: set[int],
+    group: Sequence[int],
+    flat: Sequence[tuple[int, int, ComposedSentence]],
+    report: ComposedReport,
+) -> Optional[int]:
+    """5장↔6장 동점을 «시제»로 가른다. 가를 수 없으면 None을 돌려준다.
+
+    돌려주는 값은 `report.sections`의 색인이다. 6장 쪽 문장만 미래 표지를 달고
+    있을 때에만 6장을 준다 — 반대(5장만 미래)일 때는 기존 정본 순서가 이미
+    5장을 주므로 여기서 따로 갈라 줄 것이 없다.
+
+    ★ 판정은 «그 장에 실린 그 문장»을 본다. 같은 사실이라도 두 장에 실린 글은
+      어투가 다르다. 실측에서 6장에는 「…확보해 나가겠다는 계획은」, 5장에는
+      「…확보하려 하고 있다」로 실렸다 — 원문은 「…확보해 나가겠습니다」다.
+    ★ 미래 표지 목록은 `future_plan_guard.has_forward_marker` 하나를 쓴다.
+      6장 장 배치 관문이 쓰는 바로 그 목록이다. 여기서 목록을 새로 만들면
+      「관문은 통과했는데 소유는 못 가져가는」 장이 생긴다.
+    """
+
+    if {report.sections[index].section_id for index in tied} != _TENSE_OWNED_PAIR:
+        return None
+    by_section_id = {report.sections[index].section_id: index for index in tied}
+    forward = {
+        section_id: any(
+            has_forward_marker(flat[index][2].text)
+            for index in group
+            if flat[index][0] == section_index
+        )
+        for section_id, section_index in by_section_id.items()
+    }
+    if forward[STRATEGY_TABLE_SECTION_ID] and not forward[CHALLENGE_FLOW_SECTION_ID]:
+        return by_section_id[STRATEGY_TABLE_SECTION_ID]
+    return None
+
+
+def _empty_section_notice(section: ComposedSection) -> str:
+    """문장이 다 빠진 장에 남길 안내문. 표가 남으면 그 사실까지 적는다.
+
+    ★ 왜 갈라 쓰나 (실측 — 4차 유료 실행 멀티캠퍼스 6장) — 「이 장에 담겼던
+      내용이 … 그쪽으로 모았습니다」라고 적고 바로 아래에 「회사가 밝힌 성장
+      계획」 표를 그대로 실었다. 표는 문장과 별개 재료라 남는 것이 맞지만,
+      안내문이 그 사실을 말하지 않아 읽는 사람에게는 글과 화면이 어긋나 보인다.
+    ★ 표를 «빼서» 맞추지 않는다. 표는 자기 근거로 검증을 통과한 자료다 —
+      문장을 옮긴다고 함께 지우면 근거 있는 내용을 잃는다.
+    """
+
+    if section.flow_rows or section.news_rows:
+        return NOTICE_DUPLICATE_MOVED_TABLE_KEPT
+    return NOTICE_DUPLICATE_MOVED
 
 
 def _section_sentence_counts(report: ComposedReport) -> dict[str, int]:
@@ -313,13 +392,23 @@ def drop_cross_section_duplicates(
             )
             if count:
                 depth[section_index] = count
-        owner = min(
-            {flat[index][0] for index in group},
-            key=lambda section_index: (
-                -depth.get(section_index, 0),
-                order.get(report.sections[section_index].section_id, section_index),
-            ),
-        )
+        # 깊이가 같은 장들만 남긴다 — 여기부터가 «동점 처리»다.
+        candidates = {flat[index][0] for index in group}
+        best_depth = max(depth.get(section_index, 0) for section_index in candidates)
+        tied = {
+            section_index
+            for section_index in candidates
+            if depth.get(section_index, 0) == best_depth
+        }
+        # 5장↔6장 동점은 정본 순서가 아니라 시제로 가른다(_TENSE_OWNED_PAIR 주석).
+        owner = _future_section_owner(tied, group, flat, report)
+        if owner is None:
+            owner = min(
+                tied,
+                key=lambda section_index: order.get(
+                    report.sections[section_index].section_id, section_index
+                ),
+            )
         for index in group:
             if flat[index][0] != owner:
                 drop.add(index)
@@ -344,7 +433,13 @@ def drop_cross_section_duplicates(
             if sentence_index not in removed
         )
         # 장 삭제 금지 — 비면 왜 비었는지 정직하게 남긴다.
-        notice = section.notice or (NOTICE_DUPLICATE_MOVED if not kept else "")
+        # ★ 표는 문장과 별개 재료라 이 단계에서 그대로 남는다(아래 flow_rows).
+        #   그런데 안내문이 「그쪽으로 모았습니다」만 말하면, 바로 아래에 표가
+        #   실려 글과 화면이 어긋난다(실측 — 6장 「회사가 밝힌 성장 계획」).
+        #   그래서 표가 남는 장에는 남는다는 사실까지 적는다.
+        notice = section.notice
+        if not kept and not notice:
+            notice = _empty_section_notice(section)
         rebuilt.append(
             ComposedSection(
                 section_id=section.section_id,
@@ -355,6 +450,10 @@ def drop_cross_section_duplicates(
                 #   — 실측에서 7장 흐름도가 두 번 연속 안 나온 진짜 원인이었다.
                 #   중복 «문장»을 옮기는 단계가 «도식»까지 지우면 안 된다.
                 flow_rows=section.flow_rows,
+                # ★ 보도표와 그 제외 사유도 같은 이유로 함께 넘긴다. 기본값이
+                #   빈 값이라 안 넘기면 이 단계가 조용히 지운다.
+                news_rows=section.news_rows,
+                news_decisions=section.news_decisions,
             )
         )
 

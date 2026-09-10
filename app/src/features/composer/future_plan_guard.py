@@ -620,22 +620,42 @@ def future_plan_problem(
     return ""
 
 
+def has_forward_marker(text: str) -> bool:
+    """이 문장이 «앞으로 할 일»을 가리키는 표지를 하나라도 달고 있나.
+
+    ★ 왜 따로 두나 — `future_section_prose_problem`의 «빈 문자열»은 «미래
+      표지가 있다»가 아니다. 양태 표지가 아예 없는 문장도 빈 문자열을 받는다
+      (판정을 미루는 것이지 미래라고 인정한 것이 아니다). 미래인지 «긍정으로»
+      물어야 하는 자리(장 간 중복의 소유권 가르기)가 그 차이를 구별하지 못하면
+      시제가 없는 문장까지 미래 장으로 넘어간다.
+    ★ 목록을 새로 만들지 않는다 — 아래 `future_section_prose_problem`이 이
+      함수를 그대로 쓴다. 두 벌로 늘리면 한쪽만 고쳐져 「장에는 남는데 소유는
+      옮겨지지 않는」 어긋남이 생긴다(`PROMISSORY_MARKER` 주석과 같은 이유).
+    """
+
+    surface = _normalized(text)
+    if FUTURE_SECTION_FORWARD_RE.search(surface):
+        return True
+    for sentence in _sentences(surface):
+        for match in MODALITY_RE.finditer(sentence):
+            if _modality_kind(match) in MODALITY_FUTURE_KINDS:
+                return True
+    return False
+
+
 def future_section_prose_problem(text: str) -> str:
     """명시적 진행·완료만 있고 미래 구문이 없는 본문을 미래 장에서 제외한다.
 
     양태 표지가 없는 문장과 현재+미래 혼합 문장은 기존 의미 검수에 남긴다.
     이 검사는 장 배치만 다루며 자기 인용·대상·활동·양태 근거를 대신하지 않는다.
     """
-    surface = _normalized(text)
-    if FUTURE_SECTION_FORWARD_RE.search(surface):
+    if has_forward_marker(text):
         return ""
-    ongoing_or_done = False
-    for sentence in _sentences(surface):
-        for match in MODALITY_RE.finditer(sentence):
-            kind = _modality_kind(match)
-            if kind in MODALITY_FUTURE_KINDS:
-                return ""
-            ongoing_or_done = True
+    surface = _normalized(text)
+    ongoing_or_done = any(
+        MODALITY_RE.search(sentence) is not None
+        for sentence in _sentences(surface)
+    )
     if not ongoing_or_done:
         return ""
     return FUTURE_SECTION_NO_FORWARD_STATEMENT

@@ -19,13 +19,18 @@ from __future__ import annotations
 
 import logging
 
-from src.features.composer.constants import NOTICE_DUPLICATE_MOVED, SECTION_IDS
+from src.features.composer.constants import (
+    NOTICE_DUPLICATE_MOVED,
+    NOTICE_DUPLICATE_MOVED_TABLE_KEPT,
+    SECTION_IDS,
+)
 from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.port import (
     ComposedReport,
     ComposedSection,
     ComposedSentence,
     FlowRow,
+    NewsRow,
 )
 
 _LOGGER_NAME = "src.features.composer.dedupe"
@@ -401,3 +406,233 @@ def test_문장이_하나뿐이어도_장별_문장_수를_남긴다(caplog):
 
     assert 뺀수 == 0
     assert "identity:1→1" in caplog.text
+
+
+# ══════════════════════════════════════════════════════════
+# ⑦ 5장↔6장 동점은 «정본 순서»가 아니라 «시제»로 가른다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 필요한가 (실측 — 4차 유료 실행 멀티캠퍼스, 보고서 run e193846f) —
+#   회사가 사업보고서에 「…확보해 나가겠습니다」라고 적은 한 사실을 작가가 두 장에
+#   옮겼다. 6장에는 계획 어투로, 5장에는 「…확보하려 하고 있다」는 진행 어투로.
+#   근거가 같으니 이 단계가 하나를 뺐는데, 두 장이 각각 한 문장씩이라 «깊이»가
+#   동점이었고 동점이면 정본 목차에서 앞선 5장이 이겼다. 6장은 통째로 비었다.
+#   미래 계획은 현재 과제와 같은 근거를 쓰는 일이 잦아 6장이 구조적으로 진다.
+# ★ 아래 5장 문장은 그 실행의 보고서에 실제로 실린 글자 그대로다.
+#   6장 문장은 «옮겨져 사라졌기 때문에» 산출물에 남아 있지 않다 — 그래서 원문
+#   공시의 어투(「…확보해 나가겠습니다」)로 되살린 재구성이다. 재구성인 것을
+#   여기 밝혀 둔다. 남아 있는 것은 그 장의 안내문이 NOTICE_DUPLICATE_MOVED
+#   였다는 사실뿐이고, 그 문자열은 이 단계에서만 붙는다.
+
+_실측_5장_진행어투 = (
+    "회사는 이러한 교육서비스 부문의 매출 감소에 대응하여 AI 교육 체계를 "
+    "고도화하고 진단 기반 리더십 교육을 강화함으로써 안정적인 매출 기반과 "
+    "차별화된 수익 모델을 확보하려 하고 있다."
+)
+_재구성_6장_계획어투 = (
+    "회사는 진단 기반 리더십 교육을 강화함으로써 안정적인 매출 기반과 "
+    "차별화된 수익 모델을 확보해 나가겠다고 밝혔다."
+)
+_5장_계획어투 = (
+    "회사는 매출 감소에 대응해 진단 기반 리더십 교육을 강화함으로써 안정적인 "
+    "매출 기반과 차별화된 수익 모델을 확보할 계획이다."
+)
+_6장_진행어투 = (
+    "회사는 진단 기반 리더십 교육을 강화함으로써 안정적인 매출 기반과 "
+    "차별화된 수익 모델을 확보하고 있다."
+)
+
+
+def test_5장6장_동점이면_미래를_말한_6장이_소유한다():
+    """실측 회귀 — 같은 근거를 5장은 진행형, 6장은 계획형으로 썼다."""
+    report = _report(
+        current_challenges=(_sentence(_실측_5장_진행어투, ("153",)),),
+        future_strategy=(_sentence(_재구성_6장_계획어투, ("153",)),),
+    )
+
+    새보고서, 뺀수 = drop_cross_section_duplicates(report)
+
+    assert 뺀수 == 1
+    assert _texts(새보고서, "future_strategy") == [_재구성_6장_계획어투]
+    assert _texts(새보고서, "current_challenges") == []
+
+
+def test_6장이_진행형이면_기존대로_앞선_5장이_소유한다():
+    """미래 표지가 6장 쪽에 없으면 가를 근거가 없다 — 순서 규칙 그대로."""
+    report = _report(
+        current_challenges=(_sentence(_실측_5장_진행어투, ("153",)),),
+        future_strategy=(_sentence(_6장_진행어투, ("153",)),),
+    )
+
+    새보고서, 뺀수 = drop_cross_section_duplicates(report)
+
+    assert 뺀수 == 1
+    assert _texts(새보고서, "current_challenges") == [_실측_5장_진행어투]
+    assert _texts(새보고서, "future_strategy") == []
+
+
+def test_두_장_모두_미래를_말하면_한쪽으로_몰지_않는다():
+    """둘 다 계획형이면 시제로는 못 가른다 — 기존 순서 규칙에 맡긴다."""
+    report = _report(
+        current_challenges=(_sentence(_5장_계획어투, ("153",)),),
+        future_strategy=(_sentence(_재구성_6장_계획어투, ("153",)),),
+    )
+
+    새보고서, 뺀수 = drop_cross_section_duplicates(report)
+
+    assert 뺀수 == 1
+    assert _texts(새보고서, "current_challenges") == [_5장_계획어투]
+
+
+def test_시제_규칙은_5장6장_밖의_쌍에는_걸리지_않는다():
+    """1장↔6장은 시제로 갈리는 쌍이 아니다 — 정본 순서 그대로 1장이 이긴다."""
+    report = _report(
+        identity=(_sentence(_실측_5장_진행어투, ("153",)),),
+        future_strategy=(_sentence(_재구성_6장_계획어투, ("153",)),),
+    )
+
+    새보고서, 뺀수 = drop_cross_section_duplicates(report)
+
+    assert 뺀수 == 1
+    assert _texts(새보고서, "identity") == [_실측_5장_진행어투]
+    assert _texts(새보고서, "future_strategy") == []
+
+
+def test_깊이가_더_깊은_장은_시제보다_먼저_이긴다():
+    """시제는 «동점»을 가르는 규칙이다 — 깊이 규칙을 밀어내지 않는다."""
+    다른_문장 = (
+        "회사는 국내 경기위축에 따른 공공기관 및 교육예산 축소로 교육서비스 "
+        "부문의 매출이 감소했다고 밝혔다."
+    )
+    report = _report(
+        current_challenges=(
+            _sentence(_실측_5장_진행어투, ("153",)),
+            _sentence(다른_문장, ("153",)),
+        ),
+        future_strategy=(_sentence(_재구성_6장_계획어투, ("153",)),),
+    )
+
+    새보고서, 뺀수 = drop_cross_section_duplicates(report)
+
+    assert 뺀수 == 1
+    assert _실측_5장_진행어투 in _texts(새보고서, "current_challenges")
+    assert _texts(새보고서, "future_strategy") == []
+
+
+def test_시제_판정은_생산_미래표지_함수를_그대로_쓴다():
+    """목록을 두 벌로 만들지 않았는지 «행동»으로 묶는다.
+
+    6장 장 배치 관문이 통과시키는 어투는 이 단계에서도 미래로 읽혀야 한다.
+    한쪽만 고쳐지면 「관문은 통과했는데 소유는 못 가져가는」 장이 생긴다.
+    """
+    from src.features.composer.future_plan_guard import (
+        future_section_prose_problem,
+        has_forward_marker,
+    )
+
+    assert has_forward_marker(_재구성_6장_계획어투) is True
+    assert has_forward_marker(_실측_5장_진행어투) is False
+    assert future_section_prose_problem(_재구성_6장_계획어투) == ""
+    assert future_section_prose_problem(_실측_5장_진행어투) == (
+        "future_section_no_forward_statement"
+    )
+
+
+# ══════════════════════════════════════════════════════════
+# ⑧ 안내문과 화면이 어긋나지 않는다 — 표가 남으면 남는다고 적는다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 필요한가 (실측 — 4차 유료 실행 멀티캠퍼스 6장) — 「이 장에 담겼던 내용이
+#   … 그쪽으로 모았습니다」라고 적어 놓고 바로 아래에 「회사가 밝힌 성장 계획」
+#   표(2026년 이후)를 그대로 실었다. 표는 문장과 별개 재료라 남는 것이 맞다.
+#   틀린 것은 «표가 남았다는 말이 없는» 안내문이다.
+
+
+def _표_남는_보고서(표_있는_장: str, 표) -> ComposedReport:
+    return ComposedReport(
+        sections=tuple(
+            ComposedSection(
+                section_id=section_id,
+                sentences=(
+                    (_sentence(_파트너_문장, ("12",)),)
+                    if section_id == 표_있는_장
+                    else (
+                        _sentence(_파트너_문장_변형, ("12",)),
+                        _sentence(_공연_문장, ("12",)),
+                    )
+                    if section_id == "identity"
+                    else ()
+                ),
+                flow_rows=표 if section_id == 표_있는_장 else (),
+            )
+            for section_id in SECTION_IDS
+        )
+    )
+
+
+def test_표가_남는_장은_안내문도_표가_남았다고_말한다():
+    경로 = (FlowRow(cells=("수지", "가공", "가구사"), citations=("12",)),)
+
+    새보고서, _ = drop_cross_section_duplicates(
+        _표_남는_보고서("operations_partners", 경로)
+    )
+
+    비워진_장 = next(
+        s for s in 새보고서.sections if s.section_id == "operations_partners"
+    )
+    assert 비워진_장.sentences == ()
+    assert 비워진_장.flow_rows == 경로
+    assert 비워진_장.notice == NOTICE_DUPLICATE_MOVED_TABLE_KEPT
+    assert "표" in 비워진_장.notice, "표가 남았다는 말이 안내문에 없습니다"
+    assert "자료가 없어서" in 비워진_장.notice
+
+
+def test_표가_없는_장의_안내문은_그대로다():
+    """표가 없으면 늘리지 않는다 — 화면에 없는 것을 말하면 그것도 거짓이다."""
+    새보고서, _ = drop_cross_section_duplicates(_표_남는_보고서("portfolio", ()))
+
+    비워진_장 = next(s for s in 새보고서.sections if s.section_id == "portfolio")
+    assert 비워진_장.notice == NOTICE_DUPLICATE_MOVED
+    assert "표" not in 비워진_장.notice
+
+
+def test_보도표가_남아도_안내문이_표를_말한다():
+    보도 = (
+        NewsRow(
+            cells=("2025-09-15", "mk.co.kr", "수도전기공고 OPIc 위탁 교육"),
+            citations=("210",),
+        ),
+    )
+    report = ComposedReport(
+        sections=tuple(
+            ComposedSection(
+                section_id=section_id,
+                sentences=(
+                    (_sentence(_파트너_문장, ("12",)),)
+                    if section_id == "operations_partners"
+                    else (
+                        _sentence(_파트너_문장_변형, ("12",)),
+                        _sentence(_공연_문장, ("12",)),
+                    )
+                    if section_id == "identity"
+                    else ()
+                ),
+                news_rows=보도 if section_id == "operations_partners" else (),
+                news_decisions=(
+                    (("209", "검수후미반영", "본문 검수를 통과하지 못했습니다."),)
+                    if section_id == "operations_partners"
+                    else ()
+                ),
+            )
+            for section_id in SECTION_IDS
+        )
+    )
+
+    새보고서, _ = drop_cross_section_duplicates(report)
+
+    비워진_장 = next(
+        s for s in 새보고서.sections if s.section_id == "operations_partners"
+    )
+    assert 비워진_장.news_rows == 보도, "문장을 옮기면서 보도표가 사라졌습니다"
+    assert 비워진_장.news_decisions != (), "뉴스 제외 사유가 사라졌습니다"
+    assert 비워진_장.notice == NOTICE_DUPLICATE_MOVED_TABLE_KEPT
