@@ -79,10 +79,11 @@ def test_exact_derived_acronym_and_typo_blocks_preserve_intent_and_abstain():
 
     jyp = generate_dart_company_matches(index, "JYP", limit=3)
     assert [item.record.corp_code for item in jyp[:2]] == ["00258689", "00535454"]
-    assert {item.match_kind for item in jyp[:2]} == {
-        "acronym_token",
-        "acronym_reading",
-    }
+    # acronym_token 과 acronym_reading 이 동점이던 예전과 달리, 이번 우선순위
+    # 재정렬(acronym_token > acronym_reading, MATCH_KIND_PRIORITY 참고)로 후보가
+    # 둘 다 있으면 acronym_token 이 항상 이긴다 — 00535454 도 by_token 색인에
+    # "jyp"(corp_eng_name="JYP Corporation") 가 이미 걸려 있어 kind 가 바뀐다.
+    assert {item.match_kind for item in jyp[:2]} == {"acronym_token"}
 
     old_exact = generate_dart_company_matches(index, "제이와이피", limit=3)
     assert old_exact[0].record.corp_code == "00535454"

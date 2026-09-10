@@ -29,10 +29,11 @@ from typing import Protocol, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from src.features.budget import logic as budget_logic
-from src.features.business_candidate import ai_rerank
+from src.features.business_candidate import ai_rerank, alias_resolution
 from src.features.business_candidate.address_constants import ADDRESS_SCORE_BY_STRENGTH
 from src.features.business_candidate.address_match import address_match_strength
 from src.features.business_candidate.constants import (
+    AI_ALIAS_TIMEOUT_SEC,
     AI_RERANK_TIMEOUT_SEC,
     CANDIDATE_ATTEMPT_TTL_SEC,
     MAX_ADDRESS_CHARS,
@@ -51,6 +52,7 @@ from src.features.business_candidate.constants import (
     RATE_WINDOW_SEC,
 )
 from src.features.business_candidate.dart_identity import (
+    LENGTH_TIEBREAK_KINDS,
     MATCH_KIND_PRIORITY,
     normalize_company_name,
 )
@@ -151,6 +153,11 @@ class RawBusinessCandidate:
     english_name: str = ""
     name_match_kind: str = ""
     name_similarity: float = 0.0
+    #: AI가 옮긴 정식명으로 찾아온 후보면 ``"ai"``. 결정적 경로는 빈 문자열이다.
+    #: 어느 값도 회사를 확정하지 않으며, 사람이 고르는 절차는 두 경로가 같다.
+    alias_source: str = ""
+    #: 그때 AI가 준 정식 법인명. 점수 계산과 화면 구분의 근거라 함께 나른다.
+    alias_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -170,6 +177,9 @@ class BusinessCandidate:
     english_name: str = ""
     name_match_kind: str = ""
     name_similarity: float = 0.0
+    #: `RawBusinessCandidate`와 같은 뜻. 화면 출처 구분과 시험이 읽는다.
+    alias_source: str = ""
+    alias_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -186,6 +196,9 @@ class CandidateResolution:
     #: AI 보조 재정렬 결과(`ai_rerank.RERANK_STATUS_*`). 부르지 않았으면 빈 문자열이다.
     #: 후보 집합은 이 값과 무관하게 같고, 어떤 값도 회사를 확정하지 않는다.
     rerank_status: str = ""
+    #: AI 정식명 번역 결과(`alias_resolution.ALIAS_STATUS_*`). 열지 않았으면 빈
+    #: 문자열이다. 이 값은 후보를 «더할» 수 있을 뿐 어떤 회사도 확정하지 않는다.
+    alias_status: str = ""
 
 
 class BusinessCandidateProvider(Protocol):
@@ -193,6 +206,10 @@ class BusinessCandidateProvider(Protocol):
 
     구현체는 한 호출 안에서 자체 재시도하면 안 되며, 과금형 공급자는 이 계약에 붙이지
     않는다. 비용이 드는 공급자는 기존 paid phase에 별도로 설계해야 한다.
+
+    ★ 선택 확장: 클래스 속성 ``accepts_alias_ask = True``를 붙인 구현체만
+      ``search(..., alias_ask=...)``를 추가로 받는다. 표시가 없는 구현체에는 그
+      인자를 넘기지 않으므로 이 최소 계약은 그대로다.
     """
 
     costs_money: bool
@@ -340,6 +357,18 @@ def _domain_key(url: str) -> str:
     return "".join(labels[:-1] or labels)
 
 
+def _ai_alias_evidence(alias_name: str) -> str:
+    """AI 추정 정식명으로 찾은 후보의 이름 근거 한 줄.
+
+    사용자가 적은 말이 맞은 것이 아니라 «AI가 추정한 이름»이 맞았다는 사실과,
+    그래서 사람이 확인해야 한다는 것만 짧게 말한다.
+    """
+    shown = _plain_text(alias_name, MAX_NAME_CHARS)
+    if shown:
+        return f"AI가 추정한 정식명({shown})과 일치합니다 · 사람이 확인해야 합니다"
+    return "AI가 추정한 정식명과 일치합니다 · 사람이 확인해야 합니다"
+
+
 def _score(
     *,
     query: str,
@@ -352,6 +381,8 @@ def _score(
     english_name: str = "",
     name_match_kind: str = "",
     name_similarity: float = 0.0,
+    alias_source: str = "",
+    alias_name: str = "",
 ) -> tuple[float, tuple[str, ...]]:
     score = 0.0
     evidence: list[str] = []
@@ -381,6 +412,26 @@ def _score(
     elif match_kind == "spacing":
         score += 0.60
         evidence.append("공백을 정리한 회사명이 DART 정식명칭과 일치합니다")
+    elif match_kind == "prefix":
+        # 등록명이 입력한 이름으로 «시작»한다(당근->당근마켓). 법인 접미사·계열
+        # 표기를 생략한 입력의 주 경로다. 분기가 없으면 아래 낙하 분기(0.44)로
+        # 떨어져 오타(trigram)보다도 뒤로 밀린다 — 그때 화면 순서가
+        # `dart_identity.MATCH_KIND_PRIORITY`와 정반대가 된다.
+        #
+        # 자리는 legal_suffix(0.54) «바로 아래»다. 이 값을 더 올려 약어 종류
+        # (acronym_token 0.56) 위로 두면, 종목코드 가점(+0.08)이 붙은 부분 일치
+        # 후보가 가점 없는 «완전 일치» 후보를 앞질러 버린다(2026-09-10 실측:
+        # 0.58로 두자 "넥슨" 1위가 exact_name 넥슨 -> prefix 넥슨게임즈로 뒤집혔다).
+        # acronym_token/acronym_reading이 legal_suffix보다 높은 것은 이 변경 전부터
+        # 있던 어긋남이라 여기서 건드리지 않는다.
+        score += 0.53
+        evidence.append("DART 정식명칭이 입력한 회사명으로 시작합니다")
+    elif match_kind == "substring":
+        # 등록명 «안쪽»에 입력한 이름이 들어 있다(올리브영->씨제이올리브영).
+        # 시작 위치가 아니라 우연한 겹침일 여지가 prefix보다 크므로 한 칸 아래에
+        # 두되, 오타 유사도(trigram 최대 0.52)보다는 위에 둔다.
+        score += 0.525
+        evidence.append("DART 정식명칭 안에 입력한 회사명이 들어 있습니다")
     elif match_kind == "acronym_token":
         score += 0.56
         evidence.append("DART 영문 정식명칭에 입력한 약어가 독립된 이름으로 적혀 있습니다")
@@ -430,6 +481,14 @@ def _score(
             score += min(0.32, 0.16 * len(overlap))
             evidence.append("회사명 토큰이 겹칩니다: " + ", ".join(sorted(overlap)[:3]))
 
+    if alias_source == ALIAS_SOURCE_AI and evidence:
+        # ★ 여기까지 쌓인 근거는 «이름 비교» 한 줄뿐이고, 그 비교에 쓴 이름은
+        #   사용자가 적은 말이 아니라 AI가 추정한 정식명이다(호출부가 query에
+        #   alias_name을 넣는다). 그대로 두면 「입력한 회사명과 …일치합니다」가
+        #   되어 사용자가 적지도 않은 이름의 일치를 확신 근거로 보게 된다.
+        #   점수는 바꾸지 않는다 — 바꾸는 것은 «무엇이 맞았는지»의 설명뿐이다.
+        evidence[0] = _ai_alias_evidence(alias_name)
+
     domain_key = _domain_key(homepage)
     ascii_query = "".join(ch for ch in query_key if ch.isascii() and ch.isalnum())
     if ascii_query and len(ascii_query) >= 2 and ascii_query in domain_key:
@@ -472,8 +531,15 @@ def score_business_candidate(
     english_name: str = "",
     name_match_kind: str = "",
     name_similarity: float = 0.0,
+    alias_source: str = "",
+    alias_name: str = "",
 ) -> tuple[float, tuple[str, ...]]:
-    """공급자와 resolver가 공유하는 후보 점수·표시 근거 계약."""
+    """공급자와 resolver가 공유하는 후보 점수·표시 근거 계약.
+
+    ``alias_source``/``alias_name``은 «AI가 추정한 정식명으로 찾아온 후보인가»를
+    표시 근거에만 반영한다. 점수는 두 값과 무관하게 같다. 기본값은 결정적
+    경로(빈 문자열)라, 값을 넘기지 않는 호출부는 예전과 똑같이 동작한다.
+    """
     return _score(
         query=query,
         address_hint=address_hint,
@@ -485,6 +551,8 @@ def score_business_candidate(
         english_name=english_name,
         name_match_kind=name_match_kind,
         name_similarity=name_similarity,
+        alias_source=alias_source,
+        alias_name=alias_name,
     )
 
 
@@ -499,6 +567,9 @@ CHIP_TONE_UNKNOWN = "unknown"
 _CHIP_ID_EXACT = "식별번호 일치"
 _CHIP_NAME_EXACT = "법인명 일치"
 _CHIP_NAME_PARTIAL = "법인명 부분 일치"
+#: 사용자가 적은 이름이 아니라 «AI가 추정한 정식명»이 맞았다는 뜻. 초록(확신)
+#: 칩을 주지 않는다 — 이 화면의 존재 이유가 사람이 확인하는 것이기 때문이다.
+_CHIP_NAME_AI_ALIAS = "AI 추정명 일치"
 _CHIP_NAME_SIMILAR = "법인명 유사"
 _CHIP_NAME_UNKNOWN = "법인명 불확실"
 _CHIP_ADDRESS_MATCH = "주소 일치"
@@ -506,7 +577,14 @@ _CHIP_ADDRESS_MISMATCH = "주소 불일치"
 _CHIP_ADDRESS_UNKNOWN = "주소 불확실"
 
 _PARTIAL_MATCH_KINDS = frozenset(
-    {"acronym_token", "acronym_reading", "acronym_cross_script", "token"}
+    {
+        "prefix",
+        "substring",
+        "acronym_token",
+        "acronym_reading",
+        "acronym_cross_script",
+        "token",
+    }
 )
 
 
@@ -530,6 +608,12 @@ def _name_chip(candidate: BusinessCandidate, query: str) -> CandidateDisplayChip
     english_key = _company_key(candidate.english_name)
     expanded_query_key = _company_key(_latin_acronym_korean(query))
 
+    if candidate.alias_source == ALIAS_SOURCE_AI:
+        # ★ 이 후보는 사용자가 적은 말이 아니라 «AI가 추정한 정식명»으로 찾았다.
+        #   여기서 초록 「법인명 일치」를 주면 사용자가 적지도 않은 이름의 일치를
+        #   가장 강한 확신 신호로 보게 되고, 「AI는 회사를 확정하지 않는다」는
+        #   설계가 화면에서 무너진다. 종류가 무엇이든 확신 칩을 주지 않는다.
+        return CandidateDisplayChip(CHIP_TONE_PART, _CHIP_NAME_AI_ALIAS)
     if match_kind == "exact_id":
         return CandidateDisplayChip(CHIP_TONE_OK, _CHIP_ID_EXACT)
     if match_kind in {"exact_name", "legal_suffix"} or (
@@ -556,6 +640,29 @@ def _name_chip(candidate: BusinessCandidate, query: str) -> CandidateDisplayChip
     if _tokens(query) & _tokens(candidate.candidate_name):
         return CandidateDisplayChip(CHIP_TONE_PART, _CHIP_NAME_PARTIAL)
     return CandidateDisplayChip(CHIP_TONE_UNKNOWN, _CHIP_NAME_UNKNOWN)
+
+
+def screen_sort_key(
+    item: BusinessCandidate,
+) -> tuple[float, int, bool, int, str, str]:
+    """사용자가 보는 후보 순서를 정하는 유일한 키.
+
+    ``dart_identity._match_sort_key``가 «어떤 15건이 살아남는지»를 정한다면 이
+    키는 «그중 어느 3장이 보이는지»를 정한다. 두 키가 어긋나면 matcher가 정한
+    의도가 화면에 도달하지 않으므로, matcher의 길이 동점 규칙을 여기서도 쓴다.
+    """
+    return (
+        -float(item.score),
+        # prefix/substring 은 정의상 같은 종류로 여러 후보가 묶인다("아시아나"가
+        # 아시아나항공·아시아나IDT·아시아나에어포트를 함께 침). matcher와 같은
+        # 규칙으로 «등록명이 짧은 = 입력에 더 가까운» 쪽을 앞세운다. 다른 종류는
+        # 0을 반환해 기존 동점 처리 순서를 그대로 둔다.
+        len(item.candidate_name) if item.name_match_kind in LENGTH_TIEBREAK_KINDS else 0,
+        not bool(item.stock_code),
+        -(int(item.modify_date) if item.modify_date else 0),
+        item.candidate_name,
+        item.address,
+    )
 
 
 def _address_chip(candidate: BusinessCandidate, address_hint: str) -> CandidateDisplayChip:
@@ -683,7 +790,10 @@ def _claim_rate(rate_key: str, now: float) -> bool:
 
 
 def _call_once(
-    provider: BusinessCandidateProvider, company: str, address_hint: str
+    provider: BusinessCandidateProvider,
+    company: str,
+    address_hint: str,
+    alias_ask: Callable[[str], str] | None = None,
 ) -> Sequence[RawBusinessCandidate]:
     # Thread timeout은 응답을 기다리는 상한이다. 공급자 구현도 전달받은 timeout을
     # 네트워크 연결·읽기 양쪽에 적용해야 한다.
@@ -715,12 +825,19 @@ def _call_once(
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     def invoke() -> Sequence[RawBusinessCandidate]:
-        return provider.search(
-            company=company,
-            address_hint=address_hint,
-            limit=provider_limit,
-            timeout_sec=provider_timeout_sec,
-        )
+        search_kwargs: dict[str, object] = {
+            "company": company,
+            "address_hint": address_hint,
+            "limit": provider_limit,
+            "timeout_sec": provider_timeout_sec,
+        }
+        # ★ 번역 ask는 «받겠다고 표시한» 어댑터에만 넘긴다. 계약에 없는 공급자에
+        #   억지로 밀어 넣으면 TypeError가 나서 후보 검색 자체가 실패한다.
+        if alias_ask is not None and bool(
+            getattr(provider, "accepts_alias_ask", False)
+        ):
+            search_kwargs["alias_ask"] = alias_ask
+        return provider.search(**search_kwargs)
 
     try:
         # paid worker 안에서 다시 만든 thread에도 요청 로컬 attempt/예산 문맥을
@@ -776,6 +893,58 @@ def _timeboxed_rerank_ask(ask: ai_rerank.RerankAsk) -> ai_rerank.RerankAsk:
     return bounded
 
 
+#: AI가 옮긴 정식명으로 찾아온 후보의 표식. 결정적 경로는 빈 문자열이다.
+ALIAS_SOURCE_AI: str = "ai"
+#: 후보가 실을 수 있는 «어떻게 들어왔는지» 값. 그 밖의 값은 빈 문자열로 낮춘다.
+ALIAS_SOURCE_VALUES: frozenset[str] = frozenset({"", ALIAS_SOURCE_AI})
+
+
+def _alias_status(channel: "_AliasAskChannel | None") -> str:
+    """번역 단계를 열었을 때만 그 결과를 옮긴다. 열지 않았으면 빈 문자열이다."""
+
+    return "" if channel is None else channel.status
+
+
+class _AliasAskChannel:
+    """번역 ask를 시간 상한 안에 가두고, 어댑터가 알려 준 결과를 받아 둔다.
+
+    이 호출은 공급자 검색 «안에서» 일어나므로 이미 worker 자리를 하나 쥐고 있다.
+    여기서 자리를 또 빌리면 겹쳐 도는 다른 검색의 자리를 잠식하므로 빌리지 않고,
+    시간 상한만 다시 건다.
+    """
+
+    def __init__(self, ask: Callable[[str], str]) -> None:
+        self._ask = ask
+        self.status = ""
+
+    def report(self, status: object) -> None:
+        """어댑터가 번역 단계 결과를 되돌려 주는 자리. 응답 원문은 받지 않는다."""
+        reported = _plain_text(status, MAX_SOURCE_LABEL_CHARS)
+        # 어댑터가 아는 사유 코드만 관측 칸에 들인다. 자유 문자열을 그대로 받으면
+        # 공급자 응답 조각이 로그·화면 경계로 새어 나갈 수 있다.
+        self.status = (
+            reported if reported in alias_resolution.ALIAS_STATUS_VALUES else ""
+        )
+        inner = getattr(self._ask, "report", None)
+        if callable(inner):
+            inner(self.status)
+
+    def __call__(self, prompt: str) -> str:
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+        def invoke() -> str:
+            return str(self._ask(prompt) or "")
+
+        try:
+            # ThreadPoolExecutor는 contextvars를 자동 전파하지 않는다. 요청 로컬
+            # attempt/예산 문맥을 명시적으로 복사해야 하위 gateway가 막지 않는다.
+            request_context = contextvars.copy_context()
+            future = executor.submit(request_context.run, invoke)
+            return future.result(timeout=AI_ALIAS_TIMEOUT_SEC)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+
 def resolve_candidates(
     provider: BusinessCandidateProvider | None,
     *,
@@ -785,11 +954,14 @@ def resolve_candidates(
     now: float | None = None,
     allow_paid_provider: bool = False,
     rerank_ask: Callable[[str], str] | None = None,
+    alias_ask: Callable[[str], str] | None = None,
 ) -> CandidateResolution:
     """공급자를 최대 한 번 호출하고, 안전한 상위 후보만 돌려준다.
 
     반환 후보는 어디까지나 사용자가 선택할 목록이다. 이 함수에는 자동 확정 경로가 없다.
     ``rerank_ask``를 주면 결정적 순위가 갈리지 않을 때만 AI에 순서를 한 번 물어본다.
+    ``alias_ask``를 주면 이름이 겹치는 후보를 한 건도 못 찾았을 때만 AI에 정식
+    법인명을 한 번 물어 그 이름으로 공급자가 다시 찾는다. 공급자 호출 수는 그대로 1회다.
     """
     if provider is None:
         return CandidateResolution(ResolutionStatus.UNCONFIGURED)
@@ -808,14 +980,18 @@ def resolve_candidates(
 
     safe_company = _plain_text(company, MAX_NAME_CHARS)
     safe_address_hint = _plain_text(address_hint, MAX_ADDRESS_CHARS)
+    alias_channel = None if alias_ask is None else _AliasAskChannel(alias_ask)
     try:
-        raw_candidates = _call_once(provider, safe_company, safe_address_hint)
+        raw_candidates = _call_once(
+            provider, safe_company, safe_address_hint, alias_ask=alias_channel
+        )
     except (concurrent.futures.TimeoutError, ProviderTimedOut):
         logger.warning("회사 후보 검색 시간초과 provider=%s", provider_name)
         return CandidateResolution(
             ResolutionStatus.TIMED_OUT,
             provider_called=True,
             provider_name=provider_name,
+            alias_status=_alias_status(alias_channel),
         )
     except ProviderWorkerUnavailable:
         logger.warning("회사 후보 검색 worker 부족 provider=%s", provider_name)
@@ -829,6 +1005,7 @@ def resolve_candidates(
             ResolutionStatus.RATE_LIMITED,
             provider_called=True,
             provider_name=provider_name,
+            alias_status=_alias_status(alias_channel),
         )
     except Exception as error:  # noqa: BLE001 — 공급자 원문/예외 본문은 로그에 남기지 않는다
         # ★ 예외를 통째로 삼켜서 화면도 로그도 원인을 못 말했다.
@@ -848,6 +1025,7 @@ def resolve_candidates(
             local_profile_enrichment_failed=bool(
                 getattr(error, "local_profile_enrichment_failed", False)
             ),
+            alias_status=_alias_status(alias_channel),
         )
 
     ranked: list[BusinessCandidate] = []
@@ -878,6 +1056,13 @@ def resolve_candidates(
         if not math.isfinite(name_similarity):
             name_similarity = 0.0
         name_similarity = min(1.0, max(0.0, name_similarity))
+        alias_name = _plain_text(raw.alias_name, MAX_NAME_CHARS)
+        alias_source = _plain_text(raw.alias_source, MAX_SOURCE_LABEL_CHARS)
+        if alias_source not in ALIAS_SOURCE_VALUES:
+            # 공급자가 모르는 값을 적어도 화면 표식으로 승격시키지 않는다.
+            alias_source = ""
+        if not alias_source:
+            alias_name = ""
         if re.fullmatch(r"\d{6}", stock_code) is None:
             stock_code = ""
         if re.fullmatch(r"\d{8}", modify_date) is None:
@@ -904,7 +1089,12 @@ def resolve_candidates(
             continue
         seen.add(dedupe_key)
         score, evidence = score_business_candidate(
-            query=safe_company,
+            # AI가 옮긴 정식명으로 찾아온 후보는 그 이름으로 잰다(공급자 쪽과 같은
+            # 규칙). ⚠️ 종류에 따라 두 질의의 점수가 «다르다» — 2026-09-10 실측:
+            # exact_name 은 0.5275로 같지만 spacing 은 0.5275 대 0.5112,
+            # legal_suffix 는 0.5275 대 0.4624로 갈린다. 두 종류 모두
+            # `ALIAS_STRONG_MATCH_KINDS`에 있어 이 경로로 실제로 들어온다.
+            query=alias_name or safe_company,
             address_hint=safe_address_hint,
             candidate_name=candidate_name,
             address=address,
@@ -914,6 +1104,11 @@ def resolve_candidates(
             english_name=english_name,
             name_match_kind=name_match_kind,
             name_similarity=name_similarity,
+            # 점수에는 영향이 없고 표시 근거만 갈린다. 이 두 값이 없으면 화면이
+            # 「입력한 회사명과 …일치합니다」로 사용자가 적지도 않은 이름을 근거로
+            # 내세운다.
+            alias_source=alias_source,
+            alias_name=alias_name,
         )
         if score < MIN_CANDIDATE_SCORE:
             continue
@@ -934,18 +1129,12 @@ def resolve_candidates(
                 english_name=english_name,
                 name_match_kind=name_match_kind,
                 name_similarity=name_similarity,
+                alias_source=alias_source,
+                alias_name=alias_name,
             )
         )
 
-    ranked.sort(
-        key=lambda item: (
-            -item.score,
-            not bool(item.stock_code),
-            -(int(item.modify_date) if item.modify_date else 0),
-            item.candidate_name,
-            item.address,
-        )
-    )
+    ranked.sort(key=screen_sort_key)
     rerank_status = ""
     if rerank_ask is not None:
         # 상위 3개를 자르기 «전»에 순서를 다시 잡아야 밀려 있던 정답이 화면에 든다.
@@ -963,4 +1152,5 @@ def resolve_candidates(
         provider_called=True,
         provider_name=provider_name,
         rerank_status=rerank_status,
+        alias_status=_alias_status(alias_channel),
     )

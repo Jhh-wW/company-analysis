@@ -78,6 +78,14 @@ AI_RERANK_MAX_OUTPUT_TOKENS: Final[int] = 200
 AI_RERANK_TIE_EPSILON: Final[float] = 1e-9
 # 갱신일·상장 여부 같은 보조 점수 차이만으로 화면 밖 공식 후보를 포기하지 않는다.
 AI_RERANK_AMBIGUITY_MARGIN: Final[float] = 0.16
+# 1위 근거가 «사용자가 적은 이름이 그대로 맞았다»면 순서를 다시 물을 이유가 없다.
+# 부분 일치(prefix/substring/약어) 후보가 아무리 많이 딸려 와도 사람이 고를 1위는
+# 이미 정해져 있고, 재정렬은 1위를 바꾸는 용도가 아니다. 이 면제가 없으면 부분
+# 일치 후보가 늘어난 것만으로 유료 호출이 켜진다 — 2026-09-10 오프라인 실측
+# (별명 51 + 흔한 이름 17 + 띄어쓰기 5 + 영문 약어 7 = 79개 질의, 주소 힌트 없음,
+# `.local-artifacts/alias-fix-round2/` 시뮬레이션)에서 발동이 11건 → 35건이었다.
+# `dart_identity.MATCH_KIND_PRIORITY`의 부분집합이어야 하며 시험이 그것을 못 박는다.
+RERANK_EXEMPT_TOP_KINDS: Final[tuple[str, ...]] = ("exact_id", "exact_name", "spacing")
 # 운영 스위치. 값이 없거나 "1"이면 켜짐이고, 그 밖의 값(오타 포함)은 모두 꺼짐이다.
 CANDIDATE_AI_RERANK_ENV_NAME: Final[str] = "CANDIDATE_AI_RERANK"
 CANDIDATE_AI_RERANK_ENV_ON: Final[str] = "1"
@@ -94,3 +102,41 @@ CANDIDATE_AI_RERANK_ENV_ON: Final[str] = "1"
 # 미사용 예약은 정산에서 그대로 풀린다. 이 값이 부족하면 재정렬 호출이 전송 전에
 # 거절되므로 `pipeline/tests/test_business_candidates.py`가 추정액을 직접 재서 못 박는다.
 AI_RERANK_RESERVE_KRW: Final[float] = 20.0
+
+# ── AI 정식 법인명 번역 ────────────────────────────────────────
+# 사람이 적은 별명으로 공식 목록에서 «이름이 겹치는» 후보를 한 건도 못 찾았을 때만
+# 도는 보조 단계다. AI는 이름만 번역하고 회사 확정은 사람이 한다.
+#: 이 종류의 후보가 하나라도 있으면 이름이 이미 겹친 것이라 번역이 필요 없다.
+#: `dart_identity.MATCH_KIND_PRIORITY`의 부분집합이어야 하며, 시험이 그것을 못 박는다.
+ALIAS_STRONG_MATCH_KINDS: Final[tuple[str, ...]] = (
+    "exact_id",
+    "exact_name",
+    "spacing",
+    "legal_suffix",
+)
+#: AI가 옮긴 정식명으로 찾아온 후보의 화면 출처 표시. 결정적 경로와 구분된다.
+#: `MAX_SOURCE_LABEL_CHARS` 안이어야 하며 시험이 그것을 못 박는다.
+DART_ALIAS_SOURCE_LABEL: Final[str] = "전자공시(DART) 기업개황 · AI 정식명 추정"
+#: 응답 JSON의 유일한 키. 프롬프트·스키마·파서가 이 한 값을 공유한다.
+ALIAS_RESPONSE_KEY: Final[str] = "정식명"
+#: 한 번의 검색에서 받아들이는 정식명 후보 수. 넘으면 응답 전체를 버린다.
+AI_ALIAS_MAX_NAMES: Final[int] = 3
+#: 응답은 짧은 이름 목록뿐이다. 길게 열어 두면 설명을 덧붙일 여지만 준다.
+AI_ALIAS_MAX_OUTPUT_TOKENS: Final[int] = 200
+#: 공급자 호출과 같은 UX 상한 안에서만 응답을 기다린다.
+AI_ALIAS_TIMEOUT_SEC: Final[float] = PROVIDER_TIMEOUT_SEC
+#: 운영 스위치. 값이 없거나 "1"이면 켜짐이고, 그 밖의 값(오타 포함)은 모두 꺼짐이다.
+CANDIDATE_AI_ALIAS_ENV_NAME: Final[str] = "CANDIDATE_AI_ALIAS"
+CANDIDATE_AI_ALIAS_ENV_ON: Final[str] = "1"
+# 번역 한 번의 «호출 전» 예약액. 실제 청구가 아니라 provider 호출 직전에 잡는
+# 방어적 상한이다. 프롬프트에 후보 목록이 없어 재정렬보다 짧지만, 고정 여유
+# REQUEST_ESTIMATE_MARGIN_TOKENS(4096)가 추정액의 대부분이라 자릿수는 같다.
+# 생산 추정기(`budget/provider_budget.py::estimate_request_tokens_exact`
+# → `usage_cost_krw`)로 잰 2026-09-10 실측이 근거다.
+#   · 고정 여유 4,096 token만으로 5.74원 · 출력 상한 200 token으로 1.40원
+#   · 보통 질의(619 byte) 8.54원
+#   · 최악값 — 이름 MAX_NAME_CHARS자 + 주소 MAX_ADDRESS_CHARS자(2,448 byte) 11.10원
+# 그 최악값 11.10원에 여유를 얹어 12원으로 잡는다. 미사용 예약은 정산에서 풀린다.
+# 이 값이 부족하면 번역 호출이 전송 전에 거절되므로
+# `pipeline/tests/test_candidate_recall.py`가 추정액을 직접 재서 못 박는다.
+AI_ALIAS_RESERVE_KRW: Final[float] = 12.0

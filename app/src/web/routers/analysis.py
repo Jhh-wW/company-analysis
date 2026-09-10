@@ -32,9 +32,11 @@ from src.features.budget.constants import (
     SPEND_PHASE_IDENTIFY,
 )
 from src.features.business_candidate import ai_rerank as candidate_ai_rerank
+from src.features.business_candidate import alias_resolution as candidate_ai_alias
 from src.features.business_candidate import logic as candidate_logic
 from src.features.business_candidate import providers as candidate_providers
 from src.features.business_candidate.constants import (
+    AI_ALIAS_RESERVE_KRW,
     AI_RERANK_RESERVE_KRW,
     CANDIDATE_ATTEMPT_TTL_SEC,
 )
@@ -148,7 +150,13 @@ class _FreeCandidateProviderHealthGuard:
         return getattr(self._provider, name)
 
     def search(
-        self, *, company: str, address_hint: str, limit: int, timeout_sec: float
+        self,
+        *,
+        company: str,
+        address_hint: str,
+        limit: int,
+        timeout_sec: float,
+        alias_ask: object | None = None,
     ) -> object:
         # resolve_candidates의 rate/worker 경계를 지난 뒤라서 여기까지 왔을 때만
         # PROBING lease를 잡는다. 더 일찍 잡으면 로컬 rate-limit에도 provider가
@@ -166,12 +174,18 @@ class _FreeCandidateProviderHealthGuard:
         if not permission.allowed:
             # 실제 provider를 부르지 않았다는 기존 결과 계약을 재사용한다.
             raise candidate_logic.ProviderWorkerUnavailable
-        return self._provider.search(
-            company=company,
-            address_hint=address_hint,
-            limit=limit,
-            timeout_sec=timeout_sec,
-        )
+        # ★ 이 껍데기는 «__getattr__로» 감싼 provider의 표식을 그대로 내보낸다.
+        #   그래서 resolver는 여기에도 번역 ask를 넘긴다. 인자를 받아 넘기지
+        #   않으면 후보 검색 전체가 TypeError로 실패한다.
+        search_kwargs: dict[str, object] = {
+            "company": company,
+            "address_hint": address_hint,
+            "limit": limit,
+            "timeout_sec": timeout_sec,
+        }
+        if alias_ask is not None:
+            search_kwargs["alias_ask"] = alias_ask
+        return self._provider.search(**search_kwargs)
 
 
 def _guard_free_candidate_provider(provider: object) -> object:
@@ -882,17 +896,49 @@ def _candidate_rerank_ask(pipeline: object) -> object | None:
         return None
 
 
+def _candidate_alias_ask(pipeline: object) -> object | None:
+    """스위치가 켜져 있고 파이프라인이 계량 AI ask를 줄 때만 번역을 연다.
+
+    ask를 만들기만 하고 provider를 부르지는 않는다. 실제 호출은 이름이 겹치는
+    후보를 한 건도 못 찾았을 때 DART 어댑터 안에서 최대 한 번 일어난다.
+    """
+
+    if not candidate_ai_alias.ai_alias_enabled():
+        return None
+    factory = getattr(pipeline, "make_candidate_alias_ask", None)
+    if not callable(factory):
+        # AI 엔진이 없는 파이프라인(데모·시험 fixture)은 번역을 열지 않는다.
+        return None
+    try:
+        return factory()
+    except Exception:  # noqa: BLE001 — 보조 단계 준비 실패로 후보 화면을 막지 않는다
+        logger.exception("회사 후보 AI 정식명 번역을 준비하지 못했습니다")
+        return None
+
+
+def _candidate_ask_spent_krw(ask: object | None) -> float:
+    """계량 AI ask가 실제로 쓴 원화 비용만 읽는다. 없으면 0원이다."""
+
+    if ask is None:
+        return 0.0
+    try:
+        return max(0.0, float(getattr(ask, "spent_krw", 0.0)))
+    except (TypeError, ValueError, OverflowError):
+        # 비용을 모르면 0원이라고 말하지 않고 로그로 남긴 뒤 0원으로 둔다.
+        logger.warning("회사 후보 보조 AI 비용을 숫자로 읽지 못했습니다")
+        return 0.0
+
+
 def _rerank_spent_krw(rerank_ask: object | None) -> float:
     """재정렬 ask가 실제로 쓴 원화 비용만 읽는다. 없으면 0원이다."""
 
-    if rerank_ask is None:
-        return 0.0
-    try:
-        return max(0.0, float(getattr(rerank_ask, "spent_krw", 0.0)))
-    except (TypeError, ValueError, OverflowError):
-        # 비용을 모르면 0원이라고 말하지 않고 로그로 남긴 뒤 0원으로 둔다.
-        logger.warning("회사 후보 AI 재정렬 비용을 숫자로 읽지 못했습니다")
-        return 0.0
+    return _candidate_ask_spent_krw(rerank_ask)
+
+
+def _alias_spent_krw(alias_ask: object | None) -> float:
+    """번역 ask가 실제로 쓴 원화 비용만 읽는다. 없으면 0원이다."""
+
+    return _candidate_ask_spent_krw(alias_ask)
 
 
 def _rerank_billing_uncertain(rerank_ask: object | None) -> bool:
@@ -901,6 +947,14 @@ def _rerank_billing_uncertain(rerank_ask: object | None) -> bool:
     if rerank_ask is None:
         return False
     return bool(getattr(rerank_ask, "billing_uncertain", False))
+
+
+def _alias_billing_uncertain(alias_ask: object | None) -> bool:
+    """번역 ask가 «얼마 썼는지 모르는» 호출을 남겼는가."""
+
+    if alias_ask is None:
+        return False
+    return bool(getattr(alias_ask, "billing_uncertain", False))
 
 
 def _log_candidate_rerank(
@@ -918,6 +972,21 @@ def _log_candidate_rerank(
     )
 
 
+def _log_candidate_alias(
+    resolution: candidate_logic.CandidateResolution, cost_krw: float
+) -> None:
+    """사용자 입력·AI 응답은 남기지 않고 번역 결과만 한 줄로 남긴다."""
+
+    if not resolution.alias_status:
+        return
+    logger.info(
+        "회사 후보 AI 정식명 번역 status=%s 후보=%d 비용=%.1f원",
+        resolution.alias_status,
+        len(resolution.candidates),
+        cost_krw,
+    )
+
+
 async def _resolve_business_candidates(
     request: Request,
     *,
@@ -927,6 +996,7 @@ async def _resolve_business_candidates(
     allow_paid_provider: bool,
     analysis_run_id: str,
     rerank_ask: object | None = None,
+    alias_ask: object | None = None,
 ) -> tuple[candidate_logic.CandidateResolution, float] | Response:
     """회사 후보 공급자 하나를 slot·rate·비용 경계 안에서 정확히 한 번 실행한다."""
     slot_bucket_id = (
@@ -947,6 +1017,7 @@ async def _resolve_business_candidates(
     settled_cost = 0.0
     client_host = request.client.host if request.client is not None else ""
     budget_refused_rerank = False
+    budget_refused_alias = False
     kwargs = dict(
         company=user_input.company,
         address_hint=user_input.region,
@@ -960,19 +1031,22 @@ async def _resolve_business_candidates(
         if phase is None or settled:
             return
         settled = True
-        # AI 재정렬은 무료 공급자 갈래에서도 돈을 쓴다. 실지출과 «모름»을 먼저 읽는다.
-        rerank_cost = _rerank_spent_krw(rerank_ask)
-        rerank_uncertain = _rerank_billing_uncertain(rerank_ask)
+        # AI 보조 단계는 무료 공급자 갈래에서도 돈을 쓴다. 재정렬과 정식명 번역의
+        # 실지출과 «모름»을 먼저 읽는다. 둘은 같은 후보 검색 한 번의 지출이다.
+        assist_cost = _rerank_spent_krw(rerank_ask) + _alias_spent_krw(alias_ask)
+        assist_uncertain = _rerank_billing_uncertain(
+            rerank_ask
+        ) or _alias_billing_uncertain(alias_ask)
         if (
             result is not None
             and not result.provider_called
-            and rerank_cost <= 0.0
-            and not rerank_uncertain
+            and assist_cost <= 0.0
+            and not assist_uncertain
         ):
             paid_runtime._cancel_paid_phase(phase)
             return
-        amount = rerank_cost
-        uncertain = rerank_uncertain
+        amount = assist_cost
+        uncertain = assist_uncertain
         if provider_is_paid:
             # 유료 공급자(구글)의 예상비용 계약은 그대로 둔다. timeout·실패는
             # 요청이 나갔을 수 있어 여전히 미확정으로 닫는다.
@@ -996,13 +1070,20 @@ async def _resolve_business_candidates(
     def marked(
         result: candidate_logic.CandidateResolution,
     ) -> candidate_logic.CandidateResolution:
-        """비용 승인을 못 받아 재정렬을 건너뛴 사실을 결과에 정직하게 남긴다."""
+        """비용 승인을 못 받아 보조 단계를 건너뛴 사실을 결과에 정직하게 남긴다."""
 
-        if not budget_refused_rerank:
+        changes: dict[str, str] = {}
+        if budget_refused_rerank:
+            changes["rerank_status"] = (
+                candidate_ai_rerank.RERANK_STATUS_SKIPPED_BUDGET
+            )
+        if budget_refused_alias:
+            changes["alias_status"] = (
+                candidate_ai_alias.ALIAS_STATUS_SKIPPED_BUDGET
+            )
+        if not changes:
             return result
-        return replace(
-            result, rerank_status=candidate_ai_rerank.RERANK_STATUS_SKIPPED_BUDGET
-        )
+        return replace(result, **changes)
 
     try:
         if provider_is_paid:
@@ -1020,6 +1101,19 @@ async def _resolve_business_candidates(
                 # AI 재정렬도 같은 후보 검색 한 번의 지출이다. 예약을 함께 잡지
                 # 않으면 Haiku 호출이 호출별 예산 경계에서 막힌다.
                 requested += AI_RERANK_RESERVE_KRW
+            if alias_ask is not None and not bool(
+                getattr(provider, "accepts_alias_ask", False)
+            ):
+                # ★ 정식명 번역은 «받겠다고 표시한» 어댑터 안에서만 돈다
+                #   (`candidate_logic._call_once`가 그 표식으로 인자를 건다).
+                #   표식이 없는 공급자(구글)에서 예약만 잡으면 절대 못 쓸 돈이
+                #   호출별 상한을 갉아먹고, 상한에 걸리면 후보 검색 «전체»가
+                #   「혼잡」으로 끝난다. 못 쓸 ask는 넘기지도 않는다(관측 혼선 방지).
+                alias_ask = None
+            if alias_ask is not None:
+                # ★ 정식명 번역은 재정렬과 «다른» 호출이다. 한 검색에서 둘 다
+                #   나갈 수 있으므로 예약을 겹쳐 쓰면 뒤에 나가는 쪽이 막힌다.
+                requested += AI_ALIAS_RESERVE_KRW
             phase = paid_runtime._begin_paid_phase(
                 run_id=analysis_run_id,
                 phase=SPEND_PHASE_CANDIDATE,
@@ -1032,6 +1126,7 @@ async def _resolve_business_candidates(
                     request, BUSY_MESSAGE, "candidate-budget-store"
                 )
             kwargs["rerank_ask"] = rerank_ask
+            kwargs["alias_ask"] = alias_ask
             task = asyncio.create_task(
                 asyncio.to_thread(
                     paid_runtime._call_paid_provider,
@@ -1043,22 +1138,30 @@ async def _resolve_business_candidates(
             )
         else:
             guarded_provider = _guard_free_candidate_provider(provider)
-            if rerank_ask is not None:
+            if rerank_ask is not None or alias_ask is not None:
                 # ★ 무료 DART 갈래에는 원래 유료 phase가 없었다. 그 상태에서 계량
                 #   AI를 부르면 «원자 예약 문맥이 없다»며 전송 전에 거절된다.
                 #   구글 갈래와 «같은» 승인·예약 경로를 열어야 호출이 성립한다.
+                assist_reserve = 0.0
+                if rerank_ask is not None:
+                    assist_reserve += AI_RERANK_RESERVE_KRW
+                if alias_ask is not None:
+                    assist_reserve += AI_ALIAS_RESERVE_KRW
                 phase = paid_runtime._begin_paid_phase(
                     run_id=analysis_run_id,
                     phase=SPEND_PHASE_CANDIDATE,
                     share_key=resolved_track[1],
                     cap_krw=resolved_track[2],
-                    requested_cost_krw=AI_RERANK_RESERVE_KRW,
+                    requested_cost_krw=assist_reserve,
                 )
                 if phase is None:
-                    # 승인 거절은 후보 검색을 막지 않는다. 재정렬만 건너뛴다.
-                    budget_refused_rerank = True
+                    # 승인 거절은 후보 검색을 막지 않는다. 보조 AI만 건너뛴다.
+                    budget_refused_rerank = rerank_ask is not None
+                    budget_refused_alias = alias_ask is not None
                     rerank_ask = None
+                    alias_ask = None
             kwargs["rerank_ask"] = rerank_ask
+            kwargs["alias_ask"] = alias_ask
             if phase is None:
                 task = asyncio.create_task(
                     asyncio.to_thread(
@@ -1420,6 +1523,7 @@ async def confirm_page(
                     return job_runtime._storage_unavailable_response(request)
                 candidate_started = time.perf_counter()
                 local_rerank_ask = _candidate_rerank_ask(runtime._PIPELINE)
+                local_alias_ask = _candidate_alias_ask(runtime._PIPELINE)
                 local_outcome = await _resolve_business_candidates(
                     request,
                     provider=local_provider,
@@ -1428,6 +1532,7 @@ async def confirm_page(
                     allow_paid_provider=False,
                     analysis_run_id=candidate_run_id,
                     rerank_ask=local_rerank_ask,
+                    alias_ask=local_alias_ask,
                 )
                 if isinstance(local_outcome, Response):
                     public_ids.release(candidate_run_id)
@@ -1436,8 +1541,11 @@ async def confirm_page(
                 candidate_elapsed = time.perf_counter() - candidate_started
                 # DART 후보 검색 자체는 무과금이라, 여기서 드는 비용은 AI 보조
                 # 재정렬뿐이다. Google 갈래와 «같은 자리»에 같은 방식으로 적는다.
-                candidate_search_cost_krw = _rerank_spent_krw(local_rerank_ask)
+                candidate_search_cost_krw = _rerank_spent_krw(
+                    local_rerank_ask
+                ) + _alias_spent_krw(local_alias_ask)
                 _log_candidate_rerank(candidate_resolution, candidate_search_cost_krw)
+                _log_candidate_alias(candidate_resolution, candidate_search_cost_krw)
                 _observe_candidate_resolution(
                     candidate_resolution, incurred_cost_krw=candidate_search_cost_krw
                 )
@@ -1566,6 +1674,7 @@ async def confirm_page(
             candidate_started = time.perf_counter()
             grant.in_flight = True
             google_rerank_ask = _candidate_rerank_ask(runtime._PIPELINE)
+            google_alias_ask = _candidate_alias_ask(runtime._PIPELINE)
             try:
                 try:
                     external_outcome = await _resolve_business_candidates(
@@ -1576,6 +1685,7 @@ async def confirm_page(
                         allow_paid_provider=True,
                         analysis_run_id=candidate_run_id,
                         rerank_ask=google_rerank_ask,
+                        alias_ask=google_alias_ask,
                     )
                 except asyncio.CancelledError:
                     # helper가 worker 완료와 비용 정산까지 기다린 뒤 전파한다. 응답을
@@ -1592,8 +1702,11 @@ async def confirm_page(
             candidate_resolution, candidate_search_cost_krw = external_outcome
             # Google 검색 비용과 AI 보조 재정렬 비용은 같은 후보 검색 한 번의 값이라
             # 한 자리에 합쳐 기록한다.
-            candidate_search_cost_krw += _rerank_spent_krw(google_rerank_ask)
+            candidate_search_cost_krw += _rerank_spent_krw(
+                google_rerank_ask
+            ) + _alias_spent_krw(google_alias_ask)
             _log_candidate_rerank(candidate_resolution, candidate_search_cost_krw)
+            _log_candidate_alias(candidate_resolution, candidate_search_cost_krw)
             _observe_candidate_resolution(
                 candidate_resolution, incurred_cost_krw=candidate_search_cost_krw
             )
