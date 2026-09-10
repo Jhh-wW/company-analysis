@@ -1022,7 +1022,9 @@ def test_운영_FULL_직접경로는_비교생산물이_없으면_provider_0회�
     reviewer = Reviewer()
     diagram_calls: list[str] = []
 
-    def fake_ask_factory(_engine, _client, *, stage: str, max_tokens: int):
+    def fake_ask_factory(
+        _engine, _client, *, stage: str, max_tokens: int, reserved_calls: int = 0,
+    ):
         assert max_tokens > 0
         if stage == "v2_compose":
             return writer

@@ -48,6 +48,27 @@ MAX_TOTAL_AI_CALLS: Final[int] = (
     + SUPPLEMENT_REVIEW_CALLS
 )
 
+# 본문 검수 «뒤»에 반드시 남아 있어야 하는 호출. 하나라도 못 부르면 보고서가
+# 「도식 없음 + 본문 재활용 요약」으로 조용히 줄어든다(2026-09-10 실측).
+DIAGRAM_REVIEW_CALLS: Final[int] = 1
+SUMMARY_WRITER_CALLS: Final[int] = 1
+SUMMARY_REVIEW_CALLS: Final[int] = 1
+MANDATORY_TAIL_AI_CALLS: Final[int] = (
+    DIAGRAM_REVIEW_CALLS + SUMMARY_WRITER_CALLS + SUMMARY_REVIEW_CALLS
+)
+
+# 재검수(재작성문을 다시 판정) 1회. 재작성만 하고 이걸 못 부르면 그 재작성은
+# 판정 없이 버려진다 — 재작성을 시작하기 전에 이 몫까지 남아 있어야 한다.
+REWRITE_RECHECK_CALLS: Final[int] = 1
+
+# 본문 «앞»에서 도는 단계(뉴스 등)가 남겨야 하는 최소 몫.
+# ★ 보충(supplement) 몫이 아니라 «필수 단계»에서 유도한다. 예전에는
+#   MAX_TOTAL_AI_CALLS(보충 계산식)를 그대로 썼고 두 값이 우연히 같아
+#   맞아 보였다.
+MANDATORY_REPORT_AI_CALLS: Final[int] = (
+    PRIMARY_WRITER_CALLS + PRIMARY_REVIEW_CALLS + MANDATORY_TAIL_AI_CALLS
+)
+
 
 class RecoveryAction(str, Enum):
     """오케스트레이터가 다음에 할 수 있는 닫힌 행동."""
@@ -502,6 +523,9 @@ __all__ = [
     "MAX_SUPPLEMENT_SECTIONS",
     "QUALITY_DERIVED_STOP_REASON_CODES",
     "MAX_TOTAL_AI_CALLS",
+    "MANDATORY_TAIL_AI_CALLS",
+    "MANDATORY_REPORT_AI_CALLS",
+    "REWRITE_RECHECK_CALLS",
     "PRIMARY_AI_CALLS",
     "PRIMARY_REVIEW_CALLS",
     "PRIMARY_WRITER_CALLS",

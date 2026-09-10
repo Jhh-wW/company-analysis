@@ -1,4 +1,11 @@
-"""뉴스가 필수 작성과 보충 검수의 공통 호출 몫을 먼저 쓰지 않는다."""
+"""뉴스가 «필수» 작성·검수와 필수 후속 단계의 호출 몫을 먼저 쓰지 않는다.
+
+★ 예약값의 근거가 바뀌었다(2026-09-11). 예전에는 보충(supplement) 경로
+  계산식인 ``MANDATORY_REPORT_AI_CALLS``를 그대로 썼는데, 정작 지켜야 하는 것은
+  장 작성 9 + 본문 검수 1 + «필수 후속»(도식 검수·요약 작성·요약 검수) 3이다.
+  두 값이 우연히 13으로 같아 맞아 보였을 뿐이라, 유도식이 다른
+  ``MANDATORY_REPORT_AI_CALLS``로 옮긴다(값은 그대로 13).
+"""
 
 import datetime as dt
 from types import SimpleNamespace
@@ -9,7 +16,7 @@ from src.core.news_research_adapter import prepare_news_research
 from src.features.budget.provider_budget import RequestCallLimitReached
 from src.features.news_intake.models import NewsCollectionPolicy
 from src.features.pipeline import real
-from src.shared.report_recovery import MAX_TOTAL_AI_CALLS
+from src.shared.report_recovery import MANDATORY_REPORT_AI_CALLS
 
 
 def _search(_query, **_kwargs):
@@ -29,15 +36,15 @@ def _prepare(limit, *, policy=None):
 
 
 @pytest.mark.parametrize("already_used", [0, 1, 3, 5])
-def test_이전사용량을_빼고도_FULL_보충검수까지_남겨둔다(already_used):
+def test_이전사용량을_빼고도_필수작성과_필수후속까지_남겨둔다(already_used):
     engine = real._MeteredEngine(SimpleNamespace())
     for _ in range(already_used):
         engine.reserve_provider_call()
-    available = engine.available_provider_calls(reserved_calls=MAX_TOTAL_AI_CALLS)
+    available = engine.available_provider_calls(reserved_calls=MANDATORY_REPORT_AI_CALLS)
     session = _prepare(available)
     for _ in range(session.policy.max_analysis_calls):
         engine.reserve_provider_call()
-    for _ in range(MAX_TOTAL_AI_CALLS):
+    for _ in range(MANDATORY_REPORT_AI_CALLS):
         engine.reserve_provider_call()
     with pytest.raises(RequestCallLimitReached):
         engine.reserve_provider_call()
@@ -46,10 +53,10 @@ def test_이전사용량을_빼고도_FULL_보충검수까지_남겨둔다(alrea
 def test_뉴스예산을_별도요청과_공유하지_않는다():
     first = real._MeteredEngine(SimpleNamespace())
     second = real._MeteredEngine(SimpleNamespace())
-    before = second.available_provider_calls(reserved_calls=MAX_TOTAL_AI_CALLS)
+    before = second.available_provider_calls(reserved_calls=MANDATORY_REPORT_AI_CALLS)
     first.reserve_provider_call()
-    assert first.available_provider_calls(reserved_calls=MAX_TOTAL_AI_CALLS) == before - 1
-    assert second.available_provider_calls(reserved_calls=MAX_TOTAL_AI_CALLS) == before
+    assert first.available_provider_calls(reserved_calls=MANDATORY_REPORT_AI_CALLS) == before - 1
+    assert second.available_provider_calls(reserved_calls=MANDATORY_REPORT_AI_CALLS) == before
 
 
 def test_뉴스예산도_검색정책_지문에_결속하고_좁은정책을_늘리지_않는다():

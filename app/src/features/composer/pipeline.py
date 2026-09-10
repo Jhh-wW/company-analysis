@@ -891,6 +891,8 @@ def run_v2(
     writer_ask: AskFn,
     reviewer_ask: AskFn,
     initial_reviewer_ask: Optional[AskFn] = None,
+    rewrite_ask: Optional[AskFn] = None,
+    recheck_ask: Optional[AskFn] = None,
     diagram_ask: Optional[AskFn] = None,
     corp_type: str = "",
     grade: Grade = Grade.PARTIAL,
@@ -938,6 +940,13 @@ def run_v2(
             재검수·요약 검수보다 큰 출력 여유가 필요하다. 넘기지 않으면
             (None) 예전과 똑같이 reviewer_ask 하나로 전부 처리한다 —
             기존 호출 계약이 그대로 유지된다.
+        rewrite_ask: «거짓» 판정 문장 재작성 전용 호출자. 재작성은 선택적
+            다듬기라 못 해도 그 문장이 제거될 뿐이지만, 뒤따르는 도식 검수·
+            요약 작성·요약 검수는 못 하면 보고서에서 통째로 빠진다. 부르는
+            쪽이 «그 몫을 남기고 멈추는» 호출자를 넣어 순서를 지킨다.
+            (None) 예전과 똑같이 reviewer_ask 를 쓴다.
+        recheck_ask: 재작성문 재검수 전용 호출자. 같은 이유로 분리한다.
+            (None) 예전과 똑같이 reviewer_ask 를 쓴다.
         corp_type / grade / generated_at / as_of_date / analysis_period /
             latest_performance_period / table_presentation: 렌더 메타 —
             render_report에 그대로 전달된다.
@@ -978,6 +987,8 @@ def run_v2(
     writer_for_run = writer_ask
     reviewer_for_run = reviewer_ask
     initial_reviewer_for_run = initial_reviewer_ask
+    rewrite_for_run = rewrite_ask
+    recheck_for_run = recheck_ask
     normalized_build_identity_sha256 = ""
     if release_mode is ReleaseMode.FULL:
         # 성공/실패 어느 쪽이든 첫 유료 호출 전에 typed 9장·회사·evidence
@@ -1014,6 +1025,22 @@ def run_v2(
             role="reviewer",
             validation_round=ValidationRound.PRIMARY,
             section_ids=("bundled",),
+        )
+        rewrite_for_run = (
+            call_recorder.wrap(
+                rewrite_ask, role="reviewer",
+                validation_round=ValidationRound.PRIMARY,
+                section_ids=("bundled",),
+            )
+            if rewrite_ask is not None else None
+        )
+        recheck_for_run = (
+            call_recorder.wrap(
+                recheck_ask, role="reviewer",
+                validation_round=ValidationRound.PRIMARY,
+                section_ids=("bundled",),
+            )
+            if recheck_ask is not None else None
         )
         if initial_reviewer_ask is not None:
             # 최초 본문 검수는 «실제로 보낸 그 호출»이 영수증에 남아야 한다.
@@ -1201,6 +1228,8 @@ def run_v2(
             draft, verification_fragments, performance_table, reviewer_for_run,
             diagnostics=review_diagnostics,
             initial_ask=initial_reviewer_for_run,
+            rewrite_ask=rewrite_for_run,
+            recheck_ask=recheck_for_run,
             protocol_diagnostics=composition_diagnostics,
             baseline_date=baseline_date,
         )
@@ -1215,6 +1244,8 @@ def run_v2(
             ),
             diagnostics=review_diagnostics,
             initial_ask=initial_reviewer_for_run,
+            rewrite_ask=rewrite_for_run,
+            recheck_ask=recheck_for_run,
             protocol_diagnostics=composition_diagnostics,
             baseline_date=baseline_date,
         )

@@ -375,7 +375,9 @@ def _가짜_ask를_끼운다(
     writer = writer or _가짜작가()
     reviewer = reviewer or _가짜검수()
 
-    def fake_ask_factory(_engine, _client, *, stage: str, max_tokens: int):
+    def fake_ask_factory(
+        _engine, _client, *, stage: str, max_tokens: int, reserved_calls: int = 0,
+    ):
         assert max_tokens > 0
         if stage == "v2_compose":
             return writer

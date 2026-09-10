@@ -383,7 +383,9 @@ def test_생산_매출원문은_보존하되_비교생산물없는_직접_FULL�
     reviewer = _ExactBundledReviewer()
     diagram_calls: list[str] = []
 
-    def fake_ask_factory(_engine, _client, *, stage: str, max_tokens: int):
+    def fake_ask_factory(
+        _engine, _client, *, stage: str, max_tokens: int, reserved_calls: int = 0,
+    ):
         assert max_tokens > 0
         if stage == "v2_compose":
             return writer

@@ -181,7 +181,11 @@ from src.features.spanselect.constants import (
 )
 from src.shared.official_ir import verified_official_ir_fragment_is_usable
 from src.shared import engine_build_identity, generation_coordination
-from src.shared.report_recovery import MAX_TOTAL_AI_CALLS as COMPOSER_RUNTIME_CALL_RESERVE
+from src.shared.report_recovery import (
+    MANDATORY_REPORT_AI_CALLS as COMPOSER_RUNTIME_CALL_RESERVE,
+    MANDATORY_TAIL_AI_CALLS,
+    REWRITE_RECHECK_CALLS,
+)
 from src.shared import runtime_failure_constants as failure_constants
 from src.shared import runtime_failure_diagnostic as runtime_failure
 from src.features.pipeline.provider_error_diagnostics import safe_provider_error_metadata
@@ -790,6 +794,10 @@ class _MeteredEngine:
         object.__setattr__(self, "_billing_uncertain", False)
         object.__setattr__(self, "_stage", "unspecified")
         object.__setattr__(self, "_prompt_cache", False)
+        # ★ 반드시 여기서 만든다. 이 껍데기의 __getattr__ 은 모르는 이름을
+        #   «감싼 1판 엔진»으로 넘기므로, 초기화를 빠뜨리면 뒤 단계 예약값을
+        #   남의 객체에서 읽을 수 있다.
+        object.__setattr__(self, "_reserved_calls", 0)
         object.__setattr__(self, "_provider_call_count", 0)
         object.__setattr__(self, "_provider_call_lock", threading.Lock())
 
@@ -806,6 +814,7 @@ class _MeteredEngine:
             "_billing_uncertain",
             "_stage",
             "_prompt_cache",
+            "_reserved_calls",
             "_provider_call_count",
             "_provider_call_lock",
         }:
@@ -839,7 +848,7 @@ class _MeteredEngine:
         clean = str(stage).strip()
         object.__setattr__(self, "_stage", clean or "unspecified")
 
-    def reserve_provider_call(self) -> int:
+    def reserve_provider_call(self, *, reserved_calls: int = 0) -> int:
         """요청 전체 AI 호출 상한을 실제 전송 경계에서 원자적으로 강제한다.
 
         성공 usage 목록의 길이를 세면 예외·usage 누락 호출이 빠진다. 호출을 보내기
@@ -847,8 +856,10 @@ class _MeteredEngine:
         초과하면 원장·네트워크 전에 멈춘다.
         """
 
+        if type(reserved_calls) is not int or reserved_calls < 0:
+            raise ValueError("남겨 둘 AI 호출 수는 0 이상의 정수여야 합니다")
         with self._provider_call_lock:
-            if self._provider_call_count >= MAX_AI_CALLS_PER_REQUEST:
+            if self._provider_call_count >= MAX_AI_CALLS_PER_REQUEST - reserved_calls:
                 # ★ 돈이 아니라 «횟수»다 — 전용 타입으로 구분해 던진다.
                 #   composer 의 «선택적 다듬기»는 이 구분을 보고 포기하고
                 #   지금까지 만든 보고서로 끝낸다(실측 근거는
@@ -870,17 +881,29 @@ class _MeteredEngine:
         with self._provider_call_lock:
             return max(0, MAX_AI_CALLS_PER_REQUEST - self._provider_call_count - reserved_calls)
 
+    @property
+    def reserved_calls(self) -> int:
+        """지금 단계가 «뒤 단계 몫으로» 남겨 두어야 하는 호출 수."""
+        return int(self._reserved_calls)
+
     @contextmanager
-    def stage_context(self, stage: str, *, prompt_cache: bool = False):
+    def stage_context(
+        self, stage: str, *, prompt_cache: bool = False, reserved_calls: int = 0,
+    ):
         previous_stage = self._stage
         previous_cache = self._prompt_cache
+        previous_reserved = self.reserved_calls
         self.set_stage(stage)
         object.__setattr__(self, "_prompt_cache", bool(prompt_cache))
+        if type(reserved_calls) is not int or reserved_calls < 0:
+            raise ValueError("남겨 둘 AI 호출 수는 0 이상의 정수여야 합니다")
+        object.__setattr__(self, "_reserved_calls", reserved_calls)
         try:
             yield
         finally:
             object.__setattr__(self, "_stage", previous_stage)
             object.__setattr__(self, "_prompt_cache", previous_cache)
+            object.__setattr__(self, "_reserved_calls", previous_reserved)
 
 
 def _already_cache_marked_text_blocks(content: object) -> bool:
@@ -1008,8 +1031,11 @@ def _meter_stage(
     stage: str,
     *,
     prompt_cache: bool = False,
+    reserved_calls: int = 0,
 ):
-    with metered.stage_context(stage, prompt_cache=prompt_cache):
+    with metered.stage_context(
+        stage, prompt_cache=prompt_cache, reserved_calls=reserved_calls,
+    ):
         yield
 
 
@@ -1083,7 +1109,9 @@ class _MeteredMessages:
         # ``MAX_AI_CALLS_PER_REQUEST``가 문서와 시험에만 있으면 실패 응답처럼
         # usages에 안 쌓이는 호출은 무한히 반복될 수 있다. 실제 전송보다 먼저
         # 요청 로컬 계수를 잡아 상한을 넘는 호출을 원장·네트워크 앞에서 닫는다.
-        self._metered.reserve_provider_call()
+        self._metered.reserve_provider_call(
+            reserved_calls=self._metered.reserved_calls
+        )
         # 본조사는 DART snapshot과 single-flight owner가 확정된 뒤에만
         # phase를 연다. 이 호출은 누락된 새 provider 경로도 예산 문맥
         # 없이 밖으로 나가지 못하게 하는 마지막 방어선이다.
@@ -5348,6 +5376,7 @@ def _v2_ask_via_provider(
     *,
     stage: str,
     max_tokens: int,
+    reserved_calls: int = 0,
 ):
     """composer의 AskFn(프롬프트→응답 문자열)을 기존 provider 포트로 감싼다.
 
@@ -5394,7 +5423,12 @@ def _v2_ask_via_provider(
             else text
         )
         try:
-            with _meter_stage(engine, stage, prompt_cache=use_prompt_cache):
+            with _meter_stage(
+                engine,
+                stage,
+                prompt_cache=use_prompt_cache,
+                reserved_calls=reserved_calls,
+            ):
                 response = client.messages.create(
                     model=getattr(engine, "MODEL", "") or GENERATION_MODEL,
                     max_tokens=max_tokens,
@@ -6018,6 +6052,21 @@ def _run_v2_composer(
         engine, client, stage="v2_review",
         max_tokens=V2_INITIAL_REVIEWER_MAX_TOKENS,
     )
+    # 선택적 다듬기 전용 — «내 뒤에 반드시 와야 하는 호출»을 남기고 멈춘다.
+    #   재작성: 재검수 1 + 필수 후속 3 을 남긴다 (재검수를 못 할 재작성은 안 한다).
+    #   재검수: 필수 후속 3 을 남긴다.
+    # 못 부르면 그 문장이 «제거»될 뿐이지만, 도식·요약은 못 부르면 보고서에서
+    # 통째로 빠진다(2026-09-10 멀티캠퍼스 실측: 도식 16줄·요약 작성 미실행).
+    rewrite_ask = _v2_ask_via_provider(
+        engine, client, stage="v2_review",
+        max_tokens=V2_REVIEWER_MAX_TOKENS,
+        reserved_calls=MANDATORY_TAIL_AI_CALLS + REWRITE_RECHECK_CALLS,
+    )
+    recheck_ask = _v2_ask_via_provider(
+        engine, client, stage="v2_review",
+        max_tokens=V2_REVIEWER_MAX_TOKENS,
+        reserved_calls=MANDATORY_TAIL_AI_CALLS,
+    )
     diagram_ask = _v2_ask_via_provider(
         engine, client, stage="v2_diagram", max_tokens=V2_DIAGRAM_MAX_TOKENS
     )
@@ -6033,6 +6082,8 @@ def _run_v2_composer(
             writer_ask=writer_ask,
             reviewer_ask=reviewer_ask,
             initial_reviewer_ask=initial_reviewer_ask,
+            rewrite_ask=rewrite_ask,
+            recheck_ask=recheck_ask,
             diagram_ask=diagram_ask,
             corp_type=corp_type,
             generated_at=business_date.isoformat(),

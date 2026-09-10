@@ -1769,8 +1769,15 @@ def _rewrite_and_recheck(
     diagnostics: Optional[list[dict]] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
+    rewrite_ask: Optional[AskFn] = None,
+    recheck_ask: Optional[AskFn] = None,
 ) -> None:
     """«거짓» 판정 문장들: 재작성 1회 → 수치 재검증 → 재검수 → 최종 처분.
+
+    ``rewrite_ask``/``recheck_ask``: 각 단계 전용 호출자. 주지 않으면 예전처럼
+    ``ask`` 하나를 쓴다. 부르는 쪽이 «필수 후속 단계 몫을 남긴 호출자»를
+    넣으면, 도식 검수·요약 작성·요약 검수를 굶기기 전에 이 선택적 다듬기가
+    먼저 멈춘다.
 
     최종 처분 규칙:
       · 재작성 실패(빈 응답·호출 실패) → 제거 — 이미 거짓으로 판정된 글이다.
@@ -1795,7 +1802,9 @@ def _rewrite_and_recheck(
             # 이미 «거짓» 판정을 받은 문장이다. 못 살리면 빼는 쪽이 안전하다.
             final[item.number] = None
             continue
-        rewritten_text = _ask_rewrite(ask, item.sentence, frag_by_id)
+        rewritten_text = _ask_rewrite(
+            rewrite_ask or ask, item.sentence, frag_by_id
+        )
         if not rewritten_text:
             final[item.number] = None
             continue
@@ -1813,7 +1822,7 @@ def _rewrite_and_recheck(
     if not recheck_items:
         return
     verdicts = _ask_verdicts(
-        ask,
+        recheck_ask or ask,
         recheck_items,
         frag_by_id,
         table_evidence,
@@ -1846,6 +1855,8 @@ def _semantic_review(
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
+    rewrite_ask: Optional[AskFn] = None,
+    recheck_ask: Optional[AskFn] = None,
 ) -> list[list[ComposedSentence]]:
     """인용 있는 «확인»·«해석» 문장을 같은 1회 검수 호출로 대조한다.
 
@@ -1983,6 +1994,8 @@ def _semantic_review(
                     diagnostics=diagnostics,
                     protocol_diagnostics=protocol_diagnostics,
                     baseline_date=baseline_date,
+                    rewrite_ask=rewrite_ask,
+                    recheck_ask=recheck_ask,
                 )
             except AskFatalError as error:
                 # ★ 실측 — «이 요청에 허락된 몫을 다 썼다»는 한도만은 여기서
@@ -2238,6 +2251,8 @@ def _verify_report_inner(
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
+    rewrite_ask: Optional[AskFn] = None,
+    recheck_ask: Optional[AskFn] = None,
 ) -> ComposedReport:
     frag_by_id = {
         fragment.fragment_id: fragment
@@ -2279,6 +2294,8 @@ def _verify_report_inner(
             initial_ask=initial_ask,
             protocol_diagnostics=protocol_diagnostics,
             baseline_date=baseline_date,
+            rewrite_ask=rewrite_ask,
+            recheck_ask=recheck_ask,
         )
     else:
         allowed_for_review = dict(allowed_fragment_ids_by_section)
@@ -2349,6 +2366,8 @@ def verify_report(
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
+    rewrite_ask: Optional[AskFn] = None,
+    recheck_ask: Optional[AskFn] = None,
 ) -> ComposedReport:
     """진입 함수 — 규칙 ①~④를 보고서 전체에 문장 단위로 적용한다.
 
@@ -2359,6 +2378,11 @@ def verify_report(
         ask: 검수·재작성용 AI 호출 주입 함수 (작가와 «다른 호출» —
             Generator/Evaluator 분리는 부르는 쪽이 별도 클로저로 보장한다).
         diagnostics: 의미 근거 결속으로 최종 제외된 후보의 비식별 진단 수집기.
+        rewrite_ask: «거짓» 판정 문장 재작성 전용 호출자. 생략하면 ``ask``.
+        recheck_ask: 재작성문 재검수 전용 호출자. 생략하면 ``ask``.
+            ★ 이 둘은 «선택적 다듬기»라, 부르는 쪽이 도식 검수·요약 작성·
+              요약 검수 몫을 남긴 호출자를 넣어 두면 필수 후속 단계보다
+              먼저 멈춘다. 멈추면 그 문장은 재작성 대신 제거된다.
         baseline_date: 보고서 기준일 (ISO ``YYYY-MM-DD``). 근거 결속의
             executive_status_guard 에만 쓴다 — 넘기지 않으면 그 가드가 날짜
             문턱 없이 이탈 표지 존재만으로 판정한다. 기존 호출 계약은 그대로다.
@@ -2370,7 +2394,8 @@ def verify_report(
     try:
         if (allowed_fragment_ids_by_section is None and diagnostics is None
                 and initial_ask is None and protocol_diagnostics is None
-                and baseline_date is None):
+                and baseline_date is None and rewrite_ask is None
+                and recheck_ask is None):
             # legacy 호출 모양과 monkeypatch 경계를 그대로 보존한다.
             return _verify_report_inner(
                 report, fragments, performance_table, ask
@@ -2385,6 +2410,8 @@ def verify_report(
             initial_ask=initial_ask,
             protocol_diagnostics=protocol_diagnostics,
             baseline_date=baseline_date,
+            rewrite_ask=rewrite_ask,
+            recheck_ask=recheck_ask,
         )
     except AskFatalError:
         # 요청 전역 장애 — «검증기 내부 오류»로 위장하지 않고 그대로 재전파한다.
