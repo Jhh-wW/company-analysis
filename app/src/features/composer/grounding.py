@@ -413,12 +413,27 @@ def _stated_continuous_periods(text: str, expression: str) -> int:
       근거»가 모자란 것이다(실측 멀티캠퍼스: 인용 [8] 표는 2023·2024·2025 세 해).
     ⚠️ 검수 응답이 댄 표현과 후보 문장 «양쪽»에서 찾는다. 표현이 문장의 일부만
        옮겨 적어 수가 빠졌을 때도 문장이 못 박은 수를 그대로 적용하기 위해서다.
+    ⚠️ 짝은 «글자 포함»이 아니라 «자리 겹침»으로 맞춘다. 포함으로 맞추면 검수
+       AI가 표현의 왼쪽(수)을 빼고 오른쪽으로 길게 잡는 것만으로 하한을
+       비껴간다 — 실측 문장 「3년 연속 감소하면서 전체 매출 규모가 축소되고
+       있다」에서 표현을 「연속 감소하면서」로 적으면 어느 방향도 성립하지
+       않아 0으로 떨어졌다. 표현이 덮은 자리와 「N년 연속」이 겹치면 그 N이
+       이 주장이 못 박은 수다.
     """
 
+    spans: list[tuple[int, int]] = []
+    start = text.find(expression) if expression else -1
+    while start >= 0:
+        spans.append((start, start + len(expression)))
+        start = text.find(expression, start + 1)
     counts = [
         int(match.group("periods"))
         for match in COUNTED_CONTINUOUS_RE.finditer(text)
-        if match.group() in expression or expression in match.group()
+        # 표현을 문장에서 못 찾으면(호출자가 이미 막지만) 문장 전체를 본다.
+        if not spans or any(
+            match.start() < span_end and span_start < match.end()
+            for span_start, span_end in spans
+        )
     ]
     return max(counts, default=0)
 

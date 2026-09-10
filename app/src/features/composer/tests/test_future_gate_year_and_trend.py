@@ -35,7 +35,11 @@ from src.features.composer.future_plan_constants import (
     FUTURE_SOURCE_KEY,
     FUTURE_TARGET_KEY,
 )
-from src.features.composer.grounding import grounding_problem, grounding_requirements
+from src.features.composer.grounding import (
+    _stated_continuous_periods,
+    grounding_problem,
+    grounding_requirements,
+)
 from src.features.composer.grounding_constants import (
     GROUNDING_INVALID, GROUNDING_KEY, TREND_KEY,
 )
@@ -154,6 +158,58 @@ def test_a_duration_is_not_read_as_a_year(source):
     )
     assert len(problems) == 1, problems
     assert "2026" in problems[0], problems[0]
+
+
+#: 독립 검토(P2-1)가 찾은 «여는 인용부호 + 기간». 아포스트로피가 연도 표지가
+#: 아니라 구절을 여는 따옴표인데, 공백만 막은 규칙은 이 꼴을 2026년으로 읽었다.
+#: 첫 줄이 실측 재현 문장이다(한국어 기사·공시가 구절을 작은따옴표로 묶는 꼴).
+OPENING_QUOTE_DURATIONS = (
+    "창사 이래 '26년 만의 최대 실적'을 기록했다고 밝혔습니다.",
+    "'26년간 이어온 어학 교육 사업입니다.",
+    "'26년째 이어온 어학 교육 사업입니다.",
+    "'26년 동안 이어온 어학 교육 사업입니다.",
+    "'26년 이상 이어온 어학 교육 사업입니다.",
+    "'26년 전에 시작한 어학 교육 사업입니다.",
+    "'26년차 강사가 어학 교육을 맡고 있습니다.",
+)
+
+
+@pytest.mark.parametrize("source", OPENING_QUOTE_DURATIONS)
+def test_an_opening_quote_before_a_duration_is_not_a_year(source):
+    """아포스트로피가 «따옴표»일 때까지 연도로 읽으면 없는 해가 만들어진다.
+
+    ★ base(`6040a028`)에는 이 정규식 자체가 없어 전부 거절됐다 — 축약 연도
+      규칙이 «완화 방향»으로 새로 연 구멍이라 여기서 닫는다.
+    """
+
+    _report, problems = check_diagram_numbers(
+        _flow_report(("어학 교육", "2026년", "확대")), _fragments(source)
+    )
+    assert len(problems) == 1, problems
+    assert "2026" in problems[0], problems[0]
+
+
+#: 기간 꼬리 목록이 «다른 낱말의 첫 글자»까지 삼키면 축약 연도 규칙 자체가
+#: 무의미해진다. 「전략」·「후반」·「차별화」는 공시에서 흔한 연도 표현이다.
+YEAR_LOOKALIKE_TAILS = (
+    "'26년 전략을 제시하며 어학 교육을 확대하겠습니다.",
+    "'26년 후반 어학 교육을 확대하겠습니다.",
+    "'26년 차별화 전략으로 어학 교육을 확대하겠습니다.",
+    "'26년 만족도 조사를 거쳐 어학 교육을 확대하겠습니다.",
+    "'26년 간담회를 열어 어학 교육을 확대하겠습니다.",
+    "'26년에는 어학 교육을 확대하겠습니다.",
+    "'26년 매출 목표에 맞춰 어학 교육을 확대하겠습니다.",
+)
+
+
+@pytest.mark.parametrize("source", YEAR_LOOKALIKE_TAILS)
+def test_a_real_abbreviated_year_still_grounds_the_cell(source):
+    """꼬리 목록이 정상 연도까지 막지 않는다 — 이 줄들은 계속 통과해야 한다."""
+
+    _report, problems = check_diagram_numbers(
+        _flow_report(("어학 교육", "2026년", "확대")), _fragments(source)
+    )
+    assert problems == (), problems
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -383,3 +439,62 @@ def test_three_year_values_still_prove_a_two_year_streak():
         {"공시": _trend_source(_THREE_YEARS)},
         _trend_evidence("2년 연속 감소", _THREE_YEARS),
     ) == ""
+
+
+#: 독립 검토(P2-2)가 찾은 우회로. 하한은 검수 응답이 «표현»으로 무엇을 적었는지에
+#: 달려 있었고, 짝을 «글자 포함»으로 맞추면 수를 뺀 채 오른쪽으로 길게 잡는 것만으로
+#: 0으로 떨어졌다. 실측 문장이 「3년 연속 감소«하면서» 전체 매출 규모가…」라서
+#: 검수 AI가 이 표현을 집을 확률이 낮지 않다.
+TRUNCATED_STREAK_EXPRESSIONS = (
+    "연속 감소",
+    "연속 감소하면서",
+    "연속 감소하면서 전체 매출 규모가 축소",
+)
+
+
+@pytest.mark.parametrize("expression", TRUNCATED_STREAK_EXPRESSIONS)
+def test_trimming_the_number_out_of_the_expression_does_not_lower_the_floor(
+    expression,
+):
+    """표현에서 수를 잘라내도 문장이 못 박은 「3년 연속」의 하한이 그대로 적용된다."""
+
+    assert grounding_problem(
+        THREE_YEAR_CLAIM,
+        {"공시": _trend_source(_THREE_YEARS)},
+        _trend_evidence(expression, _THREE_YEARS),
+    ) == GROUNDING_INVALID
+
+
+@pytest.mark.parametrize("expression", TRUNCATED_STREAK_EXPRESSIONS)
+def test_the_same_trimmed_expression_passes_when_the_evidence_is_enough(
+    expression,
+):
+    """하한을 올린 것이지 표현을 벌한 것이 아니다 — 네 해 값이면 그대로 통과한다."""
+
+    assert grounding_problem(
+        THREE_YEAR_CLAIM,
+        {"공시": _trend_source(_FOUR_YEARS)},
+        _trend_evidence(expression, _FOUR_YEARS),
+    ) == ""
+
+
+def test_only_the_streak_overlapping_this_expression_sets_the_floor():
+    """자리가 겹치는 「N년 연속」만 본다 — 다른 절의 수까지 끌어오지 않는다.
+
+    ★ 이 결함을 「문장 전체에서 최대」로 고치면 이 시험이 깨진다. 그 구현은 한
+      문장 안의 관계 없는 주장까지 하한으로 묶어 근거가 충분한 추세를 거짓
+      차단한다. 「자리 겹침」이 맞는 답이라는 것을 여기서 못 박는다.
+    ⚠️ 이 성질은 `grounding_problem` 으로는 가려낼 수 없다 — 두 주장이 든
+      문장은 표현이 덮지 못한 나머지 추세 자리 때문에 어차피 거절되기 때문이다.
+      그래서 하한을 정하는 함수를 직접 부른다.
+    """
+
+    text = (
+        "외국어서비스 매출액이 2년 연속 감소했고, "
+        "그와 별개로 수강생 수는 4년 연속 증가했다."
+    )
+    assert _stated_continuous_periods(text, "2년 연속 감소") == 2
+    assert _stated_continuous_periods(text, "연속 감소했고") == 2
+    assert _stated_continuous_periods(text, "4년 연속 증가") == 4
+    # 문장이 못 박은 수를 표현이 한 글자도 덮지 않으면 하한을 새로 만들지 않는다.
+    assert _stated_continuous_periods(text, "수강생 수는") == 0

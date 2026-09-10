@@ -365,8 +365,38 @@ _APOSTROPHES: Final[str] = "'’‘`´ʼ"
 _ABBREVIATED_YEAR_BASE: Final[int] = 2000
 #: ⚠️ 아포스트로피와 숫자 사이에 공백을 허용하지 않는다. 허용하면 「…밝혔다.'
 #:    26년 만에」처럼 «닫는 인용부호 뒤에 온 기간»이 연도로 읽힌다.
+#: ⚠️ 그러나 공백을 막아도 «여는 인용부호»는 남는다 — 「창사 이래 '26년 만의
+#:    최대 실적'」처럼 아포스트로피가 기간 표현에 바로 붙는 꼴이다. 이때
+#:    아포스트로피는 연도 표지가 아니라 구절을 여는 따옴표이므로, 「년」 뒤에
+#:    기간 꼬리가 오면 연도로 읽지 않는다 (아래 닫힌 목록).
+#: ★ 목록이 틀리는 두 방향의 값이 다르다 — 꼬리를 «빠뜨리면» 근거에 없는 해가
+#:   만들어져 게이트가 느슨해지고, 꼬리를 «넓게 잡으면» 그 칸이 종전처럼
+#:   「없는 수」로 빠질 뿐이다(이 정규식이 없던 base 동작). 그래서 애매하면
+#:   넓은 쪽을 고른다.
+#: ⚠️ 다만 「전」·「후」·「간」처럼 다른 낱말의 첫 글자이기도 한 꼬리는 «조사까지가
+#:    한 낱말»일 때만 기간으로 본다. 그렇게 하지 않으면 「'26년 전략」·
+#:    「'26년 후반」·「'26년 간담회」 같은 정상 연도 표현이 통째로 안 읽힌다.
+_DURATION_TAILS_PLAIN: Final[tuple[str, ...]] = (
+    "동안", "째", "이상", "이하", "미만",
+)
+_DURATION_TAILS_BOUNDED: Final[tuple[str, ...]] = ("만", "간", "차", "전", "후", "여")
+#: 꼬리 뒤에 여기까지 붙으면 한 낱말이 끝난 것으로 본다.
+_DURATION_PARTICLE: Final[str] = (
+    r"(?:에도|에는|에|의|이나|이|인|은|는|을|도|만|과|까지|부터)?"
+)
+_DURATION_TAIL_PATTERN: Final[str] = (
+    r"(?:"
+    + "|".join(_DURATION_TAILS_PLAIN)
+    + r"|(?:"
+    + "|".join(_DURATION_TAILS_BOUNDED)
+    + r")"
+    + _DURATION_PARTICLE
+    + r"(?![가-힣])"
+    + r")"
+)
 _ABBREVIATED_YEAR_RE: Final[re.Pattern[str]] = re.compile(
     rf"[{re.escape(_APOSTROPHES)}](?P<year>\d{{2}})(?![\d,.])\s*년"
+    rf"(?!\s*{_DURATION_TAIL_PATTERN})"
 )
 #: 날짜 표기 안에서 월·일 숫자를 다시 읽을 때 쓴다 (연도 뒤 구간 전용).
 _PLAIN_DIGITS_RE: Final[re.Pattern[str]] = re.compile(r"\d+")
@@ -1099,6 +1129,7 @@ def _ask_grouped_verdicts(
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
+    baseline_date: Optional[str] = None,
 ) -> Optional[dict[int, str]]:
     """packet 본문·도식을 정확히 한 번에 검수한다.
 
@@ -1183,6 +1214,7 @@ def _ask_grouped_verdicts(
             and item.sentence.grade == GRADE_CONFIRMED
             and item.citations
         ),
+        baseline_date=baseline_date,
     )
 
 
@@ -1254,9 +1286,14 @@ def _apply_grounding(
     culture_candidate_numbers: frozenset[int] = frozenset(),
     flow_cells_by_number: Optional[Mapping[int, Sequence[str]]] = None,
     confirmed_prose_numbers: frozenset[int] = frozenset(),
+    baseline_date: Optional[str] = None,
 ) -> dict[int, str]:
+    # ★ 보고서 기준일을 그대로 넘긴다. 안 넘기면 executive_status_guard 가 날짜
+    #   문턱 없이 이탈 «표지» 존재만으로 판정해, 「기준일 이후에 물러날 예정」인
+    #   임원 문장까지 근거 없음으로 뺀다(가드 머리말 참고).
     constrained, problems = constrain_verdicts(
         raw, verdicts, candidates, cells_by_number=flow_cells_by_number,
+        baseline_date=baseline_date,
     )
     # 같은 파서로 미래 근거를 읽고, 중복 번호는 근거 없음으로 처리한다.
     # 같은 값이 «이 후보가 어느 인용을 근거로 들었는가»도 담고 있어 함께 쓴다.
@@ -1579,6 +1616,7 @@ def _ask_verdicts(
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
+    baseline_date: Optional[str] = None,
 ) -> Optional[dict[int, str]]:
     """검수 AI 1회 호출(+파싱 실패 시 1회 재요청). 그래도 실패면 None.
 
@@ -1645,6 +1683,7 @@ def _ask_verdicts(
             and item.sentence.grade == GRADE_CONFIRMED
             and item.sentence.citations
         ),
+        baseline_date=baseline_date,
     )
 
 
@@ -1729,6 +1768,7 @@ def _rewrite_and_recheck(
     *,
     diagnostics: Optional[list[dict]] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
+    baseline_date: Optional[str] = None,
 ) -> None:
     """«거짓» 판정 문장들: 재작성 1회 → 수치 재검증 → 재검수 → 최종 처분.
 
@@ -1780,6 +1820,7 @@ def _rewrite_and_recheck(
         table_source,
         diagnostics=diagnostics,
         protocol_diagnostics=protocol_diagnostics,
+        baseline_date=baseline_date,
     )
     for item in recheck_items:
         verdict = VERDICT_FALSE if verdicts is None else verdicts.get(item.number)
@@ -1804,6 +1845,7 @@ def _semantic_review(
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
+    baseline_date: Optional[str] = None,
 ) -> list[list[ComposedSentence]]:
     """인용 있는 «확인»·«해석» 문장을 같은 1회 검수 호출로 대조한다.
 
@@ -1857,6 +1899,7 @@ def _semantic_review(
         diagnostics=diagnostics,
         initial_ask=initial_ask,
         protocol_diagnostics=protocol_diagnostics,
+        baseline_date=baseline_date,
     )
     if verdicts is None:
         logger.warning(
@@ -1939,6 +1982,7 @@ def _semantic_review(
                     final,
                     diagnostics=diagnostics,
                     protocol_diagnostics=protocol_diagnostics,
+                    baseline_date=baseline_date,
                 )
             except AskFatalError as error:
                 # ★ 실측 — «이 요청에 허락된 몫을 다 썼다»는 한도만은 여기서
@@ -1992,6 +2036,7 @@ def _semantic_review_grouped(
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
+    baseline_date: Optional[str] = None,
 ) -> tuple[list[list[ComposedSentence]], dict[str, tuple[FlowRow, ...]]]:
     """packet 문장과 도식을 장별 근거 블록으로 묶어 AI 1회 검수한다.
 
@@ -2072,6 +2117,7 @@ def _semantic_review_grouped(
         ask, items, frag_by_id, table, diagnostics=diagnostics,
         initial_ask=initial_ask,
         protocol_diagnostics=protocol_diagnostics,
+        baseline_date=baseline_date,
     )
     sentence_by_number: dict[int, Optional[ComposedSentence]] = {}
     flow_kept_numbers: set[int] = set()
@@ -2191,6 +2237,7 @@ def _verify_report_inner(
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
+    baseline_date: Optional[str] = None,
 ) -> ComposedReport:
     frag_by_id = {
         fragment.fragment_id: fragment
@@ -2231,6 +2278,7 @@ def _verify_report_inner(
             diagnostics=diagnostics,
             initial_ask=initial_ask,
             protocol_diagnostics=protocol_diagnostics,
+            baseline_date=baseline_date,
         )
     else:
         allowed_for_review = dict(allowed_fragment_ids_by_section)
@@ -2256,6 +2304,7 @@ def _verify_report_inner(
             diagnostics=diagnostics,
             initial_ask=initial_ask,
             protocol_diagnostics=protocol_diagnostics,
+            baseline_date=baseline_date,
         )
     reviewed_summary = reviewed_groups.pop()
 
@@ -2299,6 +2348,7 @@ def verify_report(
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
+    baseline_date: Optional[str] = None,
 ) -> ComposedReport:
     """진입 함수 — 규칙 ①~④를 보고서 전체에 문장 단위로 적용한다.
 
@@ -2309,6 +2359,9 @@ def verify_report(
         ask: 검수·재작성용 AI 호출 주입 함수 (작가와 «다른 호출» —
             Generator/Evaluator 분리는 부르는 쪽이 별도 클로저로 보장한다).
         diagnostics: 의미 근거 결속으로 최종 제외된 후보의 비식별 진단 수집기.
+        baseline_date: 보고서 기준일 (ISO ``YYYY-MM-DD``). 근거 결속의
+            executive_status_guard 에만 쓴다 — 넘기지 않으면 그 가드가 날짜
+            문턱 없이 이탈 표지 존재만으로 판정한다. 기존 호출 계약은 그대로다.
 
     Returns:
         검증된 ComposedReport. 어떤 입력에서도 예외를 던지지 않으며,
@@ -2316,7 +2369,8 @@ def verify_report(
     """
     try:
         if (allowed_fragment_ids_by_section is None and diagnostics is None
-                and initial_ask is None and protocol_diagnostics is None):
+                and initial_ask is None and protocol_diagnostics is None
+                and baseline_date is None):
             # legacy 호출 모양과 monkeypatch 경계를 그대로 보존한다.
             return _verify_report_inner(
                 report, fragments, performance_table, ask
@@ -2330,6 +2384,7 @@ def verify_report(
             diagnostics=diagnostics,
             initial_ask=initial_ask,
             protocol_diagnostics=protocol_diagnostics,
+            baseline_date=baseline_date,
         )
     except AskFatalError:
         # 요청 전역 장애 — «검증기 내부 오류»로 위장하지 않고 그대로 재전파한다.
@@ -2355,8 +2410,15 @@ def verify_sentences(
     *,
     diagnostics: Optional[list[dict]] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
+    baseline_date: Optional[str] = None,
 ) -> tuple[ComposedSentence, ...]:
-    """문장 묶음 하나에 같은 규칙 전부를 적용한다 — 3-3 요약 검증 재사용용."""
+    """문장 묶음 하나에 같은 규칙 전부를 적용한다 — 3-3 요약 검증 재사용용.
+
+    ``baseline_date``: 보고서 기준일(ISO ``YYYY-MM-DD``). 본문 경로
+    (`verify_report`)와 «같은 값»을 받아야 한다 — 요약은 본문에서 고른 문장을
+    다시 검수하므로, 여기만 기준일이 비면 본문에서 살아남은 임원 문장이
+    요약에서만 빠져 한 보고서 안에 두 잣대가 생긴다.
+    """
     try:
         frag_by_id = {
             fragment.fragment_id: fragment
@@ -2373,6 +2435,7 @@ def verify_sentences(
             group_ids=(REVIEW_SUMMARY_GROUP,),
             diagnostics=diagnostics,
             protocol_diagnostics=protocol_diagnostics,
+            baseline_date=baseline_date,
         )
         return tuple(reviewed[0])
     except AskFatalError:

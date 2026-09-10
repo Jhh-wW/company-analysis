@@ -539,6 +539,7 @@ def _legacy_summary_stage(
     review_diagnostics: list[dict] | None = None,
     summary_diagnostics: list[dict] | None = None,
     protocol_diagnostics: list[dict] | None = None,
+    baseline_date: str | None = None,
 ) -> tuple[ComposedReport, int, NumericSafetyFiltering]:
     """기존 SHADOW 요약 경로를 글자·호출 순서까지 그대로 보존한다.
 
@@ -597,6 +598,9 @@ def _legacy_summary_stage(
                 summary, fragments, performance_table, reviewer_ask,
                 diagnostics=review_diagnostics,
                 protocol_diagnostics=protocol_diagnostics,
+                # 본문 검증과 «같은» 기준일을 준다. 여기만 비우면 본문에서
+                # 살아남은 임원 문장이 요약에서만 빠져 두 잣대가 된다.
+                baseline_date=baseline_date,
             )
         except AskFatalError as error:
             if not getattr(error, "degradable", False):
@@ -1187,12 +1191,18 @@ def run_v2(
     draft_body_count = _total_sentences(draft)  # 이 시점 summary는 빈 튜플이다
 
     # ② 본문 검증 (검수 — 문장 단위 제거/강등만, 장 삭제 없음)
+    # ★ 보고서 기준일을 검증기에 함께 넘긴다. 이 값이 없으면 임원 재직 가드가
+    #   날짜 문턱 없이 이탈 «표지»만 보고 판정해, 「기준일 이후에 물러날 예정」인
+    #   임원 문장까지 근거 없음으로 뺀다. render 메타로만 쓰이던 값을 판정에도
+    #   쓰는 것이라 형식은 그대로 ISO(YYYY-MM-DD)다.
+    baseline_date = as_of_date or None
     if prepared_evidence is None:
         verified = verify_report(
             draft, verification_fragments, performance_table, reviewer_for_run,
             diagnostics=review_diagnostics,
             initial_ask=initial_reviewer_for_run,
             protocol_diagnostics=composition_diagnostics,
+            baseline_date=baseline_date,
         )
     else:
         verified = verify_report(
@@ -1206,6 +1216,7 @@ def run_v2(
             diagnostics=review_diagnostics,
             initial_ask=initial_reviewer_for_run,
             protocol_diagnostics=composition_diagnostics,
+            baseline_date=baseline_date,
         )
         _assert_composed_report_evidence_invariant(
             verified,
@@ -1251,6 +1262,7 @@ def run_v2(
             _normalize_fragments(verification_fragments),
             diagram_ask or reviewer_ask,
             diagnostics=review_diagnostics,
+            baseline_date=baseline_date,
         )
     elif prepared_evidence is None:
         # ENFORCE_NO_PARTIAL은 이식기 호환 모드라 typed packet/장별 bundled
@@ -1364,6 +1376,7 @@ def run_v2(
             review_diagnostics=review_diagnostics,
             summary_diagnostics=composition_diagnostics,
             protocol_diagnostics=composition_diagnostics,
+            baseline_date=baseline_date,
         )
     else:
         body_rendered = render_report(
@@ -1610,6 +1623,7 @@ def run_v2(
                 ),
                 diagnostics=review_diagnostics,
                 protocol_diagnostics=composition_diagnostics,
+                baseline_date=baseline_date,
             )
             supplement_verified, supplement_moved = drop_cross_section_duplicates(
                 retain_verified_news(
