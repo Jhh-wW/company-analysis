@@ -52,12 +52,14 @@ from src.features.composer.news_block import (
     NEWS_BLOCK_HEADERS,
     NEWS_BLOCK_PRESENTATION,
     news_block_caption,
+    oldest_stale_report_year,
 )
 from src.features.composer.port import (
     ComposedReport,
     ComposedSection,
     ComposedSentence,
     FilingMeta,
+    NewsRow,
     PerformanceTable,
 )
 from src.features.composer.portfolio_name_table import PortfolioNameTable
@@ -653,7 +655,7 @@ def _flow_report_table(
 
 
 def _news_report_table(
-    section: ComposedSection, numbers: Mapping[str, int]
+    section: ComposedSection, numbers: Mapping[str, int], *, as_of_date: str = ""
 ) -> Optional[ReportTable]:
     """장 끝의 「최근 보도 (보조)」 표를 만든다. 실을 줄이 없으면 None.
 
@@ -662,11 +664,16 @@ def _news_report_table(
       presentation을 「표」로 두어 도식으로 그려지지 않게 한다.
     ★ 근거 없는 줄은 `news_block`이 이미 뺐다. 여기서는 «실존하는 조각을
       가리키는가»만 한 번 더 본다 — 없는 번호를 인쇄하지 않기 위해서다.
+    ★ as_of_date: 캡션 제목에 「최근」이라고 적으면서 실은 1차 기간창(12개월)
+      보다 오래된 기사만 실린 장이 있었다(실측: 2023-11-12 기사만 실린 장의
+      캡션이 「최근 보도」). 표에 실제로 인쇄되는 행만으로 가장 오래된
+      발행일을 다시 재고, 기준일과 비교해 캡션에 연도를 더할지 정한다.
     """
 
     if not section.news_rows:
         return None
     rows: list[list[str]] = []
+    included_rows: list[NewsRow] = []
     cited: list[int] = []
     for row in section.news_rows:
         row_numbers = [
@@ -677,11 +684,14 @@ def _news_report_table(
         if not row_numbers:
             continue
         rows.append([str(cell).strip() for cell in row.cells])
+        included_rows.append(row)
         cited.extend(row_numbers)
     if not rows:
         return None
     return ReportTable(
-        caption=news_block_caption(len(rows)),
+        caption=news_block_caption(
+            len(rows), oldest_stale_report_year(included_rows, as_of_date)
+        ),
         headers=list(NEWS_BLOCK_HEADERS),
         rows=rows,
         # 캡션 근거는 표 전체를 대표하는 첫 조각 하나만 단다(흐름표와 같은 규칙).
@@ -1396,7 +1406,7 @@ def render_report(
         # 언론 보조 보도표는 «장의 맨 끝»에 붙인다 — 회사 공식 자료로 만든
         # 표를 먼저 보이고, 보조 자료는 그 뒤에 둔다. 순서를 바꾸면 독자가
         # 언론 보도를 그 장의 주된 근거로 읽는다.
-        news_table = _news_report_table(section, numbers)
+        news_table = _news_report_table(section, numbers, as_of_date=as_of_date)
         if news_table is not None:
             # ★ 행마다 «전부» 부록 사용 목록에 등록한다(흐름표와 다른 점).
             #   보도표의 조각은 본문 문장이 인용하지 않는 조각이라, 여기서

@@ -44,6 +44,7 @@ from src.features.composer.news_block import (
     NEWS_BLOCK_HEADERS,
     NEWS_BLOCK_PRESENTATION,
     news_block_caption,
+    oldest_stale_report_year,
 )
 from src.features.composer.port import (
     CollectedFragment,
@@ -1013,11 +1014,15 @@ def _name_table_binding(
 def _news_table_payload(
     section: object,
     fragment_bindings: Mapping[str, _FragmentBinding],
+    *,
+    as_of_date: str = "",
 ) -> dict[str, object] | None:
     """장 끝 보도표를 pre-render 정본 표 항목으로 만든다. 없으면 None.
 
     renderer(`render._news_report_table`)와 «같은 순서·같은 글자»를 만들어야
-    한다 — 하나라도 어긋나면 봉인 대조가 보고서 전체를 막는다.
+    한다 — 하나라도 어긋나면 봉인 대조가 보고서 전체를 막는다. 캡션의 연도
+    표시 여부도 같은 함수(``news_block.oldest_stale_report_year``)로 같은
+    ``as_of_date``를 넣어 계산해야 그 대조가 깨지지 않는다.
     """
 
     news_rows = tuple(getattr(section, "news_rows", ()) or ())
@@ -1055,7 +1060,14 @@ def _news_table_payload(
         #   news라고 적으면 어느 실행에서도 대조가 실패한다. 표의 «출처»는
         #   행별 결속(source_fragment_ids)이 이미 정확히 말한다.
         kind="program",
-        caption=news_block_caption(len(rows)),
+        # ★ 봉인은 «전체 행»(news_rows, 이 함수 위쪽), 렌더는 «인쇄되는
+        #   행»(render._news_report_table의 included_rows, citation이
+        #   numbers에 없으면 빠진 행)으로 연도를 잰다. 두 행 집합이 이미
+        #   같다는 전제 위에서만 연도도 같다 — 어긋나면 캡션이 갈리기 전에
+        #   행 수·행 내용 대조(위 rows/row_bindings 비교)가 먼저 막는다.
+        caption=news_block_caption(
+            len(rows), oldest_stale_report_year(news_rows, as_of_date)
+        ),
         headers=NEWS_BLOCK_HEADERS,
         rows=rows,
         cite=source_cites[0],
@@ -1928,7 +1940,9 @@ def build_public_structure_seal(
                 )
             )
         # 보도표는 «장의 맨 끝». renderer도 같은 자리에 붙인다.
-        news_payload = _news_table_payload(section, fragment_bindings)
+        news_payload = _news_table_payload(
+            section, fragment_bindings, as_of_date=as_of_date
+        )
         if news_payload is not None:
             section_tables.append(news_payload)
         for table_index, payload in enumerate(section_tables):
