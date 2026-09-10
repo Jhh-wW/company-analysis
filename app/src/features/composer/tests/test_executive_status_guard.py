@@ -91,12 +91,130 @@ def test_departure_scheduled_after_baseline_is_not_yet_effective():
 
 
 def test_missing_date_near_marker_falls_back_to_marker_only():
-    """창 안에서 날짜를 못 찾으면(경력 나열이 길어서) 표지만으로 판정한다."""
+    """날짜가 «아예 없으면» 표지만으로 판정한다(닫힌 날짜 꼴 밖인 경우 포함)."""
 
-    sources = {"dart-officer": DART_DISMISSAL_EXCERPT}
+    sources = {"dart-officer": "해임 정석목 남 해당없음 계열회사 임원(당사 임원)"}
     assert guard(
         REAL_CANDIDATE_SENTENCE, sources, baseline_date="2026-09-10",
     ) == EXECUTIVE_STATUS_OUTDATED
+    # 「올해 3월」처럼 닫힌 숫자 꼴이 아닌 표기도 «날짜 없음»으로 본다.
+    assert guard(
+        REAL_CANDIDATE_SENTENCE,
+        {"dart-officer": "해임 정석목 남 올해 3월 계열회사 임원(당사 임원)"},
+        baseline_date="2026-09-10",
+    ) == EXECUTIVE_STATUS_OUTDATED
+
+
+def test_departure_date_is_found_across_a_real_table_row():
+    """★ 예정 이탈 면제가 «실제 표 거리»에서도 작동한다.
+
+    표지는 이름 바로 옆에 붙지만 날짜는 그 행의 끝에 있다(실측 129자).
+    표지와 같은 창(40자)으로 날짜를 찾으면 못 찾고 표지만 믿게 되어, 아직
+    오지 않은 예정 이탈까지 거절한다.
+    """
+
+    sources = {"dart-officer": DART_DISMISSAL_EXCERPT}
+    # 해임 예정일 2026-03-18 «앞» 기준일 — 아직 발효되지 않았다.
+    assert guard(REAL_CANDIDATE_SENTENCE, sources, baseline_date="2026-02-01") == ""
+    # 같은 조각, 기준일만 뒤로 — 그때는 그대로 거절한다.
+    assert guard(
+        REAL_CANDIDATE_SENTENCE, sources, baseline_date="2026-09-10",
+    ) == EXECUTIVE_STATUS_OUTDATED
+
+
+def test_multiple_dates_in_the_window_fall_back_to_marker_only():
+    """넓힌 날짜 창에 다른 사람의 날짜가 섞이면 면제하지 않는다(fail-closed)."""
+
+    two_people = (
+        "해임 정석목 남 1966년 06월 계열회사 임원 2026년 03월 18일. "
+        "해임 김철수 남 1970년 02월 계열회사 임원 2027년 05월 20일."
+    )
+    assert guard(
+        REAL_CANDIDATE_SENTENCE, {"s": two_people}, baseline_date="2026-02-01",
+    ) == EXECUTIVE_STATUS_OUTDATED
+
+
+# ── 오탐 회귀 (독립 검토 F2) ─────────────────────────────────────────────
+#: 실제 DART 「임원 현황」 표의 열 이름 순서 그대로. 해임·사임·퇴임이 한 번도
+#: 없는 «깨끗한» 표이고, 임기만료일 값(2028-03-20)은 기준일보다 뒤다.
+DART_CLEAN_OFFICER_TABLE = (
+    "성명 성별 출생년월 직위 등기임원여부 상근여부 담당업무 주요경력 "
+    "소유주식수 최대주주와의관계 재직기간 임기만료일 "
+    "김하늘 남 1971년 04월 대표이사 사내이사 상근 경영총괄 "
+    "서울대학교 경영학과 20년 2028년 03월 20일"
+)
+
+#: 같은 표에서 임기만료일 «값»이 「-」인 행(미등기·비상근 임원에 실제로 흔하다).
+#: 이 모양에서는 날짜 창을 아무리 넓혀도 날짜가 없으므로, 열 이름 오탐을 막는
+#: 것은 오직 「임기만료(?!일)」 좁힘 하나뿐이다 — 두 수정이 겹치지 않는 자리다.
+DART_CLEAN_OFFICER_TABLE_WITHOUT_DATE = (
+    "성명 성별 출생년월 직위 등기임원여부 상근여부 담당업무 재직기간 임기만료일 "
+    "김하늘 남 1971년 04월 대표이사 사내이사 상근 경영총괄 20년 -"
+)
+
+#: 실제 「다.등기임원 선임 후보자 및 해임 대상자 현황」 표의 제목 대목.
+DART_APPOINTMENT_TABLE = (
+    "다. 등기임원 선임 후보자 및 해임 대상자 현황 "
+    "구분 성명 성별 출생년월 최대주주와의 관계 "
+    "선임 김하늘 남 1971년 04월 해당없음"
+)
+
+
+def test_clean_officer_table_column_name_does_not_reject_a_sitting_officer():
+    """★ 「임기만료일」은 열 «이름»이다 — 사람의 이탈 기록이 아니다.
+
+    이 표에는 해임·사임·퇴임이 한 번도 없다. 그런데 「임기만료」를 문자열
+    포함으로 찾으면 열 이름 하나 때문에 재직 중인 대표이사 문장이 거절된다.
+    """
+
+    candidate = "2025년 12월 31일 기준 대표이사 김하늘이 회사를 총괄하고 있다."
+    assert guard(
+        candidate, {"dart-officer": DART_CLEAN_OFFICER_TABLE},
+        baseline_date="2026-09-10",
+    ) == ""
+    # ★ 임기만료일 «값»이 「-」인 행 — 날짜가 아예 없어 날짜 창 확대로는 구제되지
+    #   않는다. 이 줄이 초록인 이유는 오직 「임기만료(?!일)」 좁힘 때문이다.
+    assert guard(
+        candidate, {"dart-officer": DART_CLEAN_OFFICER_TABLE_WITHOUT_DATE},
+        baseline_date="2026-09-10",
+    ) == ""
+
+
+def test_expired_term_written_as_a_real_departure_is_still_rejected():
+    """좁히되 없애지 않는다 — 서술로 쓰인 「임기만료」는 그대로 잡는다."""
+
+    source = "김하늘 대표이사는 2025년 03월 20일 임기만료로 물러났다."
+    candidate = "대표이사 김하늘이 회사를 총괄하고 있다."
+    assert guard(
+        candidate, {"s": source}, baseline_date="2026-09-10",
+    ) == EXECUTIVE_STATUS_OUTDATED
+
+
+def test_common_nouns_beside_a_title_are_not_taken_as_names():
+    """★ 「선임」·「보고서」·「비중」은 사람 이름이 아니다.
+
+    실제로 「선임」이 이름으로 잡혀, 「등기임원 선임 후보자 및 해임 대상자
+    현황」 표를 인용한 정상 문장이 표 안의 「해임」과 묶여 거절됐다.
+    """
+
+    from src.features.composer.executive_status_guard import _candidate_names
+
+    assert _candidate_names("신임 대표이사 선임이 예정돼 있다.") == ()
+    assert _candidate_names("감사보고서의 의견을 공시했다.") == ()
+    assert _candidate_names("사외이사 비중을 높였다.") == ()
+    # 사람 이름은 그대로 잡힌다 — 위 좁힘이 검사를 꺼 버린 것이 아니다.
+    assert "정석목" in _candidate_names("멀티캠퍼스(대표이사 정석목)가 협약했다.")
+    assert "김하늘" in _candidate_names("대표이사 김하늘이 총괄한다.")
+
+
+def test_appointment_table_sentence_is_kept():
+    """실측 오탐 그대로 — 선임 안건 문장이 같은 표의 「해임」과 묶이지 않는다."""
+
+    candidate = "2026년 3월 주주총회에서 신임 대표이사 선임이 예정돼 있다."
+    assert guard(
+        candidate, {"dart-officer": DART_APPOINTMENT_TABLE},
+        baseline_date="2026-09-10",
+    ) == ""
 
 
 # ── 발동 경계 ────────────────────────────────────────────────────────────

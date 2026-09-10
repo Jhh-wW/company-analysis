@@ -56,6 +56,9 @@ from src.features.pipeline.tests.test_full_post_output_diagnostics import (  # n
 from src.features.pipeline.tests.test_real_cache import FakeEngine
 from src.features.provenance.sources import Source
 from src.features.revenuemix.logic import build as build_revenue_mix
+from src.shared.report_evidence.registry_eligibility import (
+    registry_indexing_ineligible,
+)
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
 from src.shared.report_evidence.source_verification import SourceVerification
 
@@ -267,3 +270,123 @@ def test_형식이_깨진_검증결과와_중복_등록부는_그대로_닫는�
     assert type(honest(report.citations[2], tuple(report.citations),
                        reference_date=report.as_of_date,
                        evidence_text="")) is SourceVerification
+
+
+def test_등록부의_자격없는_줄과_정본_줄이_실제로_갈린다(
+    _full_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """이 시험이 지키려는 «구분» 자체를 실측으로 못 박는다.
+
+    ★ legacy 모양은 실제로 두 가지다(둘 다 도장·등록부가 깨진 것이 아니다):
+        · 공시 원문 조각 — ``source_type``·``fact_status``가 빈 문자열
+        · DART 재무 API 응답 — 세 날짜 필드가 모두 빈 문자열
+      술어가 앞의 한 가지만 알면 두 번째가 «검증 실패»로 분류돼 legacy 보존
+      시험이 빨간불이 된다. 그래서 두 모양이 등록부에 실제로 함께 있다는
+      사실을 여기서 고정한다.
+    """
+
+    report, _official_evidence = _real_report_and_evidence(monkeypatch, _full_runtime)
+    verifier = supplementary_research_source_verifier()
+    registry = tuple(report.citations)
+
+    unverified = [
+        source
+        for source in registry
+        if verifier(
+            source, registry, reference_date=report.as_of_date, evidence_text=""
+        )
+        is None
+    ]
+    assert len(unverified) >= _MINIMUM_LEGACY_CITATIONS
+    # 검증되지 않은 줄은 «전부» 색인 자격이 없는 legacy 줄이어야 한다.
+    assert all(registry_indexing_ineligible(source) for source in unverified)
+    # 그리고 검증을 통과한 줄은 «하나도» 자격 없음으로 분류되면 안 된다.
+    assert all(
+        not registry_indexing_ineligible(source)
+        for source in registry
+        if source not in unverified
+    )
+    assert any(
+        not source.source_type.strip() and not source.fact_status.strip()
+        for source in unverified
+    ), "공시 원문 조각 모양(필수 필드 부재)이 등록부에서 사라졌습니다"
+
+
+def test_정본출처가_한_건이라도_검증불가면_그대로_닫는다(
+    _full_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 독립 검토의 재현 그대로 — 정본 줄을 한 건씩 «검증 불가»로 만든다.
+
+    변경 전에는 ``verified is None``을 전부 건너뛰어, 정본 출처의 도장이
+    깨져도(=검증자가 ``None``) 보고서가 그대로 나갔다. 이제는 자격 없는
+    legacy 줄만 건너뛰고 나머지는 예전처럼 등록부 전체를 닫는다.
+    """
+
+    report, official_evidence = _real_report_and_evidence(monkeypatch, _full_runtime)
+    honest = supplementary_research_source_verifier()
+    registry = tuple(report.citations)
+    canonical = [
+        source
+        for source in registry
+        if honest(
+            source, registry, reference_date=report.as_of_date, evidence_text=""
+        )
+        is not None
+    ]
+    assert len(canonical) >= 10, "정본 출처가 너무 적어 이 시험이 의미를 잃습니다"
+
+    for target in canonical:
+        def one_source_unavailable(
+            source, registry_arg, *, reference_date, evidence_text, _target=target
+        ):
+            if source is _target:
+                return None
+            return honest(
+                source,
+                registry_arg,
+                reference_date=reference_date,
+                evidence_text=evidence_text,
+            )
+
+        decision = assess_supplementary_research_release(
+            report,
+            official_evidence=official_evidence,
+            source_verifier=one_source_unavailable,
+        )
+        assert decision.allowed is False, f"{target.number}번 정본 출처"
+        assert decision.code == SUPPLEMENTARY_RELEASE_INVALID_CITATION_REGISTRY
+
+
+def test_정본출처의_도장이_깨지면_그대로_닫는다(
+    _full_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """가짜 검증자가 아니라 «실제 원문 도장»을 깨뜨려도 닫히는지 본다."""
+
+    report, official_evidence = _real_report_and_evidence(monkeypatch, _full_runtime)
+    honest = supplementary_research_source_verifier()
+    registry = tuple(report.citations)
+    target = next(
+        source
+        for source in registry
+        if honest(
+            source, registry, reference_date=report.as_of_date, evidence_text=""
+        )
+        is not None
+    )
+    assert target.provenance_seal, "도장이 없으면 이 시험이 아무것도 증명하지 못합니다"
+
+    broken = replace(target, provenance_seal="a" * 64)
+    tampered = replace(
+        report,
+        citations=[broken if source is target else source for source in registry],
+    )
+
+    decision = assess_supplementary_research_release(
+        tampered, official_evidence=official_evidence, source_verifier=honest
+    )
+
+    assert decision.allowed is False
+    assert decision.code == SUPPLEMENTARY_RELEASE_INVALID_CITATION_REGISTRY

@@ -10,8 +10,11 @@ from typing import Optional
 
 import pytest
 
-from src.features.composer.constants import GRADE_CONFIRMED
-from src.features.composer.pipeline import _legacy_summary_stage
+from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
+from src.features.composer.pipeline import (
+    _legacy_summary_stage,
+    _supplement_safe_summary,
+)
 from src.features.composer.port import (
     AskFatalError,
     ComposedReport,
@@ -63,6 +66,35 @@ def _report(*section_sentences: tuple[str, str, str]) -> ComposedReport:
             for section_id, text, citation in section_sentences
         )
     )
+
+
+def _interpreted(text: str, citation: str) -> ComposedSentence:
+    """reviewer 전역 실패로 «해석»까지 강등된 본문 문장."""
+
+    return ComposedSentence(
+        text=text, citations=(citation,), grade=GRADE_INTERPRETED,
+        verification_state="verified",
+    )
+
+
+#: 장마다 «두» 문장이 있는 본문. 모두 «해석»이라 1차 보충(확인 문장만 고름)이
+#: 아무것도 못 채우고 안전 보충 경로가 실제로 돌아간다.
+_BODY_TWO_EACH = ComposedReport(
+    sections=(
+        ComposedSection("identity", (
+            _interpreted("가나다전자 개요 첫 문단이다.", "1"),
+            _interpreted("가나다전자 개요 둘째 문단이다.", "1"),
+        )),
+        ComposedSection("business_model", (
+            _interpreted("가나다전자 사업모델 첫 문단이다.", "2"),
+            _interpreted("가나다전자 사업모델 둘째 문단이다.", "2"),
+        )),
+        ComposedSection("portfolio", (
+            _interpreted("가나다전자 포트폴리오 첫 문단이다.", "3"),
+            _interpreted("가나다전자 포트폴리오 둘째 문단이다.", "3"),
+        )),
+    )
+)
 
 
 _BODY_THREE = _report(
@@ -465,3 +497,61 @@ def test_reviewer_fatal_preserves_draft_observation() -> None:
     assert record["수치검사후수"] is None
     assert record["최종수"] is None
     _assert_no_leaked_content(record)
+
+
+# ══════════════════════════════════════════════════════════
+# 안전 보충의 «고르는 순서» (독립 검토 F6)
+# ══════════════════════════════════════════════════════════
+
+
+def test_안전보충은_각_장의_첫_문장을_마지막_순위로_돌린다() -> None:
+    """★ 예전에는 이 경로가 걸릴 때마다 요약이 「1·2·3장 첫 문장」이었다.
+
+    장을 번갈아 돌며 «각 장의 첫 문장»부터 집었기 때문이다. 실측 실행의 요약
+    3건이 정확히 그 서명이었다. 장마다 다른 문장이 있으면 그것부터 쓴다.
+    """
+
+    chosen = _supplement_safe_summary((), _BODY_TWO_EACH)
+
+    texts = [sentence.text for sentence in chosen]
+    firsts = [section.sentences[0].text for section in _BODY_TWO_EACH.sections]
+    assert len(texts) == 3
+    assert not (set(texts) & set(firsts)), (
+        f"각 장의 첫 문장이 그대로 요약이 됐다: {texts}"
+    )
+    assert texts == [
+        section.sentences[1].text for section in _BODY_TWO_EACH.sections
+    ]
+
+
+def test_안전보충은_한_문장뿐인_장에서는_그_첫_문장을_쓴다() -> None:
+    """순서만 바꿨을 뿐 «쓸 수 있는 문장 집합»은 같다 — 빈 요약 위험 0."""
+
+    thin = ComposedReport(
+        sections=tuple(
+            ComposedSection(section.section_id, section.sentences[:1])
+            for section in _BODY_TWO_EACH.sections
+        )
+    )
+
+    chosen = _supplement_safe_summary((), thin)
+
+    assert [sentence.text for sentence in chosen] == [
+        section.sentences[0].text for section in thin.sections
+    ]
+
+
+def test_안전보충은_다른_문장을_다_쓴_뒤에야_첫_문장을_쓴다() -> None:
+    """장이 둘뿐이라 최소 문장 수를 채우려면 첫 문장까지 가야 한다."""
+
+    two_sections = ComposedReport(sections=_BODY_TWO_EACH.sections[:2])
+
+    chosen = _supplement_safe_summary((), two_sections)
+    texts = [sentence.text for sentence in chosen]
+
+    assert len(texts) == 3
+    # 둘째 문장 둘이 먼저, 그다음에야 첫 문장 하나가 온다.
+    assert texts[:2] == [
+        section.sentences[1].text for section in two_sections.sections
+    ]
+    assert texts[2] == two_sections.sections[0].sentences[0].text

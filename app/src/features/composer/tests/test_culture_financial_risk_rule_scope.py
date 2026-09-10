@@ -147,6 +147,92 @@ def test_위험_범주만_있고_규정_표현이_없으면_대상이_아니다(
 
 
 # ══════════════════════════════════════════════════════════
+# ②-b «누가 맡는지» 말한 제도 문장은 동사가 달라도 보존한다 (독립 검토 F4)
+# ══════════════════════════════════════════════════════════
+
+#: 8장 안내문은 «재무 위험을 누가 맡는지 조직으로 설명한 문장만 예외»라고
+#: 적었는데, 코드는 조직 주체와 «닫힌 동사 일곱 개»를 둘 다 요구했다. 그래서
+#: 누가 맡는지 분명히 말한 아래 문장들이 동사 하나 때문에 차단됐다.
+ACTOR_RULE_TEXTS = (
+    "리스크관리위원회가 유동성 위험 관리규정에 따라 거래한도를 심의·의결한다.",
+    "재무팀이 환위험 관리규정을 수립하고 운영한다.",
+    "이사회가 신용위험 관리규정의 이행을 감독한다.",
+    "위험관리위원회가 유동성 위험 관리정책을 분기마다 검토한다.",
+    "경영지원팀이 유동성 위험 관리기준의 준수 여부를 매월 점검한다.",
+)
+
+
+@pytest.mark.parametrize("text", ACTOR_RULE_TEXTS)
+def test_담당조직이_말해진_제도_문장은_동사가_달라도_보존된다(text):
+    assert culture_financial_risk_goal_problem(text) == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "재무팀이 환위험 관리규정을 수립하지 않는다.",
+        "리스크관리위원회가 유동성 위험 관리규정을 심의하지 않는다.",
+        "담당부서가 신용위험 관리절차를 운영하지 못한다.",
+    ),
+)
+def test_넓힌_동사도_부정되면_면제가_만들어지지_않는다(text):
+    assert culture_financial_risk_goal_problem(text) == (
+        CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED
+    )
+
+
+def test_넓힌_동사는_조직_주체_없이는_면제를_만들지_않는다():
+    """★ 이 블록의 안전선은 «누가»다 — 동사만 넓혔지 주체 요구는 그대로다."""
+    for text in (
+        "환위험 관리규정을 수립하고 운영하고 있다.",
+        "유동성 위험 관리원칙을 지속적으로 관리한다.",
+    ):
+        assert culture_financial_risk_goal_problem(text) == (
+            CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED
+        ), text
+
+
+def test_넓힌_동사가_목표_노출_블록까지_풀지는_않는다():
+    """목표/노출 블록은 조직 주체를 요구하지 않으므로 목록을 넓히지 않았다."""
+    assert culture_financial_risk_goal_problem(
+        "회사는 환율 변동 위험에 노출되어 있으며 이를 지속적으로 관리한다."
+    ) == CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED
+
+
+# ══════════════════════════════════════════════════════════
+# ②-c 사내대출 복리후생 문장 (독립 검토 F5)
+# ══════════════════════════════════════════════════════════
+
+#: 「신용검증」이 범주 목록에 있어서, 조직 주체가 없는 복리후생 문장이 재무위험
+#: 규정 서술로 분류돼 차단됐다.
+STAFF_LOAN_TEXT = (
+    "회사는 임직원 사내대출 관리규정에 따라 신용검증절차를 거쳐 주택자금을 지원한다."
+)
+
+
+def test_사내대출_복리후생_문장은_보존된다():
+    assert culture_financial_risk_goal_problem(STAFF_LOAN_TEXT) == ""
+
+
+def test_신용_범주는_신용검증_없이도_실측_문장을_그대로_잡는다():
+    """★ 「신용검증」을 뺀 자리를 무엇이 대신 잡는지 못 박는다.
+
+    실측 신용 문장은 「신용거래」와 「연체관리」를 함께 쓰고 있어 범주가 두
+    갈래로 잡힌다. 그래서 절차 이름 하나를 빼도 차단이 유지된다.
+    """
+    assert "신용검증" in CREDIT_RULE_TEXT
+    assert "신용거래" in CREDIT_RULE_TEXT
+    assert "연체관리" in CREDIT_RULE_TEXT
+    assert culture_financial_risk_goal_problem(CREDIT_RULE_TEXT) == (
+        CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED
+    )
+    # 「신용검증」만 지운 같은 문장도 그대로 차단된다.
+    assert culture_financial_risk_goal_problem(
+        CREDIT_RULE_TEXT.replace("신용검증절차의 수행을", "절차의 수행을")
+    ) == CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED
+
+
+# ══════════════════════════════════════════════════════════
 # ③ 실제 verify_report 경계 — 배선까지 확인한다
 # ══════════════════════════════════════════════════════════
 

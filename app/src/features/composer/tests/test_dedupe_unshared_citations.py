@@ -31,12 +31,49 @@ from src.features.composer.port import (
 #: 실측 — 세 조각 모두 같은 사업보고서(rcept_no 20260316000476)에서 나왔다.
 FILING_URL = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260316000476"
 
+#: 실측 — 같은 공시의 legacy 조각과 typed 조각이 공유하는 문서 신원.
+#: 두 생산 갈래(evidence_transport의 legacy 갈래·typed 갈래)가 같은 규칙으로
+#: 만든다: DART 접수번호 기반 ``document:<host>:<접수번호>``.
+FILING_IDENTITY = "document:dart.fss.or.kr:20260316000476"
+
+#: 실측 — typed 조각만 갖는 문서 전체 원문 지문. legacy 조각은 이 필드가 생기기
+#: 전 모양이라 항상 빈 문자열이다.
+FILING_SHA256 = "73d6677" + "0" * 57
+
 
 def _filing_fragments(*fragment_ids: str) -> tuple[CollectedFragment, ...]:
     """한 공시 문서를 여러 조각으로 쪼갠 실제 모양을 만든다."""
     return tuple(
         CollectedFragment(fragment_id, "공시", "원문", source_url=FILING_URL)
         for fragment_id in fragment_ids
+    )
+
+
+def _legacy_fragment(fragment_id: str, *, identity: str = FILING_IDENTITY):
+    """운영 legacy 조각 — 문서 지문이 «항상» 빈 문자열이고 신원만 있다."""
+    return CollectedFragment(
+        fragment_id,
+        "매출수주",
+        "원문",
+        document_identity=identity,
+        document_content_sha256="",
+    )
+
+
+def _typed_fragment(
+    fragment_id: str,
+    *,
+    identity: str = FILING_IDENTITY,
+    sha256: str = FILING_SHA256,
+):
+    """운영 typed 조각 — 신원과 문서 지문을 «둘 다» 싣는다."""
+    return CollectedFragment(
+        fragment_id,
+        "공시",
+        "원문",
+        source_url=FILING_URL,
+        document_identity=identity,
+        document_content_sha256=sha256,
     )
 
 # ── 실측: 같은 사실을 두 장이 각각 다른 조각으로 인용했다 ──
@@ -125,6 +162,111 @@ def test_조각은_달라도_같은_문서면_거의_같은_문장을_한_장만
     assert _texts(cleaned, "operations_partners") == []
 
 
+def test_legacy조각과_typed조각이_섞여도_같은_문서로_묶인다():
+    """★ 실측 실행이 정확히 이 모양이었다 — 열쇠 «하나»로는 갈라진다.
+
+    3장이 인용한 조각은 legacy(지문 없음·신원만), 7장이 인용한 두 조각은
+    typed(지문 있음)였다. 우선순위 하나만 열쇠로 쓰면 3장은 신원, 7장은
+    지문이 열쇠가 되어 교집합이 비고 «같은 문서» 판정이 통째로 꺼진다.
+    겹침은 0.8889로 문턱 위인데도 한 문장도 빠지지 않았다.
+    """
+    mixed = (
+        _legacy_fragment("v2-frag-8"),
+        _typed_fragment("v2-frag-26"),
+        _typed_fragment("v2-frag-28"),
+        _legacy_fragment("v2-frag-153"),
+    )
+    assert mixed[0].document_content_sha256 == ""
+    assert mixed[1].document_content_sha256 != ""
+    assert mixed[0].document_identity == mixed[1].document_identity
+
+    cleaned, dropped = drop_cross_section_duplicates(_order_report(), fragments=mixed)
+
+    assert dropped == 1
+    assert _texts(cleaned, "portfolio") == [
+        PORTFOLIO_SEGMENT_TEXT,
+        PORTFOLIO_ORDER_TEXT,
+    ]
+    assert _texts(cleaned, "operations_partners") == []
+
+
+def test_legacy와_typed가_서로_다른_문서면_닮아도_지우지_않는다():
+    """열쇠를 집합으로 넓혀도 «다른 문서»의 안전선은 그대로다 — 음성 짝."""
+    mixed = (
+        _legacy_fragment("v2-frag-8", identity="document:dart.fss.or.kr:20250101000001"),
+        _typed_fragment(
+            "v2-frag-26",
+            identity="document:dart.fss.or.kr:20260316000476",
+            sha256="a" * 64,
+        ),
+        _typed_fragment(
+            "v2-frag-28",
+            identity="document:dart.fss.or.kr:20260316000476",
+            sha256="a" * 64,
+        ),
+        _legacy_fragment(
+            "v2-frag-153", identity="document:dart.fss.or.kr:20250101000001"
+        ),
+    )
+
+    cleaned, dropped = drop_cross_section_duplicates(_order_report(), fragments=mixed)
+
+    assert dropped == 0
+    assert _texts(cleaned, "operations_partners") == [OPERATIONS_ORDER_TEXT]
+
+
+def test_흔한_문서명은_다른_문서를_묶는_다리가_되지_않는다():
+    """「사업보고서」 같은 제목은 강한 열쇠가 하나도 없을 때만 쓴다."""
+    same_title = (
+        CollectedFragment(
+            "v2-frag-8",
+            "공시",
+            "원문",
+            document_title="사업보고서",
+            document_identity="document:dart.fss.or.kr:20250101000001",
+        ),
+        CollectedFragment(
+            "v2-frag-26",
+            "공시",
+            "원문",
+            document_title="사업보고서",
+            document_identity="document:dart.fss.or.kr:20260316000476",
+            document_content_sha256="b" * 64,
+        ),
+        CollectedFragment(
+            "v2-frag-28",
+            "공시",
+            "원문",
+            document_title="사업보고서",
+            document_identity="document:dart.fss.or.kr:20260316000476",
+            document_content_sha256="b" * 64,
+        ),
+        CollectedFragment(
+            "v2-frag-153",
+            "공시",
+            "원문",
+            document_title="사업보고서",
+            document_identity="document:dart.fss.or.kr:20250101000001",
+        ),
+    )
+
+    _, dropped = drop_cross_section_duplicates(_order_report(), fragments=same_title)
+
+    assert dropped == 0
+
+
+def test_강한_열쇠가_없으면_문서명으로_묶는다():
+    """예전 동작 보존 — 지문·신원·주소가 하나도 없는 조각은 문서명이 열쇠다."""
+    title_only = tuple(
+        CollectedFragment(fragment_id, "공시", "원문", document_title="사업보고서")
+        for fragment_id in ("v2-frag-8", "v2-frag-26", "v2-frag-28", "v2-frag-153")
+    )
+
+    _, dropped = drop_cross_section_duplicates(_order_report(), fragments=title_only)
+
+    assert dropped == 1
+
+
 def test_문서까지_다르면_닮아도_지우지_않는다():
     """정말 다른 자료에서 온 두 사실은 표현이 닮아도 남긴다 — 기존 안전선."""
     other = tuple(
@@ -157,26 +299,78 @@ def test_문서_열쇠가_없는_조각끼리는_같은_문서로_묶이지_않�
     assert dropped == 0
 
 
-def test_운영_경로가_조각을_실제로_넘긴다():
+def test_운영_경로가_조각을_실제로_넘긴다(monkeypatch):
     """★ 배선 단정 — 넘기지 않으면 이 규칙은 운영에서 통째로 꺼진다.
 
-    호출부의 인자를 직접 읽는다. 시험 안에서 따로 만들어 검사하면 운영 배선이
-    빠져도 초록불이 된다.
+    운영 진입점(run_v2)을 실제로 돌리고 «그 호출이 받은 인자»를 단정한다.
+    시험 안에서 따로 만들어 검사하면 운영 배선이 빠져도 초록불이 된다.
+
+    ★ 예전 판은 소스 문자열을 세는 검사였는데
+      ``source.count("fragments=_normalize_fragments(verification_fragments)")``
+      가 dedupe와 무관한 다른 호출 두 건만으로도 충족돼 사실상 공전했다.
     """
+    from src.features.composer import dedupe as dedupe_module
+    from src.features.composer import pipeline
+    from src.features.composer.logic import _normalize_fragments
+    from src.features.composer.tests.test_pipeline import (
+        _FakeReviewer,
+        _FakeWriter,
+        _raw_fragments,
+    )
+
+    seen: list[tuple[tuple, dict]] = []
+
+    def spy(*args, **kwargs):
+        seen.append((args, kwargs))
+        return dedupe_module.drop_cross_section_duplicates(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "drop_cross_section_duplicates", spy)
+
+    raw = _raw_fragments()
+    pipeline.run_v2(
+        "가나다전자", raw, None,
+        writer_ask=_FakeWriter(), reviewer_ask=_FakeReviewer(),
+        corp_type="상장사", as_of_date="2026-08-24",
+    )
+
+    assert seen, "운영 경로가 중복 제거를 아예 부르지 않았습니다"
+    expected = _normalize_fragments(raw)
+    assert expected, "이 시험의 조각 픽스처가 비면 아무것도 증명하지 못합니다"
+    for _args, kwargs in seen:
+        assert "fragments" in kwargs, (
+            "조각을 넘기지 않는 drop_cross_section_duplicates 호출이 있습니다"
+        )
+        assert tuple(kwargs["fragments"]) == expected
+
+
+def test_모든_호출부가_같은_조각을_넘긴다():
+    """보충 경로처럼 이 시험이 못 도는 호출부까지 «구문»으로 전수 확인한다.
+
+    문자열 세기가 아니라 실제 호출 노드만 본다 — 다른 함수의 호출이나 주석은
+    세지 않는다.
+    """
+    import ast
     import inspect
 
     from src.features.composer import pipeline
 
-    source = inspect.getsource(pipeline)
-    calls = source.count("drop_cross_section_duplicates(")
-    # import 줄 1개는 호출이 아니다.
-    assert calls >= 2, "호출부가 줄었습니다 — 배선 단정을 다시 맞추세요"
-    assert source.count("fragments=_normalize_fragments(verification_fragments)") >= 2
-    for chunk in source.split("drop_cross_section_duplicates(")[1:]:
-        head = chunk[:600]
-        assert "fragments=" in head, (
-            "조각을 넘기지 않는 drop_cross_section_duplicates 호출이 있습니다"
+    tree = ast.parse(inspect.getsource(pipeline))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "drop_cross_section_duplicates"
+    ]
+    assert len(calls) >= 2, "호출부가 줄었습니다 — 배선 단정을 다시 맞추세요"
+    for call in calls:
+        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+        assert "fragments" in keywords, (
+            f"{call.lineno}행의 호출이 조각을 넘기지 않습니다"
         )
+        assert ast.unparse(keywords["fragments"]) == (
+            "_normalize_fragments(verification_fragments)"
+        ), f"{call.lineno}행이 다른 조각을 넘깁니다"
 
 
 def test_실측_짝의_겹침이_문턱_위에_있다():

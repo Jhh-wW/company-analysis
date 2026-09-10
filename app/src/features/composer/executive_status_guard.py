@@ -21,7 +21,9 @@ from datetime import date
 from src.features.composer.executive_status_constants import (
     DEPARTURE_DATE_RE,
     EXECUTIVE_STATUS_OUTDATED,
-    STATUS_DEPARTURE_WORDS,
+    STATUS_DATE_WINDOW_CHARS,
+    STATUS_DEPARTURE_RE,
+    STATUS_NAME_STOPWORDS,
     STATUS_REAPPOINTMENT_WORDS,
     STATUS_WINDOW_CHARS,
     TITLE_NAME_PATTERNS,
@@ -40,6 +42,20 @@ def _occurrences(haystack: str, needle: str) -> tuple[int, ...]:
     return tuple(found)
 
 
+def _is_name_like(surface: str) -> bool:
+    """그 표면형을 사람 이름 자리로 인정할 것인가.
+
+    ★ 이름 자리는 «직함 옆 한글 2~4음절»이라는 모양만 본다. 그래서 직함 뒤에
+      이어지는 보통명사(「대표이사 선임이」의 「선임」, 「감사보고서의」의
+      「보고서」, 「사외이사 비중을」의 「비중」)가 그대로 이름 후보가 된다.
+      실측에서 그 오인 때문에 정상 문장 하나가 통째로 거절됐다.
+      닫힌 불용어 목록으로만 걸러 낸다 — 이 모듈은 유사도·형태소 분석을 쓰지
+      않기 때문이다(모듈 머리말의 «지키는 선»).
+    """
+
+    return bool(surface) and surface not in STATUS_NAME_STOPWORDS
+
+
 def _candidate_names(text: str) -> tuple[str, ...]:
     """직함 곁에 붙은 «이름처럼 보이는» 표면형을 뽑는다. 조사 삼킴은 되돌린다.
 
@@ -47,6 +63,9 @@ def _candidate_names(text: str) -> tuple[str, ...]:
       (「목」이 받침으로 끝나 「이」가 붙는 꼴). 원문 조각에는 조사 없는 표 형태
       (「정석목」)로 실리는 일이 많으므로, 조사로 끝나면 그 글자를 뗀 짧은 형태도
       함께 후보로 둔다 — 둘 다 시도해 한쪽이라도 원문과 맞으면 된다.
+
+    ★ 조사를 뗀 꼴이 불용어면 붙은 꼴도 함께 버린다 — 「선임이」와 「선임」은
+      같은 낱말이라 한쪽만 걸러 내면 다른 쪽으로 그대로 새기 때문이다.
     """
 
     names: list[str] = []
@@ -55,24 +74,35 @@ def _candidate_names(text: str) -> tuple[str, ...]:
             raw = match.group(1)
             if not raw:
                 continue
-            if raw not in names:
-                names.append(raw)
+            trimmed = ""
             if len(raw) >= 3 and raw[-1] in TRAILING_PARTICLE_CHARS:
                 trimmed = raw[:-1]
-                if len(trimmed) >= 2 and trimmed not in names:
-                    names.append(trimmed)
+            if not _is_name_like(raw) or (trimmed and not _is_name_like(trimmed)):
+                continue
+            if raw not in names:
+                names.append(raw)
+            if len(trimmed) >= 2 and trimmed not in names:
+                names.append(trimmed)
     return tuple(names)
 
 
 def _parse_departure_date(window: str) -> "date | None":
-    match = DEPARTURE_DATE_RE.search(window)
-    if not match:
-        return None
-    try:
-        year, month, day = (int(part) for part in match.groups())
-        return date(year, month, day)
-    except ValueError:
-        return None
+    """창 안에서 이탈 날짜가 «하나로 확정될 때만» 돌려준다.
+
+    ★ 서로 다른 날짜가 둘 이상이면 어느 것이 이 사람의 것인지 확정할 수 없으므로
+      ``None``을 돌려준다 — 호출자는 그때 표지를 그대로 믿는다(fail-closed).
+      날짜 창을 표지 창보다 넓게 잡아도 다른 사람의 날짜로 면제가 만들어지지
+      않게 하는 유일한 안전선이다.
+    """
+
+    found: set[date] = set()
+    for match in DEPARTURE_DATE_RE.finditer(window):
+        try:
+            year, month, day = (int(part) for part in match.groups())
+            found.add(date(year, month, day))
+        except ValueError:
+            continue
+    return found.pop() if len(found) == 1 else None
 
 
 def _departed_without_reappointment(
@@ -90,13 +120,20 @@ def _departed_without_reappointment(
     for start in _occurrences(source_text, name):
         window_start = max(0, start - STATUS_WINDOW_CHARS)
         window_end = min(len(source_text), start + len(name) + STATUS_WINDOW_CHARS)
-        window = source_text[window_start:window_end]
-        if not any(word in window for word in STATUS_DEPARTURE_WORDS):
+        if STATUS_DEPARTURE_RE.search(source_text[window_start:window_end]) is None:
             continue
         if baseline is None:
             return True
-        departure_date = _parse_departure_date(window)
-        # ★ 날짜를 못 찾으면(표지만 있고 날짜가 창 밖에 있으면) 미확인이 아니라
+        # ★ 날짜는 표지보다 «넓은» 창에서 찾는다. 표지는 이름 바로 옆에 붙지만
+        #   날짜는 그 표 행의 끝에 있어서, 같은 창을 쓰면 실제 표 모양에서
+        #   날짜를 한 번도 못 찾는다(실측: 이름→날짜 129자).
+        date_window = source_text[
+            max(0, start - STATUS_DATE_WINDOW_CHARS) : min(
+                len(source_text), start + len(name) + STATUS_DATE_WINDOW_CHARS
+            )
+        ]
+        departure_date = _parse_departure_date(date_window)
+        # ★ 날짜를 못 찾거나 여러 날짜가 섞여 확정할 수 없으면 미확인이 아니라
         #   표지를 그대로 믿는다 — 날짜 표기가 닫힌 꼴 밖일 뿐 이탈 사실 자체는
         #   여전히 표지가 말하고 있기 때문이다.
         if departure_date is None or departure_date <= baseline:

@@ -30,6 +30,8 @@ from src.features.composer.culture_constants import (
     CULTURE_FINANCIAL_RISK_GOVERNANCE_VERB_RE,
     CULTURE_FINANCIAL_RISK_ORG_ACTOR_RE,
     CULTURE_FINANCIAL_RISK_POLICY_GOAL_RE,
+    CULTURE_FINANCIAL_RISK_RULE_GOVERNANCE_NEGATION_RE,
+    CULTURE_FINANCIAL_RISK_RULE_GOVERNANCE_VERB_RE,
     CULTURE_FINANCIAL_RISK_RULE_RE,
     CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,
     CULTURE_FLOW_CELL_COUNT,
@@ -224,6 +226,10 @@ def _financial_risk_rule_clauses(text: str) -> tuple[str, ...]:
       둘 다 있어야 한다. 동사만으로 면제하지 않는 이유는 실측에 있다 —
       «매 보고기간말에 손상여부를 검토하는»의 «검토»는 사람·조직이 하는
       승인 절차가 아니라 회계 동작인데, 동사만 보면 면제가 만들어진다.
+    ★ 절차 동사는 이 블록 «전용» 목록을 쓴다
+      (CULTURE_FINANCIAL_RISK_RULE_GOVERNANCE_VERB_RE). 심의·의결·수립·운영·
+      점검·관리까지 담아 «누가 맡는지»를 말한 제도 문장을 보존하되, 조직
+      주체를 요구하지 않는 목표/노출 블록의 목록은 넓히지 않는다.
     ★ «회사»·«당사»·«관리주체» 같은 일반 명사는 주체로 세지 않는다. 그런
       말은 거의 모든 문장에 있어서 인정하면 이 규칙이 통째로 꺼진다.
     ★ 판단 경계는 «같은 절»이다 — culture_accounting·목표/노출 블록과 같다.
@@ -240,8 +246,10 @@ def _financial_risk_rule_clauses(text: str) -> tuple[str, ...]:
             continue
         governance_bound = (
             CULTURE_FINANCIAL_RISK_ORG_ACTOR_RE.search(surface_clause)
-            and CULTURE_FINANCIAL_RISK_GOVERNANCE_VERB_RE.search(surface_clause)
-            and not CULTURE_FINANCIAL_RISK_GOVERNANCE_NEGATION_RE.search(surface_clause)
+            and CULTURE_FINANCIAL_RISK_RULE_GOVERNANCE_VERB_RE.search(surface_clause)
+            and not CULTURE_FINANCIAL_RISK_RULE_GOVERNANCE_NEGATION_RE.search(
+                surface_clause
+            )
         )
         if governance_bound:
             continue

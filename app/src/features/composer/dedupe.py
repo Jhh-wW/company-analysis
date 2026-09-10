@@ -88,35 +88,54 @@ _KEEP_CHARS_RE: Final[re.Pattern[str]] = re.compile(r"[^0-9A-Za-z가-힣]+")
 
 def _document_keys(
     fragments: Optional[Sequence[CollectedFragment]],
-) -> dict[str, str]:
-    """조각 id → «어느 원문 문서에서 왔나» 열쇠.
+) -> dict[str, frozenset[str]]:
+    """조각 id → «어느 원문 문서에서 왔나» 열쇠 «집합».
+
+    ★ 왜 «하나»가 아니라 «집합»인가 (실측) — 조각 생산자가 두 갈래다.
+      typed 조각은 지문(document_content_sha256)과 신원(document_identity)을
+      둘 다 채우지만, legacy 조각은 지문을 빈 문자열로 «고정»하고
+      (pipeline/evidence_transport.py의 legacy 갈래) 신원만 채운다. 우선순위
+      하나만 열쇠로 쓰면 같은 공시에서 나온 두 조각이 한쪽은 지문, 한쪽은
+      신원으로 갈려 교집합이 비고 «같은 문서» 판정이 통째로 꺼진다.
+      실측 실행에서 3장 legacy 조각과 7장 typed 조각이 정확히 그 모양이었다.
+      그래서 조각이 가진 강한 열쇠를 «전부» 담고 하나라도 겹치면 같은 문서로
+      본다.
 
     ★ 열쇠가 없는 조각은 «자기 자신»을 열쇠로 갖는다 — 빈 값끼리 묶여 서로
-      무관한 조각이 «같은 문서»가 되는 사고를 막는다(fail-closed). 지문·신원·
-      주소·문서명 순으로 있는 것을 쓰고, 하나도 없으면 조각 id를 쓴다.
+      무관한 조각이 «같은 문서»가 되는 사고를 막는다(fail-closed).
+
+    ★ 문서명은 강한 열쇠가 하나도 없을 때만 쓴다 — 「사업보고서」처럼 흔한
+      제목은 서로 다른 회사의 다른 문서에도 똑같이 붙어 있어서, 지문·신원·
+      주소와 나란히 두면 무관한 문서를 묶는 다리가 된다.
     """
 
-    keys: dict[str, str] = {}
+    keys: dict[str, frozenset[str]] = {}
     for fragment in fragments or ():
         fragment_id = str(fragment.fragment_id)
-        for candidate in (
-            fragment.document_content_sha256,
-            fragment.document_identity,
-            fragment.source_url,
-            fragment.document_title,
-        ):
-            if candidate:
-                keys[fragment_id] = candidate
-                break
-        else:
-            keys[fragment_id] = f"조각:{fragment_id}"
+        strong = {
+            candidate
+            for candidate in (
+                fragment.document_content_sha256,
+                fragment.document_identity,
+                fragment.source_url,
+            )
+            if candidate
+        }
+        keys[fragment_id] = frozenset(
+            strong or {fragment.document_title or f"조각:{fragment_id}"}
+        )
     return keys
 
 
-def _documents_of(citations: frozenset[str], keys: dict[str, str]) -> frozenset[str]:
+def _documents_of(
+    citations: frozenset[str], keys: dict[str, frozenset[str]]
+) -> frozenset[str]:
     """그 문장이 근거로 든 문서 열쇠 집합. 모르는 조각은 자기 id로 남는다."""
 
-    return frozenset(keys.get(citation, f"조각:{citation}") for citation in citations)
+    merged: set[str] = set()
+    for citation in citations:
+        merged |= keys.get(citation, frozenset({f"조각:{citation}"}))
+    return frozenset(merged)
 
 
 def _signature(text: str) -> frozenset[str]:
