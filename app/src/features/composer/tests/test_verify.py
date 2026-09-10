@@ -1260,3 +1260,144 @@ def test_장_밖_인용_제외는_검수_대상이_없어도_되살아나지_않
     assert checked.sections[0].sentences == (), (
         "검수 대상이 없다는 이유로 장 밖 인용 문장이 되살아났다"
     )
+
+
+# ══════════════════════════════════════════════════════════
+# 배율 어휘 · 실적표 원값 (2026-09-11 인텍에프에이 실측)
+# ══════════════════════════════════════════════════════════
+
+
+def test_천원과_백만원도_단위_붙은_수로_읽는다():
+    """전에는 배율을 «조·억·만» 세 글자로만 읽어 공시 표의 주력 단위 둘이
+    통째로 관문 밖이었다 (보관 공시 29건: 어느 세는 방법으로도 백만원이 26개
+    문서 이상, 천원이 13개 문서 이상 — grounding_constants 주석 참고)."""
+    for text, expected in (
+        ("15,191,230천원", 15_191_230_000),
+        ("1,257백만원", 1_257_000_000),
+        ("4,596,000천원", 4_596_000_000),
+    ):
+        numbers = _extract_numbers(text)
+        assert len(numbers) == 1, text
+        assert numbers[0].unit_marked is True, text
+        assert numbers[0].token * numbers[0].scale == expected, text
+
+
+def test_천만원과_천억원의_배율을_긴_어휘부터_읽는다():
+    """한 글자씩 읽으면 「3천만원」이 3,000으로 읽혀 값이 1/10,000이 된다."""
+    for text, expected in (
+        ("3천만원", 30_000_000),
+        ("1천억원", 100_000_000_000),
+        ("2십억원", 2_000_000_000),
+        ("5만원", 50_000),
+    ):
+        numbers = _extract_numbers(text)
+        assert len(numbers) == 1, text
+        assert numbers[0].token * numbers[0].scale == expected, text
+
+
+def _rounded_table() -> PerformanceTable:
+    """이 실행의 4장 표 그대로 — 억원 표시값이 원값의 자리수를 지운 표."""
+    return PerformanceTable(
+        caption="전자공시 최근 두 사업연도 별도 주요 실적 (결산월: 십이월, 단위: 억원)",
+        headers=("사업연도", "매출액", "영업이익", "당기순이익"),
+        rows=(("2025", "274", "4", "1"), ("2024", "258", "6", "4")),
+        unit="억원",
+        cite="조각 1·사업내용",
+        raw_rows=(
+            ("2025", "27,351,053,389", "436,660,956", "82,552,618"),
+            ("2024", "25,811,194,484", "583,314,634", "366,016,342"),
+        ),
+        scale_divisor="100000000",
+        raw_unit="원",
+        unit_dimension="currency",
+    )
+
+
+def test_실적표_결속_원문은_표시값과_원값을_함께_싣는다():
+    """표시값 줄은 그대로 두고 원값 줄을 «더한다» — 빼면 기존 「4억원」 인용이 깨진다."""
+    from src.features.composer.verify import _table_grounding_source
+
+    source = _table_grounding_source(_rounded_table())
+    lines = source.split("\n")
+
+    assert "2025년 | 당기순이익 | 1억원" in lines
+    assert "2025년 | 당기순이익 | 82,552,618원 (원값)" in lines
+    assert "2024년 | 당기순이익 | 4억원" in lines
+    assert "2024년 | 당기순이익 | 366,016,342원 (원값)" in lines
+    # 지표 3개 × 사업연도 2개 × (표시값 + 원값) = 12줄
+    assert len(lines) == 12
+
+
+def test_원값이_없는_실적표는_결속_원문이_그대로다():
+    """raw_rows가 없는 표는 바이트가 바뀌지 않는다 (회귀 불변)."""
+    from src.features.composer.verify import _table_grounding_source
+
+    assert _table_grounding_source(_table()) == "매출액 | 2022년 | 1,500억원\n" \
+        "매출액 | 2023년 | 1,600억원\n매출액 | 2024년 | 1,683억원"
+
+
+def test_전치된_실적표의_행_머리_연도도_기간으로_읽힌다():
+    """행 머리가 연도인 표에서 맨 「2025」는 날짜 표기가 아니라 기간으로 안 읽혔다.
+
+    그래서 「2025년 …」이라고 쓴 후보의 기간이 원문 기간(없음)과 어긋나
+    표시값·원값 모두 결속에 실패했다 — 배율을 넓혀도 이 줄이 없으면 4장은 그대로 빈다.
+    """
+    from src.features.composer.grounding import grounding_problem
+    from src.features.composer.verify import _table_grounding_source
+
+    source = _table_grounding_source(_rounded_table())
+    for value, quote in (
+        ("82,552,618원", "2025년 | 당기순이익 | 82,552,618원"),
+        ("1억원", "2025년 | 당기순이익 | 1억원"),
+    ):
+        text = f"2025년 당기순이익은 {value}으로 집계됐다."
+        proof = {"검증근거": _numeric_grounding(
+            expression=f"당기순이익은 {value}",
+            metric="당기순이익",
+            source_id=TABLE_SOURCE_ID,
+            quote=quote,
+            source_value=value,
+        )}
+        assert grounding_problem(text, {TABLE_SOURCE_ID: source}, proof) == "", value
+
+
+def _past_changes_report(sentences: tuple[ComposedSentence, ...]) -> ComposedReport:
+    return ComposedReport(
+        sections=(
+            ComposedSection(section_id="past_changes", sentences=sentences, notice=""),
+        ),
+        summary=(),
+    )
+
+
+def test_실적표_원값이_검수_프롬프트에도_실린다():
+    """결속에 쓰는 글과 검수 AI가 보는 글이 갈리면 안 된다 — 실제 ask 인자를 단정한다."""
+    report = _past_changes_report(
+        (_sentence("2025년 매출액은 274억원이다.", ("1",)),)
+    )
+    ask = _FakeVerifier([_verdict_json({1: VERDICT_TRUE})])
+
+    verify_report(report, _raw_fragments(), _rounded_table(), ask)
+
+    assert ask.review_prompts, "검수 프롬프트가 만들어지지 않았다"
+    prompt = ask.review_prompts[0]
+    # 결속 원문 줄과 검수 AI가 보는 표 둘 다에 원값이 실려야 한다.
+    assert "82,552,618원 (원값)" in prompt
+    assert '"raw_rows"' in prompt
+    assert "366,016,342" in prompt
+
+
+def test_검수_지침이_수급_방향_역전과_합계_귀속을_금지한다():
+    """생산 상수를 import 하지 않고 실제 프롬프트 글자를 단정한다."""
+    report = _past_changes_report(
+        (_sentence("2025년 매출액은 274억원이다.", ("1",)),)
+    )
+    ask = _FakeVerifier([_verdict_json({1: VERDICT_TRUE})])
+
+    verify_report(report, _raw_fragments(), _rounded_table(), ask)
+
+    prompt = ask.review_prompts[0]
+    assert "금액·수량은 값이 같아도 주체와 수급 방향이 다르면 «거짓»이다." in prompt
+    assert "«제공받은·수령한·차입한·담보로 제공받은»" in prompt
+    assert "«제공한·설정한·대여한·담보로 제공한»" in prompt
+    assert "전체 합계를 한 거래처에 귀속시키면 거짓이다." in prompt

@@ -107,9 +107,13 @@ from src.features.composer.grounding import (
 )
 from src.features.composer.grounding_constants import (
     GROUNDING_GUIDE,
+    MAGNITUDE_ALTERNATION,
+    MAGNITUDE_SCALES,
+    MAGNITUDE_TOKENS,
     REVIEW_GROUNDING_REJECTED,
     GROUNDING_SOURCE_FIELD,
     NUMERIC_KEY,
+    TABLE_RAW_VALUE_ROW_SUFFIX,
     TABLE_SOURCE_ID,
 )
 from src.features.composer.logic import (
@@ -374,16 +378,19 @@ REWRITE_EVIDENCE_HEAD: Final[str] = "\n근거 원문:\n"
 REWRITE_SENTENCE_HEAD: Final[str] = "\n불합격 문장: "
 
 # ── 수치 검증 ──
-#: 숫자 바로 뒤에 올 수 있는 배율 글자와 꼬리 단위. 아래 정규식 세 개가 이
+#: 숫자 바로 뒤에 올 수 있는 배율 어휘와 꼬리 단위. 아래 정규식 세 개가 이
 #: 목록 하나를 함께 본다 — 한쪽에만 단위를 더하면 잣대가 갈라진다.
-_MAGNITUDE_CHARS: Final[str] = "조억만"
+#: ★ 배율 어휘는 grounding_constants 한 곳에만 적는다. 결속기(grounding.py)와
+#:   이 파일이 같은 배율로 읽어야 두 검증기의 값이 갈라지지 않는다.
 _TAIL_UNITS: Final[tuple[str, ...]] = ("원", "%", "퍼센트", "배")
-_UNIT_SUFFIX_ALTERNATION: Final[str] = "|".join((*_MAGNITUDE_CHARS, *_TAIL_UNITS))
+_UNIT_SUFFIX_ALTERNATION: Final[str] = "|".join((*MAGNITUDE_TOKENS, *_TAIL_UNITS))
 
 #: 숫자 토큰 + 바로 뒤 단위. «내용» 검사가 아니라 «숫자와 그 배율» 추출 전용이다.
+#: ⚠️ 배율은 문자 클래스가 아니라 «교대»다 — 「3천만원」의 배율은 «천만»이지
+#:    «천»이 아니다. MAGNITUDE_TOKENS 가 긴 어휘를 앞에 두는 이유가 이것이다.
 _NUMBER_UNIT_RE: Final[re.Pattern[str]] = re.compile(
     r"(?P<num>\d+(?:,\d{3})*(?:\.\d+)?)"
-    rf"(?:\s*(?P<mag>[{_MAGNITUDE_CHARS}]))?"
+    rf"(?:\s*(?P<mag>{MAGNITUDE_ALTERNATION}))?"
     rf"(?:\s*(?P<tail>{'|'.join(_TAIL_UNITS)}))?"
 )
 
@@ -479,11 +486,8 @@ _PLAIN_DIGITS_RE: Final[re.Pattern[str]] = re.compile(r"\d+")
 _RAW_WON_AMOUNT_RE: Final[re.Pattern[str]] = re.compile(
     r"\d{1,3}(?:,\d{3}){3,}\s*원"
 )
-_MAGNITUDE_SCALES: Final[dict[str, Decimal]] = {
-    "조": Decimal(10) ** 12,
-    "억": Decimal(10) ** 8,
-    "만": Decimal(10) ** 4,
-}
+#: 배율 어휘 → 곱할 값 (정본은 grounding_constants.MAGNITUDE_SCALES).
+_MAGNITUDE_SCALES: Final[dict[str, Decimal]] = MAGNITUDE_SCALES
 _PERCENT_SCALE: Final[Decimal] = Decimal("0.01")
 _NO_SCALE: Final[Decimal] = Decimal(1)
 
@@ -1511,19 +1515,47 @@ def _apply_grounding(
     return constrained
 
 
+def _raw_table_row(table: PerformanceTable, index: int) -> Optional[Sequence[str]]:
+    """표시 행 `index`에 대응하는 원값 행. 자리수·길이가 어긋나면 없는 것으로 본다."""
+
+    if not table.raw_rows or not str(table.raw_unit).strip():
+        return None
+    if len(table.raw_rows) != len(table.rows):
+        return None
+    raw_row = table.raw_rows[index]
+    return raw_row if len(raw_row) == len(table.rows[index]) else None
+
+
 def _table_grounding_source(table: Optional[PerformanceTable]) -> str:
-    """행·기간·단위를 반복한 실적표 결속 원문을 결정론적으로 만든다."""
+    """행·기간·단위를 반복한 실적표 결속 원문을 결정론적으로 만든다.
+
+    ★ 표시값에 더해 «원값» 줄을 함께 싣는다 (2026-09-11 인텍에프에이 실측).
+      표시값은 억원 단위로 반올림돼 당기순이익이 「4억원 → 1억원」으로 실린다.
+      그 두 값으로는 실제 변동(-77.45%)을 말한 문장이 근거를 댈 수 없어
+      4장 산문이 통째로 근거 없음으로 떨어졌다. 원값 82,552,618원·366,016,342원이
+      결속 원문에 있으면 같은 문장이 그대로 검산된다.
+    ⚠️ 표시값 줄은 빼지 않는다 — 「4억원」을 인용한 기존 문장이 깨진다.
+      원값 줄은 raw_rows·raw_unit이 있을 때만 «더한다»(없는 표는 바이트가 같다).
+    """
 
     if table is None or not table.rows or len(table.headers) < 2:
         return ""
     lines: list[str] = []
-    for row in table.rows:
+    for index, row in enumerate(table.rows):
         if not row:
             continue
         metric = str(row[0]).strip()
         if not metric:
             continue
-        for header, raw_value in zip(table.headers[1:], row[1:]):
+        # 전치된 표(행 머리가 연도)에서도 네 자리 연도는 «기간»으로 읽히게 한다.
+        # 아래 header 쪽과 같은 잣대다 — 맨 「2025」는 날짜 표기가 아니라서
+        # _period_at 이 못 읽고, 그러면 「2025년 …」이라고 쓴 후보의 기간이
+        # 원문 기간과 어긋나 표시값·원값 모두 결속에 실패한다(2026-09-11 실측).
+        if metric.isdigit() and len(metric) == 4:
+            metric += "년"
+        raw_row = _raw_table_row(table, index)
+        raw_unit = str(table.raw_unit).strip()
+        for column, (header, raw_value) in enumerate(zip(table.headers[1:], row[1:]), start=1):
             period = str(header).strip()
             value = str(raw_value).strip()
             if not period or not value or not _extract_numbers(value):
@@ -1534,11 +1566,30 @@ def _table_grounding_source(table: Optional[PerformanceTable]) -> str:
             if table.unit and numbers and not any(item.unit_marked for item in numbers):
                 value += str(table.unit).strip()
             lines.append(f"{metric} | {period} | {value}")
+            if raw_row is None:
+                continue
+            raw_cell = str(raw_row[column]).strip()
+            if not raw_cell or not _extract_numbers(raw_cell):
+                continue
+            raw_text = raw_cell if any(
+                item.unit_marked for item in _extract_numbers(raw_cell)
+            ) else raw_cell + raw_unit
+            if raw_text == value:
+                # 배율이 1이라 표시값과 같은 표는 줄을 늘리지 않는다.
+                continue
+            lines.append(
+                f"{metric} | {period} | {raw_text}{TABLE_RAW_VALUE_ROW_SUFFIX}"
+            )
     return "\n".join(lines)
 
 
 def _render_table_evidence(table: Optional[PerformanceTable]) -> str:
-    """검수 프롬프트에 싣는 실적표 — 표 수치를 근거로 쓴 문장을 살리기 위함."""
+    """검수 프롬프트에 싣는 실적표 — 표 수치를 근거로 쓴 문장을 살리기 위함.
+
+    ★ 결속에 쓰는 글(_table_grounding_source)과 검수 AI가 보는 글이 갈리면
+      안 된다. 원값 줄이 결속 원문에만 있으면 검수 AI는 그 값을 보지 못한 채
+      «근거에 없는 수»로 판정한다.
+    """
     if table is None or not table.rows:
         return ""
     payload = {
@@ -1547,6 +1598,9 @@ def _render_table_evidence(table: Optional[PerformanceTable]) -> str:
         "headers": list(table.headers),
         "rows": [list(row) for row in table.rows],
     }
+    if any(_raw_table_row(table, index) is not None for index in range(len(table.rows))):
+        payload["raw_unit"] = str(table.raw_unit).strip()
+        payload["raw_rows"] = [list(row) for row in table.raw_rows]
     return REVIEW_TABLE_HEAD + json.dumps(payload, ensure_ascii=False) + "\n"
 
 

@@ -14,7 +14,7 @@ from src.features.composer.grounding_constants import REVIEW_SUPPORT_CANDIDATE_V
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import re
 import unicodedata
 
@@ -29,6 +29,7 @@ from src.features.composer.grounding_constants import (
     CONTINUOUS_POINTS_OVER_PERIODS, DOWN_RE, GROUNDING_INVALID, GROUNDING_KEY,
     GROUNDING_SOURCE_FIELD,
     GROUNDING_MISSING,
+    MAGNITUDE_SCALES, SOURCE_UNIT_HEADER_RE,
     MIN_CONTINUOUS_POINTS, MIN_TREND_POINTS, NUMERIC_KEY, PARENTHETICAL_RE,
     PARTICLE_RE, PLANNED_END_RE, RETROSPECTIVE_RE, SENTENCE_SPLIT_RE, TIME_KEY,
     TREND_DIRECTIONS, TREND_KEY, YEAR_RE, PAIR_SEPARATOR_RE, PRESENT_PERIOD,
@@ -205,14 +206,56 @@ class _BoundAmount:
     dimension: str
 
 
+def _unit_header_scale(text: str, position: int) -> Decimal | None:
+    """`position` «앞»에 놓인 가장 가까운 「(단위: …원)」 머리말의 배율.
+
+    ★ 왜 필요한가 — 공시 표는 「(단위: 천원)」 머리말 한 줄을 두고 칸에는 맨
+      숫자만 적는다(보관 원문 29건 전부 이 모양). 머리말을 읽지 않으면 그 표의
+      값은 «단위 없는 수»라 결속 대상에서 통째로 빠지고, 그러면 천원·백만원
+      금액을 인용한 «맞는 문장»까지 조용히 근거 없음으로 떨어진다.
+    ⚠️ 값보다 뒤에 있는 머리말은 다른 표의 것이므로 보지 않는다.
+    """
+
+    scale: Decimal | None = None
+    for match in SOURCE_UNIT_HEADER_RE.finditer(text, 0, position):
+        magnitude = match.group("unit").removesuffix("원")
+        # 「(단위: 원)」은 배율 1, 아는 배율은 그 값, 모르는 어휘는 None(결속 안 함).
+        scale = Decimal(1) if not magnitude else MAGNITUDE_SCALES.get(magnitude)
+    return scale
+
+
+def _bare_amount_token(value: str) -> Decimal | None:
+    """단위가 붙지 않은 «표 칸 한 개»의 수. 그 밖의 모양이면 None.
+
+    ⚠️ 연도는 금액이 아니다. 머리말 배율을 연도에 곱하면 표 머리글 「2025」가
+       2,025천원짜리 금액 근거가 되어 관문이 느슨해진다.
+    """
+
+    from src.features.composer.verify import _BARE_YEAR_RE, _NUMBER_UNIT_RE
+
+    match = _NUMBER_UNIT_RE.fullmatch(value.strip())
+    if match is None or match.group("mag") or match.group("tail"):
+        return None
+    if _BARE_YEAR_RE.fullmatch(match.group("num")):
+        return None
+    try:
+        return Decimal(match.group("num").replace(",", ""))
+    except InvalidOperation:
+        return None
+
+
 def _amount_spans(text: str) -> tuple[_BoundAmount, ...]:
     """환산 파서와 같은 숫자를 읽되 각각의 원문 위치를 보존한다."""
     from src.features.composer.verify import _DATE_EXPR_RE, _NUMBER_UNIT_RE
 
     spans: list[tuple[int, int]] = [match.span() for match in COMPOUND_AMOUNT_RE.finditer(text)]
     dates = [match.span() for match in _DATE_EXPR_RE.finditer(text)]
+    bare: list[tuple[int, int]] = []
     for match in _NUMBER_UNIT_RE.finditer(text):
         if not (match.group("mag") or match.group("tail")):
+            # 단위 머리말이 앞서는 표 칸만 «그 표의 단위»로 읽는다. 머리말이
+            # 없으면 지금까지처럼 맨 숫자로 남겨 결속 대상에서 뺀다.
+            bare.append(match.span("num"))
             continue
         if any(match.start() < end and start < match.end() for start, end in (*spans, *dates)):
             continue
@@ -229,7 +272,20 @@ def _amount_spans(text: str) -> tuple[_BoundAmount, ...]:
         values = _amount_values(value_text)
         if sum(values.values()) == 1:
             result.append(_BoundAmount(start, end, value_text, next(iter(values)), _dimension(value_text)))
-    return tuple(result)
+    for start, end in bare:
+        if any(start < other_end and other_start < end
+               for other_start, other_end in (*spans, *dates)):
+            continue
+        token = _bare_amount_token(text[start:end])
+        if token is None:
+            continue
+        scale = _unit_header_scale(text, start)
+        if scale is None:
+            continue
+        if _negative_at(text, start):
+            start, token = start - 1, -token
+        result.append(_BoundAmount(start, end, text[start:end], token * scale, "금액"))
+    return tuple(sorted(result, key=lambda amount: (amount.start, amount.end)))
 
 
 def _period_at(text: str, position: int) -> tuple[int, int | None] | None:
@@ -322,6 +378,13 @@ def _bound_value(entry: Mapping, quote: str) -> Decimal | None:
             values = Counter({Decimal(value): 1})
         except Exception:
             return None
+    # 「(단위: 천원)」 머리말이 앞선 표 칸은 맨 숫자라도 그 표의 단위로 읽는다.
+    # 머리말이 없으면 값을 만들지 않는다 — 단위를 모르는 수는 결속하지 않는다.
+    if not values:
+        token = _bare_amount_token(value)
+        scale = _unit_header_scale(quote, quote.find(value)) if token is not None else None
+        if scale is not None:
+            values = Counter({token * scale: 1})
     if sum(values.values()) != 1:
         return None
     if _metric_value_spans(metric, value, quote):

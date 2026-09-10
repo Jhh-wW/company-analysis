@@ -315,3 +315,126 @@ def test_negative_amount_cannot_be_approved_as_positive_with_exact_quote() -> No
     text, quote = "영업이익은 100억원이다.", "영업이익은 -100억원이다."
     proof = {"검증근거": {NUMERIC_KEY: [_numeric(text, "영업이익", quote, "-100억원")]}}
     assert grounding_problem(text, {"공시": quote}, proof) == GROUNDING_INVALID
+
+
+# ══════════════════════════════════════════════════════════
+# 배율 어휘 확장 · 원문 단위 머리말 (2026-09-11 인텍에프에이 실측)
+# ══════════════════════════════════════════════════════════
+
+#: 실제 감사보고서 주석 11 (2)의 지급보증 표. 태그를 걷어 한 줄로 편 모양이라
+#: «표 전체가 한 구절 안에 있는» 가장 통과하기 쉬운 조건이다 — 그런데도
+#: 합계를 특정 제공처의 금액으로 옮긴 문장은 막혀야 한다.
+GUARANTEE_NOTE = (
+    "당기말 현재 당사가 타인으로부터 제공받은 지급보증의 내역은 다음과 같습니다. "
+    "(단위: 천원) 제공자 보증내용 제공처 보증금액 "
+    "대표이사 연대보증 서울보증보험 5,784,949 기업은행 1,295,000 "
+    "서울보증보험 이행계약 등 - 8,111,281 합 계 15,191,230"
+)
+#: 같은 표에서 단위 머리말만 뗀 대조군. 단위를 모르는 맨 숫자는 결속하지 않는다.
+GUARANTEE_NOTE_WITHOUT_HEADER = GUARANTEE_NOTE.replace("(단위: 천원) ", "")
+WRONG_GUARANTEE_SENTENCE = (
+    "서울보증보험에 대해 총 15,191,230천원 규모의 지급보증을 설정하고 있다."
+)
+RIGHT_GUARANTEE_SENTENCE = (
+    "당기말 현재 회사가 제공받은 지급보증에는 기업은행 1,295,000천원이 포함된다."
+)
+
+
+def test_천원_금액_문장은_수치_결속을_요구받는다() -> None:
+    """전에는 «천원»이 배율로 안 읽혀 수치 결속이 아예 요구되지 않았다.
+
+    요구되지 않으면 관문을 «통과»한 것이 아니라 관문 밖으로 나간 것이다 —
+    방향·귀속이 뒤집힌 이 문장이 그렇게 검사 없이 공개됐다.
+    """
+    assert NUMERIC_KEY in grounding_requirements(
+        WRONG_GUARANTEE_SENTENCE, (GUARANTEE_NOTE,)
+    )
+    # 검증근거를 대지 않으면 «빠뜨림»으로 닫힌다(fail-closed).
+    assert grounding_problem(WRONG_GUARANTEE_SENTENCE, {"공시": GUARANTEE_NOTE}, {})
+
+
+def test_합계_금액을_특정_상대의_금액으로_옮긴_문장을_막는다() -> None:
+    """합계 15,191,230천원은 서울보증보험분(13,896,230천원)이 아니다."""
+    for source_metric in ("지급보증", "합 계"):
+        proof = {"검증근거": {NUMERIC_KEY: [{
+            "표현": "총 15,191,230천원 규모의 지급보증",
+            "항목": "지급보증",
+            "근거": "공시",
+            "원문": GUARANTEE_NOTE,
+            "원문항목": source_metric,
+            "원문값": "15,191,230",
+        }]}}
+        assert grounding_problem(
+            WRONG_GUARANTEE_SENTENCE, {"공시": GUARANTEE_NOTE}, proof
+        ) == GROUNDING_INVALID, source_metric
+
+
+def test_단위_머리말이_붙은_표의_맨_숫자를_원문값으로_인정한다() -> None:
+    """재현율 음성 대조 — 같은 표의 «맞는 문장»은 그대로 통과해야 한다.
+
+    공시 표는 「(단위: 천원)」 머리말 한 줄을 두고 칸에는 맨 숫자만 적는다.
+    머리말을 읽지 않으면 이 문장도 함께 조용히 사라진다.
+    """
+    proof = {"검증근거": {NUMERIC_KEY: [{
+        "표현": "기업은행 1,295,000천원",
+        "항목": "기업은행",
+        "근거": "공시",
+        "원문": GUARANTEE_NOTE,
+        "원문항목": "기업은행",
+        "원문값": "1,295,000",
+    }]}}
+    assert grounding_problem(
+        RIGHT_GUARANTEE_SENTENCE, {"공시": GUARANTEE_NOTE}, proof
+    ) == ""
+    # 머리말이 없으면 단위를 모르는 수이므로 결속하지 않는다.
+    without = dict(proof["검증근거"][NUMERIC_KEY][0])
+    without["원문"] = GUARANTEE_NOTE_WITHOUT_HEADER
+    assert grounding_problem(
+        RIGHT_GUARANTEE_SENTENCE,
+        {"공시": GUARANTEE_NOTE_WITHOUT_HEADER},
+        {"검증근거": {NUMERIC_KEY: [without]}},
+    ) == GROUNDING_INVALID
+
+
+def test_표의_다른_행_금액을_빌려온_문장은_막힌다() -> None:
+    """1,295,000은 기업은행 행, 5,784,949는 대표이사 행의 값이다."""
+    proof = {"검증근거": {NUMERIC_KEY: [{
+        "표현": "기업은행 5,784,949천원",
+        "항목": "기업은행",
+        "근거": "공시",
+        "원문": GUARANTEE_NOTE,
+        "원문항목": "기업은행",
+        "원문값": "5,784,949",
+    }]}}
+    text = "당기말 현재 회사가 제공받은 지급보증에는 기업은행 5,784,949천원이 포함된다."
+    assert grounding_problem(text, {"공시": GUARANTEE_NOTE}, proof) == GROUNDING_INVALID
+
+
+def test_반올림으로_지워진_원값을_인용한_문장이_수치_결속에_성공한다() -> None:
+    """실적표 결속 원문이 표시값만 실으면 원값 문장이 근거를 못 댄다.
+
+    억원 표시값은 당기순이익을 「1억원 / 4억원」으로 눌러 실제 변동
+    (82,552,618원 → 366,016,342원)을 말한 문장이 통째로 떨어졌다.
+    """
+    source = (
+        "2025년 | 당기순이익 | 1억원\n"
+        "2025년 | 당기순이익 | 82,552,618원 (원값)\n"
+        "2024년 | 당기순이익 | 4억원\n"
+        "2024년 | 당기순이익 | 366,016,342원 (원값)"
+    )
+    for value, quote in (
+        ("82,552,618원", "2025년 | 당기순이익 | 82,552,618원"),
+        ("1억원", "2025년 | 당기순이익 | 1억원"),
+    ):
+        text = f"2025년 당기순이익은 {value}으로 집계됐다."
+        proof = {"검증근거": {NUMERIC_KEY: [_numeric(
+            f"당기순이익은 {value}", "당기순이익", quote, value, source_id="실적표",
+        )]}}
+        assert grounding_problem(text, {"실적표": source}, proof) == "", value
+    # 다른 해의 원값을 그 해 값으로 옮기면 막힌다.
+    borrowed = "2025년 당기순이익은 366,016,342원으로 집계됐다."
+    proof = {"검증근거": {NUMERIC_KEY: [_numeric(
+        "당기순이익은 366,016,342원", "당기순이익",
+        "2025년 | 당기순이익 | 82,552,618원", "366,016,342원", source_id="실적표",
+    )]}}
+    assert grounding_problem(borrowed, {"실적표": source}, proof) == GROUNDING_INVALID
