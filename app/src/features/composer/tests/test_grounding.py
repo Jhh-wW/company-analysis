@@ -315,3 +315,241 @@ def test_negative_amount_cannot_be_approved_as_positive_with_exact_quote() -> No
     text, quote = "영업이익은 100억원이다.", "영업이익은 -100억원이다."
     proof = {"검증근거": {NUMERIC_KEY: [_numeric(text, "영업이익", quote, "-100억원")]}}
     assert grounding_problem(text, {"공시": quote}, proof) == GROUNDING_INVALID
+
+
+# ══════════════════════════════════════════════════════════
+# 배율 어휘 확장 · 원문 단위 머리말 (2026-09-11 인텍에프에이 실측)
+# ══════════════════════════════════════════════════════════
+
+#: 실제 감사보고서 주석 11 (2)의 지급보증 표. 태그를 걷어 한 줄로 편 모양이라
+#: «표 전체가 한 구절 안에 있는» 가장 통과하기 쉬운 조건이다 — 그런데도
+#: 합계를 특정 제공처의 금액으로 옮긴 문장은 막혀야 한다.
+GUARANTEE_NOTE = (
+    "당기말 현재 당사가 타인으로부터 제공받은 지급보증의 내역은 다음과 같습니다. "
+    "(단위: 천원) 제공자 보증내용 제공처 보증금액 "
+    "대표이사 연대보증 서울보증보험 5,784,949 기업은행 1,295,000 "
+    "서울보증보험 이행계약 등 - 8,111,281 합 계 15,191,230"
+)
+#: 같은 표에서 단위 머리말만 뗀 대조군. 단위를 모르는 맨 숫자는 결속하지 않는다.
+GUARANTEE_NOTE_WITHOUT_HEADER = GUARANTEE_NOTE.replace("(단위: 천원) ", "")
+WRONG_GUARANTEE_SENTENCE = (
+    "서울보증보험에 대해 총 15,191,230천원 규모의 지급보증을 설정하고 있다."
+)
+RIGHT_GUARANTEE_SENTENCE = (
+    "당기말 현재 회사가 제공받은 지급보증에는 기업은행 1,295,000천원이 포함된다."
+)
+
+
+def test_천원_금액_문장은_수치_결속을_요구받는다() -> None:
+    """전에는 «천원»이 배율로 안 읽혀 수치 결속이 아예 요구되지 않았다.
+
+    요구되지 않으면 관문을 «통과»한 것이 아니라 관문 밖으로 나간 것이다 —
+    방향·귀속이 뒤집힌 이 문장이 그렇게 검사 없이 공개됐다.
+    """
+    assert NUMERIC_KEY in grounding_requirements(
+        WRONG_GUARANTEE_SENTENCE, (GUARANTEE_NOTE,)
+    )
+    # 검증근거를 대지 않으면 «빠뜨림»으로 닫힌다(fail-closed).
+    assert grounding_problem(WRONG_GUARANTEE_SENTENCE, {"공시": GUARANTEE_NOTE}, {})
+
+
+def test_합계_금액을_특정_상대의_금액으로_옮긴_문장을_막는다() -> None:
+    """합계 15,191,230천원은 서울보증보험분(13,896,230천원)이 아니다."""
+    for source_metric in ("지급보증", "합 계"):
+        proof = {"검증근거": {NUMERIC_KEY: [{
+            "표현": "총 15,191,230천원 규모의 지급보증",
+            "항목": "지급보증",
+            "근거": "공시",
+            "원문": GUARANTEE_NOTE,
+            "원문항목": source_metric,
+            "원문값": "15,191,230",
+        }]}}
+        assert grounding_problem(
+            WRONG_GUARANTEE_SENTENCE, {"공시": GUARANTEE_NOTE}, proof
+        ) == GROUNDING_INVALID, source_metric
+
+
+def test_단위_머리말이_붙은_표의_맨_숫자를_원문값으로_인정한다() -> None:
+    """재현율 음성 대조 — 같은 표의 «맞는 문장»은 그대로 통과해야 한다.
+
+    공시 표는 「(단위: 천원)」 머리말 한 줄을 두고 칸에는 맨 숫자만 적는다.
+    머리말을 읽지 않으면 이 문장도 함께 조용히 사라진다.
+    """
+    proof = {"검증근거": {NUMERIC_KEY: [{
+        "표현": "기업은행 1,295,000천원",
+        "항목": "기업은행",
+        "근거": "공시",
+        "원문": GUARANTEE_NOTE,
+        "원문항목": "기업은행",
+        "원문값": "1,295,000",
+    }]}}
+    assert grounding_problem(
+        RIGHT_GUARANTEE_SENTENCE, {"공시": GUARANTEE_NOTE}, proof
+    ) == ""
+    # 머리말이 없으면 단위를 모르는 수이므로 결속하지 않는다.
+    without = dict(proof["검증근거"][NUMERIC_KEY][0])
+    without["원문"] = GUARANTEE_NOTE_WITHOUT_HEADER
+    assert grounding_problem(
+        RIGHT_GUARANTEE_SENTENCE,
+        {"공시": GUARANTEE_NOTE_WITHOUT_HEADER},
+        {"검증근거": {NUMERIC_KEY: [without]}},
+    ) == GROUNDING_INVALID
+
+
+def test_표의_다른_행_금액을_빌려온_문장은_막힌다() -> None:
+    """1,295,000은 기업은행 행, 5,784,949는 대표이사 행의 값이다."""
+    proof = {"검증근거": {NUMERIC_KEY: [{
+        "표현": "기업은행 5,784,949천원",
+        "항목": "기업은행",
+        "근거": "공시",
+        "원문": GUARANTEE_NOTE,
+        "원문항목": "기업은행",
+        "원문값": "5,784,949",
+    }]}}
+    text = "당기말 현재 회사가 제공받은 지급보증에는 기업은행 5,784,949천원이 포함된다."
+    assert grounding_problem(text, {"공시": GUARANTEE_NOTE}, proof) == GROUNDING_INVALID
+
+
+def test_반올림으로_지워진_원값을_인용한_문장이_수치_결속에_성공한다() -> None:
+    """실적표 결속 원문이 표시값만 실으면 원값 문장이 근거를 못 댄다.
+
+    억원 표시값은 당기순이익을 「1억원 / 4억원」으로 눌러 실제 변동
+    (82,552,618원 → 366,016,342원)을 말한 문장이 통째로 떨어졌다.
+    """
+    source = (
+        "2025년 | 당기순이익 | 1억원\n"
+        "2025년 | 당기순이익 | 82,552,618원 (원값)\n"
+        "2024년 | 당기순이익 | 4억원\n"
+        "2024년 | 당기순이익 | 366,016,342원 (원값)"
+    )
+    for value, quote in (
+        ("82,552,618원", "2025년 | 당기순이익 | 82,552,618원"),
+        ("1억원", "2025년 | 당기순이익 | 1억원"),
+    ):
+        text = f"2025년 당기순이익은 {value}으로 집계됐다."
+        proof = {"검증근거": {NUMERIC_KEY: [_numeric(
+            f"당기순이익은 {value}", "당기순이익", quote, value, source_id="실적표",
+        )]}}
+        assert grounding_problem(text, {"실적표": source}, proof) == "", value
+    # 다른 해의 원값을 그 해 값으로 옮기면 막힌다.
+    borrowed = "2025년 당기순이익은 366,016,342원으로 집계됐다."
+    proof = {"검증근거": {NUMERIC_KEY: [_numeric(
+        "당기순이익은 366,016,342원", "당기순이익",
+        "2025년 | 당기순이익 | 82,552,618원", "366,016,342원", source_id="실적표",
+    )]}}
+    assert grounding_problem(borrowed, {"실적표": source}, proof) == GROUNDING_INVALID
+
+
+# ══════════════════════════════════════════════════════════
+# 차원 분리 · 머리말 어휘 가드 (2026-09-11 독립 검토 P2-1·P2-2·P3-1)
+# ══════════════════════════════════════════════════════════
+
+#: 실제 코퍼스 문장 그대로 — 생산 «수량»이 원 금액 주장의 근거가 되던 자리.
+COUNT_SOURCE = "SDC의 디스플레이 패널 생산실적은 1,851천개(8세대 Glass 환산 기준)이며"
+#: 실제 코퍼스 문장 그대로 — 외화가 원 금액 주장의 근거가 되던 자리.
+CURRENCY_SOURCE = "2021.11월 자본금 100백만불 유상증자 완료"
+
+
+def _judge(text: str, expression: str, metric: str, source_value: str, quote: str) -> str:
+    proof = {"검증근거": {NUMERIC_KEY: [{
+        "표현": expression,
+        "항목": metric,
+        "근거": "공시",
+        "원문": quote,
+        "원문항목": metric,
+        "원문값": source_value,
+    }]}}
+    return grounding_problem(text, {"공시": quote}, proof)
+
+
+def test_수량_근거는_원_금액_주장을_뒷받침하지_못한다() -> None:
+    """「1,851천개」가 「1,851천원」의 근거가 됐다 — 차원 판정이 꼬리 단위만 봤다."""
+    assert _judge(
+        "생산실적은 1,851천원이다.", "생산실적은 1,851천원", "생산실적",
+        "1,851천개", COUNT_SOURCE,
+    ) == GROUNDING_INVALID
+    # 표지를 떼어 적는 것만으로 빠져나가지 못한다 — 값의 범위가 표지까지다.
+    assert _judge(
+        "생산실적은 1,851천원이다.", "생산실적은 1,851천원", "생산실적",
+        "1,851천", COUNT_SOURCE,
+    ) == GROUNDING_INVALID
+    # 조사가 바로 붙은 모양도 같다.
+    assert _judge(
+        "생산실적은 1,851천원이다.", "생산실적은 1,851천원", "생산실적",
+        "1,851천", "패널 생산실적은 1,851천개이며 전년과 같다.",
+    ) == GROUNDING_INVALID
+
+
+def test_외화_근거는_원_금액_주장을_뒷받침하지_못한다() -> None:
+    """「100백만불」이 「100백만원」의 근거가 됐다. 표지를 떼어 적어도 막힌다."""
+    for source_value in ("100백만불", "100백만"):
+        assert _judge(
+            "자본금 100백만원 유상증자를 완료했다.", "자본금 100백만원", "자본금",
+            source_value, CURRENCY_SOURCE,
+        ) == GROUNDING_INVALID, source_value
+    for source_value in ("9,937백만달러", "9,937백만"):
+        assert _judge(
+            "약정한도액 9,937백만원을 보유하고 있다.", "약정한도액 9,937백만원",
+            "약정한도액", source_value,
+            "당기말 현재 약정한도액 9,937백만달러를 보유하고 있습니다.",
+        ) == GROUNDING_INVALID, source_value
+
+
+def test_원_금액_근거는_그대로_결속된다() -> None:
+    """차원을 갈랐다고 정상 금액 결속이 막히면 안 된다 (재현율 음성 대조)."""
+    assert _judge(
+        "매출액 15,191,230천원을 기록했다.", "매출액 15,191,230천원", "매출액",
+        "15,191,230천원", "당기 매출액 15,191,230천원을 기록하였습니다.",
+    ) == ""
+
+
+def test_단위_머리말_배율은_수량_비율_주식_칸에_붙지_않는다() -> None:
+    """머리말 배율은 그 표의 «금액» 칸에만 해당한다.
+
+    같은 표에 섞인 직원수·발행주식총수·매출비중에 배율을 붙이면
+    「직원수 1,200」이 「직원수 120만원」의 근거가 된다.
+    """
+    for text, expression, metric, source_value, quote in (
+        ("직원수 120만원을 기록했다.", "직원수 120만원", "직원수", "1,200",
+         "(단위: 천원) 직원수 1,200 평균급여 45,000"),
+        ("발행주식총수 100만원을 기록했다.", "발행주식총수 100만원", "발행주식총수",
+         "1,000,000", "(단위: 원) 발행주식총수 1,000,000 자본금 5,000,000"),
+        ("매출비중 3,702만원을 기록했다.", "매출비중 3,702만원", "매출비중", "37.02",
+         "(단위: 백만원) 매출비중 37.02 영업이익 1,234"),
+    ):
+        assert _judge(text, expression, metric, source_value, quote) == GROUNDING_INVALID, metric
+    # 같은 줄의 «금액» 칸은 그대로 결속된다.
+    assert _judge(
+        "매출액 15,191,230천원을 기록했다.", "매출액 15,191,230천원", "매출액",
+        "15,191,230", "(단위: 천원) 매출액 15,191,230",
+    ) == ""
+    # 앞 칸의 이름이 뒤 칸까지 번지지 않는다 — 직원수 뒤의 평균급여는 금액이다.
+    assert _judge(
+        "평균급여 4,500만원을 지급했다.", "평균급여 4,500만원", "평균급여", "45,000",
+        "(단위: 천원) 직원수 1,200 평균급여 45,000",
+    ) == ""
+
+
+def test_단위_머리말_표기_변형을_읽는다() -> None:
+    """실측 59회 중 절반을 못 읽던 표기 변형 — 꼬리·공백·대괄호·전각 괄호."""
+    for quote in (
+        "(단위: 백만원, %) 매출액 1,234",
+        "(단위 : 천 원, 주) 매출액 1,234,000",
+        "[단위: 천원] 매출액 1,234,000",
+        "（단위: 천원） 매출액 1,234,000",
+    ):
+        value = quote.rsplit(" ", 1)[1]
+        expected = "1,234백만원" if "백만원" in quote else "1,234,000천원"
+        assert _judge(
+            f"매출액 {expected}을 기록했다.", f"매출액 {expected}", "매출액", value, quote,
+        ) == "", quote
+
+
+def test_원_단위가_아닌_머리말은_배율로_읽지_않는다() -> None:
+    """「(단위: 주)」·「(단위:USD)」는 원 금액 머리말이 아니다 (fail-closed)."""
+    for quote in ("(단위: 주) 발행총수 1,234", "(단위:USD) 한도액 1,234"):
+        value = quote.rsplit(" ", 1)[1]
+        metric = quote.rsplit(" ", 2)[1]
+        assert _judge(
+            f"{metric} 1,234원을 기록했다.", f"{metric} 1,234원", metric, value, quote,
+        ) == GROUNDING_INVALID, quote
