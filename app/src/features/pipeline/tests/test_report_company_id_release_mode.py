@@ -165,9 +165,18 @@ def _frags() -> dict[int, dict[str, str]]:
     return {
         index: {
             "종류": "공식 IR",
+            # ★ 8장은 «인재상과 일하는 방식» 장이라, 그 장의 조각 원문에 사람·
+            #   조직 제도 소재가 하나도 없으면 8장 원문 절 계약이 설계대로 그
+            #   장을 비운다. 예전 원문은 「문화」라는 낱말 하나뿐인 낱말 나열이라
+            #   실물에서 나올 수 없는 모양이었다. 절을 «뒤에» 붙이므로 작가
+            #   대역 문장과 그 원문 대조는 그대로다.
             "원문": " ".join(
                 _장_문장(index - 1, mark, ending_index)
                 for ending_index in range(len(_SENTENCE_ENDINGS))
+            ) + (
+                " 임직원 교육훈련과 조직문화 정착은 인사부서가 담당한다."
+                if index - 1 == SECTION_IDS.index("culture")
+                else ""
             ),
             "출처": f"https://corpid.example/document/{index}",
             "문서명": f"공식 자료 {index}",

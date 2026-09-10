@@ -42,7 +42,13 @@ from src.features.composer.port import (
 _원문 = (
     "캐스팅·트레이닝과 콘텐츠 기획·핵심 제작은 내부에서 수행하고, "
     "음반 유통은 Republic Records·Sony Music과, 공연 인프라는 Live Nation과 "
-    "협력한다. 2025년 연결 매출액은 8,219억 원이다."
+    "협력한다. 2025년 연결 매출액은 8,219억 원이다. "
+    # ★ 마지막 절은 8장(인재상·일하는 방식) 시험용이다. 이 파일의 «카드형 장»
+    #   시험이 8장을 쓰는데, 8장 후보는 자기 인용 원문에 사람·조직 제도 소재가
+    #   있어야 공개된다(culture_section_evidence_problem). 앞 세 절은 사업 운영
+    #   설명뿐이라 8장 근거로는 원래 성립하지 않는 모양이었다. 절을 «뒤에»
+    #   붙이므로 역할 결속 시험이 인용하는 앞 절의 글자는 그대로다.
+    "임직원 교육훈련과 조직문화 정착은 인사부서가 담당한다."
 )
 
 
@@ -554,3 +560,73 @@ def test_연도만_문제였던_경로가_의미검수까지_지나_남는다():
 
     assert _운영장(report).flow_rows == _손상차손_경로
     assert problems == ()
+
+
+# ══════════════════════════════════════════════════════════
+# 8장 도식도 본문과 «같은» 재무 규정 잣대를 받는다
+#
+# ★ 왜 (실측) — 재무위험 «규정» 규칙은 본문 블록에만 걸려 있었다. 그래서
+#   산문에서 빠진 재무 서술이 표의 칸으로 옮겨 적히면 그대로 통과했다.
+#   실제 실행의 표 한 행(신용위험 관리 규정)이 그 자리였다. 같은 보고서
+#   안에서 두 잣대를 만들지 않는다.
+# ══════════════════════════════════════════════════════════
+
+_재무규정_원문 = (
+    "당사는 환위험 관리규정에 환위험의 정의, 측정주기, 관리절차를 포함하여 "
+    "운영하고 있습니다."
+)
+_재무규정_칸 = ("환위험 관리", "환위험 관리규정 운영", "")
+_재무규정_문장 = "회사는 환위험 관리규정을 운영하는 방식으로 일한다."
+
+
+@pytest.mark.parametrize("grouped", (False, True), ids=("legacy", "grouped"))
+def test_문화_도식행도_재무규정_규칙에_본문과_같은_사유로_걸린다(grouped) -> None:
+    from src.features.composer.culture_constants import (
+        CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,
+    )
+    from src.features.composer.verify import verify_report
+
+    문장 = ComposedSentence(
+        text=_재무규정_문장, citations=("9",), grade="확인"
+    )
+    행 = FlowRow(cells=_재무규정_칸, citations=("9",))
+    draft = ComposedReport(
+        sections=(ComposedSection("culture", (문장,), flow_rows=(행,)),)
+    )
+    fragments = (CollectedFragment(fragment_id="9", kind="공시", text=_재무규정_원문),)
+    diagnostics: list[dict] = []
+
+    if grouped:
+        import re as _re
+
+        def ask(prompt: str) -> str:
+            numbers = _re.findall(r"^\[(\d+)\] \(", prompt, _re.MULTILINE)
+            return json.dumps(
+                {"판정": [{"번호": int(n), "결과": VERDICT_TRUE, "장": "culture",
+                          "근거": ["9"]} for n in numbers]},
+                ensure_ascii=False,
+            )
+
+        checked = verify_report(
+            draft, fragments, None, ask,
+            allowed_fragment_ids_by_section={"culture": frozenset({"9"})},
+            diagnostics=diagnostics,
+        )
+    else:
+        checked, _사유 = check_diagrams(
+            draft, fragments, ask=_검수({1: VERDICT_TRUE}), diagnostics=diagnostics
+        )
+
+    culture = next(s for s in checked.sections if s.section_id == "culture")
+    assert culture.flow_rows == (), "도식 행이 본문과 다른 잣대로 살아남았다"
+    도식_사유 = [
+        event["reason_code"] for event in diagnostics if event["kind"] == "도식"
+    ]
+    assert 도식_사유 == [CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED]
+    if grouped:
+        # 같은 진입점의 본문 문장도 «같은» 사유코드로 빠진다.
+        assert culture.sentences == ()
+        본문_사유 = [
+            event["reason_code"] for event in diagnostics if event["kind"] == "본문"
+        ]
+        assert 본문_사유 == 도식_사유

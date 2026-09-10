@@ -116,7 +116,16 @@ def _official_evidence() -> OfficialEvidenceCollectionResult:
     candidates: list[ChapterEvidenceCandidates] = []
     for index, section_id in enumerate(REQUIRED_EVIDENCE_SECTION_IDS):
         slots = collector_slots_for(section_id)
-        text = " ".join(_section_sentences(index))
+        # ★ 8장은 «인재상과 일하는 방식» 장이다. 그 장의 원문 절에 사람·조직
+        #   제도 소재가 하나도 없으면 8장 원문 절 계약이 설계대로 그 장을
+        #   통째로 비운다. 예전 픽스처의 8장 문서는 「문화」라는 낱말 하나뿐인
+        #   낱말 나열이라 실물에서 나올 수 없는 모양이었다. 절을 «뒤에»
+        #   붙이므로 작가 응답 문장과 그 원문 대조는 그대로다.
+        text = " ".join(_section_sentences(index)) + (
+            " 임직원 교육훈련과 조직문화 정착은 인사부서가 담당한다."
+            if section_id == "culture"
+            else ""
+        )
         text_sha256 = _sha256(text)
         if index == 0:
             receipt_number = "20260330000001"

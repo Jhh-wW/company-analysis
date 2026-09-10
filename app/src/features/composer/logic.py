@@ -81,6 +81,9 @@ from src.features.composer.news_constants import NEWS_WRITER_GUIDE
 from src.features.composer.news_usage import news_metadata, parse_news_decisions
 from src.features.composer.news_block import _is_news_fragment
 from src.shared.report_quality.composition_diagnostic_constants import (
+    DIAGRAM_ROW_COUNT_STEP,
+    DIAGRAM_STAGE_PARSED,
+    DIAGRAM_STAGE_SECTION_EVIDENCE,
     EXTRACT_DIRECT,
     EXTRACT_SLICED,
 )
@@ -1135,6 +1138,33 @@ def _prepare_section_evidence_packets(
     )
 
 
+def record_flow_row_counts(
+    diagnostics: Optional[list[dict]],
+    report: ComposedReport,
+    *,
+    stage: str,
+) -> None:
+    """장별 도식 행 수를 «개수»만 단계 기록으로 남긴다.
+
+    ★ 왜 두 번 부르나 — 도식 0줄의 원인은 둘 중 하나다. ① 작가가 애초에 빈
+      배열을 냈다 ② 우리가 걸렀다. 「작성」 직후와 「장근거정리」 직후를 함께
+      남기면 그 둘이 구분된다. 예전에는 «검증» 제외 기록만 있었고 그 기록은
+      정리 필터 «뒤»에 있어서, 여기서 사라진 줄은 어디에도 남지 않았다.
+    ⚠️ 칸 내용·인용 id·회사 원문은 남기지 않는다 — 장 이름과 개수만.
+    """
+
+    if diagnostics is None:
+        return
+    diagnostics.append({
+        "step": DIAGRAM_ROW_COUNT_STEP,
+        "단계": stage,
+        "장별행수": {
+            section.section_id: len(section.flow_rows)
+            for section in report.sections
+        },
+    })
+
+
 def _sanitize_report_to_section_evidence(
     report: ComposedReport,
     allowed_fragment_ids_by_section: Mapping[str, frozenset[str]],
@@ -1341,6 +1371,7 @@ def compose_sections(
     ask: AskFn,
     *,
     section_evidence_packets: Optional[SectionEvidencePackets] = None,
+    composition_diagnostics: Optional[list[dict]] = None,
 ) -> ComposedReport:
     """9개 장 전부를 작가 AI로 쓴다 — 장마다 1회 호출(파싱 실패 시 +1회).
 
@@ -1353,6 +1384,8 @@ def compose_sections(
         section_evidence_packets: 장마다 허용할 근거 조각 묶음. 지정하면 아홉
             장 키를 먼저 검증하고, 각 작가에게 자기 장 묶음만 보여 준다.
             미지정이면 기존 flat fragments 프롬프트를 그대로 유지한다.
+        composition_diagnostics: 주어지면 장별 도식 «행 수»를 작성 직후와 장
+            근거 정리 직후에 각각 남긴다(원문·칸 내용은 남기지 않는다).
 
     Returns:
         9개 장이 «전부» 들어 있는 ComposedReport. 실패한 장도 삭제하지 않고
@@ -1424,9 +1457,14 @@ def compose_sections(
         if prepared is None:
             already_written.extend(sentence.text for sentence in section.sentences)
     report = ComposedReport(sections=tuple(sections), summary=())
+    # 작가 응답을 읽은 «직후» 줄 수 — 아래 정리에서 사라진 줄과 구분하기 위해
+    # 반드시 정리 «전»에 남긴다.
+    record_flow_row_counts(
+        composition_diagnostics, report, stage=DIAGRAM_STAGE_PARSED
+    )
     if prepared is None:
         return report
-    return _sanitize_report_to_section_evidence(
+    sanitized = _sanitize_report_to_section_evidence(
         report,
         prepared.allowed_fragment_ids_by_section,
         supported_claim_slots_by_fragment_id=(
@@ -1434,6 +1472,10 @@ def compose_sections(
         ),
         enforce_claim_slot_support=prepared.enforce_claim_slot_support,
     )
+    record_flow_row_counts(
+        composition_diagnostics, sanitized, stage=DIAGRAM_STAGE_SECTION_EVIDENCE
+    )
+    return sanitized
 
 
 def compose_selected_sections(
@@ -1667,46 +1709,110 @@ def _split_out_duplicates(
     return kept, len(kept) != len(sentences)
 
 
-def _confirmed_by_section_rounds(
-    report: ComposedReport,
+def _by_section_rounds(
+    pools: Sequence[Sequence[ComposedSentence]],
 ) -> tuple[ComposedSentence, ...]:
-    """본문의 «확인» 문장을 «서로 다른 장 우선» 순서로 편다.
+    """장을 번갈아 도는 순서를 만들되 «각 장의 첫 문장»을 마지막으로 돌린다.
 
-    한 바퀴에 장마다 한 문장씩(각 장의 첫 확인 문장부터) 뽑고,
-    부족하면 다음 바퀴로 — 같은 장에서 연달아 뽑지 않기 위한 순서다.
+    ★ 왜 첫 문장을 뒤로 미루나 (실측) — 예전에는 한 바퀴에 장마다 «첫» 문장을
+      집었다. 그래서 이 순서가 요약 보충에 쓰일 때마다 요약이 「1·2·3장 첫
+      문장」이라는 똑같은 서명으로 나왔다. 실측 실행의 요약 3건이 정확히
+      본문 2장·3장·1장의 첫 문장과 축자 동일했다. 장마다 쓸 만한 다른 문장이
+      있으면 그것부터 쓰고, 한 문장뿐인 장에서만 그 첫 문장을 쓴다.
+    ★ 순서만 바뀌고 «쓸 수 있는 문장 집합»은 그대로다 — 요약이 빌 위험은 0이다.
+    ★ 장을 «번갈아» 도는 성질은 그대로다. 첫 문장을 통째로 뒤로 몰지 않고
+      장마다 «시작점만» 한 칸 옮긴다(둘째 문장부터 돌고 첫 문장이 그 장의
+      마지막 차례). 통째로 뒤로 몰면 문장이 많은 한 장에서 세 개를 연달아
+      집어 「서로 다른 장 우선」이 깨진다 — 실측으로 확인한 자리다.
+    ★ 이 순서를 만드는 곳은 여기 한 곳이다. 예전에는 pipeline 쪽에 같은 뜻의
+      정렬이 한 벌 더 있었는데, 그 벌은 앞선 위임이 이미 최소 문장 수를
+      채워 버려 «한 번도 실행되지 않는» 죽은 코드였다.
     """
-    pools = [
-        [s for s in section.sentences if s.grade == GRADE_CONFIRMED]
-        for section in report.sections
-    ]
-    deepest = max((len(pool) for pool in pools), default=0)
+
+    rotated = [list(pool[1:]) + list(pool[:1]) for pool in pools]
+    deepest = max((len(pool) for pool in rotated), default=0)
     ordered: list[ComposedSentence] = []
     for round_index in range(deepest):
-        for pool in pools:
+        for pool in rotated:
             if round_index < len(pool):
                 ordered.append(pool[round_index])
     return tuple(ordered)
 
 
+def _confirmed_by_section_rounds(
+    report: ComposedReport,
+) -> tuple[ComposedSentence, ...]:
+    """본문의 «확인» 문장을 «서로 다른 장 우선» 순서로 편다."""
+    return _by_section_rounds([
+        [s for s in section.sentences if s.grade == GRADE_CONFIRMED]
+        for section in report.sections
+    ])
+
+
+def _any_grade_by_section_rounds(
+    report: ComposedReport,
+) -> tuple[ComposedSentence, ...]:
+    """등급을 가리지 않은 본문 문장을 같은 «서로 다른 장 우선» 순서로 편다.
+
+    검수가 전역 실패하면 모든 문장이 «해석»으로 강등돼 «확인» 문장이 0개일 수
+    있다. 그때도 요약을 비우지 않기 위한 마지막 재료이며, 순서 규칙은 확인
+    문장 경로와 «같은 함수»를 쓴다.
+    """
+    return _by_section_rounds([
+        list(section.sentences) for section in report.sections
+    ])
+
+
+def _fill_summary(
+    summary: Sequence[ComposedSentence],
+    ordered: Sequence[ComposedSentence],
+    *,
+    excluded_keys: frozenset[str],
+) -> tuple[ComposedSentence, ...]:
+    """이미 고른 요약에 후보를 순서대로 채워 최소 문장 수를 맞춘다."""
+
+    chosen: list[ComposedSentence] = list(summary)
+    seen = {_normalized_text(sentence.text) for sentence in chosen}
+    for candidate in ordered:
+        if len(chosen) >= SUMMARY_MIN_SENTENCES:
+            break
+        key = _normalized_text(candidate.text)
+        if not key or key in seen or key in excluded_keys:
+            continue
+        chosen.append(candidate)
+        seen.add(key)
+    return tuple(chosen)
+
+
 def _supplement_summary(
-    summary: Sequence[ComposedSentence], report: ComposedReport
+    summary: Sequence[ComposedSentence],
+    report: ComposedReport,
+    *,
+    excluded_keys: frozenset[str] = frozenset(),
 ) -> tuple[ComposedSentence, ...]:
     """요약이 최소 문장 수에 못 미치면 본문 «확인» 문장으로 보충한다.
 
     ★ 본문 재사용이 허용되는 유일한 경로다(정본 기준) —
       빈 요약으로 인한 차단을 만들지 않기 위해서다.
+
+    ``excluded_keys``: 되돌려 넣으면 «안 되는» 문장의 정규화 본문. 앞 단계가
+    안전 검사로 뺀 문장이 이 보충으로 되살아나는 자리를 막는다.
     """
-    chosen: list[ComposedSentence] = list(summary)
-    seen = {_normalized_text(sentence.text) for sentence in chosen}
-    for candidate in _confirmed_by_section_rounds(report):
-        if len(chosen) >= SUMMARY_MIN_SENTENCES:
-            break
-        key = _normalized_text(candidate.text)
-        if key in seen:
-            continue
-        chosen.append(candidate)
-        seen.add(key)
-    return tuple(chosen)
+    return _fill_summary(
+        summary, _confirmed_by_section_rounds(report), excluded_keys=excluded_keys
+    )
+
+
+def _supplement_summary_any_grade(
+    summary: Sequence[ComposedSentence],
+    report: ComposedReport,
+    *,
+    excluded_keys: frozenset[str] = frozenset(),
+) -> tuple[ComposedSentence, ...]:
+    """«확인» 문장이 모자랄 때 등급을 가리지 않고 같은 순서로 보충한다."""
+    return _fill_summary(
+        summary, _any_grade_by_section_rounds(report), excluded_keys=excluded_keys
+    )
 
 
 def compose_summary(

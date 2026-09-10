@@ -47,21 +47,29 @@ from src.shared.report_quality.generation import (
 from src.shared.report_quality.models import PublicationPolicy
 from src.shared.report_quality.contract import contract_for_generation
 from src.shared.report_quality.review_diagnostic_constants import REVIEW_SCOPE_ITEMS
-from src.shared.report_quality.composition_diagnostic_constants import SUMMARY_STEP
+from src.shared.report_quality.composition_diagnostic_constants import (
+    DIAGRAM_STAGE_SECTION_EVIDENCE,
+    SUMMARY_STEP,
+)
 from src.features.composer.logic import (
     AskFn,
     FragmentsInput,
     SectionEvidencePackets,
     _assert_composed_report_evidence_invariant,
     _normalize_fragments,
+    # 요약 «되돌아옴» 제외 집합은 보충 쪽과 «같은» 정규화를 써야 한다 —
+    # 다른 정규화를 쓰면 같은 문장이 다른 열쇠가 되어 제외가 조용히 빗나간다.
+    _normalized_text,
     _prepare_section_evidence_packets,
     _sanitize_report_to_section_evidence,
+    record_flow_row_counts,
     _validate_table_citations_for_section,
     SUMMARY_MAX_SENTENCES,
     SUMMARY_MIN_SENTENCES,
     # 요약 보충 규칙(본문 «확인» 문장 재사용·서로 다른 장 우선)은 3-3이 정의한
     # 단일 구현을 그대로 쓴다 — 같은 feature 내부 재사용이라 별도 복제를 두지 않는다.
     _supplement_summary,
+    _supplement_summary_any_grade,
     compose_selected_sections,
     compose_sections,
     compose_summary,
@@ -485,6 +493,8 @@ def _apply_generation_quality_label(
 def _supplement_safe_summary(
     summary: tuple[ComposedSentence, ...],
     report: ComposedReport,
+    *,
+    excluded_keys: frozenset[str] = frozenset(),
 ) -> tuple[ComposedSentence, ...]:
     """수치 안전 경계 뒤 요약이 짧으면 안전한 본문으로 최소치만 채운다.
 
@@ -493,39 +503,26 @@ def _supplement_safe_summary(
     미결속 수치 문장을 제거한 본문에서 장을 번갈아 골라, 예전의 «강등하되
     보고서 전체는 막지 않는다» 안전선을 지킨다.
 
-    ★ 각 장의 «첫» 문장은 마지막 순위로 돌린다 (실측) — 예전에는 장을 번갈아
-      돌며 «각 장의 첫 문장»부터 집어서, 이 경로가 걸릴 때마다 요약이
-      「1·2·3장 첫 문장」이라는 똑같은 서명으로 나왔다. 실측 실행의 요약 3건이
-      정확히 그 모양이었다. 장마다 쓸 만한 다른 문장이 있으면 그것부터 쓰고,
-      한 문장뿐인 장에서만 그 첫 문장을 쓴다.
+    ★ «각 장의 첫 문장을 마지막 순위로» 규칙은 이제 두 경로가 «같은» 생산자
+      (logic._by_section_rounds)를 쓴다. 예전에는 이 함수 안에 같은 뜻의
+      정렬이 한 벌 더 있었는데, 바로 위 «확인» 문장 위임이 이미 최소 문장
+      수를 채워 버려서 그 벌은 한 번도 실행되지 않았다(죽은 코드). 그래서
+      실측 실행의 요약 3건이 그대로 본문 첫 문장 서명이었다.
     ★ 요약이 빌 위험은 그대로 0이다 — 순서만 바뀌고 «쓸 수 있는 문장 집합»은
       같기 때문이다. 본문 재사용을 막는 근사 복제 검사는 이 경로에 걸지
       않는다. 여기 오는 문장은 «정의상» 본문 문장이라, 검사를 걸면 요약이
       통째로 비고 이 함수의 존재 이유(빈 요약 차단 방지)가 사라진다.
+
+    ``excluded_keys``: 앞 단계의 수치 안전 검사가 «뺀» 문장의 정규화 본문.
+    그 문장이 이 보충으로 되살아나는 자리를 막는다.
     """
 
-    chosen = list(_supplement_summary(summary, report))
+    chosen = _supplement_summary(summary, report, excluded_keys=excluded_keys)
     if len(chosen) >= SUMMARY_MIN_SENTENCES:
-        return tuple(chosen)
-    seen = {" ".join(sentence.text.split()) for sentence in chosen}
-    pools = [list(section.sentences) for section in report.sections]
-    later = [pool[1:] for pool in pools]
-    firsts = [pool[:1] for pool in pools]
-    for group in (later, firsts):
-        deepest = max((len(pool) for pool in group), default=0)
-        for round_index in range(deepest):
-            for pool in group:
-                if len(chosen) >= SUMMARY_MIN_SENTENCES:
-                    return tuple(chosen)
-                if round_index >= len(pool):
-                    continue
-                candidate = pool[round_index]
-                key = " ".join(candidate.text.split())
-                if not key or key in seen:
-                    continue
-                chosen.append(candidate)
-                seen.add(key)
-    return tuple(chosen)
+        return chosen
+    return _supplement_summary_any_grade(
+        chosen, report, excluded_keys=excluded_keys
+    )
 
 
 def _legacy_summary_stage(
@@ -620,18 +617,31 @@ def _legacy_summary_stage(
         if record is not None:
             record["첫보충후수"] = len(summary)
             record["도달단계"] = "첫보충"
+    before_numeric_safety = tuple(summary)[:SUMMARY_MAX_SENTENCES]
     final = ComposedReport(
         sections=verified.sections,
-        summary=tuple(summary)[:SUMMARY_MAX_SENTENCES],
+        summary=before_numeric_safety,
     )
     final, summary_numeric_filtering = enforce_public_numeric_safety(final)
     if record is not None:
         record["수치검사후수"] = len(final.summary)
         record["도달단계"] = "수치검사"
     if len(final.summary) < SUMMARY_MIN_SENTENCES:
+        # ★ 보충 재료는 «수치 안전 검사를 통과한» 본문(final)에서만 고르고,
+        #   그 검사가 요약에서 «뺀» 문장은 다시 넣지 않는다. 예전에는 검사
+        #   «전» 보고서(verified)를 넘겨서, 방금 뺀 그 문장이 그대로 되돌아왔다
+        #   (실측 단계 기록: 수치검사후수 2 → 최종수 3, 되돌아온 문장이 바로
+        #   빠진 그 문장이었다). 수치 검사는 그 뒤로 다시 돌지 않았다.
+        removed_summary_keys = frozenset(
+            _normalized_text(sentence.text) for sentence in before_numeric_safety
+        ) - frozenset(
+            _normalized_text(sentence.text) for sentence in final.summary
+        )
         final = ComposedReport(
             sections=final.sections,
-            summary=_supplement_safe_summary(final.summary, verified),
+            summary=_supplement_safe_summary(
+                final.summary, final, excluded_keys=removed_summary_keys
+            ),
         )
     if record is not None:
         record["최종수"] = len(final.summary)
@@ -1149,6 +1159,10 @@ def run_v2(
         # claim-slot 소유권 강제 플래그가 사라진다. 검증한 정본 입력을 그대로
         # 넘겨 작성 경계도 같은 계약을 보게 한다.
         section_evidence_packets=section_evidence_packets,
+        # 장별 도식 «행 수»를 작성 직후·장 근거 정리 직후에 남긴다. 이 기록이
+        # 없으면 어떤 장의 도식 0줄이 «작가가 안 냈다»인지 «우리가 걸렀다»인지
+        # 되짚을 방법이 없다.
+        composition_diagnostics=composition_diagnostics,
     )
     draft, news_supplemented = supplement_news_candidates(
         draft, _normalize_fragments(verification_fragments),
@@ -1167,6 +1181,13 @@ def run_v2(
                 enforce_claim_slot_support=(
                     prepared_evidence.enforce_claim_slot_support
                 ),
+            )
+            # 이 자리는 «두 번째» 정리다(작성 단계에서 이미 한 번 돈다). 뉴스
+            # 보충이 끼어든 뒤의 줄 수라 앞 기록과 값이 다를 수 있으므로 따로
+            # 남긴다 — 기록은 관측이며 중복 제거하지 않는다.
+            record_flow_row_counts(
+                composition_diagnostics, draft,
+                stage=DIAGRAM_STAGE_SECTION_EVIDENCE,
             )
             _assert_composed_report_evidence_invariant(
                 draft,

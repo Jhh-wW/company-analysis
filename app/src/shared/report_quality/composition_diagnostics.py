@@ -3,6 +3,9 @@
 from collections.abc import Mapping
 
 from src.shared.report_quality.composition_diagnostic_constants import (
+    DIAGRAM_ROW_COUNT_SECTION_IDS,
+    DIAGRAM_ROW_COUNT_STAGES,
+    DIAGRAM_ROW_COUNT_STEP,
     PROTOCOL_COUNT_FIELDS,
     PROTOCOL_ENUM_FIELDS,
     PROTOCOL_OFFSET_FIELDS,
@@ -70,6 +73,30 @@ def _summary(record: Mapping) -> dict[str, object] | None:
     return result
 
 
+def _diagram_rows(record: Mapping) -> dict[str, object] | None:
+    """장별 도식 행 수 기록 — 단계 이름과 «개수»만 통과시킨다.
+
+    칸 내용·인용 id는 애초에 담기지 않지만, 계약 밖 장 이름과 숫자가 아닌 값은
+    여기서 닫아서 버린다(다른 기록과 같은 방식).
+    """
+
+    stage = record.get("단계")
+    if not isinstance(stage, str) or stage not in DIAGRAM_ROW_COUNT_STAGES:
+        return None
+    counts = record.get("장별행수")
+    if not isinstance(counts, Mapping):
+        return None
+    return {
+        "step": DIAGRAM_ROW_COUNT_STEP,
+        "단계": stage,
+        "장별행수": {
+            key: value for key, value in counts.items()
+            if isinstance(key, str) and key in DIAGRAM_ROW_COUNT_SECTION_IDS
+            and _count(value)
+        },
+    }
+
+
 def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], ...]:
     """원문·응답·임의 오류문을 버리고 시도 순서와 단계 미도달을 보존한다.
 
@@ -85,7 +112,8 @@ def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], 
         step = record.get("step")
         normalized = (
             _protocol(record) if step == PROTOCOL_STEP else
-            _summary(record) if step == SUMMARY_STEP else None
+            _summary(record) if step == SUMMARY_STEP else
+            _diagram_rows(record) if step == DIAGRAM_ROW_COUNT_STEP else None
         )
         if normalized is not None:
             result.append(normalized)

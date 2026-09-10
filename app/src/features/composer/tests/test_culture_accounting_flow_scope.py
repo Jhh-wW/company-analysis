@@ -16,7 +16,10 @@ import json
 
 import pytest
 
-from src.features.composer.culture_constants import CULTURE_ACCOUNTING_POLICY_MISPLACED
+from src.features.composer.culture_constants import (
+    CULTURE_ACCOUNTING_POLICY_MISPLACED,
+    CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
+)
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem,
     culture_accounting_policy_problem,
@@ -173,7 +176,7 @@ def test_the_prose_guard_keeps_its_existing_contract():
 
 
 # ── 실제 진입점 — 평면 검수와 묶음 검수 ─────────────────────────────
-def _run(section_id, cells, source_text, grouped):
+def _run(section_id, cells, source_text, grouped, *, diagnostics=None):
     row = FlowRow(tuple(cells), ("s1",))
     draft = ComposedReport((ComposedSection(section_id, (), flow_rows=(row,)),))
     fragments = (CollectedFragment("s1", "공시", source_text),)
@@ -191,9 +194,12 @@ def _run(section_id, cells, source_text, grouped):
         result = verify_report(
             draft, fragments, None, ask,
             allowed_fragment_ids_by_section={section_id: frozenset({"s1"})},
+            diagnostics=diagnostics,
         )
     else:
-        result, _dropped = check_diagrams(draft, fragments, ask)
+        result, _dropped = check_diagrams(
+            draft, fragments, ask, diagnostics=diagnostics
+        )
     return result.sections[0].flow_rows, row, calls
 
 
@@ -212,14 +218,53 @@ def test_the_compact_ecl_row_is_dropped_at_both_entry_points(grouped):
         (("위험관리 책임의 명확화", "이사회 중심의 위험관리 체계 구축 및 감독", ""), OVERSIGHT_SOURCE),
         (("신용위험 관리", "손실충당금 산출 결과를 재무 담당부서가 검토하고 이사회가 승인", ""),
          BOUND_PROCEDURE_SOURCE),
-        (("재무 건전성 유지", "영업활동 현금흐름 모니터링 및 부채비율 관리", ""), LIQUIDITY_SOURCE),
     ],
-    ids=("board-oversight", "bound-procedure", "liquidity-monitoring"),
+    ids=("board-oversight", "bound-procedure"),
 )
 def test_procedure_rows_survive_both_entry_points(cells, source_text, grouped):
+    """원문이 «누가» 맡는지 말한 절차 행은 두 진입점에서 그대로 남는다."""
+
     rows, row, calls = _run(CULTURE_SECTION_ID, cells, source_text, grouped)
     assert rows == (row,)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("grouped", (False, True), ids=("flat", "grouped"))
+def test_a_monitoring_row_without_an_actor_now_leaves_by_the_section_contract(grouped):
+    """★ 의도가 바뀐 근거 — 8장은 «누가» 맡는지 말한 재무 문장만 예외로 둔다.
+
+    LIQUIDITY_SOURCE는 「연결회사는 … 모니터링하고 … 관리하고 있습니다」로,
+    조직 주체도 사람·조직 제도 소재도 없다. 예전에는 이 행이 8장에 그대로
+    실렸는데, 실측 실행에서 8장이 이런 재무 문장으로 통째로 채워지는 일이
+    반복돼 «원문 절» 긍정 계약(culture_section_evidence_problem)을 새로 걸었다.
+    이 행은 그 계약에 걸려 빠진다.
+
+    ★ 이 시험이 지키는 것 — ① 회계 측정 가드의 계약은 그대로다(아래 첫 단정:
+      「재무」라는 낱말만으로 막지 않는다) ② 빠지는 사유는 회계 정책이 아니라
+      «장 계약»이다 ③ 다른 장에서는 같은 행이 멀쩡히 남는다(아래 마지막 단정).
+    """
+
+    cells = ("재무 건전성 유지", "영업활동 현금흐름 모니터링 및 부채비율 관리", "")
+    # ① 회계 측정 가드는 여전히 이 행을 막지 않는다.
+    assert culture_accounting_flow_problem(cells, cited(LIQUIDITY_SOURCE)) == ""
+
+    # ② 8장에서는 원문 절 계약에 걸려 빠지고, 사유 코드가 그것임을 단정한다.
+    diagnostics: list[dict] = []
+    rows, _row, calls = _run(
+        CULTURE_SECTION_ID, cells, LIQUIDITY_SOURCE, grouped,
+        diagnostics=diagnostics,
+    )
+    assert rows == ()
+    assert len(calls) == 1
+    assert [event["reason_code"] for event in diagnostics] == [
+        CULTURE_SECTION_EVIDENCE_OFFCONTRACT
+    ]
+
+    # ③ 같은 행이 다른 장에 있으면 이 계약의 대상이 아니다.
+    other_rows, other_row, _calls = _run(
+        "operations_partners", cells, LIQUIDITY_SOURCE, grouped
+    )
+    assert other_rows == (other_row,)
 
 
 @pytest.mark.parametrize("grouped", (False, True), ids=("flat", "grouped"))

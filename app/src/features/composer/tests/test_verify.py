@@ -1035,3 +1035,123 @@ def test_기계_검증_로그에_문장_본문이_안_들어간다(caplog):
     # 그래도 «무엇이 몇 건 처분됐는지»는 남아야 한다 (진단용 로그의 목적)
     assert "코드 검증 처분" in caplog.text
     assert "인용 미실존 제거 1" in caplog.text
+
+
+# ══════════════════════════════════════════════════════════
+# 8장 «원문 절» 계약과 «자료 부재 단언» 가드의 운영 진입점 배선
+#
+# ★ 시험 안에서 따로 만든 경로가 아니라 `verify_report`(운영 진입점)를 그대로
+#   부른다. 검수 AI가 «참»이라고 답해도 이 두 검사는 따로 걸려야 한다.
+# ══════════════════════════════════════════════════════════
+
+_계약밖_원문 = (
+    "당사는 적정 유동성의 유지를 위하여 주기적인 자금수지 예측과 자금수지 "
+    "관리를 통하여 유동성 위험을 최소화하고 있습니다."
+)
+_부재단언_문장 = (
+    "공식 자료에서 회사의 인재상, 핵심가치 선언, 조직문화를 명시적으로 밝힌 "
+    "내용을 찾을 수 없다."
+)
+
+
+def _모두_참으로_답하는_검수(calls: list[str]):
+    def ask(prompt: str) -> str:
+        calls.append(prompt)
+        numbers = [int(n) for n in _REVIEW_ITEM_NUMBER_RE.findall(prompt)]
+        return json.dumps(
+            {"판정": [{"번호": number, "결과": VERDICT_TRUE, "장": "culture",
+                      "근거": ["7"]} for number in numbers]},
+            ensure_ascii=False,
+        )
+
+    return ask
+
+
+import re as _re  # noqa: E402 - 아래 정규식 하나만 쓰는 지역 import
+
+#: 평면·묶음 검수 프롬프트 양쪽에서 후보 번호만 읽는다.
+_REVIEW_ITEM_NUMBER_RE = _re.compile(r"^\[(\d+)\] \(", _re.MULTILINE)
+
+
+def test_8장_계약_규칙이_본문과_도식_같은_진입점에서_걸린다() -> None:
+    """산문 1문장과 도식 1행이 «같은 사유코드»로 빠진다 — 두 잣대를 만들지 않는다."""
+
+    from src.features.composer.culture_constants import (
+        CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
+    )
+
+    문장 = ComposedSentence(
+        text="회사는 유동성을 관리하는 방식으로 일한다.",
+        citations=("7",),
+        grade=GRADE_CONFIRMED,
+    )
+    행 = FlowRow(cells=("재무 건전성", "유동성 위험 최소화", ""), citations=("7",))
+    draft = ComposedReport(
+        sections=(ComposedSection("culture", (문장,), flow_rows=(행,)),)
+    )
+    fragments = (CollectedFragment("7", "공시", _계약밖_원문),)
+    diagnostics: list[dict] = []
+    calls: list[str] = []
+
+    checked = verify_report(
+        draft, fragments, None, _모두_참으로_답하는_검수(calls),
+        allowed_fragment_ids_by_section={"culture": frozenset({"7"})},
+        diagnostics=diagnostics,
+    )
+
+    culture = checked.sections[0]
+    assert culture.sentences == ()
+    assert culture.flow_rows == ()
+    종류별 = {event["kind"] for event in diagnostics}
+    assert 종류별 == {"본문", "도식"}, f"두 경로 중 한쪽만 걸렸다: {diagnostics}"
+    assert {event["reason_code"] for event in diagnostics} == {
+        CULTURE_SECTION_EVIDENCE_OFFCONTRACT
+    }
+
+
+@pytest.mark.parametrize("grouped", (False, True), ids=("flat", "grouped"))
+def test_인용_없는_해석도_부재단언_검사를_받는다(grouped) -> None:
+    """★ 새는 자리가 바로 «인용 없음»이다.
+
+    의미 검수는 인용 없는 문장을 대조할 자료가 없다는 이유로 통째로 건너뛴다.
+    부재 단언은 그 자리에서 가장 잘 통과한다 — 실측 실행의 두 문장이 정확히
+    그 모양(인용 0개·등급 «해석»)이었다.
+    """
+
+    from src.features.composer.absence_claim_constants import (
+        ABSENCE_CLAIM_UNSUPPORTED,
+    )
+
+    부재단언 = ComposedSentence(
+        text=_부재단언_문장, citations=(), grade=GRADE_INTERPRETED
+    )
+    정상문장 = ComposedSentence(
+        text="회사는 임직원 교육훈련 제도를 운영한다.",
+        citations=("7",),
+        grade=GRADE_CONFIRMED,
+    )
+    draft = ComposedReport(
+        sections=(ComposedSection("culture", (부재단언, 정상문장)),)
+    )
+    fragments = (
+        CollectedFragment(
+            "7", "공시", "당사는 임직원 교육훈련 제도를 운영하고 있습니다."
+        ),
+    )
+    diagnostics: list[dict] = []
+    calls: list[str] = []
+
+    checked = verify_report(
+        draft, fragments, None, _모두_참으로_답하는_검수(calls),
+        allowed_fragment_ids_by_section=(
+            {"culture": frozenset({"7"})} if grouped else None
+        ),
+        diagnostics=diagnostics,
+    )
+
+    texts = [sentence.text for sentence in checked.sections[0].sentences]
+    assert _부재단언_문장 not in texts, "인용이 없다는 이유로 검사를 건너뛰었다"
+    assert 정상문장.text in texts, "음성 대조 — 정상 문장까지 지우면 안 된다"
+    assert [event["reason_code"] for event in diagnostics] == [
+        ABSENCE_CLAIM_UNSUPPORTED
+    ]

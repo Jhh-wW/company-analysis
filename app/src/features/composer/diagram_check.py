@@ -99,8 +99,10 @@ from src.features.composer.direct_support_constants import (
 )
 from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
 from src.features.composer.scope_guard import flow_scope_problem
+from src.features.composer.absence_claim_guard import absence_claim_problem
 from src.features.composer.culture_guard import (
-    culture_accounting_flow_problem, culture_flow_problem, culture_problem,
+    culture_accounting_flow_problem, culture_financial_risk_goal_problem,
+    culture_flow_problem, culture_problem, culture_section_evidence_problem,
 )
 from src.features.composer.verify import (
     _SentenceNumber,
@@ -584,7 +586,12 @@ def _review_rows(
         section_id = owner[number]
         if result == VERDICT_TRUE and number not in grounding_problems:
             sources = candidates[number][1]
-            flow_problem = flow_scope_problem(row.cells, sources)
+            # ★ 자료 부재 단언은 장과 무관하다 — 문장에서 막은 거짓말이 칸으로
+            #   옮겨 적히면 그대로 공개되므로 여기서도 같은 사유코드로 건다.
+            flow_problem = (
+                absence_claim_problem(candidates[number][0])
+                or flow_scope_problem(row.cells, sources)
+            )
             if not flow_problem and section_id == CHALLENGE_FLOW_SECTION_ID:
                 # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 앞의 검사가
                 # 「비었는가」만 보므로, 채워졌지만 원문에 없는 말은 여기서만
@@ -595,10 +602,17 @@ def _review_rows(
             if not flow_problem and section_id == "culture":
                 # 축약된 칸은 원문을 줄여 적어 산문 검사의 세 표지 결합에 걸리지
                 # 않는다. 그 행이 «인용한 원문»의 순수 회계 절과 결속됐을 때만 막는다.
+                # ★ 재무위험 «규정» 규칙과 원문 절 계약을 도식에도 건다. 예전에는
+                #   본문에만 걸려 있어서 산문에서 빠진 재무 서술이 표의 칸으로
+                #   옮겨 적히면 그대로 통과했다 — 같은 보고서 안의 두 잣대였다.
                 flow_problem = (
                     culture_flow_problem(row.cells, sources)
                     or culture_accounting_flow_problem(row.cells, sources)
                     or culture_problem(" ; ".join(row.cells), sources)
+                    or culture_financial_risk_goal_problem(" ; ".join(row.cells))
+                    or culture_section_evidence_problem(
+                        " ; ".join(row.cells), sources
+                    )
                 )
             # 6장 성장 계획 표만 미래 근거를 결속한다 — 이 장의 산문과 다른 장의
             # 도식은 그대로 기존 검수만 거친다.

@@ -1018,3 +1018,116 @@ def test_생성지표는_등록부전용_source가_아니라_실제_인용조각
         fragments,
         rendered,
     ) == (2, 2)
+
+
+# ══════════════════════════════════════════════════════════
+# 핵심 요약이 본문 «첫 문장»을 축자 복제하지 않는다 (운영 진입점 배선)
+#
+# ★ 실측 재현 조건 — 작가 한도에 닿아 요약 «초안이 0건»이면 보충 경로만 남는다.
+#   그 경로가 장마다 «첫» 문장부터 집어서, 요약 3건이 본문 2장·3장·1장의 첫
+#   문장과 축자 동일해졌다. 아래 두 시험은 시험 안에서 따로 만든 경로가 아니라
+#   운영 진입점 `_legacy_summary_stage` 를 그대로 호출한다.
+# ══════════════════════════════════════════════════════════
+
+_요약_최소 = 3
+
+
+def _요약용_문장(text: str, *, numeric_verified: bool = False):
+    from src.features.composer.port import ComposedSentence
+
+    return ComposedSentence(
+        text=text,
+        citations=("1",),
+        grade=GRADE_CONFIRMED,
+        verification_state="verified" if numeric_verified else "unverified",
+    )
+
+
+def _요약용_본문(*, identity_sentences):
+    from src.features.composer.port import ComposedReport, ComposedSection
+
+    sections = []
+    for section_id in SECTION_IDS:
+        if section_id == "identity":
+            문장들 = identity_sentences
+        else:
+            문장들 = (
+                _요약용_문장(f"{section_id} 첫 문장이다."),
+                _요약용_문장(f"{section_id} 둘째 문장이다."),
+            )
+        sections.append(ComposedSection(section_id=section_id, sentences=문장들))
+    return ComposedReport(sections=tuple(sections))
+
+
+def _한도에_닿은_작가():
+    def writer_ask(_prompt: str) -> str:
+        raise AskFatalError(RuntimeError("호출 횟수 상한"), call_limit=True)
+
+    return writer_ask
+
+
+def _불려서는_안_되는_검수():
+    def reviewer_ask(_prompt: str) -> str:  # pragma: no cover - 불리면 시험 실패
+        raise AssertionError("작성 한도에 닿았으면 요약 검수는 호출되지 않는다")
+
+    return reviewer_ask
+
+
+def test_작성한도에_닿아도_요약이_본문_첫문장_서명을_만들지_않는다() -> None:
+    from src.features.composer.pipeline import _legacy_summary_stage
+    from src.features.composer.structured_claims import NumericSafetyFiltering
+
+    verified = _요약용_본문(identity_sentences=(
+        _요약용_문장("identity 첫 문장이다."),
+        _요약용_문장("identity 둘째 문장이다."),
+    ))
+    첫문장_서명 = [
+        section.sentences[0].text for section in verified.sections[:_요약_최소]
+    ]
+
+    final, draft_count, _filtering = _legacy_summary_stage(
+        verified, (), None,
+        writer_ask=_한도에_닿은_작가(),
+        reviewer_ask=_불려서는_안_되는_검수(),
+        body_numeric_filtering=NumericSafetyFiltering(),
+    )
+
+    texts = [sentence.text for sentence in final.summary]
+    assert draft_count == 0, "이 시험의 전제 — 작가가 요약 초안을 못 냈다"
+    assert len(texts) == _요약_최소
+    assert texts != 첫문장_서명, f"요약이 본문 첫 문장 서명 그대로다: {texts}"
+    assert not (set(texts) & set(첫문장_서명))
+
+
+def test_수치_안전_검사가_뺀_문장은_요약_보충으로_되돌아오지_않는다() -> None:
+    """★ 인접 결함 — 뺀 문장을 보충이 그대로 되돌려 넣고 있었다.
+
+    실측 단계 기록: 수치검사후수 2 → 최종수 3이고, 되돌아온 그 한 문장이 바로
+    수치 검사가 뺀 문장이었다. 수치 검사는 그 뒤로 다시 돌지 않는다.
+    """
+    from src.features.composer.pipeline import _legacy_summary_stage
+    from src.features.composer.structured_claims import (
+        NumericSafetyFiltering, has_public_numeric_token,
+    )
+
+    수치_문장 = _요약용_문장(
+        "설립일은 1997년 4월 25일이고 상장일은 2001년 11월 21일이다.",
+        numeric_verified=True,
+    )
+    assert has_public_numeric_token(수치_문장.text), "이 시험의 전제 — 공개 숫자 문장"
+    # 장에 문장이 하나뿐이라 보충이 «반드시» 이 문장을 먼저 집는다.
+    verified = _요약용_본문(identity_sentences=(수치_문장,))
+
+    final, _draft_count, filtering = _legacy_summary_stage(
+        verified, (), None,
+        writer_ask=_한도에_닿은_작가(),
+        reviewer_ask=_불려서는_안_되는_검수(),
+        body_numeric_filtering=NumericSafetyFiltering(),
+    )
+
+    texts = [sentence.text for sentence in final.summary]
+    assert filtering.removed_summary_count >= 1, (
+        "이 시험의 전제 — 수치 안전 검사가 요약에서 문장을 실제로 뺐다"
+    )
+    assert 수치_문장.text not in texts, "뺀 문장이 보충으로 되돌아왔다"
+    assert len(texts) == _요약_최소, "제외 때문에 요약이 짧아지면 안 된다"
