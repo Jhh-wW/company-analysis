@@ -44,6 +44,10 @@ from src.features.composer.port import (
     ComposedReport,
     ComposedSection,
     ComposedSentence,
+    PerformanceTable,
+)
+from src.shared.revenue_table_provenance import (
+    revenue_table_section_id_from_caption,
 )
 
 logger = logging.getLogger(__name__)
@@ -105,6 +109,11 @@ _MIN_COMPARE_CHARS: Final[int] = 20
 #: ★ «깊이»보다 앞세우지 않는다. 이 파일의 중심 규칙(그 사실을 가장 많이 다룬
 #:   장이 소유한다)은 실측으로 세운 것이고, 여기서 고치는 것은 그 뒤에 오던
 #:   «동점 처리»뿐이다.
+#: ⚠️ 이 규칙이 하는 일은 «소유를 어디로 줄지»를 정하는 것뿐이다. 빈 장을
+#:    없애지 못한다 — 실측 r4처럼 5장에 그 문장 «하나»뿐이면 소유가 6장으로
+#:    가면서 이번에는 5장이 빈다. 독립 검토가 base/new를 같은 입력에 나란히
+#:    돌려 5장 1→0 · 6장 0→1 로 확인했다. 빈 장 자체는 같은 근거 조각이 5장과
+#:    6장 후보로 «함께» 뽑히는 상류(span 선택)와 6장 관문을 고쳐야 없어진다.
 _TENSE_OWNED_PAIR: Final[frozenset[str]] = frozenset(
     {CHALLENGE_FLOW_SECTION_ID, STRATEGY_TABLE_SECTION_ID}
 )
@@ -255,7 +264,48 @@ def _future_section_owner(
     return None
 
 
-def _empty_section_notice(section: ComposedSection) -> str:
+def sections_with_program_tables(
+    performance_table: Optional[PerformanceTable] = None,
+    composition_tables: Sequence[PerformanceTable] = (),
+) -> frozenset[str]:
+    """`ComposedSection` «밖»에서 렌더 인자로 들어오는 표가 실릴 장 id 집합.
+
+    ★ 왜 필요한가 (독립 검토 지적) — 실적표(4장)와 매출 구성표(2·3장)는
+      `ComposedSection`의 칸이 아니라 `render_report`의 인자다. 그래서 중복
+      제거 단계는 그 장에 표가 남는지 «볼 수 없고», 문장이 다 빠지면
+      「그쪽으로 모았습니다」만 적힌 채 표가 실린다 — 6장에서 고친 어긋남이
+      2·3·4장에는 그대로 남아 있었다.
+    ★ 장 배정 규칙을 새로 만들지 않는다. 캡션→장 매핑은 렌더가 쓰는
+      `revenue_table_section_id_from_caption` 그대로고, 실적표의 장 id도 렌더
+      상수를 그대로 읽는다. 두 벌이 되면 한쪽만 고쳐져 안내문이 다시 어긋난다
+      (대조 시험: test_dedupe.py 의 렌더 대조 단정).
+    ★ 캡션을 못 읽는 표는 «없는 것처럼» 넘긴다. 그 표는 렌더에서 같은 함수에
+      다시 걸려 그때 오류가 난다 — 안내문 한 줄 때문에 보고서 생성을 더 이른
+      자리에서 죽이지 않는다.
+    ★ 3장 「회사가 공시한 대표 이름」 표는 여기 없다. 그 표는 중복 제거보다
+      «뒤»에서 조립되어 이 자리에서는 존재를 알 수 없다(보고 항목). 같은 장에
+      매출 구성표가 함께 있으면 그 표로 잡힌다.
+    """
+
+    # ★ 지역 import — 이 한 함수 밖으로 렌더 의존을 넓히지 않는다.
+    from src.features.composer.render import PERFORMANCE_TABLE_SECTION_ID
+
+    section_ids: set[str] = set()
+    if performance_table is not None and performance_table.rows:
+        section_ids.add(PERFORMANCE_TABLE_SECTION_ID)
+    for table in composition_tables:
+        if not table.rows:
+            continue
+        try:
+            section_ids.add(revenue_table_section_id_from_caption(table.caption))
+        except ValueError:
+            logger.warning("구성표 캡션에서 장을 읽지 못해 안내문 판정에서 뺍니다")
+    return frozenset(section_ids)
+
+
+def _empty_section_notice(
+    section: ComposedSection, sections_with_tables: frozenset[str]
+) -> str:
     """문장이 다 빠진 장에 남길 안내문. 표가 남으면 그 사실까지 적는다.
 
     ★ 왜 갈라 쓰나 (실측 — 4차 유료 실행 멀티캠퍼스 6장) — 「이 장에 담겼던
@@ -264,9 +314,16 @@ def _empty_section_notice(section: ComposedSection) -> str:
       안내문이 그 사실을 말하지 않아 읽는 사람에게는 글과 화면이 어긋나 보인다.
     ★ 표를 «빼서» 맞추지 않는다. 표는 자기 근거로 검증을 통과한 자료다 —
       문장을 옮긴다고 함께 지우면 근거 있는 내용을 잃는다.
+    ★ 이 장이 들고 있는 표(`flow_rows`·`news_rows`)와 «밖에서 들어오는»
+      표(`sections_with_tables`)를 함께 본다. 뒤엣것을 빼면 2·3·4장에서
+      같은 어긋남이 그대로 난다.
     """
 
-    if section.flow_rows or section.news_rows:
+    if (
+        section.flow_rows
+        or section.news_rows
+        or section.section_id in sections_with_tables
+    ):
         return NOTICE_DUPLICATE_MOVED_TABLE_KEPT
     return NOTICE_DUPLICATE_MOVED
 
@@ -300,6 +357,7 @@ def drop_cross_section_duplicates(
     report: ComposedReport,
     *,
     fragments: Optional[Sequence[CollectedFragment]] = None,
+    sections_with_tables: Optional[Sequence[str]] = None,
 ) -> tuple[ComposedReport, int]:
     """여러 장에 반복된 같은 사실을 «소유 장 하나»만 남기고 뺀다.
 
@@ -324,6 +382,11 @@ def drop_cross_section_duplicates(
             문서에서 왔는지»가 있어야 한다. 넘기지 않으면 ②가 꺼지고 ①만
             남는다 — 예전 동작 그대로다. 운영 호출부는 반드시 넘긴다
             (시험: test_dedupe_unshared_citations.py 의 배선 단정).
+        sections_with_tables: `ComposedSection` «밖»에서 렌더 인자로 들어오는
+            표(실적표·매출 구성표)가 실릴 장 id들. 문장이 다 빠진 장의 안내문이
+            「표는 남는다」를 말할지 정하는 데만 쓴다 — 어느 문장을 뺄지에는
+            아무 영향이 없다. 넘기지 않으면 종전 동작(장이 «들고 있는» 표만
+            본다). 호출부는 `sections_with_program_tables`로 만들어 넘긴다.
 
     Returns:
         (중복이 빠진 보고서, 뺀 문장 수).
@@ -421,6 +484,7 @@ def drop_cross_section_duplicates(
     for index in drop:
         dropped_by_section.setdefault(flat[index][0], set()).add(flat[index][1])
 
+    table_sections = frozenset(sections_with_tables or ())
     rebuilt: list[ComposedSection] = []
     for section_index, section in enumerate(report.sections):
         removed = dropped_by_section.get(section_index)
@@ -439,7 +503,7 @@ def drop_cross_section_duplicates(
         #   그래서 표가 남는 장에는 남는다는 사실까지 적는다.
         notice = section.notice
         if not kept and not notice:
-            notice = _empty_section_notice(section)
+            notice = _empty_section_notice(section, table_sections)
         rebuilt.append(
             ComposedSection(
                 section_id=section.section_id,

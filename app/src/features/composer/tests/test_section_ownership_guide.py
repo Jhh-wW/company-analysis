@@ -251,3 +251,59 @@ def test_5장_지침이_말한_두_어투가_실제_판정에서_갈린다():
 
     assert has_forward_marker(계획_어투) is True
     assert has_forward_marker(진행_어투) is False
+
+
+# ══════════════════════════════════════════════════════════
+# 계획이 «없다»는 문장은 미래 표지가 아니다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 필요한가 (독립 검토 지적) — 「자기주식 소각 계획은 없습니다」가 미래 표지
+#   True로 잡혔다. 계획을 밝힌 문장이 아니라 계획이 «없다»는 문장이다. 5장에
+#   그런 문장이 있으면 소유권 가르기가 「5장도 미래를 말한다」로 읽어 규칙이
+#   꺼진다(미탐 방향).
+# ★ 부정 판정은 새로 만들지 않고 표 쪽 가드가 쓰던 `_plan_denied_after_marker`
+#   하나를 그대로 쓴다. 그래서 표지 «앞»의 부정(「하지 않을 계획」)은 정상적인
+#   부정 계획으로 그대로 남는다 — 그 구분이 그 함수의 존재 이유다.
+# ★ 실측 (공시 21건·절 문장 2,331개): 표지 판정이 바뀐 문장은 2개이고 둘 다
+#   「…계획은 없습니다」다. 반대 방향(False→True)은 0개다.
+
+
+def test_계획이_없다는_문장은_미래_표지가_아니다():
+    from src.features.composer.future_plan_guard import has_forward_marker
+
+    for 문장 in (
+        "현재 예정중인 자기주식 취득·처분·소각 계획은 없습니다.",
+        "당사는 신규 공장을 증설할 계획은 없습니다.",
+    ):
+        assert has_forward_marker(문장) is False, 문장
+
+
+def test_부정_계획은_여전히_미래_표지다():
+    """「하지 않을 계획」은 계획이 없는 것이 아니라 «안 하겠다는 계획»이다."""
+    from src.features.composer.future_plan_guard import has_forward_marker
+
+    assert has_forward_marker("당사는 당분간 신규 출점을 하지 않을 계획이다.") is True
+
+
+def test_정당한_계획_문장은_그대로_미래_표지다():
+    """부정 규칙이 정상 계획까지 끄지 않는지 확인한다."""
+    from src.features.composer.future_plan_guard import has_forward_marker
+
+    for 문장 in (
+        "회사는 2026년에 AI 교육 체계를 고도화할 계획이다.",
+        "회사는 신규 민자사업 참여를 추진할 예정입니다.",
+        "회사는 새로운 시장으로 사업 영역을 확장하겠다고 밝혔다.",
+    ):
+        assert has_forward_marker(문장) is True, 문장
+
+
+def test_계획_서술어만으로도_미래_표지가_된다():
+    """★ 독립 검토 뮤테이션 M8 — `FUTURE_SECTION_FORWARD_RE` 갈래를 꺼도
+    composer 시험이 전부 통과했다. 그 갈래로만 잡히는 어투를 못 박는다.
+
+    「계획하고 있다」는 양태 목록에서는 진행(「하고 있」)으로만 읽혀 미래로
+    잡히지 않는다. 이 갈래가 꺼지면 정상 계획 문장이 통째로 미래가 아니게 된다.
+    """
+    from src.features.composer.future_plan_guard import has_forward_marker
+
+    assert has_forward_marker("회사는 신규 공장 건설을 계획하고 있다.") is True

@@ -631,14 +631,22 @@ def has_forward_marker(text: str) -> bool:
     ★ 목록을 새로 만들지 않는다 — 아래 `future_section_prose_problem`이 이
       함수를 그대로 쓴다. 두 벌로 늘리면 한쪽만 고쳐져 「장에는 남는데 소유는
       옮겨지지 않는」 어긋남이 생긴다(`PROMISSORY_MARKER` 주석과 같은 이유).
+    ★ 표지 «뒤»에서 그 계획을 취소한 문장은 세지 않는다 — 「…소각 계획은
+      없습니다」는 계획을 밝힌 문장이 아니라 계획이 «없다»는 문장이다
+      (독립 검토 지적). 부정 판정도 새로 만들지 않고 표 쪽 가드가 쓰는
+      `_plan_denied_after_marker` 하나를 그대로 쓴다. 표지 «앞»의 부정
+      (「하지 않을 계획」)은 정상적인 부정 계획이므로 그대로 미래로 센다.
     """
 
     surface = _normalized(text)
-    if FUTURE_SECTION_FORWARD_RE.search(surface):
-        return True
+    for match in FUTURE_SECTION_FORWARD_RE.finditer(surface):
+        if not _plan_denied_after_marker(surface, match.end()):
+            return True
     for sentence in _sentences(surface):
         for match in MODALITY_RE.finditer(sentence):
-            if _modality_kind(match) in MODALITY_FUTURE_KINDS:
+            if _modality_kind(match) not in MODALITY_FUTURE_KINDS:
+                continue
+            if not _plan_denied_after_marker(sentence, match.end()):
                 return True
     return False
 
