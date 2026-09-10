@@ -25,6 +25,7 @@ from src.features.composer.diagram_check import (
     FLOW_REVIEW_ROW_NUMBER_PATTERN,
 )
 from src.features.composer.logic import AskFn, SUMMARY_PROMPT_HEADER
+from src.features.composer.tests.test_pipeline import _summary_selection_json
 from src.features.composer.pipeline import V2RunOutput, run_v2
 from src.features.composer.render import (
     ENGINE_V2_SCHEMA_VERSION,
@@ -77,13 +78,21 @@ def _golden_sections() -> dict[str, Any]:
     return copy.deepcopy(_RESPONSES_FIXTURE["장별_응답"])
 
 
+#: 요약 «고르기»가 돌려주는 문장 수. 가짜 AI(`_summary_selection_json`)가 서로
+#: 다른 장에서 세 개를 고른다.
+#: ★ 2026-09-11 이전에는 fixture의 «핵심요약_응답» 문장 수를 그대로 썼다.
+#:   그때는 AI가 요약을 새로 썼기 때문이다. 이제는 검증된 본문 문장을 고르므로
+#:   초안 수는 «고른 개수»다. 생산 상수를 빌려 오지 않고 글자로 적는다.
+_SUMMARY_PICKS = 3
+
+
 def _expected_total() -> int:
-    """fixture가 약속한 초안 문장 수 (본문 9장 + 요약) — 매직 넘버 대신 실측."""
+    """fixture가 약속한 초안 문장 수 (본문 9장 + 고른 요약) — 매직 넘버 대신 실측."""
     body = sum(
         len(payload["문장들"])
         for payload in _RESPONSES_FIXTURE["장별_응답"].values()
     )
-    return body + len(_RESPONSES_FIXTURE["핵심요약_응답"]["문장들"])
+    return body + _SUMMARY_PICKS
 
 
 #: 그 한 문장이 어느 장에서 빠지는가 — 1장이 쓴 회사 표어가 8장으로 간다.
@@ -108,9 +117,8 @@ class _GoldenWriter:
 
     def __call__(self, prompt: str) -> str:
         if SUMMARY_PROMPT_HEADER in prompt:
-            return json.dumps(
-                _RESPONSES_FIXTURE["핵심요약_응답"], ensure_ascii=False
-            )
+            # 요약은 이제 «고르기»다 — fixture 문장을 지어내지 않고 번호만 답한다.
+            return _summary_selection_json(prompt)
         for section_id in SECTION_IDS:
             if SECTION_GUIDES[section_id] in prompt:
                 return json.dumps(self._sections[section_id], ensure_ascii=False)
@@ -336,8 +344,10 @@ def test_검수_거짓_문장은_재작성_1회와_재검수를_거쳐_확인으
     assert len(reviewer.rewrite_prompts) == 1
     assert target_text in reviewer.rewrite_prompts[0]
     assert _FRAGMENTS_FIXTURE["8"]["원문"] in reviewer.rewrite_prompts[0]
-    # 검수는 본문 → 재검수 → 요약 순서로 3회 — 재검수 대상은 고친 문장이다
-    assert len(reviewer.review_prompts) == 3
+    # 검수는 본문 → 재검수 순서로 2회 — 재검수 대상은 고친 문장이다.
+    # ★ 2026-09-11 이전에는 뒤에 «요약 검수»가 붙어 3회였다. 요약이 검증된
+    #   본문 문장을 글자 그대로 싣게 되면서 다시 검수할 새 글자가 없어졌다.
+    assert len(reviewer.review_prompts) == 2
     assert rewritten_text in reviewer.review_prompts[1]
     # 문장은 제거되지 않고 고쳐진 «확인»으로 남았다 — 장·보고서 생존
     culture_texts = _section_texts(report, "culture")

@@ -34,7 +34,6 @@ from src.features.composer.constants import (
     EVIDENCE_LABEL_SHORT_KIND,
     FORBIDDEN_TOPICS_GUIDE,
     GRADE_CONFIRMED,
-    GRADE_INTERPRETED,
     JSON_SCHEMA_GUIDE,
     NOTICE_COMPOSE_FAILED,
     NOTICE_INSUFFICIENT_EVIDENCE,
@@ -1679,69 +1678,55 @@ def compose_selected_sections(
 
 
 # ══════════════════════════════════════════════════════════
-# 핵심 요약 (소단계 3-3) — 본문 완성 «후» 새로 쓴다 (기준문서 3절)
+# 핵심 요약 (소단계 3-3) — 검증된 본문 문장 중에서 «고른다»
 # ══════════════════════════════════════════════════════════
+#
+# ★ 왜 «쓰기»가 아니라 «고르기»인가 (2026-09-11 실측) — 예전에는 본문을
+#   재료로 요약을 새로 쓰게 했다. 그러면 새로 쓴 문장은 어느 본문 사실에도
+#   축자로 맞지 않아 결속(bound_summary_fact_id)이 붙지 않는다. 그래서
+#   ① 결속을 요구하는 실행(4차 멀티캠퍼스 run e193846f)에서는 초안 4문장이
+#      검수·수치 안전 검사에 전부 지워져(수치검사후수 0) 본문 재활용으로
+#      되돌아갔고, 살려 둔 작성·검수 두 호출 40.39원이 최종 요약에 0문장
+#      기여했다.
+#   ② 결속을 요구하지 않는 실행(2차 인텍에프에이)에서는 결속 없는 AI 요약
+#      2건이 그대로 출고됐다.
+#   두 결말은 같은 모순의 양면이다 — 작성기는 축자 재사용을 «재탕»으로 버리고
+#   결속기는 축자만 인정한다. 그래서 «고른다»로 바꾼다. 고른 문장은 본문
+#   문장 그 자체이므로 결속이 «구성상» 보장되고, 새 문장이 없으니 요약을
+#   다시 검수할 이유도 없다.
 
 SUMMARY_PROMPT_HEADER: Final[str] = (
     "당신은 «공식 근거 기반 기업분석 보고서»의 본문을 모두 읽고, "
-    "보고서 맨 앞에 실릴 «핵심 요약»을 산문으로 작성한다.\n"
+    "보고서 맨 앞에 실릴 «핵심 요약»에 넣을 문장을 «고른다».\n"
+    "문장을 새로 쓰지 않는다 — 아래 후보의 «번호»만 고른다.\n"
     "지원 직무·채용공고·지원자 정보는 주어지지 않았다. 개인이나 직무에 맞춘 "
-    "내용을 만들지 마라.\n"
+    "문장을 고르지 마라.\n"
 )
 
-#: 요약 작성 규칙 — 본문 재탕 금지 + 장별 인용·등급 규칙과 동일한 규칙 적용.
-SUMMARY_RULES_GUIDE: Final[str] = (
-    "작성 규칙:\n"
-    f"1. 아래 본문 전체를 근거로 핵심 요약 {SUMMARY_MIN_SENTENCES}~"
-    f"{SUMMARY_MAX_SENTENCES}문장을 «새로» 쓴다.\n"
-    "2. 본문 문장을 글자 그대로 옮겨 적지 않는다 — 여러 장을 종합한 "
-    "새 문장으로 쓴다. 조사·어미·꼬리말만 바꿔 옮기는 것도 «옮겨 적기»다. "
-    "한 장의 한 문장을 다시 쓰지 말고, 서로 다른 장의 사실을 묶어 그 뜻을 "
-    "말하는 문장으로 쓴다.\n"
-    "3. 모든 문장에 인용(조각 id 배열)과 등급을 붙인다. 인용 id는 본문 문장 뒤 "
-    "[인용: …]에 표시된 조각 번호를 그대로 쓴다.\n"
-    f"   - 등급 «{GRADE_CONFIRMED}»: 인용한 조각 원문에 직접 근거가 있는 "
-    "사실 서술.\n"
-    f"   - 등급 «{GRADE_INTERPRETED}»: 공식 자료에 기반한 분석·의미 부여. "
-    "종합적 해석이면 빈 배열도 허용된다.\n"
-    "4. 본문에 없는 사실·숫자를 지어내지 않는다.\n"
-    "5. «글» 문장 본문 안에 [숫자]·[인용: …] 같은 대괄호 표기를 직접 쓰지 "
-    "않는다. 인용은 반드시 «인용» 배열로만 표시한다.\n"
+#: 응답이 객체 모양으로 올 때 번호 배열을 담는 키.
+SUMMARY_SELECTION_NUMBERS_KEY: Final[str] = "번호"
+
+#: 고르는 규칙 — 무엇을 우선하는지만 말하고, 글자를 만들라고 하지 않는다.
+SUMMARY_SELECTION_RULES_GUIDE: Final[str] = (
+    "고르는 규칙:\n"
+    f"1. 아래 후보 문장 중 {SUMMARY_MIN_SENTENCES}~"
+    f"{SUMMARY_MAX_SENTENCES}개의 번호를 고른다.\n"
+    "2. 회사를 처음 보는 취업준비생에게 가장 중요한 순서로 고른다.\n"
+    "3. 서로 다른 장에서 고른다 — 고를 장이 모자랄 때만 같은 장에서 둘을 "
+    "고른다.\n"
+    "4. 수치나 고유명사가 들어 있는 문장을 먼저 고른다.\n"
+    "5. 문장을 고치거나 새로 쓰지 않는다. 번호만 답한다.\n"
 )
 
-#: 요약 출력 JSON 안내 — 장별 JSON_SCHEMA_GUIDE와 같은 모양(키 상수 공유).
-#: (장별 안내문은 «자료 목록» 문구가 있어 요약 프롬프트에는 안 맞아 따로 둔다.)
-SUMMARY_JSON_GUIDE: Final[str] = (
-    "출력 형식 — 설명·머리말 없이 아래 모양의 JSON만 출력한다:\n"
-    f'{{"{RESPONSE_SENTENCES_KEY}": [{{"{RESPONSE_TEXT_KEY}": "<문장>", '
-    f'"{RESPONSE_CITATIONS_KEY}": ["<조각id>", "..."], '
-    f'"{RESPONSE_GRADE_KEY}": "{GRADE_CONFIRMED}" 또는 '
-    f'"{GRADE_INTERPRETED}"}}]}}\n'
+#: 출력 형식 — 번호 배열 하나뿐이라 출력 토큰이 아주 작다.
+SUMMARY_SELECTION_JSON_GUIDE: Final[str] = (
+    "출력 형식 — 설명·머리말 없이 고른 번호만 담은 JSON 배열 하나만 출력한다:\n"
+    "[1, 4, 7]\n"
 )
 
-SUMMARY_BODY_HEAD: Final[str] = "\n방금 완성된 보고서 본문 (전체):\n"
-
-#: 재탕 검출 후 재요청에 덧붙이는 안내 — 계획(04장 3-3): 재요청은 1회.
-SUMMARY_DUPLICATE_REMINDER: Final[str] = (
-    "\n(직전 응답에 본문 문장을 그대로 옮겨 적었거나 거의 그대로 옮긴 문장이 "
-    "있었다. 본문 재탕 없이, 종합한 새 문장으로만 다시 요약하라.)\n"
+SUMMARY_CANDIDATE_HEAD: Final[str] = (
+    "\n고를 수 있는 본문 문장 (번호. [장 이름] 문장):\n"
 )
-
-#: «거의 그대로»를 재탕으로 볼 닮음 비율(difflib 기준, 0~1).
-#:
-#: ★ 왜 필요한가 (실측) — 기존 검출은 공백만 지운 «정확히 같은 문자열»만
-#:   잡았다. 그래서 조사 하나·어미 하나만 바꿔 옮긴 문장은 재탕 재요청
-#:   경로를 그대로 지나간다. 교육서비스 회사 실행에서 본문 3장과 7장에
-#:   실린 같은 수주 문장이 꼬리만 달랐던 것처럼(«교육서비스 포트폴리오의»
-#:   ↔ «회사의»), 사람이 보면 같은 문장인데 코드만 다르다고 본다.
-#: ★ 0.95는 «거의 글자 그대로»만 가리키는 값이다. 어휘 목록·어미 패턴을
-#:   쓰지 않는 순수 모양 비교라 닫힌 게이트 금지 원칙을 그대로 지킨다.
-SUMMARY_NEAR_COPY_RATIO: Final[float] = 0.95
-
-#: 닮음 비교를 적용할 최소 글자 수. 짧은 문장은 우연히 많이 닮는다
-#: («매출은 감소했다»·«매출이 감소했다»). 이 길이 미만이면 정확히 같은
-#: 문자열일 때만 재탕으로 본다 — dedupe의 _MIN_COMPARE_CHARS와 같은 이유다.
-SUMMARY_NEAR_COPY_MIN_CHARS: Final[int] = 20
 
 
 def _normalized_text(text: str) -> str:
@@ -1753,91 +1738,105 @@ def _normalized_text(text: str) -> str:
     return " ".join(text.split())
 
 
-def _render_report_body(report: ComposedReport) -> str:
-    """본문 전체를 장 제목·등급·인용 번호와 함께 편다 — 작가의 요약 재료."""
-    lines: list[str] = [SUMMARY_BODY_HEAD]
+@dataclass(frozen=True)
+class SummaryCandidate:
+    """요약에 실어도 된다고 판정된 본문 문장 하나와 그 문장이 실린 장."""
+
+    section_id: str
+    sentence: ComposedSentence
+
+
+def summary_candidates(
+    report: ComposedReport,
+    *,
+    accept: Optional[Callable[[ComposedSentence], bool]] = None,
+) -> tuple[SummaryCandidate, ...]:
+    """요약 후보를 본문 순서대로 모은다 — 같은 문장은 한 번만 담는다.
+
+    ``accept``: «요약 잣대»를 통과하는지 보는 술어. 부르는 쪽이 수치 안전
+    검사와 «같은» 술어를 넘겨, 통과하지 못할 문장이 애초에 후보로 나가지
+    않게 한다. 예전에는 요약을 다 만든 «뒤»에 이 검사를 걸어서, 걸러진
+    자리를 규칙 보충이 메우고 그 보충분이 또 걸리는 일이 반복됐다.
+    """
+
+    candidates: list[SummaryCandidate] = []
+    seen: set[str] = set()
     for section in report.sections:
-        if not section.sentences:
-            continue  # 빈 장은 요약할 재료가 없다
-        title = SECTION_TITLES.get(section.section_id, section.section_id)
-        lines.append(f"\n[{title}]\n")
         for sentence in section.sentences:
-            line = f"- ({sentence.grade}) {sentence.text}"
-            if sentence.citations:
-                line += " [인용: " + ", ".join(sentence.citations) + "]"
-            lines.append(line + "\n")
-    return "".join(lines)
+            key = _normalized_text(sentence.text)
+            if not key or key in seen:
+                continue
+            if accept is not None and not accept(sentence):
+                continue
+            seen.add(key)
+            candidates.append(SummaryCandidate(section.section_id, sentence))
+    return tuple(candidates)
 
 
-def build_summary_prompt(report: ComposedReport) -> str:
-    """핵심 요약을 쓰게 하는 지시문 — 규칙 + 본문 전체 + JSON 강제."""
+def build_summary_selection_prompt(
+    candidates: Sequence[SummaryCandidate],
+) -> str:
+    """고를 후보를 «번호 + 장 이름 + 문장»으로 나열한 지시문을 만든다."""
+
     parts = [
         SUMMARY_PROMPT_HEADER,
         "\n",
-        SUMMARY_RULES_GUIDE,
+        SUMMARY_SELECTION_RULES_GUIDE,
         FORBIDDEN_TOPICS_GUIDE,
-        SUMMARY_JSON_GUIDE,
-        _render_report_body(report),
+        SUMMARY_SELECTION_JSON_GUIDE,
+        SUMMARY_CANDIDATE_HEAD,
     ]
+    for number, candidate in enumerate(candidates, start=1):
+        title = SECTION_TITLES.get(candidate.section_id, candidate.section_id)
+        parts.append(f"{number}. [{title}] {candidate.sentence.text}\n")
     return "".join(parts)
 
 
-def _body_sentence_keys(report: ComposedReport) -> frozenset[str]:
-    """본문 전 문장의 비교용 형태 집합 — 재탕 검출에 쓴다."""
-    return frozenset(
-        _normalized_text(sentence.text)
-        for section in report.sections
-        for sentence in section.sentences
-    )
+#: 번호로 읽어 줄 문자열의 최대 자릿수. 후보는 많아야 수백 개라 이보다 긴
+#: 숫자는 번호가 아니며, 아주 긴 숫자 문자열을 int()에 넣으면 파이썬 자체가
+#: 자릿수 상한으로 예외를 던진다.
+_SUMMARY_NUMBER_MAX_DIGITS: Final[int] = 6
 
 
-def _is_body_near_copy(text: str, body_keys: frozenset[str]) -> bool:
-    """본문 문장을 그대로 또는 «거의 그대로» 옮겨 적었는지 본다.
+def _selection_number(item: Any) -> Optional[int]:
+    """응답 항목 하나를 후보 번호로 읽는다. 번호가 아니면 None."""
 
-    ① 공백만 지운 문자열이 본문 문장과 같으면 길이와 무관하게 재탕이다.
-    ② 충분히 긴 문장은 본문 문장과의 닮음이 SUMMARY_NEAR_COPY_RATIO 이상일
-       때도 재탕으로 본다 — 조사·어미만 바꾼 옮겨 적기를 잡기 위해서다.
+    if isinstance(item, bool):
+        # bool은 int의 하위형이라 True가 1번으로 읽힌다 — 먼저 막는다.
+        return None
+    if isinstance(item, int):
+        return item
+    if isinstance(item, str):
+        text = item.strip()
+        if text.isdigit() and len(text) <= _SUMMARY_NUMBER_MAX_DIGITS:
+            return int(text)
+    return None
 
-    ★ 어휘 목록·어미 패턴·출처 종류를 보지 않는다. 두 문자열이 얼마나 닮았나
-      라는 «모양»만 본다(닫힌 게이트 금지 원칙).
+
+def parse_summary_selection(raw: str, candidate_count: int) -> tuple[int, ...]:
+    """응답에서 «후보 번호»만 읽는다 — 그 밖의 것은 전부 버린다.
+
+    ★ 글자를 읽지 않는다. 범위 밖 번호·중복·JSON 아님은 모두 «그만큼 못
+      골랐다»로 처리하고, 모자란 자리는 부르는 쪽의 규칙 보충이 메운다.
+      응답이 문장을 담아 와도 그 글자는 보고서에 실리지 않는다.
     """
 
-    # 지역 import — 이 수정을 요약 단계 함수 안에만 가두기 위해서다.
-    from difflib import SequenceMatcher
-
-    key = _normalized_text(text)
-    if key in body_keys:
-        return True
-    if len(key) < SUMMARY_NEAR_COPY_MIN_CHARS:
-        return False
-    for body_key in body_keys:
-        if len(body_key) < SUMMARY_NEAR_COPY_MIN_CHARS:
+    payload = extract_json_payload(raw)
+    if isinstance(payload, Mapping):
+        payload = payload.get(SUMMARY_SELECTION_NUMBERS_KEY)
+    if isinstance(payload, (str, bytes)) or not isinstance(payload, Sequence):
+        return ()
+    numbers: list[int] = []
+    for item in payload:
+        number = _selection_number(item)
+        if number is None or not 1 <= number <= candidate_count:
             continue
-        matcher = SequenceMatcher(None, key, body_key)
-        # 값이 싼 상한부터 본다 — 대부분의 짝은 여기서 걸러진다.
-        if matcher.real_quick_ratio() < SUMMARY_NEAR_COPY_RATIO:
+        if number in numbers:
             continue
-        if matcher.quick_ratio() < SUMMARY_NEAR_COPY_RATIO:
-            continue
-        if matcher.ratio() >= SUMMARY_NEAR_COPY_RATIO:
-            return True
-    return False
-
-
-def _split_out_duplicates(
-    sentences: Sequence[ComposedSentence], body_keys: frozenset[str]
-) -> tuple[tuple[ComposedSentence, ...], bool]:
-    """본문을 그대로·거의 그대로 옮겨 적은 문장을 골라낸다.
-
-    Returns:
-        (재탕이 아닌 문장들, 재탕이 하나라도 있었는가)
-    """
-    kept = tuple(
-        sentence
-        for sentence in sentences
-        if not _is_body_near_copy(sentence.text, body_keys)
-    )
-    return kept, len(kept) != len(sentences)
+        numbers.append(number)
+        if len(numbers) >= SUMMARY_MAX_SENTENCES:
+            break
+    return tuple(numbers)
 
 
 def _by_section_rounds(
@@ -1965,62 +1964,47 @@ def _supplement_summary_any_grade(
     )
 
 
-def compose_summary(
-    report: ComposedReport,
+def select_summary_sentences(
+    candidates: Sequence[SummaryCandidate],
     ask: AskFn,
-    *,
-    reject_inline_citation_markers: bool = False,
-) -> ComposedReport:
-    """본문 완성 후 핵심 요약 3~5문장을 새로 써서 채운 보고서를 돌려준다.
+) -> tuple[ComposedSentence, ...]:
+    """후보 중에서 AI가 고른 문장을 «글자 그대로» 돌려준다 (AI 호출 1회).
 
-    흐름:
-        ① 본문 전체를 주고 요약을 새로 쓰게 한다 (파싱 실패 시 1회 재요청).
-        ② 본문 문장을 글자 그대로 옮긴 재탕을 코드로 검출 → 1회 재요청.
-           재요청 결과에서도 재탕은 버리고, 쓸 것이 없으면 1차 생존 문장을 쓴다.
-        ③ 그래도 최소 문장 수 미만이면 본문 «확인» 문장으로 보충한다
-           (이때만 재사용 허용, 서로 다른 장 우선). 빈 요약이어도 차단하지 않는다.
+    돌려주는 것은 후보로 받은 그 ``ComposedSentence`` 객체다 — 글자·인용·
+    등급·구조화 사실이 본문과 완전히 같으므로 요약 결속이 구성상 보장된다.
+
+    ★ 재요청하지 않는다. 응답이 번호가 아니면 «그만큼 못 골랐다»로 두고
+      부르는 쪽의 규칙 보충이 메운다 — 번호 하나 받자고 호출을 한 번 더
+      쓰는 것보다, 검증된 본문 문장으로 채우는 편이 결과가 같고 싸다.
 
     Args:
-        report: compose_sections가 만든 본문 (summary는 무시하고 새로 채운다).
+        candidates: 요약 잣대를 이미 통과한 본문 문장들.
         ask: 프롬프트 문자열 → 응답 문자열 주입 함수 (시험은 가짜 함수 사용).
 
     Returns:
-        sections는 그대로 두고 summary만 채운 새 ComposedReport.
+        AI가 고른 본문 문장들. 재료가 없거나 못 골랐으면 빈 튜플.
+
+    Raises:
+        AskFatalError: 요청 전역 장애(예산 소진·한도)는 삼키지 않고 그대로
+            올린다 — 부르는 쪽이 «한도 도달»로 기록하고 규칙 보충으로 간다.
     """
-    body_keys = _body_sentence_keys(report)
-    if not body_keys:
-        # 본문이 통째로 비면 요약할 재료가 없다 — 헛호출도, 차단도 하지 않는다
-        return ComposedReport(sections=report.sections, summary=())
-    prompt = build_summary_prompt(report)
-    # 요약에는 경로표가 없다 — 응답 원문은 버린다.
-    sentences, _raw = _ask_and_parse(
-        ask,
-        prompt,
-        reject_inline_citation_markers=reject_inline_citation_markers,
-    )
-    retries = 0
-    while sentences is None and retries < PARSE_RETRY_LIMIT:
-        retries += 1
-        sentences, _raw = _ask_and_parse(
-            ask,
-            prompt + RETRY_REMINDER,
-            reject_inline_citation_markers=reject_inline_citation_markers,
+
+    if not candidates:
+        # 재료가 없으면 헛호출하지 않는다.
+        return ()
+    prompt = build_summary_selection_prompt(candidates)
+    try:
+        raw = ask(prompt)
+    except AskFatalError:
+        raise
+    except Exception as error:  # noqa: BLE001 - 요약 실패가 보고서를 멈추면 안 된다
+        # ⚠️ 예외 «메시지»는 남기지 않는다 — provider 응답 본문이 섞일 수 있다.
+        logger.warning("요약 선택 실패(삼킴) kind=%s", type(error).__name__)
+        return ()
+    numbers = parse_summary_selection(str(raw), len(candidates))
+    if not numbers:
+        logger.warning(
+            "요약 선택 응답에서 후보 번호를 하나도 읽지 못했다 — "
+            "검증된 본문 문장으로 채운다"
         )
-    if sentences is None:
-        sentences = ()
-    kept, had_duplicate = _split_out_duplicates(sentences, body_keys)
-    if had_duplicate:
-        # 재탕 검출 → 1회 재요청. 실패하거나 또 전부 재탕이면 1차 생존 문장 유지.
-        retry_sentences, _retry_raw = _ask_and_parse(
-            ask,
-            prompt + SUMMARY_DUPLICATE_REMINDER,
-            reject_inline_citation_markers=reject_inline_citation_markers,
-        )
-        if retry_sentences:
-            retry_kept, _ = _split_out_duplicates(retry_sentences, body_keys)
-            if retry_kept:
-                kept = retry_kept
-    summary = kept[:SUMMARY_MAX_SENTENCES]
-    if len(summary) < SUMMARY_MIN_SENTENCES:
-        summary = _supplement_summary(summary, report)
-    return ComposedReport(sections=report.sections, summary=summary)
+    return tuple(candidates[number - 1].sentence for number in numbers)

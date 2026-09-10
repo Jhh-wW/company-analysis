@@ -32,6 +32,10 @@ from src.features.composer.diagram_check import (
     FLOW_REVIEW_ROW_NUMBER_PATTERN,
 )
 from src.features.composer.pipeline import run_v2
+from src.features.composer.tests.test_pipeline import (
+    _summary_selection_json,
+    summary_candidate_filler,
+)
 from src.features.composer.port import filing_meta_from_raw, fragments_from_raw
 from src.features.composer.portfolio_name_table import (
     NAME_TABLE_CAPTION_PREFIX,
@@ -117,24 +121,19 @@ class _Writer:
 
     def __call__(self, prompt: str) -> str:
         if "핵심 요약" in prompt:
-            return json.dumps(
-                {
-                    "문장들": [
-                        {"글": text, "인용": ["1"], "등급": "확인"}
-                        for text in (
-                            "테스트 회사의 공식 근거다.",
-                            "회사의 공식 근거를 제시한다.",
-                            "테스트 회사의 공식 자료다.",
-                        )
-                    ]
-                },
-                ensure_ascii=False,
-            )
+            # 요약은 이제 «고르기»다 — 문장을 지어내지 않고 후보 번호만 답한다.
+            return _summary_selection_json(prompt)
         payload: dict[str, object] = {
             "문장들": [
                 {"글": "테스트 회사의 공식 근거다.", "인용": ["1"], "등급": "확인"}
             ]
         }
+        # 장마다 다른 문장을 하나 더 둬야 요약 후보가 3개 이상 생긴다
+        # (근거는 `summary_candidate_filler` docstring).
+        문장들 = payload["문장들"]
+        보충 = summary_candidate_filler(prompt)
+        if isinstance(문장들, list) and 보충 is not None:
+            문장들.append(보충)
         if PORTFOLIO_TABLE_HEADERS[0] in prompt:
             self.portfolio_prompts.append(prompt)
             cells = (

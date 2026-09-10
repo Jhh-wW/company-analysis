@@ -11,9 +11,12 @@
   ① 운영 진입 `run_v2` 가 `as_of_date` 를 검증기·도식검사에 넘긴다.
   ② `verify_report` 가 받은 값을 근거 결속의 임원 가드까지 흘린다.
   ③ `check_diagrams` 도 같은 값을 같은 가드까지 흘린다.
-  ④ `verify_sentences`(SHADOW 요약 재검증)도 «같은» 값을 받는다. 요약은 본문에서
-     고른 문장을 다시 검수하므로, 여기만 비면 본문에서 살아남은 임원 문장이
-     요약에서만 빠져 한 보고서 안에 두 잣대가 생긴다.
+  ④ 요약은 ②를 통과한 본문 문장에서만 온다. 재검증(`verify_sentences`)을
+     한 번도 부르지 않고, 고른 «번호»가 가리키는 그 문장이 그대로 실린다.
+     (2026-09-11 이전에는 ④가 「요약 재검증도 같은 기준일을 받는가」였다.
+      요약을 AI가 새로 쓰던 시절, 한 보고서 안에 잣대가 둘이 되는 것을 막던
+      겹이다. 요약이 축자 재사용이 되면서 그 겹이 필요 없어졌고, 대신 위
+      두 가지를 지킨다 — 각 시험 docstring에 근거를 적었다.)
 
 ⚠️ 시험 안에서 값을 따로 만들어 검사하지 않는다 — 가드가 «실제로 받은» 인자를
    그대로 기록해 단정한다. 그러지 않으면 배선이 끊겨도 초록불이 된다.
@@ -22,6 +25,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -39,7 +43,9 @@ from src.features.composer.tests.test_pipeline import (
     _FakeReviewer,
     _FakeWriter,
     _raw_fragments,
+    _summary_selection_json,
 )
+from src.features.composer.render import INTERPRETATION_MARKER
 from src.features.composer.verify import verify_report
 
 #: 운영 호출자가 실제로 넘기는 모양 그대로 — `real.py` 는
@@ -54,6 +60,19 @@ CANDIDATE = "당사는 기업 대상 어학 교육 과정을 운영한다."
 
 def _fragments() -> tuple[CollectedFragment, ...]:
     return (CollectedFragment(FRAGMENT, "사업내용", SOURCE),)
+
+
+#: 렌더가 붙이는 «표시» 장식 — 인용 번호 `[n]`과 «해석» 표지.
+#: 같은 문장이라도 본문과 요약에서 번호 표시 정책이 달라(`_marker_visibility`)
+#: 글자가 갈린다. 요약이 «본문 문장 그대로인가»를 보려면 이 장식을 걷어낸다.
+_DISPLAY_MARKER_RE = re.compile(r"\s*\[\d+\]")
+
+
+def _bare(text: str) -> str:
+    """표시 장식을 걷어낸 문장 본문만 남긴다."""
+
+    stripped = _DISPLAY_MARKER_RE.sub("", text)
+    return stripped.replace(INTERPRETATION_MARKER, "").strip()
 
 
 def _approving_ask() -> object:
@@ -186,31 +205,40 @@ def test_run_v2_hands_its_as_of_date_to_both_verification_stages(monkeypatch):
     assert set(diagram_seen) == {BASELINE}, diagram_seen
 
 
-def test_run_v2_gives_the_summary_recheck_the_same_baseline_date(monkeypatch):
-    """④ SHADOW 요약 재검증도 본문과 «같은» 기준일을 받는다.
+def test_run_v2_summary_comes_from_verified_body_without_a_recheck(monkeypatch):
+    """④ 요약은 «검증된 본문 문장»에서만 온다 — 재검증 호출이 아예 없다.
 
-    ★ 이 겹이 빠지면 한 보고서 안에 잣대가 둘이 된다 — 본문에서 살아남은 임원
-      문장이 요약에서만 근거 없음으로 빠진다. SHADOW 는 보완조사·DART 부분
-      보고서 갈래에서 실제로 도는 운영 경로다(legacy 전용이 아니다).
+    ★ 이 시험이 대신하는 것 (2026-09-11) — 예전 ④는 「SHADOW 요약 재검증도
+      본문과 같은 기준일을 받는다」였다. 그 겹이 필요했던 이유는 요약을 AI가
+      «새로 썼기» 때문이다. 한 보고서 안에 잣대가 둘이 되는 것을 막으려고
+      요약에도 같은 기준일로 같은 검수를 다시 걸었다.
+      이제 요약은 본문 문장을 글자 그대로 고른다. 그 문장은 이미 ②
+      `verify_report`가 그 기준일로 판정한 문장이므로 «잣대가 둘이 될 자리»
+      자체가 없다. 그래서 지키는 것을 「같은 값을 받는가」에서 「요약 문장이
+      본문 문장인가 + 재검증을 안 부르는가」로 바꾼다. 삭제가 아니라 대체다.
+    ⚠️ spy 는 정의 모듈(`composer/verify.py`)에 건다. 파이프라인이 이름을 다시
+      들여오거나 다른 모듈이 대신 불러도 여기서 잡힌다.
     """
 
+    from src.features.composer import verify as verify_module
+
     body_seen: list[object] = []
-    summary_seen: list[object] = []
+    recheck_calls: list[tuple] = []
     real_verify = pipeline.verify_report
-    real_sentences = pipeline.verify_sentences
+    real_sentences = verify_module.verify_sentences
 
     def verify_spy(*args, **kwargs):
         body_seen.append(kwargs.get("baseline_date"))
         return real_verify(*args, **kwargs)
 
     def sentences_spy(*args, **kwargs):
-        summary_seen.append(kwargs.get("baseline_date"))
+        recheck_calls.append((args, kwargs))
         return real_sentences(*args, **kwargs)
 
     monkeypatch.setattr(pipeline, "verify_report", verify_spy)
-    monkeypatch.setattr(pipeline, "verify_sentences", sentences_spy)
+    monkeypatch.setattr(verify_module, "verify_sentences", sentences_spy)
 
-    pipeline.run_v2(
+    output = pipeline.run_v2(
         "가나다전자",
         _raw_fragments(),
         None,
@@ -220,27 +248,68 @@ def test_run_v2_gives_the_summary_recheck_the_same_baseline_date(monkeypatch):
         as_of_date=BASELINE,
     )
 
-    assert summary_seen, "verify_sentences 가 안 불렸다 — 이 시험이 아무것도 못 잰다"
-    assert set(summary_seen) == {BASELINE}, summary_seen
-    # 본문과 요약이 «같은» 값을 본다는 것까지 못 박는다.
-    assert set(summary_seen) == set(body_seen), (body_seen, summary_seen)
+    assert set(body_seen) == {BASELINE}, body_seen
+    assert recheck_calls == [], (
+        "요약 재검증이 다시 배선됐다 — 같은 문장을 두 번, 다른 잣대로 검수한다"
+    )
+    summary_texts = [_bare(item.text) for item in output.report.summary_items]
+    assert summary_texts, "요약이 비었다 — 이 시험이 아무것도 못 잰다"
+    body_texts = {
+        _bare(text)
+        for section in output.report.sections
+        for text, _cite in section.prose_lines
+    }
+    for text in summary_texts:
+        assert text in body_texts, (
+            f"요약 문장이 본문에 없다 — 어딘가에서 새 글자가 생겼다: {text}"
+        )
 
 
-def test_verify_sentences_passes_the_baseline_date_to_the_executive_guard(guard_calls):
-    """④-b 진입 함수가 받은 값이 실제로 가드까지 간다."""
+#: 고르기 프롬프트의 후보 한 줄 — `logic.build_summary_selection_prompt` 계약.
+_CANDIDATE_LINE_RE = re.compile(r"^(\d+)\. \[([^\]]+)\] (.+)$", re.MULTILINE)
 
-    from src.features.composer.verify import verify_sentences
 
-    verify_sentences(
-        (ComposedSentence(CANDIDATE, (FRAGMENT,), GRADE_CONFIRMED),),
-        _fragments(),
+def test_run_v2_summary_carries_the_exact_sentence_each_number_points_at():
+    """④-b 고른 «번호»가 가리키는 그 문장이 요약에 실린다.
+
+    ★ 이 시험이 대신하는 것 (2026-09-11) — 예전 ④-b는 `verify_sentences`
+      진입 함수가 받은 기준일이 임원 가드까지 가는지 보았다. 그 경로는 요약에서
+      사라졌다(본문 경로 ②는 바로 위 시험이 그대로 지킨다).
+      요약이 축자 재사용이 된 뒤로 「본문 첫 문장과 유사도 1.0」은 결함이 아니라
+      설계다. 대신 새로 생긴 위험이 «번호↔문장 대응»이다 — 후보 목록을 1부터
+      세는데 코드가 0부터 세면, 요약은 여전히 «본문 문장»이라 어떤 검사도
+      안 걸리면서 엉뚱한 문장이 실린다. 그 자리를 여기서 못 박는다.
+    ⚠️ 시험 안에서 기대값을 따로 만들지 않는다 — AI가 «실제로 본» 프롬프트의
+      후보 줄에서 번호를 되짚어 기대 문장을 만든다.
+    """
+
+    writer = _FakeWriter()
+    output = pipeline.run_v2(
+        "가나다전자",
+        _raw_fragments(),
         None,
-        _approving_ask(),
-        baseline_date=BASELINE,
+        writer_ask=writer,
+        reviewer_ask=_FakeReviewer(),
+        corp_type="상장사",
+        as_of_date=BASELINE,
     )
 
-    assert guard_calls, "임원 가드가 한 번도 안 불렸다"
-    assert set(guard_calls) == {BASELINE}, guard_calls
+    고르기_프롬프트 = [p for p in writer.prompts if "핵심 요약" in p]
+    assert len(고르기_프롬프트) == 1, "요약 고르기 호출은 정확히 1회다"
+    후보 = {
+        int(number): (title, text)
+        for number, title, text in _CANDIDATE_LINE_RE.findall(고르기_프롬프트[0])
+    }
+    assert len(후보) >= 3, f"후보가 너무 적다 — 이 시험이 아무것도 못 잰다: {후보}"
+
+    고른번호 = json.loads(_summary_selection_json(고르기_프롬프트[0]))
+    assert len(고른번호) == 3, 고른번호
+    기대문장 = [후보[number][1] for number in 고른번호]
+
+    assert [_bare(item.text) for item in output.report.summary_items] == 기대문장
+    # 후보 줄은 «어느 장의 문장인지»를 함께 실어 준다 — AI가 장을 섞어 고를 수
+    # 있게 하는 재료다. 가짜 AI는 그 재료를 써서 장마다 하나씩 골랐다.
+    assert len({후보[number][0] for number in 고른번호}) == len(고른번호)
 
 
 def test_run_v2_without_an_as_of_date_keeps_none(monkeypatch):

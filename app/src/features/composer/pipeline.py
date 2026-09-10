@@ -1,7 +1,7 @@
 """엔진 v2 오케스트레이션 (소단계 3-4b) — 쓰기→검증→요약→렌더→중복경고→출고검증.
 
 ★ 이 파일은 composer 조각들을 «정해진 순서로 잇기만» 한다:
-    compose_sections → verify_report → compose_summary → (요약 재검증·보충)
+    compose_sections → verify_report → (요약 문장 고르기·보충)
     → render_report → (versioned 품질 shadow 판정) → (중복 검출 경고) → validate_v2
   각 단계의 규칙은 각 소유 파일(logic/verify/render/validate)에 있다.
 ★ AI 호출은 두 개의 주입 함수로만 한다 — 작가(writer_ask)와 검수(reviewer_ask)는
@@ -57,9 +57,6 @@ from src.features.composer.logic import (
     SectionEvidencePackets,
     _assert_composed_report_evidence_invariant,
     _normalize_fragments,
-    # 요약 «되돌아옴» 제외 집합은 보충 쪽과 «같은» 정규화를 써야 한다 —
-    # 다른 정규화를 쓰면 같은 문장이 다른 열쇠가 되어 제외가 조용히 빗나간다.
-    _normalized_text,
     _prepare_section_evidence_packets,
     _sanitize_report_to_section_evidence,
     record_flow_row_counts,
@@ -72,7 +69,8 @@ from src.features.composer.logic import (
     _supplement_summary_any_grade,
     compose_selected_sections,
     compose_sections,
-    compose_summary,
+    select_summary_sentences,
+    summary_candidates,
 )
 from src.features.composer.constants import (
     DEFAULT_CITATION_STYLE,
@@ -155,7 +153,9 @@ from src.features.composer.structured_claims import (
     safe_numeric_owners_by_fact_id,
 )
 from src.features.composer.validate import V2ValidationError, validate_v2
-from src.features.composer.verify import verify_report, verify_sentences
+# ★ verify_sentences를 «일부러» 들여오지 않는다 — 요약 재검증 단계가 없어졌고,
+#   import가 남아 있으면 다음 사람이 무심코 다시 부를 자리가 된다.
+from src.features.composer.verify import verify_report
 from src.features.pipeline.port import Grade, Report
 # ★ 경계 메모 — ``composer/render.py``·``port.py`` 머리말은 「composer는
 #   report_standard를 import 하지 않는다」고 적어 두었고, 그래서 그 두 파일은
@@ -499,7 +499,7 @@ def _supplement_safe_summary(
     excluded_keys: frozenset[str] = frozenset(),
     accept: Callable[[ComposedSentence], bool] | None = None,
 ) -> tuple[ComposedSentence, ...]:
-    """수치 안전 경계 뒤 요약이 짧으면 안전한 본문으로 최소치만 채운다.
+    """AI가 고른 요약이 짧으면 안전한 본문 문장으로 최소치만 채운다.
 
     먼저 기존 계약대로 «확인» 문장을 고른다. reviewer가 전역 실패하면 모든
     문장이 «해석»으로 강등돼 확인 문장이 0개일 수 있다. 그 경우에도 이미
@@ -534,18 +534,28 @@ def _supplement_safe_summary(
 
 def _legacy_summary_stage(
     verified: ComposedReport,
-    fragments: FragmentsInput,
-    performance_table: Optional[PerformanceTable],
     *,
     writer_ask: AskFn,
-    reviewer_ask: AskFn,
     body_numeric_filtering: NumericSafetyFiltering,
-    review_diagnostics: list[dict] | None = None,
     summary_diagnostics: list[dict] | None = None,
-    protocol_diagnostics: list[dict] | None = None,
-    baseline_date: str | None = None,
 ) -> tuple[ComposedReport, int, NumericSafetyFiltering]:
-    """기존 SHADOW 요약 경로를 글자·호출 순서까지 그대로 보존한다.
+    """검증된 본문 문장 중 AI가 고른 3~5문장으로 핵심 요약을 채운다.
+
+    흐름:
+        ① 후보 만들기 — 본문 문장 중 «요약 잣대»를 통과한 것만 모은다.
+           수치 안전 검사를 뒤가 아니라 «앞»에 걸어, 통과하지 못할 문장이
+           애초에 요약 후보로 나가지 않게 한다.
+        ② 고르기 — AI 호출 1회. 후보 번호만 답하게 하고 번호만 읽는다.
+        ③ 보충 — 못 골랐거나 모자라면 검증된 본문 문장으로 채운다(규칙).
+        ④ 수치 안전 재검사 — ①의 술어와 같은 재료를 쓰므로 정상적으로는
+           아무것도 빠지지 않는다. 두 잣대가 갈라지면 조용히 새는 대신
+           여기서 빠지고 경고가 남는다(fail-closed 뒷문).
+
+    ★ 요약 «재검증»(verify_sentences) 호출이 없다. 요약 문장은 본문에서
+      글자 그대로 가져온 것이고, 그 본문은 이미 verify_report를 통과했다.
+      같은 문장을 두 번 검수하면 호출값만 쓰고 잣대가 둘로 갈라진다 —
+      실측(4차 멀티캠퍼스)에서 재검수가 초안 4문장 중 3문장을 지웠고 남은
+      1문장도 수치 안전 검사가 지워 최종 기여가 0문장이었다.
 
     ``summary_diagnostics``가 주어지면 원문·오류문·인용 id 없이 단계별
     «개수»와 도달 단계만 하나의 dict로 기록한다(계약:
@@ -565,6 +575,10 @@ def _legacy_summary_stage(
                 len(section.sentences) for section in verified.sections
             ),
             "초안수": None,
+            # ★ «검수» 두 칸은 이제 영구히 None·False다 — 요약 재검증 단계
+            #   자체가 없어졌기 때문이다. 0으로 적으면 «검수했는데 다 떨어졌다»
+            #   처럼 읽혀 실제로 안 돈 단계와 구분이 사라진다. 계약 필드는
+            #   그대로 두어 옛 실행 기록과 같은 모양으로 남긴다.
             "검수후수": None,
             "첫보충후수": None,
             "수치검사후수": None,
@@ -574,53 +588,54 @@ def _legacy_summary_stage(
         }
         summary_diagnostics.append(record)
 
+    # ★ 후보 잣대는 수치 안전 검사가 요약에 쓰는 술어와 «같은 함수»다.
+    #   한 벌로 두어야 앞뒤가 갈라지지 않는다.
+    safe_owner_by_fact_id = safe_numeric_owners_by_fact_id(verified.sections)
+
+    def _summary_ready(sentence: ComposedSentence) -> bool:
+        return is_release_ready_summary_sentence(
+            sentence, safe_owner_by_fact_id=safe_owner_by_fact_id
+        )
+
+    candidates = summary_candidates(verified, accept=_summary_ready)
+    if len(candidates) < SUMMARY_MIN_SENTENCES:
+        # 계약 필드에 «후보 수» 칸이 없어 로그로 남긴다 — 요약이 짧게 끝난
+        # 실행에서 「본문이 얇아서」인지 「고르기가 실패해서」인지 가른다.
+        logger.warning(
+            "요약 후보가 %d문장뿐이다(본문 %d문장 중) — 요약이 최소 %d문장에 "
+            "못 미칠 수 있다",
+            len(candidates),
+            sum(len(section.sentences) for section in verified.sections),
+            SUMMARY_MIN_SENTENCES,
+        )
+
     # 호출 «횟수» 상한과 요청 로컬 «예약액» 소진을 함께 뜻한다 — 둘 다
     # «이 요청 몫을 다 썼다»일 뿐 돈·계정 장애가 아니라서 처리가 같다.
-    summary_ask_limited = False
     try:
-        with_summary = compose_summary(verified, writer_ask)
+        selected = select_summary_sentences(candidates, writer_ask)
     except AskFatalError as error:
         if not getattr(error, "degradable", False):
             raise
-        summary_ask_limited = True
-        with_summary = verified
+        selected = ()
         if record is not None:
             record["작성한도도달"] = True
         logger.warning(
-            "요청 AI 한도에 닿아 핵심 요약을 «새로 쓰지» 못했다 — "
+            "요청 AI 한도에 닿아 핵심 요약 문장을 «고르지» 못했다 — "
             "검증을 마친 본문 문장으로 채운다"
         )
-    summary_draft_count = len(with_summary.summary)
+    summary_draft_count = len(selected)
     if record is not None:
         record["초안수"] = summary_draft_count
         record["도달단계"] = "작성"
 
-    summary = with_summary.summary
-    if summary and not summary_ask_limited:
-        try:
-            summary = verify_sentences(
-                summary, fragments, performance_table, reviewer_ask,
-                diagnostics=review_diagnostics,
-                protocol_diagnostics=protocol_diagnostics,
-                # 본문 검증과 «같은» 기준일을 준다. 여기만 비우면 본문에서
-                # 살아남은 임원 문장이 요약에서만 빠져 두 잣대가 된다.
-                baseline_date=baseline_date,
-            )
-        except AskFatalError as error:
-            if not getattr(error, "degradable", False):
-                raise
-            summary = ()
-            if record is not None:
-                record["검수한도도달"] = True
-            logger.warning(
-                "요청 AI 한도에 닿아 새 요약을 검증하지 못했다 — 검증하지 "
-                "않은 요약을 내보내는 대신 본문 확인 문장으로 채운다"
-            )
-        if record is not None:
-            record["검수후수"] = len(summary)
-            record["도달단계"] = "검수"
+    summary: tuple[ComposedSentence, ...] = selected
     if len(summary) < SUMMARY_MIN_SENTENCES:
-        summary = _supplement_summary(summary, verified)
+        # 보충도 «요약 잣대»를 통과한 문장만 쓴다. 본문에 남았다는 사실만으로
+        # 요약에 실을 수 없다 — 본문은 「검수 통과 표식」만으로도 남지만
+        # 요약은 구조화 사실과 소유 장 일치를 요구한다.
+        summary = _supplement_safe_summary(
+            summary, verified, accept=_summary_ready
+        )
         if record is not None:
             record["첫보충후수"] = len(summary)
             record["도달단계"] = "첫보충"
@@ -633,46 +648,15 @@ def _legacy_summary_stage(
     if record is not None:
         record["수치검사후수"] = len(final.summary)
         record["도달단계"] = "수치검사"
-    if len(final.summary) < SUMMARY_MIN_SENTENCES:
-        # ★ 보충 재료는 «수치 안전 검사를 통과한» 본문(final)에서만 고르고,
-        #   그 검사가 요약에서 «뺀» 문장은 다시 넣지 않는다. 예전에는 검사
-        #   «전» 보고서(verified)를 넘겨서, 방금 뺀 그 문장이 그대로 되돌아왔다
-        #   (실측 단계 기록: 수치검사후수 2 → 최종수 3, 되돌아온 문장이 바로
-        #   빠진 그 문장이었다). 수치 검사는 그 뒤로 다시 돌지 않았다.
-        removed_summary_keys = frozenset(
-            _normalized_text(sentence.text) for sentence in before_numeric_safety
-        ) - frozenset(
-            _normalized_text(sentence.text) for sentence in final.summary
+    if len(final.summary) < len(before_numeric_safety):
+        # ★ 여기서 뭔가 빠졌다면 후보 술어와 요약 잣대가 갈라졌다는 뜻이다.
+        #   다시 보충하지 않는다 — 같은 술어로 고른 문장이 또 걸릴 자리라
+        #   길이만 맞추다 같은 구멍을 반복한다. 짧게 나가고 크게 남긴다.
+        logger.warning(
+            "요약 수치 안전 검사가 %d문장을 뺐다 — 후보 술어와 요약 잣대가 "
+            "갈라졌다는 뜻이다",
+            len(before_numeric_safety) - len(final.summary),
         )
-        # ★ 잔여 구멍 — «뺀 그 문장»만 막으면 «같은 이유로 빠졌어야 할 다른
-        #   본문 문장»이 그대로 들어온다(운영 진입점 재현: 최종 3건 전부가
-        #   재검사하면 빠질 문장이 되는 경우가 있었다). 본문 잣대와 요약
-        #   잣대가 다르기 때문이다 — 본문은 「검수 통과 표식」만으로도 남지만
-        #   요약은 구조화 사실과 소유 장 일치를 요구한다.
-        #   그래서 보충 후보를 «요약 잣대»로 먼저 거른다.
-        safe_owner_by_fact_id = safe_numeric_owners_by_fact_id(final.sections)
-        supplemented = _supplement_safe_summary(
-            final.summary, final,
-            excluded_keys=removed_summary_keys,
-            accept=lambda sentence: is_release_ready_summary_sentence(
-                sentence, safe_owner_by_fact_id=safe_owner_by_fact_id
-            ),
-        )
-        # ★ 그리고 보충 «뒤»에 같은 검사를 한 번 더 건다 — fail-closed 뒷문이다.
-        #   위 술어와 같은 재료를 쓰므로 정상적으로는 아무것도 빠지지 않지만,
-        #   두 잣대가 앞으로 갈라지면 조용히 새는 대신 여기서 빠진다.
-        final, resupplement_filtering = enforce_public_numeric_safety(
-            ComposedReport(sections=final.sections, summary=supplemented)
-        )
-        summary_numeric_filtering = summary_numeric_filtering.merged(
-            resupplement_filtering
-        )
-        if len(final.summary) < len(supplemented):
-            logger.warning(
-                "요약 보충 뒤 수치 안전 재검사가 %d문장을 다시 뺐다 — "
-                "보충 술어와 요약 잣대가 갈라졌다는 뜻이다",
-                len(supplemented) - len(final.summary),
-            )
     if record is not None:
         record["최종수"] = len(final.summary)
         record["도달단계"] = "최종"
@@ -957,9 +941,11 @@ def run_v2(
     흐름:
         ① compose_sections — 작가 AI가 9개 장을 산문으로 쓴다 (장 삭제 없음).
         ② verify_report — 출처 실존·수치·의미 검수·라벨 정합을 «문장 단위»로.
-        ③ compose_summary — 검증된 본문을 재료로 핵심 요약 3~5문장을 새로 쓴다.
-        ④ 요약 재검증 — 새로 쓴 요약 문장에 같은 검증을 적용하고, 부족하면
-           이미 검증된 본문 «확인» 문장으로 보충한다 (이때만 재사용 허용).
+        ③ 핵심 요약 — 검증된 본문 문장 중 AI가 고른 3~5문장을 글자 그대로
+           싣는다 (AI 호출 1회, 번호만 답한다). 못 골랐거나 모자라면 검증된
+           본문 «확인» 문장으로 규칙 보충한다.
+        ④ (요약 재검증 단계는 없다 — 고른 문장이 이미 ②를 통과한 본문
+           문장이라 다시 검수할 새 글자가 없다.)
         ⑤ render_report — 웹·PDF 공용 pipeline Report로 변환.
         ⑤-a 품질·안전 판정 — 구조화된 누적 증감률은 원자 claim으로, 나머지는
            결속되지 않은 공개 내용으로 정직하게 측정한다. 전체 안전 판정은
@@ -1444,21 +1430,17 @@ def run_v2(
             ),
         )
 
-    # ③~④ 요약. SHADOW는 이미 운영 중인 AI 작성·재검증 경로를 그대로
-    # 보존한다. 엄격 모드는 본문에 없던 말을 새로 만들지 않고, 렌더러가
-    # 만든 검증 FactRecord에 정확히 결속된 본문 문장을 0원으로 재사용한다.
+    # ③ 요약. 두 갈래 모두 «본문에 없던 말을 새로 만들지 않는다». SHADOW는
+    # 검증된 본문 문장 중 AI가 고른 3~5문장을 쓰고(AI 1회), 엄격 모드는
+    # 렌더러가 만든 검증 FactRecord에 정확히 결속된 본문 문장을 0원으로
+    # 재사용한다. 고른 문장은 본문 문장 그 자체라 결속이 구성상 보장되고,
+    # 그래서 요약 재검증 호출이 없다.
     if release_mode is ReleaseMode.SHADOW:
         final, summary_draft_count, numeric_filtering = _legacy_summary_stage(
             verified,
-            verification_fragments,
-            performance_table,
             writer_ask=writer_ask,
-            reviewer_ask=reviewer_for_run,
             body_numeric_filtering=body_numeric_filtering,
-            review_diagnostics=review_diagnostics,
             summary_diagnostics=composition_diagnostics,
-            protocol_diagnostics=composition_diagnostics,
-            baseline_date=baseline_date,
         )
     else:
         body_rendered = render_report(

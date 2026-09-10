@@ -53,10 +53,21 @@ from src.shared.report_generation.public_projection import (
 
 
 class _FlatWriter:
-    """packet 없이 아홉 장 + legacy 요약 한 번을 답하는 가짜 작성자."""
+    """packet 없이 아홉 장 + legacy 요약 한 번을 답하는 가짜 작성자.
 
-    def __init__(self) -> None:
+    ``unbound_section_id``: 그 장에만 «주장슬롯 없는» 공개 문장을 한 줄 더
+    쓴다. 결속되지 않은 공개 내용이라 안전 판정이 출고를 막는다 — 「출고
+    불가 관측」을 재료로 쓰는 시험이 이 갈래를 켠다.
+    ★ 왜 새로 필요한가 (2026-09-11) — 예전에는 요약을 AI가 새로 썼고 그
+      요약 문장이 어느 fact와도 결속되지 않아, 아무것도 안 해도 늘 출고
+      불가였다. 이제 요약은 이미 결속된 본문 문장을 그대로 고르므로 이
+      실행은 «출고 가능»이 된다. 그래서 출고 불가를 만들려면 본문 쪽에
+      결속 없는 공개 내용을 «명시적으로» 넣어야 한다.
+    """
+
+    def __init__(self, *, unbound_section_id: str = "") -> None:
         self.prompts: list[str] = []
+        self._unbound_section_id = unbound_section_id
 
     def __call__(self, prompt: str) -> str:
         self.prompts.append(prompt)
@@ -77,19 +88,26 @@ class _FlatWriter:
         index = len(self.prompts) - 1
         section_id = SECTION_IDS[index]
         mark = _MARKS[index]
-        return json.dumps(
+        문장들: list[dict[str, object]] = [
             {
-                "문장들": [
-                    {
-                        "글": f"{mark} 회사의 공식 자료를 확인했다.",
-                        "인용": ["1"],
-                        "등급": GRADE_CONFIRMED,
-                        "주장슬롯": CLAIM_SLOTS_BY_SECTION[section_id][0],
-                    }
-                ]
-            },
-            ensure_ascii=False,
-        )
+                "글": f"{mark} 회사의 공식 자료를 확인했다.",
+                "인용": ["1"],
+                "등급": GRADE_CONFIRMED,
+                "주장슬롯": CLAIM_SLOTS_BY_SECTION[section_id][0],
+            }
+        ]
+        if section_id and section_id == self._unbound_section_id:
+            # 주장슬롯이 없으면 원자 사실로 승격되지 않아 «결속되지 않은
+            # 공개 내용»이 된다. 장의 «둘째» 줄로 둔다 — 요약 고르기가 장마다
+            # 첫 후보를 집으므로 요약에는 안 실리고 본문에만 남는다.
+            문장들.append(
+                {
+                    "글": f"{mark} 회사는 결속 없는 설명을 덧붙였다.",
+                    "인용": ["1"],
+                    "등급": GRADE_CONFIRMED,
+                }
+            )
+        return json.dumps({"문장들": 문장들}, ensure_ascii=False)
 
 
 class _LegacyReviewer:
@@ -105,18 +123,22 @@ class _LegacyReviewer:
         )
 
 
-def _run_shadow():
+def _run_shadow(*, unbound_section_id: str = ""):
+    """평면 SHADOW 실행. ``unbound_section_id``는 `_FlatWriter` 참고."""
+
+    texts = [f"{mark} 회사의 공식 자료를 확인했다." for mark in _MARKS]
+    texts += [f"{mark} 회사는 결속 없는 설명을 덧붙였다." for mark in _MARKS]
     fragment = CollectedFragment(
         fragment_id="1",
         kind="회사 공식 자료",
-        text=" ".join(f"{mark} 회사의 공식 자료를 확인했다." for mark in _MARKS),
+        text=" ".join(texts),
         source_url="https://projection.example/flat",
     )
     return run_v2(
         "가나다전자",
         (fragment,),
         None,
-        writer_ask=_FlatWriter(),
+        writer_ask=_FlatWriter(unbound_section_id=unbound_section_id),
         reviewer_ask=_LegacyReviewer(),
         diagram_ask=_NoDiagram(),
         release_mode=ReleaseMode.SHADOW,

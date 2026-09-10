@@ -1425,8 +1425,10 @@ def test_SHADOW_flat은_legacy_요약과_검수호출을_유지하고_manifest�
         release_mode=ReleaseMode.SHADOW,
     )
 
-    assert len(writer.prompts) == 10  # 본문 9 + legacy AI 요약 1
-    assert len(reviewer.prompts) == 2  # 본문 1 + legacy 요약 검수 1
+    assert len(writer.prompts) == 10  # 본문 9 + legacy 요약 «고르기» 1
+    # ★ 2026-09-11 이전에는 2였다 (본문 1 + 요약 검수 1). 요약이 검증된 본문
+    #   문장을 글자 그대로 싣게 되면서 요약 재검증 호출이 사라졌다.
+    assert len(reviewer.prompts) == 1  # 본문 검수 1
     assert diagram.calls == 0
     assert output.report.public_structure_manifest == ""
     assert "public_structure_manifest" not in report_to_dict(output.report)

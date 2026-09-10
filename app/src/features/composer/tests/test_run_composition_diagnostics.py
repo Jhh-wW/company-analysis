@@ -52,8 +52,10 @@ def test_real_run_preserves_output_calls_and_records_across_final_gate(
     assert len(records) == len(sink)
     parses = [record for record in records if record["step"] == "8_본문검수_응답판독"]
     summaries = [record for record in records if record["step"] == "8_핵심요약_단계"]
-    # 본문과 새 요약 모두 같은 실제 검수 경계를 지난다.
-    assert len(parses) >= 2
+    # ★ 본문 검수 «한 번»만 이 판독 경계를 지난다 (2026-09-11). 예전에는 요약
+    #   재검증이 같은 경계를 한 번 더 지나 2건이었다. 요약이 검증된 본문 문장을
+    #   글자 그대로 싣게 되면서 다시 판독할 응답이 없어졌다.
+    assert len(parses) >= 1
     assert all(record["판독"] == "ok" for record in parses)
     assert len(summaries) == 1
     assert summaries[0]["최종수"] == len(baseline.report.summary_items)
