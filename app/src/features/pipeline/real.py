@@ -238,7 +238,9 @@ from src.features.cost_tracking.store import AiCostEvent
 from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC, DART_SUCCESS_STATUS
 from src.features.pipeline.candidate_profile_constants import (
     DART_PROFILE_ENRICHMENT_LIMIT,
+    DART_PROFILE_NO_DATA_STATUS,
 )
+from src.features.pipeline.candidate_profiles import fetch_candidate_profiles
 from src.features.pipeline.candidate_profile_lookahead import (
     candidate_profile_lookahead,
 )
@@ -2555,18 +2557,15 @@ class RealPipeline:
             score_business_candidate,
         )
 
-        # company.json은 후보마다 외부 DART 요청 한 번이다. 화면 표시 수와 profile
-        # 보강 수를 분리한다. 정확 식별 후보를 먼저 지키고, 남은 슬롯은 match kind별
-        # 대표에 배분해야 짧은 공식 약어의 동명 후보가 앞에 몰려도 다른 공식 별칭의
-        # 관련 법인이 주소 비교 전에 탈락하지 않는다.
-        # 전체 resolver timeout 뒤 취소할 수 없는 thread가 계속 호출하지 않도록
-        # 보강 폭은 다섯 건으로 고정하고, 매 호출 전에 deadline을 다시 확인한다.
-        display_cap = max(1, min(int(limit), 3))
-        profile_cap = max(display_cap, DART_PROFILE_ENRICHMENT_LIMIT)
+        # 주소를 읽기 전 다섯 곳으로, AI를 부르기 전 세 곳으로 자르면 후순위의
+        # 같은 이름 법인은 영원히 확인할 수 없다. 공식 후보를 보강한 뒤 요청한
+        # 폭으로 반환하고, 웹 화면의 세 장 제한은 최종 resolver가 맡는다.
+        result_cap = max(1, min(int(limit), DART_PROFILE_ENRICHMENT_LIMIT))
+        profile_cap = DART_PROFILE_ENRICHMENT_LIMIT
         deadline = time.monotonic() + max(0.1, float(timeout_sec))
         all_matches = list(
             generate_dart_company_matches(
-                _company_candidate_index(), company, limit=max(15, profile_cap * 3)
+                _company_candidate_index(), company, limit=profile_cap
             )
         )
         matched = candidate_profile_lookahead(all_matches, limit=profile_cap)
@@ -2577,16 +2576,24 @@ class RealPipeline:
         engine.load_env()
         counter = engine.UsageCounter()
         ranked_out: list[tuple[float, int, str, str, dict[str, object]]] = []
-        for match in matched:
-            if time.monotonic() >= deadline:
-                break
+        def fetch_profile(match):
             record = match.record
-            corp_code = record.corp_code
-            profile = engine.get_json("company.json", {"corp_code": corp_code}, counter)
+            profile = engine.get_json("company.json", {"corp_code": record.corp_code}, counter)
+            if isinstance(profile, dict) and profile.get("status") == DART_PROFILE_NO_DATA_STATUS:
+                return None
             if not isinstance(profile, dict) or profile.get("status") != DART_SUCCESS_STATUS:
                 raise LocalDartProfileEnrichmentError(
                     "DART 기업개황 후보 조회가 정상 상태가 아닙니다"
                 )
+            if profile.get("corp_code") and profile["corp_code"] != record.corp_code:
+                raise LocalDartProfileEnrichmentError("DART 기업개황의 법인 식별번호가 다릅니다")
+            return profile
+
+        for match, profile in fetch_candidate_profiles(matched, fetch_profile, deadline=deadline):
+            if profile is None:
+                continue
+            record = match.record
+            corp_code = record.corp_code
             candidate_name = str(profile.get("corp_name") or record.corp_name)
             address = str(profile.get("adres") or "")
             homepage = _homepage_url_for_display(profile.get("hm_url", ""))
@@ -2632,7 +2639,7 @@ class RealPipeline:
                 item[3],
             )
         )
-        return [item[4] for item in ranked_out[:display_cap]]
+        return [item[4] for item in ranked_out[:result_cap]]
 
     def find_company(self, user_input: UserInput) -> Optional[CompanyCard]:
         """2 식별 → 3 확인 카드까지만 한다. 여기서 멈추고 사람에게 보여준다."""

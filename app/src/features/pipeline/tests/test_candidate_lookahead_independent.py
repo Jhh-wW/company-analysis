@@ -1,7 +1,7 @@
 """DART 후보 보강 lookahead의 독립 안전 계약.
 
 외부 DART 호출 대신 로컬 matcher 결과와 기업개황을 주입한다. 시험의 목적은
-특정 회사를 1위로 고정하는 것이 아니라, 다섯 번의 공식 profile 예산 안에서
+특정 회사를 1위로 고정하는 것이 아니라, 공식 profile 요청 상한 안에서
 강한 이름 근거를 빠뜨리지 않으면서 모호한 경우는 그대로 남기는 것이다.
 """
 
@@ -87,7 +87,7 @@ def _run(monkeypatch, matches, profiles, *, company="SM", address_hint="서울 �
     return engine, rows
 
 
-def test_SM_rank9_acronym_reading은_동일한_profile5회안에서_주소비교기회를_얻는다(
+def test_sm_rank_nine_acronym_reading_is_compared_by_address(
     monkeypatch,
 ):
     """상위권에 다른 kind가 몰려도 최고 acronym_reading 한 건은 보강한다."""
@@ -118,22 +118,21 @@ def test_SM_rank9_acronym_reading은_동일한_profile5회안에서_주소비교
 
     engine, rows = _run(monkeypatch, matches, profiles)
 
-    assert len(engine.calls) == 5
+    assert len(engine.calls) == len(matches)
     assert "00000009" in engine.calls
     assert {"00000001", "00000002"}.issubset(engine.calls)
     assert rows[0]["candidate_ref"] == "00000009"
 
 
-def test_동종_kind_동명이인은_주소를_읽기도전에_임의후보를_lookahead하지_않는다(
+def test_same_kind_homonyms_preserve_later_address_match(
     monkeypatch,
 ):
-    """kind 다양성으로 풀 수 없는 동명이인은 추가 식별정보가 필요하다."""
+    """같은 근거 종류라도 사용자 주소와 맞는 법인이 조회 전에 빠지면 안 된다."""
     matches = [
         _match(rank, "exact_name", corp_name="미래") for rank in range(1, 7)
     ]
     profiles = _profiles(matches)
-    # 6위 주소가 입력과 같다는 사실은 profile을 호출하기 전에는 알 수 없다.
-    # 이를 미리 안다고 가정해 선발하면 비공식 주소 추론/정답 누설이 된다.
+    # 6위 주소는 실제 profile을 읽어서만 판단한다.
     profiles["00000006"]["adres"] = "서울특별시 성동구 왕십리로"
 
     engine, rows = _run(
@@ -144,9 +143,9 @@ def test_동종_kind_동명이인은_주소를_읽기도전에_임의후보를_l
         address_hint="서울 성동구",
     )
 
-    assert engine.calls == [f"{rank:08d}" for rank in range(1, 6)]
-    assert "00000006" not in {row["candidate_ref"] for row in rows}
-    assert len(rows) == 3
+    assert set(engine.calls) == {f"{rank:08d}" for rank in range(1, 7)}
+    assert rows[0]["candidate_ref"] == "00000006"
+    assert len(rows) == len(matches)
 
 
 def test_약한_token과_trigram_다양성은_정확법인명후보를_밀어내지_않는다(monkeypatch):
@@ -159,7 +158,8 @@ def test_약한_token과_trigram_다양성은_정확법인명후보를_밀어내
 
     engine, _rows = _run(monkeypatch, matches, profiles, company="동양")
 
-    assert engine.calls == [f"{rank:08d}" for rank in range(1, 6)]
+    assert set(engine.calls[:3]) == {"00000001", "00000002", "00000003"}
+    assert set(engine.calls) == {f"{rank:08d}" for rank in range(1, 8)}
 
 
 def test_정확한_corp와_stock_ID는_다양성보다_먼저보호되고_자동확정하지_않는다(
@@ -196,14 +196,14 @@ def test_정확한_corp와_stock_ID는_다양성보다_먼저보호되고_자동
             address_hint="모름",
         )
 
-        assert len(engine.calls) == 5
-        assert engine.calls[0] == "00000001"
+        assert len(engine.calls) == len(matches)
+        assert "00000001" in engine.calls[:3]
         assert rows[0]["candidate_ref"] == "00000001"
         # 이 API는 후보 행만 반환한다. 사람이 선택하기 전 확정 card는 만들지 않는다.
         assert "confirmed" not in rows[0]
 
 
-def test_이미_top5인_다른업종약어후보는_불필요한추가호출없이_유지된다(monkeypatch):
+def test_cross_industry_acronym_candidates_remain_in_official_pool(monkeypatch):
     cases = (
         ("HYBE", 1, "legal_suffix"),
         ("YG", 4, "acronym_token"),
@@ -232,6 +232,6 @@ def test_이미_top5인_다른업종약어후보는_불필요한추가호출없�
             address_hint="모름",
         )
 
-        assert len(engine.calls) == 5
+        assert len(engine.calls) == len(matches)
         assert f"{target_rank:08d}" in engine.calls
-        assert len(rows) == 3
+        assert len(rows) == len(matches)

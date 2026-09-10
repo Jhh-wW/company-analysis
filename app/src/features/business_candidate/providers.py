@@ -17,6 +17,7 @@ from src.features.business_candidate.constants import (
     ENV_GOOGLE_PLACES_API_KEY,
     ENV_GOOGLE_PLACES_BILLING_ACK,
     LOCAL_DART_PROVIDER_TIMEOUT_SEC,
+    MAX_RAW_CANDIDATES,
     PROVIDER_DISABLED,
     PROVIDER_GOOGLE_PLACES,
     PROVIDER_PIPELINE,
@@ -32,9 +33,8 @@ class PipelineProviderAdapter:
 
     costs_money = False
     provider_name = "DART"
-    # 각 후보 주소를 DART 기업개황으로 조회하므로 한 요청에서 외부 호출을 세 번으로
-    # 고정한다. resolver 전체 worker도 세 개뿐이라 timeout 뒤 thread 누적도 제한된다.
-    max_results = 3
+    # 화면의 세 장 제한은 주소 비교와 AI 보완을 마친 resolver에서 적용한다.
+    max_results = MAX_RAW_CANDIDATES
     # corpCode cold-start + local parse/index + bounded profile enrichment.
     # Google and any generic provider keep the common 8-second boundary.
     resolution_timeout_sec = LOCAL_DART_PROVIDER_TIMEOUT_SEC

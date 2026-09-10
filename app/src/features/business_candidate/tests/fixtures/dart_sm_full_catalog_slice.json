@@ -1,0 +1,133 @@
+{
+  "source": "OpenDART CORPCODE 2026-09-08, company.json 2026-09-09",
+  "records": [
+    [
+      "01491917",
+      "에스엠",
+      "SM",
+      "",
+      "20200806"
+    ],
+    [
+      "01101643",
+      "에스엠",
+      "SM",
+      "",
+      "20170630"
+    ],
+    [
+      "00238977",
+      "에스엠화진",
+      "SM HWAJIN Co., Ltd.",
+      "134780",
+      "20260604"
+    ],
+    [
+      "00783246",
+      "글로벌에스엠",
+      "Global SM Tech Limited",
+      "900070",
+      "20260416"
+    ],
+    [
+      "00147860",
+      "에스엠벡셀",
+      "SM BEXEL CO.,LTD",
+      "010580",
+      "20260227"
+    ],
+    [
+      "00185046",
+      "SM C&C",
+      "SM Culture & Contents Co., Ltd.",
+      "048550",
+      "20250326"
+    ],
+    [
+      "00367604",
+      "SM Life Design",
+      "SM Life Design Group Co., Ltd.",
+      "063440",
+      "20250325"
+    ],
+    [
+      "00577380",
+      "신진에스엠",
+      "SINJIN SM CO.,LTD.",
+      "138070",
+      "20241210"
+    ],
+    [
+      "00260930",
+      "에스엠",
+      "SM ENTERTAINMENT CO., Ltd.",
+      "041510",
+      "20240328"
+    ]
+  ],
+  "profiles": {
+    "01491917": {
+      "status": "000",
+      "corp_code": "01491917",
+      "corp_name": "유한회사에스엠",
+      "adres": "전라남도 여수시 선소로 130 (신기동) 3층",
+      "hm_url": ""
+    },
+    "01101643": {
+      "status": "000",
+      "corp_code": "01101643",
+      "corp_name": "주식회사에스엠",
+      "adres": "경상남도 김해시 율하2로97번길 8 1338번지(율하동)",
+      "hm_url": ""
+    },
+    "00238977": {
+      "status": "000",
+      "corp_code": "00238977",
+      "corp_name": "에스엠화진 주식회사",
+      "adres": "경상북도 영천시 도남공단길 16 (도남동, 화진)",
+      "hm_url": "www.hwajin-corp.com"
+    },
+    "00783246": {
+      "status": "000",
+      "corp_code": "00783246",
+      "corp_name": "글로벌에스엠테크리미티드",
+      "adres": "GEORGE TOWN,GRAND CAYMAN KY1-1112 CAYMAN ISLANDS SCOTLA CENTRE 4TH FLOOR,P.O.BOX2804,",
+      "hm_url": "www.globalsmtech.com"
+    },
+    "00147860": {
+      "status": "000",
+      "corp_code": "00147860",
+      "corp_name": "(주)에스엠벡셀",
+      "adres": "충청남도 아산시 도고면 도고면로 48-15 (주)지코",
+      "hm_url": "www.smbexel.com"
+    },
+    "00185046": {
+      "status": "000",
+      "corp_code": "00185046",
+      "corp_name": "(주)에스엠컬처앤콘텐츠",
+      "adres": "서울특별시 성동구 왕십리로 83-21 디타워동 14층(성수동1가, 아크로 서울포레스트)",
+      "hm_url": "www.smcultureandcontents.com"
+    },
+    "00367604": {
+      "status": "000",
+      "corp_code": "00367604",
+      "corp_name": "(주)에스엠라이프디자인그룹",
+      "adres": "경기도 파주시 직지길 376",
+      "hm_url": "smlifedesign.com"
+    },
+    "00577380": {
+      "status": "000",
+      "corp_code": "00577380",
+      "corp_name": "(주)신진에스엠",
+      "adres": "전라북도 장수군  장계면 장무로 352-73 (주)신진에스엠장수공장",
+      "hm_url": "www.sinjin-sm.co.kr"
+    },
+    "00260930": {
+      "status": "000",
+      "corp_code": "00260930",
+      "corp_name": "(주)에스엠엔터테인먼트",
+      "adres": "서울특별시 성동구 왕십리로 83-21 아크로 서울포레스트 디타워",
+      "hm_url": "smentertainment.com"
+    }
+  }
+}

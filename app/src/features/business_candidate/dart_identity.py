@@ -42,7 +42,7 @@ _MODIFY_DATE_RE = re.compile(r"[0-9]{8}")
 # 잘 알려진 업종형 접미사 목록으로만 한정한다.
 _GLUED_COMPANY_TYPE_SUFFIXES: tuple[str, ...] = tuple(
     sorted(
-        {"엔터테인먼트", "홀딩스", "인터내셔널", "테크놀로지"},
+        {"엔터테인먼트", "엔터", "홀딩스", "인터내셔널", "테크놀로지"},
         key=len,
         reverse=True,
     )
@@ -60,6 +60,7 @@ MATCH_KIND_PRIORITY: Mapping[str, int] = MappingProxyType(
     {
         "exact_id": 6,
         "exact_name": 5,
+        "spacing": 4,
         "legal_suffix": 4,
         "acronym_token": 4,
         "acronym_reading": 4,
@@ -100,6 +101,7 @@ class DartCompanyIndex:
     by_corp_code: Mapping[str, DartCompanyRecord]
     by_stock_code: Mapping[str, tuple[str, ...]]
     by_exact_name: Mapping[str, tuple[str, ...]]
+    by_compact_name: Mapping[str, tuple[str, ...]]
     by_derived_name: Mapping[str, tuple[str, ...]]
     by_token: Mapping[str, tuple[str, ...]]
     by_official_acronym: Mapping[str, tuple[str, ...]]
@@ -257,6 +259,7 @@ def build_dart_company_index(records: Iterable[DartCompanyRecord]) -> DartCompan
     by_code: dict[str, DartCompanyRecord] = {}
     stock_postings: dict[str, list[str]] = {}
     exact_postings: dict[str, list[str]] = {}
+    compact_postings: dict[str, list[str]] = {}
     derived_postings: dict[str, list[str]] = {}
     token_postings: dict[str, list[str]] = {}
     acronym_postings: dict[str, list[str]] = {}
@@ -296,6 +299,7 @@ def build_dart_company_index(records: Iterable[DartCompanyRecord]) -> DartCompan
             )
             aliases.append(alias)
             exact_postings.setdefault(exact_key, []).append(record.corp_code)
+            compact_postings.setdefault(exact_key.replace("\x1f", ""), []).append(record.corp_code)
             if derived_exact_key and derived_exact_key != exact_key:
                 derived_postings.setdefault(derived_exact_key, []).append(
                     record.corp_code
@@ -324,6 +328,7 @@ def build_dart_company_index(records: Iterable[DartCompanyRecord]) -> DartCompan
         by_corp_code=MappingProxyType(by_code),
         by_stock_code=_freeze_postings(stock_postings),
         by_exact_name=_freeze_postings(exact_postings),
+        by_compact_name=_freeze_postings(compact_postings),
         by_derived_name=_freeze_postings(derived_postings),
         by_token=_freeze_postings(token_postings),
         by_official_acronym=_freeze_postings(acronym_postings),
@@ -447,6 +452,16 @@ def generate_dart_company_matches(
         similarity=1.0,
         alias_predicate=lambda alias: alias.exact_key == exact_query,
     )
+
+    # 검색에서만 공백 차이를 흡수한다. 법인 확정용 공통 이름 비교는 넓히지 않는다.
+    # 짧은 영문 조각을 합쳐 다른 약어를 만들지는 않는다.
+    compact_query = exact_query.replace("\x1f", "")
+    if re.search(r"[가-힣]", raw_query) or len(compact_query) >= TRIGRAM_MIN_CHARS:
+        _add_codes(
+            matches, index, index.by_compact_name.get(compact_query, ()),
+            kind="spacing", similarity=1.0,
+            alias_predicate=lambda alias: alias.exact_key.replace("\x1f", "") == compact_query,
+        )
 
     derived_codes = index.by_derived_name.get(derived_query, ())
     _add_codes(

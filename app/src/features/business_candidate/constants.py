@@ -33,10 +33,10 @@ PROVIDER_WORKER_SLOTS: Final[int] = MAX_CONCURRENT_RUNS
 CANDIDATE_ATTEMPT_TTL_SEC: Final[int] = 300
 
 # DART local 후보의 첫 요청은 1회성 corpCode 다운로드와 XML parse/index를
-# 포함할 수 있어 외부 검색의 8초 UX 상한과 분리한다. 관측된 cold 약 14초에
-# 여유를 둔 30초까지만 웹 요청이 기다린다. 기존 내부 HTTP timeout은 별도로
+# 포함할 수 있어 외부 검색의 8초 UX 상한과 분리한다. 원시 후보 15개 보강에서
+# 첫 요청이 30초를 넘는 것을 관측해 로컬 DART만 60초까지 기다린다. 내부 HTTP는
 # bounded이며, outer timeout 뒤 worker slot은 실제 완료까지 유지해 thread 폭증을 막는다.
-LOCAL_DART_PROVIDER_TIMEOUT_SEC: Final[float] = 30.0
+LOCAL_DART_PROVIDER_TIMEOUT_SEC: Final[float] = 60.0
 MAX_PROVIDER_TIMEOUT_SEC: Final[float] = LOCAL_DART_PROVIDER_TIMEOUT_SEC
 
 # 후보 응답의 어느 문자열도 이보다 길게 화면·점수 계산 경계 안으로 들이지 않는다.
@@ -51,7 +51,10 @@ RATE_WINDOW_SEC: Final[int] = 60
 RATE_MAX_SEARCHES: Final[int] = 6
 
 # 낮은 점수의 검색 잡음은 보여주지 않는다. 이 값을 넘겨도 자동 확정하지 않는다.
-MIN_CANDIDATE_SCORE: Final[float] = 0.25
+# 이름·홈페이지·상세주소·상장·갱신일 점수의 이론상 합계로 정규화한다.
+# 1.0에서 잘라 버리면 같은 건물의 다른 법인까지 동점이 된다.
+MAX_CANDIDATE_SCORE_SUM: Final[float] = 1.23
+MIN_CANDIDATE_SCORE: Final[float] = 0.25 / MAX_CANDIDATE_SCORE_SUM
 
 # websiteUri가 포함된 Text Search Enterprise 공개 정가(USD 35/1,000
 # 기준) × 서비스의 보수적 환율 1,400원. 무료 구간이어도 예산 admission은
@@ -62,7 +65,7 @@ GOOGLE_PLACES_ACCOUNTING_COST_KRW: Final[float] = 49.0
 # 결정적 규칙으로 순위가 갈리지 않을 때만 도는 보조 단계다. 자동 확정 경로가
 # 아니며, 사람이 후보를 고르는 절차는 그대로다.
 CANDIDATE_RERANK_MODEL: Final[str] = "claude-haiku-4-5"
-# 1위와 같은 점수의 후보가 이 수 이상일 때만 AI에 물어본다. 셋 이하이면 화면
+# 1위와 같은 점수의 후보가 이 수 이상이면 AI에 물어본다. 전체 후보가 셋 이하이면 화면
 # 상한(MAX_CANDIDATES)과 같아 어차피 전부 보이므로 돈을 쓸 이유가 없다.
 AI_RERANK_MIN_TIE: Final[int] = 4
 # AI에 보내는 후보 수. 원시 후보 상한과 같아 정렬 대상이 잘리지 않는다.
@@ -73,6 +76,8 @@ AI_RERANK_TIMEOUT_SEC: Final[float] = PROVIDER_TIMEOUT_SEC
 AI_RERANK_MAX_OUTPUT_TOKENS: Final[int] = 200
 # 부동소수 점수를 같은 점수로 볼 오차. 같은 입력은 같은 값이 나오므로 아주 좁게 둔다.
 AI_RERANK_TIE_EPSILON: Final[float] = 1e-9
+# 갱신일·상장 여부 같은 보조 점수 차이만으로 화면 밖 공식 후보를 포기하지 않는다.
+AI_RERANK_AMBIGUITY_MARGIN: Final[float] = 0.16
 # 운영 스위치. 값이 없거나 "1"이면 켜짐이고, 그 밖의 값(오타 포함)은 모두 꺼짐이다.
 CANDIDATE_AI_RERANK_ENV_NAME: Final[str] = "CANDIDATE_AI_RERANK"
 CANDIDATE_AI_RERANK_ENV_ON: Final[str] = "1"
