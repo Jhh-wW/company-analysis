@@ -37,6 +37,27 @@ from src.features.composer.culture_guard import (
 from src.features.composer.prose_own_source import (
     prose_own_source_problem,
 )
+from src.shared.report_quality.composition_diagnostic_constants import (
+    PATH_FLAT,
+    PATH_PACKET,
+    READ_VERDICTS_KEY_MISSING,
+    READ_VERDICTS_NOT_LIST,
+    ROW_EVIDENCE_DUPLICATE,
+    ROW_EVIDENCE_EMPTY,
+    ROW_EVIDENCE_MISMATCH,
+    ROW_NOT_MAPPING,
+    ROW_NUMBER_CONFLICT,
+    ROW_NUMBER_NOT_INT,
+    ROW_OWNER_MISMATCH,
+    ROW_RESULT_INVALID,
+)
+from src.features.composer.review_protocol_observation import (
+    envelope_code_for_payload,
+    finish_protocol_observation,
+    new_protocol_observation,
+    note_envelope,
+    note_row_failure,
+)
 from src.features.composer.scope_guard import flow_scope_problem
 from src.features.composer.challenge_guard import challenge_response_problem
 from src.features.composer.constants import CHALLENGE_FLOW_SECTION_ID, STRATEGY_TABLE_SECTION_ID
@@ -917,28 +938,65 @@ def _build_grouped_review_prompt(
     return "".join(parts)
 
 
+def _grouped_row_reason(
+    result: str,
+    section_id: str,
+    evidence_ids: Sequence[str],
+    owners: Mapping[int, str],
+    number: int,
+) -> str:
+    """packet 행이 왜 걸렸는지만 되짚는다 — 판정에는 관여하지 않는다.
+
+    되짚는 순서는 아래 ``_parse_grouped_verdicts`` 의 ``or`` 순서와 같다.
+    """
+    if result not in VALID_VERDICTS:
+        return ROW_RESULT_INVALID
+    if owners.get(number) != section_id:
+        return ROW_OWNER_MISMATCH
+    if not evidence_ids:
+        return ROW_EVIDENCE_EMPTY
+    if len(evidence_ids) != len(set(evidence_ids)):
+        return ROW_EVIDENCE_DUPLICATE
+    return ROW_EVIDENCE_MISMATCH
+
+
 def _parse_grouped_verdicts(
     raw: Optional[str],
     owners: Mapping[int, str],
     evidence_ids_by_number: Mapping[int, frozenset[str]],
+    *,
+    observe: Optional[dict] = None,
 ) -> Optional[dict[int, str]]:
-    """번호뿐 아니라 입력 장과 같은 판정만 받아 장 경계를 잠근다."""
+    """번호뿐 아니라 입력 장과 같은 판정만 받아 장 경계를 잠근다.
+
+    ``observe``: 주면 지나간 분기의 «개수와 닫힌 코드»만 적는다. 반환값과
+    판정 규칙은 그대로이며 응답 본문은 담지 않는다.
+    """
 
     if raw is None:
         return None
-    payload = extract_json_payload(raw)
+    payload = extract_json_payload(raw, observe=observe)
     if not isinstance(payload, Mapping):
+        note_envelope(observe, envelope_code_for_payload(observe, raw))
+        return None
+    if observe is not None and REVIEW_VERDICTS_KEY not in payload:
+        note_envelope(observe, READ_VERDICTS_KEY_MISSING)
         return None
     entries = payload.get(REVIEW_VERDICTS_KEY)
     if not isinstance(entries, list):
+        note_envelope(observe, READ_VERDICTS_NOT_LIST)
         return None
+    if observe is not None:
+        observe["응답행수"] = len(entries)
     out: dict[int, str] = {}
     invalid_numbers: set[int] = set()
     for entry in entries:
         if not isinstance(entry, Mapping):
+            note_row_failure(observe, ROW_NOT_MAPPING)
             continue
         number = entry.get(REVIEW_NUMBER_KEY)
         if isinstance(number, bool) or not isinstance(number, int):
+            note_row_failure(observe, ROW_NUMBER_NOT_INT)
             continue
         result = str(entry.get(REVIEW_RESULT_KEY) or "").strip()
         section_id = str(entry.get(REVIEW_SECTION_KEY) or "").strip()
@@ -956,15 +1014,23 @@ def _parse_grouped_verdicts(
             or len(evidence_ids) != len(set(evidence_ids))
             or frozenset(evidence_ids) != expected_evidence_ids
         ):
+            note_row_failure(
+                observe,
+                _grouped_row_reason(
+                    result, section_id, evidence_ids, owners, number,
+                ),
+            )
             invalid_numbers.add(number)
             out.pop(number, None)
             continue
         if number in out and out[number] != result:
+            note_row_failure(observe, ROW_NUMBER_CONFLICT)
             invalid_numbers.add(number)
             out.pop(number, None)
             continue
         if number not in invalid_numbers:
             out[number] = result
+    finish_protocol_observation(observe, out, owners)
     return out or None
 
 
@@ -976,6 +1042,7 @@ def _ask_grouped_verdicts(
     *,
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
+    protocol_diagnostics: Optional[list[dict]] = None,
 ) -> Optional[dict[int, str]]:
     """packet 본문·도식을 정확히 한 번에 검수한다.
 
@@ -990,7 +1057,23 @@ def _ask_grouped_verdicts(
     }
     # 최초 본문 검수 전용 호출자가 있으면 이 «한 번»에만 쓴다.
     raw = _safe_ask(initial_ask or ask, prompt)
-    verdicts = _parse_grouped_verdicts(raw, owners, evidence_ids_by_number)
+    # 관측은 «실제로 보낸» 이 한 번에 대해서만 만든다.
+    observe = (
+        new_protocol_observation(
+            PATH_PACKET,
+            1,
+            prompt_chars=len(prompt),
+            response_chars=len(raw or ""),
+            requested_count=len(owners),
+        )
+        if protocol_diagnostics is not None
+        else None
+    )
+    verdicts = _parse_grouped_verdicts(
+        raw, owners, evidence_ids_by_number, observe=observe,
+    )
+    if observe is not None:
+        protocol_diagnostics.append(observe)
     if verdicts is None:
         return None
     table_source = _table_grounding_source(table)
@@ -1358,41 +1441,63 @@ def _build_review_prompt(
     return "".join(parts)
 
 
-def _parse_verdicts(raw: Optional[str]) -> Optional[dict[int, str]]:
+def _parse_verdicts(
+    raw: Optional[str],
+    *,
+    observe: Optional[dict] = None,
+    requested_numbers: Sequence[int] = (),
+) -> Optional[dict[int, str]]:
     """검수 응답을 {번호: 판정}으로 바꾼다. 통째로 못 읽으면 None(재요청 대상).
 
     개별 항목의 안전 규칙:
       · 계약 밖 판정값 → 그 번호는 미응답 처리
       · 같은 번호의 모순 중복 → 그 번호는 미응답 처리
       · bool 번호(True는 int의 하위 타입) → 버림
+
+    ``observe``: 주면 지나간 분기의 «개수와 닫힌 코드»만 적는다. 반환값과
+    판정 규칙은 그대로이며 응답 본문은 담지 않는다.
+    ``requested_numbers``: 관측의 «미응답/요청밖» 계산에만 쓴다. 요청에
+    없던 번호도 계약 그대로 반환 dict 에 남긴다.
     """
     if raw is None:
         return None
-    payload = extract_json_payload(raw)
+    payload = extract_json_payload(raw, observe=observe)
     if not isinstance(payload, Mapping):
+        note_envelope(observe, envelope_code_for_payload(observe, raw))
+        return None
+    if observe is not None and REVIEW_VERDICTS_KEY not in payload:
+        note_envelope(observe, READ_VERDICTS_KEY_MISSING)
         return None
     entries = payload.get(REVIEW_VERDICTS_KEY)
     if not isinstance(entries, list):
+        note_envelope(observe, READ_VERDICTS_NOT_LIST)
         return None
+    if observe is not None:
+        observe["응답행수"] = len(entries)
     out: dict[int, str] = {}
     invalid_numbers: set[int] = set()
     for entry in entries:
         if not isinstance(entry, Mapping):
+            note_row_failure(observe, ROW_NOT_MAPPING)
             continue
         number = entry.get(REVIEW_NUMBER_KEY)
         if isinstance(number, bool) or not isinstance(number, int):
+            note_row_failure(observe, ROW_NUMBER_NOT_INT)
             continue
         result = str(entry.get(REVIEW_RESULT_KEY) or "").strip()
         if result not in VALID_VERDICTS:
+            note_row_failure(observe, ROW_RESULT_INVALID)
             invalid_numbers.add(number)
             out.pop(number, None)
             continue
         if number in out and out[number] != result:
+            note_row_failure(observe, ROW_NUMBER_CONFLICT)
             invalid_numbers.add(number)
             out.pop(number, None)
             continue
         if number not in invalid_numbers:
             out[number] = result
+    finish_protocol_observation(observe, out, requested_numbers)
     if not out:
         return None
     return out
@@ -1407,6 +1512,7 @@ def _ask_verdicts(
     *,
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
+    protocol_diagnostics: Optional[list[dict]] = None,
 ) -> Optional[dict[int, str]]:
     """검수 AI 1회 호출(+파싱 실패 시 1회 재요청). 그래도 실패면 None.
 
@@ -1417,13 +1523,38 @@ def _ask_verdicts(
     """
     reviewer = initial_ask or ask
     prompt = _build_review_prompt(items, frag_by_id, table_evidence, table_source)
+    requested_numbers = [item.number for item in items]
+
+    def _observe_attempt(attempt: int, sent: str, answer: Optional[str]):
+        # 실제로 보낸 호출에만 관측을 만든다 — 도달하지 않은 시도는 기록하지 않는다.
+        if protocol_diagnostics is None:
+            return None
+        return new_protocol_observation(
+            PATH_FLAT,
+            attempt,
+            prompt_chars=len(sent),
+            response_chars=len(answer or ""),
+            requested_count=len(requested_numbers),
+        )
+
     raw = _safe_ask(reviewer, prompt)
-    verdicts = _parse_verdicts(raw)
+    observe = _observe_attempt(1, prompt, raw)
+    verdicts = _parse_verdicts(
+        raw, observe=observe, requested_numbers=requested_numbers,
+    )
+    if observe is not None:
+        protocol_diagnostics.append(observe)
     retries = 0
     while verdicts is None and retries < PARSE_RETRY_LIMIT:
         retries += 1
-        raw = _safe_ask(reviewer, prompt + RETRY_REMINDER)
-        verdicts = _parse_verdicts(raw)
+        retry_prompt = prompt + RETRY_REMINDER
+        raw = _safe_ask(reviewer, retry_prompt)
+        observe = _observe_attempt(retries + 1, retry_prompt, raw)
+        verdicts = _parse_verdicts(
+            raw, observe=observe, requested_numbers=requested_numbers,
+        )
+        if observe is not None:
+            protocol_diagnostics.append(observe)
     if verdicts is None:
         return None
     candidates = {item.number: _grounding_candidate(
@@ -1531,6 +1662,7 @@ def _rewrite_and_recheck(
     final: dict[int, Optional[ComposedSentence]],
     *,
     diagnostics: Optional[list[dict]] = None,
+    protocol_diagnostics: Optional[list[dict]] = None,
 ) -> None:
     """«거짓» 판정 문장들: 재작성 1회 → 수치 재검증 → 재검수 → 최종 처분.
 
@@ -1581,6 +1713,7 @@ def _rewrite_and_recheck(
         table_evidence,
         table_source,
         diagnostics=diagnostics,
+        protocol_diagnostics=protocol_diagnostics,
     )
     for item in recheck_items:
         verdict = VERDICT_FALSE if verdicts is None else verdicts.get(item.number)
@@ -1604,6 +1737,7 @@ def _semantic_review(
     group_ids: Optional[Sequence[str]] = None,
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
+    protocol_diagnostics: Optional[list[dict]] = None,
 ) -> list[list[ComposedSentence]]:
     """인용 있는 «확인»·«해석» 문장을 같은 1회 검수 호출로 대조한다.
 
@@ -1656,6 +1790,7 @@ def _semantic_review(
         table_source,
         diagnostics=diagnostics,
         initial_ask=initial_ask,
+        protocol_diagnostics=protocol_diagnostics,
     )
     if verdicts is None:
         logger.warning(
@@ -1737,6 +1872,7 @@ def _semantic_review(
                     table_source,
                     final,
                     diagnostics=diagnostics,
+                    protocol_diagnostics=protocol_diagnostics,
                 )
             except AskFatalError as error:
                 # ★ 실측 — «이 요청에 허락된 몫을 다 썼다»는 한도만은 여기서
@@ -1789,6 +1925,7 @@ def _semantic_review_grouped(
     *,
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
+    protocol_diagnostics: Optional[list[dict]] = None,
 ) -> tuple[list[list[ComposedSentence]], dict[str, tuple[FlowRow, ...]]]:
     """packet 문장과 도식을 장별 근거 블록으로 묶어 AI 1회 검수한다.
 
@@ -1859,6 +1996,7 @@ def _semantic_review_grouped(
         _ask_grouped_verdicts(
             ask, (), frag_by_id, table, diagnostics=diagnostics,
             initial_ask=initial_ask,
+            protocol_diagnostics=protocol_diagnostics,
         )
         return (
             [list(group) for group in groups],
@@ -1867,6 +2005,7 @@ def _semantic_review_grouped(
     verdicts = _ask_grouped_verdicts(
         ask, items, frag_by_id, table, diagnostics=diagnostics,
         initial_ask=initial_ask,
+        protocol_diagnostics=protocol_diagnostics,
     )
     sentence_by_number: dict[int, Optional[ComposedSentence]] = {}
     flow_kept_numbers: set[int] = set()
@@ -1985,6 +2124,7 @@ def _verify_report_inner(
     ] = None,
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
+    protocol_diagnostics: Optional[list[dict]] = None,
 ) -> ComposedReport:
     frag_by_id = {
         fragment.fragment_id: fragment
@@ -2024,6 +2164,7 @@ def _verify_report_inner(
             ),
             diagnostics=diagnostics,
             initial_ask=initial_ask,
+            protocol_diagnostics=protocol_diagnostics,
         )
     else:
         allowed_for_review = dict(allowed_fragment_ids_by_section)
@@ -2048,6 +2189,7 @@ def _verify_report_inner(
             ask,
             diagnostics=diagnostics,
             initial_ask=initial_ask,
+            protocol_diagnostics=protocol_diagnostics,
         )
     reviewed_summary = reviewed_groups.pop()
 
@@ -2090,6 +2232,7 @@ def verify_report(
     ] = None,
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
+    protocol_diagnostics: Optional[list[dict]] = None,
 ) -> ComposedReport:
     """진입 함수 — 규칙 ①~④를 보고서 전체에 문장 단위로 적용한다.
 
@@ -2107,7 +2250,7 @@ def verify_report(
     """
     try:
         if (allowed_fragment_ids_by_section is None and diagnostics is None
-                and initial_ask is None):
+                and initial_ask is None and protocol_diagnostics is None):
             # legacy 호출 모양과 monkeypatch 경계를 그대로 보존한다.
             return _verify_report_inner(
                 report, fragments, performance_table, ask
@@ -2120,6 +2263,7 @@ def verify_report(
             allowed_fragment_ids_by_section=allowed_fragment_ids_by_section,
             diagnostics=diagnostics,
             initial_ask=initial_ask,
+            protocol_diagnostics=protocol_diagnostics,
         )
     except AskFatalError:
         # 요청 전역 장애 — «검증기 내부 오류»로 위장하지 않고 그대로 재전파한다.
@@ -2144,6 +2288,7 @@ def verify_sentences(
     ask: AskFn,
     *,
     diagnostics: Optional[list[dict]] = None,
+    protocol_diagnostics: Optional[list[dict]] = None,
 ) -> tuple[ComposedSentence, ...]:
     """문장 묶음 하나에 같은 규칙 전부를 적용한다 — 3-3 요약 검증 재사용용."""
     try:
@@ -2161,6 +2306,7 @@ def verify_sentences(
             ask,
             group_ids=(REVIEW_SUMMARY_GROUP,),
             diagnostics=diagnostics,
+            protocol_diagnostics=protocol_diagnostics,
         )
         return tuple(reviewed[0])
     except AskFatalError:

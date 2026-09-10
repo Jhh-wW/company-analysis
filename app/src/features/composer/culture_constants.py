@@ -64,6 +64,52 @@ CULTURE_ACCOUNTING_CREDIT_CHARACTERISTIC_RE: Final[re.Pattern[str]] = re.compile
 )
 CULTURE_ACCOUNTING_OVERDUE_BASIS_RE: Final[re.Pattern[str]] = re.compile(r"연체일")
 
+# ── 순수 주식기준보상 "회계 인식·측정" 서술이 culture 장에 잘못 들어간 경우만
+#    좁게 잡는다(culture_accounting_* 와 같은 절 단위 설계, 같은
+#    CULTURE_ACCOUNTING_POLICY_MISPLACED 사유를 재사용 — 새 공유 영역 불필요) ──
+# 단순히 "보상"·"주식"·"공정가치" 같은 낱말 하나만으로는 걸리지 않는다.
+# 같은 절 안에 ① 현금결제(방식) ② 회계처리 ③ 부채의 공정가치 재측정
+# ④ 보상원가 네 어휘가 모두 있어야 «순수 회계 인식·측정 절»로 본다.
+#
+# 면제(같은 절 결속 절차) 판단은 아래 CULTURE_ACCOUNTING_COMPENSATION_
+# GOVERNANCE_VERB_RE/NEGATION_RE를 쓴다 — 손실충당금 블록의 버전은 재사용하지
+# 않는다(이 절 전용으로 좁힌 것이라 손실충당금·재무위험·도식 판정 범위는
+# 그대로다). "관리한다"는 이 동사 목록에 없으므로 그 수사만으로는 면제되지
+# 않는다.
+#
+# ★ 조사(을/를)만으로는 면제하지 않는다 — "감독을 받는다"·"승인을 받는다"
+#   처럼 뒤에 실제 "받다"가 이어질 때만 인정한다("외부 감독을 위한
+#   참고자료"처럼 다른 말이 이어지면 조사만으로는 걸리지 않는다). "의"는
+#   조사 결합만으로는 아예 인정하지 않는다("감독의무"가 조사+명사로 오검
+#   출되던 자리).
+# ★ "승인한"이 "승인한도"(명사)의 일부일 때는 걸리지 않는다 — 발견된
+#   그 한 낱말만 좁혀 제외한다(기존 "감독당국" 제외와 같은 방식).
+CULTURE_ACCOUNTING_COMPENSATION_SETTLEMENT_RE: Final[re.Pattern[str]] = re.compile(
+    r"현금결제(?:방식)?"
+)
+CULTURE_ACCOUNTING_COMPENSATION_TREATMENT_RE: Final[re.Pattern[str]] = re.compile(
+    r"회계처리"
+)
+CULTURE_ACCOUNTING_COMPENSATION_REMEASURE_RE: Final[re.Pattern[str]] = re.compile(
+    r"부채의?공정가치(?:를|을)?재측정"
+)
+CULTURE_ACCOUNTING_COMPENSATION_COST_RE: Final[re.Pattern[str]] = re.compile(
+    r"보상원가"
+)
+CULTURE_ACCOUNTING_COMPENSATION_GOVERNANCE_VERB_RE: Final[re.Pattern[str]] = re.compile(
+    r"검토(?:하|한|함|받)|승인(?:하|한(?!도)|함|받)|감독(?!당국)(?:하|한|함|받)|"
+    r"(?:검토|승인|감독)(?:을|를)(?=받)"
+)
+# «~한 바 없다»·«~한 적이 없다»도 부정으로 본다 — 손실충당금 블록의 부정
+# 목록(하지않/하지못/되지않/되지못/받지않/받지못/미~)에는 이 두 표현이
+# 없어서 "승인한 바 없다"·"검토한 적이 없다"가 오히려 면제를 만들던 자리다.
+# 이 두 표현만 이 절 전용으로 덧붙이고, 손실충당금 블록의 부정 판정은
+# 바꾸지 않는다.
+CULTURE_ACCOUNTING_COMPENSATION_GOVERNANCE_NEGATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:검토|승인|감독)(?:하지않|하지못|되지않|되지못|한바없|한적이?없)|"
+    r"받지않|받지못|미(?:검토|승인|감독)"
+)
+
 # 같은 절 안에 실제 검토·승인·감독 절차가 결속돼 있는지 본다. "이사회"·
 # "담당자" 같은 명사 하나만으로는 절차가 성립하지 않는다 — 반드시 아래
 # 동사가 있어야 한다. 부정되면(검토하지 않는다, 승인을 받지 못한다 등)

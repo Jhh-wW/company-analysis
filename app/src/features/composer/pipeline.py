@@ -47,6 +47,7 @@ from src.shared.report_quality.generation import (
 from src.shared.report_quality.models import PublicationPolicy
 from src.shared.report_quality.contract import contract_for_generation
 from src.shared.report_quality.review_diagnostic_constants import REVIEW_SCOPE_ITEMS
+from src.shared.report_quality.composition_diagnostic_constants import SUMMARY_STEP
 from src.features.composer.logic import (
     AskFn,
     FragmentsInput,
@@ -523,8 +524,37 @@ def _legacy_summary_stage(
     reviewer_ask: AskFn,
     body_numeric_filtering: NumericSafetyFiltering,
     review_diagnostics: list[dict] | None = None,
+    summary_diagnostics: list[dict] | None = None,
+    protocol_diagnostics: list[dict] | None = None,
 ) -> tuple[ComposedReport, int, NumericSafetyFiltering]:
-    """기존 SHADOW 요약 경로를 글자·호출 순서까지 그대로 보존한다."""
+    """기존 SHADOW 요약 경로를 글자·호출 순서까지 그대로 보존한다.
+
+    ``summary_diagnostics``가 주어지면 원문·오류문·인용 id 없이 단계별
+    «개수»와 도달 단계만 하나의 dict로 기록한다(계약:
+    ``src.shared.report_quality.composition_diagnostic_constants``). 실행하지
+    못한 단계의 개수는 ``None``으로 남겨 실제 0건과 구분한다. 외부(비분해)
+    예외가 나면 그 지점까지 채운 필드만 호출자 목록에 이미 남아 있다 —
+    이 함수는 그 값을 되돌리거나 지우지 않는다.
+    """
+
+    record: dict[str, object] | None = None
+    if summary_diagnostics is not None:
+        record = {
+            "step": SUMMARY_STEP,
+            "경로": "legacy",
+            "도달단계": "시작",
+            "본문후보수": sum(
+                len(section.sentences) for section in verified.sections
+            ),
+            "초안수": None,
+            "검수후수": None,
+            "첫보충후수": None,
+            "수치검사후수": None,
+            "최종수": None,
+            "작성한도도달": False,
+            "검수한도도달": False,
+        }
+        summary_diagnostics.append(record)
 
     # 호출 «횟수» 상한과 요청 로컬 «예약액» 소진을 함께 뜻한다 — 둘 다
     # «이 요청 몫을 다 썼다»일 뿐 돈·계정 장애가 아니라서 처리가 같다.
@@ -536,11 +566,16 @@ def _legacy_summary_stage(
             raise
         summary_ask_limited = True
         with_summary = verified
+        if record is not None:
+            record["작성한도도달"] = True
         logger.warning(
             "요청 AI 한도에 닿아 핵심 요약을 «새로 쓰지» 못했다 — "
             "검증을 마친 본문 문장으로 채운다"
         )
     summary_draft_count = len(with_summary.summary)
+    if record is not None:
+        record["초안수"] = summary_draft_count
+        record["도달단계"] = "작성"
 
     summary = with_summary.summary
     if summary and not summary_ask_limited:
@@ -548,27 +583,42 @@ def _legacy_summary_stage(
             summary = verify_sentences(
                 summary, fragments, performance_table, reviewer_ask,
                 diagnostics=review_diagnostics,
+                protocol_diagnostics=protocol_diagnostics,
             )
         except AskFatalError as error:
             if not getattr(error, "degradable", False):
                 raise
             summary = ()
+            if record is not None:
+                record["검수한도도달"] = True
             logger.warning(
                 "요청 AI 한도에 닿아 새 요약을 검증하지 못했다 — 검증하지 "
                 "않은 요약을 내보내는 대신 본문 확인 문장으로 채운다"
             )
+        if record is not None:
+            record["검수후수"] = len(summary)
+            record["도달단계"] = "검수"
     if len(summary) < SUMMARY_MIN_SENTENCES:
         summary = _supplement_summary(summary, verified)
+        if record is not None:
+            record["첫보충후수"] = len(summary)
+            record["도달단계"] = "첫보충"
     final = ComposedReport(
         sections=verified.sections,
         summary=tuple(summary)[:SUMMARY_MAX_SENTENCES],
     )
     final, summary_numeric_filtering = enforce_public_numeric_safety(final)
+    if record is not None:
+        record["수치검사후수"] = len(final.summary)
+        record["도달단계"] = "수치검사"
     if len(final.summary) < SUMMARY_MIN_SENTENCES:
         final = ComposedReport(
             sections=final.sections,
             summary=_supplement_safe_summary(final.summary, verified),
         )
+    if record is not None:
+        record["최종수"] = len(final.summary)
+        record["도달단계"] = "최종"
     return (
         final,
         summary_draft_count,
@@ -841,6 +891,7 @@ def run_v2(
     build_identity_sha256: str = "",
     research_diagnostics: dict[str, object] | None = None,
     review_diagnostics_sink: list[dict] | None = None,
+    composition_diagnostics_sink: list[dict] | None = None,
 ) -> V2RunOutput:
     """엔진 v2 전체 흐름을 한 번 돌려 최종 보고서를 만든다 (04장 3-4절).
 
@@ -886,6 +937,8 @@ def run_v2(
         review_diagnostics_sink: 최종 출고 게이트가 예외를 내도 검수 중간 관측을
             보존할 요청 로컬 목록. 성공 반환의 ``review_diagnostics``와 달리
             보충 뒤 살아남은 후보를 아직 포함할 수 있다.
+        composition_diagnostics_sink: 판독 시도와 요약 단계별 개수를 보존할
+            요청 로컬 목록. 보고서가 없어도 실행 기록에 전달한다.
 
     Returns:
         V2RunOutput — 검증 끝난 Report와 초안·생존 문장 수.
@@ -900,6 +953,9 @@ def run_v2(
 
     review_diagnostics = (
         review_diagnostics_sink if review_diagnostics_sink is not None else []
+    )
+    composition_diagnostics = (
+        composition_diagnostics_sink if composition_diagnostics_sink is not None else []
     )
     call_recorder: _CallLedgerRecorder | None = None
     writer_for_run = writer_ask
@@ -1123,6 +1179,7 @@ def run_v2(
             draft, verification_fragments, performance_table, reviewer_for_run,
             diagnostics=review_diagnostics,
             initial_ask=initial_reviewer_for_run,
+            protocol_diagnostics=composition_diagnostics,
         )
     else:
         verified = verify_report(
@@ -1135,6 +1192,7 @@ def run_v2(
             ),
             diagnostics=review_diagnostics,
             initial_ask=initial_reviewer_for_run,
+            protocol_diagnostics=composition_diagnostics,
         )
         _assert_composed_report_evidence_invariant(
             verified,
@@ -1287,6 +1345,8 @@ def run_v2(
             reviewer_ask=reviewer_for_run,
             body_numeric_filtering=body_numeric_filtering,
             review_diagnostics=review_diagnostics,
+            summary_diagnostics=composition_diagnostics,
+            protocol_diagnostics=composition_diagnostics,
         )
     else:
         body_rendered = render_report(
@@ -1532,6 +1592,7 @@ def run_v2(
                     prepared_evidence.allowed_fragment_ids_by_section
                 ),
                 diagnostics=review_diagnostics,
+                protocol_diagnostics=composition_diagnostics,
             )
             supplement_verified, supplement_moved = drop_cross_section_duplicates(
                 retain_verified_news(

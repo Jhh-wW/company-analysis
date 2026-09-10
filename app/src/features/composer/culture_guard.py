@@ -8,6 +8,12 @@ from collections.abc import Mapping, Sequence
 import unicodedata
 
 from src.features.composer.culture_constants import (
+    CULTURE_ACCOUNTING_COMPENSATION_COST_RE,
+    CULTURE_ACCOUNTING_COMPENSATION_GOVERNANCE_NEGATION_RE,
+    CULTURE_ACCOUNTING_COMPENSATION_GOVERNANCE_VERB_RE,
+    CULTURE_ACCOUNTING_COMPENSATION_REMEASURE_RE,
+    CULTURE_ACCOUNTING_COMPENSATION_SETTLEMENT_RE,
+    CULTURE_ACCOUNTING_COMPENSATION_TREATMENT_RE,
     CULTURE_ACCOUNTING_CREDIT_CHARACTERISTIC_RE,
     CULTURE_ACCOUNTING_GOVERNANCE_NEGATION_RE,
     CULTURE_ACCOUNTING_GOVERNANCE_VERB_RE,
@@ -95,9 +101,20 @@ def culture_accounting_policy_problem(text: str) -> str:
     애초에 이 판단의 대상이 아니다. 재무 단어가 있다는 이유만으로는 절대
     차단하지 않는다 — 인식 어휘와 측정 기준 어휘가 같은 절에 함께 있을
     때만 차단 대상이 되고, 그 절에 결속된 절차가 있으면 다시 보존한다.
+
+    ★ 손실충당금 묶음과 별도로, 순수 주식기준보상 «회계 인식·측정» 절
+    (현금결제방식 + 회계처리 + 부채의 공정가치 재측정 + 보상원가가 같은
+    절에 전부 있는 경우)도 같은 사유(CULTURE_ACCOUNTING_POLICY_MISPLACED)로
+    걸린다 — 새 사유를 만들지 않는다. 이 절의 면제 판단은
+    CULTURE_ACCOUNTING_COMPENSATION_GOVERNANCE_VERB_RE(활용형만 인정,
+    "감독당국" 같은 명사는 제외)를 쓴다 — 손실충당금 블록의 느슨한 버전을
+    재사용하지 않는다. "…보상을 관리하고 있다"의 "관리"는 이 동사 목록에
+    없으므로 그 수사만으로는 여전히 면제되지 않는다.
     """
     return (CULTURE_ACCOUNTING_POLICY_MISPLACED
-            if _pure_accounting_measurement_clauses(text) else "")
+            if (_pure_accounting_measurement_clauses(text)
+                or _pure_compensation_measurement_clauses(text))
+            else "")
 
 
 def _pure_accounting_measurement_clauses(text: str) -> tuple[str, ...]:
@@ -123,6 +140,47 @@ def _pure_accounting_measurement_clauses(text: str) -> tuple[str, ...]:
         governance_bound = (
             CULTURE_ACCOUNTING_GOVERNANCE_VERB_RE.search(surface_clause)
             and not CULTURE_ACCOUNTING_GOVERNANCE_NEGATION_RE.search(surface_clause)
+        )
+        if governance_bound:
+            continue
+        found.append(surface_clause)
+    return tuple(found)
+
+
+def _pure_compensation_measurement_clauses(text: str) -> tuple[str, ...]:
+    """«순수 주식기준보상 회계 인식·측정»인 절만 표면형으로 모아 준다.
+
+    한 절이 현금결제(방식)·회계처리·부채의 공정가치 재측정·보상원가 네
+    어휘를 모두 담고 있으면 회계 서술이고, 같은 절 안에 부정되지 않은
+    검토·승인·감독이 결속돼 있으면 그 절차 서술이 우선하므로 «순수»가
+    아니다 — 그 절은 여기서 빠진다.
+
+    ★ 넷 중 하나라도 빠지면 대상이 아니다 — «보상»·«주식»·«공정가치» 같은
+      낱말 하나만으로는 걸리지 않는다. 성과평가 대상기간·지급기준일·
+      보상위원회 승인 같은 실제 직원 보상제도 서술은 이 네 어휘를 같은
+      절에 전부 담지 않으므로 애초에 대상이 아니다.
+    ★ 판단 경계는 «같은 절»이다. 면제(같은 절 결속 절차) 판단은 이 절 전용
+      CULTURE_ACCOUNTING_COMPENSATION_GOVERNANCE_VERB_RE/NEGATION_RE를 쓴다
+      (손실충당금 블록의 버전은 재사용하지 않는다). "감독당국"·"승인권한"·
+      "감독의무"·"승인한도"처럼 활용되지 않은 명사만으로는 면제하지 않고,
+      "승인한 바 없다"·"검토한 적이 없다"처럼 부정된 절차도 면제로 인정하지
+      않는다 — "감독을 받는다"·"승인을 받는다"·"검토하고 승인한다"처럼
+      실제 결속된 절차는 그대로 보존한다.
+    """
+
+    found: list[str] = []
+    for clause in SOURCE_CLAUSE_SPLIT_RE.split(text):
+        surface_clause = _surface(clause)
+        if not surface_clause:
+            continue
+        if not (CULTURE_ACCOUNTING_COMPENSATION_SETTLEMENT_RE.search(surface_clause)
+                and CULTURE_ACCOUNTING_COMPENSATION_TREATMENT_RE.search(surface_clause)
+                and CULTURE_ACCOUNTING_COMPENSATION_REMEASURE_RE.search(surface_clause)
+                and CULTURE_ACCOUNTING_COMPENSATION_COST_RE.search(surface_clause)):
+            continue
+        governance_bound = (
+            CULTURE_ACCOUNTING_COMPENSATION_GOVERNANCE_VERB_RE.search(surface_clause)
+            and not CULTURE_ACCOUNTING_COMPENSATION_GOVERNANCE_NEGATION_RE.search(surface_clause)
         )
         if governance_bound:
             continue

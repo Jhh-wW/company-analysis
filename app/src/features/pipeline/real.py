@@ -5798,6 +5798,7 @@ def _run_v2_composer(
         engine, client, stage="v2_diagram", max_tokens=V2_DIAGRAM_MAX_TOKENS
     )
     review_diagnostics_sink: list[dict] = []
+    composition_diagnostics_sink: list[dict] = []
     try:
         output = composer_pipeline.run_v2(
             company_name,
@@ -5835,6 +5836,7 @@ def _run_v2_composer(
                 steps, enabled=news_intake_switch.news_intake_enabled()
             ),
             review_diagnostics_sink=review_diagnostics_sink,
+            composition_diagnostics_sink=composition_diagnostics_sink,
         )
         news_usage = getattr(output, "news_usage_diagnostics", None)
         if isinstance(news_usage, dict) and news_usage:
@@ -6030,6 +6032,12 @@ def _run_v2_composer(
             reason_code=failure_constants.REASON_REPORT_ASSEMBLY_FAILED,
         )
         raise
+    finally:
+        from src.shared.report_quality.composition_diagnostics import (  # noqa: PLC0415
+            observed_composition_steps,
+        )
+
+        steps.extend(observed_composition_steps(composition_diagnostics_sink))
 
     # composer는 본문·인용을 만들지만 수집 단계의 3상태(ok/none/failed)는
     # 알지 못한다. RunResult에만 두면 최초 worker가 사라진 뒤 캐시·재시작

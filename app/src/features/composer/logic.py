@@ -80,6 +80,10 @@ from src.shared.report_evidence.policy import required_slots_for
 from src.features.composer.news_constants import NEWS_WRITER_GUIDE
 from src.features.composer.news_usage import news_metadata, parse_news_decisions
 from src.features.composer.news_block import _is_news_fragment
+from src.shared.report_quality.composition_diagnostic_constants import (
+    EXTRACT_DIRECT,
+    EXTRACT_SLICED,
+)
 from src.shared.report_quality.output_constants import SUMMARY_MIN_SENTENCES, SUMMARY_MAX_SENTENCES
 
 logger = logging.getLogger(__name__)
@@ -504,7 +508,9 @@ def _strip_inline_citation_markers(text: str) -> str:
     return " ".join(cleaned.split())
 
 
-def extract_json_payload(raw: str) -> Optional[Any]:
+def extract_json_payload(
+    raw: str, *, observe: Optional[dict] = None
+) -> Optional[Any]:
     """응답 문자열에서 JSON을 꺼낸다. 코드 펜스·앞뒤 설명이 붙어도 살린다.
 
     ★ 내용 검사가 아니다 — 「JSON으로 읽히는가」만 본다.
@@ -527,25 +533,39 @@ def extract_json_payload(raw: str) -> Optional[Any]:
 
     Args:
         raw: AI 응답 원문. None·빈 문자열도 받는다.
+        observe: 주면 «어떻게 읽었는지»만 적는다(추출방식·자른 offset).
+            내용은 담지 않으며 반환값과 동작에 영향이 없다.
 
     Returns:
         JSON으로 읽힌 값(보통 dict). 못 읽으면 None.
+        ★ ``null`` 은 «적법하게 읽혀 None» 이다. 못 읽은 것과 구분하려면
+          ``observe['추출방식']`` 을 함께 보아야 한다.
     """
     text = (raw or "").strip()
     if not text:
         return None
     try:
-        return json.loads(text)
+        payload = json.loads(text)
     except (json.JSONDecodeError, ValueError):
         pass
+    else:
+        if observe is not None:
+            observe["추출방식"] = EXTRACT_DIRECT
+        return payload
     # 코드 펜스(```json … ```)나 머리말이 붙은 경우: 첫 «{»부터 마지막 «}»까지만 다시 시도
     start, end = text.find("{"), text.rfind("}")
+    if observe is not None:
+        observe["json시작offset"] = start
+        observe["json끝offset"] = end
     if start < 0 or end <= start:
         return None
     try:
-        return json.loads(text[start : end + 1])
+        payload = json.loads(text[start : end + 1])
     except (json.JSONDecodeError, ValueError):
         return None
+    if observe is not None:
+        observe["추출방식"] = EXTRACT_SLICED
+    return payload
 
 
 def _sentence_from_item(

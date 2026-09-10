@@ -31,7 +31,7 @@ import datetime as dt
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import pytest
 
@@ -40,7 +40,20 @@ from src.core import deployment_identity
 from src.core.provider_gateway import attempt_context
 from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.features.budget import provider_budget
-from src.features.composer.constants import GRADE_CONFIRMED, SECTION_IDS
+from src.features.composer.constants import (
+    GRADE_CONFIRMED,
+    SECTION_IDS,
+    STRATEGY_TABLE_SECTION_ID,
+)
+from src.features.composer.future_plan_constants import (
+    FUTURE_ACTIVITY_KEY,
+    FUTURE_KEY,
+    FUTURE_MODE_KEY,
+    FUTURE_MODE_PLAN,
+    FUTURE_QUOTE_KEY,
+    FUTURE_SOURCE_KEY,
+    FUTURE_TARGET_KEY,
+)
 from src.features.pipeline import real
 from src.features.pipeline.port import CompanyCard, Grade, Outcome, Report, RunResult, UserInput
 from src.features.pipeline.tests.test_real_cache import CORP_ID, FakeEngine
@@ -65,6 +78,38 @@ _DATE = dt.date(2026, 8, 24)
 # 9개 장에 하나씩 붙일 표식 글자 — 장마다 다른 문장이 나오게 한다.
 _SECTION_MARKS = "가나다라마바사아자"
 _SENTENCE_ENDINGS = ("첫째", "둘째", "셋째", "넷째", "다섯째")
+
+#: 성장 전략 장은 «앞으로의 계획»만 실을 수 있다(`composer/verify.py`의
+#: `future_section_prose_problem`·`future_plan_prose_problem`). 그래서 이 장만
+#: 다른 장의 서술 문장 틀 대신 (대상, 활동, 계획 문장) 세 쌍으로 따로 둔다.
+#: 같은 문장을 조각 원문에도 그대로 실어, 검수 대역이 대는 근거가 실제 원문의
+#: 연속 구절이 되게 한다 — 근거를 빼면 이 장이 다시 제외된다.
+_FUTURE_STRATEGY_PLANS: Final[tuple[tuple[str, str, str], ...]] = (
+    ("해외 고객 기반", "확대", "회사는 해외 고객 기반을 확대할 계획이다."),
+    ("프리미엄 제품 라인업", "강화", "회사는 프리미엄 제품 라인업을 강화할 계획이다."),
+    ("물류 자동화 설비", "도입", "회사는 물류 자동화 설비를 도입할 계획이다."),
+    ("디지털 마케팅 조직", "신설", "회사는 디지털 마케팅 조직을 신설할 계획이다."),
+    ("해외 생산 거점", "확대", "회사는 해외 생산 거점을 확대할 계획이다."),
+)
+_FUTURE_STRATEGY_SENTENCES: Final[tuple[str, ...]] = tuple(
+    sentence for _target, _activity, sentence in _FUTURE_STRATEGY_PLANS
+)
+assert len(_FUTURE_STRATEGY_PLANS) == len(_SENTENCE_ENDINGS), (
+    "성장 전략 장도 다른 장과 같은 문장 수를 유지해야 한다"
+)
+#: 성장 전략 장의 순번 — 조각 번호와 작가 호출 순서가 이 값으로 이어진다.
+_FUTURE_SECTION_INDEX: Final[int] = SECTION_IDS.index(STRATEGY_TABLE_SECTION_ID)
+
+
+def _장_문장(section_index: int, mark: str, ending_index: int) -> str:
+    """작가 대역과 조각 원문이 같은 장별 문장을 쓰게 한다."""
+    if section_index == _FUTURE_SECTION_INDEX:
+        return _FUTURE_STRATEGY_SENTENCES[ending_index]
+    return (
+        f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 대응 "
+        f"협력 실적 {_SENTENCE_ENDINGS[ending_index]} 공식 자료에서 확인했다."
+    )
+
 
 #: 가짜 회사 목록이 쓰는 것과 같은 gen8 고유번호. FULL 경로는 이 값으로
 #: section packet을 만들므로 8자리가 아니면 입력 계약에서 먼저 걸린다.
@@ -121,9 +166,8 @@ def _frags() -> dict[int, dict[str, str]]:
         index: {
             "종류": "공식 IR",
             "원문": " ".join(
-                f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 대응 "
-                f"협력 실적 {ending} 공식 자료에서 확인했다."
-                for ending in _SENTENCE_ENDINGS
+                _장_문장(index - 1, mark, ending_index)
+                for ending_index in range(len(_SENTENCE_ENDINGS))
             ),
             "출처": f"https://corpid.example/document/{index}",
             "문서명": f"공식 자료 {index}",
@@ -216,15 +260,12 @@ class _가짜작가:
             {
                 "문장들": [
                     {
-                        "글": (
-                            f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 "
-                            f"과제 대응 협력 실적 {ending} 공식 자료에서 확인했다."
-                        ),
+                        "글": _장_문장(index, mark, slot_index),
                         "인용": [str(index + 1)],
                         "등급": GRADE_CONFIRMED,
                         "주장슬롯": slots[slot_index % len(slots)],
                     }
-                    for slot_index, ending in enumerate(_SENTENCE_ENDINGS)
+                    for slot_index in range(len(_SENTENCE_ENDINGS))
                 ]
             },
             ensure_ascii=False,
@@ -237,8 +278,42 @@ class _가짜작가:
 #: 이 시험이 company_id가 아니라 요약 부족으로 빨간불이 된다.
 _검수항목_장잠금 = re.compile(r"\[(\d+)\] \(장: ([^,]+), 종류: ([^,]+), 인용: ([^)]+)\)")
 _검수항목_옛표기 = re.compile(r"\[(\d+)\] \(등급: ([^,]+), 인용: ([^)]+)\)")
+#: `composer/verify.py`가 후보 문장을 싣는 줄 — 검수 대역이 «무엇을 판정하는지»를
+#: 번호·순서가 아니라 실제 문장 내용에서 읽기 위해 쓴다.
+_검수_후보문장 = re.compile(r"(?m)^\s*문장\(JSON 문자열\): (.+)$")
 #: `composer/verify.py`의 REWRITE_SENTENCE_HEAD — 검수가 아니라 재작성 요청이다.
 _재작성_프롬프트_표식 = "불합격 문장: "
+
+
+def _후보_블록(prompt: str, 항목들: list[re.Match], 순번: int) -> str:
+    """항목 머리 다음부터 다음 항목 머리 앞까지 — 그 후보의 본문만 잘라낸다."""
+    끝 = 항목들[순번 + 1].start() if 순번 + 1 < len(항목들) else len(prompt)
+    return prompt[항목들[순번].end():끝]
+
+
+def _미래근거(후보_블록: str, 근거_ids: list[str]) -> dict:
+    """성장 전략 후보 문장이 실제로 담은 계획에 대응하는 미래 근거를 붙인다.
+
+    후보 순번으로 짝짓지 않는다 — 프롬프트에 실린 문장을 그대로 읽어 그 계획의
+    대상·활동·원문을 댄다. 근거가 없으면 빈 값을 돌려주고, 그때 이 장의 문장은
+    `future_plan_evidence_missing`으로 제외된다(fail-closed).
+    """
+    문장 = _검수_후보문장.search(후보_블록)
+    if 문장 is None or not 근거_ids:
+        return {}
+    본문 = json.loads(문장.group(1))
+    항목 = [
+        {
+            FUTURE_SOURCE_KEY: 근거_ids[0],
+            FUTURE_TARGET_KEY: 대상,
+            FUTURE_ACTIVITY_KEY: 활동,
+            FUTURE_QUOTE_KEY: 계획문장,
+            FUTURE_MODE_KEY: FUTURE_MODE_PLAN,
+        }
+        for 대상, 활동, 계획문장 in _FUTURE_STRATEGY_PLANS
+        if 계획문장 in 본문
+    ]
+    return {FUTURE_KEY: 항목} if 항목 else {}
 
 
 class _가짜검수:
@@ -255,22 +330,37 @@ class _가짜검수:
             # 응답으로 닫는다(그 문장은 빠진다) — 가짜가 엉뚱한 형식을
             # 판정으로 오독해 «참»을 지어내는 것보다 안전하다.
             return ""
-        장잠금 = _검수항목_장잠금.findall(prompt)
+        장잠금 = list(_검수항목_장잠금.finditer(prompt))
+        판정: list[dict[str, Any]] = []
         if 장잠금:
-            판정 = [
-                {
+            for 순번, 항목 in enumerate(장잠금):
+                number, section_id, _kind, citations = 항목.groups()
+                근거_ids = re.findall(r"조각 (\d+)", citations)
+                한줄: dict[str, Any] = {
                     "번호": int(number),
                     "장": section_id,
-                    "근거": re.findall(r"조각 (\d+)", citations),
+                    "근거": 근거_ids,
                     "결과": "참",
                 }
-                for number, section_id, _kind, citations in 장잠금
-            ]
+                if section_id == STRATEGY_TABLE_SECTION_ID:
+                    검증근거 = _미래근거(_후보_블록(prompt, 장잠금, 순번), 근거_ids)
+                    if 검증근거:
+                        한줄["검증근거"] = 검증근거
+                판정.append(한줄)
         else:
-            판정 = [
-                {"번호": int(number), "결과": "참"}
-                for number, _grade, _citations in _검수항목_옛표기.findall(prompt)
-            ]
+            옛표기 = list(_검수항목_옛표기.finditer(prompt))
+            for 순번, 항목 in enumerate(옛표기):
+                number, _grade, citations = 항목.groups()
+                한줄 = {"번호": int(number), "결과": "참"}
+                # 옛 표기 프롬프트에는 소유 장이 항목 머리에 없다. 계획 문장을
+                # 실제로 담은 후보에만 근거가 붙으므로 장을 몰라도 안전하다.
+                검증근거 = _미래근거(
+                    _후보_블록(prompt, 옛표기, 순번),
+                    re.findall(r"조각 (\d+)", citations),
+                )
+                if 검증근거:
+                    한줄["검증근거"] = 검증근거
+                판정.append(한줄)
         assert 판정, "검수 프롬프트에서 문장 목록을 읽지 못했습니다 — 가짜가 형식을 놓쳤습니다"
         return json.dumps({"판정": 판정}, ensure_ascii=False)
 
