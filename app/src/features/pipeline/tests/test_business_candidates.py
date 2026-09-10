@@ -11,6 +11,7 @@ import pytest
 from src.features.pipeline import real
 from src.features.pipeline.candidate_profile_constants import (
     DART_PROFILE_ENRICHMENT_LIMIT,
+    DART_PROFILE_WORKERS,
 )
 from src.features.pipeline.port import UserInput
 from src.shared.company_identity import verified_official_company_names_equivalent
@@ -55,23 +56,18 @@ def _catalog(size: int = 10):
     )
 
 
-def test_DART_local후보는_화면3개와_분리해_profile을_최대5건만_보강한다(monkeypatch):
+def test_dart_enrichment_preserves_raw_candidate_limit_before_display(monkeypatch):
     engine = _CandidateEngine()
     monkeypatch.setattr(real, "_engine", lambda: engine)
-    monkeypatch.setattr(real, "_company_catalog", _catalog)
+    monkeypatch.setattr(real, "_company_catalog", lambda: _catalog(20))
 
     rows = real.RealPipeline().search_business_candidates(
         company="JYP", address_hint="서울 강동구", limit=15, timeout_sec=8.0
     )
 
-    assert len(rows) == 3
-    assert engine.calls == [
-        "00000010",
-        "00000009",
-        "00000008",
-        "00000007",
-        "00000006",
-    ]
+    assert len(rows) == DART_PROFILE_ENRICHMENT_LIMIT == 15
+    assert set(engine.calls) == {f"{i:08d}" for i in range(6, 21)}
+    assert len(engine.calls) == DART_PROFILE_ENRICHMENT_LIMIT
 
 
 def test_DART_local후보는_deadline뒤_남은_profile을_계속_부르지_않는다(monkeypatch):
@@ -79,15 +75,15 @@ def test_DART_local후보는_deadline뒤_남은_profile을_계속_부르지_않�
     monkeypatch.setattr(real, "_engine", lambda: engine)
     monkeypatch.setattr(real, "_company_catalog", _catalog)
 
-    rows = real.RealPipeline().search_business_candidates(
-        company="JYP", address_hint="서울 강동구", limit=3, timeout_sec=0.03
-    )
+    with pytest.raises(TimeoutError):
+        real.RealPipeline().search_business_candidates(
+            company="JYP", address_hint="서울 강동구", limit=3, timeout_sec=0.03
+        )
+    assert len(engine.calls) <= DART_PROFILE_WORKERS
+    assert set(engine.calls) <= {"00000010", "00000009", "00000008"}
 
-    assert len(rows) == 1
-    assert engine.calls == ["00000010"]
 
-
-def test_SM_실제공식목록충돌에서도_다른약어근거와_주소를_profile5회안에_비교한다(
+def test_sm_official_catalog_collisions_are_compared_within_profile_limit(
     monkeypatch,
 ):
     target_code = "00260930"
@@ -135,14 +131,8 @@ def test_SM_실제공식목록충돌에서도_다른약어근거와_주소를_pr
         company="SM", address_hint=target_address, limit=3, timeout_sec=8.0
     )
 
-    assert engine.calls == [
-        "01491917",
-        "01101643",
-        "00238977",
-        target_code,
-        "00783246",
-    ]
-    assert len(engine.calls) == DART_PROFILE_ENRICHMENT_LIMIT
+    assert set(engine.calls) == {row[0] for row in catalog}
+    assert len(engine.calls) == len(catalog) <= DART_PROFILE_ENRICHMENT_LIMIT
     assert rows[0]["candidate_ref"] == target_code
     assert rows[0]["candidate_name"] == target_name
     assert rows[0]["name_match_kind"] == "acronym_reading"
@@ -178,7 +168,7 @@ def test_DART_local_profile_형식오류는_후보보강전용_표식으로_구�
     class InvalidProfileEngine(_CandidateEngine):
         def get_json(self, _path, params, _counter):
             self.calls.append(str(params["corp_code"]))
-            return {"status": "013"}
+            return {"status": "900"}
 
     engine = InvalidProfileEngine()
     monkeypatch.setattr(real, "_engine", lambda: engine)
@@ -188,7 +178,7 @@ def test_DART_local_profile_형식오류는_후보보강전용_표식으로_구�
         real.RealPipeline().search_business_candidates(
             company="JYP", address_hint="서울 강동구", limit=3, timeout_sec=8.0
         )
-    assert engine.calls == ["00000010"]
+    assert 0 < len(engine.calls) <= DART_PROFILE_WORKERS
 
 
 def test_JYP_강동구는_XML순서와무관하게_현재상장사를_첫후보로_두고_옛법인도_비교시킨다(
@@ -385,16 +375,17 @@ def test_YG_전체목록형_동명후보에서도_rank4_상장법인을_최종3�
     )
 
     # 공식 전체 목록에서는 목표 법인이 이름-only 순위 4위다. profile 보강은
-    # 다섯 건에서 멈춘다. 정확명·법적접미사 근거를 먼저 지킨 뒤에도 목표 법인은
+    # 원시 후보 상한에서 멈춘다. 정확명·법적접미사 근거를 먼저 지킨 뒤에도 목표 법인은
     # 상장 여부까지 비교한 최종 화면 세 장에 포함된다.
     assert payload["expected_local_rank"] == 4
-    assert engine.calls == [
+    assert {
         "01841468",
         "00617086",
         "00249247",
         "00139719",
         "00613318",
-    ]
+    }.issubset(engine.calls)
+    assert len(engine.calls) == DART_PROFILE_ENRICHMENT_LIMIT
     assert len(rows) == 3
     assert "00613318" in [str(row["candidate_ref"]) for row in rows]
     target = next(row for row in rows if row["candidate_ref"] == "00613318")

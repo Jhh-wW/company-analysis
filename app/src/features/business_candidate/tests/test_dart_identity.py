@@ -18,6 +18,18 @@ from src.features.pipeline import real
 _GOLD_PATH = Path(__file__).parent / "fixtures" / "dart_identity_gold.json"
 
 
+@pytest.mark.parametrize(("official", "query"), [
+    ("삼성전자", "삼성 전자"), ("현대 자동차", "현대자동차"),
+    ("(주)한빛정밀기술", "한빛 정밀 기술"), ("Alpha Systems", "AlphaSystems"),
+])
+def test_search_spacing_normalization_preserves_official_identity(official, query):
+    index = build_dart_company_index([DartCompanyRecord("00000001", official)])
+    matches = generate_dart_company_matches(index, query)
+    assert matches[0].record.corp_code == "00000001"
+    assert matches[0].record.corp_name == official
+    assert matches[0].match_kind == "spacing"
+
+
 def _gold():
     return json.loads(_GOLD_PATH.read_text(encoding="utf-8"))
 

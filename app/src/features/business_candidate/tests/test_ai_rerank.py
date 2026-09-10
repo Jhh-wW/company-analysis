@@ -84,6 +84,26 @@ def test_후보가_넷이어도_동점이_아니면_부르지_않는다():
 # ── 운영 스위치 ────────────────────────────────
 
 
+def test_official_candidates_with_small_score_differences_allow_ai_rerank():
+    rows = [
+        _candidate(f"후보{i}", score=0.70 - i * 0.01, name_match_kind="acronym_token")
+        for i in range(5)
+    ]
+    assert ai_rerank.should_rerank(rows, address_hint="서울") is True
+
+
+def test_unambiguous_address_and_official_id_do_not_allow_ai_override():
+    from dataclasses import replace
+
+    rows = [
+        _candidate("일치회사", score=0.9, name_match_kind="acronym_token", address="서울 성동구 왕십리로 83-21"),
+        *[_candidate(f"후보{i}", score=0.85, name_match_kind="acronym_token", address="서울 강남구 테헤란로 1") for i in range(4)],
+    ]
+    assert ai_rerank.should_rerank(rows, address_hint="서울 성동구 왕십리로 83-21") is False
+    rows[0] = replace(rows[0], name_match_kind="exact_id")
+    assert ai_rerank.should_rerank(rows) is False
+
+
 def test_스위치는_기본_켜짐이고_0일때만_꺼진다(monkeypatch):
     monkeypatch.delenv(CANDIDATE_AI_RERANK_ENV_NAME, raising=False)
     assert ai_rerank.ai_rerank_enabled() is True

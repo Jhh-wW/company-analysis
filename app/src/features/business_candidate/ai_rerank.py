@@ -21,6 +21,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 from src.features.business_candidate.constants import (
+    AI_RERANK_AMBIGUITY_MARGIN,
     AI_RERANK_MAX_CANDIDATES,
     AI_RERANK_MIN_TIE,
     AI_RERANK_TIE_EPSILON,
@@ -28,6 +29,8 @@ from src.features.business_candidate.constants import (
     CANDIDATE_AI_RERANK_ENV_ON,
     MAX_CANDIDATES,
 )
+from src.features.business_candidate.address_constants import ADDRESS_DISTRICT_STRENGTH
+from src.features.business_candidate.address_match import address_match_strength
 
 if TYPE_CHECKING:  # pragma: no cover - 순환 import를 피하려고 형만 빌린다
     from src.features.business_candidate.logic import BusinessCandidate
@@ -79,12 +82,17 @@ def ai_rerank_enabled() -> bool:
     return raw.strip() == CANDIDATE_AI_RERANK_ENV_ON
 
 
-def should_rerank(ranked: Sequence["BusinessCandidate"]) -> bool:
-    """화면에 다 못 담는데 1위 점수가 여럿과 같을 때만 참이다."""
+def should_rerank(ranked: Sequence["BusinessCandidate"], *, address_hint: str = "") -> bool:
+    """화면 밖 공식 후보와의 차이가 불분명할 때 보완 순서를 묻는다."""
 
     candidates = tuple(ranked)
     if len(candidates) <= MAX_CANDIDATES:
         # 전부 보여 줄 수 있으면 순서를 바꿔도 사람이 보는 목록은 같다.
+        return False
+    if any(candidate.name_match_kind == "exact_id" for candidate in candidates):
+        return False
+    strengths = [address_match_strength(address_hint, candidate.address) for candidate in candidates]
+    if strengths[0] >= ADDRESS_DISTRICT_STRENGTH and strengths[0] > max(strengths[1:]):
         return False
     top_score = float(candidates[0].score)
     tied = sum(
@@ -92,7 +100,13 @@ def should_rerank(ranked: Sequence["BusinessCandidate"]) -> bool:
         for candidate in candidates
         if abs(float(candidate.score) - top_score) <= AI_RERANK_TIE_EPSILON
     )
-    return tied >= AI_RERANK_MIN_TIE
+    if tied >= AI_RERANK_MIN_TIE:
+        return True
+    return (
+        candidates[0].provider_name == "DART"
+        and bool(candidates[0].name_match_kind)
+        and top_score - float(candidates[MAX_CANDIDATES].score) <= AI_RERANK_AMBIGUITY_MARGIN
+    )
 
 
 def build_rerank_prompt(
@@ -193,7 +207,7 @@ def rerank_candidates(
     address_hint: str,
     ask: RerankAsk | None,
 ) -> tuple[list["BusinessCandidate"], str]:
-    """동점이 많을 때만 AI에 순서를 묻고, 실패하면 원래 순서를 그대로 쓴다.
+    """공식 후보 순위가 불분명하면 AI에 묻고, 실패하면 원래 순서를 쓴다.
 
     Args:
         ranked: 결정적 규칙으로 이미 정렬된 후보들.
@@ -206,7 +220,7 @@ def rerank_candidates(
     """
 
     original = list(ranked)
-    if ask is None or not should_rerank(original):
+    if ask is None or not should_rerank(original, address_hint=address_hint):
         return original, RERANK_STATUS_NO_TIE
 
     limited = original[:AI_RERANK_MAX_CANDIDATES]

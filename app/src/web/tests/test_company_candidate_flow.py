@@ -871,7 +871,7 @@ def test_일반텍스트와_image_only신호는_confirm후보흐름을_유지한
     assert pipeline.lookup_calls == 0
 
 
-def test_cold_DART가_공통8초보다_길어도_30초안이면_warm과같은_무료후보를낸다(
+def test_cold_dart_within_local_timeout_returns_same_candidates_as_warm_search(
     monkeypatch,
 ):
     from src.features.business_candidate import logic as candidate_logic
@@ -944,7 +944,7 @@ def test_cold_DART가_공통8초보다_길어도_30초안이면_warm과같은_�
     for response in (cold_response, warm_response):
         assert "확인할 회사 후보입니다" in response.text
         assert response.text.index("JYP Ent.") < response.text.index("(주)제이와이피")
-    assert received_timeouts == [30.0, 30.0]
+    assert received_timeouts == [60.0, 60.0]
     assert pipeline.lookup_calls == 0
     assert pipeline.search_calls == 2
     assert [attempt.candidate_count for attempt in attempts] == [2, 2]
@@ -2027,24 +2027,75 @@ def _candidate_names_in_order(body: str) -> list[str]:
     return list(dict.fromkeys(found))
 
 
-def _lift_raw_candidate_cap(monkeypatch) -> None:
-    """원시 후보 상한을 풀어 «동점 4개» 상황 자체가 만들어지게 한다.
+@pytest.mark.parametrize("query", ["SM", "에스엠엔터테인먼트"])
+def test_sm_official_profiles_reach_signed_candidate_selection_and_confirmation(monkeypatch, query):
+    import json
+    from pathlib import Path
+    from src.features.pipeline import real
 
-    ⚠️ 운영 어댑터는 원시 후보를 세 개로 자른다
-    (``providers.py::PipelineProviderAdapter.max_results``). 그 상한 그대로면
-    ``resolve_candidates``가 받는 후보가 화면 상한과 같아 재정렬 조건이 성립할 수
-    없다. 이 시험은 상한이 풀렸을 때 «배선»이 맞는지만 확인한다.
-    """
+    fixture = Path(__file__).resolve().parents[2] / "features/business_candidate/tests/fixtures/dart_sm_full_catalog_slice.json"
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+    catalog = tuple(tuple(row) for row in payload["records"])
+    target_code = "00260930"
+    target = payload["profiles"][target_code]
+    calls = []
 
-    assert candidate_providers.PipelineProviderAdapter.max_results == 3
-    monkeypatch.setattr(
-        candidate_providers.PipelineProviderAdapter, "max_results", 5
-    )
+    class OfficialProfileEngine:
+        MODEL = ""
+
+        class UsageCounter:
+            pass
+
+        def load_env(self):
+            pass
+
+        def get_json(self, path, params, counter):
+            assert path == "company.json"
+            calls.append(params["corp_code"])
+            return payload["profiles"][params["corp_code"]]
+
+    monkeypatch.setattr(real, "_company_catalog", lambda: catalog)
+    monkeypatch.setattr(real, "_engine", OfficialProfileEngine)
+    monkeypatch.setattr(real.RealPipeline, "make_candidate_rerank_ask", lambda self: None)
+    monkeypatch.setattr(runtime, "_PIPELINE", real.RealPipeline())
+    client, csrf = _admin_client()
+    try:
+        response = client.post("/confirm", data=_form(csrf, company=query, region=target["adres"]))
+        assert response.status_code == 200
+        assert "확인할 회사 후보입니다" in response.text
+        forms = re.findall(r"<form\b.*?</form>", response.text, re.DOTALL)
+        selected_form = next(form for form in forms if f'name="candidate_ref" value="{target_code}"' in form)
+        assert len(calls) <= 15
+        assert not job_runtime._PAID_ATTEMPTS
+        selected_fields = {
+            name: _hidden(selected_form, name) for name in (
+                "candidate_attempt_token", "candidate_selection_token", "candidate_index",
+                "candidate_name", "candidate_provider", "candidate_ref",
+            )
+        }
+        confirmed = client.post("/confirm", data=_form(
+            csrf, company=query, region=target["adres"], candidate_resolution_confirmed="yes",
+            **selected_fields,
+        ))
+        assert confirmed.status_code == 200
+        assert "이 회사가 맞나요?" in confirmed.text
+        attempt = job_runtime._PAID_ATTEMPTS[_hidden(confirmed.text, "paid_attempt_token")]
+        assert attempt.card.ref == target_code
+        assert attempt.card.legal_name == target["corp_name"]
+        assert attempt.card.typed_name == query
+        assert calls[-1] == target_code
+    finally:
+        client.close()
+
+
+def _assert_raw_candidate_cap() -> None:
+    """운영 상한 그대로 AI 단계에 도달해야 한다. 시험에서 임의로 풀지 않는다."""
+    assert candidate_providers.PipelineProviderAdapter.max_results == 15
 
 
 def test_동점후보는_AI가_준_순서로_보이고_비용은_구글과_같은_자리에_남는다(monkeypatch):
     monkeypatch.delenv("CANDIDATE_AI_RERANK", raising=False)
-    _lift_raw_candidate_cap(monkeypatch)
+    _assert_raw_candidate_cap()
     ask = _가짜_재정렬_ask('{"order":[3,4]}', spent_krw=2.0)
     pipeline = _tied_pipeline(ask)
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
@@ -2073,7 +2124,7 @@ def test_동점후보는_AI가_준_순서로_보이고_비용은_구글과_같�
 
 def test_재정렬_스위치가_꺼져_있으면_AI를_부르지_않는다(monkeypatch):
     monkeypatch.setenv("CANDIDATE_AI_RERANK", "0")
-    _lift_raw_candidate_cap(monkeypatch)
+    _assert_raw_candidate_cap()
     ask = _가짜_재정렬_ask('{"order":[3,4]}', spent_krw=2.0)
     pipeline = _tied_pipeline(ask)
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
@@ -2097,7 +2148,7 @@ def test_재정렬_스위치가_꺼져_있으면_AI를_부르지_않는다(monke
 
 def test_AI_엔진이_없는_파이프라인은_재정렬을_열지_않는다(monkeypatch):
     monkeypatch.delenv("CANDIDATE_AI_RERANK", raising=False)
-    _lift_raw_candidate_cap(monkeypatch)
+    _assert_raw_candidate_cap()
     pipeline = _tied_pipeline(with_ai=False)
     monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
     client, csrf = _admin_client()
@@ -2222,7 +2273,7 @@ def test_무료_DART갈래도_예약문맥을_열어_재정렬_AI가_실제로_�
     """★ 예전엔 여기서 «원자 예약 문맥이 설치되지 않았습니다»로 전송 전에 막혔다."""
 
     monkeypatch.delenv("CANDIDATE_AI_RERANK", raising=False)
-    _lift_raw_candidate_cap(monkeypatch)
+    _assert_raw_candidate_cap()
     _enable_attempt_ledger()
     messages = _가짜_provider_messages([3, 4])
     monkeypatch.setattr(
@@ -2272,7 +2323,7 @@ def test_무료_DART갈래도_예약문맥을_열어_재정렬_AI가_실제로_�
 
 def test_재정렬_비용승인이_거절되면_AI없이_후보만_정상으로_돌려준다(monkeypatch):
     monkeypatch.delenv("CANDIDATE_AI_RERANK", raising=False)
-    _lift_raw_candidate_cap(monkeypatch)
+    _assert_raw_candidate_cap()
     messages = _가짜_provider_messages([3, 4])
     monkeypatch.setattr(
         pipeline_real, "_engine", lambda: _가짜_1판엔진(messages)

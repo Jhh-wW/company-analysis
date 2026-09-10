@@ -40,7 +40,7 @@ def test_운영공급자는_명시설정과_무료표시가_모두_있어야_열
     rows = adapter.search(company="JYP", address_hint="서울", limit=3, timeout_sec=2)
     assert rows[0].candidate_name == "(주)제이와이피엔터테인먼트"
     assert adapter.provider_name == "DART"
-    assert adapter.resolution_timeout_sec == LOCAL_DART_PROVIDER_TIMEOUT_SEC == 30.0
+    assert adapter.resolution_timeout_sec == LOCAL_DART_PROVIDER_TIMEOUT_SEC == 60.0
     assert not hasattr(rows[0], "snippet")
 
 

@@ -30,11 +30,14 @@ from urllib.parse import urlsplit, urlunsplit
 
 from src.features.budget import logic as budget_logic
 from src.features.business_candidate import ai_rerank
+from src.features.business_candidate.address_constants import ADDRESS_SCORE_BY_STRENGTH
+from src.features.business_candidate.address_match import address_match_strength
 from src.features.business_candidate.constants import (
     AI_RERANK_TIMEOUT_SEC,
     CANDIDATE_ATTEMPT_TTL_SEC,
     MAX_ADDRESS_CHARS,
     MAX_CANDIDATES,
+    MAX_CANDIDATE_SCORE_SUM,
     MAX_PROVIDER_TIMEOUT_SEC,
     MAX_RAW_CANDIDATES,
     MAX_NAME_CHARS,
@@ -365,7 +368,7 @@ def _score(
     if match_kind == "exact_id":
         score += 0.64
         evidence.append("입력한 DART 고유번호 또는 종목코드가 정확히 일치합니다")
-    elif match_kind == "exact_name":
+    elif match_kind == "exact_name" or (query_key and query_key == candidate_key):
         score += 0.62
         evidence.append(
             "입력한 회사명이 DART 영문 정식명칭과 일치합니다"
@@ -375,6 +378,9 @@ def _score(
     elif match_kind == "legal_suffix":
         score += 0.54
         evidence.append("영문 법인격 접미사를 제외한 DART 정식명칭이 일치합니다")
+    elif match_kind == "spacing":
+        score += 0.60
+        evidence.append("공백을 정리한 회사명이 DART 정식명칭과 일치합니다")
     elif match_kind == "acronym_token":
         score += 0.56
         evidence.append("DART 영문 정식명칭에 입력한 약어가 독립된 이름으로 적혀 있습니다")
@@ -433,9 +439,10 @@ def _score(
         score += 0.02
         evidence.append("공개 홈페이지 주소가 제공되었습니다")
 
-    address_overlap = _address_tokens(address_hint) & _address_tokens(address)
-    if address_overlap:
-        score += min(0.16, 0.08 * len(address_overlap))
+    address_strength = address_match_strength(address_hint, address)
+    if address_strength:
+        score += ADDRESS_SCORE_BY_STRENGTH[address_strength]
+        address_overlap = _address_tokens(address_hint) & _address_tokens(address)
         evidence.append("주소가 겹칩니다: " + ", ".join(sorted(address_overlap)[:3]))
 
     if re.fullmatch(r"\d{6}", stock_code):
@@ -450,7 +457,7 @@ def _score(
             f"DART 법인목록 정보가 {modify_date[:4]}-{modify_date[4:6]}-"
             f"{modify_date[6:]}에 갱신되었습니다"
         )
-    return min(1.0, score), tuple(evidence)
+    return min(1.0, score / MAX_CANDIDATE_SCORE_SUM), tuple(evidence)
 
 
 def score_business_candidate(
