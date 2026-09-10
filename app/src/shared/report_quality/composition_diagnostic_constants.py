@@ -1,5 +1,7 @@
 """작성 기능과 실행 기능이 공유하는 원문 없는 단계 진단 계약."""
 
+from src.shared.report_quality.constants import STRICT_REQUIRED_QUALITY_SECTION_IDS
+
 PATH_FLAT = "flat"
 PATH_PACKET = "packet"
 EXTRACT_DIRECT = "direct"
@@ -49,3 +51,21 @@ SUMMARY_COUNT_FIELDS = (
 )
 SUMMARY_BOOL_FIELDS = ("작성한도도달", "검수한도도달")
 SUMMARY_STAGES = frozenset(("시작", "작성", "검수", "첫보충", "수치검사", "최종"))
+
+# ── 장별 도식(경로표) 행 수 기록 ──────────────────────────────────────────
+#
+# ★ 왜 필요한가 (실측) — 어떤 장의 도식이 «0줄»로 나왔을 때, 작가가 애초에
+#   빈 배열을 냈는지 우리가 걸렀는지를 되짚을 기록이 하나도 없었다. 도식
+#   «검증» 제외 기록(8_도식_검증_제외)은 장 근거 정리 필터 «뒤»에 있어서,
+#   그 필터에서 조용히 사라진 줄은 어느 기록에도 남지 않는다. 그래서 매
+#   실행이 「왜 0줄인지 확인 못 함」으로 끝났다.
+# ⚠️ 칸 내용·인용 id·회사 원문은 남기지 않는다 — 장 이름과 «개수»만 남긴다.
+DIAGRAM_ROW_COUNT_STEP = "8_도식_생성수"
+#: 작가 응답을 읽은 «직후» — parse_flow_rows가 만든 줄 수 그대로.
+DIAGRAM_STAGE_PARSED = "작성"
+#: 장 밖 인용·미지원 의미칸을 거르는 정리 «직후».
+DIAGRAM_STAGE_SECTION_EVIDENCE = "장근거정리"
+DIAGRAM_ROW_COUNT_STAGES = frozenset((
+    DIAGRAM_STAGE_PARSED, DIAGRAM_STAGE_SECTION_EVIDENCE,
+))
+DIAGRAM_ROW_COUNT_SECTION_IDS = frozenset(STRICT_REQUIRED_QUALITY_SECTION_IDS)

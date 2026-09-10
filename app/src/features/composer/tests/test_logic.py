@@ -554,3 +554,239 @@ def test_어댑터는_CollectedFragment_필드를_보존한다():
 
     assert fragment.document_title == ""
     assert fragment.location == ""
+
+
+# ══════════════════════════════════════════════════════════
+# ④ 요약 보충 순서 — 각 장 «첫» 문장을 마지막 차례로 돌린다
+#
+# ★ 왜 (실측) — 예전에는 한 바퀴에 장마다 «첫» 문장부터 집었다. 그래서 요약
+#   보충이 걸릴 때마다 요약이 「1·2·3장 첫 문장」이라는 똑같은 서명으로 나왔고,
+#   실측 실행의 요약 3건이 정확히 본문 2장·3장·1장의 첫 문장과 축자 동일했다.
+# ══════════════════════════════════════════════════════════
+
+
+def _확인문장(text: str):
+    from src.features.composer.port import ComposedSentence
+
+    return ComposedSentence(text=text, citations=("1",), grade=GRADE_CONFIRMED)
+
+
+def _본문(장당_문장수: int, 장수: int = 3):
+    from src.features.composer.port import ComposedReport, ComposedSection
+
+    return ComposedReport(
+        sections=tuple(
+            ComposedSection(
+                section_id=SECTION_IDS[index],
+                sentences=tuple(
+                    _확인문장(f"{SECTION_IDS[index]}-{순번}번문장이다.")
+                    for 순번 in range(1, 장당_문장수 + 1)
+                ),
+            )
+            for index in range(장수)
+        )
+    )
+
+
+def test_확인문장_보충은_각_장_첫문장을_마지막_순위로_돌린다() -> None:
+    from src.features.composer.logic import _supplement_summary
+
+    report = _본문(장당_문장수=2)
+    첫문장들 = {section.sentences[0].text for section in report.sections}
+
+    고른것 = _supplement_summary((), report)
+
+    texts = [sentence.text for sentence in 고른것]
+    assert len(texts) == 3
+    assert not (set(texts) & 첫문장들), f"각 장의 첫 문장이 그대로 요약이 됐다: {texts}"
+    assert texts == [section.sentences[1].text for section in report.sections]
+
+
+def test_확인문장_보충은_여전히_장을_번갈아_고른다() -> None:
+    """★ 첫 문장을 뒤로 미루면서 «서로 다른 장 우선»을 잃으면 안 된다."""
+    from src.features.composer.logic import _supplement_summary
+    from src.features.composer.port import ComposedReport, ComposedSection
+
+    몰린_본문 = ComposedReport(
+        sections=(
+            ComposedSection("identity", tuple(
+                _확인문장(f"A{n}이다.") for n in (1, 2, 3)
+            )),
+            ComposedSection("business_model", (_확인문장("B1이다."),)),
+        )
+    )
+
+    texts = [s.text for s in _supplement_summary((), 몰린_본문)]
+
+    assert texts == ["A2이다.", "B1이다.", "A3이다."]
+
+
+def test_한_문장뿐인_장에서는_그_첫_문장을_쓴다() -> None:
+    """순서만 바뀌고 «쓸 수 있는 문장 집합»은 같다 — 요약이 빌 위험은 0이다."""
+    from src.features.composer.logic import _supplement_summary
+
+    report = _본문(장당_문장수=1)
+
+    texts = [s.text for s in _supplement_summary((), report)]
+
+    assert texts == [section.sentences[0].text for section in report.sections]
+
+
+def test_되돌리면_안_되는_문장은_보충에서_빠진다() -> None:
+    """앞 단계의 안전 검사가 뺀 문장이 이 보충으로 되살아나면 안 된다."""
+    from src.features.composer.logic import _normalized_text, _supplement_summary
+
+    report = _본문(장당_문장수=2)
+    금지 = report.sections[0].sentences[1].text
+
+    texts = [
+        s.text
+        for s in _supplement_summary(
+            (), report, excluded_keys=frozenset({_normalized_text(금지)})
+        )
+    ]
+
+    assert 금지 not in texts
+    assert len(texts) == 3, "제외 때문에 최소 문장 수를 못 채우면 안 된다"
+
+
+# ══════════════════════════════════════════════════════════
+# 8장 도식 «생성 수» 기록 — 0줄이 왜 0줄인지 되짚을 수 있게 한다
+# ══════════════════════════════════════════════════════════
+
+_문화_도식_칸 = ("존중과 신뢰", "경영지원팀 주관", "환위험 관리규정 운영")
+
+
+def _도식_패킷(*, culture_slots: tuple[str, ...]):
+    from src.features.composer.port import (
+        CollectedFragment, SectionEvidencePacket, SectionEvidencePacketSet,
+    )
+    from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+
+    generation = "a" * 64
+    packets = []
+    for index, section_id in enumerate(SECTION_IDS, start=1):
+        slots = (
+            culture_slots if section_id == "culture"
+            else (CLAIM_SLOTS_BY_SECTION[section_id][0],)
+        )
+        packets.append(
+            SectionEvidencePacket(
+                company_id="00123456",
+                evidence_generation_sha256=generation,
+                section_id=section_id,
+                fragments=(
+                    CollectedFragment(
+                        fragment_id=str(index),
+                        kind="typed-evidence-v1:test",
+                        text=(
+                            f"테스트 회사의 {section_id} 공식 원문이다. "
+                            "임직원 교육훈련과 조직문화 정착은 인사부서가 담당한다."
+                        ),
+                        source_url=f"https://example.com/documents/{index}",
+                        document_identity=f"document:example.com:doc-{index}",
+                        document_content_sha256=f"{index:064x}",
+                        supported_claim_slots=slots,
+                    ),
+                ),
+            )
+        )
+    return SectionEvidencePacketSet(
+        company_id="00123456",
+        evidence_generation_sha256=generation,
+        packets=tuple(packets),
+    )
+
+
+def _도식_작가(*, culture_slot: str):
+    from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+
+    def ask(prompt: str) -> str:
+        section_id = next(
+            (sid for sid in SECTION_IDS if SECTION_GUIDES[sid] in prompt),
+            SECTION_IDS[0],
+        )
+        문장 = {
+            "글": f"테스트 회사의 {section_id} 공식 원문이다.",
+            "인용": [str(SECTION_IDS.index(section_id) + 1)],
+            "등급": GRADE_CONFIRMED,
+            "주장슬롯": (
+                culture_slot if section_id == "culture"
+                else CLAIM_SLOTS_BY_SECTION[section_id][0]
+            ),
+        }
+        경로표 = (
+            [{"칸": list(_문화_도식_칸), "인용": [str(SECTION_IDS.index("culture") + 1)]}]
+            if section_id == "culture"
+            else []
+        )
+        return json.dumps(
+            {"문장들": [문장], "경로표": 경로표}, ensure_ascii=False
+        )
+
+    return ask
+
+
+def _도식_기록(sink: list[dict]) -> list[dict]:
+    from src.shared.report_quality.composition_diagnostics import (
+        observed_composition_steps,
+    )
+    from src.shared.report_quality.composition_diagnostic_constants import (
+        DIAGRAM_ROW_COUNT_STEP,
+    )
+
+    return [
+        step for step in observed_composition_steps(sink)
+        if step["step"] == DIAGRAM_ROW_COUNT_STEP
+    ]
+
+
+def test_장별_도식_생성수가_단계에_기록된다() -> None:
+    """작가가 낸 줄 수가 «작성» 단계 기록에 장별로 남는다."""
+
+    sink: list[dict] = []
+    compose_sections(
+        "테스트 회사", (), None,
+        _도식_작가(culture_slot="culture:work_principle"),
+        section_evidence_packets=_도식_패킷(
+            culture_slots=(
+                "culture:work_principle", "culture:verified_case",
+            )
+        ),
+        composition_diagnostics=sink,
+    )
+
+    기록 = _도식_기록(sink)
+    작성 = [step for step in 기록 if step["단계"] == "작성"]
+    assert len(작성) == 1
+    assert 작성[0]["장별행수"]["culture"] == 1
+    assert set(작성[0]["장별행수"]) == set(SECTION_IDS)
+    # 원문·칸 내용은 절대 실리지 않는다.
+    assert all(칸 not in repr(기록) for 칸 in _문화_도식_칸)
+
+
+def test_슬롯_미지원_도식행_제외는_기록을_남긴다() -> None:
+    """★ 조용한 탈락을 관측 가능하게 만든다.
+
+    8장 「확인된 사례」 칸이 요구하는 의미 칸을 인용 조각이 지원하지 않으면
+    그 줄은 사라지는데, 예전에는 안내문도 진단도 남지 않아 «작가가 안 냈는지
+    우리가 걸렀는지»를 되짚을 방법이 없었다. 두 단계 기록의 «차이»가 그
+    답이다.
+    """
+
+    sink: list[dict] = []
+    report = compose_sections(
+        "테스트 회사", (), None,
+        _도식_작가(culture_slot="culture:work_principle"),
+        section_evidence_packets=_도식_패킷(
+            culture_slots=("culture:work_principle",)
+        ),
+        composition_diagnostics=sink,
+    )
+
+    culture = next(s for s in report.sections if s.section_id == "culture")
+    assert culture.flow_rows == (), "이 시험의 전제 — 그 줄은 실제로 사라진다"
+
+    기록 = _도식_기록(sink)
+    단계별 = {step["단계"]: step["장별행수"]["culture"] for step in 기록}
+    assert 단계별 == {"작성": 1, "장근거정리": 0}

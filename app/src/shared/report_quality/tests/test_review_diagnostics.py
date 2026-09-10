@@ -24,6 +24,10 @@ def test_transport_contract_matches_the_actual_producer():
     from src.features.composer.culture_constants import (
         CULTURE_ACCOUNTING_POLICY_MISPLACED, CULTURE_EVIDENCE_SCOPE_MISMATCH,
         CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,
+        CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
+    )
+    from src.features.composer.absence_claim_constants import (
+        ABSENCE_CLAIM_UNSUPPORTED,
     )
     from src.features.composer.challenge_constants import CHALLENGE_RESPONSE_MISSING
     from src.features.composer.future_plan_constants import (
@@ -44,6 +48,10 @@ def test_transport_contract_matches_the_actual_producer():
         FUTURE_SECTION_NO_FORWARD_STATEMENT,
         CHALLENGE_RESPONSE_MISSING,
         CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,
+        # 8장 «원문 절» 긍정 계약과 장 무관 부재 단언 가드가 더해졌다 —
+        # 둘 다 새 사유 코드를 쓰므로 이 전송 계약에도 함께 등록한다.
+        CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
+        ABSENCE_CLAIM_UNSUPPORTED,
         *PROSE_OWN_SOURCE_REASON_CODES,
         *EXECUTIVE_STATUS_REASON_TEXTS,
     }

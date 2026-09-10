@@ -14,6 +14,10 @@ REVIEW_SCOPE_ITEMS = {
     "challenge_response_missing": "장별 작성범위",
     "future_section_no_forward_statement": "장별 작성범위",
     "culture_financial_risk_scope_misplaced": "장별 작성범위",
+    "culture_section_evidence_offcontract": "장별 작성범위",
+    # ★ 장과 무관한 부재 단언(composer.absence_claim_constants). 코드 문자열은
+    #   그 모듈의 상수와 «반드시 같은 값»이어야 한다.
+    "absence_claim_unsupported": "자료 부재 단언",
     # ★ «확인» 산문의 자기 원문 근거(composer.prose_own_source_constants).
     #   코드 문자열은 그 모듈의 상수와 «반드시 같은 값»이어야 한다.
     "prose_own_source_unsupported": "자기 근거 부족",

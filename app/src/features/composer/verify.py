@@ -29,10 +29,12 @@ from __future__ import annotations
 from src.features.composer.news_constants import NEWS_REVIEW_GUIDE
 from src.features.composer.news_usage import attribution_prefix, news_metadata
 from src.features.composer.news_block import _is_news_fragment
+from src.features.composer.absence_claim_guard import absence_claim_problem
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_accounting_policy_problem,
     culture_financial_risk_goal_problem,
     culture_flow_problem, culture_problem,
+    culture_section_evidence_problem,
 )
 from src.features.composer.prose_own_source import (
     prose_own_source_problem,
@@ -190,6 +192,78 @@ def _append_grounding_diagnostic(
             ),
         }
     )
+
+
+def _absence_claim_rejected(
+    sentence: ComposedSentence,
+    *,
+    section_id: str,
+    kind: str,
+    diagnostics: Optional[list[dict]],
+) -> bool:
+    """자료 부재를 단언한 문장인가 — 맞으면 진단을 남기고 참을 돌려준다.
+
+    ★ 이 검사는 «인용 유무와 무관하게» 돌아야 한다. 의미 검수는 인용 없는
+      문장을 대조할 자료가 없다는 이유로 통째로 건너뛰는데, 부재 단언은
+      바로 그 자리에서 가장 잘 통과한다(실측: 인용 0개·등급 «해석»인
+      「공식 자료에서 … 찾을 수 없다」 두 문장이 그대로 공개됐다).
+    """
+
+    problem = absence_claim_problem(sentence.text)
+    if not problem:
+        return False
+    logger.warning("의미 근거 검증: %s, 장 %s 문장 공개 제외", problem, section_id)
+    _append_grounding_diagnostic(
+        diagnostics,
+        section_id=section_id,
+        kind=kind,
+        reason_code=problem,
+        candidate_text=sentence.text,
+        sources={},
+    )
+    return True
+
+
+def _groups_without_positions(
+    groups: Sequence[Sequence[ComposedSentence]],
+    rejected: set[tuple[int, int]],
+) -> list[list[ComposedSentence]]:
+    """검수 «전»에 제외가 확정된 자리만 빼고 묶음을 그대로 되돌린다."""
+
+    return [
+        [
+            sentence
+            for sentence_index, sentence in enumerate(group)
+            if (group_index, sentence_index) not in rejected
+        ]
+        for group_index, group in enumerate(groups)
+    ]
+
+
+def cellwise_problem(
+    cells: Sequence[str], predicate: Callable[[str], str]
+) -> str:
+    """도식 칸을 «칸마다 따로» 검사하고 첫 사유를 돌려준다.
+
+    ★ 왜 필요한가 (실측) — 칸을 이어 붙이는 구분자 `" ; "` 는 절 분리 정규식
+      `[.!?。\\n]+` 에 걸리지 않는다. 그래서 세 칸이 «한 절»이 되고, 서로 다른
+      칸의 표지가 우연히 만나 정상 행이 지워졌다:
+        · ("공식 자료 검토 절차", "분기 점검", "세부 기준을 명시하지 않았다")
+          → 1칸의 지시어와 3칸의 부재 술어가 결합해 부재 단언으로 판정
+        · ("신용위험", "여신 심사", "사내 복리후생 관리규정을 둔다")
+          → 1칸의 위험 범주와 3칸의 관리규정이 결합해 재무 서술로 판정
+      두 가드의 docstring이 「판단 경계는 «같은 절»이다 — 앞 절과 뒤 절이
+      우연히 만나 걸리지 않게 한다」고 적은 계약을 도식에서만 깬 것이다.
+    ★ 칸 하나가 그 자체로 한 절이다. 하나라도 걸리면 그 행을 뺀다.
+    """
+
+    for cell in cells:
+        if not str(cell).strip():
+            continue
+        problem = predicate(str(cell))
+        if problem:
+            return problem
+    return ""
 
 
 def _review_labelled_flow_cells(section_id: str, row: FlowRow) -> list[str]:
@@ -1330,8 +1404,17 @@ def _apply_grounding(
         # 실제 소유 장을 따른다. 오래된 주장 슬롯만으로 요약이나 다른 장의
         # 정상 회계 설명까지 문화 장의 배치 제한에 넣지 않는다.
         if context and context[:2] == ("culture", DIAGNOSTIC_KIND_BODY):
+            # ★ 세 번째 검사(원문 절 긍정 계약)는 후보 «표현»이 아니라 후보가
+            #   기댄 원문을 본다 — 앞의 두 검사가 표현만 보기 때문에 같은 재무
+            #   서술을 꼬리만 바꿔 적으면 그대로 통과했다(실측: 2건 차단 ↔
+            #   4건 신규 유입, 순증 0).
+            # ⚠️ 순서가 «사유 코드»를 정한다. 새 원문 절 계약은 가장 넓은
+            #   그물이라 반드시 «마지막»에 둔다 — 앞에 두면 근거 범위 확대·
+            #   회계 정책 같은 더 구체적인 사유가 이 코드에 가려진다.
             problem = (culture_accounting_policy_problem(text)
-                       or culture_financial_risk_goal_problem(text))
+                       or culture_financial_risk_goal_problem(text)
+                       or culture_problem(text, sources)
+                       or culture_section_evidence_problem(text, sources))
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
@@ -1355,7 +1438,13 @@ def _apply_grounding(
                 continue
         if flow_cells_by_number is not None and number in flow_cells_by_number:
             cells = flow_cells_by_number[number]
-            problem = flow_scope_problem(cells, sources)
+            # ★ 문장 경로의 부재 단언 검사는 도식 행을 보지 않는다(그 검사는
+            #   문장 목록만 돈다). 같은 거짓말이 칸으로 옮겨 적히면 그대로
+            #   공개되므로 여기서도 같은 사유코드로 건다 — 장 무관.
+            # ⚠️ 칸마다 «따로» 건다. 이어 붙인 문자열로 걸면 서로 다른 칸의
+            #   표지가 결합해 정상 행이 지워진다(cellwise_problem 머리말).
+            problem = (cellwise_problem(cells, absence_claim_problem)
+                       or flow_scope_problem(cells, sources))
             if not problem and context and context[0] == CHALLENGE_FLOW_SECTION_ID:
                 # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 묶음 검수 경로와
                 # flat 경로가 «같은» 두 검사를 쓴다 — 한쪽만 걸면 그 경로로만
@@ -1366,8 +1455,25 @@ def _apply_grounding(
             if not problem and context and context[0] == "culture":
                 # 축약된 칸은 원문을 줄여 적어 산문 검사의 세 표지 결합에 걸리지
                 # 않는다. 그 행이 «인용한 원문»의 순수 회계 절과 결속됐을 때만 막는다.
-                problem = (culture_flow_problem(cells, sources)
-                           or culture_accounting_flow_problem(cells, sources))
+                # ★ 재무위험 규정 규칙과 원문 절 계약을 «도식에도» 건다. 예전에는
+                #   본문에만 걸려 있어서, 산문에서 빠진 재무 서술이 표의 칸으로
+                #   옮겨 적히면 같은 보고서 안에서 두 잣대가 됐다.
+                # ⚠️ 넓은 그물(원문 절 계약)은 마지막이다 — 사유 코드 우선순위는
+                #   본문 블록과 같다.
+                problem = (
+                    culture_flow_problem(cells, sources)
+                    or culture_accounting_flow_problem(cells, sources)
+                    or cellwise_problem(
+                        cells, culture_financial_risk_goal_problem
+                    )
+                    or culture_problem(text, sources)
+                    or cellwise_problem(
+                        cells,
+                        lambda cell: culture_section_evidence_problem(
+                            cell, sources
+                        ),
+                    )
+                )
             # 6장 성장 계획 표만 미래 근거를 결속한다. 다른 장의 도식과 이 장의
             # 산문 문장(칸이 없다)은 이 검사를 지나가지 않는다.
             if not problem and context and context[0] == STRATEGY_TABLE_SECTION_ID:
@@ -1867,10 +1973,30 @@ def _semantic_review(
     """
     items: list[_ReviewItem] = []
     position_numbers: dict[tuple[int, int], int] = {}
+    absence_rejected_positions: set[tuple[int, int]] = set()
     number = 0
     for group_index, group in enumerate(groups):
         for sentence_index, sentence in enumerate(group):
             if sentence.grade not in (GRADE_CONFIRMED, GRADE_INTERPRETED):
+                continue
+            section_id = (
+                group_ids[group_index]
+                if group_ids is not None
+                else str(group_index)
+            )
+            kind = (
+                DIAGNOSTIC_KIND_SUMMARY
+                if section_id == REVIEW_SUMMARY_GROUP
+                else DIAGNOSTIC_KIND_BODY
+            )
+            # ★ 자료 부재 단언은 인용 «앞»에서 건다. 아래 건너뛰기가 인용 없는
+            #   문장을 검수 대상에서 통째로 빼기 때문에, 여기 두지 않으면 그
+            #   문장은 어떤 검사도 받지 않고 그대로 공개된다.
+            if _absence_claim_rejected(
+                sentence, section_id=section_id, kind=kind,
+                diagnostics=diagnostics,
+            ):
+                absence_rejected_positions.add((group_index, sentence_index))
                 continue
             # 인용 없는 해석은 대조할 외부 자료가 없다. 이 경로는 별도의
             # 정책 과제이며, 검수 AI에 빈 근거를 보내 «참»을 만들지 않는다.
@@ -1878,25 +2004,16 @@ def _semantic_review(
                 continue
             number += 1
             position_numbers[(group_index, sentence_index)] = number
-            section_id = (
-                group_ids[group_index]
-                if group_ids is not None
-                else str(group_index)
-            )
             items.append(
                 _ReviewItem(
                     number=number,
                     sentence=sentence,
                     section_id=section_id,
-                    kind=(
-                        DIAGNOSTIC_KIND_SUMMARY
-                        if section_id == REVIEW_SUMMARY_GROUP
-                        else DIAGNOSTIC_KIND_BODY
-                    ),
+                    kind=kind,
                 )
             )
     if not items:
-        return [list(group) for group in groups]
+        return _groups_without_positions(groups, absence_rejected_positions)
 
     table_evidence = _render_table_evidence(table)
     table_source = _table_grounding_source(table)
@@ -2022,6 +2139,8 @@ def _semantic_review(
     for group_index, group in enumerate(groups):
         out: list[ComposedSentence] = []
         for sentence_index, sentence in enumerate(group):
+            if (group_index, sentence_index) in absence_rejected_positions:
+                continue
             item_number = position_numbers.get((group_index, sentence_index))
             if item_number is None:
                 out.append(sentence)
@@ -2071,6 +2190,14 @@ def _semantic_review_grouped(
             raise ValueError(f"검수 허용 근거가 없는 장입니다: {section_id}")
         for sentence_index, sentence in enumerate(group):
             if sentence.grade not in (GRADE_CONFIRMED, GRADE_INTERPRETED):
+                continue
+            # ★ 자료 부재 단언은 인용 «앞»에서 건다 — legacy 경로와 같은 이유·
+            #   같은 사유코드다. 두 경로 중 한쪽만 걸면 그 경로로만 새어 나간다.
+            if _absence_claim_rejected(
+                sentence, section_id=section_id, kind=DIAGNOSTIC_KIND_BODY,
+                diagnostics=diagnostics,
+            ):
+                rejected_sentence_positions.add((group_index, sentence_index))
                 continue
             if not sentence.citations:
                 continue
@@ -2123,7 +2250,7 @@ def _semantic_review_grouped(
             protocol_diagnostics=protocol_diagnostics,
         )
         return (
-            [list(group) for group in groups],
+            _groups_without_positions(groups, rejected_sentence_positions),
             {section_id: () for section_id in flow_rows_by_section},
         )
     verdicts = _ask_grouped_verdicts(

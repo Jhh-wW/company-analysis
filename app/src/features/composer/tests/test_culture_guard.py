@@ -2,8 +2,14 @@
 
 import pytest
 
-from src.features.composer.culture_constants import CULTURE_EVIDENCE_SCOPE_MISMATCH
-from src.features.composer.culture_guard import culture_problem
+from src.features.composer.culture_constants import (
+    CULTURE_EVIDENCE_SCOPE_MISMATCH,
+    CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
+)
+from src.features.composer.culture_guard import (
+    culture_problem,
+    culture_section_evidence_problem,
+)
 
 
 @pytest.mark.parametrize("claim,sources", [
@@ -94,3 +100,126 @@ def test_guard_does_not_claim_to_verify_official_status_or_other_culture_topics(
     claim = "매출 확대는 조직의 의사결정 방식을 보여준다."
     source = "매출이 확대됐다. 승인권한은 이사회가 갖는다."
     assert culture_problem(claim, {"뉴스": source}) == ""
+
+
+# ══════════════════════════════════════════════════════════
+# 8장 «원문 절» 긍정 계약 — 판정 재료가 후보 표현이 아니라 인용 원문이다
+#
+# ★ 왜 필요한가 (실측) — 기존 재무위험 가드는 후보 «표현»을 본다. 실행 두 판을
+#   비교하니 그 가드가 2건을 새로 잡는 동안, 같은 내용을 꼬리만 바꿔 적어
+#   안 걸리는 재무 문장 4개가 그 자리에 새로 들어왔다(순증 0). 아래 시험은
+#   «표현을 바꿔도 판정이 안 바뀐다»를 값으로 못 박는다.
+# ══════════════════════════════════════════════════════════
+
+#: 실제 실행의 8장 4문장이 각각 옮겨 적은 사업보고서 원문 절.
+_재무위험_주관_원문 = (
+    "재무위험관리는 주로 당사의 경영지원팀에서 주관하고 있으며 당사 내 "
+    "사업부와의 긴밀한 협조 하에 재무위험 관리정책 수립 및 재무위험의 측정, "
+    "평가, 헷지 등을 실행하고 있습니다"
+)
+_유동성_원문 = (
+    "당사는 적정 유동성의 유지를 위하여 주기적인 자금수지 예측, 필요 현금수준 "
+    "추정, 자금수지 관리 및 계획대비 실적 관리를 통하여 유동성 위험을 "
+    "최소화하고 있습니다"
+)
+_자본관리_원문 = (
+    "당사의 자본관리 목적은 계속기업으로서 주주 및 이해당사자들에게 이익을 "
+    "지속적으로 제공할 수 있는 능력을 보호하고 자본비용을 절감하기 위해 "
+    "최적의 자본구조를 유지하는 것입니다"
+)
+_이자율위험_원문 = (
+    "당사는 이자율위험관리의 목표를 이자율변동으로 인한 불확실성의 최소화를 "
+    "추구함으로써 기업의 가치를 극대화하는 데 두고 있습니다"
+)
+
+
+@pytest.mark.parametrize("원문", [_유동성_원문, _자본관리_원문, _이자율위험_원문],
+                         ids=("유동성", "자본관리", "이자율위험"))
+@pytest.mark.parametrize("후보", [
+    # 같은 내용을 «규정 꼬리»가 있는 표현과 없는 표현으로 각각 적는다.
+    # 예전 가드는 이 둘을 다르게 판정했다 — 이 계약은 같게 판정한다.
+    "회사는 위험을 최소화하는 선제적 재무관리 원칙을 실행하고 있다.",
+    "회사는 위험을 최소화하고 있다.",
+    "회사의 일하는 방식은 재무 건전성을 지키는 데 초점을 맞춘다.",
+], ids=("규정꼬리있음", "규정꼬리없음", "문화어휘로_바꿔씀"))
+def test_재무_원문만_인용한_8장_문장은_표현을_바꿔도_제외된다(후보, 원문):
+    assert culture_section_evidence_problem(
+        후보, {"34": 원문}
+    ) == CULTURE_SECTION_EVIDENCE_OFFCONTRACT
+
+
+def test_재무_위험을_누가_맡는지_말한_원문은_보존된다():
+    """8장 안내문의 예외 — 재무 위험을 «누가» 맡는지 조직으로 설명한 자료."""
+
+    assert culture_section_evidence_problem(
+        "회사는 경영지원팀을 중심으로 재무위험관리를 주관한다.",
+        {"34": _재무위험_주관_원문},
+    ) == ""
+    # 후보 표현을 다르게 적어도 판정은 그대로다 — 재료가 원문이기 때문이다.
+    assert culture_section_evidence_problem(
+        "재무위험 관리의 주관 조직이 정해져 있다.",
+        {"34": _재무위험_주관_원문},
+    ) == ""
+
+
+@pytest.mark.parametrize("원문", [
+    "당사는 임직원 사내대출 관리규정에 따라 신용검증절차를 거쳐 주택자금을 "
+    "지원하고 있으며, 인사위원회가 승진 기준을 심의합니다",
+    "당사의 인재상은 도전과 협업을 실천하는 인재입니다",
+    "사.직원 등 현황 직원수 902명, 평균근속연수 8.5년입니다",
+    "당사는 전결규정에 따라 의사결정 권한을 위임하고 있으며 승인권한을 "
+    "부서장에게 부여합니다",
+], ids=("인사제도", "인재상", "직원현황", "의사결정절차"))
+def test_인사제도_인재상_직원현황_원문은_보존된다(원문):
+    """음성 대조 — 이 장이 실제로 다루는 소재는 그대로 남는다."""
+
+    assert culture_section_evidence_problem("회사의 제도를 설명한다.", {"7": 원문}) == ""
+
+
+def test_그_소재가_없다고_적은_원문은_근거로_세지_않는다():
+    """「인재상을 공시하지 않는다」는 절은 인재상 자료가 아니다."""
+
+    assert culture_section_evidence_problem(
+        "회사의 인재상을 설명한다.",
+        {"7": "당사는 인재상을 별도로 공시하지 않습니다"},
+    ) == CULTURE_SECTION_EVIDENCE_OFFCONTRACT
+
+
+def test_인용_원문이_없으면_이_장의_소재를_확인할_수_없다():
+    """fail-closed — 빈 결과는 «확인됐다»가 아니라 «확인할 수 없다»이다."""
+
+    assert culture_section_evidence_problem(
+        "회사의 조직문화를 설명한다.", {}
+    ) == CULTURE_SECTION_EVIDENCE_OFFCONTRACT
+
+
+def test_이_계약은_회사나_업종을_보지_않는다():
+    """회사명·업종·연도가 달라도 같은 원문 모양이면 같은 판정이다."""
+
+    사람_원문 = "{회사}는 임직원 교육훈련 제도를 운영한다"
+    재무_원문 = "{회사}는 유동성 위험을 최소화하고 있습니다"
+    for 회사 in ("새빛산업", "가나다전자", "한밭바이오"):
+        assert culture_section_evidence_problem(
+            "후보", {"1": 사람_원문.format(회사=회사)}
+        ) == ""
+        assert culture_section_evidence_problem(
+            "후보", {"1": 재무_원문.format(회사=회사)}
+        ) == CULTURE_SECTION_EVIDENCE_OFFCONTRACT
+
+
+def test_명사_안에_묻힌_어간으로는_면제되지_않는다():
+    """★ 실측으로 찾은 우회 구멍 — 「스마트교육사업부」의 «교육».
+
+    면제(②)는 조직 주체 «와» 절차 행위를 함께 요구한다. 행위 어간을 낱말
+    안에서만 찾으면, 부서 이름 하나와 그런 명사 하나만 있으면 계약이 뚫린다.
+    그래서 어간이 «서술어나 조사와 함께» 쓰였을 때만 인정한다.
+    """
+
+    우회_시도 = "경영지원실은 스마트교육사업부의 2025년 매출이 늘었다고 밝혔습니다."
+    assert culture_section_evidence_problem(
+        "후보", {"1": 우회_시도}
+    ) == CULTURE_SECTION_EVIDENCE_OFFCONTRACT
+
+    # 같은 조직 주체라도 «실제로 무엇을 한다»고 적히면 그대로 보존된다.
+    실제_절차 = "경영지원실은 임직원 교육훈련 과정을 운영하고 있습니다."
+    assert culture_section_evidence_problem("후보", {"1": 실제_절차}) == ""

@@ -8,6 +8,10 @@ import re
 
 import pytest
 
+from src.features.composer.culture_constants import (
+    CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
+)
+from src.features.composer.culture_guard import culture_flow_problem
 from src.features.composer.diagram_check import check_diagrams
 from src.features.composer.port import (
     CollectedFragment, ComposedReport, ComposedSection, FlowRow,
@@ -72,8 +76,34 @@ def test_actual_goal_is_removed_and_two_actual_procedures_remain(grouped, record
 
 @pytest.mark.parametrize("grouped", (False, True), ids=("legacy", "grouped"))
 def test_same_official_goal_keeps_its_plan_qualification(grouped):
+    """계획임을 명시한 원칙 칸은 «목표 격상» 가드에 걸리지 않는다.
+
+    ★ 의도가 바뀐 근거 — 이 행이 기댄 원문(경영목표·마케팅·상생금융 추진
+      계획)에는 사람·조직 제도 소재도 조직 주체도 없다. 그래서 8장 «원문 절»
+      긍정 계약이 새로 걸린 뒤로는 진입점에서 그 계약에 걸려 빠진다.
+      이 시험이 원래 지키던 것(계획 한정어를 붙이면 «현재형 격상»으로 보지
+      않는다)은 아래 두 단정으로 그대로 지킨다 — 가드 자체가 ''을 돌려주고,
+      진입점에서 빠지는 사유도 «목표 격상»이 아니다.
+    """
+
     draft, fragments = _actual_inputs()
     goal = draft.sections[0].flow_rows[-1]
     qualified = replace(goal, cells=(goal.cells[0], goal.cells[1] + " 계획", goal.cells[2]))
+    sources = {
+        fid: fragment.text
+        for fragment in fragments
+        for fid in (fragment.fragment_id,)
+        if fid in goal.citations
+    }
+    # ① 목표 격상 가드는 계획 한정어를 존중한다 (원래 이 시험의 보호 대상).
+    assert culture_flow_problem(qualified.cells, sources) == ""
+
     draft = replace(draft, sections=(replace(draft.sections[0], flow_rows=(qualified,)),))
-    assert _check(draft, fragments, grouped, []).sections[0].flow_rows == (qualified,)
+    diagnostics: list[dict] = []
+    checked = _check(draft, fragments, grouped, diagnostics)
+
+    # ② 진입점에서 빠지되, 사유는 «목표 격상»이 아니라 «장 원문 계약»이다.
+    assert checked.sections[0].flow_rows == ()
+    assert [event["reason_code"] for event in diagnostics] == [
+        CULTURE_SECTION_EVIDENCE_OFFCONTRACT
+    ]

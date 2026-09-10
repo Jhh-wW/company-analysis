@@ -341,7 +341,18 @@ def _fragment_text(mark: str) -> str:
         "보조 제품은 유통 협력을 거쳐 소비자에게 닿는다."
     )
     source_table = f" {_COMPOSITION_SOURCE}" if mark == _MARKS[2] else ""
-    return f"{common} {sentences} {flow}{source_table}"
+    # ★ 8장은 «인재상과 일하는 방식» 장이라, 그 장의 원문 절에 사람·조직 제도
+    #   어휘가 하나도 없으면 원문 절 계약(culture_section_evidence_problem)이
+    #   설계대로 그 장을 통째로 비운다. 예전 픽스처의 8장 문서는 「문화」라는
+    #   낱말 하나뿐이어서 실물 사업보고서의 「임원 및 직원 등의 현황」에
+    #   해당하는 절이 없었다 — 즉 실물에서 나올 수 없는 모양이었다. 그 절을
+    #   8장 문서에만 덧붙인다(2장 실적표 원문을 그 장에만 붙이는 것과 같은 방식).
+    people_source = (
+        " 임직원 대상 교육제도와 복리후생 제도를 운영하며 평균 근속연수를 공시한다."
+        if mark == _MARKS[SECTION_IDS.index("culture")]
+        else ""
+    )
+    return f"{common} {sentences} {flow}{source_table}{people_source}"
 
 
 def _document_content_sha256(text: str) -> str:
