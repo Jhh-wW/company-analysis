@@ -141,12 +141,13 @@ def test_observation_failure_does_not_change_success_or_metering(monkeypatch, at
     assert len(messages.requests) == len(engine.usages) == len(attempt_observations) == 1
 
 
+@pytest.mark.parametrize("cap", [real.V2_REVIEWER_MAX_TOKENS, real.V2_INITIAL_REVIEWER_MAX_TOKENS])
 @pytest.mark.parametrize("output_tokens,prior_state", [
     (8357, "none"), (10680, "none"), (16000, "none"),
     (8357, "settled"), (8357, "held"),
 ])
 def test_body_cap_reaches_reservation_and_request_with_actual_only_settlement(
-    output_tokens, prior_state, monkeypatch,
+    output_tokens, prior_state, cap, monkeypatch, body_review_steps,
 ):
     # 입력은 과거 사용량을 사용한 시험값이며 현재 프롬프트를 실제 계수하지 않는다.
     model, input_tokens = "claude-haiku-4-5", 119943
@@ -159,7 +160,7 @@ def test_body_cap_reaches_reservation_and_request_with_actual_only_settlement(
         lambda _: None, lambda _: None,
         lambda _, observation: observations.append(observation),
     )
-    ask = real._v2_ask_via_provider(engine, client, stage="v2_review", max_tokens=real.V2_REVIEWER_MAX_TOKENS)
+    ask = real._v2_ask_via_provider(engine, client, stage="v2_review", max_tokens=cap)
     with provider_budget.activate(1000) as budget, attempt_context.activate(callbacks):
         if prior_state != "none":
             # 앞선 확정 사용액과 아직 보유한 예약액 모두 누적 한도에 포함한다.
@@ -185,11 +186,11 @@ def test_body_cap_reaches_reservation_and_request_with_actual_only_settlement(
             assert engine.usages[0]["cost_krw"] == actual_cost
             assert engine.usages[0]["out"] == output_tokens
             request, = messages.requests
-            assert request["max_tokens"] == 16000
+            assert request["max_tokens"] == cap
             assert request["model"] == messages.counts[0]["model"] == model
             assert request["messages"] == messages.counts[0]["messages"]
             expected_reserve = usage_cost_krw(
-                model, input_tokens + provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS, 16000,
+                model, input_tokens + provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS, cap,
             )
             assert reservations == [("anthropic", "v2_review", expected_reserve)]
             assert budget.accounted_krw < expected_reserve
@@ -203,9 +204,61 @@ def test_body_cap_reaches_reservation_and_request_with_actual_only_settlement(
             assert messages.requests == reservations == observations == engine.usages == []
         assert reserve_inputs == [{"model": model,
                                    "input_tokens_upper": input_tokens + provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS,
-                                   "max_tokens": 16000}]
+                                   "max_tokens": cap}]
         assert len(messages.counts) == 1
+    assert body_review_steps.steps == ([{"step": V2_RESPONSE_STEP, "단계": "v2_review",
+                                        "출력상한": cap, "종료사유": "end_turn"}]
+                                      if prior_state == "none" else [])
     assert engine.MODEL == model and engine.current_stage == "unspecified"
     assert not engine.prompt_cache_enabled
     assert real.V2_WRITER_MAX_TOKENS == 4000 and real.V2_DIAGRAM_MAX_TOKENS == 4096
     assert MAX_AI_CALLS_PER_REQUEST == 18
+
+
+@pytest.fixture
+def body_review_steps():
+    collector = run_diagnostics.begin_run()
+    try:
+        yield collector
+    finally:
+        collector.finish()
+
+
+@pytest.mark.parametrize("cap,should_send,expected_reserve", [
+    (real.V2_REVIEWER_MAX_TOKENS, True, 136.77),
+    (real.V2_INITIAL_REVIEWER_MAX_TOKENS, False, 192.77),
+])
+def test_saved_sm_followup_reserves_with_margin_before_provider_send(cap, should_send, expected_reserve):
+    # 보존된 SM 후속 검수 직전 원가와 사용량이다. 새 생성 비용 예측은 아니다.
+    model, input_tokens, output_tokens, prior_cost = "claude-haiku-4-5", 13593, 322, 829.72
+    messages = RecordingMessages("end_turn", input_tokens=input_tokens, output_tokens=output_tokens)
+    engine = real._MeteredEngine(SimpleNamespace(MODEL=model))
+    client = real._metered_client(engine, SimpleNamespace(messages=messages))
+    reservations, observations = [], []
+    callbacks = ProviderAttemptCallbacks(
+        lambda provider, stage, reserved: reservations.append((provider, stage, reserved)) or len(reservations),
+        lambda _: None, lambda _: None,
+        lambda _, observation: observations.append(observation),
+    )
+    ask = real._v2_ask_via_provider(engine, client, stage="v2_review", max_tokens=cap)
+    with provider_budget.activate(1000) as budget, attempt_context.activate(callbacks):
+        seed = budget.reserve_call(model=model, input_tokens_upper=1, max_tokens=1)
+        budget.settle_call(seed, actual_krw=prior_cost)
+        if should_send:
+            assert ask("보존 후속 검수 계량 입력") == '{"판정": []}'
+            actual_cost = usage_cost_krw(model, input_tokens, output_tokens)
+            assert budget.accounted_krw == prior_cost + actual_cost
+            assert reservations == [("anthropic", "v2_review", pytest.approx(expected_reserve, abs=0.01))]
+            assert observations[0].known_cost_krw == actual_cost
+            assert messages.requests[0]["max_tokens"] == cap
+        else:
+            with pytest.raises(Exception) as error:
+                ask("보존 후속 검수 계량 입력")
+            assert isinstance(error.value.cause, provider_budget.ProviderBudgetExceeded)
+            assert error.value.request_budget and error.value.degradable and not error.value.call_limit
+            assert budget.accounted_krw == prior_cost
+            assert messages.requests == reservations == observations == engine.usages == []
+        assert len(messages.counts) == 1
+        reserve = usage_cost_krw(model, input_tokens + provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS, cap)
+        assert reserve == pytest.approx(expected_reserve, abs=0.01)
+        assert (prior_cost + reserve <= 1000) == should_send

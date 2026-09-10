@@ -247,6 +247,10 @@ REVIEW_JSON_GUIDE: Final[str] = (
     '"결과": "참" 또는 "거짓" 또는 "애매", '
     '"검증근거": {<위에서 요구한 수치·추세·시점 배열>}}]}\n'
     "후보의 «추가 검증 필요»가 없음일 때만 검증근거를 생략할 수 있다.\n"
+    "JSON은 줄바꿈·들여쓰기·마크다운 코드블록 없이 한 줄로 간결하게 출력한다. "
+    "이 출력 형식 지침은 문자열 값 안에 실제로 옮겨 적는 근거·검증근거 배열 "
+    "내용 자체를 줄이거나 생략하라는 뜻이 아니다 — 위에서 요구한 필드는 "
+    "그대로 빠짐없이 채운다.\n"
 )
 REVIEW_TABLE_HEAD: Final[str] = "\n■ 프로그램이 검증해 만든 실적표 (이것도 근거다)\n"
 REVIEW_EVIDENCE_HEAD: Final[str] = "\n■ 근거 자료 (인용된 조각만)\n"
@@ -819,7 +823,10 @@ def _build_grouped_review_prompt(
             f'"{BODY_REVIEW_COMPARISON_KEY}": "1: 주체와 역할 일치", '
             '"결과": "참", "검증근거": {}}]} JSON만 출력한다. '
             "번호·장·후보가 인용한 근거 id를 입력 그대로 되돌리고, 추가 검증 "
-            "필요가 없음일 때만 검증근거를 생략하라.\n"
+            "필요가 없음일 때만 검증근거를 생략하라. "
+            "JSON은 줄바꿈·들여쓰기·마크다운 코드블록 없이 한 줄로 간결하게 "
+            "출력한다 — 번호·장·근거·검증근거 등 요구된 필드나 그 배열 내용을 "
+            "줄이거나 생략하라는 뜻이 아니다.\n"
         ),
     ]
     section_order: list[str] = []
@@ -965,6 +972,7 @@ def _ask_grouped_verdicts(
     table: Optional[PerformanceTable],
     *,
     diagnostics: Optional[list[dict]] = None,
+    initial_ask: Optional[AskFn] = None,
 ) -> Optional[dict[int, str]]:
     """packet 본문·도식을 정확히 한 번에 검수한다.
 
@@ -977,7 +985,8 @@ def _ask_grouped_verdicts(
     evidence_ids_by_number = {
         item.number: frozenset(item.citations) for item in items
     }
-    raw = _safe_ask(ask, prompt)
+    # 최초 본문 검수 전용 호출자가 있으면 이 «한 번»에만 쓴다.
+    raw = _safe_ask(initial_ask or ask, prompt)
     verdicts = _parse_grouped_verdicts(raw, owners, evidence_ids_by_number)
     if verdicts is None:
         return None
@@ -1386,15 +1395,23 @@ def _ask_verdicts(
     table_source: str = "",
     *,
     diagnostics: Optional[list[dict]] = None,
+    initial_ask: Optional[AskFn] = None,
 ) -> Optional[dict[int, str]]:
-    """검수 AI 1회 호출(+파싱 실패 시 1회 재요청). 그래도 실패면 None."""
+    """검수 AI 1회 호출(+파싱 실패 시 1회 재요청). 그래도 실패면 None.
+
+    ``initial_ask``: 최초 본문 검수 전용 호출자. 주어지면 이 호출과 그 파싱
+    재요청에만 쓴다 — 재작성·재검수는 언제나 ``ask`` 를 그대로 쓴다.
+    부르는 쪽이 «어느 검수인지»를 인자로 정한다. 프롬프트 글자·입력 크기·
+    호출 순번으로 짐작하지 않는다.
+    """
+    reviewer = initial_ask or ask
     prompt = _build_review_prompt(items, frag_by_id, table_evidence, table_source)
-    raw = _safe_ask(ask, prompt)
+    raw = _safe_ask(reviewer, prompt)
     verdicts = _parse_verdicts(raw)
     retries = 0
     while verdicts is None and retries < PARSE_RETRY_LIMIT:
         retries += 1
-        raw = _safe_ask(ask, prompt + RETRY_REMINDER)
+        raw = _safe_ask(reviewer, prompt + RETRY_REMINDER)
         verdicts = _parse_verdicts(raw)
     if verdicts is None:
         return None
@@ -1575,8 +1592,11 @@ def _semantic_review(
     *,
     group_ids: Optional[Sequence[str]] = None,
     diagnostics: Optional[list[dict]] = None,
+    initial_ask: Optional[AskFn] = None,
 ) -> list[list[ComposedSentence]]:
     """인용 있는 «확인»·«해석» 문장을 같은 1회 검수 호출로 대조한다.
+
+    ``initial_ask``: 최초 본문 검수 전용 호출자. 재작성·재검수는 ``ask`` 그대로다.
 
     검수가 통째로 불능이면 대조 대상 문장을 공개 후보에서 뺀다. 라벨만
     «해석»으로 바꾸어 의미 검사를 통과한 것처럼 보이게 하지 않는다.
@@ -1624,6 +1644,7 @@ def _semantic_review(
         table_evidence,
         table_source,
         diagnostics=diagnostics,
+        initial_ask=initial_ask,
     )
     if verdicts is None:
         logger.warning(
@@ -1756,6 +1777,7 @@ def _semantic_review_grouped(
     ask: AskFn,
     *,
     diagnostics: Optional[list[dict]] = None,
+    initial_ask: Optional[AskFn] = None,
 ) -> tuple[list[list[ComposedSentence]], dict[str, tuple[FlowRow, ...]]]:
     """packet 문장과 도식을 장별 근거 블록으로 묶어 AI 1회 검수한다.
 
@@ -1824,14 +1846,16 @@ def _semantic_review_grouped(
     # 장부가 갈라진다. 빈 묶음은 어떤 항목도 되살리지 못하며, 응답도 버린다.
     if not items:
         _ask_grouped_verdicts(
-            ask, (), frag_by_id, table, diagnostics=diagnostics
+            ask, (), frag_by_id, table, diagnostics=diagnostics,
+            initial_ask=initial_ask,
         )
         return (
             [list(group) for group in groups],
             {section_id: () for section_id in flow_rows_by_section},
         )
     verdicts = _ask_grouped_verdicts(
-        ask, items, frag_by_id, table, diagnostics=diagnostics
+        ask, items, frag_by_id, table, diagnostics=diagnostics,
+        initial_ask=initial_ask,
     )
     sentence_by_number: dict[int, Optional[ComposedSentence]] = {}
     flow_kept_numbers: set[int] = set()
@@ -1949,6 +1973,7 @@ def _verify_report_inner(
         Mapping[str, frozenset[str]]
     ] = None,
     diagnostics: Optional[list[dict]] = None,
+    initial_ask: Optional[AskFn] = None,
 ) -> ComposedReport:
     frag_by_id = {
         fragment.fragment_id: fragment
@@ -1987,6 +2012,7 @@ def _verify_report_inner(
                 REVIEW_SUMMARY_GROUP,
             ),
             diagnostics=diagnostics,
+            initial_ask=initial_ask,
         )
     else:
         allowed_for_review = dict(allowed_fragment_ids_by_section)
@@ -2010,6 +2036,7 @@ def _verify_report_inner(
             performance_table,
             ask,
             diagnostics=diagnostics,
+            initial_ask=initial_ask,
         )
     reviewed_summary = reviewed_groups.pop()
 
@@ -2051,6 +2078,7 @@ def verify_report(
         Mapping[str, frozenset[str]]
     ] = None,
     diagnostics: Optional[list[dict]] = None,
+    initial_ask: Optional[AskFn] = None,
 ) -> ComposedReport:
     """진입 함수 — 규칙 ①~④를 보고서 전체에 문장 단위로 적용한다.
 
@@ -2067,7 +2095,8 @@ def verify_report(
         장 개수·순서는 입력 그대로다 (장 삭제 없음).
     """
     try:
-        if allowed_fragment_ids_by_section is None and diagnostics is None:
+        if (allowed_fragment_ids_by_section is None and diagnostics is None
+                and initial_ask is None):
             # legacy 호출 모양과 monkeypatch 경계를 그대로 보존한다.
             return _verify_report_inner(
                 report, fragments, performance_table, ask
@@ -2079,6 +2108,7 @@ def verify_report(
             ask,
             allowed_fragment_ids_by_section=allowed_fragment_ids_by_section,
             diagnostics=diagnostics,
+            initial_ask=initial_ask,
         )
     except AskFatalError:
         # 요청 전역 장애 — «검증기 내부 오류»로 위장하지 않고 그대로 재전파한다.

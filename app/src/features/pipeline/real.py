@@ -603,6 +603,11 @@ def _generation_cache_namespace(
 V2_WRITER_MAX_TOKENS: Final[int] = 4000
 V2_REVIEWER_MAX_TOKENS: Final[int] = 16000
 
+#: 전체 본문 판정이 16,000토큰 제한으로 잘리는 경우를 위한 전용 상한.
+#: 작은 후속 검수는 기존 상한으로 예약한다. 이 상한도 기존 단계 예산을
+#: 통과해야 하며, 실제 비용은 응답 usage로 정산한다.
+V2_INITIAL_REVIEWER_MAX_TOKENS: Final[int] = 24000
+
 #: 도식은 모든 장의 판정·짧은 대조 근거·수치 결속 배열을 함께 돌려준다.
 #: 실제 24행 검수에서 512토큰 출력 뒤 파싱 재요청이 관측돼 전용 상한을
 #: 2048로 두었다. 본문 검수와 분리하고 기존 1000원 단계 예약은 유지한다.
@@ -5784,6 +5789,11 @@ def _run_v2_composer(
     reviewer_ask = _v2_ask_via_provider(
         engine, client, stage="v2_review", max_tokens=V2_REVIEWER_MAX_TOKENS
     )
+    # 최초 본문 검수 전용 — 같은 stage·같은 계량 경계를 지나고 상한만 다르다.
+    initial_reviewer_ask = _v2_ask_via_provider(
+        engine, client, stage="v2_review",
+        max_tokens=V2_INITIAL_REVIEWER_MAX_TOKENS,
+    )
     diagram_ask = _v2_ask_via_provider(
         engine, client, stage="v2_diagram", max_tokens=V2_DIAGRAM_MAX_TOKENS
     )
@@ -5797,6 +5807,7 @@ def _run_v2_composer(
             performance_table,
             writer_ask=writer_ask,
             reviewer_ask=reviewer_ask,
+            initial_reviewer_ask=initial_reviewer_ask,
             diagram_ask=diagram_ask,
             corp_type=corp_type,
             generated_at=business_date.isoformat(),

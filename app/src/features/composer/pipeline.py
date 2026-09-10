@@ -823,6 +823,7 @@ def run_v2(
     *,
     writer_ask: AskFn,
     reviewer_ask: AskFn,
+    initial_reviewer_ask: Optional[AskFn] = None,
     diagram_ask: Optional[AskFn] = None,
     corp_type: str = "",
     grade: Grade = Grade.PARTIAL,
@@ -864,6 +865,11 @@ def run_v2(
         performance_table: 프로그램이 검증해 만든 3개년 실적표. 없으면 None.
         writer_ask: 작가 AI 호출 (프롬프트 문자열 → 응답 문자열).
         reviewer_ask: 검수·재작성 AI 호출 — 작가와 «별도 클로저»여야 한다.
+        initial_reviewer_ask: «최초 본문 검수»만 쓰는 별도 호출자. 그 한 번은
+            후보 전부와 근거 배열을 한 응답에 담아야 해서 뒤따르는 재작성·
+            재검수·요약 검수보다 큰 출력 여유가 필요하다. 넘기지 않으면
+            (None) 예전과 똑같이 reviewer_ask 하나로 전부 처리한다 —
+            기존 호출 계약이 그대로 유지된다.
         corp_type / grade / generated_at / as_of_date / analysis_period /
             latest_performance_period / table_presentation: 렌더 메타 —
             render_report에 그대로 전달된다.
@@ -898,6 +904,7 @@ def run_v2(
     call_recorder: _CallLedgerRecorder | None = None
     writer_for_run = writer_ask
     reviewer_for_run = reviewer_ask
+    initial_reviewer_for_run = initial_reviewer_ask
     normalized_build_identity_sha256 = ""
     if release_mode is ReleaseMode.FULL:
         # 성공/실패 어느 쪽이든 첫 유료 호출 전에 typed 9장·회사·evidence
@@ -935,6 +942,15 @@ def run_v2(
             validation_round=ValidationRound.PRIMARY,
             section_ids=("bundled",),
         )
+        if initial_reviewer_ask is not None:
+            # 최초 본문 검수는 «실제로 보낸 그 호출»이 영수증에 남아야 한다.
+            # 감싸지 않으면 FULL 장부에서 검수 1회가 통째로 빠진다.
+            initial_reviewer_for_run = call_recorder.wrap(
+                initial_reviewer_ask,
+                role="reviewer",
+                validation_round=ValidationRound.PRIMARY,
+                section_ids=("bundled",),
+            )
 
     # packet 계약은 첫 유료 호출 전에 닫는다. 작성에는 장별 packet만,
     # 검증·부록에는 충돌 검사를 마친 결정론적 union만 전달한다.
@@ -1106,6 +1122,7 @@ def run_v2(
         verified = verify_report(
             draft, verification_fragments, performance_table, reviewer_for_run,
             diagnostics=review_diagnostics,
+            initial_ask=initial_reviewer_for_run,
         )
     else:
         verified = verify_report(
@@ -1117,6 +1134,7 @@ def run_v2(
                 prepared_evidence.allowed_fragment_ids_by_section
             ),
             diagnostics=review_diagnostics,
+            initial_ask=initial_reviewer_for_run,
         )
         _assert_composed_report_evidence_invariant(
             verified,

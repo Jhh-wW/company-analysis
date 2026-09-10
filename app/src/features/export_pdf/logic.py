@@ -2358,7 +2358,8 @@ def _paragraphs_with_heading(
             for item in flowables
         )
         if section_height <= height_limit:
-            return [KeepTogether(flowables)]
+            # 짧은 장도 제목과 본문이 함께 들어갈 자리를 먼저 확보한다.
+            return [CondPageBreak(section_height), KeepTogether(flowables)]
     first_group = [*heading, paragraphs[0]]
     # 묶음의 사전 높이 추정과 실제 배치 사이에 여백 차이가 생길 수 있다.
     # 제목만 남지 않도록 첫 문단까지의 여백을 포함해 먼저 자리를 확보한다.

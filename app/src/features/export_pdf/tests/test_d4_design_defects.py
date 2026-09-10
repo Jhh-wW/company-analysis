@@ -12,8 +12,10 @@
 from __future__ import annotations
 
 import io
+import json
 from dataclasses import replace
-from typing import Any, Sequence
+from pathlib import Path
+from typing import Any, Final, Sequence
 
 import pdfplumber
 import pytest
@@ -33,7 +35,7 @@ from src.features.export_pdf.logic import (
     build_pdf,
 )
 from src.features.pipeline.canonical_demo import build_demo_report
-from src.features.pipeline.port import ReportTable
+from src.features.pipeline.port import Grade, Report, ReportSection, ReportTable
 from src.features.report_standard.visualization import (
     Card,
     CardField,
@@ -589,3 +591,75 @@ class _CoverItem:
         self.label = label
         self.value = value
         self.unit = unit
+
+
+#: SM(에스엠엔터테인먼트) 실측 3~4쪽 회귀 — 표 없는 짧은 장(text_only 경로)이
+#: ``_paragraphs_with_heading``의 단일 ``KeepTogether``만 돌려받아, d396이 고친
+#: ``CondPageBreak`` 보강(표 있는 긴 장 경로)의 보호를 받지 못했다.
+#: fixtures/sm_section9_short_no_table.json은 그 실측 payload에서 이 장(9장,
+#: cell=competitive_position)만 그대로 옮긴 것이다 — DB·다른 로컬 산출물 의존 없이
+#: 어느 체크아웃에서도 이 파일 하나로 재현·회귀 검증한다.
+_SM_SECTION9_FIXTURE_PATH: Final = Path(__file__).resolve().parent / "fixtures/sm_section9_short_no_table.json"
+
+
+def _load_sm_section9_report() -> Report:
+    """고정 JSON 표본에서 실제 ``Report``/``ReportSection`` 생성자로 재구성한다."""
+
+    payload = json.loads(_SM_SECTION9_FIXTURE_PATH.read_text(encoding="utf-8"))
+    section = ReportSection(**{
+        key: (value if key != "lines" and key != "prose_lines" else [tuple(pair) for pair in value])
+        for key, value in payload["section"].items()
+    })
+    report_fields = {**payload["report"], "grade": Grade(payload["report"]["grade"])}
+    return Report(sections=[section], **report_fields)
+
+
+def _render_sm_section9(leading_spacer_pt: float) -> bytes:
+    from reportlab.lib.pagesizes import A4  # noqa: PLC0415
+    from reportlab.platypus import SimpleDocTemplate  # noqa: PLC0415
+
+    from src.features.export_pdf.logic import _add_section, _OutlineAnchor  # noqa: PLC0415
+
+    report = _load_sm_section9_report()
+    section = report.sections[0]  # competitive_position · 「회사가 밝힌 차별점」, tables=()
+    styles = _styles()
+    width = A4[0] - _BOUNDARY_MARGIN_PT * 2
+    story: list[Flowable] = [
+        _OutlineAnchor("root", "분석 본문", level=0), Spacer(1, leading_spacer_pt),
+    ]
+    _add_section(story, report, section, styles, width, "sec")
+    buffer = io.BytesIO()
+    SimpleDocTemplate(
+        buffer, pagesize=A4, leftMargin=_BOUNDARY_MARGIN_PT, rightMargin=_BOUNDARY_MARGIN_PT,
+        topMargin=_BOUNDARY_MARGIN_PT, bottomMargin=_BOUNDARY_MARGIN_PT,
+    ).build(story)
+    return buffer.getvalue()
+
+
+def test_no_table_short_section_keeps_heading_with_first_paragraph() -> None:
+    """실측 경계값(leading_spacer_pt=595) — SM 9장 고아 제목이 재현되는 자리다.
+
+    되돌아가면 무엇이 보이나 — 「9. 회사가 밝힌 차별점」 제목만 이번 쪽 맨 아래
+    혼자 남고, 번호 1번 본문(확인 범위 안내 포함)은 다음 쪽 맨 위에서 새로
+    시작한다(SM PDF 3~4쪽 실측과 같은 모양).
+    """
+
+    with pdfplumber.open(io.BytesIO(_render_sm_section9(595))) as document:
+        pages = [page.extract_text() or "" for page in document.pages]
+    heading_pages = [i for i, text in enumerate(pages) if "차별점" in text and "9." in text]
+    body_pages = [i for i, text in enumerate(pages) if "초안 문장들" in text]
+    assert heading_pages and body_pages, "제목·본문 중 하나가 어느 쪽에도 없습니다"
+    assert heading_pages == body_pages, (
+        f"제목과 본문이 서로 다른 쪽에 있습니다(제목={heading_pages}, 본문={body_pages}) "
+        "— 표 없는 짧은 장에서도 고아 제목이 재현됩니다"
+    )
+
+
+def test_no_table_short_section_stays_on_page_when_room_enough() -> None:
+    """여유 있는 자리(leading_spacer_pt=500)에서 불필요하게 다음 쪽으로 넘기지 않는다."""
+
+    with pdfplumber.open(io.BytesIO(_render_sm_section9(500))) as document:
+        first_page_text = document.pages[0].extract_text() or ""
+    assert "차별점" in first_page_text and "초안 문장들" in first_page_text, (
+        "여유가 있는데도 제목·본문이 첫 쪽에 함께 놓이지 않았습니다"
+    )
