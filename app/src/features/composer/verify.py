@@ -2410,8 +2410,15 @@ def verify_sentences(
     *,
     diagnostics: Optional[list[dict]] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
+    baseline_date: Optional[str] = None,
 ) -> tuple[ComposedSentence, ...]:
-    """문장 묶음 하나에 같은 규칙 전부를 적용한다 — 3-3 요약 검증 재사용용."""
+    """문장 묶음 하나에 같은 규칙 전부를 적용한다 — 3-3 요약 검증 재사용용.
+
+    ``baseline_date``: 보고서 기준일(ISO ``YYYY-MM-DD``). 본문 경로
+    (`verify_report`)와 «같은 값»을 받아야 한다 — 요약은 본문에서 고른 문장을
+    다시 검수하므로, 여기만 기준일이 비면 본문에서 살아남은 임원 문장이
+    요약에서만 빠져 한 보고서 안에 두 잣대가 생긴다.
+    """
     try:
         frag_by_id = {
             fragment.fragment_id: fragment
@@ -2428,6 +2435,7 @@ def verify_sentences(
             group_ids=(REVIEW_SUMMARY_GROUP,),
             diagnostics=diagnostics,
             protocol_diagnostics=protocol_diagnostics,
+            baseline_date=baseline_date,
         )
         return tuple(reviewed[0])
     except AskFatalError:
