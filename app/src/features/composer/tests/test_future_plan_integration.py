@@ -180,11 +180,24 @@ def test_the_parser_extracts_nothing_from_a_malformed_response(raw):
     assert future_plan_entries_by_number(raw) == {}
 
 
-@pytest.mark.parametrize("number", (True, False, "1", 1.0, None))
+@pytest.mark.parametrize("number", (True, False, 1.0, None))
 def test_the_parser_drops_non_integer_numbers(number):
     raw = _response([{"번호": number, "결과": "참",
                       "검증근거": {FUTURE_KEY: [KEEP_EVIDENCE]}}])
     assert future_plan_entries_by_number(raw) == {}
+
+
+@pytest.mark.parametrize("number", ("1", " 1 "))
+def test_the_parser_accepts_pure_digit_string_numbers(number):
+    """"1"처럼 순수 숫자 문자열로 와도 정수로 보정해 받는다.
+
+    이 함수는 ``support_entries_by_number``(direct_support.py)를 그대로
+    위임 호출하므로(모듈 docstring 참고) 그 파서의 번호 보정 규칙을 그대로
+    물려받는다 — True/False/1.0/None처럼 «진짜 비정수»만 여전히 버린다.
+    """
+    raw = _response([{"번호": number, "결과": "참",
+                      "검증근거": {FUTURE_KEY: [KEEP_EVIDENCE]}}])
+    assert set(future_plan_entries_by_number(raw)) == {1}
 
 
 def test_a_verdict_entry_that_is_not_an_object_is_skipped():

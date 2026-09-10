@@ -18,13 +18,15 @@ from decimal import Decimal
 import re
 import unicodedata
 
+from src.features.composer.executive_status_guard import executive_status_problem
 from src.features.composer.modality_guard import modality_problem
 from src.features.composer.role_binding import claims_role_or_fee, role_binding_problem
 from src.features.composer.numeric_quote_refs import resolve_numeric_quote_refs
 from src.features.composer.scope_guard import scope_problem
 
 from src.features.composer.grounding_constants import (
-    COMPARATIVE_RE, CONTINUOUS_RE, DOWN_RE, GROUNDING_INVALID, GROUNDING_KEY,
+    COMPARATIVE_RE, CONTINUOUS_RE, COUNTED_CONTINUOUS_RE,
+    CONTINUOUS_POINTS_OVER_PERIODS, DOWN_RE, GROUNDING_INVALID, GROUNDING_KEY,
     GROUNDING_SOURCE_FIELD,
     GROUNDING_MISSING,
     MIN_CONTINUOUS_POINTS, MIN_TREND_POINTS, NUMERIC_KEY, PARENTHETICAL_RE,
@@ -144,6 +146,13 @@ def grounding_requirements(text: str, sources: Sequence[str]) -> tuple[str, ...]
     # 기존 의미 검수에 남겨 두어 추론을 일괄 삭제하지 않는다.
     if (_amounts(text) and _trend_spans(text) and not direct
         and not PLANNED_END_RE.search(text)):
+        required.append(TREND_KEY)
+    # 「N년 연속 감소」처럼 «몇 번 연속인지»를 수로 못 박은 주장은 금액을 함께
+    # 적지 않아도 재계산 대상이다. 그 N 자체가 근거에 대한 수치 주장이며,
+    # 도식 게이트는 같은 문구의 N 을 이미 «인용 원문에 없는 수»로 거절한다 —
+    # 본문만 통과시키면 같은 주장에 두 잣대가 된다(실측 멀티캠퍼스 C5).
+    if (TREND_KEY not in required and COUNTED_CONTINUOUS_RE.search(text)
+        and not direct and not PLANNED_END_RE.search(text)):
         required.append(TREND_KEY)
     years = _retrospective_years(text, sources)
     if (years and not direct
@@ -396,6 +405,24 @@ def _numeric_valid(text: str, entries: object, sources: Mapping[str, str]) -> bo
     return covered == _amount_values(text)
 
 
+def _stated_continuous_periods(text: str, expression: str) -> int:
+    """이 주장이 «몇 번 연속»이라고 못 박았는지. 수를 대지 않았으면 0.
+
+    ★ 「3년 연속 감소」는 전년비 변화가 세 번이라는 주장이다. 값이 세 개뿐인 표는
+      변화가 두 번이라 그 주장을 뒷받침하지 못한다 — 사실 여부와 별개로 «인용한
+      근거»가 모자란 것이다(실측 멀티캠퍼스: 인용 [8] 표는 2023·2024·2025 세 해).
+    ⚠️ 검수 응답이 댄 표현과 후보 문장 «양쪽»에서 찾는다. 표현이 문장의 일부만
+       옮겨 적어 수가 빠졌을 때도 문장이 못 박은 수를 그대로 적용하기 위해서다.
+    """
+
+    counts = [
+        int(match.group("periods"))
+        for match in COUNTED_CONTINUOUS_RE.finditer(text)
+        if match.group() in expression or expression in match.group()
+    ]
+    return max(counts, default=0)
+
+
 def _trend_valid(text: str, entries: object, sources: Mapping[str, str]) -> bool:
     if not isinstance(entries, list) or not entries:
         return False
@@ -440,7 +467,16 @@ def _trend_valid(text: str, entries: object, sources: Mapping[str, str]) -> bool
                 return False
             observed[period_key] = value
             dimensions.add(_dimension(point["원문값"]))
-        minimum = MIN_CONTINUOUS_POINTS if direction.startswith("지속") else MIN_TREND_POINTS
+        if direction.startswith("지속"):
+            # 못 박은 N이 있으면 N+1개 값을 요구한다. 수를 대지 않은 「지속적으로
+            # 증가」는 종전대로 최소 세 점이다 — 잣대를 낮추지 않는다.
+            stated = _stated_continuous_periods(text, expression)
+            minimum = max(
+                MIN_CONTINUOUS_POINTS,
+                stated + CONTINUOUS_POINTS_OVER_PERIODS if stated else 0,
+            )
+        else:
+            minimum = MIN_TREND_POINTS
         if (len(observed) < minimum or len(dimensions) != 1
             or len({quarter is None for _, quarter in observed}) != 1):
             return False
@@ -627,13 +663,21 @@ def constrain_verdicts(
     candidates: Mapping[int, tuple[str, Mapping[str, str]]],
     *,
     cells_by_number: Mapping[int, Sequence[str]] | None = None,
+    baseline_date: str | None = None,
 ) -> tuple[dict[int, str], dict[int, str]]:
     """같은 검수 응답의 근거를 실제 입력에 결속한다. 추가 AI 호출은 없다.
 
     거짓 판정의 기존 재작성 기회는 유지한다. 참·애매의 결속 실패는 별도
     처분으로 반환해 해석 강등이나 형식 재시도로 우회하지 못하게 한다.
+
+    ``baseline_date``(ISO ``YYYY-MM-DD``, 보고서 기준일)는 executive_status_guard
+    에만 쓰인다 — 생략하면 그 가드는 날짜 문턱 없이 이탈 표지 존재만으로
+    판정한다(§executive_status_constants 참고). 기존 호출자는 그대로 동작한다.
     """
     from src.features.composer.logic import extract_json_payload
+    # verify.py의 검수 파서와 같은 번호 보정 규칙을 쓴다 — 이 함수는 raw를
+    # 파서와 별도로 다시 읽으므로 파서를 고쳐도 이 자리는 저절로 안 따라온다.
+    from src.features.composer.verdict_number import coerce_verdict_number
 
     result = dict(verdicts)
     payload = extract_json_payload(raw or "")
@@ -642,8 +686,8 @@ def constrain_verdicts(
     for entry in entries:
         if not isinstance(entry, Mapping):
             continue
-        number = entry.get(REVIEW_NUMBER_KEY)
-        if isinstance(number, bool) or not isinstance(number, int) or number not in candidates:
+        number = coerce_verdict_number(entry.get(REVIEW_NUMBER_KEY))
+        if number is None or number not in candidates:
             continue
         if number not in verdicts or verdicts[number] == REVIEW_REJECTED:
             continue
@@ -667,6 +711,9 @@ def constrain_verdicts(
             )
             or role_binding_problem(
                 text, sources, relation_evidence.get(number), cells,
+            )
+            or executive_status_problem(
+                text, sources, cells, baseline_date=baseline_date,
             )
         )
         if problem:

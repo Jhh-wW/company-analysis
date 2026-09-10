@@ -60,6 +60,9 @@ from src.features.composer.review_protocol_observation import (
 )
 from src.features.composer.scope_guard import flow_scope_problem
 from src.features.composer.challenge_guard import challenge_response_problem
+from src.features.composer.challenge_response_evidence import (
+    challenge_response_evidence_problem,
+)
 from src.features.composer.constants import CHALLENGE_FLOW_SECTION_ID, STRATEGY_TABLE_SECTION_ID
 from src.features.composer.future_plan_constants import (
     FUTURE_PLAN_REVIEW_GUIDE,
@@ -270,6 +273,7 @@ REVIEW_JSON_GUIDE: Final[str] = (
     f'"{BODY_REVIEW_COMPARISON_KEY}": "<인용 id: 핵심 일치/누락 관계>", '
     '"결과": "참" 또는 "거짓" 또는 "애매", '
     '"검증근거": {<위에서 요구한 수치·추세·시점 배열>}}]}\n'
+    "번호는 따옴표 없는 정수로 쓴다.\n"
     "후보의 «추가 검증 필요»가 없음일 때만 검증근거를 생략할 수 있다.\n"
     "JSON은 줄바꿈·들여쓰기·마크다운 코드블록 없이 한 줄로 간결하게 출력한다. "
     "이 출력 형식 지침은 문자열 값 안에 실제로 옮겨 적는 근거·검증근거 배열 "
@@ -338,6 +342,31 @@ _DATE_EXPR_RE: Final[re.Pattern[str]] = re.compile(
 #: 쉼표·소수점에 이어졌거나 배율·단위가 바로 붙은 수는 연도가 아니다.
 _BARE_YEAR_RE: Final[re.Pattern[str]] = re.compile(
     rf"(?<![\d,.]){_YEAR_DIGITS}(?![\d,.]|(?:{_UNIT_SUFFIX_ALTERNATION}))"
+)
+
+# ── 축약 연도 「'26년」 (2026-09-10 멀티캠퍼스 실측으로 추가) ──
+# ★ 왜 필요한가 — 공시 원문이 「'26년은 AI 교육 체계를 고도화하고 …」처럼
+#   아포스트로피 축약으로 연도를 적는다. 네 자리 연도만 읽으면 그 조각의
+#   «연도 집합»이 통째로 비고, 작성기가 같은 해를 「2026년」으로 편 칸은
+#   「인용 원문에 없는 수 — 2026」으로 버려진다. 실측: 6장 도식 경로 2줄이
+#   이 한 가지 이유로 빠져 성장 전략 장이 통째로 비었다.
+# ★ 어느 쪽이든 같은 규칙으로 읽는다 — 이 함수는 후보 칸과 근거 원문에 모두
+#   쓰이므로, 후보가 「'26년」이라 적고 근거가 「2026년」이라 적은 반대 방향도
+#   같이 맞는다. 한쪽만 정규화하면 잣대가 갈라진다.
+# ⚠️ 아포스트로피가 «연도임을 밝히는 표지»다. 표지 없는 「26년」은 기간
+#    (「업력 26년」·「26년간」)과 구별할 방법이 없어 읽지 않는다 — 읽으면
+#    「설립 25년」이 「2025년」 주장의 근거가 되어 게이트가 «느슨해진다».
+_APOSTROPHES: Final[str] = "'’‘`´ʼ"
+#: 세기 기준. 공시문의 두 자리 축약은 2000년대를 가리킨다
+#: (`src/shared/official_ir.py::_four_digit_year`·
+#:  `src/features/pipeline/section567_contract.py` 와 같은 관례).
+#: 과거 세기로 잘못 펴는 것보다 미래 세기로 펴는 쪽이 «없는 수»로 남아
+#: fail-closed 다 — 근거에 없는 해를 만들어 주지 않는다.
+_ABBREVIATED_YEAR_BASE: Final[int] = 2000
+#: ⚠️ 아포스트로피와 숫자 사이에 공백을 허용하지 않는다. 허용하면 「…밝혔다.'
+#:    26년 만에」처럼 «닫는 인용부호 뒤에 온 기간»이 연도로 읽힌다.
+_ABBREVIATED_YEAR_RE: Final[re.Pattern[str]] = re.compile(
+    rf"[{re.escape(_APOSTROPHES)}](?P<year>\d{{2}})(?![\d,.])\s*년"
 )
 #: 날짜 표기 안에서 월·일 숫자를 다시 읽을 때 쓴다 (연도 뒤 구간 전용).
 _PLAIN_DIGITS_RE: Final[re.Pattern[str]] = re.compile(r"\d+")
@@ -437,7 +466,27 @@ def _extract_numbers(text: str) -> tuple[_SentenceNumber, ...]:
     """
     found: list[tuple[int, _SentenceNumber]] = []
     date_spans: list[tuple[int, int]] = []
+    # ★ 축약 연도가 먼저다 — 「'26년」의 26을 맨 숫자로 읽으면 근거의 「2026년」과
+    #   영원히 어긋나고, 자리를 날짜로 잡아 두지 않으면 연도와 맨 숫자 26이
+    #   둘 다 나와 같은 자리를 두 번 세게 된다.
+    for match in _ABBREVIATED_YEAR_RE.finditer(text):
+        date_spans.append(match.span())
+        found.append(
+            (
+                match.start("year"),
+                _SentenceNumber(
+                    token=Decimal(
+                        _ABBREVIATED_YEAR_BASE + int(match.group("year"))
+                    ),
+                    scale=_NO_SCALE,
+                    unit_marked=False,
+                    is_year=True,
+                ),
+            )
+        )
     for match in _DATE_EXPR_RE.finditer(text):
+        if _overlaps_any(match.span(), date_spans):
+            continue
         date_spans.append(match.span())
         found.append(
             (
@@ -846,6 +895,7 @@ def _build_grouped_review_prompt(
             '"근거": ["1"], '
             f'"{BODY_REVIEW_COMPARISON_KEY}": "1: 주체와 역할 일치", '
             '"결과": "참", "검증근거": {}}]} JSON만 출력한다. '
+            "번호는 따옴표 없는 정수로 쓴다. "
             "번호·장·후보가 인용한 근거 id를 입력 그대로 되돌리고, 추가 검증 "
             "필요가 없음일 때만 검증근거를 생략하라. "
             "JSON은 줄바꿈·들여쓰기·마크다운 코드블록 없이 한 줄로 간결하게 "
@@ -971,8 +1021,14 @@ def _parse_grouped_verdicts(
 
     ``observe``: 주면 지나간 분기의 «개수와 닫힌 코드»만 적는다. 반환값과
     판정 규칙은 그대로이며 응답 본문은 담지 않는다.
+    번호가 순수 숫자 문자열("3")로 와도 정수로 보정해 받는다(표현형만
+    확장, composer.verdict_number 공용 — verify._parse_verdicts·
+    diagram_check.py와 같은 규칙).
     """
-
+    # verify.py 안 다른 검수 파서(_parse_verdicts)와 같은 번호 보정 규칙을
+    # 쓰게 공용 모듈에서 가져온다(지역 import — grounding.py가 이미 쓰는
+    # 관행과 같다).
+    from src.features.composer.verdict_number import coerce_verdict_number
     if raw is None:
         return None
     payload = extract_json_payload(raw, observe=observe)
@@ -994,8 +1050,8 @@ def _parse_grouped_verdicts(
         if not isinstance(entry, Mapping):
             note_row_failure(observe, ROW_NOT_MAPPING)
             continue
-        number = entry.get(REVIEW_NUMBER_KEY)
-        if isinstance(number, bool) or not isinstance(number, int):
+        number = coerce_verdict_number(entry.get(REVIEW_NUMBER_KEY))
+        if number is None:
             note_row_failure(observe, ROW_NUMBER_NOT_INT)
             continue
         result = str(entry.get(REVIEW_RESULT_KEY) or "").strip()
@@ -1264,7 +1320,12 @@ def _apply_grounding(
             cells = flow_cells_by_number[number]
             problem = flow_scope_problem(cells, sources)
             if not problem and context and context[0] == CHALLENGE_FLOW_SECTION_ID:
-                problem = challenge_response_problem(cells)
+                # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 묶음 검수 경로와
+                # flat 경로가 «같은» 두 검사를 쓴다 — 한쪽만 걸면 그 경로로만
+                # 근거 없는 대응이 새어 나간다.
+                problem = challenge_response_problem(
+                    cells
+                ) or challenge_response_evidence_problem(cells, sources)
             if not problem and context and context[0] == "culture":
                 # 축약된 칸은 원문을 줄여 적어 산문 검사의 세 표지 결합에 걸리지
                 # 않는다. 그 행이 «인용한 원문»의 순수 회계 절과 결속됐을 때만 막는다.
@@ -1453,12 +1514,17 @@ def _parse_verdicts(
       · 계약 밖 판정값 → 그 번호는 미응답 처리
       · 같은 번호의 모순 중복 → 그 번호는 미응답 처리
       · bool 번호(True는 int의 하위 타입) → 버림
+      · 순수 숫자 문자열 번호("3") → 정수로 보정해 받음(표현형만 확장,
+        composer.verdict_number 공용 — diagram_check.py와 같은 규칙)
 
     ``observe``: 주면 지나간 분기의 «개수와 닫힌 코드»만 적는다. 반환값과
     판정 규칙은 그대로이며 응답 본문은 담지 않는다.
     ``requested_numbers``: 관측의 «미응답/요청밖» 계산에만 쓴다. 요청에
     없던 번호도 계약 그대로 반환 dict 에 남긴다.
     """
+    # verify.py·diagram_check.py가 같은 번호 보정 규칙을 쓰게 공용 모듈에서
+    # 가져온다(지역 import — 이 함수 밖 다른 줄은 건드리지 않는다).
+    from src.features.composer.verdict_number import coerce_verdict_number
     if raw is None:
         return None
     payload = extract_json_payload(raw, observe=observe)
@@ -1480,8 +1546,8 @@ def _parse_verdicts(
         if not isinstance(entry, Mapping):
             note_row_failure(observe, ROW_NOT_MAPPING)
             continue
-        number = entry.get(REVIEW_NUMBER_KEY)
-        if isinstance(number, bool) or not isinstance(number, int):
+        number = coerce_verdict_number(entry.get(REVIEW_NUMBER_KEY))
+        if number is None:
             note_row_failure(observe, ROW_NUMBER_NOT_INT)
             continue
         result = str(entry.get(REVIEW_RESULT_KEY) or "").strip()

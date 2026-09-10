@@ -34,6 +34,9 @@ from src.shared.report_evidence.constants import (
     OFFICIAL_WEB_SOURCE_KINDS,
 )
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
+from src.shared.report_evidence.registry_eligibility import (
+    registry_indexing_ineligible,
+)
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
 from src.shared.report_evidence.source_verification import (
     SourceVerification,
@@ -105,7 +108,31 @@ def _citation_registry(
     dict[str, tuple[object, SourceVerification]],
     dict[str, tuple[object, SourceVerification]],
 ] | None:
-    """기존 정본 검증을 통과하고 ID·번호가 모호하지 않은 등록부."""
+    """기존 정본 검증을 통과한 출처만 ID·번호로 모호함 없이 색인한 등록부.
+
+    등록부에는 typed 공식 출처만 있는 것이 아니다. 같은 보고서가 v2 legacy
+    조각 출처(공시 원문 조각·재무 API 응답)도 함께 싣는데, 그 출처들은 v3
+    출처표의 필수 필드(``source_type``·``fact_status``·발행일)가 없어
+    ``is_canonical_valid``가 거짓이고 검증자가 ``None``을 돌려준다. 그것은
+    「이 회사 자료가 깨졌다」가 아니라 「본문 근거로 셀 수 없는 출처다」라는
+    뜻이므로 색인에서만 뺀다. 전체를 거절하면 legacy 조각이 한 줄만 있어도
+    내부 계약 오류가 되어, legacy 조각이 늘 섞이는 보완조사 경로가 자료
+    유무와 무관하게 항상 막힌다.
+
+    ★ 그런데 검증자는 «자격 없음»뿐 아니라 도장(provenance seal) 깨짐, 등록부
+      번호·ID 중복, typed 등록부 계약 위반, 검증 중 예외에도 똑같이 ``None``을
+      돌려준다. ``None``을 전부 건너뛰면 그 fail-closed 알람이 통째로 사라진다
+      — 실측 재현에서 정본 출처 14건을 한 건씩 검증 불가로 만들어도 12건이
+      출고 허용으로 뒤집혔다. 그래서 «구조적으로 색인 대상이 아닌 줄»만
+      ``registry_indexing_ineligible``로 가려 건너뛰고, 나머지 검증 실패는
+      예전처럼 등록부 전체를 닫는다. 그 술어는 v3 색인 필수 필드 유무만 보고
+      도장·중복·결속은 보지 않는다 — 검증기의 몫을 대신 눈감아 주지 않는다.
+
+    색인에서 빠진 출처는 아래 본문 판정에서 «없는 번호»가 되어 그 번호를 쓴
+    문장·표 행이 통째로 제외된다. 판정은 좁아질 뿐 넓어지지 않는다. 등록부
+    자체가 모호하거나(중복 ID·번호) 검증자가 형식이 깨진 값을 돌려주거나
+    한 줄도 통과하지 못하면 예전처럼 그대로 닫는다.
+    """
 
     if type(report.citations) is not list or not report.citations:
         return None
@@ -119,6 +146,10 @@ def _citation_registry(
             reference_date=report.as_of_date,
             evidence_text="",
         )
+        if verified is None:
+            if registry_indexing_ineligible(source):
+                continue
+            return None
         if (
             type(verified) is not SourceVerification
             or not verified.source_id.strip()
@@ -132,6 +163,8 @@ def _citation_registry(
         item = (source, verified)
         by_id[verified.source_id] = item
         by_number[str(verified.number)] = item
+    if not by_id:
+        return None
     return registry, by_id, by_number
 
 

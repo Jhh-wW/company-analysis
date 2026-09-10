@@ -22,12 +22,17 @@ from src.features.composer.culture_constants import (
     CULTURE_ACCOUNTING_RECOGNITION_RE,
     CULTURE_ATTRIBUTION_RE,
     CULTURE_EVIDENCE_SCOPE_MISMATCH,
+    CULTURE_FINANCIAL_RISK_CATEGORY_RE,
     CULTURE_FINANCIAL_RISK_DERIVATIVE_RE,
     CULTURE_FINANCIAL_RISK_EXPOSURE_RE,
     CULTURE_FINANCIAL_RISK_GOAL_CONTEXT_RE,
     CULTURE_FINANCIAL_RISK_GOVERNANCE_NEGATION_RE,
     CULTURE_FINANCIAL_RISK_GOVERNANCE_VERB_RE,
+    CULTURE_FINANCIAL_RISK_ORG_ACTOR_RE,
     CULTURE_FINANCIAL_RISK_POLICY_GOAL_RE,
+    CULTURE_FINANCIAL_RISK_RULE_GOVERNANCE_NEGATION_RE,
+    CULTURE_FINANCIAL_RISK_RULE_GOVERNANCE_VERB_RE,
+    CULTURE_FINANCIAL_RISK_RULE_RE,
     CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,
     CULTURE_FLOW_CELL_COUNT,
     CURRENT_CULTURE_DENIAL_RE,
@@ -196,13 +201,60 @@ def _recognition_terms(surface_text: str) -> frozenset[str]:
 
 
 def culture_financial_risk_goal_problem(text: str) -> str:
-    """문화 본문의 순수 재무위험 목표·노출 설명을 제외한다.
+    """문화 본문의 재무위험 목표·노출·관리규정 설명을 제외한다.
 
-    같은 절에 부정되지 않은 업무 절차 구문이 있으면 보존한다. 절차의
+    세 모양을 같은 사유로 잡는다 — 일반 목표, 위험 노출, 그리고 신용·유동성·
+    환위험 같은 «위험 범주 + 관리 규정» 서술. 앞의 둘은 같은 절에 부정되지
+    않은 업무 절차 «동사»가 있으면 보존하고, 세 번째는 그 절이 조직 주체와
+    절차 동사를 «둘 다» 말할 때만 보존한다(상수 주석의 실측 근거). 절차의
     주체나 사실성은 기존 인용 검수가 맡으며 이 함수는 장 배치만 검사한다.
     """
     return (CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED
-            if _pure_financial_risk_goal_clauses(text) else "")
+            if (_pure_financial_risk_goal_clauses(text)
+                or _financial_risk_rule_clauses(text)) else "")
+
+
+def _financial_risk_rule_clauses(text: str) -> tuple[str, ...]:
+    """«재무위험 범주 + 관리 규정» 절만 표면형으로 모아 준다.
+
+    한 절이 재무·금융 위험의 범주와 그 위험을 다루는 규정·정책·원칙·절차·
+    기준·체계를 함께 말하면 이 장의 계약(인재상·조직문화·일하는 방식)과 맞지
+    않는 재무위험 관리 서술로 본다.
+
+    ★ 면제는 «누가 + 무엇을 한다»가 같은 절에 다 있을 때만 만들어진다.
+      조직 주체(이사회·위원회·담당부서·팀 등)와 부정되지 않은 절차 동사가
+      둘 다 있어야 한다. 동사만으로 면제하지 않는 이유는 실측에 있다 —
+      «매 보고기간말에 손상여부를 검토하는»의 «검토»는 사람·조직이 하는
+      승인 절차가 아니라 회계 동작인데, 동사만 보면 면제가 만들어진다.
+    ★ 절차 동사는 이 블록 «전용» 목록을 쓴다
+      (CULTURE_FINANCIAL_RISK_RULE_GOVERNANCE_VERB_RE). 심의·의결·수립·운영·
+      점검·관리까지 담아 «누가 맡는지»를 말한 제도 문장을 보존하되, 조직
+      주체를 요구하지 않는 목표/노출 블록의 목록은 넓히지 않는다.
+    ★ «회사»·«당사»·«관리주체» 같은 일반 명사는 주체로 세지 않는다. 그런
+      말은 거의 모든 문장에 있어서 인정하면 이 규칙이 통째로 꺼진다.
+    ★ 판단 경계는 «같은 절»이다 — culture_accounting·목표/노출 블록과 같다.
+      뒤 절의 이사회 언급이나 부정된 승인으로는 면제가 만들어지지 않는다.
+    """
+
+    found: list[str] = []
+    for clause in SOURCE_CLAUSE_SPLIT_RE.split(text):
+        surface_clause = _surface(clause)
+        if not surface_clause:
+            continue
+        if not (CULTURE_FINANCIAL_RISK_CATEGORY_RE.search(surface_clause)
+                and CULTURE_FINANCIAL_RISK_RULE_RE.search(surface_clause)):
+            continue
+        governance_bound = (
+            CULTURE_FINANCIAL_RISK_ORG_ACTOR_RE.search(surface_clause)
+            and CULTURE_FINANCIAL_RISK_RULE_GOVERNANCE_VERB_RE.search(surface_clause)
+            and not CULTURE_FINANCIAL_RISK_RULE_GOVERNANCE_NEGATION_RE.search(
+                surface_clause
+            )
+        )
+        if governance_bound:
+            continue
+        found.append(surface_clause)
+    return tuple(found)
 
 
 def _pure_financial_risk_goal_clauses(text: str) -> tuple[str, ...]:

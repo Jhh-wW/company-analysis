@@ -75,15 +75,25 @@ def _운영장(report: ComposedReport) -> ComposedSection:
 def _검수(
     결과: dict[int, str],
     grounding_by_number: dict[int, dict[str, object]] | None = None,
+    *,
+    번호를_문자열로: bool = False,
 ):
-    """번호별 판정을 돌려주는 가짜 검수 AI. 프롬프트도 기록한다."""
+    """번호별 판정을 돌려주는 가짜 검수 AI. 프롬프트도 기록한다.
+
+    ``번호를_문자열로``: 켜면 «번호» 필드를 정수 대신 순수 숫자 문자열
+    ("1")로 낸다 — AI가 표기를 그렇게 흔들어도 좁은 보정으로 판정이
+    똑같이 나오는지 시험할 때만 켠다. 기본은 꺼짐(기존 시험은 그대로).
+    """
     기록: list[str] = []
 
     def ask(prompt: str) -> str:
         기록.append(prompt)
         entries: list[dict[str, object]] = []
         for number, result in 결과.items():
-            entry: dict[str, object] = {"번호": number, "결과": result}
+            entry: dict[str, object] = {
+                "번호": str(number) if 번호를_문자열로 else number,
+                "결과": result,
+            }
             grounding = (grounding_by_number or {}).get(number)
             if grounding is not None:
                 entry["검증근거"] = grounding

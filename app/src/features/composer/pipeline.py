@@ -492,6 +492,16 @@ def _supplement_safe_summary(
     문장이 «해석»으로 강등돼 확인 문장이 0개일 수 있다. 그 경우에도 이미
     미결속 수치 문장을 제거한 본문에서 장을 번갈아 골라, 예전의 «강등하되
     보고서 전체는 막지 않는다» 안전선을 지킨다.
+
+    ★ 각 장의 «첫» 문장은 마지막 순위로 돌린다 (실측) — 예전에는 장을 번갈아
+      돌며 «각 장의 첫 문장»부터 집어서, 이 경로가 걸릴 때마다 요약이
+      「1·2·3장 첫 문장」이라는 똑같은 서명으로 나왔다. 실측 실행의 요약 3건이
+      정확히 그 모양이었다. 장마다 쓸 만한 다른 문장이 있으면 그것부터 쓰고,
+      한 문장뿐인 장에서만 그 첫 문장을 쓴다.
+    ★ 요약이 빌 위험은 그대로 0이다 — 순서만 바뀌고 «쓸 수 있는 문장 집합»은
+      같기 때문이다. 본문 재사용을 막는 근사 복제 검사는 이 경로에 걸지
+      않는다. 여기 오는 문장은 «정의상» 본문 문장이라, 검사를 걸면 요약이
+      통째로 비고 이 함수의 존재 이유(빈 요약 차단 방지)가 사라진다.
     """
 
     chosen = list(_supplement_summary(summary, report))
@@ -499,19 +509,22 @@ def _supplement_safe_summary(
         return tuple(chosen)
     seen = {" ".join(sentence.text.split()) for sentence in chosen}
     pools = [list(section.sentences) for section in report.sections]
-    deepest = max((len(pool) for pool in pools), default=0)
-    for round_index in range(deepest):
-        for pool in pools:
-            if len(chosen) >= SUMMARY_MIN_SENTENCES:
-                return tuple(chosen)
-            if round_index >= len(pool):
-                continue
-            candidate = pool[round_index]
-            key = " ".join(candidate.text.split())
-            if not key or key in seen:
-                continue
-            chosen.append(candidate)
-            seen.add(key)
+    later = [pool[1:] for pool in pools]
+    firsts = [pool[:1] for pool in pools]
+    for group in (later, firsts):
+        deepest = max((len(pool) for pool in group), default=0)
+        for round_index in range(deepest):
+            for pool in group:
+                if len(chosen) >= SUMMARY_MIN_SENTENCES:
+                    return tuple(chosen)
+                if round_index >= len(pool):
+                    continue
+                candidate = pool[round_index]
+                key = " ".join(candidate.text.split())
+                if not key or key in seen:
+                    continue
+                chosen.append(candidate)
+                seen.add(key)
     return tuple(chosen)
 
 
@@ -1208,7 +1221,11 @@ def run_v2(
         verified, _normalize_fragments(verification_fragments),
         review_input=draft, diagnostics=news_review_rejections,
     )
-    verified, moved_sentences = drop_cross_section_duplicates(verified)
+    # ★ 조각을 함께 넘긴다. 안 넘기면 «같은 문서의 다른 조각» 중복(3장↔7장
+    #   수주 문장 실측)이 그대로 남는다 — 문서 열쇠가 없으면 그 판정을 못 한다.
+    verified, moved_sentences = drop_cross_section_duplicates(
+        verified, fragments=_normalize_fragments(verification_fragments),
+    )
     if moved_sentences:
         logger.info("장 간 중복 %d문장을 소유 장으로 모았습니다", moved_sentences)
     if prepared_evidence is not None:
@@ -1598,7 +1615,10 @@ def run_v2(
                 retain_verified_news(
                     supplement_verified, _normalize_fragments(verification_fragments),
                     review_input=supplement_draft, diagnostics=news_review_rejections,
-                )
+                ),
+                # ★ 본 경로와 같은 조각을 넘긴다 — 보충 경로만 문서 열쇠가
+                #   없으면 같은 중복이 보충 장에서만 살아남는다.
+                fragments=_normalize_fragments(verification_fragments),
             )
             if supplement_moved:
                 logger.info(
