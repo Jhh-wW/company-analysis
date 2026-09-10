@@ -274,8 +274,9 @@ def portfolio_name_is_grounded(
       (``PORTFOLIO_NAME_ENTITY_MARKERS``)뿐이고, 그것도 «그 문서가 실제로
       괄호 안에 그 표기를 쓸 때»만 인정한다 — 그러지 않으면 「제품(주)」처럼
       아무 이름에나 법인격 표기를 붙여 하한을 우회할 수 있다.
-    ★ 머리에는 하한을 걸지 않는다. 괄호 밖 토막을 따로 재면 「기타(A/S) 등」의
-      꼬리 「등」이 한 글자라 정당한 이름이 통째로 막힌다.
+    ★ 머리에도 같은 하한을 걸되, 괄호 밖 토막을 «따로» 재지는 않는다. 따로
+      재면 「기타(A/S) 등」의 꼬리 「등」이 한 글자라 정당한 이름이 통째로
+      막힌다. 머리는 괄호 안을 지운 나머지 «하나»로 본다.
     """
 
     if not name.strip():
@@ -301,8 +302,13 @@ def portfolio_name_is_grounded(
     #   같은 머리말을 늘 쓰므로 흔한 모양이다.
     # ★ 이름 쪽만 지우면 「기타(A/S) 등」의 꼬리 「등」을 따로 재지 않으면서도
     #   근거는 글자 그대로 남는다. 그런 이름은 대개 ①에서 이미 통과한다.
+    # ★ 머리에도 같은 길이 하한을 건다 (2026-09-11 재검토) — 한 글자 머리는
+    #   웬만한 문서 어디에나 있어서 회사를 못 가린다. 「제(전기전자 제품)」
+    #   처럼 괄호 안에만 실물이 있는 이름이 통과하던 자리다. 이름 전체가
+    #   원문에 축자로 있는 경우는 ①에서 이미 통과했으므로, 이 하한 때문에
+    #   정상 이름을 잃지 않는다.
     head = _bracket_free_surface(name)
-    if not head:
+    if len(head) < PORTFOLIO_NAME_MIN_PART_CHARS:
         return False
     if not any(head in source for source in cited):
         return False
