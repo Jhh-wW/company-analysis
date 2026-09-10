@@ -98,6 +98,8 @@ from src.features.composer.direct_support_constants import (
     FLOW_CELL_JOIN, RELATION_REVIEW_GUIDE,
 )
 from src.features.composer.portfolio_name_constants import (
+    PORTFOLIO_NAME_BRACKET_SPAN_RE,
+    PORTFOLIO_NAME_ENTITY_MARKERS,
     PORTFOLIO_NAME_MIN_PART_CHARS,
     PORTFOLIO_NAME_PART_SPLIT_RE,
 )
@@ -190,17 +192,52 @@ def _compact_surface(value: str) -> str:
     return "".join(compact)
 
 
+def _normalize_before_split(value: str) -> str:
+    """가르기 «전»에 호환문자를 펼친다.
+
+    ★ 왜 순서가 중요한가 (2026-09-11 재검토 실측) — 「㈜」는 NFKC로 「(주)」가
+      된다. 가르기를 정규화 «전»에 하면 「㈜수퍼톤」은 안 갈리고
+      「(주)수퍼톤」은 갈려, 같은 뜻의 두 표기가 다른 판정을 받았다.
+    """
+
+    return unicodedata.normalize("NFKC", str(value or ""))
+
+
 def _portfolio_name_parts(name: str) -> tuple[str, ...]:
     """이름을 괄호로 갈라 «압축된 부분»들로 돌려준다. 빈 부분은 버린다.
 
-    첫 부분이 «머리»(괄호 앞 본체)이고 나머지가 «설명»이다. 부르는 쪽이 둘을
-    서로 다른 범위로 검사한다.
+    진단·조사용이다. 판정은 «머리»(`_bracket_free_surface`)와 «괄호 안»
+    (`_bracketed_surfaces`)을 따로 보는 아래 함수들이 한다.
     """
 
     return tuple(
         compact
-        for part in PORTFOLIO_NAME_PART_SPLIT_RE.split(name)
+        for part in PORTFOLIO_NAME_PART_SPLIT_RE.split(_normalize_before_split(name))
         if (compact := _compact_surface(part))
+    )
+
+
+def _bracket_free_surface(value: str) -> str:
+    """괄호 «구간»을 통째로 지운 나머지의 압축 표면.
+
+    이름과 근거 글에 «같은 방식»을 쓴다. 그래야 「기타(A/S) 등」의 머리
+    「기타 등」이 원문 「기타(A/S) 등」에서 확인된다 — 꼬리 「등」을 따로 떼어
+    한 글자라고 버리지 않는다.
+    """
+
+    normalized = _normalize_before_split(value)
+    return _compact_surface(PORTFOLIO_NAME_BRACKET_SPAN_RE.sub(" ", normalized))
+
+
+def _bracketed_surfaces(value: str) -> tuple[str, ...]:
+    """괄호 «안»에 든 부분들의 압축 표면."""
+
+    return tuple(
+        compact
+        for match in PORTFOLIO_NAME_BRACKET_SPAN_RE.finditer(
+            _normalize_before_split(value)
+        )
+        if (compact := _compact_surface(match.group(1)))
     )
 
 
@@ -242,28 +279,56 @@ def portfolio_name_is_grounded(
       괄호 안이 같은 공시의 다른 조각에 있었다. 그래서 카드가 통째로 버려졌다.
     ★ 어느 경우에도 근거 글을 «이어 붙이지 않는다». 각 부분은 하나의 글 안에
       그대로 있어야 한다.
-    ★ 모든 부분이 ``PORTFOLIO_NAME_MIN_PART_CHARS`` 이상이어야 한다. 한 글자
-      부분은 웬만한 문서 어디에나 있어서 「제품(주)」·「제품(1)」처럼 회사를
-      전혀 못 가리는 이름을 통과시킨다.
+    ★ 괄호 «안» 부분은 ``PORTFOLIO_NAME_MIN_PART_CHARS`` 이상이어야 한다. 한
+      글자 부분은 웬만한 문서 어디에나 있어서 「카카오(T)」·「제품(1)」처럼
+      회사를 전혀 못 가리는 이름을 통과시킨다. 예외는 법인격 표기
+      (``PORTFOLIO_NAME_ENTITY_MARKERS``)뿐이고, 그것도 «그 문서가 실제로
+      괄호 안에 그 표기를 쓸 때»만 인정한다 — 그러지 않으면 「제품(주)」처럼
+      아무 이름에나 법인격 표기를 붙여 하한을 우회할 수 있다.
+    ★ 머리에는 하한을 걸지 않는다. 괄호 밖 토막을 따로 재면 「기타(A/S) 등」의
+      꼬리 「등」이 한 글자라 정당한 이름이 통째로 막힌다.
     """
 
     if not name.strip():
         return True
-    parts = _portfolio_name_parts(name)
-    if not parts:
-        return False
-    if any(len(part) < PORTFOLIO_NAME_MIN_PART_CHARS for part in parts):
-        return False
     cited = _compact_surfaces(source_texts)
     described = cited if document_texts is None else _compact_surfaces(
         document_texts
     )
-    head, *described_parts = parts
-    if not any(head in source for source in cited):
+
+    # ① 빠른 길 — 이름 전체가 인용 조각에 글자 그대로 있으면 더 볼 것이 없다.
+    whole = _compact_surface(name)
+    if not whole:
         return False
-    return all(
-        any(part in source for source in described) for part in described_parts
+    if any(whole in source for source in cited):
+        return True
+
+    # ② 머리 — 괄호 안을 지운 나머지를, 근거에서도 «같은 방식»으로 지우고 본다.
+    head = _bracket_free_surface(name)
+    if not head:
+        return False
+    head_sources = tuple(
+        surface
+        for text in source_texts
+        if (surface := _bracket_free_surface(text))
     )
+    if not any(head in source for source in head_sources):
+        return False
+
+    # ③ 괄호 안 설명 — 같은 문서 어디든 글자 그대로.
+    marker_spans = {
+        span
+        for text in (source_texts if document_texts is None else document_texts)
+        for span in _bracketed_surfaces(text)
+    }
+    for part in _bracketed_surfaces(name):
+        if len(part) < PORTFOLIO_NAME_MIN_PART_CHARS and not (
+            part in PORTFOLIO_NAME_ENTITY_MARKERS and part in marker_spans
+        ):
+            return False
+        if not any(part in source for source in described):
+            return False
+    return True
 
 
 def _numbers_are_grounded(cell: str, source_text: str) -> Optional[str]:

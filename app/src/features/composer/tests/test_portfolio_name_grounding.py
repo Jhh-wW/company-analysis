@@ -404,12 +404,152 @@ def test_괄호_안_설명은_같은_문서에_있을_때만_통과한다() -> N
     assert problems == ()
 
 
+#: 법인격 표기·괄호 밖 짧은 꼬리가 붙은 «정상» 이름. 셋 다 공시 원문에 글자
+#: 그대로 있는 모양이고, 기반 커밋에서도 통과하던 것이다.
+_ENTITY_DOCUMENT = "document:dart.fss.or.kr:20260320000802"
+_SUBSIDIARY_ROW = "종속기업 | (주)수퍼톤 | 영업 거래"
+_AFFILIATE_ROW = "종속기업 | 카카오(유) | 영업 거래"
+_PRODUCT_ETC_ROW = "주요 제품 및 서비스: 기타(A/S) 등"
+
+
+def _entity_fragments() -> tuple[CollectedFragment, ...]:
+    return (
+        _fragment("60", _SUBSIDIARY_ROW, document_identity=_ENTITY_DOCUMENT),
+        _fragment("61", _AFFILIATE_ROW, document_identity=_ENTITY_DOCUMENT),
+        _fragment("62", _PRODUCT_ETC_ROW, document_identity=_ENTITY_DOCUMENT),
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "cite"),
+    (
+        ("(주)수퍼톤", "60"),
+        # 같은 뜻의 한 글자 표기. 가르기를 정규화 «뒤»에 해야 같은 판정이 된다.
+        ("㈜수퍼톤", "60"),
+        # 원문은 「(주)수퍼톤」인데 작가가 뒤에 붙여 쓴 모양 — 빠른 길이 아니라
+        # 「머리 + 법인격 표기」 경로로 통과한다.
+        ("수퍼톤(주)", "60"),
+        ("카카오(유)", "61"),
+        # 괄호 밖 꼬리 「등」이 한 글자다. 저장소가 스스로 정당하다고 못 박아 둔
+        # 이름 모양이라, 꼬리를 따로 재면 정상 이름이 통째로 막힌다.
+        ("기타(A/S) 등", "62"),
+    ),
+)
+def test_법인격_표기와_괄호_밖_짧은_꼬리가_붙은_이름은_막지_않는다(
+    name: str, cite: str
+) -> None:
+    row = FlowRow(
+        cells=(name, "종속회사 사업", "운영 확대", "주력"), citations=(cite,)
+    )
+
+    checked, problems = check_diagram_numbers(_report(row), _entity_fragments())
+
+    assert _portfolio_row(checked) == row
+    assert problems == ()
+
+
+def test_같은_뜻의_법인격_표기는_한_글자든_세_글자든_같은_판정이다() -> None:
+    """★ 가르기를 정규화 «전»으로 되돌리면 이 시험이 빨간불이 된다.
+
+    「㈜」는 NFKC로 「(주)」가 된다. 가르기가 먼저면 「㈜수퍼톤」은 안 갈려
+    머리가 「주수퍼톤」이 되고, 「(주)수퍼톤」만 갈려 머리가 「수퍼톤」이 된다.
+    같은 뜻의 두 표기가 다른 판정을 받는다.
+
+    ★ 마지막 짝이 그 차이를 실제로 드러낸다 — 원문이 이름을 뒤집어 적어
+      «빠른 길»이 안 걸리므로, 판정이 머리·괄호 안 경로로만 결정된다.
+    """
+
+    세_글자_원문 = (_SUBSIDIARY_ROW,)
+    한_글자_원문 = ("종속기업 | ㈜수퍼톤 | 영업 거래",)
+    뒤집힌_원문 = ("종속기업 | 수퍼톤(주) | 영업 거래",)
+
+    assert portfolio_name_is_grounded("㈜수퍼톤", 세_글자_원문) is True
+    assert portfolio_name_is_grounded("(주)수퍼톤", 세_글자_원문) is True
+    assert portfolio_name_is_grounded("㈜수퍼톤", 한_글자_원문) is True
+    assert portfolio_name_is_grounded("(주)수퍼톤", 한_글자_원문) is True
+    assert portfolio_name_is_grounded("㈜수퍼톤", 뒤집힌_원문) is True
+    assert portfolio_name_is_grounded("(주)수퍼톤", 뒤집힌_원문) is True
+
+
+def test_이름_전체가_인용_조각에_있으면_괄호_안이_한_글자여도_통과한다() -> None:
+    """★ 빠른 길 — 원문에 «글자 그대로» 있는 이름은 하한으로 막지 않는다.
+
+    공시 표는 주석 번호를 이름 뒤에 괄호로 단다(「기타(1) 등」). 그 한 글자
+    때문에 원문에 그대로 있는 이름이 막히면 안 된다. 빠른 길을 빼면 머리·괄호
+    안 경로로 내려가 「1」이 하한에 걸린다 — 그때 이 시험이 빨간불이 된다.
+    """
+
+    footnote_row = "주요 제품 및 서비스: 기타(1) 등"
+    row = FlowRow(
+        cells=("기타(1) 등", "기타 매출", "운영 확대", "주력"), citations=("63",)
+    )
+
+    checked, problems = check_diagram_numbers(
+        _report(row),
+        (_fragment("63", footnote_row, document_identity=_ENTITY_DOCUMENT),),
+    )
+
+    assert _portfolio_row(checked) == row
+    assert problems == ()
+
+
+def test_법인격_표기가_아닌_한_글자_괄호말은_같은_자리에서도_막힌다() -> None:
+    """★ `PORTFOLIO_NAME_ENTITY_MARKERS`를 비우면 위 시험이 빨간불이 된다.
+
+    같은 원문·같은 자리에서 「(주)」는 통과하고 「(T)」·「(1)」은 막힌다 —
+    예외가 «법인격 표기 목록»에서만 나온다는 뜻이다.
+    """
+
+    source = (_SUBSIDIARY_ROW,)
+
+    assert portfolio_name_is_grounded("수퍼톤(주)", source) is True
+    for name in ("수퍼톤(T)", "수퍼톤(1)"):
+        assert portfolio_name_is_grounded(name, source) is False, name
+
+
+def test_법인격_표기는_그_문서가_괄호_안에_쓸_때만_인정한다() -> None:
+    """★ 아무 이름에나 「(주)」를 붙여 한 글자 하한을 우회하지 못한다.
+
+    「제품」은 손익계산서 조각에 있고 「주」는 「주식회사」에 있지만, 이 공시는
+    괄호 안에 법인격 표기를 쓰지 않는다. 그런 문서에서 「제품(주)」를 인정하면
+    하한이 사실상 사라진다 — 예외는 «그 문서가 실제로 그렇게 적을 때»만 준다.
+    """
+
+    row = FlowRow(
+        cells=("제품(주)", "전력전자 제품 제조·판매", "매출 확대", "주력"),
+        citations=("45",),
+    )
+
+    막힘, problems = check_diagram_numbers(
+        _report(row), _same_document_fragments()
+    )
+    assert 막힘.sections[0].flow_rows == ()
+    assert any(PORTFOLIO_NAME_NOT_IN_SOURCE_CODE in item for item in problems)
+
+    # 같은 이름도 그 문서가 괄호 안에 법인격 표기를 쓰면 통과한다.
+    통과, problems = check_diagram_numbers(
+        _report(row),
+        _same_document_fragments()
+        + (
+            _fragment(
+                "47",
+                "종속기업 | (주)수퍼톤 | 영업 거래",
+                document_identity=_FILING_DOCUMENT,
+            ),
+        ),
+    )
+    assert _portfolio_row(통과) == row
+    assert problems == ()
+
+
 def test_한_글자_부분만_다른_이름은_회사를_못_가려서_막는다() -> None:
     """★ `PORTFOLIO_NAME_MIN_PART_CHARS`를 1로 낮추면 이 시험이 깨진다.
 
     아래 이름들의 한 글자 부분은 «근거 원문에 실제로 있다»(「주」는 「주식회사」
     에, 「1」은 「1. 당사의 개요」에). 그래서 길이 하한이 사라지는 순간 전부
     통과한다 — 느슨해지는 방향을 막는 것이 이 시험의 목적이다.
+    「제품(주)」는 법인격 표기지만 이 공시가 괄호 안에 그 표기를 쓰지 않아
+    예외를 못 받는다(바로 위 시험이 그 경계를 따로 잰다).
     """
 
     fragments = _same_document_fragments()
