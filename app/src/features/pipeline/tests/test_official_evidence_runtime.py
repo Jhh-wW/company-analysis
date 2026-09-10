@@ -18,6 +18,8 @@ import pytest
 
 from src.core import deployment_identity
 from src.features.business_candidate.dart_identity import DartCompanyRecord
+from src.features.observability import constants as observability_constants
+from src.features.observability import run_diagnostics
 from src.features.company_comparison import (
     ComparisonSourceConfigurationError,
     ComparisonSourceInternalError,
@@ -26,6 +28,7 @@ from src.features.company_comparison import (
 from src.features.company_comparison.official_sources import (
     dart_profile_attestation_material,
 )
+from src.features.composer.constants import DART_DOCUMENT_URL_TEMPLATE
 from src.features.company_comparison.v2_bridge import (
     attach_comparison_program_evidence,
 )
@@ -61,6 +64,7 @@ from src.shared.report_evidence.constants import (
     SOURCE_KIND_DART_BUSINESS_REPORT,
     SOURCE_KIND_OFFICIAL_IR_PDF,
     SOURCE_KIND_OFFICIAL_WEB_PAGE,
+    SOURCE_KIND_ROBOTS_TXT,
     SourceRequirement,
     SourceTier,
 )
@@ -141,6 +145,10 @@ def _official_result(
     *,
     document_count: int = 9,
     first_state: CollectionState | None = None,
+    first_source_kind: str = SOURCE_KIND_OFFICIAL_WEB_PAGE,
+    first_reason_code: str = "fixture_state",
+    #: ``first_state``를 몇 «개» 장에 적용할지. 기본 1이라 옛 동작 그대로다.
+    failed_section_count: int = 1,
     variant: str = "기본",
     unclassified_evidence: UnclassifiedEvidenceObservation | None = None,
     profile: dict[str, Any] | None = None,
@@ -175,7 +183,7 @@ def _official_result(
     candidates: list[ChapterEvidenceCandidates] = []
     for index, section_id in enumerate(REQUIRED_EVIDENCE_SECTION_IDS):
         slots = collector_slots_for(section_id)
-        if index == 0 and first_state is not None:
+        if index < failed_section_count and first_state is not None:
             candidates.append(
                 ChapterEvidenceCandidates(
                     company_id=CORP_ID,
@@ -185,12 +193,12 @@ def _official_result(
                     attempts=(
                         CollectionAttempt(
                             company_id=CORP_ID,
-                            attempt_id=f"attempt-{variant}-first",
-                            source_kind=SOURCE_KIND_OFFICIAL_WEB_PAGE,
+                            attempt_id=f"attempt-{variant}-first-{index}",
+                            source_kind=first_source_kind,
                             requirement=SourceRequirement.REQUIRED,
                             state=first_state,
                             slot_ids=slots,
-                            reason_code="fixture_state",
+                            reason_code=first_reason_code,
                         ),
                     ),
                     candidate_readiness=(
@@ -1576,6 +1584,9 @@ def test_우리은행_운영모양은_FULL패킷전에_문서하한_부분보고
         for step in steps
         if step.get("step") == "6_수집_공식근거사전검사"
     )
+    # 2026-09-11 진단 필드 보강으로 기대 dict을 갱신했다 — 전환이 열리면
+    # 「사유코드」가 정상적으로 비므로 무엇이 왜 막혔는지를 옆 필드로 남긴다.
+    # 이 모양은 문서 하한 전환이라 불명·미달 장이 하나도 없다.
     assert formal_step == {
         "step": "6_수집_공식근거사전검사",
         "후보장": len(REQUIRED_EVIDENCE_SECTION_IDS),
@@ -1584,11 +1595,158 @@ def test_우리은행_운영모양은_FULL패킷전에_문서하한_부분보고
         "판정": "READY_FOR_GENERATION",
         "사유코드": "",
         "DART부분보고서전환": True,
+        "불명장수": 0,
+        "불명장목록": [],
+        "미달장수": 0,
+        "전환갈래": "too_few_documents_for_full",
+        "차단사유코드": [],
+        "차단사유코드총수": 0,
     }
     assert {
         "step": "6_수집_DART부분보고서전환",
         "사유코드": "too_few_documents_for_full",
     } in steps
+
+
+def _with_dart_evidence(
+    result: OfficialEvidenceCollectionResult,
+) -> OfficialEvidenceCollectionResult:
+    """정상 후보 하나를 실제 DART 문서와 결속된 근거로 바꾼다."""
+
+    candidates = list(result.candidates)
+    target_index = next(
+        index
+        for index, candidate in enumerate(candidates)
+        if candidate.documents and candidate.fragments
+    )
+    target = candidates[target_index]
+    receipt_number = "20260330000001"
+    document_id = f"{SOURCE_KIND_DART_BUSINESS_REPORT}:{receipt_number}"
+    candidates[target_index] = replace(
+        target,
+        documents=(
+            replace(
+                target.documents[0],
+                document_id=document_id,
+                canonical_url=DART_DOCUMENT_URL_TEMPLATE.format(
+                    document_id=receipt_number
+                ),
+                source_kind=SOURCE_KIND_DART_BUSINESS_REPORT,
+                domain_attestation_source_id="",
+                domain_attestation_evidence="",
+            ),
+        ),
+        fragments=(replace(target.fragments[0], document_id=document_id),),
+    )
+    return OfficialEvidenceCollectionResult(
+        company_id=result.company_id,
+        candidates=tuple(candidates),
+        unclassified_evidence=result.unclassified_evidence,
+    )
+
+
+def test_일시장애_부분보고서_전환도_불명_장과_사유코드를_진단에_남긴다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-09-11 실측 모양 — robots.txt를 못 읽어 필수 장이 UNKNOWN으로 남았다.
+
+    그때 「사유코드」가 빈 문자열이 되어 검수자가 「무엇이 왜 막혔나」를 실행
+    기록에서 찾을 수 없었다. 판단 값은 그대로 두고 진단 값을 옆에 남긴다.
+    """
+
+    official = _with_dart_evidence(
+        _official_result(
+            first_state=CollectionState.FAILED,
+            first_source_kind=SOURCE_KIND_ROBOTS_TXT,
+            first_reason_code="robots_unreachable",
+        )
+    )
+    blocked_section_id = REQUIRED_EVIDENCE_SECTION_IDS[0]
+    preflight = real.assess_official_evidence(official)
+
+    assert preflight.dart_partial_fallback is True
+    assert preflight.dart_partial_reason == "transient_web_failure"
+    # 전환이 열리면 판단 값은 «정상적으로» 빈다. 그래서 진단이 따로 필요하다.
+    assert preflight.detail_code == ""
+    assert preflight.decision.unknown_section_ids == (blocked_section_id,)
+
+    _freeze_runtime(
+        monkeypatch,
+        mode=real.engine_mode.EngineMode.V2,
+        release_mode=ReleaseMode.FULL,
+    )
+    calls = _wire_runtime(monkeypatch, engine=FakeEngine())
+
+    result = _run(_Collector([official]))
+
+    assert result.outcome is Outcome.REPORT, result.message
+    assert len(calls.composers) == 1
+    steps = calls.composers[0]["steps"]
+    formal_step = next(
+        step for step in steps if step.get("step") == "6_수집_공식근거사전검사"
+    )
+
+    assert formal_step["사유코드"] == ""
+    assert formal_step["DART부분보고서전환"] is True
+    assert formal_step["불명장수"] == 1
+    assert formal_step["불명장목록"] == [blocked_section_id]
+    assert formal_step["전환갈래"] == "transient_web_failure"
+    # ★ 여기 실리는 것은 «장:막힌 경로:의미 칸»이지 전송 사유(robots_unreachable)가
+    #   아니다. 게이트는 슬롯별 판정만 만들고 전송 사유는 자료원 진단 단계
+    #   (`6_수집_공식자료원진단` 히스토그램)가 따로 들고 있다. 두 곳을 이 장
+    #   이름으로 이어 붙이는 것이 이 필드의 쓸모다.
+    assert formal_step["차단사유코드"] == [
+        f"{blocked_section_id}:required_path_failed:{slot_id}"
+        for slot_id in collector_slots_for(blocked_section_id)
+    ]
+    # 상한에 안 걸린 실행은 총수와 실린 수가 같다 — 「잘렸다」로 안 읽힌다.
+    assert formal_step["차단사유코드총수"] == len(formal_step["차단사유코드"])
+
+
+def test_막힌_사유_코드가_상한을_넘으면_잘렸다는_표시를_남긴다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 진단 소실을 고치면서 «새 조용한 소실»을 만들지 않는다.
+
+    요약 계층은 자기가 자를 때만 표식을 붙인다. 여기서 상한으로 자른 목록은
+    표식 없이 짧아져, 화면에서 「원래 그만큼이었다」와 구분되지 않는다.
+    """
+
+    official = _official_result(
+        first_state=CollectionState.FAILED,
+        first_source_kind=SOURCE_KIND_ROBOTS_TXT,
+        first_reason_code="robots_unreachable",
+        failed_section_count=len(REQUIRED_EVIDENCE_SECTION_IDS),
+    )
+    preflight = real.assess_official_evidence(official)
+    total = len(preflight.decision.reason_codes)
+    assert total > observability_constants.PREFLIGHT_REASON_CODE_LIMIT, (
+        "시험 전제 — 사유 코드가 상한을 넘어야 잘림을 잴 수 있다"
+    )
+
+    _freeze_runtime(
+        monkeypatch,
+        mode=real.engine_mode.EngineMode.V2,
+        release_mode=ReleaseMode.FULL,
+    )
+    _wire_runtime(monkeypatch, engine=FakeEngine())
+
+    with run_diagnostics.capture() as captured:
+        result = _run(_Collector([official]))
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    formal_step = next(
+        step
+        for step in captured.steps
+        if step.get("step") == "6_수집_공식근거사전검사"
+    )
+
+    assert formal_step["차단사유코드총수"] == total
+    assert len(formal_step["차단사유코드"]) < total, "잘렸다는 사실"
+    assert (
+        len(formal_step["차단사유코드"])
+        == observability_constants.PREFLIGHT_REASON_CODE_LIMIT
+    )
 
 
 def test_문서를_모은_뒤_일부만_실패하면_오류가_아니라_부분으로_남는다() -> None:

@@ -42,7 +42,13 @@ from src.features.composer.port import (
 _원문 = (
     "캐스팅·트레이닝과 콘텐츠 기획·핵심 제작은 내부에서 수행하고, "
     "음반 유통은 Republic Records·Sony Music과, 공연 인프라는 Live Nation과 "
-    "협력한다. 2025년 연결 매출액은 8,219억 원이다."
+    "협력한다. 2025년 연결 매출액은 8,219억 원이다. "
+    # ★ 마지막 절은 8장(인재상·일하는 방식) 시험용이다. 이 파일의 «카드형 장»
+    #   시험이 8장을 쓰는데, 8장 후보는 자기 인용 원문에 사람·조직 제도 소재가
+    #   있어야 공개된다(culture_section_evidence_problem). 앞 세 절은 사업 운영
+    #   설명뿐이라 8장 근거로는 원래 성립하지 않는 모양이었다. 절을 «뒤에»
+    #   붙이므로 역할 결속 시험이 인용하는 앞 절의 글자는 그대로다.
+    "임직원 교육훈련과 조직문화 정착은 인사부서가 담당한다."
 )
 
 
@@ -554,3 +560,137 @@ def test_연도만_문제였던_경로가_의미검수까지_지나_남는다():
 
     assert _운영장(report).flow_rows == _손상차손_경로
     assert problems == ()
+
+
+# ══════════════════════════════════════════════════════════
+# 8장 도식도 본문과 «같은» 재무 규정 잣대를 받는다
+#
+# ★ 왜 (실측) — 재무위험 «규정» 규칙은 본문 블록에만 걸려 있었다. 그래서
+#   산문에서 빠진 재무 서술이 표의 칸으로 옮겨 적히면 그대로 통과했다.
+#   실제 실행의 표 한 행(신용위험 관리 규정)이 그 자리였다. 같은 보고서
+#   안에서 두 잣대를 만들지 않는다.
+# ══════════════════════════════════════════════════════════
+
+_재무규정_원문 = (
+    "당사는 환위험 관리규정에 환위험의 정의, 측정주기, 관리절차를 포함하여 "
+    "운영하고 있습니다."
+)
+_재무규정_칸 = ("환위험 관리", "환위험 관리규정 운영", "")
+_재무규정_문장 = "회사는 환위험 관리규정을 운영하는 방식으로 일한다."
+
+
+@pytest.mark.parametrize("grouped", (False, True), ids=("legacy", "grouped"))
+def test_문화_도식행도_재무규정_규칙에_본문과_같은_사유로_걸린다(grouped) -> None:
+    from src.features.composer.culture_constants import (
+        CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,
+    )
+    from src.features.composer.verify import verify_report
+
+    문장 = ComposedSentence(
+        text=_재무규정_문장, citations=("9",), grade="확인"
+    )
+    행 = FlowRow(cells=_재무규정_칸, citations=("9",))
+    draft = ComposedReport(
+        sections=(ComposedSection("culture", (문장,), flow_rows=(행,)),)
+    )
+    fragments = (CollectedFragment(fragment_id="9", kind="공시", text=_재무규정_원문),)
+    diagnostics: list[dict] = []
+
+    if grouped:
+        import re as _re
+
+        def ask(prompt: str) -> str:
+            numbers = _re.findall(r"^\[(\d+)\] \(", prompt, _re.MULTILINE)
+            return json.dumps(
+                {"판정": [{"번호": int(n), "결과": VERDICT_TRUE, "장": "culture",
+                          "근거": ["9"]} for n in numbers]},
+                ensure_ascii=False,
+            )
+
+        checked = verify_report(
+            draft, fragments, None, ask,
+            allowed_fragment_ids_by_section={"culture": frozenset({"9"})},
+            diagnostics=diagnostics,
+        )
+    else:
+        checked, _사유 = check_diagrams(
+            draft, fragments, ask=_검수({1: VERDICT_TRUE}), diagnostics=diagnostics
+        )
+
+    culture = next(s for s in checked.sections if s.section_id == "culture")
+    assert culture.flow_rows == (), "도식 행이 본문과 다른 잣대로 살아남았다"
+    도식_사유 = [
+        event["reason_code"] for event in diagnostics if event["kind"] == "도식"
+    ]
+    assert 도식_사유 == [CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED]
+    if grouped:
+        # 같은 진입점의 본문 문장도 «같은» 사유코드로 빠진다.
+        assert culture.sentences == ()
+        본문_사유 = [
+            event["reason_code"] for event in diagnostics if event["kind"] == "본문"
+        ]
+        assert 본문_사유 == 도식_사유
+
+
+# ══════════════════════════════════════════════════════════
+# 도식 경로의 «자료 부재 단언» 배선과 칸 경계
+#
+# ★ 왜 (독립 검토 실측) — 이 배선을 지워도 composer 시험이 전부 통과했다.
+#   아무도 지켜 주지 않는 기능이었다. 그리고 칸을 이어 붙여 검사하는 바람에
+#   서로 다른 칸의 표지가 결합해 정상 행이 지워지고 있었다.
+# ══════════════════════════════════════════════════════════
+
+#: 8장 원문 절 계약을 통과시키는 사람·조직 원문 (이 시험의 관심사가 아니다).
+_사람_원문 = "당사는 임직원 교육훈련 제도를 운영하고 인재상을 공시하고 있습니다."
+#: 한 칸 안에 자료 지시어와 부재 술어가 «함께» 있는 칸.
+_부재_칸 = ("인재상", "핵심가치 공유", "공식 자료에서 확인할 수 없다")
+#: 지시어와 부재 술어가 «서로 다른 칸»에 흩어진 정상 행 — 살아남아야 한다.
+_흩어진_칸 = ("공식 자료 검토 절차", "분기 점검", "세부 기준을 명시하지 않았다")
+
+
+def _도식_판정(cells, source_text=_사람_원문):
+    row = FlowRow(cells=tuple(cells), citations=("9",))
+    draft = ComposedReport(
+        sections=(ComposedSection("culture", (), flow_rows=(row,)),)
+    )
+    fragments = (
+        CollectedFragment(fragment_id="9", kind="공시", text=source_text),
+    )
+    diagnostics: list[dict] = []
+    checked, _사유 = check_diagrams(
+        draft, fragments, ask=_검수({1: VERDICT_TRUE}), diagnostics=diagnostics
+    )
+    culture = next(s for s in checked.sections if s.section_id == "culture")
+    return culture.flow_rows, diagnostics
+
+
+def test_부재_단언을_옮겨_적은_도식행은_평면_진입점에서_빠진다() -> None:
+    from src.features.composer.absence_claim_constants import (
+        ABSENCE_CLAIM_UNSUPPORTED,
+    )
+
+    rows, diagnostics = _도식_판정(_부재_칸)
+
+    assert rows == (), "부재 단언을 옮겨 적은 행이 그대로 공개됐다"
+    assert [event["reason_code"] for event in diagnostics] == [
+        ABSENCE_CLAIM_UNSUPPORTED
+    ]
+
+
+def test_표지가_서로_다른_칸에_흩어진_행은_그대로_남는다() -> None:
+    """★ 칸 하나가 한 절이다 — 이어 붙이면 없던 거짓말이 생긴다."""
+
+    rows, diagnostics = _도식_판정(_흩어진_칸)
+
+    assert len(rows) == 1, f"정상 행이 칸 결합 때문에 지워졌다: {diagnostics}"
+    assert diagnostics == []
+
+
+def test_위험범주와_관리규정이_다른_칸에_있으면_재무_서술이_아니다() -> None:
+    """독립 검토 반례 — 1칸의 「신용위험」과 3칸의 「관리규정」이 결합했다."""
+
+    rows, diagnostics = _도식_판정(
+        ("신용위험", "여신 심사", "사내 복리후생 관리규정을 둔다")
+    )
+
+    assert len(rows) == 1, f"서로 다른 칸의 표지가 결합해 지워졌다: {diagnostics}"

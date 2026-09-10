@@ -211,7 +211,9 @@ def test_FULL_생성후_manifest_결속형식오류는_자료부족이_아닌_�
     writer = _ExactPacketWriter()
     reviewer = _FuturePlanBundledReviewer()
 
-    def fake_ask_factory(_engine, _client, *, stage: str, max_tokens: int):
+    def fake_ask_factory(
+        _engine, _client, *, stage: str, max_tokens: int, reserved_calls: int = 0,
+    ):
         assert max_tokens > 0
         if stage == "v2_compose":
             return writer

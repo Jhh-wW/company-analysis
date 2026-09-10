@@ -35,6 +35,10 @@ from src.features.composer.culture_constants import (
     CULTURE_FINANCIAL_RISK_RULE_RE,
     CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,
     CULTURE_FLOW_CELL_COUNT,
+    CULTURE_PEOPLE_INSTITUTION_RE,
+    CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
+    CULTURE_SECTION_ORG_ACTION_NEGATION_RE,
+    CULTURE_SECTION_ORG_ACTION_RE,
     CURRENT_CULTURE_DENIAL_RE,
     EXPLICIT_CULTURE_RE,
     FLOW_GOAL_QUALIFIER_RE,
@@ -75,6 +79,62 @@ def culture_problem(text: str, sources_mapping: Mapping[str, str]) -> str:
                 # 주장인지와 출처 공식성은 같은 기존 검수 호출이 판정한다.
                 return ""
     return CULTURE_EVIDENCE_SCOPE_MISMATCH
+
+
+def culture_section_evidence_problem(
+    text: str, sources_mapping: Mapping[str, str]
+) -> str:
+    """8장 후보가 «기댄 원문 절»에 이 장의 소재가 있을 때만 통과시킨다.
+
+    ★ 반드시 culture 장 후보(본문 문장 또는 도식 행)일 때만 호출한다. 다른
+      장은 이 계약의 대상이 아니다.
+
+    ★ 왜 후보 «표현»이 아니라 원문을 보나 (실측) — 기존 재무위험 가드는 후보
+      문장의 어휘를 본다. 그래서 같은 재무 서술을 꼬리만 바꿔 적으면
+      (「…원칙을 실행하고 있다」 → 「…하고 있다」) 그대로 빠져나갔고, 가드가
+      2건을 새로 잡는 동안 안 걸리는 재무 문장 4개가 그 자리를 채워 순증이
+      0이었다. 원문 절은 후보가 고쳐 쓸 수 없으므로 판정이 흔들리지 않는다.
+
+    보존 조건(둘 중 하나):
+      ① 사람·조직 제도 어휘가 있는 절 — CULTURE_PEOPLE_INSTITUTION_RE 또는
+         기존 EXPLICIT_CULTURE_RE(의사결정·승인 절차 어휘).
+      ② 조직 주체 + 부정되지 않은 절차 동사가 «둘 다» 있는 절 — 「누가
+         맡는지」를 말한 자료. 동사만으로는 면제하지 않는다(「손상여부를
+         검토하는」 같은 회계 동작이 면제를 만들던 자리).
+
+    ⚠️ 「공시하지 않는다」처럼 그 소재가 «없다»고 적은 절은 근거로 세지 않는다
+      (culture_problem과 같은 경계). 인용 원문이 아예 없으면 이 장의 소재를
+      확인할 방법이 없으므로 사유를 돌려준다 — fail-closed.
+    ⚠️ 빈 문자열은 그 문장이 옳다는 뜻이 아니다. 주어·시점·주장 범주 일치는
+      기존 의미 검수가 그대로 판정한다.
+
+    ``text``는 «판정 재료»가 아니다 — 빈 후보를 판정 대상에서 빼는 데만 쓴다.
+    이 함수의 존재 이유가 «후보 표현으로는 판정하지 않는다»이므로, 후보 문자열이
+    판정에 들어오는 자리를 일부러 남기지 않았다.
+    """
+
+    if not _surface(text):
+        return ""  # 실을 내용이 없는 후보는 이 계약의 대상이 아니다.
+    for source in sources_mapping.values():
+        for clause in SOURCE_CLAUSE_SPLIT_RE.split(source):
+            surface_clause = _surface(clause)
+            if not surface_clause:
+                continue
+            if SOURCE_UNAVAILABLE_RE.search(surface_clause):
+                continue
+            if (CULTURE_PEOPLE_INSTITUTION_RE.search(surface_clause)
+                    or EXPLICIT_CULTURE_RE.search(surface_clause)):
+                return ""
+            governance_bound = (
+                CULTURE_FINANCIAL_RISK_ORG_ACTOR_RE.search(surface_clause)
+                and CULTURE_SECTION_ORG_ACTION_RE.search(surface_clause)
+                and not CULTURE_SECTION_ORG_ACTION_NEGATION_RE.search(
+                    surface_clause
+                )
+            )
+            if governance_bound:
+                return ""
+    return CULTURE_SECTION_EVIDENCE_OFFCONTRACT
 
 
 def culture_accounting_policy_problem(text: str) -> str:

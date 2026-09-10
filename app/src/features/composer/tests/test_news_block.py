@@ -24,11 +24,13 @@ from src.features.composer.news_block import (
     news_block_caption,
     news_block_steps,
     news_ownership_from_claim_slots,
+    oldest_stale_report_year,
 )
 from src.features.composer.port import (
     CollectedFragment,
     ComposedReport,
     ComposedSection,
+    NewsRow,
 )
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 
@@ -593,3 +595,361 @@ def test_composer는_news_intake를_직접_import하지_않는다() -> None:
                     violations.append(f"{path.name}:{node.lineno}:{module}")
 
     assert violations == []
+
+
+# ══════════════════════════════════════════════════════════
+# ⑤ 캡션 연도 표시 — 1차 기간창(12개월)보다 오래된 기사가 섞이면
+#   「최근」이 거짓이 되지 않도록 발행연도를 덧붙인다
+#   (운영 실측: 2023-11-12 기사만 실린 장의 캡션이 「최근 보도」였다)
+# ══════════════════════════════════════════════════════════
+
+
+def _row(published_on: str, fragment_id: str = "40") -> NewsRow:
+    return NewsRow(
+        cells=(published_on, _PUBLISHER + " · 가나다전자 물류 자동화", _SENTENCE),
+        citations=(fragment_id,),
+        evidence_texts=(_SENTENCE,),
+    )
+
+
+def test_기간창_밖의_오래된_행이_있으면_그_연도를_돌려준다() -> None:
+    assert oldest_stale_report_year((_row("2023-11-12"),), "2026-09-11") == 2023
+
+
+def test_가장_오래된_행_하나만_기간창_밖이어도_그_연도를_쓴다() -> None:
+    rows = (_row("2026-08-01", "40"), _row("2023-11-12", "41"))
+    assert oldest_stale_report_year(rows, "2026-09-11") == 2023
+
+
+def test_전부_기간창_안이면_None이다() -> None:
+    rows = (_row("2026-08-01", "40"), _row("2025-10-01", "41"))
+    assert oldest_stale_report_year(rows, "2026-09-11") is None
+
+
+def test_정확히_12개월_전은_기간_안으로_본다() -> None:
+    """news_usage.py의 기존 ``cutoff <= published <= today`` 관례와 맞춘다."""
+
+    assert oldest_stale_report_year((_row("2025-09-11"),), "2026-09-11") is None
+    assert oldest_stale_report_year((_row("2025-09-10"),), "2026-09-11") == 2025
+
+
+@pytest.mark.parametrize("as_of_date", ("", "모름", "2026-13-40"))
+def test_기준일이_없거나_형식이_다르면_None이다(as_of_date: str) -> None:
+    assert oldest_stale_report_year((_row("2023-11-12"),), as_of_date) is None
+
+
+def test_행_발행일_형식이_다르면_None이다() -> None:
+    assert oldest_stale_report_year((_row("2023년 11월"),), "2026-09-11") is None
+
+
+def test_행이_없으면_None이다() -> None:
+    assert oldest_stale_report_year((), "2026-09-11") is None
+
+
+def test_연도를_주면_캡션에_그_연도를_덧붙인다() -> None:
+    assert news_block_caption(1, 2023) == "최근 보도 (보조, 1기사 · 2023년 보도 포함)"
+
+
+def test_연도가_없으면_기존_캡션_그대로다() -> None:
+    assert news_block_caption(2, None) == "최근 보도 (보조, 2기사)"
+    assert news_block_caption(2) == "최근 보도 (보조, 2기사)"
+
+
+def test_실제_렌더_진입점이_오래된_기사에_연도를_붙인다() -> None:
+    """배선 시험 — ``render._news_report_table``은 이 보강이 실제로 붙는
+
+    «운영 진입점»이다. 시험 안에서 따로 캡션을 다시 조립하지 않고, 그
+    함수가 돌려준 문자열을 그대로 잰다.
+    """
+
+    from src.features.composer import render as render_module
+
+    section = ComposedSection(
+        section_id="identity", sentences=(), news_rows=(_row("2023-11-12"),)
+    )
+
+    table = render_module._news_report_table(  # noqa: SLF001
+        section, {"40": 1}, as_of_date="2026-09-11"
+    )
+
+    assert table is not None
+    assert table.caption == "최근 보도 (보조, 1기사 · 2023년 보도 포함)"
+
+
+def test_실제_렌더_진입점은_최근_기사면_기존_캡션을_쓴다() -> None:
+    from src.features.composer import render as render_module
+
+    section = ComposedSection(
+        section_id="identity", sentences=(), news_rows=(_row("2026-08-20"),)
+    )
+
+    table = render_module._news_report_table(  # noqa: SLF001
+        section, {"40": 1}, as_of_date="2026-09-11"
+    )
+
+    assert table is not None
+    assert table.caption == "최근 보도 (보조, 1기사)"
+
+
+def test_기준일을_안_주면_오래된_기사여도_기존_캡션이다() -> None:
+    """fail-safe — as_of_date 배선이 없는 옛 호출부를 깨지 않는다."""
+
+    from src.features.composer import render as render_module
+
+    section = ComposedSection(
+        section_id="identity", sentences=(), news_rows=(_row("2023-11-12"),)
+    )
+
+    table = render_module._news_report_table(section, {"40": 1})  # noqa: SLF001
+
+    assert table is not None
+    assert table.caption == "최근 보도 (보조, 1기사)"
+
+
+def test_FULL_봉인_표_항목도_같은_as_of_date로_같은_캡션을_만든다() -> None:
+    """FULL 경로 — ``public_manifest._news_table_payload``는
+
+    ``render._news_report_table``과 «같은 순서·같은 글자»를 만들어야 한다
+    (그 함수 자체 docstring). ``as_of_date``를 안 넣으면 캡션만 renderer와
+    달라져 봉인 대조가 보고서 «전체»를 막는다 — 이 시험은 그 대조가 실제로
+    같은 글자를 내는지를 잰다.
+    """
+
+    from src.features.composer.public_manifest import _FragmentBinding, _news_table_payload
+    from src.features.provenance.sources import exact_evidence_text_hash
+
+    row = _row("2023-11-12")
+    section = ComposedSection(section_id="identity", sentences=(), news_rows=(row,))
+    binding = _FragmentBinding(
+        fragment_id="40",
+        document_identity="document:media.example:news-40",
+        exact_evidence_hash=exact_evidence_text_hash(_SENTENCE),
+        text=_SENTENCE,
+        published_on="2023-11-12",
+        publisher=_PUBLISHER,
+        title="가나다전자 물류 자동화",
+        is_news=True,
+    )
+
+    payload = _news_table_payload(section, {"40": binding}, as_of_date="2026-09-11")
+
+    assert payload is not None
+    assert payload["caption"] == "최근 보도 (보조, 1기사 · 2023년 보도 포함)"
+
+    from src.features.composer import render as render_module
+
+    rendered = render_module._news_report_table(  # noqa: SLF001
+        section, {"40": 1}, as_of_date="2026-09-11"
+    )
+    assert rendered is not None
+    assert payload["caption"] == rendered.caption
+
+
+# ══════════════════════════════════════════════════════════
+# ⑥ 배선 시험 — 헬퍼를 직접 불러 기준일을 손수 넣는 위 시험들은 「운영
+#   진입점이 실제로 그 기준일을 넘기는가」를 못 잡는다(독립 검토 재현:
+#   render.py·public_manifest.py·quality_projection.py 세 곳 중 어느
+#   ``as_of_date=...`` 전달을 지워도 composer+web 전체가 그대로 통과했다).
+#   그래서 여기서는 운영 진입점(render_report·build_public_structure_seal·
+#   build_generation_quality_candidate)을 직접 불러, 그 배선 한 줄이
+#   빠지면 해당 시험만 빨간불이 되게 만든다.
+# ══════════════════════════════════════════════════════════
+
+_WIRING_STALE_PUBLISHED_ON = "2023-11-12"
+_WIRING_AS_OF_DATE = "2026-09-11"
+
+
+def _wiring_fixture() -> tuple[ComposedReport, tuple[CollectedFragment, ...]]:
+    """세 배선 시험이 공유하는 «오래된 기사 1건이 실린 1장(identity)»짜리 입력."""
+
+    from src.features.composer.tests.test_news_block_channels import _news_fragment
+
+    fragment = _news_fragment("40", _WIRING_STALE_PUBLISHED_ON, _SENTENCE)
+    row = NewsRow(
+        cells=(
+            _WIRING_STALE_PUBLISHED_ON,
+            _PUBLISHER + " · 가나다전자 물류 자동화 확대",
+            _SENTENCE,
+        ),
+        citations=("40",),
+        evidence_texts=(_SENTENCE,),
+    )
+    composed = ComposedReport(
+        sections=tuple(
+            ComposedSection(
+                section_id=section_id,
+                sentences=(),
+                news_rows=(row,) if section_id == "identity" else (),
+            )
+            for section_id in SECTION_IDS
+        )
+    )
+    return composed, (fragment,)
+
+
+def _news_table_from(rendered) -> object:
+    return next(
+        table
+        for section in rendered.sections
+        if section.cell == "identity"
+        for table in section.tables
+    )
+
+
+def test_배선1_render_report_진입점이_기준일을_실제로_전달한다() -> None:
+    """render.py의 ``_news_report_table(section, numbers, as_of_date=as_of_date)``
+
+    배선(``render.py``의 ``news_table = _news_report_table(...)`` 줄)에서
+    ``as_of_date=as_of_date``를 지우면(기본값 ``""``로 빠지면) 이 시험만
+    빨간불이어야 한다.
+    """
+
+    from src.core import news_intake_switch
+    from src.features.composer.render import render_report
+
+    composed, fragments = _wiring_fixture()
+
+    news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(news_intake_switch.NEWS_INTAKE_ENV_NAME, "1")
+        rendered = render_report(
+            "가나다전자", composed, fragments, None, as_of_date=_WIRING_AS_OF_DATE
+        )
+    news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+
+    table = _news_table_from(rendered)
+    assert table.caption == "최근 보도 (보조, 1기사 · 2023년 보도 포함)"
+
+
+def test_배선2_seal_진입점이_기준일을_실제로_전달해_렌더와_일치한다() -> None:
+    """public_manifest.py의 ``_news_table_payload(section, fragment_bindings,
+
+    as_of_date=as_of_date)`` 배선을 지우면 정본 표 캡션이 렌더 캡션과
+    달라져 ``assert_report_matches_public_structure``가
+    ``PublicManifestError``를 던져야 한다.
+    """
+
+    from src.core import news_intake_switch
+    from src.features.composer.constants import DEFAULT_CITATION_STYLE, SECTION_IDS as _SIDS
+    from src.features.composer.public_manifest import (
+        assert_report_matches_public_structure,
+        build_public_structure_seal,
+    )
+    from src.features.composer.render import render_report
+
+    composed, fragments = _wiring_fixture()
+    packet_hashes = tuple(
+        (section_id, f"{index:02d}" * 32) for index, section_id in enumerate(_SIDS, start=1)
+    )
+
+    news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(news_intake_switch.NEWS_INTAKE_ENV_NAME, "1")
+        seal = build_public_structure_seal(
+            composed,
+            fragments,
+            None,
+            filing_meta=None,
+            composition_tables=(),
+            table_presentation="table",
+            company_id="00123456",
+            evidence_generation_sha256="a" * 64,
+            evidence_packet_sha256s=packet_hashes,
+            company_name="가나다전자",
+            corp_type="",
+            generated_at="",
+            as_of_date=_WIRING_AS_OF_DATE,
+            analysis_period="",
+            latest_performance_period="",
+            citation_style=DEFAULT_CITATION_STYLE,
+        )
+        rendered = render_report(
+            "가나다전자",
+            composed,
+            fragments,
+            None,
+            as_of_date=_WIRING_AS_OF_DATE,
+            public_structure_seal=seal,
+            company_id="00123456",
+        )
+    news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+
+    assert_report_matches_public_structure(rendered, seal)  # 예외 없으면 통과
+    assert (
+        _news_table_from(rendered).caption
+        == "최근 보도 (보조, 1기사 · 2023년 보도 포함)"
+    )
+
+
+def test_배선3_shadow_대조_진입점이_기준일을_실제로_전달해_결속으로_본다() -> None:
+    """quality_projection.py의 ``_only_bound_news_tables(..., as_of_date=
+
+    rendered.as_of_date)`` 배선을 지우면(기본값 ``""``로 빠지면) 캡션
+    불일치로 ``has_unbound_public_content``가 ``True``로 바뀌어야 한다.
+    """
+
+    from src.core import news_intake_switch
+    from src.features.composer.quality_projection import (
+        build_generation_quality_candidate,
+    )
+    from src.features.composer.render import render_report
+
+    composed, fragments = _wiring_fixture()
+
+    news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(news_intake_switch.NEWS_INTAKE_ENV_NAME, "1")
+        rendered = render_report(
+            "가나다전자", composed, fragments, None, as_of_date=_WIRING_AS_OF_DATE
+        )
+    news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
+
+    candidate = build_generation_quality_candidate(rendered, composed)
+
+    identity = next(
+        section for section in candidate.sections if section.section_id == "identity"
+    )
+    assert identity.has_unbound_public_content is False
+
+
+# ══════════════════════════════════════════════════════════
+# ⑦ (P2) 로컬 복제 달력 계산이 news_intake 정본과 값이 같은지 대조
+#   (composer는 news_intake를 직접 import할 수 없어 계산을 복제했다 —
+#   news_block._month_boundary의 docstring 참조. 값이 갈리면 composer가
+#   판단하는 「1차 기간창」과 news_intake가 실제로 수집한 기간창이 서로
+#   다른 경계를 쓰게 된다.)
+#
+#   이 시험 파일(composer/tests/*.py)은 test_composer는_news_intake를_
+#   직접_import하지_않는다가 스캔하는 범위 밖이다 — 그 시험은
+#   ``Path(__file__).resolve().parents[1]``(= composer/, tests/ 밖)의
+#   ``*.py``만 훑고 하위 tests/ 폴더는 보지 않는다(비재귀 glob). 이 시험
+#   자체를 실행해 실제로 안 걸리는 것까지 확인했다(아래 보고 참조) —
+#   production 코드는 여전히 news_intake를 import하지 않는다.
+# ══════════════════════════════════════════════════════════
+
+
+def test_로컬_달력_계산이_news_intake_정본과_같은_값을_낸다() -> None:
+    import datetime as dt
+
+    from src.features.composer.news_block import _month_boundary as _composer_boundary  # noqa: SLF001
+    from src.features.news_intake.search_snapshot import (
+        month_boundary as _news_intake_boundary,
+    )
+
+    cases = [
+        # (기준일, 개월) — 윤년 2월 29일, 월말 축소(3/31→2월엔 28·29일),
+        # 연도 경계(1월→작년), 기준값(12개월)까지 훑는다.
+        (dt.date(2026, 9, 11), 12),
+        (dt.date(2026, 9, 11), 24),
+        (dt.date(2026, 9, 11), 36),
+        (dt.date(2026, 1, 15), 1),
+        (dt.date(2024, 3, 31), 1),  # 2024=윤년, 2월은 29일까지만 있다
+        (dt.date(2025, 3, 31), 1),  # 2025=평년, 2월은 28일까지만 있다
+        (dt.date(2024, 2, 29), 12),  # 윤년 2/29 기준 1년 전 = 2023/2/28
+        (dt.date(2026, 12, 31), 12),
+        (dt.date(2000, 1, 1), 12),  # 400으로 나뉘는 윤년 경계
+    ]
+    for as_of, months in cases:
+        assert _composer_boundary(as_of, months) == _news_intake_boundary(
+            as_of, months
+        ), (as_of, months)

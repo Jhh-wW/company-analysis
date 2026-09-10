@@ -1035,3 +1035,407 @@ def test_기계_검증_로그에_문장_본문이_안_들어간다(caplog):
     # 그래도 «무엇이 몇 건 처분됐는지»는 남아야 한다 (진단용 로그의 목적)
     assert "코드 검증 처분" in caplog.text
     assert "인용 미실존 제거 1" in caplog.text
+
+
+# ══════════════════════════════════════════════════════════
+# 8장 «원문 절» 계약과 «자료 부재 단언» 가드의 운영 진입점 배선
+#
+# ★ 시험 안에서 따로 만든 경로가 아니라 `verify_report`(운영 진입점)를 그대로
+#   부른다. 검수 AI가 «참»이라고 답해도 이 두 검사는 따로 걸려야 한다.
+# ══════════════════════════════════════════════════════════
+
+_계약밖_원문 = (
+    "당사는 적정 유동성의 유지를 위하여 주기적인 자금수지 예측과 자금수지 "
+    "관리를 통하여 유동성 위험을 최소화하고 있습니다."
+)
+_부재단언_문장 = (
+    "공식 자료에서 회사의 인재상, 핵심가치 선언, 조직문화를 명시적으로 밝힌 "
+    "내용을 찾을 수 없다."
+)
+
+
+def _모두_참으로_답하는_검수(calls: list[str]):
+    def ask(prompt: str) -> str:
+        calls.append(prompt)
+        numbers = [int(n) for n in _REVIEW_ITEM_NUMBER_RE.findall(prompt)]
+        return json.dumps(
+            {"판정": [{"번호": number, "결과": VERDICT_TRUE, "장": "culture",
+                      "근거": ["7"]} for number in numbers]},
+            ensure_ascii=False,
+        )
+
+    return ask
+
+
+import re as _re  # noqa: E402 - 아래 정규식 하나만 쓰는 지역 import
+
+#: 평면·묶음 검수 프롬프트 양쪽에서 후보 번호만 읽는다.
+_REVIEW_ITEM_NUMBER_RE = _re.compile(r"^\[(\d+)\] \(", _re.MULTILINE)
+
+
+def test_8장_계약_규칙이_본문과_도식_같은_진입점에서_걸린다() -> None:
+    """산문 1문장과 도식 1행이 «같은 사유코드»로 빠진다 — 두 잣대를 만들지 않는다."""
+
+    from src.features.composer.culture_constants import (
+        CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
+    )
+
+    문장 = ComposedSentence(
+        text="회사는 유동성을 관리하는 방식으로 일한다.",
+        citations=("7",),
+        grade=GRADE_CONFIRMED,
+    )
+    행 = FlowRow(cells=("재무 건전성", "유동성 위험 최소화", ""), citations=("7",))
+    draft = ComposedReport(
+        sections=(ComposedSection("culture", (문장,), flow_rows=(행,)),)
+    )
+    fragments = (CollectedFragment("7", "공시", _계약밖_원문),)
+    diagnostics: list[dict] = []
+    calls: list[str] = []
+
+    checked = verify_report(
+        draft, fragments, None, _모두_참으로_답하는_검수(calls),
+        allowed_fragment_ids_by_section={"culture": frozenset({"7"})},
+        diagnostics=diagnostics,
+    )
+
+    culture = checked.sections[0]
+    assert culture.sentences == ()
+    assert culture.flow_rows == ()
+    종류별 = {event["kind"] for event in diagnostics}
+    assert 종류별 == {"본문", "도식"}, f"두 경로 중 한쪽만 걸렸다: {diagnostics}"
+    assert {event["reason_code"] for event in diagnostics} == {
+        CULTURE_SECTION_EVIDENCE_OFFCONTRACT
+    }
+
+
+@pytest.mark.parametrize("grouped", (False, True), ids=("flat", "grouped"))
+def test_인용_없는_해석도_부재단언_검사를_받는다(grouped) -> None:
+    """★ 새는 자리가 바로 «인용 없음»이다.
+
+    의미 검수는 인용 없는 문장을 대조할 자료가 없다는 이유로 통째로 건너뛴다.
+    부재 단언은 그 자리에서 가장 잘 통과한다 — 실측 실행의 두 문장이 정확히
+    그 모양(인용 0개·등급 «해석»)이었다.
+    """
+
+    from src.features.composer.absence_claim_constants import (
+        ABSENCE_CLAIM_UNSUPPORTED,
+    )
+
+    부재단언 = ComposedSentence(
+        text=_부재단언_문장, citations=(), grade=GRADE_INTERPRETED
+    )
+    정상문장 = ComposedSentence(
+        text="회사는 임직원 교육훈련 제도를 운영한다.",
+        citations=("7",),
+        grade=GRADE_CONFIRMED,
+    )
+    draft = ComposedReport(
+        sections=(ComposedSection("culture", (부재단언, 정상문장)),)
+    )
+    fragments = (
+        CollectedFragment(
+            "7", "공시", "당사는 임직원 교육훈련 제도를 운영하고 있습니다."
+        ),
+    )
+    diagnostics: list[dict] = []
+    calls: list[str] = []
+
+    checked = verify_report(
+        draft, fragments, None, _모두_참으로_답하는_검수(calls),
+        allowed_fragment_ids_by_section=(
+            {"culture": frozenset({"7"})} if grouped else None
+        ),
+        diagnostics=diagnostics,
+    )
+
+    texts = [sentence.text for sentence in checked.sections[0].sentences]
+    assert _부재단언_문장 not in texts, "인용이 없다는 이유로 검사를 건너뛰었다"
+    assert 정상문장.text in texts, "음성 대조 — 정상 문장까지 지우면 안 된다"
+    assert [event["reason_code"] for event in diagnostics] == [
+        ABSENCE_CLAIM_UNSUPPORTED
+    ]
+
+
+# ══════════════════════════════════════════════════════════
+# 묶음 진입점의 도식 부재 단언 배선 · 칸 경계 · 이른 반환 조임
+# ══════════════════════════════════════════════════════════
+
+_사람_원문 = "당사는 임직원 교육훈련 제도를 운영하고 인재상을 공시하고 있습니다."
+
+
+def _도식_묶음_판정(cells, source_text=_사람_원문):
+    """묶음 검수 프롬프트가 배정한 «그» 번호·장·인용으로만 참을 답한다."""
+    from src.features.composer.tests.review_evidence_fixture import review_items
+
+    row = FlowRow(cells=tuple(cells), citations=("9",))
+    draft = ComposedReport(
+        sections=(ComposedSection("culture", (), flow_rows=(row,)),)
+    )
+    fragments = (CollectedFragment("9", "공시", source_text),)
+    diagnostics: list[dict] = []
+    calls: list[str] = []
+
+    def ask(prompt: str) -> str:
+        calls.append(prompt)
+        items = review_items(prompt)
+        assert items, "묶음 검수 입력에 후보가 없습니다"
+        return json.dumps(
+            {"판정": [{
+                "번호": item.number,
+                "장": item.section,
+                "근거": [
+                    citation.strip().removeprefix("조각 ").strip()
+                    for citation in item.citations
+                ],
+                "결과": VERDICT_TRUE,
+            } for item in items]},
+            ensure_ascii=False,
+        )
+
+    checked = verify_report(
+        draft, fragments, None, ask,
+        allowed_fragment_ids_by_section={"culture": frozenset({"9"})},
+        diagnostics=diagnostics,
+    )
+    assert len(calls) == 1
+    return checked.sections[0].flow_rows, diagnostics
+
+
+def test_부재_단언을_옮겨_적은_도식행은_묶음_진입점에서도_빠진다() -> None:
+    """★ 두 진입점 중 한쪽만 걸면 그 경로로만 새어 나간다."""
+
+    from src.features.composer.absence_claim_constants import (
+        ABSENCE_CLAIM_UNSUPPORTED,
+    )
+
+    rows, diagnostics = _도식_묶음_판정(
+        ("인재상", "핵심가치 공유", "공식 자료에서 확인할 수 없다")
+    )
+
+    assert rows == ()
+    assert [event["reason_code"] for event in diagnostics] == [
+        ABSENCE_CLAIM_UNSUPPORTED
+    ]
+
+
+def test_묶음_진입점도_칸을_따로_본다() -> None:
+    """지시어와 부재 술어가 서로 다른 칸에 흩어진 정상 행은 남는다."""
+
+    rows, diagnostics = _도식_묶음_판정(
+        ("공식 자료 검토 절차", "분기 점검", "세부 기준을 명시하지 않았다")
+    )
+
+    assert len(rows) == 1, f"정상 행이 칸 결합 때문에 지워졌다: {diagnostics}"
+
+
+def test_장_밖_인용_제외는_검수_대상이_없어도_되살아나지_않는다() -> None:
+    """★ 범위 밖 변경을 «의도한 조임»으로 못 박는다 (독립 검토 P2-4).
+
+    묶음 검수는 인용이 장 밖인 문장을 검수 «전»에 뺀다. 그런데 그렇게 빼고
+    나서 검수할 항목이 하나도 남지 않으면, 예전 이른 반환은 묶음을 통째로
+    되돌려 그 문장을 «되살렸다». 정상 경로는 되살리지 않는다 — 같은 입력이
+    검수 항목의 유무에 따라 다른 결과를 내던 자리다.
+    """
+
+    장밖_문장 = ComposedSentence(
+        text="이 문장은 다른 장의 조각을 인용한다.",
+        citations=("99",),
+        grade=GRADE_CONFIRMED,
+    )
+    draft = ComposedReport(
+        sections=(ComposedSection("culture", (장밖_문장,)),)
+    )
+    fragments = (
+        CollectedFragment("9", "공시", _사람_원문),
+        CollectedFragment("99", "공시", "다른 장 조각이다."),
+    )
+    calls: list[str] = []
+
+    checked = verify_report(
+        draft, fragments, None, _모두_참으로_답하는_검수(calls),
+        allowed_fragment_ids_by_section={"culture": frozenset({"9"})},
+    )
+
+    assert checked.sections[0].sentences == (), (
+        "검수 대상이 없다는 이유로 장 밖 인용 문장이 되살아났다"
+    )
+
+
+# ══════════════════════════════════════════════════════════
+# 배율 어휘 · 실적표 원값 (2026-09-11 인텍에프에이 실측)
+# ══════════════════════════════════════════════════════════
+
+
+def test_천원과_백만원도_단위_붙은_수로_읽는다():
+    """전에는 배율을 «조·억·만» 세 글자로만 읽어 공시 표의 주력 단위 둘이
+    통째로 관문 밖이었다 (보관 공시 29건: 어느 세는 방법으로도 백만원이 26개
+    문서 이상, 천원이 13개 문서 이상 — grounding_constants 주석 참고)."""
+    for text, expected in (
+        ("15,191,230천원", 15_191_230_000),
+        ("1,257백만원", 1_257_000_000),
+        ("4,596,000천원", 4_596_000_000),
+    ):
+        numbers = _extract_numbers(text)
+        assert len(numbers) == 1, text
+        assert numbers[0].unit_marked is True, text
+        assert numbers[0].token * numbers[0].scale == expected, text
+
+
+def test_천만원과_천억원의_배율을_긴_어휘부터_읽는다():
+    """한 글자씩 읽으면 「3천만원」이 3,000으로 읽혀 값이 1/10,000이 된다."""
+    for text, expected in (
+        ("3천만원", 30_000_000),
+        ("1천억원", 100_000_000_000),
+        ("2십억원", 2_000_000_000),
+        ("5만원", 50_000),
+    ):
+        numbers = _extract_numbers(text)
+        assert len(numbers) == 1, text
+        assert numbers[0].token * numbers[0].scale == expected, text
+
+
+def _rounded_table() -> PerformanceTable:
+    """이 실행의 4장 표 그대로 — 억원 표시값이 원값의 자리수를 지운 표."""
+    return PerformanceTable(
+        caption="전자공시 최근 두 사업연도 별도 주요 실적 (결산월: 십이월, 단위: 억원)",
+        headers=("사업연도", "매출액", "영업이익", "당기순이익"),
+        rows=(("2025", "274", "4", "1"), ("2024", "258", "6", "4")),
+        unit="억원",
+        cite="조각 1·사업내용",
+        raw_rows=(
+            ("2025", "27,351,053,389", "436,660,956", "82,552,618"),
+            ("2024", "25,811,194,484", "583,314,634", "366,016,342"),
+        ),
+        scale_divisor="100000000",
+        raw_unit="원",
+        unit_dimension="currency",
+    )
+
+
+def test_실적표_결속_원문은_표시값과_원값을_함께_싣는다():
+    """표시값 줄은 그대로 두고 원값 줄을 «더한다» — 빼면 기존 「4억원」 인용이 깨진다."""
+    from src.features.composer.verify import _table_grounding_source
+
+    source = _table_grounding_source(_rounded_table())
+    lines = source.split("\n")
+
+    assert "2025년 | 당기순이익 | 1억원" in lines
+    assert "2025년 | 당기순이익 | 82,552,618원 (원값)" in lines
+    assert "2024년 | 당기순이익 | 4억원" in lines
+    assert "2024년 | 당기순이익 | 366,016,342원 (원값)" in lines
+    # 지표 3개 × 사업연도 2개 × (표시값 + 원값) = 12줄
+    assert len(lines) == 12
+
+
+def test_원값이_없는_실적표는_결속_원문이_그대로다():
+    """raw_rows가 없는 표는 바이트가 바뀌지 않는다 (회귀 불변)."""
+    from src.features.composer.verify import _table_grounding_source
+
+    assert _table_grounding_source(_table()) == "매출액 | 2022년 | 1,500억원\n" \
+        "매출액 | 2023년 | 1,600억원\n매출액 | 2024년 | 1,683억원"
+
+
+def test_전치된_실적표의_행_머리_연도도_기간으로_읽힌다():
+    """행 머리가 연도인 표에서 맨 「2025」는 날짜 표기가 아니라 기간으로 안 읽혔다.
+
+    그래서 「2025년 …」이라고 쓴 후보의 기간이 원문 기간(없음)과 어긋나
+    표시값·원값 모두 결속에 실패했다 — 배율을 넓혀도 이 줄이 없으면 4장은 그대로 빈다.
+    """
+    from src.features.composer.grounding import grounding_problem
+    from src.features.composer.verify import _table_grounding_source
+
+    source = _table_grounding_source(_rounded_table())
+    for value, quote in (
+        ("82,552,618원", "2025년 | 당기순이익 | 82,552,618원"),
+        ("1억원", "2025년 | 당기순이익 | 1억원"),
+    ):
+        text = f"2025년 당기순이익은 {value}으로 집계됐다."
+        proof = {"검증근거": _numeric_grounding(
+            expression=f"당기순이익은 {value}",
+            metric="당기순이익",
+            source_id=TABLE_SOURCE_ID,
+            quote=quote,
+            source_value=value,
+        )}
+        assert grounding_problem(text, {TABLE_SOURCE_ID: source}, proof) == "", value
+
+
+def _past_changes_report(sentences: tuple[ComposedSentence, ...]) -> ComposedReport:
+    return ComposedReport(
+        sections=(
+            ComposedSection(section_id="past_changes", sentences=sentences, notice=""),
+        ),
+        summary=(),
+    )
+
+
+def test_실적표_원값이_검수_프롬프트에도_실린다():
+    """결속에 쓰는 글과 검수 AI가 보는 글이 갈리면 안 된다 — 실제 ask 인자를 단정한다."""
+    report = _past_changes_report(
+        (_sentence("2025년 매출액은 274억원이다.", ("1",)),)
+    )
+    ask = _FakeVerifier([_verdict_json({1: VERDICT_TRUE})])
+
+    verify_report(report, _raw_fragments(), _rounded_table(), ask)
+
+    assert ask.review_prompts, "검수 프롬프트가 만들어지지 않았다"
+    prompt = ask.review_prompts[0]
+    # 결속 원문 줄과 검수 AI가 보는 표 둘 다에 원값이 실려야 한다.
+    assert "82,552,618원 (원값)" in prompt
+    assert '"raw_rows"' in prompt
+    assert "366,016,342" in prompt
+
+
+def test_검수_지침이_수급_방향_역전과_합계_귀속을_금지한다():
+    """생산 상수를 import 하지 않고 실제 프롬프트 글자를 단정한다."""
+    report = _past_changes_report(
+        (_sentence("2025년 매출액은 274억원이다.", ("1",)),)
+    )
+    ask = _FakeVerifier([_verdict_json({1: VERDICT_TRUE})])
+
+    verify_report(report, _raw_fragments(), _rounded_table(), ask)
+
+    prompt = ask.review_prompts[0]
+    assert "금액·수량은 값이 같아도 주체와 수급 방향이 다르면 «거짓»이다." in prompt
+    assert "«제공받은·수령한·차입한·담보로 제공받은»" in prompt
+    assert "«제공한·설정한·대여한·담보로 제공한»" in prompt
+    assert "전체 합계를 한 거래처에 귀속시키면 거짓이다." in prompt
+
+
+def test_배율_어휘_목록과_배율표의_열쇠가_같고_긴_어휘가_앞선다():
+    """어휘만 더하고 배율표에 안 더하면 «조용히 배율 1»로 읽혀 값이 틀린 채 통과한다.
+
+    ★ 기대값은 생산 배율표를 베끼지 않고 한글 수사 구성으로 «따로» 구한다 —
+      배율표를 그대로 읽어 비교하면 값이 틀려도 초록불이 되는 순환 검증이 된다.
+    ⚠️ 정규식 교대는 먼저 적힌 것을 고른다. 앞선 어휘가 뒤 어휘의 앞부분이면
+      「천만원」이 「천」으로 읽혀 값이 1/10,000이 된다.
+    """
+    from decimal import Decimal
+
+    from src.features.composer.grounding_constants import (
+        MAGNITUDE_SCALES,
+        MAGNITUDE_TOKENS,
+    )
+
+    syllable_scale = {
+        "십": Decimal(10) ** 1,
+        "백": Decimal(10) ** 2,
+        "천": Decimal(10) ** 3,
+        "만": Decimal(10) ** 4,
+        "억": Decimal(10) ** 8,
+        "조": Decimal(10) ** 12,
+    }
+    assert set(MAGNITUDE_TOKENS) == set(MAGNITUDE_SCALES)
+    assert len(MAGNITUDE_TOKENS) == len(set(MAGNITUDE_TOKENS))
+    for token in MAGNITUDE_TOKENS:
+        expected = Decimal(1)
+        for syllable in token:
+            assert syllable in syllable_scale, token
+            expected *= syllable_scale[syllable]
+        assert MAGNITUDE_SCALES[token] == expected, token
+    for earlier in range(len(MAGNITUDE_TOKENS)):
+        for later in range(earlier + 1, len(MAGNITUDE_TOKENS)):
+            assert not MAGNITUDE_TOKENS[later].startswith(MAGNITUDE_TOKENS[earlier]), (
+                MAGNITUDE_TOKENS[earlier], MAGNITUDE_TOKENS[later]
+            )

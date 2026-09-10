@@ -597,6 +597,11 @@ def test_스위치OFF면_3장_부족과_뉴스미조사_안내를_포함한_바�
     assert measured["after"] == measured["before"]
     assert measured["step"] is None
     # 2026-09-08: 회사 사실은 그대로 두고 뉴스 미조사 안내 한 줄만 골든에 추가했다.
+    # 2026-09-11: 골든에서 «단 한 자리»만 바뀌었다 — 세 번째 핵심 요약이
+    #   1장 «첫» 문장 축자 복제에서 1장 «둘째» 문장으로 옮겨 갔다. 요약 보충이
+    #   장마다 첫 문장부터 집던 것이 본문 축자 복제의 생산자였고, 그 순서를
+    #   고친 결과다. 나머지 필드는 전부 그대로임을 필드별 대조로 확인한 뒤
+    #   골든을 다시 만들었다(회사 사실·문장 수·안내문 변화 없음).
     actual = _stable_result_bytes(result)
     golden = json.loads(_GOLDEN_FIXTURE.read_text(encoding="utf-8"))
     assert golden["byte_count"] == len(actual)

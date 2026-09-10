@@ -97,14 +97,22 @@ from src.features.composer.future_plan_guard import (
 from src.features.composer.direct_support_constants import (
     FLOW_CELL_JOIN, RELATION_REVIEW_GUIDE,
 )
+from src.features.composer.portfolio_name_constants import (
+    PORTFOLIO_NAME_BRACKET_SPAN_RE,
+    PORTFOLIO_NAME_ENTITY_MARKERS,
+    PORTFOLIO_NAME_MIN_PART_CHARS,
+)
 from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
 from src.features.composer.scope_guard import flow_scope_problem
+from src.features.composer.absence_claim_guard import absence_claim_problem
 from src.features.composer.culture_guard import (
-    culture_accounting_flow_problem, culture_flow_problem, culture_problem,
+    culture_accounting_flow_problem, culture_financial_risk_goal_problem,
+    culture_flow_problem, culture_problem, culture_section_evidence_problem,
 )
 from src.features.composer.verify import (
     _SentenceNumber,
     _append_grounding_diagnostic,
+    cellwise_problem,
     _evidence_number_pools,
     _extract_numbers,
     _number_found,
@@ -186,10 +194,62 @@ def _compact_surface(value: str) -> str:
     return "".join(compact)
 
 
+def _normalize_before_split(value: str) -> str:
+    """가르기 «전»에 호환문자를 펼친다.
+
+    ★ 왜 순서가 중요한가 (2026-09-11 재검토 실측) — 「㈜」는 NFKC로 「(주)」가
+      된다. 가르기를 정규화 «전»에 하면 「㈜수퍼톤」은 안 갈리고
+      「(주)수퍼톤」은 갈려, 같은 뜻의 두 표기가 다른 판정을 받았다.
+    """
+
+    return unicodedata.normalize("NFKC", str(value or ""))
+
+
+def _bracket_free_surface(value: str) -> str:
+    """괄호 «구간»을 통째로 지운 나머지의 압축 표면.
+
+    ★ «이름»에만 쓴다. 근거 글에 쓰면 지운 자리에서 앞뒤가 붙어 원문에 없던
+      이음매가 생긴다(`portfolio_name_is_grounded` ②의 설명).
+    ★ 쓰는 이유는 꼬리를 따로 재지 않기 위해서다 — 「기타(A/S) 등」을 가르면
+      꼬리 「등」이 한 글자라 정당한 이름이 막힌다. 머리는 「기타 등」 하나로 본다.
+    """
+
+    normalized = _normalize_before_split(value)
+    return _compact_surface(PORTFOLIO_NAME_BRACKET_SPAN_RE.sub(" ", normalized))
+
+
+def _bracketed_surfaces(value: str) -> tuple[str, ...]:
+    """괄호 «안»에 든 부분들의 압축 표면."""
+
+    return tuple(
+        compact
+        for match in PORTFOLIO_NAME_BRACKET_SPAN_RE.finditer(
+            _normalize_before_split(value)
+        )
+        if (compact := _compact_surface(match.group(1)))
+    )
+
+
+def _compact_surfaces(texts: Sequence[str]) -> tuple[str, ...]:
+    """근거 글들을 압축 표면으로 바꾼다. 빈 글은 비교 대상에서 뺀다."""
+
+    return tuple(
+        compact for text in texts if (compact := _compact_surface(text))
+    )
+
+
 def portfolio_name_is_grounded(
-    name: str, source_texts: Sequence[str]
+    name: str,
+    source_texts: Sequence[str],
+    document_texts: Optional[Sequence[str]] = None,
 ) -> bool:
-    """3장 이름이 인용한 조각 하나의 표면 부분문자열인지 확인한다.
+    """이름의 «머리»는 인용 조각에서, «괄호 안 설명»은 같은 문서에서 확인한다.
+
+    Args:
+        name: 3장 이름 칸.
+        source_texts: 그 줄이 «인용한» 조각 원문들.
+        document_texts: 인용 조각과 «같은 문서»에 속한 조각 원문들. 생략하면
+            인용 조각만 본다(옛 경로·이름 표는 조각 하나만 넘긴다).
 
     ★ 공개 함수인 이유 — 3장에 «결정적으로» 덧붙이는 이름 표
       (`portfolio_name_table.py`)도 같은 잣대로 자기 이름을 검사해야 한다.
@@ -197,17 +257,76 @@ def portfolio_name_is_grounded(
       칸이 생긴다.
     ★ 빈 이름에 ``True``를 주는 것은 «검사 대상이 아니다»라는 뜻이다.
       「이름이 있어야 한다」는 요구는 부르는 쪽이 따로 확인한다.
+
+    ★ 머리 부분은 «완화하지 않는다» (2026-09-11 독립 검토) — 괄호 앞 본체는
+      종전대로 인용한 조각 하나에 글자 그대로 있어야 한다. 그러지 않으면 이름에
+      괄호를 넣는 것만으로 「조각 경계에 걸친 조합」이 통과해, 「카카오」+
+      「T를 운영한다」를 막던 방어가 「카카오(T)」로 그대로 뚫린다.
+    ★ 완화는 «괄호 안 설명»에만 준다 (2026-09-11 소규모 회사 실측) — 작가는
+      이름을 ``분류(원문 표현)`` 모양으로 적는데, 실측 이름
+      「제품(전기전자 제품 및 산업용 장비)」은 머리 「제품」이 인용 조각에,
+      괄호 안이 같은 공시의 다른 조각에 있었다. 그래서 카드가 통째로 버려졌다.
+    ★ 어느 경우에도 근거 글을 «이어 붙이지 않는다». 각 부분은 하나의 글 안에
+      그대로 있어야 한다.
+    ★ 괄호 «안» 부분은 ``PORTFOLIO_NAME_MIN_PART_CHARS`` 이상이어야 한다. 한
+      글자 부분은 웬만한 문서 어디에나 있어서 「카카오(T)」·「제품(1)」처럼
+      회사를 전혀 못 가리는 이름을 통과시킨다. 예외는 법인격 표기
+      (``PORTFOLIO_NAME_ENTITY_MARKERS``)뿐이고, 그것도 «그 문서가 실제로
+      괄호 안에 그 표기를 쓸 때»만 인정한다 — 그러지 않으면 「제품(주)」처럼
+      아무 이름에나 법인격 표기를 붙여 하한을 우회할 수 있다.
+    ★ 머리에도 같은 하한을 걸되, 괄호 밖 토막을 «따로» 재지는 않는다. 따로
+      재면 「기타(A/S) 등」의 꼬리 「등」이 한 글자라 정당한 이름이 통째로
+      막힌다. 머리는 괄호 안을 지운 나머지 «하나»로 본다.
     """
 
     if not name.strip():
         return True
-    compact_name = _compact_surface(name)
-    if not compact_name:
-        return False
-    return any(
-        compact_name in _compact_surface(source_text)
-        for source_text in source_texts
+    cited = _compact_surfaces(source_texts)
+    described = cited if document_texts is None else _compact_surfaces(
+        document_texts
     )
+
+    # ① 빠른 길 — 이름 전체가 인용 조각에 글자 그대로 있으면 더 볼 것이 없다.
+    whole = _compact_surface(name)
+    if not whole:
+        return False
+    if any(whole in source for source in cited):
+        return True
+
+    # ② 머리 — 이름에서만 괄호 안을 지우고, 근거 글은 «있는 그대로» 본다.
+    #
+    # ★ 근거 쪽에서도 지우면 원문에 없던 이음매가 생긴다 (2026-09-11 재검토
+    #   실측). 지운 자리는 공백이 되고 압축에서 공백이 사라지므로, 괄호를
+    #   사이에 두고 떨어져 있던 앞뒤가 붙는다 — 원문 「제품(단위:천원)매출」이
+    #   「제품매출」이라는 이름을 통과시켰다. 공시 표는 「매출액(단위:천원)」
+    #   같은 머리말을 늘 쓰므로 흔한 모양이다.
+    # ★ 이름 쪽만 지우면 「기타(A/S) 등」의 꼬리 「등」을 따로 재지 않으면서도
+    #   근거는 글자 그대로 남는다. 그런 이름은 대개 ①에서 이미 통과한다.
+    # ★ 머리에도 같은 길이 하한을 건다 (2026-09-11 재검토) — 한 글자 머리는
+    #   웬만한 문서 어디에나 있어서 회사를 못 가린다. 「제(전기전자 제품)」
+    #   처럼 괄호 안에만 실물이 있는 이름이 통과하던 자리다. 이름 전체가
+    #   원문에 축자로 있는 경우는 ①에서 이미 통과했으므로, 이 하한 때문에
+    #   정상 이름을 잃지 않는다.
+    head = _bracket_free_surface(name)
+    if len(head) < PORTFOLIO_NAME_MIN_PART_CHARS:
+        return False
+    if not any(head in source for source in cited):
+        return False
+
+    # ③ 괄호 안 설명 — 같은 문서 어디든 글자 그대로.
+    marker_spans = {
+        span
+        for text in (source_texts if document_texts is None else document_texts)
+        for span in _bracketed_surfaces(text)
+    }
+    for part in _bracketed_surfaces(name):
+        if len(part) < PORTFOLIO_NAME_MIN_PART_CHARS and not (
+            part in PORTFOLIO_NAME_ENTITY_MARKERS and part in marker_spans
+        ):
+            return False
+        if not any(part in source for source in described):
+            return False
+    return True
 
 
 def _numbers_are_grounded(cell: str, source_text: str) -> Optional[str]:
@@ -271,6 +390,72 @@ def _source_texts(row: FlowRow, texts: Mapping[str, str]) -> tuple[str, ...]:
     )
 
 
+def _document_key(fragment: CollectedFragment) -> str:
+    """조각이 속한 «문서»를 가리키는 열쇠. 모르면 빈 문자열."""
+
+    return (
+        str(getattr(fragment, "document_identity", "") or "").strip()
+        or str(getattr(fragment, "source_document_id", "") or "").strip()
+    )
+
+
+def _document_scoped_texts(
+    fragments: Sequence[CollectedFragment],
+) -> dict[str, tuple[str, ...]]:
+    """조각 id → «같은 문서에 속한» 조각 원문들.
+
+    ★ 왜 인용 조각만으로는 부족한가 (2026-09-11 실측) — 공시 하나에서 잘린
+      조각들은 같은 문서인데도 서로를 못 본다. 제품명은 12,901자 부근, 손익
+      계산서는 7,057자 부근이라 5,844자 떨어져 서로 다른 조각이 됐고, 이름의
+      한 부분이 «인용하지 않은 같은 문서 조각»에만 있어 카드가 버려졌다.
+
+    ★ 문서 신원을 모르는 조각(legacy SHADOW)은 «자기 원문만» 본다. 신원이
+      없다고 전체를 한 문서로 뭉치면, 서로 다른 공시에서 이름을 빌려오는
+      느슨한 판정이 옛 경로에 조용히 생긴다.
+    """
+
+    by_document: dict[str, list[str]] = {}
+    for fragment in fragments:
+        key = _document_key(fragment)
+        if key:
+            by_document.setdefault(key, []).append(fragment.text)
+    scoped: dict[str, tuple[str, ...]] = {}
+    for fragment in fragments:
+        key = _document_key(fragment)
+        scoped[str(fragment.fragment_id)] = (
+            tuple(by_document[key]) if key else (fragment.text,)
+        )
+    return scoped
+
+
+def _name_source_texts(
+    row: FlowRow,
+    texts: Mapping[str, str],
+    document_texts: Mapping[str, Sequence[str]],
+) -> tuple[str, ...]:
+    """이름의 «괄호 안 설명»에 댈 근거 글 — 인용 조각과 같은 문서의 조각들.
+
+    조각을 이어 붙이지 않으므로 각 글은 따로 남긴다. 같은 글이 두 인용에서
+    겹쳐 들어오면 한 번만 남겨 비교 횟수를 늘리지 않는다.
+
+    ★ 머리 부분은 이 넓힌 집합을 쓰지 않는다 — 인용 조각만 본다
+      (`portfolio_name_is_grounded`).
+    """
+
+    collected: list[str] = []
+    seen: set[str] = set()
+    for citation in row.citations:
+        key = str(citation).strip()
+        candidates = document_texts.get(key)
+        if candidates is None:
+            candidates = (texts.get(key, ""),)
+        for text in candidates:
+            if text and text not in seen:
+                seen.add(text)
+                collected.append(text)
+    return tuple(collected)
+
+
 def _source_text(row: FlowRow, texts: Mapping[str, str]) -> str:
     return " ".join(_source_texts(row, texts))
 
@@ -281,15 +466,28 @@ def _source_text(row: FlowRow, texts: Mapping[str, str]) -> str:
 
 
 def _drop_ungrounded_portfolio_rows(
-    rows: Sequence[FlowRow], texts: Mapping[str, str]
+    rows: Sequence[FlowRow],
+    texts: Mapping[str, str],
+    document_texts: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> tuple[tuple[FlowRow, ...], list[str]]:
-    """대상을 식별할 이름이 없는 카드만 제외하고 정상 카드·본문은 보존한다."""
+    """대상을 식별할 이름이 없는 카드만 제외하고 정상 카드·본문은 보존한다.
+
+    ``document_texts``를 주면 이름의 «괄호 안 설명»을 인용 조각과 같은 문서의
+    조각들에도 대본다. 머리 부분은 어느 경우에도 인용 조각만 본다. 주지 않으면
+    종전처럼 전부 인용 조각만 본다 — 수는 이 넓힘을 쓰지 않으므로
+    (`_drop_invented_numbers`) 잣대가 갈리지 않게 인자를 나눈다.
+    """
 
     grounded: list[FlowRow] = []
     rejected: list[str] = []
+    scoped: Mapping[str, Sequence[str]] = document_texts or {}
     for row in rows:
         name = row.cells[0] if row.cells else ""
-        if name.strip() and portfolio_name_is_grounded(name, _source_texts(row, texts)):
+        if name.strip() and portfolio_name_is_grounded(
+            name,
+            _source_texts(row, texts),
+            _name_source_texts(row, texts, scoped),
+        ):
             grounded.append(row)
             continue
         rejected.append(
@@ -584,7 +782,13 @@ def _review_rows(
         section_id = owner[number]
         if result == VERDICT_TRUE and number not in grounding_problems:
             sources = candidates[number][1]
-            flow_problem = flow_scope_problem(row.cells, sources)
+            # ★ 자료 부재 단언은 장과 무관하다 — 문장에서 막은 거짓말이 칸으로
+            #   옮겨 적히면 그대로 공개되므로 여기서도 같은 사유코드로 건다.
+            # ⚠️ 칸마다 «따로» 건다 — 묶음 검수 경로와 같은 이유·같은 함수다.
+            flow_problem = (
+                cellwise_problem(row.cells, absence_claim_problem)
+                or flow_scope_problem(row.cells, sources)
+            )
             if not flow_problem and section_id == CHALLENGE_FLOW_SECTION_ID:
                 # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 앞의 검사가
                 # 「비었는가」만 보므로, 채워졌지만 원문에 없는 말은 여기서만
@@ -595,10 +799,25 @@ def _review_rows(
             if not flow_problem and section_id == "culture":
                 # 축약된 칸은 원문을 줄여 적어 산문 검사의 세 표지 결합에 걸리지
                 # 않는다. 그 행이 «인용한 원문»의 순수 회계 절과 결속됐을 때만 막는다.
+                # ★ 재무위험 «규정» 규칙과 원문 절 계약을 도식에도 건다. 예전에는
+                #   본문에만 걸려 있어서 산문에서 빠진 재무 서술이 표의 칸으로
+                #   옮겨 적히면 그대로 통과했다 — 같은 보고서 안의 두 잣대였다.
+                # ⚠️ 새로 건 두 검사는 칸마다 «따로» 건다(cellwise_problem
+                #   머리말). 기존 culture_problem 은 이 커밋 이전부터 이어
+                #   붙인 문자열을 쓰던 계약이라 그대로 둔다.
                 flow_problem = (
                     culture_flow_problem(row.cells, sources)
                     or culture_accounting_flow_problem(row.cells, sources)
-                    or culture_problem(" ; ".join(row.cells), sources)
+                    or culture_problem(FLOW_CELL_JOIN.join(row.cells), sources)
+                    or cellwise_problem(
+                        row.cells, culture_financial_risk_goal_problem
+                    )
+                    or cellwise_problem(
+                        row.cells,
+                        lambda cell: culture_section_evidence_problem(
+                            cell, sources
+                        ),
+                    )
                 )
             # 6장 성장 계획 표만 미래 근거를 결속한다 — 이 장의 산문과 다른 장의
             # 도식은 그대로 기존 검수만 거친다.
@@ -662,7 +881,9 @@ def check_diagram_numbers(
             continue
         rows = section.flow_rows
         if section.section_id == PORTFOLIO_TABLE_SECTION_ID:
-            rows, rejected = _drop_ungrounded_portfolio_rows(rows, texts)
+            rows, rejected = _drop_ungrounded_portfolio_rows(
+                rows, texts, _document_scoped_texts(fragments)
+            )
             problems.extend(
                 f"[{section.section_id}] {reason}" for reason in rejected
             )

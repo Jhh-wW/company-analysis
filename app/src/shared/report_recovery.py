@@ -48,6 +48,38 @@ MAX_TOTAL_AI_CALLS: Final[int] = (
     + SUPPLEMENT_REVIEW_CALLS
 )
 
+# 본문 검수 «뒤»에 반드시 남아 있어야 하는 호출. 하나라도 못 부르면 보고서가
+# 「도식 없음 + 본문 재활용 요약」으로 조용히 줄어든다(2026-09-10 실측).
+DIAGRAM_REVIEW_CALLS: Final[int] = 1
+SUMMARY_WRITER_CALLS: Final[int] = 1
+SUMMARY_REVIEW_CALLS: Final[int] = 1
+
+# ⚠️ 이 값은 «파싱 재요청을 포함하지 않은 최소치»다 (독립 검토 지적).
+#   세 단계는 각자 응답을 못 읽으면 1회씩 더 부른다
+#   (도식 `composer/diagram_check.py`, 요약 작성 `composer/logic.py`,
+#    요약 검수 `composer/verify.py` — 모두 PARSE_RETRY_LIMIT = 1).
+#   즉 최악은 6회이고, 3으로는 «본문 검수가 재요청을 한 번 쓴» 실행에서
+#   요약 검수가 여전히 굶을 수 있다(그때 진단에 `검수한도도달=True`가 남는다).
+#   그래도 6으로 올리지 않는다 — 뉴스 몫이 5에서 2로 급감해 보도 근거가
+#   먼저 사라지기 때문이다. 재요청은 «드물게 일어나는 일»이라는 전제 위에
+#   서 있는 값이므로, `검수한도도달`·「의미 검수 불능」 발생 빈도를 실행
+#   기록으로 계속 세어 이 전제가 유지되는지 확인한다.
+MANDATORY_TAIL_AI_CALLS: Final[int] = (
+    DIAGRAM_REVIEW_CALLS + SUMMARY_WRITER_CALLS + SUMMARY_REVIEW_CALLS
+)
+
+# 재검수(재작성문을 다시 판정) 1회. 재작성만 하고 이걸 못 부르면 그 재작성은
+# 판정 없이 버려진다 — 재작성을 시작하기 전에 이 몫까지 남아 있어야 한다.
+REWRITE_RECHECK_CALLS: Final[int] = 1
+
+# 본문 «앞»에서 도는 단계(뉴스 등)가 남겨야 하는 최소 몫.
+# ★ 보충(supplement) 몫이 아니라 «필수 단계»에서 유도한다. 예전에는
+#   MAX_TOTAL_AI_CALLS(보충 계산식)를 그대로 썼고 두 값이 우연히 같아
+#   맞아 보였다.
+MANDATORY_REPORT_AI_CALLS: Final[int] = (
+    PRIMARY_WRITER_CALLS + PRIMARY_REVIEW_CALLS + MANDATORY_TAIL_AI_CALLS
+)
+
 
 class RecoveryAction(str, Enum):
     """오케스트레이터가 다음에 할 수 있는 닫힌 행동."""
@@ -502,6 +534,9 @@ __all__ = [
     "MAX_SUPPLEMENT_SECTIONS",
     "QUALITY_DERIVED_STOP_REASON_CODES",
     "MAX_TOTAL_AI_CALLS",
+    "MANDATORY_TAIL_AI_CALLS",
+    "MANDATORY_REPORT_AI_CALLS",
+    "REWRITE_RECHECK_CALLS",
     "PRIMARY_AI_CALLS",
     "PRIMARY_REVIEW_CALLS",
     "PRIMARY_WRITER_CALLS",

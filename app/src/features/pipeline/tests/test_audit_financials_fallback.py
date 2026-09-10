@@ -121,9 +121,12 @@ def test_API_표가_있으면_감사보고서_파서를_부르지_않는다(
 def test_API가_비면_감사보고서_2개년_표와_전용_원문_조각을_만든다() -> None:
     frags, table, steps = _fallback()
 
+    # 2026-09-11 자리수 규칙 갱신 — 이 표의 가장 작은 값 21.66억이 100억 미만이라
+    # 소수 한 자리를 쓴다. 정수로 찍으면 -23.8과 -24.0이 둘 다 「-24」가 되어
+    # 두 해의 차이가 표에서 사라진다.
     assert table.rows == [
-        ["2025", "43", "-24", "-22"],
-        ["2024", "29", "-24", "-33"],
+        ["2025", "42.7", "-23.8", "-21.7"],
+        ["2024", "28.7", "-24.0", "-33.1"],
     ]
     assert table.caption.count("단위: 억원") == 1
     assert "최근 두 사업연도" in table.caption
@@ -139,9 +142,9 @@ def test_API가_비면_감사보고서_2개년_표와_전용_원문_조각을_�
     metrics = cover_metrics(SimpleNamespace(sections=[SimpleNamespace(tables=[table])]))
     assert metrics
     assert [(item.label, item.value) for item in metrics.items] == [
-        ("매출액", "43"),
-        ("영업이익", "-24"),
-        ("당기순이익", "-22"),
+        ("매출액", "42.7"),
+        ("영업이익", "-23.8"),
+        ("당기순이익", "-21.7"),
     ]
     assert metrics.cite == table.cite
 

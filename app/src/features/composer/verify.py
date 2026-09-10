@@ -29,10 +29,12 @@ from __future__ import annotations
 from src.features.composer.news_constants import NEWS_REVIEW_GUIDE
 from src.features.composer.news_usage import attribution_prefix, news_metadata
 from src.features.composer.news_block import _is_news_fragment
+from src.features.composer.absence_claim_guard import absence_claim_problem
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_accounting_policy_problem,
     culture_financial_risk_goal_problem,
     culture_flow_problem, culture_problem,
+    culture_section_evidence_problem,
 )
 from src.features.composer.prose_own_source import (
     prose_own_source_problem,
@@ -105,9 +107,13 @@ from src.features.composer.grounding import (
 )
 from src.features.composer.grounding_constants import (
     GROUNDING_GUIDE,
+    MAGNITUDE_ALTERNATION,
+    MAGNITUDE_SCALES,
+    MAGNITUDE_TOKENS,
     REVIEW_GROUNDING_REJECTED,
     GROUNDING_SOURCE_FIELD,
     NUMERIC_KEY,
+    TABLE_RAW_VALUE_ROW_SUFFIX,
     TABLE_SOURCE_ID,
 )
 from src.features.composer.logic import (
@@ -190,6 +196,78 @@ def _append_grounding_diagnostic(
             ),
         }
     )
+
+
+def _absence_claim_rejected(
+    sentence: ComposedSentence,
+    *,
+    section_id: str,
+    kind: str,
+    diagnostics: Optional[list[dict]],
+) -> bool:
+    """자료 부재를 단언한 문장인가 — 맞으면 진단을 남기고 참을 돌려준다.
+
+    ★ 이 검사는 «인용 유무와 무관하게» 돌아야 한다. 의미 검수는 인용 없는
+      문장을 대조할 자료가 없다는 이유로 통째로 건너뛰는데, 부재 단언은
+      바로 그 자리에서 가장 잘 통과한다(실측: 인용 0개·등급 «해석»인
+      「공식 자료에서 … 찾을 수 없다」 두 문장이 그대로 공개됐다).
+    """
+
+    problem = absence_claim_problem(sentence.text)
+    if not problem:
+        return False
+    logger.warning("의미 근거 검증: %s, 장 %s 문장 공개 제외", problem, section_id)
+    _append_grounding_diagnostic(
+        diagnostics,
+        section_id=section_id,
+        kind=kind,
+        reason_code=problem,
+        candidate_text=sentence.text,
+        sources={},
+    )
+    return True
+
+
+def _groups_without_positions(
+    groups: Sequence[Sequence[ComposedSentence]],
+    rejected: set[tuple[int, int]],
+) -> list[list[ComposedSentence]]:
+    """검수 «전»에 제외가 확정된 자리만 빼고 묶음을 그대로 되돌린다."""
+
+    return [
+        [
+            sentence
+            for sentence_index, sentence in enumerate(group)
+            if (group_index, sentence_index) not in rejected
+        ]
+        for group_index, group in enumerate(groups)
+    ]
+
+
+def cellwise_problem(
+    cells: Sequence[str], predicate: Callable[[str], str]
+) -> str:
+    """도식 칸을 «칸마다 따로» 검사하고 첫 사유를 돌려준다.
+
+    ★ 왜 필요한가 (실측) — 칸을 이어 붙이는 구분자 `" ; "` 는 절 분리 정규식
+      `[.!?。\\n]+` 에 걸리지 않는다. 그래서 세 칸이 «한 절»이 되고, 서로 다른
+      칸의 표지가 우연히 만나 정상 행이 지워졌다:
+        · ("공식 자료 검토 절차", "분기 점검", "세부 기준을 명시하지 않았다")
+          → 1칸의 지시어와 3칸의 부재 술어가 결합해 부재 단언으로 판정
+        · ("신용위험", "여신 심사", "사내 복리후생 관리규정을 둔다")
+          → 1칸의 위험 범주와 3칸의 관리규정이 결합해 재무 서술로 판정
+      두 가드의 docstring이 「판단 경계는 «같은 절»이다 — 앞 절과 뒤 절이
+      우연히 만나 걸리지 않게 한다」고 적은 계약을 도식에서만 깬 것이다.
+    ★ 칸 하나가 그 자체로 한 절이다. 하나라도 걸리면 그 행을 뺀다.
+    """
+
+    for cell in cells:
+        if not str(cell).strip():
+            continue
+        problem = predicate(str(cell))
+        if problem:
+            return problem
+    return ""
 
 
 def _review_labelled_flow_cells(section_id: str, row: FlowRow) -> list[str]:
@@ -300,16 +378,19 @@ REWRITE_EVIDENCE_HEAD: Final[str] = "\n근거 원문:\n"
 REWRITE_SENTENCE_HEAD: Final[str] = "\n불합격 문장: "
 
 # ── 수치 검증 ──
-#: 숫자 바로 뒤에 올 수 있는 배율 글자와 꼬리 단위. 아래 정규식 세 개가 이
+#: 숫자 바로 뒤에 올 수 있는 배율 어휘와 꼬리 단위. 아래 정규식 세 개가 이
 #: 목록 하나를 함께 본다 — 한쪽에만 단위를 더하면 잣대가 갈라진다.
-_MAGNITUDE_CHARS: Final[str] = "조억만"
+#: ★ 배율 어휘는 grounding_constants 한 곳에만 적는다. 결속기(grounding.py)와
+#:   이 파일이 같은 배율로 읽어야 두 검증기의 값이 갈라지지 않는다.
 _TAIL_UNITS: Final[tuple[str, ...]] = ("원", "%", "퍼센트", "배")
-_UNIT_SUFFIX_ALTERNATION: Final[str] = "|".join((*_MAGNITUDE_CHARS, *_TAIL_UNITS))
+_UNIT_SUFFIX_ALTERNATION: Final[str] = "|".join((*MAGNITUDE_TOKENS, *_TAIL_UNITS))
 
 #: 숫자 토큰 + 바로 뒤 단위. «내용» 검사가 아니라 «숫자와 그 배율» 추출 전용이다.
+#: ⚠️ 배율은 문자 클래스가 아니라 «교대»다 — 「3천만원」의 배율은 «천만»이지
+#:    «천»이 아니다. MAGNITUDE_TOKENS 가 긴 어휘를 앞에 두는 이유가 이것이다.
 _NUMBER_UNIT_RE: Final[re.Pattern[str]] = re.compile(
     r"(?P<num>\d+(?:,\d{3})*(?:\.\d+)?)"
-    rf"(?:\s*(?P<mag>[{_MAGNITUDE_CHARS}]))?"
+    rf"(?:\s*(?P<mag>{MAGNITUDE_ALTERNATION}))?"
     rf"(?:\s*(?P<tail>{'|'.join(_TAIL_UNITS)}))?"
 )
 
@@ -405,11 +486,8 @@ _PLAIN_DIGITS_RE: Final[re.Pattern[str]] = re.compile(r"\d+")
 _RAW_WON_AMOUNT_RE: Final[re.Pattern[str]] = re.compile(
     r"\d{1,3}(?:,\d{3}){3,}\s*원"
 )
-_MAGNITUDE_SCALES: Final[dict[str, Decimal]] = {
-    "조": Decimal(10) ** 12,
-    "억": Decimal(10) ** 8,
-    "만": Decimal(10) ** 4,
-}
+#: 배율 어휘 → 곱할 값 (정본은 grounding_constants.MAGNITUDE_SCALES).
+_MAGNITUDE_SCALES: Final[dict[str, Decimal]] = MAGNITUDE_SCALES
 _PERCENT_SCALE: Final[Decimal] = Decimal("0.01")
 _NO_SCALE: Final[Decimal] = Decimal(1)
 
@@ -1330,8 +1408,17 @@ def _apply_grounding(
         # 실제 소유 장을 따른다. 오래된 주장 슬롯만으로 요약이나 다른 장의
         # 정상 회계 설명까지 문화 장의 배치 제한에 넣지 않는다.
         if context and context[:2] == ("culture", DIAGNOSTIC_KIND_BODY):
+            # ★ 세 번째 검사(원문 절 긍정 계약)는 후보 «표현»이 아니라 후보가
+            #   기댄 원문을 본다 — 앞의 두 검사가 표현만 보기 때문에 같은 재무
+            #   서술을 꼬리만 바꿔 적으면 그대로 통과했다(실측: 2건 차단 ↔
+            #   4건 신규 유입, 순증 0).
+            # ⚠️ 순서가 «사유 코드»를 정한다. 새 원문 절 계약은 가장 넓은
+            #   그물이라 반드시 «마지막»에 둔다 — 앞에 두면 근거 범위 확대·
+            #   회계 정책 같은 더 구체적인 사유가 이 코드에 가려진다.
             problem = (culture_accounting_policy_problem(text)
-                       or culture_financial_risk_goal_problem(text))
+                       or culture_financial_risk_goal_problem(text)
+                       or culture_problem(text, sources)
+                       or culture_section_evidence_problem(text, sources))
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
@@ -1355,7 +1442,13 @@ def _apply_grounding(
                 continue
         if flow_cells_by_number is not None and number in flow_cells_by_number:
             cells = flow_cells_by_number[number]
-            problem = flow_scope_problem(cells, sources)
+            # ★ 문장 경로의 부재 단언 검사는 도식 행을 보지 않는다(그 검사는
+            #   문장 목록만 돈다). 같은 거짓말이 칸으로 옮겨 적히면 그대로
+            #   공개되므로 여기서도 같은 사유코드로 건다 — 장 무관.
+            # ⚠️ 칸마다 «따로» 건다. 이어 붙인 문자열로 걸면 서로 다른 칸의
+            #   표지가 결합해 정상 행이 지워진다(cellwise_problem 머리말).
+            problem = (cellwise_problem(cells, absence_claim_problem)
+                       or flow_scope_problem(cells, sources))
             if not problem and context and context[0] == CHALLENGE_FLOW_SECTION_ID:
                 # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 묶음 검수 경로와
                 # flat 경로가 «같은» 두 검사를 쓴다 — 한쪽만 걸면 그 경로로만
@@ -1366,8 +1459,25 @@ def _apply_grounding(
             if not problem and context and context[0] == "culture":
                 # 축약된 칸은 원문을 줄여 적어 산문 검사의 세 표지 결합에 걸리지
                 # 않는다. 그 행이 «인용한 원문»의 순수 회계 절과 결속됐을 때만 막는다.
-                problem = (culture_flow_problem(cells, sources)
-                           or culture_accounting_flow_problem(cells, sources))
+                # ★ 재무위험 규정 규칙과 원문 절 계약을 «도식에도» 건다. 예전에는
+                #   본문에만 걸려 있어서, 산문에서 빠진 재무 서술이 표의 칸으로
+                #   옮겨 적히면 같은 보고서 안에서 두 잣대가 됐다.
+                # ⚠️ 넓은 그물(원문 절 계약)은 마지막이다 — 사유 코드 우선순위는
+                #   본문 블록과 같다.
+                problem = (
+                    culture_flow_problem(cells, sources)
+                    or culture_accounting_flow_problem(cells, sources)
+                    or cellwise_problem(
+                        cells, culture_financial_risk_goal_problem
+                    )
+                    or culture_problem(text, sources)
+                    or cellwise_problem(
+                        cells,
+                        lambda cell: culture_section_evidence_problem(
+                            cell, sources
+                        ),
+                    )
+                )
             # 6장 성장 계획 표만 미래 근거를 결속한다. 다른 장의 도식과 이 장의
             # 산문 문장(칸이 없다)은 이 검사를 지나가지 않는다.
             if not problem and context and context[0] == STRATEGY_TABLE_SECTION_ID:
@@ -1405,19 +1515,51 @@ def _apply_grounding(
     return constrained
 
 
+def _raw_table_row(table: PerformanceTable, index: int) -> Optional[Sequence[str]]:
+    """표시 행 `index`에 대응하는 원값 행. 자리수·길이가 어긋나면 없는 것으로 본다."""
+
+    if not table.raw_rows or not str(table.raw_unit).strip():
+        return None
+    if len(table.raw_rows) != len(table.rows):
+        return None
+    raw_row = table.raw_rows[index]
+    return raw_row if len(raw_row) == len(table.rows[index]) else None
+
+
 def _table_grounding_source(table: Optional[PerformanceTable]) -> str:
-    """행·기간·단위를 반복한 실적표 결속 원문을 결정론적으로 만든다."""
+    """행·기간·단위를 반복한 실적표 결속 원문을 결정론적으로 만든다.
+
+    ★ 표시값에 더해 «원값» 줄을 함께 싣는다 (2026-09-11 인텍에프에이 실측).
+      표시값은 억원 단위로 반올림돼 당기순이익이 「4억원 → 1억원」으로 실린다.
+      그 두 값으로는 실제 변동(-77.45%)을 말한 문장이 근거를 댈 수 없어
+      4장 산문이 통째로 근거 없음으로 떨어졌다. 원값 82,552,618원·366,016,342원이
+      결속 원문에 있으면 같은 문장이 그대로 검산된다.
+    ⚠️ 표시값 줄은 빼지 않는다 — 「4억원」을 인용한 기존 문장이 깨진다.
+      원값 줄은 raw_rows·raw_unit이 있을 때만 «더한다»(없는 표는 바이트가 같다).
+    """
 
     if table is None or not table.rows or len(table.headers) < 2:
         return ""
     lines: list[str] = []
-    for row in table.rows:
+    for index, row in enumerate(table.rows):
         if not row:
             continue
         metric = str(row[0]).strip()
         if not metric:
             continue
-        for header, raw_value in zip(table.headers[1:], row[1:]):
+        # 전치된 표(행 머리가 연도)에서도 네 자리 연도는 «기간»으로 읽히게 한다.
+        # 아래 header 쪽과 같은 잣대다 — 맨 「2025」는 날짜 표기가 아니라서
+        # _period_at 이 못 읽고, 그러면 「2025년 …」이라고 쓴 후보의 기간이
+        # 원문 기간과 어긋나 표시값·원값 모두 결속에 실패한다(2026-09-11 실측).
+        # ★ 이 줄은 판정을 «넓힌다». 전에는 표를 근거로 연도를 밝힌 문장이 해가
+        #   맞든 틀리든 전부 떨어졌다. 이제 맞는 해는 통과하고 틀린 해는 떨어진다 —
+        #   기간 검사가 비로소 작동하는 것이다. 이 표 모양은 운영에서 유일하게
+        #   쓰이는 모양이다(company_performance·audit_financials 둘 다 행 머리가 연도).
+        if metric.isdigit() and len(metric) == 4:
+            metric += "년"
+        raw_row = _raw_table_row(table, index)
+        raw_unit = str(table.raw_unit).strip()
+        for column, (header, raw_value) in enumerate(zip(table.headers[1:], row[1:]), start=1):
             period = str(header).strip()
             value = str(raw_value).strip()
             if not period or not value or not _extract_numbers(value):
@@ -1428,11 +1570,30 @@ def _table_grounding_source(table: Optional[PerformanceTable]) -> str:
             if table.unit and numbers and not any(item.unit_marked for item in numbers):
                 value += str(table.unit).strip()
             lines.append(f"{metric} | {period} | {value}")
+            if raw_row is None:
+                continue
+            raw_cell = str(raw_row[column]).strip()
+            if not raw_cell or not _extract_numbers(raw_cell):
+                continue
+            raw_text = raw_cell if any(
+                item.unit_marked for item in _extract_numbers(raw_cell)
+            ) else raw_cell + raw_unit
+            if raw_text == value:
+                # 배율이 1이라 표시값과 같은 표는 줄을 늘리지 않는다.
+                continue
+            lines.append(
+                f"{metric} | {period} | {raw_text}{TABLE_RAW_VALUE_ROW_SUFFIX}"
+            )
     return "\n".join(lines)
 
 
 def _render_table_evidence(table: Optional[PerformanceTable]) -> str:
-    """검수 프롬프트에 싣는 실적표 — 표 수치를 근거로 쓴 문장을 살리기 위함."""
+    """검수 프롬프트에 싣는 실적표 — 표 수치를 근거로 쓴 문장을 살리기 위함.
+
+    ★ 결속에 쓰는 글(_table_grounding_source)과 검수 AI가 보는 글이 갈리면
+      안 된다. 원값 줄이 결속 원문에만 있으면 검수 AI는 그 값을 보지 못한 채
+      «근거에 없는 수»로 판정한다.
+    """
     if table is None or not table.rows:
         return ""
     payload = {
@@ -1441,6 +1602,9 @@ def _render_table_evidence(table: Optional[PerformanceTable]) -> str:
         "headers": list(table.headers),
         "rows": [list(row) for row in table.rows],
     }
+    if any(_raw_table_row(table, index) is not None for index in range(len(table.rows))):
+        payload["raw_unit"] = str(table.raw_unit).strip()
+        payload["raw_rows"] = [list(row) for row in table.raw_rows]
     return REVIEW_TABLE_HEAD + json.dumps(payload, ensure_ascii=False) + "\n"
 
 
@@ -1769,8 +1933,15 @@ def _rewrite_and_recheck(
     diagnostics: Optional[list[dict]] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
+    rewrite_ask: Optional[AskFn] = None,
+    recheck_ask: Optional[AskFn] = None,
 ) -> None:
     """«거짓» 판정 문장들: 재작성 1회 → 수치 재검증 → 재검수 → 최종 처분.
+
+    ``rewrite_ask``/``recheck_ask``: 각 단계 전용 호출자. 주지 않으면 예전처럼
+    ``ask`` 하나를 쓴다. 부르는 쪽이 «필수 후속 단계 몫을 남긴 호출자»를
+    넣으면, 도식 검수·요약 작성·요약 검수를 굶기기 전에 이 선택적 다듬기가
+    먼저 멈춘다.
 
     최종 처분 규칙:
       · 재작성 실패(빈 응답·호출 실패) → 제거 — 이미 거짓으로 판정된 글이다.
@@ -1795,7 +1966,9 @@ def _rewrite_and_recheck(
             # 이미 «거짓» 판정을 받은 문장이다. 못 살리면 빼는 쪽이 안전하다.
             final[item.number] = None
             continue
-        rewritten_text = _ask_rewrite(ask, item.sentence, frag_by_id)
+        rewritten_text = _ask_rewrite(
+            rewrite_ask or ask, item.sentence, frag_by_id
+        )
         if not rewritten_text:
             final[item.number] = None
             continue
@@ -1813,7 +1986,7 @@ def _rewrite_and_recheck(
     if not recheck_items:
         return
     verdicts = _ask_verdicts(
-        ask,
+        recheck_ask or ask,
         recheck_items,
         frag_by_id,
         table_evidence,
@@ -1846,6 +2019,8 @@ def _semantic_review(
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
+    rewrite_ask: Optional[AskFn] = None,
+    recheck_ask: Optional[AskFn] = None,
 ) -> list[list[ComposedSentence]]:
     """인용 있는 «확인»·«해석» 문장을 같은 1회 검수 호출로 대조한다.
 
@@ -1856,10 +2031,30 @@ def _semantic_review(
     """
     items: list[_ReviewItem] = []
     position_numbers: dict[tuple[int, int], int] = {}
+    absence_rejected_positions: set[tuple[int, int]] = set()
     number = 0
     for group_index, group in enumerate(groups):
         for sentence_index, sentence in enumerate(group):
             if sentence.grade not in (GRADE_CONFIRMED, GRADE_INTERPRETED):
+                continue
+            section_id = (
+                group_ids[group_index]
+                if group_ids is not None
+                else str(group_index)
+            )
+            kind = (
+                DIAGNOSTIC_KIND_SUMMARY
+                if section_id == REVIEW_SUMMARY_GROUP
+                else DIAGNOSTIC_KIND_BODY
+            )
+            # ★ 자료 부재 단언은 인용 «앞»에서 건다. 아래 건너뛰기가 인용 없는
+            #   문장을 검수 대상에서 통째로 빼기 때문에, 여기 두지 않으면 그
+            #   문장은 어떤 검사도 받지 않고 그대로 공개된다.
+            if _absence_claim_rejected(
+                sentence, section_id=section_id, kind=kind,
+                diagnostics=diagnostics,
+            ):
+                absence_rejected_positions.add((group_index, sentence_index))
                 continue
             # 인용 없는 해석은 대조할 외부 자료가 없다. 이 경로는 별도의
             # 정책 과제이며, 검수 AI에 빈 근거를 보내 «참»을 만들지 않는다.
@@ -1867,25 +2062,16 @@ def _semantic_review(
                 continue
             number += 1
             position_numbers[(group_index, sentence_index)] = number
-            section_id = (
-                group_ids[group_index]
-                if group_ids is not None
-                else str(group_index)
-            )
             items.append(
                 _ReviewItem(
                     number=number,
                     sentence=sentence,
                     section_id=section_id,
-                    kind=(
-                        DIAGNOSTIC_KIND_SUMMARY
-                        if section_id == REVIEW_SUMMARY_GROUP
-                        else DIAGNOSTIC_KIND_BODY
-                    ),
+                    kind=kind,
                 )
             )
     if not items:
-        return [list(group) for group in groups]
+        return _groups_without_positions(groups, absence_rejected_positions)
 
     table_evidence = _render_table_evidence(table)
     table_source = _table_grounding_source(table)
@@ -1983,6 +2169,8 @@ def _semantic_review(
                     diagnostics=diagnostics,
                     protocol_diagnostics=protocol_diagnostics,
                     baseline_date=baseline_date,
+                    rewrite_ask=rewrite_ask,
+                    recheck_ask=recheck_ask,
                 )
             except AskFatalError as error:
                 # ★ 실측 — «이 요청에 허락된 몫을 다 썼다»는 한도만은 여기서
@@ -2009,6 +2197,8 @@ def _semantic_review(
     for group_index, group in enumerate(groups):
         out: list[ComposedSentence] = []
         for sentence_index, sentence in enumerate(group):
+            if (group_index, sentence_index) in absence_rejected_positions:
+                continue
             item_number = position_numbers.get((group_index, sentence_index))
             if item_number is None:
                 out.append(sentence)
@@ -2058,6 +2248,14 @@ def _semantic_review_grouped(
             raise ValueError(f"검수 허용 근거가 없는 장입니다: {section_id}")
         for sentence_index, sentence in enumerate(group):
             if sentence.grade not in (GRADE_CONFIRMED, GRADE_INTERPRETED):
+                continue
+            # ★ 자료 부재 단언은 인용 «앞»에서 건다 — legacy 경로와 같은 이유·
+            #   같은 사유코드다. 두 경로 중 한쪽만 걸면 그 경로로만 새어 나간다.
+            if _absence_claim_rejected(
+                sentence, section_id=section_id, kind=DIAGNOSTIC_KIND_BODY,
+                diagnostics=diagnostics,
+            ):
+                rejected_sentence_positions.add((group_index, sentence_index))
                 continue
             if not sentence.citations:
                 continue
@@ -2110,7 +2308,7 @@ def _semantic_review_grouped(
             protocol_diagnostics=protocol_diagnostics,
         )
         return (
-            [list(group) for group in groups],
+            _groups_without_positions(groups, rejected_sentence_positions),
             {section_id: () for section_id in flow_rows_by_section},
         )
     verdicts = _ask_grouped_verdicts(
@@ -2238,6 +2436,8 @@ def _verify_report_inner(
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
+    rewrite_ask: Optional[AskFn] = None,
+    recheck_ask: Optional[AskFn] = None,
 ) -> ComposedReport:
     frag_by_id = {
         fragment.fragment_id: fragment
@@ -2279,6 +2479,8 @@ def _verify_report_inner(
             initial_ask=initial_ask,
             protocol_diagnostics=protocol_diagnostics,
             baseline_date=baseline_date,
+            rewrite_ask=rewrite_ask,
+            recheck_ask=recheck_ask,
         )
     else:
         allowed_for_review = dict(allowed_fragment_ids_by_section)
@@ -2349,6 +2551,8 @@ def verify_report(
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
+    rewrite_ask: Optional[AskFn] = None,
+    recheck_ask: Optional[AskFn] = None,
 ) -> ComposedReport:
     """진입 함수 — 규칙 ①~④를 보고서 전체에 문장 단위로 적용한다.
 
@@ -2359,6 +2563,11 @@ def verify_report(
         ask: 검수·재작성용 AI 호출 주입 함수 (작가와 «다른 호출» —
             Generator/Evaluator 분리는 부르는 쪽이 별도 클로저로 보장한다).
         diagnostics: 의미 근거 결속으로 최종 제외된 후보의 비식별 진단 수집기.
+        rewrite_ask: «거짓» 판정 문장 재작성 전용 호출자. 생략하면 ``ask``.
+        recheck_ask: 재작성문 재검수 전용 호출자. 생략하면 ``ask``.
+            ★ 이 둘은 «선택적 다듬기»라, 부르는 쪽이 도식 검수·요약 작성·
+              요약 검수 몫을 남긴 호출자를 넣어 두면 필수 후속 단계보다
+              먼저 멈춘다. 멈추면 그 문장은 재작성 대신 제거된다.
         baseline_date: 보고서 기준일 (ISO ``YYYY-MM-DD``). 근거 결속의
             executive_status_guard 에만 쓴다 — 넘기지 않으면 그 가드가 날짜
             문턱 없이 이탈 표지 존재만으로 판정한다. 기존 호출 계약은 그대로다.
@@ -2370,7 +2579,8 @@ def verify_report(
     try:
         if (allowed_fragment_ids_by_section is None and diagnostics is None
                 and initial_ask is None and protocol_diagnostics is None
-                and baseline_date is None):
+                and baseline_date is None and rewrite_ask is None
+                and recheck_ask is None):
             # legacy 호출 모양과 monkeypatch 경계를 그대로 보존한다.
             return _verify_report_inner(
                 report, fragments, performance_table, ask
@@ -2385,6 +2595,8 @@ def verify_report(
             initial_ask=initial_ask,
             protocol_diagnostics=protocol_diagnostics,
             baseline_date=baseline_date,
+            rewrite_ask=rewrite_ask,
+            recheck_ask=recheck_ask,
         )
     except AskFatalError:
         # 요청 전역 장애 — «검증기 내부 오류»로 위장하지 않고 그대로 재전파한다.

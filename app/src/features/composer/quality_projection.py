@@ -13,7 +13,12 @@ from dataclasses import replace
 
 from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
 from src.features.composer.port import ComposedReport, ComposedSentence
-from src.features.composer.news_block import NEWS_BLOCK_HEADERS, news_block_caption, news_list_excerpt
+from src.features.composer.news_block import (
+    NEWS_BLOCK_HEADERS,
+    news_block_caption,
+    news_list_excerpt,
+    oldest_stale_report_year,
+)
 from src.features.pipeline.port import FactRecord, Report
 from src.features.provenance.sources import Source, SourceKind, exact_evidence_text_hash
 from src.shared.report_quality.dto import (
@@ -41,8 +46,13 @@ def _normalized_text(value: object) -> str:
     return " ".join(str(value or "").split())
 
 
-def _only_bound_news_tables(section, rendered_section, sources) -> bool:
-    """봉인 없는 모드의 결정적 뉴스 표만 원본 행·출처와 대조한다. FULL 승인 대신 쓰지 않는다."""
+def _only_bound_news_tables(section, rendered_section, sources, *, as_of_date: str = "") -> bool:
+    """봉인 없는 모드의 결정적 뉴스 표만 원본 행·출처와 대조한다. FULL 승인 대신 쓰지 않는다.
+
+    ``as_of_date``는 renderer(``render._news_report_table``)가 캡션에 연도를
+    붙일지 정할 때 쓴 값과 같아야 한다 — 다르면 실제로는 멀쩡한 표를
+    «캡션이 다르다»는 이유로 결속 안 됨으로 오판해 보고서를 막는다.
+    """
     if section.flow_rows or not section.news_rows or rendered_section is None:
         return False
     if len(rendered_section.tables) != 1:
@@ -70,7 +80,10 @@ def _only_bound_news_tables(section, rendered_section, sources) -> bool:
         if row.cells != expected:
             return False
     return (
-        table.caption == news_block_caption(len(section.news_rows))
+        table.caption == news_block_caption(
+            len(section.news_rows),
+            oldest_stale_report_year(section.news_rows, as_of_date),
+        )
         and tuple(table.headers) == NEWS_BLOCK_HEADERS
         and table.rows == [list(row.cells) for row in section.news_rows]
         and set(table.source_cites) == {f"[{fid}]" for fid in ids}
@@ -392,7 +405,12 @@ def build_generation_quality_candidate(
         )
         has_unbound_structures = (
             has_public_structures and not structures_manifest_bound
-            and not _only_bound_news_tables(section, rendered_section, rendered.citations)
+            and not _only_bound_news_tables(
+                section,
+                rendered_section,
+                rendered.citations,
+                as_of_date=rendered.as_of_date,
+            )
         )
         sections.append(
             ReportSectionCandidate(
