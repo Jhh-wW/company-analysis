@@ -240,6 +240,32 @@ def _groups_without_positions(
     ]
 
 
+def cellwise_problem(
+    cells: Sequence[str], predicate: Callable[[str], str]
+) -> str:
+    """도식 칸을 «칸마다 따로» 검사하고 첫 사유를 돌려준다.
+
+    ★ 왜 필요한가 (실측) — 칸을 이어 붙이는 구분자 `" ; "` 는 절 분리 정규식
+      `[.!?。\\n]+` 에 걸리지 않는다. 그래서 세 칸이 «한 절»이 되고, 서로 다른
+      칸의 표지가 우연히 만나 정상 행이 지워졌다:
+        · ("공식 자료 검토 절차", "분기 점검", "세부 기준을 명시하지 않았다")
+          → 1칸의 지시어와 3칸의 부재 술어가 결합해 부재 단언으로 판정
+        · ("신용위험", "여신 심사", "사내 복리후생 관리규정을 둔다")
+          → 1칸의 위험 범주와 3칸의 관리규정이 결합해 재무 서술로 판정
+      두 가드의 docstring이 「판단 경계는 «같은 절»이다 — 앞 절과 뒤 절이
+      우연히 만나 걸리지 않게 한다」고 적은 계약을 도식에서만 깬 것이다.
+    ★ 칸 하나가 그 자체로 한 절이다. 하나라도 걸리면 그 행을 뺀다.
+    """
+
+    for cell in cells:
+        if not str(cell).strip():
+            continue
+        problem = predicate(str(cell))
+        if problem:
+            return problem
+    return ""
+
+
 def _review_labelled_flow_cells(section_id: str, row: FlowRow) -> list[str]:
     """순환 import 없이 legacy 도식 검수의 칸 이름 구현을 그대로 쓴다."""
 
@@ -1415,7 +1441,9 @@ def _apply_grounding(
             # ★ 문장 경로의 부재 단언 검사는 도식 행을 보지 않는다(그 검사는
             #   문장 목록만 돈다). 같은 거짓말이 칸으로 옮겨 적히면 그대로
             #   공개되므로 여기서도 같은 사유코드로 건다 — 장 무관.
-            problem = (absence_claim_problem(text)
+            # ⚠️ 칸마다 «따로» 건다. 이어 붙인 문자열로 걸면 서로 다른 칸의
+            #   표지가 결합해 정상 행이 지워진다(cellwise_problem 머리말).
+            problem = (cellwise_problem(cells, absence_claim_problem)
                        or flow_scope_problem(cells, sources))
             if not problem and context and context[0] == CHALLENGE_FLOW_SECTION_ID:
                 # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 묶음 검수 경로와
@@ -1432,11 +1460,20 @@ def _apply_grounding(
                 #   옮겨 적히면 같은 보고서 안에서 두 잣대가 됐다.
                 # ⚠️ 넓은 그물(원문 절 계약)은 마지막이다 — 사유 코드 우선순위는
                 #   본문 블록과 같다.
-                problem = (culture_flow_problem(cells, sources)
-                           or culture_accounting_flow_problem(cells, sources)
-                           or culture_financial_risk_goal_problem(text)
-                           or culture_problem(text, sources)
-                           or culture_section_evidence_problem(text, sources))
+                problem = (
+                    culture_flow_problem(cells, sources)
+                    or culture_accounting_flow_problem(cells, sources)
+                    or cellwise_problem(
+                        cells, culture_financial_risk_goal_problem
+                    )
+                    or culture_problem(text, sources)
+                    or cellwise_problem(
+                        cells,
+                        lambda cell: culture_section_evidence_problem(
+                            cell, sources
+                        ),
+                    )
+                )
             # 6장 성장 계획 표만 미래 근거를 결속한다. 다른 장의 도식과 이 장의
             # 산문 문장(칸이 없다)은 이 검사를 지나가지 않는다.
             if not problem and context and context[0] == STRATEGY_TABLE_SECTION_ID:

@@ -630,3 +630,67 @@ def test_문화_도식행도_재무규정_규칙에_본문과_같은_사유로_�
             event["reason_code"] for event in diagnostics if event["kind"] == "본문"
         ]
         assert 본문_사유 == 도식_사유
+
+
+# ══════════════════════════════════════════════════════════
+# 도식 경로의 «자료 부재 단언» 배선과 칸 경계
+#
+# ★ 왜 (독립 검토 실측) — 이 배선을 지워도 composer 시험이 전부 통과했다.
+#   아무도 지켜 주지 않는 기능이었다. 그리고 칸을 이어 붙여 검사하는 바람에
+#   서로 다른 칸의 표지가 결합해 정상 행이 지워지고 있었다.
+# ══════════════════════════════════════════════════════════
+
+#: 8장 원문 절 계약을 통과시키는 사람·조직 원문 (이 시험의 관심사가 아니다).
+_사람_원문 = "당사는 임직원 교육훈련 제도를 운영하고 인재상을 공시하고 있습니다."
+#: 한 칸 안에 자료 지시어와 부재 술어가 «함께» 있는 칸.
+_부재_칸 = ("인재상", "핵심가치 공유", "공식 자료에서 확인할 수 없다")
+#: 지시어와 부재 술어가 «서로 다른 칸»에 흩어진 정상 행 — 살아남아야 한다.
+_흩어진_칸 = ("공식 자료 검토 절차", "분기 점검", "세부 기준을 명시하지 않았다")
+
+
+def _도식_판정(cells, source_text=_사람_원문):
+    row = FlowRow(cells=tuple(cells), citations=("9",))
+    draft = ComposedReport(
+        sections=(ComposedSection("culture", (), flow_rows=(row,)),)
+    )
+    fragments = (
+        CollectedFragment(fragment_id="9", kind="공시", text=source_text),
+    )
+    diagnostics: list[dict] = []
+    checked, _사유 = check_diagrams(
+        draft, fragments, ask=_검수({1: VERDICT_TRUE}), diagnostics=diagnostics
+    )
+    culture = next(s for s in checked.sections if s.section_id == "culture")
+    return culture.flow_rows, diagnostics
+
+
+def test_부재_단언을_옮겨_적은_도식행은_평면_진입점에서_빠진다() -> None:
+    from src.features.composer.absence_claim_constants import (
+        ABSENCE_CLAIM_UNSUPPORTED,
+    )
+
+    rows, diagnostics = _도식_판정(_부재_칸)
+
+    assert rows == (), "부재 단언을 옮겨 적은 행이 그대로 공개됐다"
+    assert [event["reason_code"] for event in diagnostics] == [
+        ABSENCE_CLAIM_UNSUPPORTED
+    ]
+
+
+def test_표지가_서로_다른_칸에_흩어진_행은_그대로_남는다() -> None:
+    """★ 칸 하나가 한 절이다 — 이어 붙이면 없던 거짓말이 생긴다."""
+
+    rows, diagnostics = _도식_판정(_흩어진_칸)
+
+    assert len(rows) == 1, f"정상 행이 칸 결합 때문에 지워졌다: {diagnostics}"
+    assert diagnostics == []
+
+
+def test_위험범주와_관리규정이_다른_칸에_있으면_재무_서술이_아니다() -> None:
+    """독립 검토 반례 — 1칸의 「신용위험」과 3칸의 「관리규정」이 결합했다."""
+
+    rows, diagnostics = _도식_판정(
+        ("신용위험", "여신 심사", "사내 복리후생 관리규정을 둔다")
+    )
+
+    assert len(rows) == 1, f"서로 다른 칸의 표지가 결합해 지워졌다: {diagnostics}"

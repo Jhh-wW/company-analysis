@@ -1155,3 +1155,108 @@ def test_인용_없는_해석도_부재단언_검사를_받는다(grouped) -> No
     assert [event["reason_code"] for event in diagnostics] == [
         ABSENCE_CLAIM_UNSUPPORTED
     ]
+
+
+# ══════════════════════════════════════════════════════════
+# 묶음 진입점의 도식 부재 단언 배선 · 칸 경계 · 이른 반환 조임
+# ══════════════════════════════════════════════════════════
+
+_사람_원문 = "당사는 임직원 교육훈련 제도를 운영하고 인재상을 공시하고 있습니다."
+
+
+def _도식_묶음_판정(cells, source_text=_사람_원문):
+    """묶음 검수 프롬프트가 배정한 «그» 번호·장·인용으로만 참을 답한다."""
+    from src.features.composer.tests.review_evidence_fixture import review_items
+
+    row = FlowRow(cells=tuple(cells), citations=("9",))
+    draft = ComposedReport(
+        sections=(ComposedSection("culture", (), flow_rows=(row,)),)
+    )
+    fragments = (CollectedFragment("9", "공시", source_text),)
+    diagnostics: list[dict] = []
+    calls: list[str] = []
+
+    def ask(prompt: str) -> str:
+        calls.append(prompt)
+        items = review_items(prompt)
+        assert items, "묶음 검수 입력에 후보가 없습니다"
+        return json.dumps(
+            {"판정": [{
+                "번호": item.number,
+                "장": item.section,
+                "근거": [
+                    citation.strip().removeprefix("조각 ").strip()
+                    for citation in item.citations
+                ],
+                "결과": VERDICT_TRUE,
+            } for item in items]},
+            ensure_ascii=False,
+        )
+
+    checked = verify_report(
+        draft, fragments, None, ask,
+        allowed_fragment_ids_by_section={"culture": frozenset({"9"})},
+        diagnostics=diagnostics,
+    )
+    assert len(calls) == 1
+    return checked.sections[0].flow_rows, diagnostics
+
+
+def test_부재_단언을_옮겨_적은_도식행은_묶음_진입점에서도_빠진다() -> None:
+    """★ 두 진입점 중 한쪽만 걸면 그 경로로만 새어 나간다."""
+
+    from src.features.composer.absence_claim_constants import (
+        ABSENCE_CLAIM_UNSUPPORTED,
+    )
+
+    rows, diagnostics = _도식_묶음_판정(
+        ("인재상", "핵심가치 공유", "공식 자료에서 확인할 수 없다")
+    )
+
+    assert rows == ()
+    assert [event["reason_code"] for event in diagnostics] == [
+        ABSENCE_CLAIM_UNSUPPORTED
+    ]
+
+
+def test_묶음_진입점도_칸을_따로_본다() -> None:
+    """지시어와 부재 술어가 서로 다른 칸에 흩어진 정상 행은 남는다."""
+
+    rows, diagnostics = _도식_묶음_판정(
+        ("공식 자료 검토 절차", "분기 점검", "세부 기준을 명시하지 않았다")
+    )
+
+    assert len(rows) == 1, f"정상 행이 칸 결합 때문에 지워졌다: {diagnostics}"
+
+
+def test_장_밖_인용_제외는_검수_대상이_없어도_되살아나지_않는다() -> None:
+    """★ 범위 밖 변경을 «의도한 조임»으로 못 박는다 (독립 검토 P2-4).
+
+    묶음 검수는 인용이 장 밖인 문장을 검수 «전»에 뺀다. 그런데 그렇게 빼고
+    나서 검수할 항목이 하나도 남지 않으면, 예전 이른 반환은 묶음을 통째로
+    되돌려 그 문장을 «되살렸다». 정상 경로는 되살리지 않는다 — 같은 입력이
+    검수 항목의 유무에 따라 다른 결과를 내던 자리다.
+    """
+
+    장밖_문장 = ComposedSentence(
+        text="이 문장은 다른 장의 조각을 인용한다.",
+        citations=("99",),
+        grade=GRADE_CONFIRMED,
+    )
+    draft = ComposedReport(
+        sections=(ComposedSection("culture", (장밖_문장,)),)
+    )
+    fragments = (
+        CollectedFragment("9", "공시", _사람_원문),
+        CollectedFragment("99", "공시", "다른 장 조각이다."),
+    )
+    calls: list[str] = []
+
+    checked = verify_report(
+        draft, fragments, None, _모두_참으로_답하는_검수(calls),
+        allowed_fragment_ids_by_section={"culture": frozenset({"9"})},
+    )
+
+    assert checked.sections[0].sentences == (), (
+        "검수 대상이 없다는 이유로 장 밖 인용 문장이 되살아났다"
+    )

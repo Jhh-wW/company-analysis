@@ -1768,8 +1768,21 @@ def _fill_summary(
     ordered: Sequence[ComposedSentence],
     *,
     excluded_keys: frozenset[str],
+    accept: Optional[Callable[[ComposedSentence], bool]] = None,
 ) -> tuple[ComposedSentence, ...]:
-    """이미 고른 요약에 후보를 순서대로 채워 최소 문장 수를 맞춘다."""
+    """이미 고른 요약에 후보를 순서대로 채워 최소 문장 수를 맞춘다.
+
+    ``accept``: 후보가 «요약 잣대»를 통과하는지 보는 술어. 통과하지 못한
+    후보는 건너뛰고 다음 후보로 간다.
+
+    ★ 왜 필요한가 (실측) — 본문 잣대와 요약 잣대가 다르다. 본문에 남아 있는
+      문장이라고 요약에 실을 수 있는 것은 아니다. 술어 없이 채우면 방금
+      수치 안전 검사가 뺀 «그» 문장만 피하고, 같은 이유로 빠졌어야 할 다른
+      본문 문장이 그대로 들어온다(운영 진입점에서 최종 3건 전부가 그런
+      문장이 되는 경우를 재현했다).
+    ★ 후보가 바닥나면 기존 안전선 그대로 — 최소 문장 수에 못 미쳐도 억지로
+      채우지 않는다. 빈 요약 차단 방지는 등급 무관 보충이 계속 맡는다.
+    """
 
     chosen: list[ComposedSentence] = list(summary)
     seen = {_normalized_text(sentence.text) for sentence in chosen}
@@ -1778,6 +1791,8 @@ def _fill_summary(
             break
         key = _normalized_text(candidate.text)
         if not key or key in seen or key in excluded_keys:
+            continue
+        if accept is not None and not accept(candidate):
             continue
         chosen.append(candidate)
         seen.add(key)
@@ -1789,6 +1804,7 @@ def _supplement_summary(
     report: ComposedReport,
     *,
     excluded_keys: frozenset[str] = frozenset(),
+    accept: Optional[Callable[[ComposedSentence], bool]] = None,
 ) -> tuple[ComposedSentence, ...]:
     """요약이 최소 문장 수에 못 미치면 본문 «확인» 문장으로 보충한다.
 
@@ -1799,7 +1815,8 @@ def _supplement_summary(
     안전 검사로 뺀 문장이 이 보충으로 되살아나는 자리를 막는다.
     """
     return _fill_summary(
-        summary, _confirmed_by_section_rounds(report), excluded_keys=excluded_keys
+        summary, _confirmed_by_section_rounds(report),
+        excluded_keys=excluded_keys, accept=accept,
     )
 
 
@@ -1808,10 +1825,12 @@ def _supplement_summary_any_grade(
     report: ComposedReport,
     *,
     excluded_keys: frozenset[str] = frozenset(),
+    accept: Optional[Callable[[ComposedSentence], bool]] = None,
 ) -> tuple[ComposedSentence, ...]:
     """«확인» 문장이 모자랄 때 등급을 가리지 않고 같은 순서로 보충한다."""
     return _fill_summary(
-        summary, _any_grade_by_section_rounds(report), excluded_keys=excluded_keys
+        summary, _any_grade_by_section_rounds(report),
+        excluded_keys=excluded_keys, accept=accept,
     )
 
 

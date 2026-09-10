@@ -1131,3 +1131,94 @@ def test_수치_안전_검사가_뺀_문장은_요약_보충으로_되돌아오�
     )
     assert 수치_문장.text not in texts, "뺀 문장이 보충으로 되돌아왔다"
     assert len(texts) == _요약_최소, "제외 때문에 요약이 짧아지면 안 된다"
+
+
+def test_보충으로_채운_요약을_다시_검사해도_아무것도_빠지지_않는다() -> None:
+    """★ 잔여 구멍 — «뺀 그 문장»만 막고 «같은 이유로 빠졌어야 할 다른 문장»은 통과.
+
+    독립 검토가 운영 진입점에서 재현한 모양 그대로다: 아홉 장이 각각
+    「깨끗한 문장 + 공개숫자·증명서 없는 문장」을 가지면, 예전에는 최종 요약
+    3건이 «전부» 수치 안전 검사를 다시 걸면 빠지는 문장이 됐다.
+
+    원인은 본문 잣대와 요약 잣대가 다르다는 것이다 — 본문은 「검수 통과 표식 +
+    확인 등급 + 인용」만으로 남지만, 요약은 구조화 사실과 소유 장 일치를
+    요구한다. 보충이 요약 잣대를 다시 받지 않았다.
+    """
+    from src.features.composer.pipeline import _legacy_summary_stage
+    from src.features.composer.structured_claims import (
+        NumericSafetyFiltering, enforce_public_numeric_safety,
+        has_public_numeric_token,
+    )
+
+    def 본문():
+        from src.features.composer.port import ComposedReport, ComposedSection
+
+        sections = []
+        for index, section_id in enumerate(SECTION_IDS):
+            sections.append(ComposedSection(section_id=section_id, sentences=(
+                _요약용_문장(f"{section_id} 첫 문장이다."),
+                _요약용_문장(
+                    f"{section_id} 매출은 {100 + index}억원이다.",
+                    numeric_verified=True,
+                ),
+            )))
+        return ComposedReport(sections=tuple(sections))
+
+    verified = 본문()
+    # 이 시험의 전제 — 둘째 문장은 본문 잣대는 통과하지만 요약 잣대는 못 넘는다.
+    assert has_public_numeric_token(verified.sections[0].sentences[1].text)
+
+    final, _draft, _filtering = _legacy_summary_stage(
+        verified, (), None,
+        writer_ask=_한도에_닿은_작가(),
+        reviewer_ask=_불려서는_안_되는_검수(),
+        body_numeric_filtering=NumericSafetyFiltering(),
+    )
+
+    texts = [sentence.text for sentence in final.summary]
+    assert len(texts) == _요약_최소
+
+    재검사, _ = enforce_public_numeric_safety(final)
+    남은것 = [sentence.text for sentence in 재검사.summary]
+    assert 남은것 == texts, (
+        f"최종 요약에 같은 검사를 다시 걸면 빠지는 문장이 있다: "
+        f"{[t for t in texts if t not in 남은것]}"
+    )
+
+
+def test_보충이_요약_잣대를_놓치면_뒷문이_그_문장을_뺀다(monkeypatch) -> None:
+    """★ fail-closed 뒷문에도 지켜 주는 시험을 둔다.
+
+    보충 술어와 요약 잣대는 «같은 재료»를 쓰므로 정상적으로는 뒷문이 아무것도
+    빼지 않는다. 그래서 두 잣대가 앞으로 갈라지는 상황을 «주입»해서, 그때
+    조용히 새는 대신 여기서 빠지는지 확인한다. 진입점은 그대로
+    `_legacy_summary_stage`이고, 고장 낸 것은 보충 함수 하나뿐이다.
+    """
+    from src.features.composer import pipeline as pipeline_under_test
+    from src.features.composer.structured_claims import NumericSafetyFiltering
+
+    새는_문장 = _요약용_문장(
+        "identity 매출은 999억원이다.", numeric_verified=True
+    )
+    verified = _요약용_본문(identity_sentences=(
+        _요약용_문장("identity 첫 문장이다."),
+        새는_문장,
+    ))
+
+    def 잣대를_무시하는_보충(summary, report, **_kwargs):
+        return tuple(summary) + (새는_문장,)
+
+    monkeypatch.setattr(
+        pipeline_under_test, "_supplement_safe_summary", 잣대를_무시하는_보충
+    )
+
+    final, _draft, filtering = pipeline_under_test._legacy_summary_stage(
+        verified, (), None,
+        writer_ask=_한도에_닿은_작가(),
+        reviewer_ask=_불려서는_안_되는_검수(),
+        body_numeric_filtering=NumericSafetyFiltering(),
+    )
+
+    texts = [sentence.text for sentence in final.summary]
+    assert 새는_문장.text not in texts, "요약 잣대를 못 넘는 문장이 뒷문을 지나갔다"
+    assert filtering.removed_summary_count >= 1

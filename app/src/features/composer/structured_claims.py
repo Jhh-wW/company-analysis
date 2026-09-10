@@ -8,6 +8,7 @@ claim도 만들지 않아 부분/차단 상태가 그대로 드러난다.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 import hashlib
 import json
 from dataclasses import dataclass, replace
@@ -236,6 +237,57 @@ def is_release_ready_numeric_sentence(
     return fact is not None and validate_versioned_numeric_claim(fact) == ()
 
 
+def safe_numeric_owners_by_fact_id(
+    sections: Sequence[ComposedSection],
+) -> dict[str, str]:
+    """공개해도 되는 수치 문장을 실제로 실은 «소유 장»을 fact_id마다 모은다.
+
+    ★ 요약 잣대의 재료다. 요약 문장은 그 값을 실은 장이 «본문에서도» 그대로
+      살아남았을 때만 실릴 수 있다 — 본문에서 빠진 값을 요약만 들고 있으면
+      되짚을 자리가 없기 때문이다.
+    """
+
+    owners: dict[str, str] = {}
+    for section in sections:
+        for sentence in section.sentences:
+            claim = sentence.structured_claim
+            if (
+                claim is not None
+                and has_public_numeric_token(sentence.text)
+                and is_release_ready_numeric_sentence(
+                    sentence, section_id=section.section_id
+                )
+            ):
+                owners[claim.fact_id] = section.section_id
+    return owners
+
+
+def is_release_ready_summary_sentence(
+    sentence: ComposedSentence,
+    *,
+    safe_owner_by_fact_id: Mapping[str, str],
+) -> bool:
+    """요약에 실어도 되는 문장인가 — 본문 잣대보다 «좁다».
+
+    ★ 본문 잣대(`is_release_ready_numeric_sentence`)는 구조화 사실이 없어도
+      「검수 통과 표식 + 확인 등급 + 인용」이면 통과시킨다. 요약 잣대는 그
+      길을 주지 않고 구조화 사실과 소유 장 일치를 요구한다. 두 잣대가 다르기
+      때문에, 본문에 남은 문장을 요약으로 «옮기는» 경로는 반드시 이 함수를
+      다시 통과해야 한다 — 안 그러면 요약이 본문보다 느슨해진다.
+    """
+
+    if not has_public_numeric_token(sentence.text):
+        return True
+    claim = sentence.structured_claim
+    if claim is None:
+        return False
+    owner = claim.section_owner
+    return (
+        safe_owner_by_fact_id.get(claim.fact_id) == owner
+        and is_release_ready_numeric_sentence(sentence, section_id=owner)
+    )
+
+
 def enforce_public_numeric_safety(
     report: ComposedReport,
 ) -> tuple[ComposedReport, NumericSafetyFiltering]:
@@ -248,7 +300,6 @@ def enforce_public_numeric_safety(
 
     sections: list[ComposedSection] = []
     removed_sections: list[tuple[str, int]] = []
-    safe_owner_by_fact_id: dict[str, str] = {}
     for section in report.sections:
         kept = tuple(
             sentence
@@ -265,31 +316,18 @@ def enforce_public_numeric_safety(
         if removed and not kept and not notice:
             notice = NOTICE_NUMERIC_BODY_WITHHELD
         sections.append(replace(section, sentences=kept, notice=notice))
-        for sentence in kept:
-            claim = sentence.structured_claim
-            if (
-                claim is not None
-                and has_public_numeric_token(sentence.text)
-                and is_release_ready_numeric_sentence(
-                    sentence,
-                    section_id=section.section_id,
-                )
-            ):
-                safe_owner_by_fact_id[claim.fact_id] = section.section_id
+    # ★ 요약 잣대의 재료는 «걸러 낸 뒤»의 본문이다. 요약 보충 경로가 같은
+    #   잣대를 다시 쓰도록 두 조각(소유 장 모으기·요약 술어)을 함수로 뺐다 —
+    #   같은 규칙이 두 벌로 갈라지면 한쪽만 고쳐져 표류한다.
+    safe_owner_by_fact_id = safe_numeric_owners_by_fact_id(sections)
 
-    summary: list[ComposedSentence] = []
-    for sentence in report.summary:
-        if not has_public_numeric_token(sentence.text):
-            summary.append(sentence)
-            continue
-        claim = sentence.structured_claim
-        owner = claim.section_owner if claim is not None else ""
-        if (
-            claim is not None
-            and safe_owner_by_fact_id.get(claim.fact_id) == owner
-            and is_release_ready_numeric_sentence(sentence, section_id=owner)
-        ):
-            summary.append(sentence)
+    summary = [
+        sentence
+        for sentence in report.summary
+        if is_release_ready_summary_sentence(
+            sentence, safe_owner_by_fact_id=safe_owner_by_fact_id
+        )
+    ]
 
     return (
         ComposedReport(sections=tuple(sections), summary=tuple(summary)),

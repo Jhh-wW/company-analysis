@@ -107,6 +107,7 @@ from src.features.composer.culture_guard import (
 from src.features.composer.verify import (
     _SentenceNumber,
     _append_grounding_diagnostic,
+    cellwise_problem,
     _evidence_number_pools,
     _extract_numbers,
     _number_found,
@@ -588,8 +589,9 @@ def _review_rows(
             sources = candidates[number][1]
             # ★ 자료 부재 단언은 장과 무관하다 — 문장에서 막은 거짓말이 칸으로
             #   옮겨 적히면 그대로 공개되므로 여기서도 같은 사유코드로 건다.
+            # ⚠️ 칸마다 «따로» 건다 — 묶음 검수 경로와 같은 이유·같은 함수다.
             flow_problem = (
-                absence_claim_problem(candidates[number][0])
+                cellwise_problem(row.cells, absence_claim_problem)
                 or flow_scope_problem(row.cells, sources)
             )
             if not flow_problem and section_id == CHALLENGE_FLOW_SECTION_ID:
@@ -605,13 +607,21 @@ def _review_rows(
                 # ★ 재무위험 «규정» 규칙과 원문 절 계약을 도식에도 건다. 예전에는
                 #   본문에만 걸려 있어서 산문에서 빠진 재무 서술이 표의 칸으로
                 #   옮겨 적히면 그대로 통과했다 — 같은 보고서 안의 두 잣대였다.
+                # ⚠️ 새로 건 두 검사는 칸마다 «따로» 건다(cellwise_problem
+                #   머리말). 기존 culture_problem 은 이 커밋 이전부터 이어
+                #   붙인 문자열을 쓰던 계약이라 그대로 둔다.
                 flow_problem = (
                     culture_flow_problem(row.cells, sources)
                     or culture_accounting_flow_problem(row.cells, sources)
-                    or culture_problem(" ; ".join(row.cells), sources)
-                    or culture_financial_risk_goal_problem(" ; ".join(row.cells))
-                    or culture_section_evidence_problem(
-                        " ; ".join(row.cells), sources
+                    or culture_problem(FLOW_CELL_JOIN.join(row.cells), sources)
+                    or cellwise_problem(
+                        row.cells, culture_financial_risk_goal_problem
+                    )
+                    or cellwise_problem(
+                        row.cells,
+                        lambda cell: culture_section_evidence_problem(
+                            cell, sources
+                        ),
                     )
                 )
             # 6장 성장 계획 표만 미래 근거를 결속한다 — 이 장의 산문과 다른 장의

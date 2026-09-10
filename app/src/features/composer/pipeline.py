@@ -151,6 +151,8 @@ from src.features.composer.structured_claims import (
     append_past_changes_numeric_claims,
     build_past_changes_numeric_claims,
     enforce_public_numeric_safety,
+    is_release_ready_summary_sentence,
+    safe_numeric_owners_by_fact_id,
 )
 from src.features.composer.validate import V2ValidationError, validate_v2
 from src.features.composer.verify import verify_report, verify_sentences
@@ -495,6 +497,7 @@ def _supplement_safe_summary(
     report: ComposedReport,
     *,
     excluded_keys: frozenset[str] = frozenset(),
+    accept: Callable[[ComposedSentence], bool] | None = None,
 ) -> tuple[ComposedSentence, ...]:
     """수치 안전 경계 뒤 요약이 짧으면 안전한 본문으로 최소치만 채운다.
 
@@ -515,13 +518,17 @@ def _supplement_safe_summary(
 
     ``excluded_keys``: 앞 단계의 수치 안전 검사가 «뺀» 문장의 정규화 본문.
     그 문장이 이 보충으로 되살아나는 자리를 막는다.
+    ``accept``: 후보가 «요약 잣대»를 통과하는지 보는 술어. 본문 잣대와 요약
+    잣대가 다르기 때문에, 본문에 남았다는 사실만으로 요약에 실을 수 없다.
     """
 
-    chosen = _supplement_summary(summary, report, excluded_keys=excluded_keys)
+    chosen = _supplement_summary(
+        summary, report, excluded_keys=excluded_keys, accept=accept
+    )
     if len(chosen) >= SUMMARY_MIN_SENTENCES:
         return chosen
     return _supplement_summary_any_grade(
-        chosen, report, excluded_keys=excluded_keys
+        chosen, report, excluded_keys=excluded_keys, accept=accept
     )
 
 
@@ -637,12 +644,35 @@ def _legacy_summary_stage(
         ) - frozenset(
             _normalized_text(sentence.text) for sentence in final.summary
         )
-        final = ComposedReport(
-            sections=final.sections,
-            summary=_supplement_safe_summary(
-                final.summary, final, excluded_keys=removed_summary_keys
+        # ★ 잔여 구멍 — «뺀 그 문장»만 막으면 «같은 이유로 빠졌어야 할 다른
+        #   본문 문장»이 그대로 들어온다(운영 진입점 재현: 최종 3건 전부가
+        #   재검사하면 빠질 문장이 되는 경우가 있었다). 본문 잣대와 요약
+        #   잣대가 다르기 때문이다 — 본문은 「검수 통과 표식」만으로도 남지만
+        #   요약은 구조화 사실과 소유 장 일치를 요구한다.
+        #   그래서 보충 후보를 «요약 잣대»로 먼저 거른다.
+        safe_owner_by_fact_id = safe_numeric_owners_by_fact_id(final.sections)
+        supplemented = _supplement_safe_summary(
+            final.summary, final,
+            excluded_keys=removed_summary_keys,
+            accept=lambda sentence: is_release_ready_summary_sentence(
+                sentence, safe_owner_by_fact_id=safe_owner_by_fact_id
             ),
         )
+        # ★ 그리고 보충 «뒤»에 같은 검사를 한 번 더 건다 — fail-closed 뒷문이다.
+        #   위 술어와 같은 재료를 쓰므로 정상적으로는 아무것도 빠지지 않지만,
+        #   두 잣대가 앞으로 갈라지면 조용히 새는 대신 여기서 빠진다.
+        final, resupplement_filtering = enforce_public_numeric_safety(
+            ComposedReport(sections=final.sections, summary=supplemented)
+        )
+        summary_numeric_filtering = summary_numeric_filtering.merged(
+            resupplement_filtering
+        )
+        if len(final.summary) < len(supplemented):
+            logger.warning(
+                "요약 보충 뒤 수치 안전 재검사가 %d문장을 다시 뺐다 — "
+                "보충 술어와 요약 잣대가 갈라졌다는 뜻이다",
+                len(supplemented) - len(final.summary),
+            )
     if record is not None:
         record["최종수"] = len(final.summary)
         record["도달단계"] = "최종"
