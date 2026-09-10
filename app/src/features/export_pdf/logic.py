@@ -44,6 +44,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
+    CondPageBreak,
     Flowable,
     KeepTogether,
     PageBreak,
@@ -55,8 +56,9 @@ from reportlab.platypus import (
 )
 
 from src.core import clock
-from src.core.citations import citation_marker
+from src.core.citations import citation_marker, location_display
 from src.core.constants import section_display_heading
+from src.core.report_display import empty_section_notice
 from src.features.composer.constants import FLOW_UNCONFIRMED_CELL
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.composer.validate import validate_v2
@@ -293,6 +295,21 @@ class _BrandedCanvas(Canvas):
         페이지 시작 콜백에서 미리 그리면 같은 페이지에서 장이 바뀔 때 낡은 제목과
         새 제목이 PDF 텍스트에 함께 남는다. 페이지를 닫기 직전에 그리면 첫 장
         제목이 기록된 뒤라 한 번의 정확한 머리말만 남는다.
+
+        ★ 규칙(같은 쪽에 장이 여럿일 때) — 두 값을 따로 둔다:
+          · ``_current_section_name`` = «이 쪽 자체의» 머리말. 이 쪽에서
+            «처음» 그려진 장 제목으로 고정한다(기존 표시 그대로 보존 —
+            장이 여럿인 혼합 쪽 자체는 각 장 제목이 본문에 그대로 보이므로
+            머리말이 그중 하나와 달라도 읽는 사람이 본문에서 확인할 수 있다).
+          · ``_carry_section_name`` = «다음 쪽에 물려줄» 값. 이 쪽에서
+            «마지막»으로 그려진 장 제목으로 매번 갱신한다.
+          다음 쪽이 시작될 때(바로 아래) ``_current_section_name``을
+          ``_carry_section_name``으로 미리 채운다 — 그 쪽에 새 장 제목이
+          있으면 그 제목이 다시 덮어쓰고(그 쪽 자체 규칙 그대로), 없으면
+          (순수 이어짐 쪽) 이 값이 그대로 남는다. 실측: 8장 「인재상과
+          일하는 방식」·9장 「회사가 밝힌 차별점」이 한 쪽에 같이 실리면, 그
+          쪽 자체는 여전히 8장을 보여주되(기존과 동일) 9장 본문만 이어지는
+          다음 쪽은 이제 9장을 정확히 물려받는다(예전엔 8장에 멈춰 있었다).
         """
 
         if self.getPageNumber() > 1:
@@ -304,6 +321,10 @@ class _BrandedCanvas(Canvas):
             )
         super().showPage()
         self._page_section_seen = False
+        # 다음 쪽의 시작 머리말을 «이 쪽까지 실제로 시작한 마지막 장»으로
+        # 미리 채운다. 다음 쪽에 그 쪽만의 첫 장이 있으면 draw()가 다시
+        # 덮어쓴다 — 순수 이어짐 쪽에서만 이 값이 그대로 쓰인다.
+        self._current_section_name = getattr(self, "_carry_section_name", "")
 
 
 class _OutlineAnchor(Flowable):
@@ -380,6 +401,10 @@ class _SectionHeading(Flowable):
 
     def draw(self) -> None:
         canvas = cast(Canvas, self.canv)
+        # 규칙은 _BrandedCanvas.showPage()의 docstring에 있다: 이 쪽 자체의
+        # 머리말(_current_section_name)은 이 쪽의 «첫» 장만 반영하고, 다음
+        # 쪽에 물려줄 값(_carry_section_name)은 매번(마지막 장까지) 갱신한다.
+        setattr(canvas, "_carry_section_name", self.section_name)
         if not bool(getattr(canvas, "_page_section_seen", False)):
             setattr(canvas, "_current_section_name", self.section_name)
             setattr(canvas, "_page_section_seen", True)
@@ -1818,6 +1843,28 @@ def _row_cited_text(cites: Sequence[str]) -> str:
     )
 
 
+def _extra_source_markers(cite: str, source_cites: Sequence[str]) -> str:
+    """캡션 대표 인용 외에 표가 실제로 가진 나머지 출처 번호를 마저 붙인다.
+
+    ★ 표시 전달만 고친다(F-4 — 실측: 3쪽 「회사가 공시한 대표 이름」 표는
+      source_cites 4개 중 캡션에 1개만 찍혔다). 행마다 어느 출처인지는 새로
+      추정하지 않는다 — row_cites가 있는 표는 이미 행별 표식을 쓰므로
+      호출부에서 이 함수를 부르지 않는다.
+    """
+
+    seen = {cite}
+    markers: list[str] = []
+    for candidate in source_cites:
+        candidate = str(candidate)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        marker = citation_marker(candidate)
+        if marker:
+            markers.append(marker)
+    return "".join(markers)
+
+
 def _row_citation_height(text: str, style: ParagraphStyle, width: float) -> float:
     """출처가 여러 줄로 접혀도 도식의 배정 영역 안에 모두 들어가게 측정한다."""
     if not text:
@@ -2036,6 +2083,7 @@ def _add_report_table(
         rows=tuple(tuple(row) for row in table.rows),
         numeric=table.numeric,
         row_cites=table.row_cites,
+        source_cites=table.source_cites,
         styles=styles,
         width=width,
     )
@@ -2050,6 +2098,7 @@ def _add_grid_table(
     rows: Sequence[Sequence[str]],
     numeric: bool,
     row_cites: Sequence[Sequence[str]] = (),
+    source_cites: Sequence[str] = (),
     styles: dict[str, ParagraphStyle],
     width: float,
 ) -> None:
@@ -2057,9 +2106,16 @@ def _add_grid_table(
 
     값을 만들지 않는다. 넘겨받은 글자만 배치하므로 봉인 블록도 canonical 표도
     «같은 코드»로 그려진다 — 두 벌로 갈라지면 채널이 조용히 어긋난다.
+
+    ``source_cites``: 대표 ``cite`` 외에 표가 실제로 가진 나머지 출처(F-4).
+    ``row_cites``가 있는 표는 이미 행별로 출처를 보여 주므로 캡션에 다시
+    붙이지 않는다 — 두 표시를 겹치면 같은 번호가 두 번 보인다.
     """
 
-    story.append(Paragraph(_escape(_cited_text(caption, cite)), styles["small_bold"]))
+    caption_text = _cited_text(caption, cite)
+    if not row_cites:
+        caption_text += _extra_source_markers(cite, source_cites)
+    story.append(Paragraph(_escape(caption_text), styles["small_bold"]))
 
     max_columns = max(
         [len(headers), *(len(row) for row in rows)],
@@ -2284,6 +2340,36 @@ def _lead_with_heading(
     ]
 
 
+def _paragraphs_with_heading(
+    heading: Sequence[Flowable],
+    paragraphs: Sequence[Flowable],
+    width: float,
+    *,
+    text_only: bool,
+) -> list[Flowable]:
+    """짧은 글 전용 장은 한 쪽에, 긴 장은 기존 문단 경계대로 배치한다."""
+    if text_only:
+        flowables = [*heading, *paragraphs]
+        height_limit = constants.SHORT_TEXT_SECTION_MAX_HEIGHT_PT
+        section_height = sum(
+            item.wrap(width, height_limit)[1]
+            + item.getSpaceBefore()
+            + item.getSpaceAfter()
+            for item in flowables
+        )
+        if section_height <= height_limit:
+            # 짧은 장도 제목과 본문이 함께 들어갈 자리를 먼저 확보한다.
+            return [CondPageBreak(section_height), KeepTogether(flowables)]
+    first_group = [*heading, paragraphs[0]]
+    # 묶음의 사전 높이 추정과 실제 배치 사이에 여백 차이가 생길 수 있다.
+    # 제목만 남지 않도록 첫 문단까지의 여백을 포함해 먼저 자리를 확보한다.
+    required_height = sum(
+        item.wrap(width, A4[1])[1] + item.getSpaceBefore() + item.getSpaceAfter()
+        for item in first_group
+    )
+    return [CondPageBreak(required_height), KeepTogether(first_group), *paragraphs[1:]]
+
+
 def _add_section(
     story: list[Flowable],
     report: Report,
@@ -2305,6 +2391,18 @@ def _add_section(
         _HorizontalRule(width),
         Spacer(1, 10),
     ]
+    empty_notice = (
+        empty_section_notice(report, section)
+        if report.schema_version == ENGINE_V2_SCHEMA_VERSION
+        and report.public_projection is None
+        and report.release_mode != "FULL"
+        else ""
+    )
+    if empty_notice:
+        story.extend(_lead_with_heading(
+            heading_flowables, [Paragraph(_escape(empty_notice), styles["body"])]
+        ))
+        return
     if not section.is_filled:
         story.extend(heading_flowables)
         return
@@ -2331,15 +2429,14 @@ def _add_section(
         for block in detail_blocks[1:]:
             _add_section_content_block(story, block, styles, width)
     elif section.prose_paragraphs:
-        # ★ 문단 단위로 낸다 — 예전에는 한 장의 문장을 전부 이어 붙여 한
-        #   덩어리로 냈다. 첫 문단만 제목과 함께 묶어 쪽 넘김에서 떨어지지
-        #   않게 하고, 나머지는 이어서 흘린다.
+        # 긴 장은 문단 단위로 흘리고, 짧은 글 전용 장은 제목과 함께 놓는다.
         paragraphs = [
             _numbered_paragraph(position, text, styles, width)
             for position, text in enumerate(section.prose_paragraphs, start=1)
         ]
-        story.append(KeepTogether([*heading_flowables, paragraphs[0]]))
-        story.extend(paragraphs[1:])
+        story.extend(_paragraphs_with_heading(
+            heading_flowables, paragraphs, width, text_only=not section.tables
+        ))
     elif section.prose_lines:
         prose = " ".join(_cited_text(text, cite) for text, cite in section.prose_lines)
         story.append(
@@ -2640,8 +2737,10 @@ def _add_projection_section(
             _numbered_paragraph(position, text, styles, width, number_text=ordinal)
             for position, (ordinal, text) in enumerate(display.paragraphs, start=1)
         ]
-        story.append(KeepTogether([*heading_flowables, paragraphs[0]]))
-        story.extend(paragraphs[1:])
+        story.extend(_paragraphs_with_heading(
+            heading_flowables, paragraphs, width,
+            text_only=not display.tables and not band,
+        ))
         story.extend(band)
         table_start = 0
     else:
@@ -2721,7 +2820,7 @@ def _add_citations(
                 _link_markup(row.label_display, row.url),
                 row.status_display,
                 row.verification_label,
-                row.location,
+                location_display(row.location),
                 row.used_in_display,
             )
             for row in projection.citations
@@ -2733,7 +2832,7 @@ def _add_citations(
                 _source_label_markup(source),
                 _source_status(source),
                 source_verification_label(report, source.source_id),
-                source.location.strip() or "—",
+                location_display(source.location.strip()) or "—",
                 _source_used_sections(source),
             )
             for source in _citations(report)

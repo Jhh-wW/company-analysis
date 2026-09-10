@@ -64,15 +64,40 @@ from dataclasses import replace
 from typing import Callable, Final, Optional
 
 from src.features.composer.constants import (
+    CHALLENGE_FLOW_SECTION_ID,
     FLOW_ARROW_SECTION_IDS,
     FLOW_HEADERS_BY_SECTION,
+    FLOW_RELATION_REVIEW_GUIDE,
     PARSE_RETRY_LIMIT,
     PORTFOLIO_TABLE_SECTION_ID,
     RETRY_REMINDER,
+    STRATEGY_TABLE_SECTION_ID,
 )
 from src.features.composer.logic import extract_json_payload
+from src.features.composer.challenge_guard import challenge_response_problem
+from src.features.composer.diagram_review_constants import (
+    DIAGRAM_CITATIONS_PREFIX,
+    DIAGRAM_EVIDENCE_GUIDE,
+    DIAGRAM_EVIDENCE_PREFIX,
+    DIAGRAM_REASON_GUIDE,
+    DIAGRAM_REASON_KEY,
+)
 from src.features.composer.grounding import constrain_verdicts, grounding_hint
 from src.features.composer.grounding_constants import GROUNDING_GUIDE
+from src.features.composer.future_plan_constants import (
+    FUTURE_PLAN_REVIEW_GUIDE,
+)
+from src.features.composer.future_plan_guard import (
+    future_plan_entries_by_number, future_plan_problem,
+)
+from src.features.composer.direct_support_constants import (
+    FLOW_CELL_JOIN, RELATION_REVIEW_GUIDE,
+)
+from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
+from src.features.composer.scope_guard import flow_scope_problem
+from src.features.composer.culture_guard import (
+    culture_accounting_flow_problem, culture_flow_problem, culture_problem,
+)
 from src.features.composer.verify import (
     _SentenceNumber,
     _append_grounding_diagnostic,
@@ -103,8 +128,8 @@ FLOW_REVIEW_PROMPT_HEADER: Final[str] = "[도식 검수]"
 #:   거짓이다」라고 판정 기준을 줬다. 카드에는 이을 상대가 없으므로 검수
 #:   AI가 찾을 수 없는 것을 찾다가 「거짓」을 낼 수 있다. 어휘를 갈라
 #:   카드에는 «칸마다 근거가 있나»를 묻는다.
-#: ★ 화살표 장 문구는 한 글자도 바꾸지 않는다 — 6개 흐름표는 지금 잘
-#:   나오고 있다. 카드 안내는 «카드 줄이 실제로 있을 때만» 덧붙인다.
+#: 카드 안내는 «카드 줄이 실제로 있을 때만» 덧붙인다. 공통 검수에서는
+#: 상대뿐 아니라 각 칸이 주장하는 과금·수익·적용 범위도 함께 확인한다.
 FLOW_REVIEW_ARROW_ROW_NOUN: Final[str] = "경로"
 FLOW_REVIEW_CARD_ROW_NOUN: Final[str] = "카드"
 
@@ -333,15 +358,25 @@ def _labelled_cells(section_id: str, row: FlowRow) -> list[str]:
 
 
 def _review_prompt(
-    items: Sequence[tuple[int, str, FlowRow, str]],
-    texts: Optional[Mapping[str, str]] = None,
+    items: Sequence[tuple[int, str, FlowRow]],
+    texts: Mapping[str, str],
 ) -> str:
     has_card_rows = any(
-        section_id not in FLOW_ARROW_SECTION_IDS for _n, section_id, _r, _s in items
+        section_id not in FLOW_ARROW_SECTION_IDS for _n, section_id, _r in items
     )
+    # 행·인용의 최초 등장 순서와 원문 전체를 보존한다. 같은 ID만 중복 제거하며
+    # 내용이 같은 다른 ID를 합치거나 행별 허용 근거를 전역으로 넓히지 않는다.
+    source_dictionary: dict[str, str] = {}
+    for _number, _section_id, row in items:
+        for fragment_id in row.citations:
+            if fragment_id in texts:
+                source_dictionary.setdefault(fragment_id, texts[fragment_id])
     lines = [
         FLOW_REVIEW_PROMPT_HEADER,
         GROUNDING_GUIDE,
+        RELATION_REVIEW_GUIDE,
+        ROLE_BINDING_REVIEW_GUIDE,
+        FUTURE_PLAN_REVIEW_GUIDE,
         "아래는 보고서에 실릴 «사업 경로 도식»의 각 줄이다.",
         "칸마다 «칸 이름: 값» 꼴로 준다. 칸 이름은 장마다 다르다 — 「무엇으로",
         "시작하나 → 회사가 하는 일 → 누구에게 닿나」인 장도 있고, 「지금 겪는",
@@ -350,21 +385,20 @@ def _review_prompt(
         "★ 값이 없는 칸은 «아예 주지 않는다». 보고서에도 인쇄되지 않으므로",
         "  없는 칸을 이유로 그 줄을 «거짓»으로 판정하지 마라.",
         "",
-        "줄마다 그 줄이 인용한 근거 원문을 함께 준다.",
+        DIAGRAM_EVIDENCE_GUIDE,
         "판정 기준은 하나다 — **근거 원문이 이 경로를 실제로 뒷받침하는가.**",
         "",
         "★ 낱말이 원문과 «글자 그대로» 같을 필요는 없다. 첫 칸과 끝 칸은",
         "  원래 요약해 붙이는 이름이다(원문 「음반 유통은 A사와 협력」 →",
         "  칸 「음악 소비자」는 «참»이다). 글자가 아니라 «관계»를 보라.",
-        "★ 원문이 말하지 않은 상대에게 화살표를 그은 줄만 «거짓»이다",
-        "  (원문은 제조를 돕는 기술 협력이라고만 했는데 「고객」에게 닿는다고",
-        "  그린 경우).",
+        "★ 원문이 말하지 않은 상대나 내용을 넣거나, 원문에 없는 관계를",
+        "  붙인 줄은 «거짓»이다. 제조를 돕는 기술 협력을 고객 판매로 그리는",
+        "  경우와 서비스 출시를 유료 과금으로 바꾸는 경우 모두 해당한다.",
+        FLOW_RELATION_REVIEW_GUIDE,
     ]
     if has_card_rows:
-        # ★ 카드 장(3장 제품·서비스 등)은 화살표가 없다. 줄머리에 「카드」라
-        #   적어 두고, 카드에는 «칸마다 근거가 있나»를 묻는다. 이 안내는
-        #   카드 줄이 실제로 있을 때만 붙는다 — 화살표만 있는 검수의
-        #   프롬프트는 예전과 «글자 그대로» 같다.
+        # 카드 장은 화살표가 없다. 공통 주장 검수에 더해 카드의 각 칸이
+        # 한 대상을 설명하는지 확인하며 존재하지 않는 이동은 요구하지 않는다.
         lines.extend(
             (
                 "",
@@ -382,25 +416,26 @@ def _review_prompt(
         (
             "",
             "형식: 설명 없이 아래 JSON만 출력한다.",
+            DIAGRAM_REASON_GUIDE,
             '{"' + _VERDICT_KEY + '": [{"' + _VERDICT_NUMBER_KEY + '": 1, "'
+            + DIAGRAM_REASON_KEY + '": "원문과 칸 내용의 대조 근거", "'
             + _VERDICT_RESULT_KEY + '": "' + VERDICT_TRUE + '"}]}',
+            "",
+            DIAGRAM_EVIDENCE_PREFIX + json.dumps(source_dictionary, ensure_ascii=False),
             "",
         )
     )
-    for number, section_id, row, source_text in items:
+    for number, section_id, row in items:
         # 경로·원문은 신뢰할 수 없는 데이터다. JSON 문자열로 봉인해
         # 안의 줄바꿈·가짜 번호·지시가 검수 프롬프트 구조를 바꾸지 못한다.
         path_json = json.dumps(
             _labelled_cells(section_id, row), ensure_ascii=False
         )
-        source_json = json.dumps(source_text, ensure_ascii=False)
         noun = flow_review_row_noun(section_id)
         lines.append(f"[{number}] {noun}(JSON 배열): {path_json}")
-        lines.append(f"    근거 원문(JSON 문자열): {source_json}")
-        if texts is not None:
-            sources = {fid: texts[fid] for fid in row.citations if fid in texts}
-            lines.append("    인용 조각별 원문(JSON 객체): " + json.dumps(sources, ensure_ascii=False))
-            lines.append(grounding_hint(" ; ".join(row.cells), sources))
+        lines.append(DIAGRAM_CITATIONS_PREFIX + json.dumps(row.citations, ensure_ascii=False))
+        sources = {fid: texts[fid] for fid in row.citations if fid in texts}
+        lines.append(grounding_hint(FLOW_CELL_JOIN.join(row.cells), sources, row.cells))
     lines.extend(
         (
             "",
@@ -471,7 +506,7 @@ def _review_rows(
     diagnostics: Optional[list[dict]] = None,
 ) -> tuple[dict[str, tuple[FlowRow, ...]], list[str]]:
     """모든 장의 경로를 «한 묶음»으로 검수한다 (AI 1회)."""
-    items: list[tuple[int, str, FlowRow, str]] = []
+    items: list[tuple[int, str, FlowRow]] = []
     owner: dict[int, str] = {}
     blank_dropped: list[str] = []
     number = 0
@@ -485,7 +520,7 @@ def _review_rows(
                 )
                 continue
             number += 1
-            items.append((number, section_id, row, _source_text(row, texts)))
+            items.append((number, section_id, row))
             owner[number] = section_id
     if not items:
         return (
@@ -521,19 +556,46 @@ def _review_rows(
             blank_dropped
             + [
                 f"[{owner[number]}] {number}번 경로: 의미 검수 불능으로 공개 제외"
-                for number, _section, _row, _source in items
+                for number, _section, _row in items
             ],
         )
 
-    candidates = {number: (" ; ".join(row.cells), {
+    candidates = {number: (FLOW_CELL_JOIN.join(row.cells), {
         fid: texts[fid] for fid in row.citations if fid in texts
-    }) for number, _section, row, _source in items}
-    verdicts, grounding_problems = constrain_verdicts(raw, verdicts, candidates)
+    }) for number, _section, row in items}
+    # 도식은 칸이 실제 구조다 — 이어 붙인 문자열과 «함께» 칸 경계를 넘긴다.
+    verdicts, grounding_problems = constrain_verdicts(
+        raw, verdicts, candidates,
+        cells_by_number={number: row.cells for number, _section, row in items},
+    )
+    # 같은 파서로 미래 근거를 읽고, 중복 번호는 근거 없음으로 처리한다.
+    future_evidence = future_plan_entries_by_number(raw)
     kept: dict[str, list[FlowRow]] = {section_id: [] for section_id, _ in by_section}
     dropped: list[str] = list(blank_dropped)
-    for index, (number, _section, row, _source) in enumerate(items):
+    for number, _section, row in items:
         result = verdicts.get(number)
         section_id = owner[number]
+        if result == VERDICT_TRUE and number not in grounding_problems:
+            sources = candidates[number][1]
+            flow_problem = flow_scope_problem(row.cells, sources)
+            if not flow_problem and section_id == CHALLENGE_FLOW_SECTION_ID:
+                flow_problem = challenge_response_problem(row.cells)
+            if not flow_problem and section_id == "culture":
+                # 축약된 칸은 원문을 줄여 적어 산문 검사의 세 표지 결합에 걸리지
+                # 않는다. 그 행이 «인용한 원문»의 순수 회계 절과 결속됐을 때만 막는다.
+                flow_problem = (
+                    culture_flow_problem(row.cells, sources)
+                    or culture_accounting_flow_problem(row.cells, sources)
+                    or culture_problem(" ; ".join(row.cells), sources)
+                )
+            # 6장 성장 계획 표만 미래 근거를 결속한다 — 이 장의 산문과 다른 장의
+            # 도식은 그대로 기존 검수만 거친다.
+            if not flow_problem and section_id == STRATEGY_TABLE_SECTION_ID:
+                flow_problem = future_plan_problem(
+                    row.cells, sources, future_evidence.get(number)
+                )
+            if flow_problem:
+                grounding_problems[number] = flow_problem
         if number in grounding_problems:
             candidate_text, sources = candidates[number]
             _append_grounding_diagnostic(

@@ -621,10 +621,11 @@ def test_웹_v2는_ledger를_렌더하지_않는다(monkeypatch: pytest.MonkeyPa
 # ══════════════════════════════════════════════════════════
 
 #: base 커밋(0acf798)의 템플릿이 그린 v1 보고서 본문. 봉인 도입이 옛 화면을
-#: 한 글자도 바꾸지 않았음을 증명한다.
+#: 한 글자도 바꾸지 않았음을 증명한다. f29f4e90에서 문화 카드 「범위·한계」
+#: 기본 문구가 두 곳(culture-01·culture-02) 바뀐 만큼만 golden도 함께 갱신했다.
 _V1_GOLDEN = Path(__file__).with_name("result_v1_article_golden.html")
-_V1_GOLDEN_TEXT_SHA256_BEFORE_D2 = (
-    "9b1a8447701cdc989157195942492a65b76266d03101906c73088b48115ae006"
+_V1_GOLDEN_TEXT_SHA256_CURRENT_APPROVED = (
+    "4405f54d1bc6c006ef80805302985969f8a056cf67f4d7fa3f12ee8edfc9b248"
 )
 
 
@@ -667,12 +668,12 @@ def test_v1_결과페이지_HTML은_바이트_불변이다(monkeypatch: pytest.M
     assert rendered == _golden_bytes()
 
 
-def test_D2_골든_갱신은_텍스트를_한_글자도_바꾸지_않는다() -> None:
-    """배지·표 클래스·상단 띠 속성만 바뀌고 본문 텍스트는 이전과 같아야 한다."""
+def test_v1_golden_preserves_approved_visible_text() -> None:
+    """배지·표 클래스·상단 띠 속성이 바뀌어도, 본문 텍스트는 지금 승인된 문구와 같아야 한다."""
 
     golden = _V1_GOLDEN.read_text(encoding="utf-8")
 
-    assert _text_sha256(golden) == _V1_GOLDEN_TEXT_SHA256_BEFORE_D2
+    assert _text_sha256(golden) == _V1_GOLDEN_TEXT_SHA256_CURRENT_APPROVED
 
 
 # ══════════════════════════════════════════════════════════

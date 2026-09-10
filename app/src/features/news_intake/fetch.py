@@ -18,6 +18,12 @@ from html.parser import HTMLParser
 from typing import Final
 
 from src.features.news_intake import constants as c
+from src.features.news_intake.body_boundary import (
+    BodyBoundaryParser,
+    body_boundary,
+    contains_excluded_text,
+    metadata_body_text,
+)
 from src.features.news_intake.models import NewsBodyFetchResult, NewsCandidate
 from src.shared.report_quality.source_identity import canonical_url
 
@@ -198,7 +204,7 @@ class _JsonLdArticleBody(HTMLParser):
             self._chunks.append(data)
 
 
-def _json_ld_article_body(raw_html: str) -> str:
+def _json_ld_article_body(raw_html: str, excluded: set[str] | None = None) -> str:
     """기사 타입의 단일 articleBody만 받는다. 여러 기사 중 원문을 추측하지 않는다."""
 
     parser = _JsonLdArticleBody()
@@ -210,7 +216,9 @@ def _json_ld_article_body(raw_html: str) -> str:
         except (json.JSONDecodeError, ValueError):
             continue
         for value in _iter_article_bodies(payload):
-            bodies.add(_collapse(value))
+            text = metadata_body_text(value)
+            if text and not contains_excluded_text(text, excluded or set()):
+                bodies.add(text)
     # 추천 기사 등 여러 문서의 본문이 있으면 길이로 원문을 추측하지 않는다.
     return next(iter(bodies)) if len(bodies) == 1 else ""
 
@@ -312,7 +320,7 @@ class _MetaDescription(HTMLParser):
         self.handle_starttag(tag, attrs)
 
 
-def _meta_description(raw_html: str) -> str:
+def _meta_description(raw_html: str, excluded: set[str] | None = None) -> str:
     """우선순위 열쇠부터 보되, 너무 짧은 값에서 «멈추지» 않는다.
 
     실측: 어떤 언론사는 ``og:description``에 사진 설명 한 마디(16자)만 넣고
@@ -324,7 +332,9 @@ def _meta_description(raw_html: str) -> str:
     parser.feed(raw_html)
     longest = ""
     for key in _META_DESCRIPTION_KEYS:
-        value = parser.values.get(key, "")
+        value = metadata_body_text(parser.values.get(key, ""))
+        if contains_excluded_text(value, excluded or set()):
+            continue
         if len(value) >= c.BODY_MIN_CHARS:
             return value
         if len(value) > len(longest):
@@ -352,69 +362,40 @@ def extract_article_text(
         (본문, 단계 코드). 어느 겹에서도 못 얻으면 ``("", "")``.
     """
 
+    # 모든 폴백과 article 개수 판정이 같은 보조 영역 제외 결과를 사용한다.
+    # JSON-LD·메타의 복사본은 별도로 대조해 우회 재유입도 막는다.
+    boundary = body_boundary(raw_html)
+    visible = "".join("".join(boundary.visible_chunks).split())
+    # 정상 본문에도 정확히 존재하는 문장은 위젯만의 문장으로 간주하지 않는다.
+    excluded = {text for text in boundary.excluded_text if text not in visible}
     article_parser = _ArticleTagText()
-    article_parser.feed(raw_html)
+    article_parser.feed(boundary.html)
     extractors: dict[str, PrimaryExtract] = {
         c.BODY_STAGE_USABLE_RANGES: lambda value: (
             primary_extract(_without_page_chrome(value)) if article_parser.root_articles <= 1 else ""
         ),
-        c.BODY_STAGE_JSON_LD: _json_ld_article_body,
+        c.BODY_STAGE_JSON_LD: lambda value: _json_ld_article_body(value, excluded),
         c.BODY_STAGE_ARTICLE_TAG: _article_tag_text,
-        c.BODY_STAGE_META_DESCRIPTION: _meta_description,
+        c.BODY_STAGE_META_DESCRIPTION: lambda value: _meta_description(value, excluded),
     }
     for stage in c.BODY_EXTRACTION_STAGE_ORDER:
         extractor = extractors.get(stage)
         if extractor is None:
             continue
         try:
-            text = str(extractor(raw_html) or "").strip()
+            text = str(extractor(boundary.html) or "").strip()
         except Exception:  # noqa: BLE001 - 한 겹이 깨져도 다음 겹은 시도한다
             continue
-        if len(text) >= c.BODY_MIN_CHARS:
+        if len(text) >= c.BODY_MIN_CHARS and not contains_excluded_text(text, excluded):
             return text, stage
     return "", ""
 
 
-class _WithoutPageChrome(HTMLParser):
+class _WithoutPageChrome(BodyBoundaryParser):
     """범용 추출기로 넘기기 전에 제목·양식·탐색 구역을 제거한다."""
 
     def __init__(self) -> None:
-        super().__init__(convert_charrefs=False)
-        self.depth = 0
-        self.blocked: list[str] = []
-        self.parts: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if self.blocked:
-            if tag == self.blocked[-1]:
-                self.depth += 1
-            return
-        if tag in {"title", "nav", "header", "footer", "aside", "form", "script", "style", "noscript"}:
-            self.blocked.append(tag)
-            self.depth = 1
-            return
-        self.parts.append(self.get_starttag_text() or "")
-
-    def handle_endtag(self, tag: str) -> None:
-        if self.blocked:
-            if tag == self.blocked[-1]:
-                self.depth -= 1
-                if not self.depth:
-                    self.blocked.pop()
-            return
-        self.parts.append(f"</{tag}>")
-
-    def handle_data(self, data: str) -> None:
-        if not self.blocked:
-            self.parts.append(data)
-
-    def handle_entityref(self, name: str) -> None:
-        if not self.blocked:
-            self.parts.append(f"&{name};")
-
-    def handle_charref(self, name: str) -> None:
-        if not self.blocked:
-            self.parts.append(f"&#{name};")
+        super().__init__(excluded_tags=c.BODY_PAGE_CHROME_TAGS)
 
 
 def _without_page_chrome(raw_html: str) -> str:

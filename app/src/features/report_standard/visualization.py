@@ -11,6 +11,7 @@ import unicodedata
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Final
+from src.features.report_standard.constants import CULTURE_SCOPE_LIMITATION_TEXT
 from src.shared.report_generation.table_citations import validated_row_cites
 
 #: 구성 도식(100% 누적 막대)에 그릴 수 있는 분류 개수.
@@ -111,10 +112,11 @@ _CARD_LIMITATION_TEXT_BY_HEADER_KEY: Final[dict[frozenset[str], str]] = {
     #   눈가림 독립 평가에서 평가자 2명이 각각 이 모순을 지적했다.
     # ★ 그래서 «판정»을 «사실»로 바꾼다. 우리는 실행 여부를 확인하지 않았고,
     #   확인하지 않았다고 적는 것이 정직하다. 3·8장 문구처럼 행 내용과
-    #   무관하게 «참»이므로 이 층에 둘 자격이 있다.
+    #   무관하게 표시할 수 있는 검증 한계만 이 층에 둔다.
     frozenset(("계획", "시점", "공시된 내용")): "실행 여부는 확인하지 않았습니다",
-    # 8장 — 문서 §2-1: culture, v1 선례 #13 그대로("전사 공통 공식 기준").
-    frozenset(("내건 가치", "일하는 원칙", "확인된 사례")): "전사 공통 공식 기준입니다",
+    # 8장 — 표 머리말은 전사 적용이나 공식성의 증거가 아니다. 특정 부서
+    # 절차·목표를 전사 기준으로 격상하지 않고 인용 자료의 범위만 설명한다.
+    frozenset(("내건 가치", "일하는 원칙", "확인된 사례")): CULTURE_SCOPE_LIMITATION_TEXT,
 }
 
 #: 위 튜플을 «순서 무관» 비교용으로 미리 굳힌다(실측 사고 대응).

@@ -29,6 +29,7 @@ import time
 import urllib.parse
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from datetime import date
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Final, Iterable, Mapping, Optional
@@ -176,6 +177,13 @@ from src.shared import engine_build_identity, generation_coordination
 from src.shared.report_recovery import MAX_TOTAL_AI_CALLS as COMPOSER_RUNTIME_CALL_RESERVE
 from src.shared import runtime_failure_constants as failure_constants
 from src.shared import runtime_failure_diagnostic as runtime_failure
+from src.features.pipeline.provider_error_diagnostics import safe_provider_error_metadata
+from src.features.pipeline.v2_response_constants import (
+    V2_RESPONSE_STEP,
+    V2_RESPONSE_UNKNOWN,
+    V2_RESPONSE_STAGES,
+    V2_RESPONSE_STOP_REASONS,
+)
 from src.shared.company_identity import normalize_korean_registration_number
 from src.shared.generation_cache_identity import GenerationCacheNamespace
 from src.shared.report_source_identity import ReportSourceIdentity
@@ -249,6 +257,7 @@ from src.features.pipeline.news_research_context import (
     public_news_research_status,
 )
 from src.features.pipeline import engine_mode
+from src.features.pipeline import financial_source_constants as financial_source
 from src.features.pipeline.evidence_reclassify_step import (
     reclassify_official_evidence,
 )
@@ -578,22 +587,33 @@ def _generation_cache_namespace(
     )
 
 #: v2 작가·검수 호출의 출력 token 상한. 작가는 장 하나(6~12문장 JSON)를 돌려준다.
-#: 검수는 보고서 전체 «확인» 문장(50개+)의 판정 목록을 «한 번에» 돌려주므로
-#: 절단 여유를 크게 둔다 — v1 파일럿 전멸 원인이 max_tokens 절단(3,000→6,000도
-#: 부족)이었고, 검수 절단은 재요청 실패 시 확인 전원 해석 강등으로 이어진다.
-#: 실제 비용은 실행기의 건당·일일 예상비용 상한이 계속 지킨다.
+#: 검수는 전체 판정·짧은 대조 근거·수치 결속 배열을 한 번에 돌려준다.
+#: 기존 첫 검수 6640토큰에 대조 근거를 더하면 8000을 넘을 수 있어 12000을
+#: 예약했다. 이 값은 새 응답의 완료 보장이 아니며 실제 usage만 정산한다.
+#: 본조사 1000원 누적 예약과 호출 횟수 상한은 그대로 적용한다.
+#: ★ 2026-09-09 실측: 한 실행의 검수 응답이 출력 12000에서 그대로 잘렸고
+#:   (종료사유 max_tokens) 파싱 재요청이 단계 예약 잔액에 막혀 실행이 멈췄다.
+#:   같은 날 다른 실행은 12000 중 10418에서 정상 종료(end_turn)했으므로
+#:   출력 길이는 입력 크기가 아니라 후보 수·응답 스키마에 끌려간다.
+#:   잘린 쪽에 여유를 주려고 16000으로 올린다 — 상한이지 예산이 아니며,
+#:   상한을 올린다고 실제 정산이 상한까지 커지지는 않는다(실제 usage만 정산).
+#: ⚠️ 다만 호출 전 예약액은 «상한»으로 계산되므로(provider_budget.reserve_call)
+#:   이 값을 올리면 그 호출의 예약액이 출력 token 당 단가만큼 확실히 커진다.
+#:   재요청 여유를 만드는 값이 «아니다» — 재요청 예약도 같이 커진다.
 V2_WRITER_MAX_TOKENS: Final[int] = 4000
-V2_REVIEWER_MAX_TOKENS: Final[int] = 8000
+V2_REVIEWER_MAX_TOKENS: Final[int] = 16000
 
-#: 도식 검수의 출력 상한. 응답은 «경로 줄마다 참/거짓» 한 줄씩이고 줄은 장당
-#: 최대 5개다 — 실제로 200토큰이면 충분하다.
-#:
-#: ★ 왜 따로 두나 (적대 검토 실측) — 예산은 «출력 상한»으로 미리 잡는다
-#:   (provider_budget.reserve_call). 검수 상한 8000을 그대로 쓰면 도식 검수
-#:   한 번이 본조사 900원의 21.7%인 195원을 잡아 버린다. 실측 실행비가 이미
-#:   584원(대형 제조사)이라 여유가 8% 미만이고, 넘으면 «도식이 빠지는» 정도가
-#:   아니라 ProviderBudgetExceeded로 «보고서 전체»가 실패한다.
-V2_DIAGRAM_MAX_TOKENS: Final[int] = 512
+#: 전체 본문 판정이 16,000토큰 제한으로 잘리는 경우를 위한 전용 상한.
+#: 작은 후속 검수는 기존 상한으로 예약한다. 이 상한도 기존 단계 예산을
+#: 통과해야 하며, 실제 비용은 응답 usage로 정산한다.
+V2_INITIAL_REVIEWER_MAX_TOKENS: Final[int] = 24000
+
+#: 도식은 모든 장의 판정·짧은 대조 근거·수치 결속 배열을 함께 돌려준다.
+#: 실제 24행 검수에서 512토큰 출력 뒤 파싱 재요청이 관측돼 전용 상한을
+#: 2048로 두었다. 본문 검수와 분리하고 기존 1000원 단계 예약은 유지한다.
+#: ★ 2026-09-09 실측: 완료된 실행의 도식 호출 2건이 «둘 다» 출력 2048에서
+#:   잘렸다(종료사유 max_tokens). 잘린 것이 관측된 값이므로 4096으로 올린다.
+V2_DIAGRAM_MAX_TOKENS: Final[int] = 4096
 
 #: other_gate일 때 세부를 보태는 span-selection 결과 사유 코드 → 한국어 표기.
 _SPAN_RESULT_REASON_KO: Final[dict[str, str]] = {
@@ -5201,6 +5221,28 @@ def _v2_ask_via_provider(
                 reason_code=failure_constants.REASON_GENERATION_COORDINATION_FAILED,
             )
             raise AskFatalError(error, call_limit=False) from error
+        # 응답 본문·설명·임의 문자열은 진단으로 내보내지 않는다.
+        # 관측 실패는 이미 완료된 정상 응답과 정산을 바꾸지 않는다.
+        try:
+            raw_reason = getattr(response, "stop_reason", None)
+            run_diagnostics.current_steps().append({
+                "step": V2_RESPONSE_STEP,
+                "단계": (
+                    stage if type(stage) is str and stage in V2_RESPONSE_STAGES
+                    else V2_RESPONSE_UNKNOWN
+                ),
+                "출력상한": (
+                    max_tokens if type(max_tokens) is int and max_tokens > 0
+                    else None
+                ),
+                "종료사유": (
+                    raw_reason if type(raw_reason) is str
+                    and raw_reason in V2_RESPONSE_STOP_REASONS
+                    else V2_RESPONSE_UNKNOWN
+                ),
+            })
+        except Exception:  # noqa: BLE001 — 진단 오류는 본 기능에 전파하지 않는다
+            pass
         blocks = getattr(response, "content", None) or []
         return "".join(str(getattr(block, "text", "") or "") for block in blocks)
 
@@ -5747,10 +5789,16 @@ def _run_v2_composer(
     reviewer_ask = _v2_ask_via_provider(
         engine, client, stage="v2_review", max_tokens=V2_REVIEWER_MAX_TOKENS
     )
+    # 최초 본문 검수 전용 — 같은 stage·같은 계량 경계를 지나고 상한만 다르다.
+    initial_reviewer_ask = _v2_ask_via_provider(
+        engine, client, stage="v2_review",
+        max_tokens=V2_INITIAL_REVIEWER_MAX_TOKENS,
+    )
     diagram_ask = _v2_ask_via_provider(
         engine, client, stage="v2_diagram", max_tokens=V2_DIAGRAM_MAX_TOKENS
     )
     review_diagnostics_sink: list[dict] = []
+    composition_diagnostics_sink: list[dict] = []
     try:
         output = composer_pipeline.run_v2(
             company_name,
@@ -5760,6 +5808,7 @@ def _run_v2_composer(
             performance_table,
             writer_ask=writer_ask,
             reviewer_ask=reviewer_ask,
+            initial_reviewer_ask=initial_reviewer_ask,
             diagram_ask=diagram_ask,
             corp_type=corp_type,
             generated_at=business_date.isoformat(),
@@ -5787,6 +5836,7 @@ def _run_v2_composer(
                 steps, enabled=news_intake_switch.news_intake_enabled()
             ),
             review_diagnostics_sink=review_diagnostics_sink,
+            composition_diagnostics_sink=composition_diagnostics_sink,
         )
         news_usage = getattr(output, "news_usage_diagnostics", None)
         if isinstance(news_usage, dict) and news_usage:
@@ -5982,6 +6032,12 @@ def _run_v2_composer(
             reason_code=failure_constants.REASON_REPORT_ASSEMBLY_FAILED,
         )
         raise
+    finally:
+        from src.shared.report_quality.composition_diagnostics import (  # noqa: PLC0415
+            observed_composition_steps,
+        )
+
+        steps.extend(observed_composition_steps(composition_diagnostics_sink))
 
     # composer는 본문·인용을 만들지만 수집 단계의 3상태(ok/none/failed)는
     # 알지 못한다. RunResult에만 두면 최초 worker가 사라진 뒤 캐시·재시작
@@ -6401,6 +6457,7 @@ def _collect_grounded_news(
                     "캐시재사용가능": False,
                     "provider_status": observation.status_code,
                     "provider_error_type": observation.error_type,
+                    **safe_provider_error_metadata(error.__cause__),
                     "provider_transport": observation.transport_state.value,
                     "provider_billing": observation.billing_disposition.value,
                     "provider_liability_krw": observation.liability_krw,
@@ -7679,6 +7736,104 @@ def _attach_name_candidate_fragments(
     return merged, len(accepted)
 
 
+def _financial_api_disclosed_at(
+    financials: Optional[dict[str, Any]],
+    filing: Optional[dict[str, Any]],
+    corp_code: str,
+) -> str:
+    """동일 회사·연도·연간 보고코드·접수에 결속된 실제 공시일만 반환한다.
+
+    목록 응답은 reprt_code가 없으므로 engine의 연간 선택 표식과 공식 제목을
+    함께 검산한다. 조회일·보고기간 말일·접수번호 모양에서 날짜를 만들지 않는다.
+    """
+    if (
+        not isinstance(corp_code, str)
+        or not financial_source.CORP_CODE.fullmatch(corp_code)
+        or not isinstance(financials, Mapping)
+        or financials.get("status") != DART_SUCCESS_STATUS
+        or not isinstance(filing, Mapping)
+        or filing.get("corp_code") != corp_code
+    ):
+        return ""
+    title = financial_source.ANNUAL_REPORT_TITLE.fullmatch(
+        str(filing.get("report_nm") or "").strip()
+    )
+    if title is None:
+        return ""
+    year, month = title.groups()
+    report_code = filing.get("reprt_code")
+    selected_period = filing.get(financial_source.SELECTED_REPORT_PERIOD_KIND_KEY)
+    if (
+        not 1 <= int(month) <= 12
+        or (filing.get("bsns_year") is not None and str(filing["bsns_year"]) != year)
+        or report_code not in (None, "", financial_source.ANNUAL_REPORT_CODE)
+        or selected_period not in (None, "", financial_source.SELECTED_REPORT_PERIOD_KIND_ANNUAL)
+        or not (
+            report_code == financial_source.ANNUAL_REPORT_CODE
+            or selected_period == financial_source.SELECTED_REPORT_PERIOD_KIND_ANNUAL
+        )
+    ):
+        return ""
+    receipt = str(filing.get("rcept_no") or "")
+    disclosed = str(filing.get("rcept_dt") or "")
+    if (
+        not financial_source.RECEIPT_NUMBER.fullmatch(receipt)
+        or not financial_source.DISCLOSURE_DATE.fullmatch(disclosed)
+    ):
+        return ""
+    try:
+        disclosed_at = date.fromisoformat(disclosed).isoformat()
+    except ValueError:
+        return ""
+    expected = {
+        "corp_code": corp_code,
+        "bsns_year": year,
+        "reprt_code": financial_source.ANNUAL_REPORT_CODE,
+        "rcept_no": receipt,
+    }
+    rows = financials.get("list")
+    if not isinstance(rows, list) or not rows:
+        return ""
+    # 표시되는 앞부분만 맞고 뒤쪽에 다른 접수가 섞인 응답도 승인하지 않는다.
+    for row in rows:
+        if (
+            not isinstance(row, Mapping)
+            or any(row.get(key) != value for key, value in expected.items())
+            or str(row.get("fs_div") or "") not in financial_source.FINANCIAL_STATEMENT_SCOPES
+            or str(row.get("sj_div") or "") not in financial_source.FINANCIAL_STATEMENT_KINDS
+            or not isinstance(row.get("account_nm"), str)
+            or not row["account_nm"].strip()
+        ):
+            return ""
+    if any(key in financials and financials[key] != value for key, value in expected.items()):
+        return ""
+    return disclosed_at
+
+
+def _attach_financial_api_disclosure_date(
+    frags: dict[int, dict[str, str]],
+    *,
+    financials: Optional[dict[str, Any]],
+    filing: Optional[dict[str, Any]],
+    corp_code: str,
+) -> dict[int, dict[str, str]]:
+    """검증한 응답으로 만든 정확한 API 조각에 날짜만 별도 전달한다."""
+    disclosed_at = _financial_api_disclosed_at(financials, filing, corp_code)
+    if not disclosed_at or financials is None:
+        return frags
+    rows = financials["list"][:financial_source.API_FRAGMENT_ROW_LIMIT]
+    expected_text = financial_source.API_FRAGMENT_PREFIX + " · ".join(
+        f"{row.get('account_nm')} {row.get('thstrm_amount')}({row.get('thstrm_dt', '')})"
+        for row in rows if row.get("account_nm")
+    )
+    return {
+        number: {**fragment, financial_source.API_DISCLOSED_AT_KEY: disclosed_at}
+        if fragment.get("원문") == expected_text and not fragment.get("출처")
+        else fragment
+        for number, fragment in frags.items()
+    }
+
+
 def _collect(
     engine: Any,
     client: Any,
@@ -7731,6 +7886,9 @@ def _collect(
             steps.append({"step": "6_수집_원문", "오류": str(exc)[:120]})
 
     frags = engine.make_fragments(filing_text, financials)
+    frags = _attach_financial_api_disclosure_date(
+        frags, financials=financials, filing=filing, corp_code=corp_code
+    )
     # ★ 1판은 절 표제의 «첫 출현»만 본다. 그런데 사업보고서 첫 장이 «목차»라,
     #   「사업의 내용」의 첫 출현이 목차 줄이고 거기서 1,200자를 뜨면 통째로 목차가 된다.
     #   실측 — 상장 엔터사 조각 9개 중 3개가 목차였고, 그래서 1·3·4번 칸이 비었다.

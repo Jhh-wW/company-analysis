@@ -271,3 +271,6 @@ RELATIONSHIP_KEY_LABELS: Final[dict[str, str]] = {
 #: 맵에 없는 영문 내부 키가 폴백돼도 빈 문자열 대신 쓰는 기본 라벨.
 #: 빈 값은 출고 게이트의 빈 항목 검사에 걸려 보고서 전체 차단을 일으킨다.
 RELATIONSHIP_KEY_FALLBACK_LABEL: Final[str] = "공식 자료 기반 확인 항목"
+
+# 표나 사실 카드의 종류만으로 전사 적용을 단정하지 않는다.
+CULTURE_SCOPE_LIMITATION_TEXT: Final[str] = "인용 자료에 나타난 범위로 한정합니다"

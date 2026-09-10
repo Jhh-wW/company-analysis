@@ -512,8 +512,17 @@ def test_표_머리행은_검정_바탕과_흰_semibold_글자를_쓴다(
     assert ink_fills
 
 
-def test_상단띠는_페이지의_첫_장제목_하나를_보여준다(demo_pdf: bytes) -> None:
-    current = ""
+def test_top_band_shows_own_first_heading_but_continuation_inherits_last(demo_pdf: bytes) -> None:
+    """장이 실제로 시작하는 쪽 «자체»의 머리말은 그 쪽의 첫 장(기존 표시
+    그대로) — 장이 여럿이어도 각 장 제목이 본문에 그대로 보이므로, 머리말이
+    그중 하나와 달라도 읽는 사람이 본문에서 확인할 수 있다. 반면 장 제목이
+    전혀 없는 «순수 이어짐» 쪽은, 지금까지 실제로 시작한 «마지막» 장을
+    물려받아야 한다 — 실측 근거:
+    `.local-artifacts/resume-20260909-pdf-running-header-fix/`. 이 규칙은
+    `_BrandedCanvas.showPage()`/`_SectionHeading.draw()`의 docstring에도 있다.
+    """
+    current = ""  # 이 쪽 자체의 머리말(첫 장, 또는 이어짐 쪽이면 물려받은 값).
+    carry = ""  # 지금까지 실제로 시작한 마지막 장 — 다음 이어짐 쪽에 물려줄 값.
     with pdfplumber.open(io.BytesIO(demo_pdf)) as document:
         for page in document.pages[1:]:
             top = page.crop((0, 0, float(page.width), constants.PAGE_HEADER_HEIGHT_PT))
@@ -537,7 +546,10 @@ def test_상단띠는_페이지의_첫_장제목_하나를_보여준다(demo_pdf
                     (body_text.index("부록. 출처와 검증 상태"), "출처와 검증 상태")
                 )
             if candidates:
-                current = min(candidates)[1]
+                current = min(candidates)[1]  # 그 쪽 자체는 «첫» 장.
+                carry = max(candidates)[1]  # 다음 이어짐 쪽에 물려줄 «마지막» 장.
+            else:
+                current = carry  # 장 제목이 없는 순수 이어짐 쪽 — 마지막 장을 물려받는다.
             assert current
             assert current in top_text
 
@@ -550,14 +562,20 @@ def test_상단띠는_페이지의_첫_장제목_하나를_보여준다(demo_pdf
 #:   토큰 v1 시점부터 D-4 도형 수정까지 «한 번도 바뀌지 않았다»(실측 대조).
 #: ★ 낱말이 하나라도 사라지거나 새로 생기면 이 지문이 깨진다 — 도형을 옮기는
 #:   변경이 슬그머니 글자를 지우는 것을 막는 자리다.
+#: ★ 2026-09-09: f29f4e90에서 승인한 문화 기본 안내 두 곳을 반영해 갱신했다.
+#:   «전사 공통 공식 기준» 대신 «인용 자료에 나타난 범위로 한정합니다»를 쓴다.
+#:   이전 직접 비교에서 그 외 낱말 증감은 없고 공통 407단어의 좌표·폰트가
+#:   같았다. 과거 문화 함수만 복원하면 이전 네 고정값이 재현된다.
 _BODY_WORDS_SHA256 = (
-    "af25490e77cb450a163239ea202b7049736ff65b7c1488f1a85c5b4a4c3e8a5b"
+    "504bf9a7249429ecd742e9d7856925fcd0e9cc52dd119eb6f24e8f8d162cd955"
 )
 
 #: 줄바꿈·쪽 나눔까지 포함한 «배치» 지문. 디자인을 바꾸면 여기서 먼저 깨진다.
 #: D-4에서 음수 값 라벨을 0선 위로 올리면서 갱신했다(낱말은 위 지문이 지킨다).
+#: 2026-09-09: 위 문화 안내 변경으로 문자열 지문도 함께 갱신했다. 직접 비교한
+#: 5~6쪽의 공통 낱말 배치·폰트와 카드 경계·쪽 나눔은 그대로다.
 _BODY_LAYOUT_SHA256 = (
-    "113c176b11a83a40ddd49b5313c7ab99af7d1852b909db4fc96d600785e3b3ff"
+    "d8978470d3d9ba845847e07588d3e2bb85c392664c35d6321f8dd5747639cf03"
 )
 
 

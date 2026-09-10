@@ -282,6 +282,40 @@ def test_v2_보고서는_save_load_DB_왕복에서도_그대로_보존된다(tmp
     assert restored == original
 
 
+def test_table_only_sources_survive_storage_and_output_validation(tmp_path: Path) -> None:
+    """이름·뉴스 표의 두 번째 출처가 사라져 재출력이 막히던 실제 경계."""
+    from src.features.composer.validate import v2_validation_problems
+
+    original = _v2_report_for_roundtrip()
+    table = ReportTable(
+        caption="제품과 서비스 이름",
+        headers=["이름", "설명"],
+        rows=[["검사 장비", "반도체 검사"], ["유지보수", "장비 관리"]],
+        cite="[1]",
+        source_cites=["[1]", "[4]"],
+    )
+    original = replace(
+        original,
+        sections=[
+            replace(section, tables=[table]) if section.cell == "portfolio" else section
+            for section in original.sections
+        ],
+        citations=[*original.citations, replace(original.citations[0], number=4)],
+    )
+    assert v2_validation_problems(original) == ()
+    target = tmp_path / "table-source-roundtrip.db"
+    with db.connect(target) as conn:
+        reports.save(conn, "table-source", "CORP-TABLE", "", original)
+    with db.connect(target) as conn:
+        reloaded = reports.load(conn, "table-source")
+    json_reloaded = reports.report_from_json(reports.report_to_json(original))
+
+    for restored in (reloaded, json_reloaded):
+        assert restored is not None
+        assert v2_validation_problems(restored) == ()
+        assert restored == original
+
+
 def test_SHADOW_생성_보고서도_quality_observation을_저장한다(tmp_path: Path) -> None:
     """SHADOW(빈 release_mode)도 quality_observation을 저장·왕복한다.
 

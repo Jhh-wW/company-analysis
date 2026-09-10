@@ -30,7 +30,21 @@
 {% macro row_refs(cites) %}
   {%- for cite in cites -%}{{ ref(cite) }}{%- endfor -%}
 {% endmacro %}
-
+{# 표 캡션이 대표 인용 하나만 달고 있어도, 표 자체가 가진 나머지 출처는
+   전부 화면에서 갈 수 있게 마저 붙인다(F-4 — 실측: 3쪽 「회사가 공시한
+   대표 이름」 표는 source_cites 4개 중 캡션에 1개만 찍혔다).
+   ★ 행마다 어느 출처인지는 새로 추정하지 않는다 — row_cites가 있는 표는
+     이미 row_refs로 행별 표시를 하므로 여기서 건드리지 않는다.
+     ★ 이 «정의 블록»은 바깥으로 빈 줄을 흘리면 안 된다 — 표지 위 장식은
+       바이트로 대조된다(test_result_back_link.py). 그래서 이 주석은 공백을
+       먹는 꼴로 닫고, 정의 뒤에 빈 줄을 두지 않는다. -#}
+{% macro extra_source_refs(t) %}
+  {%- if not t.row_cites -%}
+    {%- for c in t.source_cites -%}
+      {%- if c != t.cite -%}{{ ref(c) }}{%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+{% endmacro %}
 {# 표 하나를 화면에 낸다 — 도식으로 그릴 수 있으면 도식, 아니면 표.
    ★ v1·v2가 «같은» 매크로를 쓴다. 예전에는 v1 분기에만 이 로직이 있어서,
      v2가 표에 presentation을 붙여도 화면이 그 값을 보지 않았다. 그래서
@@ -165,7 +179,7 @@
   {% else %}
   <div class="numtable">
   <div class="cap" id="{{ table_id }}-caption">
-  {{ t.caption }}{{ ref(t.cite) }}
+  {{ t.caption }}{{ ref(t.cite) }}{{ extra_source_refs(t) }}
   </div>
   <div class="scroll" tabindex="0" role="region" aria-labelledby="{{ table_id }}-caption">
   <table class="{{ 'nums' if t.numeric else 'texts' }}" aria-labelledby="{{ table_id }}-caption">
@@ -599,7 +613,7 @@
             </td>
             <td>{{ c.status_display }}</td>
             <td>{{ c.verification_label }}</td>
-            <td>{{ c.location }}</td>
+            <td>{{ location_display(c.location) }}</td>
             <td>{{ c.used_in_display }}</td>
           </tr>
           {% endfor %}
@@ -636,7 +650,9 @@
             장 번호를 문단마다 되풀이할 이유가 없다. PDF도 같은 커밋에서 함께 바꿨다
             (export_pdf/logic.py::_paragraph_number_markup) — 한쪽만 고치면
             「3-2 문단 보세요」가 다시 어긋난다. #}
-      {% if s.prose_paragraphs %}
+      {% set empty_notice = empty_section_notice(report, s) if report.release_mode != 'FULL' else '' %}{% if empty_notice %}
+      <p class="muted section-note">{{ empty_notice }}</p>
+      {% elif s.prose_paragraphs %}
         {% for paragraph in s.prose_paragraphs %}
         <p class="prose"><span class="pno" aria-hidden="true">{{ loop.index }}.</span><span class="prose-text">{{ inline_refs(paragraph) }}</span></p>
         {% endfor %}
@@ -692,7 +708,7 @@
               {%- if c.domain %} · {{ c.domain }}{% endif %}
               {%- if c.source_type %} · {{ c.source_type }}{% endif %}
             </td>
-            <td>{{ c.location or '—' }}</td>
+            <td>{{ location_display(c.location) or '—' }}</td>
             <td>
               {%- set usage = namespace(first=true) -%}
               {%- for section in report.sections -%}
@@ -797,7 +813,7 @@
               {%- if c.fact_status %} · {{ c.fact_status }}{% endif %}
             </td>
             <td>{{ source_verification_label(report, c.source_id) }}</td>
-            <td>{{ c.location or '—' }}</td>
+            <td>{{ location_display(c.location) or '—' }}</td>
             <td>
               {%- set usage = namespace(first=true) -%}
               {%- for section in report.sections -%}

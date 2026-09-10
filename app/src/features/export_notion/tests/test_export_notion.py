@@ -816,16 +816,37 @@ def test_v1_Notion_블록은_불변이다() -> None:
       같이 바뀌어 회귀를 못 잡는 순환 검증이 되기 때문이다.
     ★ 부분 보고서 기준값만 2026-09-05에 한 번 바꿨다. 등급 고지 블록과 미제공
       사유 문단을 «일부러» 뺀 변경이라(사용자 결정) 옛 값이 그대로면 오히려
-      변경이 안 된 것이다. 완성 보고서 기준값은 그때 그대로 — 고지가 없던
-      보고서는 한 글자도 안 바뀌었다는 증거다.
+      변경이 안 된 것이다.
+    ★ 완성 보고서 기준값은 2026-09-10에 처음 바꿨다(`f29f4e90` — 「공시 제목
+      문맥과 도식의 근거 범위 보완」). 그 커밋이 문화 카드 「범위·한계」 칸의
+      기본 문구를 「전사 공통 공식 기준」에서 `CULTURE_SCOPE_LIMITATION_TEXT`
+      (「인용 자료에 나타난 범위로 한정합니다」)로 바꿨기 때문이다 —
+      표 머리말만 보고 전사 적용을 단정하던 표시 계층의 거짓 주장을 «일부러»
+      없앤 변경이고, 근거는 `docs/reviews/2026-09-09-resume-review.md`
+      (「문화 카드와 정형 사실 카드의 기본 한계 문구를 … 바꿔 표시 계층의
+      전사 범위 단정을 제거했다」)와 독립 평가의 p8 지적이다.
+      실제 블록 diff는 이 두 칸 «단 2줄»이었고 다른 블록은 한 글자도 안
+      바뀌었다(그래서 부분 보고서 기준값은 그대로다). 옛 값
+      ``e85efced9c3b…d59041``은 그 변경 직전 값이다.
     """
 
     full = _make_report()
     partial = _partial_v1_report()
     assert full.public_projection is None and partial.public_projection is None
 
-    assert _blocks_sha256(logic.build_blocks(full, grade_note="무시되는 문구")) == (
-        "e85efced9c3b2dd92698286129313f13f87acce01d4ec8daf267f0b314d59041"
+    # ★ 위 갱신이 «그 2줄만» 바꾼 것이었다는 증거를 해시 옆에 남긴다. 생산
+    #   상수를 import하면 값이 되돌아가도 같이 따라가는 순환 검증이 되므로
+    #   리터럴로 적는다.
+    full_blocks = logic.build_blocks(full, grade_note="무시되는 문구")
+    # 표 칸은 `table` 블록의 children 안에 접혀 있으므로 직렬화한 글자에서 센다.
+    rendered = json.dumps(full_blocks, ensure_ascii=False)
+    assert rendered.count("인용 자료에 나타난 범위로 한정합니다") == 2, (
+        "문화 카드 「범위·한계」 칸 2개"
+    )
+    assert "전사 공통 공식 기준" not in rendered, "옛 전사 범위 단정 문구가 되돌아왔다"
+
+    assert _blocks_sha256(full_blocks) == (
+        "70245aae32040028a0fa8eb1694b4d7f1e569c8ca4c20e009017801617843e76"
     )
     assert _blocks_sha256(logic.build_blocks(partial)) == (
         "d92a443b7a6db9c84eb134b664cd2cdb58d027f36a451a6c0296563cec0db19d"

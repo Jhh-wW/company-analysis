@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import socket
 import sqlite3
+import sys
 from types import SimpleNamespace
 
 import httpx
@@ -17,6 +18,7 @@ from src.features.pilot_evaluation.runner import (
     PilotBatchBlocked,
     _LedgerConsistencyError,
 )
+from tools import evaluate_companies
 from tools.evaluate_companies import (
     EvaluationError, HttpEvaluation, diagnostic_metrics, digest, load_manifest,
     protect_session, text_metrics,
@@ -62,6 +64,7 @@ def harness(tmp_path, monkeypatch):
         connection.execute("CREATE TABLE storage_database_identity (singleton_id INTEGER, identity TEXT)")
         connection.execute("INSERT INTO storage_database_identity VALUES (1, '고정신원')")
         connection.execute("CREATE TABLE reports (report_id TEXT, payload_json TEXT)")
+        connection.execute("CREATE TABLE report_public_projections (report_id TEXT, projection_json TEXT)")
     calls = []
     controls = {"mismatch": False, "fail_run": False}
 
@@ -362,6 +365,172 @@ def test_unsettled_cost_saves_evidence_and_blocks_completion(harness, monkeypatc
     assert json.loads((output / "ledger.json").read_text(encoding="utf-8"))["billing_uncertain"] is True
     assert (output / "interruption.json").is_file()
     assert runner.state["cases"]["CUSTOM"]["state"] == "running"
+
+
+def test_unsettled_failure_then_get_resume_preserves_original_evidence(harness, monkeypatch):
+    """미정산 실패 뒤 --resume-only 재개는 GET만 내고, 재개 전 ledger/interruption 원본을 보존한다."""
+    build, calls, _, _, _ = harness
+    runner = build()
+    monkeypatch.setattr(runner.bridge, "_wait_for_ledger", lambda _: LedgerResult(
+        "GATE_STOPPED", 12.5, True, "", "", "", "evidence_insufficient"))
+    with pytest.raises(EvaluationError, match="미정산"):
+        runner.operate(execute=True)
+    output = runner.root / "http-evaluation-artifacts" / "main" / "CUSTOM"
+    original_ledger = (output / "ledger.json").read_bytes()
+    original_interruption = (output / "interruption.json").read_bytes()
+    posts_before_resume = sum(1 for method, _ in calls if method == "POST")
+
+    resumed = build()
+    monkeypatch.setattr(resumed.bridge, "_wait_for_ledger", lambda _: LedgerResult(
+        "GATE_STOPPED", 99.0, True, "", "", "", "evidence_insufficient"))
+    calls_before = len(calls)
+    with pytest.raises(EvaluationError, match="미정산"):
+        resumed.operate(resume_only=True)
+
+    assert all(method == "GET" for method, _ in calls[calls_before:])
+    assert sum(1 for method, _ in calls if method == "POST") == posts_before_resume == 2
+    ledger_priors = sorted(output.glob("ledger.prior-*.json"))
+    assert len(ledger_priors) == 1
+    assert ledger_priors[0].read_bytes() == original_ledger
+    assert json.loads((output / "ledger.json").read_text(encoding="utf-8"))["cost_krw"] == 99.0
+    interruption_priors = sorted(output.glob("interruption.prior-*.json"))
+    assert len(interruption_priors) == 1
+    assert interruption_priors[0].read_bytes() == original_interruption
+    assert not list(runner.checkpoint_path.parent.glob("*checkpoint*.prior-*"))
+
+
+def test_mid_report_failure_then_successful_resume_preserves_original_report_pdf_and_projection(
+    harness, monkeypatch,
+):
+    """report.pdf/report.json/public-projection.json을 이미 쓴 뒤 완료 전에 실패하면,
+
+    재개는 GET만 내고 정상 완료되며 재개 전 원본 세 파일이 고유 prior로 남는다.
+    """
+    build, calls, _, manifest, _ = harness
+    runner = build()
+    with sqlite3.connect(runner.storage) as connection:
+        connection.execute("INSERT INTO reports VALUES (?, ?)", (RUN_ID, json.dumps({"sections": []})))
+        connection.execute(
+            "INSERT INTO report_public_projections VALUES (?, ?)",
+            (RUN_ID, json.dumps({"projection": "v1"})),
+        )
+    monkeypatch.setattr(runner.bridge, "_wait_for_ledger", lambda _: LedgerResult(
+        "REPORT", 12.5, False, RUN_ID, "00126380", "d" * 64, ""))
+
+    call_count = {"n": 0}
+    real_pdf_metrics = evaluate_companies.pdf_metrics
+    def failing_once(path, terms=()):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise OSError("시뮬레이션: report.pdf/report.json은 썼지만 그 다음 단계에서 실패")
+        return real_pdf_metrics(path, terms)
+    monkeypatch.setattr(evaluate_companies, "pdf_metrics", failing_once)
+
+    with pytest.raises(OSError):
+        runner.operate(execute=True)
+
+    output = runner.root / "http-evaluation-artifacts" / "main" / "CUSTOM"
+    assert runner.state["cases"]["CUSTOM"]["state"] != "complete"
+    original_pdf = (output / "report.pdf").read_bytes()
+    original_report_json = (output / "report.json").read_bytes()
+    original_projection = (output / "public-projection.json").read_bytes()
+    posts_before_resume = sum(1 for method, _ in calls if method == "POST")
+
+    resumed = build()
+    monkeypatch.setattr(resumed.bridge, "_wait_for_ledger", lambda _: LedgerResult(
+        "REPORT", 12.5, False, RUN_ID, "00126380", "d" * 64, ""))
+    calls_before = len(calls)
+    result = resumed.operate(resume_only=True)
+
+    assert all(method == "GET" for method, _ in calls[calls_before:])
+    assert sum(1 for method, _ in calls if method == "POST") == posts_before_resume == 2
+    assert result["cases"]["CUSTOM"]["state"] == "complete"
+    for name, original in (
+        ("report.pdf", original_pdf), ("report.json", original_report_json),
+        ("public-projection.json", original_projection),
+    ):
+        priors = sorted(output.glob(f"{Path(name).stem}.prior-*{Path(name).suffix}"))
+        assert len(priors) == 1, f"{name}: {[p.name for p in priors]}"
+        assert priors[0].read_bytes() == original
+    assert (output / "metrics.json").is_file()
+
+
+def test_archive_fsync_failure_blocks_through_real_get_resume_until_recovered(harness, monkeypatch):
+    """실제 HttpEvaluation --resume-only 경로로 아카이브 fsync 실패의 전 과정을 확인한다.
+
+    ① 두 번째 시도(최초 archive)에서 fsync가 실패하면 완전한 바이트의 prior만
+       남긴 채 원본은 안 바뀌고 POST=0·체크포인트는 미완료(running)로 남는다.
+    ② 그 prior와 내용이 같은 세 번째 시도는 dedup 경로를 타지만, 재사용 전에
+       그 prior를 다시 fsync로 확인하므로 fsync가 계속 실패하면 똑같이 막힌다
+       (미완료 보존을 완료로 넘기지 않는다 — 이번 수정의 핵심 계약).
+    ③ fsync가 회복된 뒤에야 원본 파일이 비로소 최신 값으로 갱신된다.
+    """
+    build, calls, _, _, _ = harness
+    runner = build()
+    monkeypatch.setattr(runner.bridge, "_wait_for_ledger", lambda _: LedgerResult(
+        "GATE_STOPPED", 12.5, True, "", "", "", "evidence_insufficient"))
+    with pytest.raises(EvaluationError, match="미정산"):
+        runner.operate(execute=True)
+    output = runner.root / "http-evaluation-artifacts" / "main" / "CUSTOM"
+    original_ledger = (output / "ledger.json").read_bytes()
+    assert runner.state["cases"]["CUSTOM"]["state"] == "running"
+    posts_after_first = sum(1 for method, _ in calls if method == "POST")
+
+    # os.fsync 자체를 통째로 실패시키면 finish() 전에 먼저 오는 save_session()의
+    # 자체 fsync(session.dpapi 저장)부터 걸려 archive 지점을 겨냥하지 못한다(실측
+    # 확인 — 첫 시도에서 이렇게 했더니 ledger.prior가 아예 안 생겼다). 그래서
+    # 호출 프레임이 _preserve_existing_artifact일 때만 실패시키고, save_session·
+    # write_json(checkpoint 등) 쪽 fsync는 그대로 통과시킨다.
+    real_fsync = evaluate_companies.os.fsync
+    def archive_only_failing_fsync(fd):
+        caller = sys._getframe(1).f_code.co_name
+        if caller == "_preserve_existing_artifact":
+            raise OSError("시뮬레이션: 아카이브 지점의 fsync만 계속 실패")
+        return real_fsync(fd)
+    monkeypatch.setattr(evaluate_companies.os, "fsync", archive_only_failing_fsync)
+
+    # ① 최초 archive 시도 자체가 fsync에서 막힌다. session/checkpoint 쓰기는
+    #    (frame이 다르므로) 그대로 통과한다 — save_session을 따로 무력화하지 않는다.
+    resumed_2 = build()
+    monkeypatch.setattr(resumed_2.bridge, "_wait_for_ledger", lambda _: LedgerResult(
+        "GATE_STOPPED", 50.0, True, "", "", "", "evidence_insufficient"))
+    calls_before = len(calls)
+    with pytest.raises(OSError):
+        resumed_2.operate(resume_only=True)
+    assert all(method == "GET" for method, _ in calls[calls_before:])
+    assert (output / "ledger.json").read_bytes() == original_ledger
+    ledger_priors = sorted(output.glob("ledger.prior-*.json"))
+    assert len(ledger_priors) == 1
+    assert ledger_priors[0].read_bytes() == original_ledger
+    assert resumed_2.state["cases"]["CUSTOM"]["state"] == "running"
+
+    # ② 내용이 같은 prior를 재사용하려는 두 번째 재개도, 재확인 fsync가 실패하면 막힌다.
+    resumed_3 = build()
+    monkeypatch.setattr(resumed_3.bridge, "_wait_for_ledger", lambda _: LedgerResult(
+        "GATE_STOPPED", 60.0, True, "", "", "", "evidence_insufficient"))
+    calls_before = len(calls)
+    with pytest.raises(OSError):
+        resumed_3.operate(resume_only=True)
+    assert all(method == "GET" for method, _ in calls[calls_before:])
+    assert (output / "ledger.json").read_bytes() == original_ledger
+    assert len(list(output.glob("ledger.prior-*.json"))) == 1
+    assert resumed_3.state["cases"]["CUSTOM"]["state"] == "running"
+
+    total_post = sum(1 for method, _ in calls if method == "POST")
+    assert total_post == posts_after_first == 2
+
+    # ③ fsync가 회복되면 원본이 비로소 최신 값(75.0)으로 갱신된다.
+    monkeypatch.setattr(evaluate_companies.os, "fsync", real_fsync)
+    resumed_4 = build()
+    monkeypatch.setattr(resumed_4.bridge, "_wait_for_ledger", lambda _: LedgerResult(
+        "GATE_STOPPED", 75.0, True, "", "", "", "evidence_insufficient"))
+    calls_before = len(calls)
+    with pytest.raises(EvaluationError, match="미정산"):
+        resumed_4.operate(resume_only=True)
+    assert all(method == "GET" for method, _ in calls[calls_before:])
+    assert json.loads((output / "ledger.json").read_text(encoding="utf-8"))["cost_krw"] == 75.0
+    assert len(list(output.glob("ledger.prior-*.json"))) == 1
+    assert sum(1 for method, _ in calls if method == "POST") == posts_after_first == 2
 
 
 def _interruption_for_error(harness, monkeypatch, error: Exception) -> dict:

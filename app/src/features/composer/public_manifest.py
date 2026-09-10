@@ -1375,7 +1375,8 @@ def _expected_source(
             number=number,
             kind=SourceKind.FILING,
             label=DART_FINANCIAL_API_LABEL,
-            collected_at=fragment.document_date,
+            disclosed_at=fragment.financial_api_disclosed_at,
+            collected_at=fragment.source_collected_on or fragment.document_date,
             source_id=f"{_SOURCE_ID_PREFIX}{fragment.fragment_id}",
             title=DART_FINANCIAL_API_LABEL,
             # API 운영 주체가 아니라 이 재무 수치를 공시한 법인을 표시한다.

@@ -33,6 +33,55 @@ ARTICLE_HTML = (
 )
 
 
+def test_widget_boundary_reaches_grounding_through_production_fetch(monkeypatch):
+    """전송만 대체하고 실제 본문 구간·수집·grounding 검증의 연결을 실행한다."""
+    import datetime as dt
+    import json
+    from types import SimpleNamespace
+    from src.features.news_intake.collection import collect_from_snapshot, collect_search_snapshot
+    from src.features.news_intake.models import NewsCompanyContext, NewsCollectionPolicy
+
+    body = "가나다전자는 기업용 산업설비 제조 사업을 운영하며 2026년 9월 1일 자동화 설비 120대를 공급했다."
+    auxiliary = "가나다전자와 계열회사의 주가 전망은 시장 수급에 따라 변동될 수 있다는 AI 해설입니다."
+    raw = (f'<meta property="article:published_time" content="2026-09-01">'
+           f'<div id="article_body"><p>{body}</p></div>'
+           f'<section id="stock_story"><h2>기사 속 종목 이야기</h2><p>{auxiliary}</p></section>')
+    requested = _wire(monkeypatch, transport=lambda _url: _response(text=raw))
+    company = NewsCompanyContext("가나다전자", identity_context="기업용 산업설비 제조")
+    policy = NewsCollectionPolicy(trusted_publisher_domains=("media.example",))
+    searches = []
+
+    def search(query, **options):
+        searches.append(query)
+        item = SimpleNamespace(title="가나다전자 산업설비 공급", description=body,
+                               originallink=ARTICLE_URL, link="", pubDate="2026-09-01")
+        return SimpleNamespace(state="success", reason_code="news_search_ok", items=[item] if len(searches) == 1 else [],
+                               transport_attempts=1, retry_recovered=False, attempt_reason_codes=("news_search_ok",))
+
+    as_of = dt.date(2026, 9, 9)
+    snapshot = collect_search_snapshot(search_news=search, company=company, as_of=as_of, policy=policy)
+    seen_bodies = []
+
+    def analyze(prompt, schema, max_tokens):
+        articles = json.loads(prompt.split("자료 시작:\n", 1)[1])["articles"]
+        seen_bodies.extend(article["body"] for article in articles)
+        assert [article["body"] for article in articles] == [body]
+        assert auxiliary not in prompt
+        return {"items": [{"id": article["id"], "same_company": True, "material": True,
+            "entity_evidence": body, "source_type": "news_report", "excerpts": [{
+                "text": body, "section_id": "portfolio", "claim_slot": "portfolio:product_role",
+                "claim_kind": "reported_fact", "temporal_status": "completed", "topic": "products",
+                "event_key": "산업설비 공급", "event_on": "", "time_evidence": "", "subject": "", "subject_evidence": "",
+            }]} for article in articles]}
+
+    result = collect_from_snapshot(snapshot, company=company, as_of=as_of, policy=policy,
+                                   fetch_text=real._fetch_news_article_text, analyze_grounded=analyze)
+    assert requested == [ARTICLE_URL] and seen_bodies == [body]
+    assert result.diagnostics["본문단계"] == {"usable_ranges": 1}
+    assert len(result.fragments) == 1 and result.fragments[0].text == body
+    assert result.articles[0].candidate.published_on == "2026-09-01"
+
+
 def _policy(*, blocked: bool = False, robots_text: str = "") -> WideRobotsPolicy:
     parser = robotparser.RobotFileParser()
     parser.parse(robots_text.splitlines())

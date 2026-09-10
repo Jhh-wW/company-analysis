@@ -15,14 +15,6 @@ from dataclasses import dataclass
 from features.evidence_collection import constants as c
 from features.evidence_collection.models import DocumentTextRange
 
-#: 제목 줄로 볼 패턴 — 로마숫자(I. II. ...), 아라비아 숫자(1. 2. ...),
-#: 「제N장」, 한글 순서(가. 나. ...) 중 하나로 시작하고 뒤에 내용이 있는 줄.
-#: ★ v1 휴리스틱 — 본문 안 번호 매긴 목록도 오탐될 수 있다(알려진 한계).
-_HEADING_PATTERN = re.compile(
-    r"^(?:[IVXLCDM]{1,6}\.|[0-9]{1,3}\.|제\s?[0-9]{1,3}\s?장|[가나다라마바사아자차카타파하]\.)\s*\S"
-)
-
-
 @dataclass(frozen=True)
 class TextSegment:
     """제목 줄 하나가 여는 구간. 목차 구간은 애초에 만들지 않는다."""
@@ -57,13 +49,17 @@ class DocumentSegmentationResult:
 
 
 def _is_heading(line: str) -> bool:
-    return bool(_HEADING_PATTERN.match(line.strip()))
+    return bool(c.DOCUMENT_HEADING_PATTERN.match(line.strip()))
+
+
+def _is_context_heading(text: str) -> bool:
+    return _is_heading(text) or bool(c.PARAGRAPH_SUBHEADING_PATTERN.match(text.strip()))
 
 
 #: 목차 «항목» 줄(예: 「I. 회사의 개요 ...... 3」) — 점·가운뎃점 leader가 2개
 #: 이상 이어지다 쪽 번호로 끝나는 형태를 목차 항목으로 본다(P2 v1 휴리스틱 —
 #: 모든 DART 공시의 목차 표기를 전수 조사하지 않았다. 확인 못 함). 이 줄은
-#: _HEADING_PATTERN에도 걸려 진짜 표제로 오인되던 결함이 있었다 — 표제
+#: DOCUMENT_HEADING_PATTERN에도 걸려 진짜 표제로 오인되던 결함이 있었다 — 표제
 #: 패턴과 겹치는 번호 매김(로마숫자 등)을 그대로 쓰기 때문이다.
 _TOC_ENTRY_LEADER_PATTERN = re.compile(r"[.·]{2,}\s*\d{1,4}\s*$")
 
@@ -89,7 +85,9 @@ def _segment_sections_with_status(text: str) -> tuple[list[TextSegment], str]:
     current_is_toc = False
     running = 0
     for line in io.StringIO(text):
-        if _is_heading(line):
+        if _is_heading(line) or (
+            current_is_toc and _is_context_heading(line) and not _is_toc_heading(line)
+        ):
             if found_heading and not current_is_toc:
                 segments.append(
                     TextSegment(
@@ -170,6 +168,7 @@ def _split_paragraphs(
     max_candidates: int | None = None,
     max_total_chars: int | None = None,
     candidate_filter: Callable[[str], bool] | None = None,
+    preserve_heading_context: bool = False,
 ) -> tuple[list[tuple[int, int, str]], str]:
     """문단 후보와 count/문자 상한으로 잘린 이유를 함께 돌려준다."""
     paragraphs: list[tuple[int, int, str]] = []
@@ -178,9 +177,11 @@ def _split_paragraphs(
     current_start: int | None = None
     current_end: int | None = None
     running = segment.start
+    pending_heading_start: int | None = None
 
     def emit() -> None:
         nonlocal accepted_chars, truncation_reason
+        nonlocal pending_heading_start
         if truncation_reason:
             return
         if current_start is None or current_end is None:
@@ -189,6 +190,22 @@ def _split_paragraphs(
             current_start - segment.start : current_end - segment.start
         ]
         stripped = raw.strip()
+        source_start = current_start
+        heading_start = pending_heading_start
+        # 비어 있지 않은 바로 다음 문단에서만 소비한다. 짧은 표 셀이나
+        # 다른 소제목을 건너뛰어 뒤쪽 문단에 제목을 빌려주지 않는다.
+        pending_heading_start = None
+        if (
+            preserve_heading_context
+            and "\n" not in stripped
+            and "\r" not in stripped
+            and _is_context_heading(stripped)
+            and len(stripped) < c.MIN_FRAGMENT_CHARS
+            and stripped not in boilerplate
+            and not _is_toc_heading(stripped)
+        ):
+            pending_heading_start = current_start + len(raw) - len(raw.lstrip())
+            return
         eligible = (
             stripped
             and stripped not in boilerplate
@@ -201,6 +218,14 @@ def _split_paragraphs(
         )
         if not eligible:
             return
+        if heading_start is not None:
+            # 본문 자체가 기존 적격 기준을 통과한 뒤에만 원문 범위를 넓힌다.
+            # 제목·사이 공백도 문자 예산에 포함하며 합성 문장은 만들지 않는다.
+            source_start = heading_start
+            raw = segment.text[
+                source_start - segment.start : current_end - segment.start
+            ]
+            stripped = raw.strip()
         if max_candidates is not None and len(paragraphs) >= max_candidates:
             truncation_reason = c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
             return
@@ -220,7 +245,7 @@ def _split_paragraphs(
         # 깨진다. ``str.strip()``은 U+3000·U+00A0 같은 유니코드 공백도 떼며,
         # app 검사도 같은 ``str.strip()``을 쓰므로 두 판정이 대칭이다.
         lead_whitespace_chars = len(raw) - len(raw.lstrip())
-        start = current_start + lead_whitespace_chars
+        start = source_start + lead_whitespace_chars
         paragraphs.append((start, start + len(stripped), stripped))
         accepted_chars += len(stripped)
 
@@ -258,10 +283,13 @@ def segment_document_with_status(text: str) -> DocumentSegmentationResult:
             boilerplate,
             max_candidates=max(0, remaining_count),
             max_total_chars=max(0, remaining_chars),
+            preserve_heading_context=True,
         )
         for start, end, para_text in paragraphs:
+            first_line = para_text.partition("\n")[0].strip()
+            heading = first_line if _is_context_heading(first_line) else section.heading
             candidates.append(FragmentCandidate(
-                start=start, end=end, text=para_text, section_heading=section.heading,
+                start=start, end=end, text=para_text, section_heading=heading,
             ))
             total_chars += len(para_text.strip())
         if paragraph_truncation:

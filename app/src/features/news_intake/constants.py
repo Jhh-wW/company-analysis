@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Final
 
 from src.shared.report_evidence.constants import NEWS_EXCLUDED_SECTION_IDS
@@ -273,6 +274,42 @@ BODY_EXTRACTION_STAGE_ORDER: Final[tuple[str, ...]] = (
 #: 본문으로 인정하는 최소 글자 수. 메타 설명 한 문장(보통 80~160자)은 넘고,
 #: 「더보기」 같은 조각 글자는 넘지 못하는 자리에 둔다.
 BODY_MIN_CHARS: Final[int] = 20
+#: 닫는 태그를 기다리지 않는 HTML 요소.
+BODY_VOID_TAGS: Final[frozenset[str]] = frozenset({
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+    "param", "source", "track", "wbr",
+})
+#: 단어가 아니라 별도 컴포넌트의 명시적 식별자만 제외한다.
+#: stock_story는 실제 기사 밖 증시 AI 해설 구획에서 확인했다.
+BODY_AUXILIARY_COMPONENTS: Final[frozenset[str]] = frozenset({
+    "stock-story", "ai-summary", "ai-summary-widget", "ai-commentary",
+    "ai-stock-analysis", "stock-commentary", "recommended-articles",
+    "related-articles", "related-news", "recommendation-widget",
+})
+BODY_COMPONENT_ATTRIBUTES: Final[frozenset[str]] = frozenset({
+    "id", "class", "data-component", "data-widget", "data-module",
+})
+BODY_AUXILIARY_LABELS: Final[frozenset[str]] = frozenset({
+    "기사 속 종목 이야기", "ai 요약", "ai 해설", "ai 종목 해설", "추천 기사", "관련 기사",
+})
+# 인라인 시세는 회사명을 남기고 명시적 컴포넌트 안의 가격 자식만 제외한다.
+# 일반 price class나 기자가 쓴 숫자 모양은 시세 컴포넌트의 증거가 아니다.
+BODY_INLINE_QUOTE_TAG: Final[str] = "a"
+BODY_INLINE_QUOTE_CLASS: Final[str] = "stock"
+BODY_INLINE_QUOTE_ATTRIBUTE: Final[str] = "data-testid"
+BODY_INLINE_QUOTE_ATTRIBUTE_VALUE: Final[str] = "stock"
+BODY_INLINE_QUOTE_PRICE_TAG: Final[str] = "span"
+BODY_INLINE_QUOTE_PRICE_CLASS: Final[str] = "price"
+BODY_NON_TEXT_TAGS: Final[frozenset[str]] = frozenset({
+    "script", "style", "noscript", "template", "form",
+})
+BODY_PAGE_CHROME_TAGS: Final[frozenset[str]] = BODY_NON_TEXT_TAGS | frozenset({
+    "title", "nav", "header", "footer", "aside",
+})
+BODY_TEXT_BLOCK_TAGS: Final[frozenset[str]] = frozenset({
+    "article", "div", "section", "p", "br", "li", "ul", "ol", "blockquote",
+    "h1", "h2", "h3", "h4", "h5", "h6", "table", "tr", "td", "th",
+})
 #: 해독이 깨졌다고 볼 대체문자 비율. 정상 문서에도 U+FFFD가 한두 개 섞일 수
 #: 있으므로 개수가 아니라 비율로 본다.
 DECODE_REPLACEMENT_RATIO_LIMIT: Final[float] = 0.02
@@ -379,6 +416,25 @@ WINDOW_MONTHS: Final[tuple[int, ...]] = (12, 24, 36)
 WINDOW_ARTICLE_BUDGETS: Final[tuple[int, ...]] = (16, 4, 4)
 CONTENT_DUPLICATE_SIMILARITY: Final[float] = 0.88
 EVENT_DUPLICATE_SIMILARITY: Final[float] = 0.84
+#: 사건 중복 판정에서 «새 사실일 수 있는 숫자»를 찾는 정규식. 소수점·천단위
+#: 구분자(.,)가 붙은 숫자까지 하나로 묶어 읽는다 — ``grounded_mapping.same_event``
+#: 전용이며 다른 용도로 쓰지 않는다. 숫자 배열 비교는 순서를 살린 리스트로
+#: 한다(``re.findall`` 결과 그대로) — Counter로 바꿔 순서를 잃지 않는다.
+NEWS_EVENT_NUMBER_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"\d+(?:[.,]\d+)*")
+#: 사건 중복의 «순수 부분 인용» 경로에서만 쓰는 문장 분리 기준. 한글 종결
+#: 어미(다/요) 뒤 마침표·물음표·느낌표 «다음의 공백»에서만 자른다(구두점
+#: 자체는 앞 문장에 남긴다 — 문장 끝 종결형 비교에 구두점이 필요하다).
+#: 숫자 안의 소수점(예: "3.5")은 그 앞이 한글이 아니므로 자르지 않는다.
+NEWS_SENTENCE_SPLIT_RE: Final[re.Pattern[str]] = re.compile(r"(?<=[다요][.!?])\s+")
+#: 숫자+단위 뒤 문장 끝에서 «실제로 같은 뜻»인 통계 서술 종결형만 좁게 인정한다
+#: (좌: 표준형, 우: 표준형과 같다고 보는 형). 이 목록에 없는 표현은 절대
+#: 같다고 보지 않는다 — 대상명·부정·계획/현재·숫자·단위·기간·중간 문구는
+#: 이 정규화가 전혀 건드리지 않는다. 다른 단위·다른 종결형은 실제로 필요할
+#: 때만 이 목록에 추가한다(미리 일반화하지 않는다). 2026-09-09 WOORI
+#: 실제 사례(우리은행 ATM 대수 기사 두 건)에서 확인한 것만 담았다.
+NEWS_STAT_SENTENCE_ENDING_EQUIVALENTS: Final[tuple[tuple[str, str], ...]] = (
+    ("대였다.", "대로 집계됐다."),
+)
 NEWS_TRIGGER_REFRESH: Final[str] = "recent_news_refresh"
 SEARCH_TOPICS: Final[tuple[tuple[str, str], ...]] = (
     ("products", "사업"),

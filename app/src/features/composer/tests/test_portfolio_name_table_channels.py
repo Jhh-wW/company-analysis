@@ -87,8 +87,12 @@ def _writer(prompt: str) -> str:
         return json.dumps(
             {
                 "문장들": [
-                    {"글": f"요약 {mark} 문장이다.", "인용": ["1"], "등급": "확인"}
-                    for mark in ("가", "나", "다")
+                    {"글": text, "인용": ["1"], "등급": "확인"}
+                    for text in (
+                        "가나다회사는 사업부문 하나를 운영한다.",
+                        "가나다회사는 하나의 사업부문을 운영한다.",
+                        "사업부문 하나를 운영하는 회사는 가나다회사다.",
+                    )
                 ]
             },
             ensure_ascii=False,
@@ -480,6 +484,10 @@ class _ThinThenFullWriter:
         self.section_calls: dict[str, int] = {}
 
     def __call__(self, prompt: str) -> str:
+        from src.features.composer.tests.test_section_public_manifest import (
+            _section_sentence,
+        )
+
         fragment_ids = re.findall(r"\[조각 (\d+)\] \(", prompt)
         assert fragment_ids
         first = int(fragment_ids[0])
@@ -495,8 +503,7 @@ class _ThinThenFullWriter:
                 "문장들": [
                     {
                         "글": (
-                            f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 "
-                            f"대응 협력 실적 {ending} 공식 자료에서 확인했다."
+                            _section_sentence(section_id, mark, index, ending)
                         ),
                         "인용": [fragment_ids[0]],
                         "등급": self._grade,

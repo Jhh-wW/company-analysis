@@ -106,3 +106,30 @@ def split_interpretation_marker(text: str) -> tuple[str, bool]:
     if body.endswith(INTERPRETATION_SUFFIX):
         return body[: -len(INTERPRETATION_SUFFIX)].rstrip(), True
     return body, False
+
+
+#: 뉴스 조각의 내부 id(`news-fragment-<hex>`)가 «원문 위치» 칸 글자에 그대로
+#: 박힌 모양. 다른 자료(공시)의 위치 칸은 「수익인식」·「MD&A」처럼 사람이 읽는
+#: 말이므로, 이 칸만 내부 식별자가 새어 나간다(실측: PDF 8쪽 부록 245·247행).
+_INTERNAL_NEWS_FRAGMENT_LOCATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?P<prefix>.+?)\s*·\s*news-fragment-[0-9a-f]+$"
+)
+
+
+def location_display(location: str) -> str:
+    """부록 «원문 위치» 칸에 실제로 인쇄할 글자.
+
+    ★ ``location`` 값 자체(해시·봉인이 참조하는 내부 저장값)는 바꾸지 않는다.
+      이 함수는 화면·PDF 두 채널이 인쇄 직전에만 부르는 표시 전용
+      변환이다 — 번호 해석(``citation_number``)과 같은 이유로 이 모듈에
+      둔다: 채널마다 각자 문자열을 자르면 한쪽만 내부 id를 그대로 보여주는
+      사고가 되풀이된다.
+    ★ 뉴스 조각 id를 없앤 자리에 새 위치 정보를 지어내지 않는다 — 남는
+      「기사 본문」은 이미 저장돼 있던 사람이 읽는 부분이다.
+    """
+    if not location:
+        return location
+    matched = _INTERNAL_NEWS_FRAGMENT_LOCATION_RE.fullmatch(location)
+    if matched is None:
+        return location
+    return matched.group("prefix")

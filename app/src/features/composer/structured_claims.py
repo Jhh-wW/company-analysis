@@ -28,6 +28,7 @@ from src.features.composer.constants import (
     DART_FINANCIAL_API_PREFIX,
     DART_FINANCIAL_API_URL,
     GRADE_CONFIRMED,
+    NOTICE_NUMERIC_BODY_WITHHELD,
 )
 from src.features.composer.logic import FragmentsInput, _normalize_fragments
 from src.features.composer.port import (
@@ -260,7 +261,10 @@ def enforce_public_numeric_safety(
         removed = len(section.sentences) - len(kept)
         if removed:
             removed_sections.append((section.section_id, removed))
-        sections.append(replace(section, sentences=kept))
+        notice = section.notice
+        if removed and not kept and not notice:
+            notice = NOTICE_NUMERIC_BODY_WITHHELD
+        sections.append(replace(section, sentences=kept, notice=notice))
         for sentence in kept:
             claim = sentence.structured_claim
             if (

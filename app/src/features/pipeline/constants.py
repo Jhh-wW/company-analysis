@@ -21,3 +21,24 @@ NEWS_RESEARCH_BUDGET_REASON_CODES: Final[frozenset[str]] = frozenset({
     "search_budget_exhausted", "news_search_transport_budget_exhausted",
     "news_search_daily_cap",
 })
+
+
+PROVIDER_API_ERROR_TYPES: Final[frozenset[str]] = frozenset({
+    "invalid_request_error", "authentication_error", "billing_error", "permission_error",
+    "not_found_error", "rate_limit_error", "timeout_error", "api_error", "overloaded_error",
+    "request_too_large", "conflict_error",
+})
+PROVIDER_ERROR_MESSAGE_MAX_CHARS: Final[int] = 512
+PROVIDER_SCHEMA_COMPLEXITY_MESSAGE: Final[str] = "Schema is too complex for compilation."
+PROVIDER_ERROR_CATEGORY_UNKNOWN: Final[str] = "unknown"
+PROVIDER_ERROR_CATEGORY_SCHEMA_COMPLEXITY: Final[str] = "schema_too_complex"
+PROVIDER_INVALID_REQUEST_STATUS: Final[int] = 400
+PROVIDER_RATE_LIMIT_STATUS: Final[int] = 429
+# 공식 rate-limits 문서가 정의한 고정 접두부만 비교하며 뒤의 날짜는 버린다.
+PROVIDER_SPEND_LIMIT_PREFIXES: Final[tuple[tuple[str, str], ...]] = (
+    ("You have reached your specified workspace API usage limits", "workspace_spend_limit"),
+    ("You have reached your specified API usage limits", "organization_spend_limit"),
+)
+PROVIDER_ERROR_PREFIX_BOUNDARIES: Final[tuple[str, ...]] = (".", ":", " ")
+PROVIDER_ENFORCED_SPEND_LIMIT_CODE: Final[str] = "enforced_spend_limit_reached"
+PROVIDER_MONTHLY_SPEND_CATEGORY: Final[str] = "organization_monthly_spend_cap"

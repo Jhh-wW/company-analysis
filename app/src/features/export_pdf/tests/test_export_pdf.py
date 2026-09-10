@@ -282,6 +282,47 @@ def test_numeric_표는_첫열을_제외한_머리글과_값을_오른쪽_정렬
     assert label["x0"] < 80
 
 
+def test_table_without_row_cites_shows_all_source_cites_in_caption() -> None:
+    """F-4 — 3쪽 「회사가 공시한 대표 이름」 표 실측: source_cites 4개 중
+
+    캡션에 대표 인용 1개만 찍혀, 나머지 세 출처로 가는 표시가 화면에
+    없었다. 캡션이 ``cite`` 외에 ``source_cites``의 나머지 번호도 마저
+    실어야 한다. 행별 매핑은 새로 만들지 않는다(row_cites가 비어 있어도
+    행 칸에는 번호를 추정해 붙이지 않는다).
+    """
+
+    table = ReportTable(
+        caption="회사가 공시한 대표 이름 (4개)",
+        headers=["구분", "이름"],
+        rows=[["IP", "하늘소년단"], ["상품", "가나다청소기"]],
+        cite="[18]",
+        source_cites=["[18]", "[19]", "[20]", "[21]"],
+    )
+    text = _text(_table_pdf(table))
+    for number in ("18", "19", "20", "21"):
+        assert f"〔{number}〕" in text
+
+
+def test_table_with_row_cites_does_not_repeat_sources_in_caption() -> None:
+    """행별 표식(row_cites)이 이미 있는 표는 캡션에 중복으로 더 붙이지 않는다.
+
+    행마다 어느 출처인지 이미 화면에 보이므로, 캡션에까지 나머지 번호를
+    또 나열하면 같은 번호가 두 번 보인다.
+    """
+
+    table = ReportTable(
+        caption="흐름 표",
+        headers=["구분", "값"],
+        rows=[["항목", "값1"]],
+        cite="[5]",
+        source_cites=["[5]", "[6]"],
+        row_cites=[["[6]"]],
+    )
+    text = _text(_table_pdf(table))
+    assert "〔5〕" in text
+    assert text.count("〔6〕") == 1
+
+
 def test_표지_소스_요약은_수집현황이_아니라_실제_citations만_중복없이_센다() -> None:
     report = _report()
     assert source_summary(report) == "전자공시(DART) 4건 · 기타 자료 2건"

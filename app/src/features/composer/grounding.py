@@ -6,6 +6,11 @@
 
 from __future__ import annotations
 
+from src.features.composer.direct_support import claims_cause, direct_support_problem, support_entries_by_number
+from src.features.composer.direct_support_constants import RELATION_KEY
+from src.features.composer.future_plan_constants import FUTURE_KEY
+from src.features.composer.grounding_constants import REVIEW_SUPPORT_CANDIDATE_VERDICTS
+
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -13,8 +18,14 @@ from decimal import Decimal
 import re
 import unicodedata
 
+from src.features.composer.modality_guard import modality_problem
+from src.features.composer.role_binding import claims_role_or_fee, role_binding_problem
+from src.features.composer.numeric_quote_refs import resolve_numeric_quote_refs
+from src.features.composer.scope_guard import scope_problem
+
 from src.features.composer.grounding_constants import (
     COMPARATIVE_RE, CONTINUOUS_RE, DOWN_RE, GROUNDING_INVALID, GROUNDING_KEY,
+    GROUNDING_SOURCE_FIELD,
     GROUNDING_MISSING,
     MIN_CONTINUOUS_POINTS, MIN_TREND_POINTS, NUMERIC_KEY, PARENTHETICAL_RE,
     PARTICLE_RE, PLANNED_END_RE, RETROSPECTIVE_RE, SENTENCE_SPLIT_RE, TIME_KEY,
@@ -142,7 +153,7 @@ def grounding_requirements(text: str, sources: Sequence[str]) -> tuple[str, ...]
 
 
 def _quote(entry: Mapping, sources: Mapping[str, str]) -> str | None:
-    fragment_id, quote = entry.get("근거"), entry.get("원문")
+    fragment_id, quote = entry.get(GROUNDING_SOURCE_FIELD), entry.get("원문")
     if not isinstance(fragment_id, str) or not isinstance(quote, str) or not quote.strip():
         return None
     source = sources.get(fragment_id)
@@ -543,30 +554,70 @@ def _reported_comparison_valid(text: str, entries: object, sources: Mapping[str,
 
 def grounding_problem(text: str, sources: Mapping[str, str], entry: Mapping) -> str:
     """필요 근거 누락과 결속·연산 실패를 구분하며 호출이나 저장을 하지 않는다."""
+    # 원문 한정이 사라진 후보는 검수 모델의 참·애매나 추가 근거 JSON으로
+    # 승인하지 않는다. 다른 문장과 기존 수치·시점 검증 경로는 그대로 둔다.
+    scope_issue = modality_problem(text, sources) or scope_problem(text, sources)
+    if scope_issue:
+        return scope_issue
     required = grounding_requirements(text, tuple(sources.values()))
     evidence = entry.get(GROUNDING_KEY)
     if not required and evidence is None:
         return ""
     if not isinstance(evidence, Mapping):
         return GROUNDING_MISSING
+    # 같은 판정 번호의 수치 배열 안에서만 원문참조를 원문으로 되돌린다 — 다른
+    # 배열(추세·시점)이나 다른 판정 번호는 이 함수가 한 번에 한 후보만 받으므로
+    # 애초에 섞이지 않는다. 입력 evidence는 바꾸지 않고 되돌린 사본만 쓴다.
+    numeric_entries = (
+        resolve_numeric_quote_refs(evidence[NUMERIC_KEY])
+        if NUMERIC_KEY in evidence else None
+    )
     if (TREND_KEY in required and NUMERIC_KEY in evidence
-        and _numeric_valid(text, evidence[NUMERIC_KEY], sources)
-        and _reported_comparison_valid(text, evidence[NUMERIC_KEY], sources)):
+        and _numeric_valid(text, numeric_entries, sources)
+        and _reported_comparison_valid(text, numeric_entries, sources)):
         required = tuple(kind for kind in required if kind != TREND_KEY)
     validators = {NUMERIC_KEY: _numeric_valid, TREND_KEY: _trend_valid, TIME_KEY: _time_valid}
     for kind in required:
         if kind not in evidence:
             return GROUNDING_MISSING
     for kind, payload in evidence.items():
+        # 관계 근거는 아래 constrain_verdicts가 번호 중복을 함께 확인한 뒤
+        # 자기 인용에 결속한다. 기존 수치·추세·시점 검증은 전부 유지한다.
+        if kind == RELATION_KEY:
+            if not isinstance(payload, list) or any(not isinstance(item, Mapping) for item in payload):
+                return GROUNDING_INVALID
+            continue
+        # 미래 근거는 6장 성장 계획 표와 그 장의 본문 계획 문장에서 쓰이며,
+        # future_plan_guard 가 그 줄의 칸·인용 또는 그 문장·인용에 따로 결속한다.
+        # 여기서는 모양만 보고 넘긴다 — 관계 근거와 같다.
+        if kind == FUTURE_KEY:
+            if not isinstance(payload, list) or any(not isinstance(item, Mapping) for item in payload):
+                return GROUNDING_INVALID
+            continue
         if kind not in required and payload == []:
             continue
-        if kind not in validators or not validators[kind](text, payload, sources):
+        if kind not in validators:
+            return GROUNDING_INVALID
+        effective_payload = numeric_entries if kind == NUMERIC_KEY else payload
+        if not validators[kind](text, effective_payload, sources):
             return GROUNDING_INVALID
     return ""
 
 
-def grounding_hint(text: str, sources: Mapping[str, str]) -> str:
+def grounding_hint(
+    text: str, sources: Mapping[str, str], cells: Sequence[str] | None = None,
+) -> str:
+    """그 후보에 어떤 추가 근거가 필요한지 검수 프롬프트에 한 줄로 적는다.
+
+    ★ 인과와 역할·과금은 같은 «관계» 배열을 쓴다. 요구 항목 이름을 나누지 않아야
+      파서·프롬프트·가드가 한 이름으로 맞물린다.
+    ★ cells 는 도식 후보일 때만 준다 — 칸은 낱말만으로도 주장이지만, 산문은 그
+      낱말이 서술어로 쓰였을 때만 주장이다.
+    """
+
     required = grounding_requirements(text, tuple(sources.values()))
+    if claims_cause(text) or claims_role_or_fee(text, cells):
+        required += (RELATION_KEY,)
     return "  추가 검증 필요: " + (", ".join(required) or "없음") + "\n"
 
 
@@ -574,6 +625,8 @@ def constrain_verdicts(
     raw: str | None,
     verdicts: Mapping[int, str],
     candidates: Mapping[int, tuple[str, Mapping[str, str]]],
+    *,
+    cells_by_number: Mapping[int, Sequence[str]] | None = None,
 ) -> tuple[dict[int, str], dict[int, str]]:
     """같은 검수 응답의 근거를 실제 입력에 결속한다. 추가 AI 호출은 없다.
 
@@ -596,6 +649,26 @@ def constrain_verdicts(
             continue
         text, sources = candidates[number]
         problem = grounding_problem(text, sources, entry)
+        if problem:
+            result[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = problem
+    relation_evidence = support_entries_by_number(raw)
+    for number, (text, sources) in candidates.items():
+        if result.get(number) not in REVIEW_SUPPORT_CANDIDATE_VERDICTS or number in problems:
+            continue
+        # 도식 후보만 칸 경계를 함께 준다. 본문·요약은 None 이므로 한 문장
+        # 안에서 절을 넘는 연결이 새로 허용되지 않는다.
+        cells = (cells_by_number or {}).get(number)
+        # 인과 결속과 역할·과금 결속은 같은 «관계» 배열을 읽는다. 어느 쪽이든 첫
+        # 사유를 그대로 돌려 참·애매가 근거 없이 공개로 새지 않게 한다.
+        problem = (
+            direct_support_problem(
+                text, sources, relation_evidence.get(number), cells,
+            )
+            or role_binding_problem(
+                text, sources, relation_evidence.get(number), cells,
+            )
+        )
         if problem:
             result[number] = REVIEW_GROUNDING_REJECTED
             problems[number] = problem

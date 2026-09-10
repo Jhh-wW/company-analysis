@@ -364,12 +364,31 @@ def collect_dart_evidence(
             else:
                 scored.append((candidate_index, candidate, slot_scores))
 
+        # 같은 무분류 차선의 장문에 포함된 짧은 제목만 중복 범위에서 뺀다.
+        # 분류된 장문과 별도 차선의 짧은 관측은 유지한다. 정렬된 후보를
+        # 한 번씩만 훑어 기존 후보·메모리 상한과 short 관측 상태를 보존한다.
+        unscored_index = 0
+        independent_short_observations = []
+        for short_index, short_candidate in short_observations:
+            while (
+                unscored_index < len(unscored)
+                and unscored[unscored_index][1].end <= short_candidate.start
+            ):
+                unscored_index += 1
+            if (
+                unscored_index < len(unscored)
+                and unscored[unscored_index][1].start <= short_candidate.start
+                and short_candidate.end <= unscored[unscored_index][1].end
+            ):
+                continue
+            independent_short_observations.append((short_index, short_candidate))
+
         unclassified_candidates = [
             (f"unclassified{candidate_index}", candidate)
             for candidate_index, candidate in unscored
         ] + [
             (f"short{candidate_index}", candidate)
-            for candidate_index, candidate in short_observations
+            for candidate_index, candidate in independent_short_observations
         ]
 
         identity_binding = _identity_binding(company_id, filing, fetch_result)

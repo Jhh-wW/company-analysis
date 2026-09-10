@@ -899,6 +899,9 @@ class _ThinThenFullWriter:
 
     def __call__(self, prompt: str) -> str:
         import json
+        from src.features.composer.tests.test_section_public_manifest import (
+            _section_sentence,
+        )
 
         fragment_ids = re.findall(r"\[조각 (\d+)\] \(", prompt)
         assert fragment_ids
@@ -915,8 +918,7 @@ class _ThinThenFullWriter:
                 "문장들": [
                     {
                         "글": (
-                            f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 "
-                            f"대응 협력 실적 {ending} 공식 자료에서 확인했다."
+                            _section_sentence(section_id, mark, index, ending)
                         ),
                         "인용": [fragment_ids[0]],
                         "등급": self._grade,
