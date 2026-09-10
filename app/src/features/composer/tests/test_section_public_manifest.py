@@ -8,11 +8,21 @@ import json
 import re
 from dataclasses import replace
 from pathlib import Path
+from typing import Final
 
 import pytest
 
 from src.features.composer import pipeline as pipeline_module
 from src.features.composer import render as render_module
+from src.features.composer.future_plan_constants import (
+    FUTURE_ACTIVITY_KEY,
+    FUTURE_KEY,
+    FUTURE_MODE_KEY,
+    FUTURE_MODE_PLAN,
+    FUTURE_QUOTE_KEY,
+    FUTURE_SOURCE_KEY,
+    FUTURE_TARGET_KEY,
+)
 from src.features.composer.constants import (
     DART_FINANCIAL_API_DOCUMENT_ID,
     DART_FINANCIAL_API_HOST,
@@ -260,16 +270,57 @@ def test_표지메타표식_IR은_public_manifest_Source로_봉인된다() -> No
     assert has_valid_provenance_seal(source)
 
 
-def _fragment_text(mark: str) -> str:
-    common = (
-        f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 대응 협력 실적 "
-        "공식 자료에서 확인했다."
-    )
-    sentences = " ".join(
+#: 미래 장은 회사의 계획을 실제 원문·대상·활동과 결속해 검증한다.
+_FUTURE_STRATEGY_PLANS: Final[tuple[tuple[str, str, str], ...]] = (
+    ("해외 고객 기반", "확대", "회사는 해외 고객 기반을 확대할 계획이다."),
+    ("프리미엄 제품 라인업", "강화", "회사는 프리미엄 제품 라인업을 강화할 계획이다."),
+    ("물류 자동화 설비", "도입", "회사는 물류 자동화 설비를 도입할 계획이다."),
+    ("디지털 마케팅 조직", "신설", "회사는 디지털 마케팅 조직을 신설할 계획이다."),
+    ("해외 생산 거점", "확대", "회사는 해외 생산 거점을 확대할 계획이다."),
+    ("온라인 판매 채널망", "구축", "회사는 온라인 판매 채널망을 구축할 계획이다."),
+)
+_FUTURE_STRATEGY_SENTENCES: Final[tuple[str, ...]] = tuple(
+    sentence for _target, _activity, sentence in _FUTURE_STRATEGY_PLANS
+)
+
+
+def _future_strategy_evidence(index: int, fragment_id: str) -> dict:
+    """시험용 원문과 후보가 공유하는 계획 문장을 근거로 제공한다."""
+    target, activity, quote = _FUTURE_STRATEGY_PLANS[index]
+    return {
+        FUTURE_KEY: [{
+            FUTURE_SOURCE_KEY: fragment_id,
+            FUTURE_TARGET_KEY: target,
+            FUTURE_ACTIVITY_KEY: activity,
+            FUTURE_QUOTE_KEY: quote,
+            FUTURE_MODE_KEY: FUTURE_MODE_PLAN,
+        }],
+    }
+
+
+def _section_sentence(section_id: str, mark: str, ending_index: int, ending: str) -> str:
+    """일반·보충 작성 응답과 시험용 원문에 같은 장별 문장을 쓴다."""
+    if section_id == "future_strategy":
+        return _FUTURE_STRATEGY_SENTENCES[ending_index]
+    return (
         f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 대응 협력 실적 "
         f"{ending} 공식 자료에서 확인했다."
-        for ending in _ENDINGS
     )
+
+
+def _fragment_text(mark: str) -> str:
+    if mark == _MARKS[SECTION_IDS.index("future_strategy")]:
+        common = _FUTURE_STRATEGY_SENTENCES[0]
+        sentences = " ".join(_FUTURE_STRATEGY_SENTENCES)
+    else:
+        common = (
+            f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 대응 협력 실적 "
+            "공식 자료에서 확인했다."
+        )
+        sentences = " ".join(
+            _section_sentence("", mark, index, ending)
+            for index, ending in enumerate(_ENDINGS)
+        )
     flow = (
         "핵심 제품은 고객 제공을 거쳐 기업 고객에게 닿는다. "
         "보조 제품은 유통 협력을 거쳐 소비자에게 닿는다."
@@ -355,10 +406,7 @@ class _CompletePacketWriter:
         slots = CLAIM_SLOTS_BY_SECTION[section_id]
         sentences = [
             {
-                "글": (
-                    f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 대응 "
-                    f"협력 실적 {ending} 공식 자료에서 확인했다."
-                ),
+                "글": _section_sentence(section_id, mark, index, ending),
                 "인용": [fragment_ids[0]],
                 "등급": GRADE_CONFIRMED,
                 "주장슬롯": slots[index % len(slots)],
@@ -417,26 +465,39 @@ class _RecoveringPacketWriter:
         ):
             # 두 번째도 얇게 두는 시험에서는 원문 안의 다른 문장으로 바꿔
             # section/candidate가 실제로 달라진 뒤 quality 실패를 보게 한다.
-            endings = (_ENDINGS[min(section_call - 1, 1)],)
+            ending_indices = (min(section_call - 1, 1),)
         else:
-            endings = _ENDINGS
+            ending_indices = range(len(_ENDINGS))
         return json.dumps(
             {
                 "문장들": [
                     {
-                        "글": (
-                            f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 "
-                            f"대응 협력 실적 {ending} 공식 자료에서 확인했다."
+                        "글": _section_sentence(
+                            section_id, mark, ending_index, _ENDINGS[ending_index]
                         ),
                         "인용": fragment_ids,
                         "등급": GRADE_CONFIRMED,
                         "주장슬롯": slots[index % len(slots)],
                     }
-                    for index, ending in enumerate(endings)
+                    for index, ending_index in enumerate(ending_indices)
                 ]
             },
             ensure_ascii=False,
         )
+
+
+def _candidate_future_evidence(block: str, evidence_ids: list[str]) -> dict:
+    """후보 순번 대신 실제 JSON 문장에서 해당 계획의 근거를 찾는다."""
+    match = re.search(r"(?m)^\s*문장\(JSON 문자열\): (.+)$", block)
+    if match is None or not evidence_ids:
+        return {}
+    text = json.loads(match.group(1))
+    entries = [
+        _future_strategy_evidence(index, evidence_ids[0])[FUTURE_KEY][0]
+        for index, sentence in enumerate(_FUTURE_STRATEGY_SENTENCES)
+        if sentence in text
+    ]
+    return {FUTURE_KEY: entries} if entries else {}
 
 
 class _BoundGroupedReviewer:
@@ -446,25 +507,36 @@ class _BoundGroupedReviewer:
     def __call__(self, prompt: str) -> str:
         self.prompts.append(prompt)
         verdicts = []
-        for number, section_id, _kind, citations in _GROUPED_ITEM_RE.findall(
-            prompt
-        ):
+        matches = list(_GROUPED_ITEM_RE.finditer(prompt))
+        for index, match in enumerate(matches):
+            number, section_id, _kind, citations = match.groups()
             evidence_ids = re.findall(r"조각 (\d+)", citations)
-            verdicts.append(
-                {
-                    "번호": int(number),
-                    "장": section_id,
-                    "근거": evidence_ids,
-                    "결과": "참",
-                }
-            )
-        if not verdicts:
-            verdicts = [
-                {"번호": int(number), "결과": "참"}
-                for number in re.findall(
-                    r"\[(\d+)\] \(등급: [^,\n]+, 인용:", prompt
+            verdict = {
+                "번호": int(number),
+                "장": section_id,
+                "근거": evidence_ids,
+                "결과": "참",
+            }
+            if section_id == "future_strategy" and evidence_ids:
+                end = matches[index + 1].start() if index + 1 < len(matches) else len(prompt)
+                verdict["검증근거"] = _candidate_future_evidence(
+                    prompt[match.end():end], evidence_ids
                 )
-            ]
+            verdicts.append(verdict)
+        if not verdicts:
+            matches = list(re.finditer(
+                r"\[(\d+)\] \(등급: [^,\n]+, 인용: ([^)]+)\)", prompt
+            ))
+            for index, match in enumerate(matches):
+                number, citations = match.groups()
+                verdict = {"번호": int(number), "결과": "참"}
+                end = matches[index + 1].start() if index + 1 < len(matches) else len(prompt)
+                evidence = _candidate_future_evidence(
+                    prompt[match.end():end], re.findall(r"조각 (\d+)", citations)
+                )
+                if evidence:
+                    verdict["검증근거"] = evidence
+                verdicts.append(verdict)
         assert verdicts
         return json.dumps({"판정": verdicts}, ensure_ascii=False)
 
@@ -1970,10 +2042,7 @@ def test_ENFORCE_NO_PARTIAL_packetless는_도식_AI_0회이고_flow를_미공개
                 {
                     "문장들": [
                         {
-                            "글": (
-                                f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 "
-                                f"과제 대응 협력 실적 {ending} 공식 자료에서 확인했다."
-                            ),
+                            "글": _section_sentence(section_id, mark, index, ending),
                             "인용": [fragment_id],
                             "등급": GRADE_CONFIRMED,
                             "주장슬롯": slots[index % len(slots)],
