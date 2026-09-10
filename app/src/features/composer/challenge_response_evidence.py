@@ -18,8 +18,8 @@
 ⚠️ 이 검사가 «하지 않는» 것 — 정직하게 적는다.
   · 대응의 참·거짓을 판정하지 않는다. 낱말이 겹친다는 것은 대상 결속의
     증명이 아니다. 관계 판정은 기존 의미 검수(AI)와 수치·시점 검사가 맡는다.
-  · 인용 원문이 하나도 없으면 «없음»이 아니라 «판단 불가»로 보고 물러난다
-    (`diagram_check._numbers_are_grounded` 와 같은 원칙).
+  · 인용 원문을 «하나라도» 복원하지 못했으면 «없음»이 아니라 «판단 불가»로
+    보고 물러난다 (`prose_own_source._unrecoverable` 와 같은 조건).
   · 다른 줄의 인용 원문으로 메우지 않는다. 그 줄이 스스로 단 인용만 본다.
 """
 
@@ -46,6 +46,25 @@ def _compact(value: object) -> str:
     return "".join(unicodedata.normalize("NFKC", str(value or "")).casefold().split())
 
 
+def _unrecoverable(source_texts: Sequence[object]) -> bool:
+    """원문을 복원하지 못한 인용이 «하나라도» 섞여 있는가.
+
+    ★ 산문 경로(`prose_own_source._unrecoverable`)와 «같은 자리»에서 물러난다.
+      빈 원문을 그냥 빼고 남은 것만으로 판정하면, 뉴스 정확 원문처럼 다른 자리에
+      보관된 근거가 «없는 말»로 세어져 거짓 차단이 된다. 5장 대응표가 뉴스를
+      인용하면 바로 이 상황에 놓이고, 결과는 이 가드가 살리려던 그
+      「대응이 사라진다」와 같아진다.
+    ⚠️ 두 함수를 하나로 합치지 않았다 — 산문 쪽은 «확인» 산문 계약 전용이라
+      지금 같은 조건이라도 앞으로 달라질 수 있다. 대신
+      `tests/test_challenge_response_extraction.py` 의 대조 시험이 두 경로가
+      «같은 입력에서 같이 물러나는지»를 매번 확인한다.
+    """
+
+    return not source_texts or any(
+        not str(text or "").strip() for text in source_texts
+    )
+
+
 def challenge_response_evidence_problem(
     cells: Sequence[str], sources_mapping: Mapping[str, str]
 ) -> str:
@@ -68,10 +87,8 @@ def challenge_response_evidence_problem(
         # 빈 칸은 `challenge_response_problem` 의 몫이다. 두 검사가 같은 줄에
         # 각자 사유를 남기면 진단에서 원인이 두 개로 보인다.
         return ""
-    source_texts = [
-        str(text) for text in sources_mapping.values() if str(text or "").strip()
-    ]
-    if not source_texts:
+    source_texts = [str(text) for text in sources_mapping.values()]
+    if _unrecoverable(source_texts):
         return ""
     joined_sources = " ".join(source_texts)
     compact_response = _compact(response)

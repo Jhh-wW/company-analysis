@@ -52,6 +52,10 @@ from src.features.composer.port import (
     ComposedSection,
     FlowRow,
 )
+from src.features.composer.prose_own_source import prose_own_source_problem
+from src.features.composer.prose_own_source_constants import (
+    PROSE_OWN_SOURCE_UNSUPPORTED,
+)
 from src.features.composer.verify import verify_report
 
 
@@ -238,6 +242,51 @@ def test_인용_원문이_없으면_판단_불가로_물러난다():
     ) == ""
 
 
+def test_인용_하나만_복원_실패해도_판단_불가로_물러난다():
+    """독립 검토(P2-3) — «일부만» 빈 원문에서 산문과 잣대가 갈라져 있었다.
+
+    복원 못 한 인용을 «0단어»로 세면, 남은 인용만으로 대응을 벌하게 된다.
+    뉴스 정확 원문처럼 다른 자리에 보관된 근거가 있으므로 이때는 판정하지
+    않는다 — 그러지 않으면 5장 대응표가 뉴스를 인용하는 순간 이 가드가
+    살리려던 그 「대응이 사라진다」가 다시 일어난다.
+    """
+
+    assert challenge_response_evidence_problem(
+        (GROUNDED_ISSUE_CELL, UNGROUNDED_RESPONSE_CELL),
+        {"1": ACTUAL_EDUCATION_SOURCE, "8": ""},
+    ) == ""
+
+
+#: 인용 복원 상태 × (산문 경로, 대응표 경로). 두 경로가 «같은 자리»에서
+#: 물러나는지 한 시험에서 함께 확인한다 — 조건을 한쪽에만 적어 두면 한쪽만
+#: 고쳐져 잣대가 다시 갈라진다(모듈 머리말이 약속한 계약).
+UNRECOVERABLE_MATRIX = (
+    ("전부 복원 실패", {"1": "", "8": "   "}, False),
+    ("일부만 복원 실패", {"1": ACTUAL_EDUCATION_SOURCE, "8": ""}, False),
+    ("전부 복원 성공", {"1": ACTUAL_EDUCATION_SOURCE, "8": ACTUAL_GROWTH_SOURCE}, True),
+)
+
+
+@pytest.mark.parametrize(
+    "name,sources,should_judge",
+    UNRECOVERABLE_MATRIX,
+    ids=[case[0] for case in UNRECOVERABLE_MATRIX],
+)
+def test_대응표와_산문이_같은_자리에서_물러난다(name, sources, should_judge):
+    """같은 입력에서 두 «생산» 함수가 함께 판정하거나 함께 물러나야 한다."""
+
+    prose = prose_own_source_problem(UNGROUNDED_RESPONSE_CELL, sources)
+    table = challenge_response_evidence_problem(
+        (GROUNDED_ISSUE_CELL, UNGROUNDED_RESPONSE_CELL), sources
+    )
+    assert bool(prose) == bool(table), (name, prose, table)
+    assert bool(table) is should_judge, (name, table)
+    if should_judge:
+        # 물러나지 않은 자리에서는 실제로 «이» 사유가 붙는지까지 본다.
+        assert prose == PROSE_OWN_SOURCE_UNSUPPORTED, prose
+        assert table == CHALLENGE_RESPONSE_NOT_IN_SOURCE, table
+
+
 @pytest.mark.parametrize("grouped", (False, True), ids=("flat", "grouped"))
 def test_다른_장의_두_칸_행에는_이_사유가_붙지_않는다(grouped):
     """대응표 계약은 5장만의 것이다 — 다른 장 도식을 이 잣대로 벌하지 않는다.
@@ -273,6 +322,25 @@ def test_5장_프롬프트가_바로_뒤_대응_문장을_같은_줄로_내라�
     assert "«바로 뒤»" in prompt
     assert "회사가 밝힌 대응»이다" in prompt
     assert "과제만 적고 뒤 문장을 버리지 않는다" in prompt
+
+
+def test_5장_프롬프트의_대응_지시가_칸_길이_규칙과_맞선다():
+    """독립 검토(P2-4) — 두 지시가 서로 맞서면 모델은 어느 쪽이든 어긴다.
+
+    「두 문장을 두 칸으로 함께 낸다」와 「각 칸은 짧은 이름·구로 쓴다(한 문장을
+    통째로 넣지 않는다)」가 같은 지침에 함께 있었다. 앞을 따르면 칸이 길어져
+    수치 게이트에 걸릴 면이 넓어지는데, 줄 통째 폐기의 원인이 바로 그것이었다.
+    """
+
+    prompt = _prompt_for(CHALLENGE_FLOW_SECTION_ID)
+
+    # 칸 길이 규칙은 그대로 남아 있다.
+    assert "각 칸은 «짧은 이름·구»로 쓴다(한 문장을 통째로 넣지 않는다)" in prompt
+    # 그와 맞서던 문구는 없어졌다.
+    assert "두 문장을 한 줄의 두 칸으로 함께 낸다" not in prompt
+    # 대신 «핵심 구를 나눠 낸다»로 지시한다 — 뒤 문장을 버리라는 뜻이 아니다.
+    assert "두 문장의 «핵심 구»를 한 줄의 두 칸으로 나눠 낸다" in prompt
+    assert "원문 표현 그대로 짧게 줄인 구를 넣는다" in prompt
 
 
 def test_5장_프롬프트가_원문에_없는_수를_금지한다():
