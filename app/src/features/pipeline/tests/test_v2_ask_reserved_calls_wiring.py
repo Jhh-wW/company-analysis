@@ -79,15 +79,23 @@ def _돌린다(
     def 기록하는_팩토리(
         _engine, _client, *, stage: str, max_tokens: int, reserved_calls: int = 0,
     ):
-        ask = 가짜팩토리(
+        속 = 가짜팩토리(
             _engine, _client, stage=stage, max_tokens=max_tokens,
             reserved_calls=reserved_calls,
         )
+
+        # ★ 생성마다 «새» 객체여야 한다. 가짜 팩토리는 stage 가 같으면 같은
+        #   객체를 돌려주므로, 그대로 기록하면 v2_review 호출자 넷이 전부
+        #   같은 것이 되어 아래 동일성 단정이 «항상 참»이 된다 —
+        #   rewrite_ask 와 recheck_ask 를 뒤바꿔 넘겨도 초록이었다(실측).
+        def 감싼다(prompt: str, _속=속) -> str:
+            return _속(prompt)
+
         만든호출자.append(
             {"stage": stage, "max_tokens": max_tokens,
-             "reserved_calls": reserved_calls, "ask": ask}
+             "reserved_calls": reserved_calls, "ask": 감싼다}
         )
-        return ask
+        return 감싼다
 
     monkeypatch.setattr(real, "_v2_ask_via_provider", 기록하는_팩토리)
     monkeypatch.setattr(real, "_v2_cache_save", lambda **_kwargs: None)
@@ -146,6 +154,12 @@ def test_real이_run_v2에_넘기는_rewrite_recheck_클로저의_예약값을_�
                 f"필수 단계 {항목['stage']} 가 예약을 걸었습니다"
             )
 
+    # ★ 아래 동일성 단정이 뜻을 가지려면 네 호출자가 «서로 다른 객체»여야
+    #   한다. 하나라도 같아지면 인자를 뒤바꿔 넘겨도 초록이 되므로 먼저 못 박는다.
+    assert len({id(항목["ask"]) for 항목 in 검수자들}) == 4, (
+        "v2_review 호출자들이 같은 객체입니다 — 이 시험은 배선을 구분하지 못합니다"
+    )
+
     # ★ run_v2 가 «실제로 받은 객체»가 그 예약을 건 클로저와 같은 것인지 본다.
     #   시험 안에서 새로 만든 클로저와 비교하면 배선 결함을 못 잡는다.
     재작성_클로저 = next(
@@ -154,11 +168,21 @@ def test_real이_run_v2에_넘기는_rewrite_recheck_클로저의_예약값을_�
     재검수_클로저 = next(
         항목["ask"] for 항목 in 검수자들 if 항목["reserved_calls"] == _필수후속
     )
-    assert 받은인자["rewrite_ask"] is 재작성_클로저
-    assert 받은인자["recheck_ask"] is 재검수_클로저
-    # 검수·최초검수·도식은 예전 그대로 예약 없는 호출자를 받는다.
+    assert 받은인자["rewrite_ask"] is not 받은인자["recheck_ask"], (
+        "재작성과 재검수가 같은 호출자를 받았습니다 — 예약값이 서로 다른데 "
+        "같은 객체라면 둘 중 하나의 예약이 사라진 것입니다"
+    )
+    assert 받은인자["rewrite_ask"] is 재작성_클로저, (
+        "재작성 자리에 예약 "
+        f"{_재작성예약}회짜리가 아닌 호출자가 들어갔습니다"
+    )
+    assert 받은인자["recheck_ask"] is 재검수_클로저, (
+        f"재검수 자리에 예약 {_필수후속}회짜리가 아닌 호출자가 들어갔습니다"
+    )
+    # 검수·최초검수는 예전 그대로 예약 없는 호출자를 받는다.
     assert 받은인자["reviewer_ask"] is 검수자들[0]["ask"]
     assert 받은인자["initial_reviewer_ask"] is 검수자들[1]["ask"]
+    assert 받은인자["rewrite_ask"] is not 받은인자["reviewer_ask"]
 
 
 def test_재작성_예약이_재검수_예약보다_정확히_한_회_크다(

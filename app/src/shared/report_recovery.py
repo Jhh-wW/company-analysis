@@ -53,6 +53,17 @@ MAX_TOTAL_AI_CALLS: Final[int] = (
 DIAGRAM_REVIEW_CALLS: Final[int] = 1
 SUMMARY_WRITER_CALLS: Final[int] = 1
 SUMMARY_REVIEW_CALLS: Final[int] = 1
+
+# ⚠️ 이 값은 «파싱 재요청을 포함하지 않은 최소치»다 (독립 검토 지적).
+#   세 단계는 각자 응답을 못 읽으면 1회씩 더 부른다
+#   (도식 `composer/diagram_check.py`, 요약 작성 `composer/logic.py`,
+#    요약 검수 `composer/verify.py` — 모두 PARSE_RETRY_LIMIT = 1).
+#   즉 최악은 6회이고, 3으로는 «본문 검수가 재요청을 한 번 쓴» 실행에서
+#   요약 검수가 여전히 굶을 수 있다(그때 진단에 `검수한도도달=True`가 남는다).
+#   그래도 6으로 올리지 않는다 — 뉴스 몫이 5에서 2로 급감해 보도 근거가
+#   먼저 사라지기 때문이다. 재요청은 «드물게 일어나는 일»이라는 전제 위에
+#   서 있는 값이므로, `검수한도도달`·「의미 검수 불능」 발생 빈도를 실행
+#   기록으로 계속 세어 이 전제가 유지되는지 확인한다.
 MANDATORY_TAIL_AI_CALLS: Final[int] = (
     DIAGRAM_REVIEW_CALLS + SUMMARY_WRITER_CALLS + SUMMARY_REVIEW_CALLS
 )
