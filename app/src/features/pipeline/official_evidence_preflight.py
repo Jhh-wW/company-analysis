@@ -360,6 +360,15 @@ def assess_official_evidence(
     elif required_dart_collection_incomplete:
         detail_code = FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT
     elif dart_partial_fallback:
+        # ★ 여기서 비우는 것이 «정상»이다 — detail_code는 진단이 아니라
+        #   ``can_call_ai``를 가르는 판단 값이라, 전환을 열어 놓고 사유를 채우면
+        #   그 순간 AI 호출이 다시 막힌다.
+        # ★ 다만 이 빈 칸 때문에 「무엇이 왜 막혔나」가 실행 기록에서 사라졌다
+        #   (2026-09-11 실측: robots.txt 2건 실패 → 필수 장 UNKNOWN → 전환).
+        #   그래서 ``decision.unknown_section_ids``·``decision.reason_codes``·
+        #   ``dart_partial_reason``을 진단 단계(`real.py`의
+        #   ``6_수집_공식근거사전검사``)가 «옆 필드»로 따로 남긴다. 판단용 값과
+        #   진단용 값을 같은 칸에 두지 않는다.
         detail_code = ""
     elif decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE:
         detail_code = FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT
