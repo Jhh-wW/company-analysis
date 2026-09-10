@@ -28,6 +28,7 @@ from src.features.business_candidate.constants import (
     CANDIDATE_AI_RERANK_ENV_NAME,
     CANDIDATE_AI_RERANK_ENV_ON,
     MAX_CANDIDATES,
+    RERANK_EXEMPT_TOP_KINDS,
 )
 from src.features.business_candidate.address_constants import ADDRESS_DISTRICT_STRENGTH
 from src.features.business_candidate.address_match import address_match_strength
@@ -88,6 +89,10 @@ def should_rerank(ranked: Sequence["BusinessCandidate"], *, address_hint: str = 
     candidates = tuple(ranked)
     if len(candidates) <= MAX_CANDIDATES:
         # 전부 보여 줄 수 있으면 순서를 바꿔도 사람이 보는 목록은 같다.
+        return False
+    if candidates[0].name_match_kind in RERANK_EXEMPT_TOP_KINDS:
+        # 1위 근거가 «적은 이름이 그대로 맞았다»면 순서를 다시 물을 이유가 없다.
+        # 뒤에 부분 일치 후보가 몇 개 딸려 오든 사람이 고를 1위는 이미 정해져 있다.
         return False
     if any(candidate.name_match_kind == "exact_id" for candidate in candidates):
         return False

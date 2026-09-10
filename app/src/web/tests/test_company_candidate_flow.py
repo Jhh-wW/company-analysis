@@ -22,6 +22,8 @@ from src.features.budget import spend_store
 from src.features.budget.constants import SPEND_PHASE_CANDIDATE, SPEND_PHASE_IDENTIFY
 from src.features.business_candidate import providers as candidate_providers
 from src.features.business_candidate.constants import (
+    AI_ALIAS_MAX_OUTPUT_TOKENS,
+    AI_ALIAS_RESERVE_KRW,
     AI_RERANK_RESERVE_KRW,
     CANDIDATE_ATTEMPT_TTL_SEC,
 )
@@ -2417,5 +2419,532 @@ def test_구글_갈래_예약액은_구글_예상비용에_재정렬_예약을_�
             for item in reservations
             if item["phase"] == SPEND_PHASE_CANDIDATE
         ] == [AI_RERANK_RESERVE_KRW, 49.0 + AI_RERANK_RESERVE_KRW]
+    finally:
+        client.close()
+
+
+# ── 별명 → 정식 법인명 AI 번역 ────────────────────────────────
+
+
+ALIAS_BRAND_QUERY = "배민"
+ALIAS_LEGAL_NAME = "우아한형제들"
+ALIAS_CORP_CODE = "01063273"
+ALIAS_ADDRESS = "서울특별시 송파구 위례성대로 2"
+ALIAS_WEB_CATALOG = (
+    (ALIAS_CORP_CODE, ALIAS_LEGAL_NAME, "Woowa Brothers Corp.", "", "20260101"),
+    ("00111111", "가나다전자", "GANADA ELECTRONICS", "111111", "20250101"),
+)
+
+
+class _가짜_번역_ask:
+    """계량 번역 ask 자리에 들어가는 가짜. 네트워크를 쓰지 않는다."""
+
+    def __init__(self, response: str, spent_krw: float) -> None:
+        self._response = response
+        self.spent_krw = spent_krw
+        self.billing_uncertain = False
+        self.prompts: list[str] = []
+        self.reported: list[str] = []
+
+    def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return self._response
+
+    def report(self, status) -> None:
+        self.reported.append(str(status))
+
+
+class _가짜_번역_provider_messages:
+    """네트워크 없이 provider의 `messages.create` 응답 모양만 흉내 낸다."""
+
+    def __init__(self, names) -> None:
+        self.names = list(names)
+        self.requests: list[dict] = []
+
+    def create(self, **kwargs):
+        self.requests.append(kwargs)
+        return SimpleNamespace(
+            model=kwargs["model"],
+            stop_reason="end_turn",
+            content=[
+                SimpleNamespace(
+                    text=json.dumps({"정식명": self.names}, ensure_ascii=False)
+                )
+            ],
+            usage=SimpleNamespace(
+                input_tokens=1200,
+                output_tokens=30,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            ),
+        )
+
+
+class _번역_프로필엔진:
+    """공식 기업개황만 돌려주는 무과금 fixture 엔진."""
+
+    MODEL = ""
+
+    class UsageCounter:
+        pass
+
+    def __init__(self, catalog=ALIAS_WEB_CATALOG) -> None:
+        self.calls: list[str] = []
+        self.profiles = {
+            row[0]: {
+                "status": "000",
+                "corp_code": row[0],
+                "corp_name": row[1],
+                "adres": ALIAS_ADDRESS,
+                "hm_url": "",
+                "ceo_nm": "대표",
+                "est_dt": "20110301",
+            }
+            for row in catalog
+        }
+
+    def load_env(self):
+        pass
+
+    def get_json(self, endpoint, params, counter):
+        assert endpoint == "company.json"
+        self.calls.append(params["corp_code"])
+        return self.profiles[params["corp_code"]]
+
+
+def _번역_파이프라인(monkeypatch, *, alias_ask, engine=None, rerank_ask=None):
+    """실제 `RealPipeline` 어댑터를 그대로 쓰고 색인·엔진만 fixture로 바꾼다."""
+
+    engine = engine or _번역_프로필엔진()
+    monkeypatch.setattr(pipeline_real, "_company_catalog", lambda: ALIAS_WEB_CATALOG)
+    monkeypatch.setattr(pipeline_real, "_engine", lambda: engine)
+    monkeypatch.setattr(
+        pipeline_real.RealPipeline, "make_candidate_rerank_ask", lambda self: rerank_ask
+    )
+    if alias_ask is not None:
+        monkeypatch.setattr(
+            pipeline_real.RealPipeline,
+            "make_candidate_alias_ask",
+            lambda self: alias_ask,
+        )
+    monkeypatch.setattr(
+        pipeline_real.RealPipeline,
+        "find_company_metered",
+        lambda self, user_input: CompanyLookupResult(card=None, model="fake-dart"),
+    )
+    pipeline = pipeline_real.RealPipeline()
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    return pipeline, engine
+
+
+def test_별명은_AI_정식명_번역을_거쳐_사람이_고르는_후보로_이어진다(monkeypatch):
+    """★ 예전엔 «배민»으로 검색하면 후보가 한 장도 나오지 않았다."""
+
+    monkeypatch.delenv("CANDIDATE_AI_ALIAS", raising=False)
+    ask = _가짜_번역_ask(
+        json.dumps({"정식명": [ALIAS_LEGAL_NAME]}, ensure_ascii=False), spent_krw=3.0
+    )
+    _pipeline, engine = _번역_파이프라인(monkeypatch, alias_ask=ask)
+    observed = _spy_observed_resolutions(monkeypatch)
+
+    client, csrf = _admin_client()
+    try:
+        candidates = client.post(
+            "/confirm",
+            data=_form(csrf, company=ALIAS_BRAND_QUERY, region=ALIAS_ADDRESS),
+        )
+        assert candidates.status_code == 200, candidates.text
+        assert "확인할 회사 후보입니다" in candidates.text
+
+        # ① AI는 «한 번»만, 그리고 사용자가 적은 말만 담아 불렸다.
+        assert len(ask.prompts) == 1
+        assert ALIAS_BRAND_QUERY in ask.prompts[0]
+        assert observed[-1].alias_status == "applied"
+
+        # ② 옮긴 이름으로 찾은 회사가 화면 후보로 올라왔고 출처가 구분된다.
+        assert ALIAS_LEGAL_NAME in candidates.text
+        assert "AI 정식명 추정" in candidates.text
+
+        # ③ 비용은 구글·재정렬 비용이 남는 «그 자리»에 같은 방식으로 남는다.
+        attempt_token = _hidden(candidates.text, "candidate_attempt_token")
+        assert job_runtime._CANDIDATE_ATTEMPTS[attempt_token].candidate_cost_krw == 3.0
+        assert "약 3원은" in candidates.text
+
+        # ④ 확정은 사람이 한다. 서명된 후보를 골라야 확인 카드로 넘어간다.
+        forms = re.findall(r"<form\b.*?</form>", candidates.text, re.DOTALL)
+        selected_form = next(
+            form
+            for form in forms
+            if f'name="candidate_ref" value="{ALIAS_CORP_CODE}"' in form
+        )
+        selected_fields = {
+            name: _hidden(selected_form, name)
+            for name in (
+                "candidate_attempt_token",
+                "candidate_selection_token",
+                "candidate_index",
+                "candidate_name",
+                "candidate_provider",
+                "candidate_ref",
+            )
+        }
+        confirmed = client.post(
+            "/confirm",
+            data=_form(
+                csrf,
+                company=ALIAS_BRAND_QUERY,
+                region=ALIAS_ADDRESS,
+                candidate_resolution_confirmed="yes",
+                **selected_fields,
+            ),
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        assert "이 회사가 맞나요?" in confirmed.text
+        attempt = job_runtime._PAID_ATTEMPTS[
+            _hidden(confirmed.text, "paid_attempt_token")
+        ]
+        assert attempt.card.ref == ALIAS_CORP_CODE
+        assert attempt.card.legal_name == ALIAS_LEGAL_NAME
+        # 사용자가 적은 말은 그대로 보존한다. AI가 이름을 바꿔치기하지 않는다.
+        assert attempt.card.typed_name == ALIAS_BRAND_QUERY
+    finally:
+        client.close()
+
+
+def test_정식명이_이미_맞으면_번역_AI를_부르지_않는다(monkeypatch):
+    monkeypatch.delenv("CANDIDATE_AI_ALIAS", raising=False)
+    # 부르지 않은 ask는 0원을 쓴 것이다. 여기에 0이 아닌 값을 두면 «안 불렀는데
+    # 돈이 든» 앞뒤가 안 맞는 상태를 시험이 정상으로 굳혀 버린다.
+    ask = _가짜_번역_ask(
+        json.dumps({"정식명": ["가나다전자"]}, ensure_ascii=False), spent_krw=0.0
+    )
+    _번역_파이프라인(monkeypatch, alias_ask=ask)
+    observed = _spy_observed_resolutions(monkeypatch)
+
+    client, csrf = _admin_client()
+    try:
+        candidates = client.post(
+            "/confirm",
+            data=_form(csrf, company=ALIAS_LEGAL_NAME, region=ALIAS_ADDRESS),
+        )
+        assert candidates.status_code == 200, candidates.text
+        assert ask.prompts == []
+        assert observed[-1].alias_status == "not_needed"
+        assert ALIAS_LEGAL_NAME in candidates.text
+        assert "AI 정식명 추정" not in candidates.text
+        assert "이 후보 검색은 비용을 사용하지 않았습니다" in candidates.text
+    finally:
+        client.close()
+
+
+def test_번역_스위치가_꺼져_있으면_ask를_만들지도_않는다(monkeypatch):
+    monkeypatch.setenv("CANDIDATE_AI_ALIAS", "0")
+    만든_횟수: list[int] = []
+
+    def factory(self):
+        만든_횟수.append(1)
+        return _가짜_번역_ask("{}", spent_krw=0.0)
+
+    monkeypatch.setattr(pipeline_real, "_company_catalog", lambda: ALIAS_WEB_CATALOG)
+    monkeypatch.setattr(pipeline_real, "_engine", lambda: _번역_프로필엔진())
+    monkeypatch.setattr(
+        pipeline_real.RealPipeline, "make_candidate_rerank_ask", lambda self: None
+    )
+    monkeypatch.setattr(
+        pipeline_real.RealPipeline, "make_candidate_alias_ask", factory
+    )
+    monkeypatch.setattr(
+        pipeline_real.RealPipeline,
+        "find_company_metered",
+        lambda self, user_input: CompanyLookupResult(card=None, model="fake-dart"),
+    )
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline_real.RealPipeline())
+    observed = _spy_observed_resolutions(monkeypatch)
+
+    client, csrf = _admin_client()
+    try:
+        response = client.post(
+            "/confirm",
+            data=_form(csrf, company=ALIAS_BRAND_QUERY, region=ALIAS_ADDRESS),
+        )
+        assert response.status_code == 200, response.text
+        assert 만든_횟수 == []
+        assert observed[-1].alias_status == ""
+        assert observed[-1].candidates == ()
+    finally:
+        client.close()
+
+
+def test_번역_비용승인이_거절되면_AI없이_후보검색만_정상으로_끝난다(monkeypatch):
+    monkeypatch.delenv("CANDIDATE_AI_ALIAS", raising=False)
+    ask = _가짜_번역_ask(
+        json.dumps({"정식명": [ALIAS_LEGAL_NAME]}, ensure_ascii=False), spent_krw=0.0
+    )
+    _번역_파이프라인(monkeypatch, alias_ask=ask)
+    # 일일 예산·회원 한도에서 거절된 상황을 그대로 모사한다.
+    monkeypatch.setattr(paid_runtime, "_begin_paid_phase", lambda **_kwargs: None)
+    observed = _spy_observed_resolutions(monkeypatch)
+
+    client, csrf = _admin_client()
+    try:
+        # 결정적으로 찾히는 이름을 쓴다 — 후보 화면이 떠야 «검색은 정상»을 볼 수 있다.
+        response = client.post(
+            "/confirm",
+            data=_form(csrf, company=ALIAS_LEGAL_NAME, region=ALIAS_ADDRESS),
+        )
+        assert response.status_code == 200, response.text
+        assert "확인할 회사 후보입니다" in response.text
+        assert ask.prompts == []
+        # 승인 거절은 «필요 없었다»와 다른 사실이다. 그대로 적는다.
+        assert observed[-1].alias_status == "skipped_budget"
+        # 후보 검색 자체는 어떤 경우에도 실패로 바뀌지 않는다.
+        assert observed[-1].status is ResolutionStatus.OK
+        assert ALIAS_LEGAL_NAME in response.text
+        assert "이 후보 검색은 비용을 사용하지 않았습니다" in response.text
+    finally:
+        client.close()
+
+
+def test_두_보조단계가_열리면_예약액은_두_예약의_합이다(monkeypatch):
+    """★ 한쪽 예약만 잡으면 뒤에 나가는 호출이 전송 전에 거절된다."""
+
+    monkeypatch.delenv("CANDIDATE_AI_ALIAS", raising=False)
+    monkeypatch.delenv("CANDIDATE_AI_RERANK", raising=False)
+    alias_ask = _가짜_번역_ask(
+        json.dumps({"정식명": [ALIAS_LEGAL_NAME]}, ensure_ascii=False), spent_krw=0.0
+    )
+    rerank_ask = _가짜_재정렬_ask('{"order":[]}', spent_krw=0.0)
+    _번역_파이프라인(monkeypatch, alias_ask=alias_ask, rerank_ask=rerank_ask)
+    reservations = _spy_begin_paid_phase(monkeypatch)
+
+    client, csrf = _admin_client()
+    try:
+        response = client.post(
+            "/confirm",
+            data=_form(csrf, company=ALIAS_BRAND_QUERY, region=ALIAS_ADDRESS),
+        )
+        assert response.status_code == 200, response.text
+        assert [
+            item["requested_cost_krw"]
+            for item in reservations
+            if item["phase"] == SPEND_PHASE_CANDIDATE
+        ] == [AI_RERANK_RESERVE_KRW + AI_ALIAS_RESERVE_KRW]
+    finally:
+        client.close()
+
+
+def _번역예약_직접호출(monkeypatch, provider, alias_ask, rerank_ask):
+    """`_resolve_business_candidates` 를 그대로 부르고 예약·전달 인자를 기록한다."""
+
+    class RequestFixture:
+        client = type("Client", (), {"host": "127.0.0.1"})()
+
+    ticket = object()
+    reservations: list[dict] = []
+    forwarded: list[dict] = []
+
+    monkeypatch.setattr(
+        paid_runtime, "_reserve_run_slot", lambda *_a, **_k: "candidate-slot"
+    )
+    monkeypatch.setattr(paid_runtime, "_release_run_slot", lambda _slot: None)
+
+    def fake_begin(**kwargs):
+        reservations.append(dict(kwargs))
+        return ticket
+
+    def fake_call(_ticket, func, *args, **kwargs):
+        forwarded.append(dict(kwargs))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(paid_runtime, "_begin_paid_phase", fake_begin)
+    monkeypatch.setattr(paid_runtime, "_call_paid_provider", fake_call)
+    monkeypatch.setattr(paid_runtime, "_settle_paid_phase", lambda *_a, **_k: None)
+    monkeypatch.setattr(paid_runtime, "_cancel_paid_phase", lambda _phase: None)
+
+    outcome = asyncio.run(
+        analysis_router._resolve_business_candidates(
+            RequestFixture(),  # type: ignore[arg-type]
+            provider=provider,
+            user_input=UserInput(
+                company="JYP",
+                job="매니지먼트",
+                region="서울 강동구",
+                posting_text="채용 공고",
+            ),
+            resolved_track=(object(), "fixture-bucket", 100.0),  # type: ignore[arg-type]
+            allow_paid_provider=True,
+            analysis_run_id="alias-reserve-run",
+            rerank_ask=rerank_ask,
+            alias_ask=alias_ask,
+        )
+    )
+    return outcome, reservations, forwarded
+
+
+def test_유료_공급자가_번역을_못_받으면_그_예약을_잡지_않는다(monkeypatch):
+    """★ 구글 공급자에는 `accepts_alias_ask` 표식이 없어 번역이 절대 돌지
+    않는데도 예약만 12원을 더 잡았다. 그 12원이 호출별 상한을 넘기면 «후보
+    검색 전체»가 「혼잡」 응답으로 끝난다. 못 쓸 돈으로 검색을 막지 않는다.
+    """
+    provider = PaidGoogleFixture()
+    assert bool(getattr(provider, "accepts_alias_ask", False)) is False
+    # 대비: 번역을 실제로 받는 어댑터는 표식을 갖고 있다.
+    assert candidate_providers.PipelineProviderAdapter.accepts_alias_ask is True
+
+    alias_ask = _가짜_번역_ask('{"정식명": ["우아한형제들"]}', spent_krw=0.0)
+    rerank_ask = _가짜_재정렬_ask('{"order":[]}', spent_krw=0.0)
+
+    outcome, reservations, forwarded = _번역예약_직접호출(
+        monkeypatch, provider, alias_ask, rerank_ask
+    )
+
+    assert isinstance(outcome, tuple)
+    result, _cost_krw = outcome
+    assert result.status is ResolutionStatus.OK
+    assert provider.calls == 1
+
+    # ① 예약액에 번역 몫이 «없다».
+    assert [
+        item["requested_cost_krw"]
+        for item in reservations
+        if item["phase"] == SPEND_PHASE_CANDIDATE
+    ] == [provider.accounting_cost_krw + AI_RERANK_RESERVE_KRW]
+
+    # ② 못 쓰는 ask 는 넘기지도 않는다(관측 혼선 방지). 재정렬 ask 는 그대로다.
+    assert forwarded[0]["alias_ask"] is None
+    assert forwarded[0]["rerank_ask"] is rerank_ask
+    assert alias_ask.prompts == []
+    assert result.alias_status == ""
+
+
+def test_번역을_받는_유료_공급자였다면_예약을_그대로_잡는다(monkeypatch):
+    """대조군. 게이트가 «유료 갈래면 무조건 끈다»로 넓어지면 여기서 빨간불."""
+
+    class 번역받는_유료공급자(PaidGoogleFixture):
+        accepts_alias_ask = True
+
+        def search(self, *, alias_ask=None, **kwargs):
+            self.alias_ask = alias_ask
+            return super().search(**kwargs)
+
+    provider = 번역받는_유료공급자()
+    alias_ask = _가짜_번역_ask('{"정식명": ["우아한형제들"]}', spent_krw=0.0)
+    rerank_ask = _가짜_재정렬_ask('{"order":[]}', spent_krw=0.0)
+
+    outcome, reservations, forwarded = _번역예약_직접호출(
+        monkeypatch, provider, alias_ask, rerank_ask
+    )
+
+    assert isinstance(outcome, tuple)
+    assert [
+        item["requested_cost_krw"]
+        for item in reservations
+        if item["phase"] == SPEND_PHASE_CANDIDATE
+    ] == [
+        provider.accounting_cost_krw + AI_RERANK_RESERVE_KRW + AI_ALIAS_RESERVE_KRW
+    ]
+    assert forwarded[0]["alias_ask"] is alias_ask
+
+
+class _번역_계량엔진(_번역_프로필엔진):
+    """기업개황 조회와 계량 AI 전송을 한 자리에서 흉내 내는 fixture 엔진."""
+
+    MODEL = "engine-default"
+
+    def __init__(self, messages, catalog=ALIAS_WEB_CATALOG) -> None:
+        super().__init__(catalog)
+        self._messages = messages
+
+    def _client(self):
+        return SimpleNamespace(messages=self._messages)
+
+    def _ask(self, client, prompt, schema, max_tokens):
+        response = client.messages.create(
+            model=self.MODEL,
+            max_tokens=max_tokens,
+            temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+            output_config={"format": {"type": "json_schema", "schema": schema}},
+        )
+        return json.loads(response.content[0].text), {
+            "in": response.usage.input_tokens,
+            "out": response.usage.output_tokens,
+        }
+
+
+class MeteredAliasFakeRealPipeline(pipeline_real.RealPipeline):
+    """번역 ask 자리에 «진짜» 계량 껍데기를 놓는 fixture."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.alias_ask = None
+        self.alias_factory_calls = 0
+
+    def make_candidate_rerank_ask(self):
+        return None
+
+    def make_candidate_alias_ask(self):
+        self.alias_factory_calls += 1
+        self.alias_ask = pipeline_real.MeteredCandidateAliasAsk()
+        return self.alias_ask
+
+    def find_company_metered(self, user_input):
+        return CompanyLookupResult(card=None, model="fake-dart")
+
+
+def test_무료_DART갈래도_예약문맥을_열어_번역_AI가_실제로_전송된다(monkeypatch):
+    """계량 껍데기를 그대로 놓고 provider 경계까지 실제로 나가는지 본다."""
+
+    monkeypatch.delenv("CANDIDATE_AI_ALIAS", raising=False)
+    _enable_attempt_ledger()
+    messages = _가짜_번역_provider_messages([ALIAS_LEGAL_NAME])
+    engine = _번역_계량엔진(messages)
+    monkeypatch.setattr(pipeline_real, "_company_catalog", lambda: ALIAS_WEB_CATALOG)
+    monkeypatch.setattr(pipeline_real, "_engine", lambda: engine)
+    pipeline = MeteredAliasFakeRealPipeline()
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+    reservations = _spy_begin_paid_phase(monkeypatch)
+    observed = _spy_observed_resolutions(monkeypatch)
+
+    client, csrf = _admin_client()
+    try:
+        candidates = client.post(
+            "/confirm",
+            data=_form(csrf, company=ALIAS_BRAND_QUERY, region=ALIAS_ADDRESS),
+        )
+        assert candidates.status_code == 200, candidates.text
+
+        # ① provider 경계까지 실제로 나갔다(전송 전 거절이 아니다).
+        assert len(messages.requests) == 1
+        assert messages.requests[0]["model"] == "claude-haiku-4-5"
+        assert messages.requests[0]["max_tokens"] == AI_ALIAS_MAX_OUTPUT_TOKENS
+        # 프롬프트에는 사용자가 적은 말만 담는다.
+        prompt = messages.requests[0]["messages"][0]["content"]
+        assert f'"{ALIAS_BRAND_QUERY}"' in prompt
+        assert ALIAS_LEGAL_NAME not in prompt
+
+        # ② 무료 갈래도 후보검색 phase를 번역 예약액으로 연다.
+        assert [
+            item["requested_cost_krw"]
+            for item in reservations
+            if item["phase"] == SPEND_PHASE_CANDIDATE
+        ] == [AI_ALIAS_RESERVE_KRW]
+
+        # ③ 옮긴 이름으로 찾은 후보가 화면에 올라왔다.
+        assert observed[-1].alias_status == "applied"
+        assert ALIAS_LEGAL_NAME in candidates.text
+        assert "AI 정식명 추정" in candidates.text
+        # 계량 ask도 어댑터가 알려 준 사유 코드를 그대로 들고 있다.
+        assert pipeline.alias_ask.status == "applied"
+        assert pipeline.alias_ask.calls == 1
+
+        # ④ 실제로 쓴 돈이 관측·attempt 원장에 같은 값으로 남는다.
+        spent = pipeline.alias_ask.spent_krw
+        assert 0 < spent < AI_ALIAS_RESERVE_KRW
+        attempt_token = _hidden(candidates.text, "candidate_attempt_token")
+        assert (
+            job_runtime._CANDIDATE_ATTEMPTS[attempt_token].candidate_cost_krw == spent
+        )
+        assert pipeline.alias_ask.billing_uncertain is False
     finally:
         client.close()

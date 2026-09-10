@@ -6,11 +6,14 @@ import json
 
 from src.features.business_candidate import ai_rerank
 from src.features.business_candidate.constants import (
+    AI_RERANK_AMBIGUITY_MARGIN,
     AI_RERANK_MAX_CANDIDATES,
     AI_RERANK_MIN_TIE,
     CANDIDATE_AI_RERANK_ENV_NAME,
     MAX_CANDIDATES,
+    RERANK_EXEMPT_TOP_KINDS,
 )
+from src.features.business_candidate.dart_identity import MATCH_KIND_PRIORITY
 from src.features.business_candidate.logic import BusinessCandidate
 
 
@@ -79,6 +82,44 @@ def test_후보가_넷이어도_동점이_아니면_부르지_않는다():
     ]
 
     assert ai_rerank.should_rerank(rows) is False
+
+
+def test_1위가_이름_그대로_맞은_종류면_유료_재정렬을_묻지_않는다():
+    """★ 2026-09-10 실측: 부분 일치 후보가 늘어난 것만으로 유료 호출이
+    11건 -> 35건(79개 질의)으로 켜졌다. 「LG전자」는 정답이 exact_name 으로
+    이미 1위인데 2위와 점수 차가 0.08밖에 안 나 「모호하다」로 오판됐다.
+    1위 근거가 «적은 이름이 그대로 맞았다»면 순서를 다시 물을 이유가 없다.
+    """
+    for exempt_kind in ("exact_id", "exact_name", "spacing"):
+        rows = [
+            _candidate("가나다전자", score=0.5935, name_match_kind=exempt_kind),
+            *[
+                _candidate(f"가나다{index}", score=0.5122, name_match_kind="prefix")
+                for index in range(14)
+            ],
+        ]
+        # 면제가 없으면 켜지는 조건(1위와 4위의 차가 여유 안)임을 먼저 확인한다.
+        assert rows[0].score - rows[MAX_CANDIDATES].score <= AI_RERANK_AMBIGUITY_MARGIN
+        assert ai_rerank.should_rerank(rows) is False, exempt_kind
+
+
+def test_1위가_부분_일치면_모호한_경우_여전히_묻는다():
+    """대조군. 면제 목록이 「항상 안 묻는다」로 넓어지면 여기서 빨간불이 난다."""
+    rows = [
+        _candidate("가나다전자", score=0.5935, name_match_kind="acronym_cross_script"),
+        *[
+            _candidate(f"가나다{index}", score=0.5122, name_match_kind="prefix")
+            for index in range(14)
+        ],
+    ]
+
+    assert ai_rerank.should_rerank(rows) is True
+
+
+def test_재정렬_면제_종류는_matcher가_아는_이름이다():
+    """면제 목록에 오타가 나면 조용히 «아무것도 면제되지 않는» 상태가 된다."""
+    assert set(RERANK_EXEMPT_TOP_KINDS) <= set(MATCH_KIND_PRIORITY)
+    assert RERANK_EXEMPT_TOP_KINDS == ("exact_id", "exact_name", "spacing")
 
 
 # ── 운영 스위치 ────────────────────────────────

@@ -135,7 +135,8 @@ def test_sm_official_catalog_collisions_are_compared_within_profile_limit(
     assert len(engine.calls) == len(catalog) <= DART_PROFILE_ENRICHMENT_LIMIT
     assert rows[0]["candidate_ref"] == target_code
     assert rows[0]["candidate_name"] == target_name
-    assert rows[0]["name_match_kind"] == "acronym_reading"
+    # 약어 토큰 일치가 한글 읽기 일치보다 앞서므로 첫 행의 종류는 acronym_token이다.
+    assert rows[0]["name_match_kind"] == "acronym_token"
     assert verified_official_company_names_equivalent(
         rows[0]["candidate_name"],
         target_name,

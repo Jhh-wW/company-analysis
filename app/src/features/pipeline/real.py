@@ -99,10 +99,17 @@ from src.features.company_comparison.stated_differentiator import (
     add_stated_differentiator_fragments,
     register_stated_differentiator_sentence_evidence,
 )
+from src.features.business_candidate import alias_resolution
 from src.features.business_candidate.constants import (
+    AI_ALIAS_MAX_NAMES,
+    AI_ALIAS_MAX_OUTPUT_TOKENS,
     AI_RERANK_MAX_CANDIDATES,
     AI_RERANK_MAX_OUTPUT_TOKENS,
+    ALIAS_RESPONSE_KEY,
+    ALIAS_STRONG_MATCH_KINDS,
     CANDIDATE_RERANK_MODEL,
+    DART_ALIAS_SOURCE_LABEL,
+    MAX_NAME_CHARS,
 )
 from src.features.business_candidate.dart_identity import (
     DartCompanyRecord,
@@ -1941,6 +1948,110 @@ class MeteredCandidateRerankAsk:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+#: 회사 별명을 정식 법인명으로 옮기는 응답의 구조화 출력 계약.
+#: 이름 목록 하나 말고는 받지 않는다. 파서(`alias_resolution.parse_alias_names`)가
+#: 같은 규칙을 한 번 더 확인한다 — provider가 스키마를 못 지켜도 뚫리지 않게.
+_CANDIDATE_ALIAS_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        ALIAS_RESPONSE_KEY: {
+            "type": "array",
+            "maxItems": AI_ALIAS_MAX_NAMES,
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_NAME_CHARS,
+            },
+        }
+    },
+    "required": [ALIAS_RESPONSE_KEY],
+    "additionalProperties": False,
+}
+
+#: 비용 원장에 남길 단계 이름. 재정렬·본조사 단계와 섞지 않는다.
+CANDIDATE_ALIAS_STAGE: Final[str] = "candidate_alias"
+
+
+class MeteredCandidateAliasAsk:
+    """정식 법인명 번역 프롬프트 한 건을 계량 client로 보내고 원화 비용을 모은다.
+
+    ★ 재정렬(`MeteredCandidateRerankAsk`)과 «같은» 계약이다. 본조사(run)가
+      시작되기 전이라 run_id가 없어 원장에 직접 적지 않고, web 호출부가 후보
+      검색 비용과 같은 자리에 적을 수 있게 `spent_krw`만 알려 준다.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str = CANDIDATE_RERANK_MODEL,
+        max_output_tokens: int = AI_ALIAS_MAX_OUTPUT_TOKENS,
+    ) -> None:
+        self._model = str(model)
+        self._max_output_tokens = int(max_output_tokens)
+        self._spent_krw = 0.0
+        self._calls = 0
+        self._billing_uncertain = False
+        self._lock = threading.Lock()
+        self._status = ""
+
+    @property
+    def spent_krw(self) -> float:
+        """지금까지 이 ask가 만든 AI 비용(원). 실패한 호출도 잰 만큼 포함한다."""
+        with self._lock:
+            return round(self._spent_krw, 2)
+
+    @property
+    def billing_uncertain(self) -> bool:
+        """provider 예외로 «얼마 썼는지 모르는» 호출이 한 번이라도 있었는가."""
+        with self._lock:
+            return bool(self._billing_uncertain)
+
+    @property
+    def calls(self) -> int:
+        """실제로 보낸 호출 수. 운영에서 «부르지 않았다»를 확인할 때 쓴다."""
+        with self._lock:
+            return int(self._calls)
+
+    @property
+    def status(self) -> str:
+        """마지막 번역 단계의 결과(`alias_resolution.ALIAS_STATUS_*`)."""
+        with self._lock:
+            return self._status
+
+    def report(self, status: object) -> None:
+        """어댑터가 번역 단계의 결과를 되돌려 주는 자리. 응답 원문은 받지 않는다."""
+        with self._lock:
+            self._status = str(status or "")
+
+    def __call__(self, prompt: str) -> str:
+        engine = _MeteredEngine(_engine())
+        engine.load_env()
+        client = _metered_client(engine, engine._client())
+        # ★ 1판 모듈 전역이 아니라 요청 로컬 값이다. 겹쳐 도는 다른 요청의 모델을
+        #   바꾸지 않는다(`_MeteredEngine` 주석 참조).
+        engine.MODEL = self._model
+        _set_meter_stage(engine, CANDIDATE_ALIAS_STAGE)
+        with self._lock:
+            self._calls += 1
+        try:
+            payload, _usage = engine._ask(
+                client,
+                prompt,
+                _CANDIDATE_ALIAS_SCHEMA,
+                max_tokens=self._max_output_tokens,
+            )
+        finally:
+            # 예외로 끝나도 이미 나간 호출의 비용은 원장에서 빠지면 안 된다.
+            spent = _request_spent_krw(engine)
+            uncertain = _request_billing_uncertain(engine)
+            with self._lock:
+                self._spent_krw += spent
+                self._billing_uncertain = self._billing_uncertain or uncertain
+        if not isinstance(payload, dict):
+            return ""
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
 def _first_fragment_cite(
     frags: dict[int, dict[str, str]],
     *,
@@ -2545,8 +2656,84 @@ class RealPipeline:
 
         return MeteredCandidateRerankAsk()
 
+    def make_candidate_alias_ask(self) -> "MeteredCandidateAliasAsk":
+        """별명을 정식 법인명으로 옮길 계량 AI ask를 만든다.
+
+        여기서는 키를 읽거나 provider를 부르지 않는다. 엔진·키가 없으면 첫 호출이
+        예외로 끝나고, 그 예외는 번역 경계가 «결정적 결과 유지»로 삼킨다. 이
+        메서드가 없는 파이프라인(데모 등)은 번역 자체를 열지 않는다.
+        """
+
+        return MeteredCandidateAliasAsk()
+
+    @staticmethod
+    def _extend_with_alias_matches(
+        index: object,
+        matches: list[Any],
+        *,
+        company: str,
+        address_hint: str,
+        limit: int,
+        alias_ask: Callable[[str], str] | None,
+    ) -> tuple[list[Any], dict[str, str]]:
+        """AI가 옮긴 정식명으로 같은 색인을 다시 찾아 강한 후보만 합친다.
+
+        Args:
+            index: 이미 만들어 둔 로컬 DART 색인.
+            matches: 결정적 검색이 만든 후보들.
+            company: 사용자가 적은 회사 이름.
+            address_hint: 사용자가 적은 주소 힌트.
+            limit: 이름 하나를 다시 찾을 때의 후보 상한.
+            alias_ask: 번역 ask. None이면 이 단계 자체가 돌지 않는다.
+
+        Returns:
+            (합친 후보 목록, 고유번호→AI가 준 정식명). 두 번째 값이 비어 있으면
+            결정적 결과가 그대로다.
+
+        ★ «강한» 종류(정확·공백·법인접미사)만 채택한다. 약어·토큰·오타 종류까지
+          받으면 AI가 준 이름의 오차가 색인의 오차와 곱해져, 사람이 고를 목록에
+          근거 없는 회사가 섞인다.
+        """
+
+        alias_names, status = alias_resolution.alias_names_from_ask(
+            query=company,
+            address_hint=address_hint,
+            ask=alias_ask,
+            match_kinds=[getattr(item, "match_kind", "") for item in matches],
+        )
+        alias_name_by_code: dict[str, str] = {}
+        if alias_names:
+            known_codes = {item.record.corp_code for item in matches}
+            joined: list[Any] = []
+            for alias_name in alias_names:
+                for match in generate_dart_company_matches(
+                    index, alias_name, limit=limit
+                ):
+                    if match.match_kind not in ALIAS_STRONG_MATCH_KINDS:
+                        continue
+                    corp_code = match.record.corp_code
+                    if corp_code in known_codes or corp_code in alias_name_by_code:
+                        continue
+                    alias_name_by_code[corp_code] = alias_name
+                    joined.append(match)
+            if joined:
+                matches = list(matches) + joined
+            else:
+                # 이름은 받았지만 공식 목록에 없었다. 「적용」이라고 말하지 않는다.
+                status = alias_resolution.ALIAS_STATUS_NO_MATCH
+        report = getattr(alias_ask, "report", None)
+        if callable(report):
+            report(status)
+        return list(matches), alias_name_by_code
+
     def search_business_candidates(
-        self, *, company: str, address_hint: str, limit: int, timeout_sec: float
+        self,
+        *,
+        company: str,
+        address_hint: str,
+        limit: int,
+        timeout_sec: float,
+        alias_ask: Callable[[str], str] | None = None,
     ) -> list[dict[str, object]]:
         """공식 DART 색인 후보를 top-k 기업개황으로 보강해 반환한다.
 
@@ -2563,10 +2750,20 @@ class RealPipeline:
         result_cap = max(1, min(int(limit), DART_PROFILE_ENRICHMENT_LIMIT))
         profile_cap = DART_PROFILE_ENRICHMENT_LIMIT
         deadline = time.monotonic() + max(0.1, float(timeout_sec))
+        index = _company_candidate_index()
         all_matches = list(
-            generate_dart_company_matches(
-                _company_candidate_index(), company, limit=profile_cap
-            )
+            generate_dart_company_matches(index, company, limit=profile_cap)
+        )
+        # ★ 결정적 검색이 «이름이 겹치는» 후보를 못 찾았을 때만, AI에 정식 법인명을
+        #   한 번 물어 그 이름으로 같은 로컬 색인을 다시 찾는다. AI는 이름만 옮기고
+        #   후보 확정은 하지 않는다. 실패·이상 응답이면 결정적 결과를 그대로 쓴다.
+        all_matches, alias_name_by_code = self._extend_with_alias_matches(
+            index,
+            all_matches,
+            company=company,
+            address_hint=address_hint,
+            limit=profile_cap,
+            alias_ask=alias_ask,
         )
         matched = candidate_profile_lookahead(all_matches, limit=profile_cap)
         if not matched:
@@ -2597,8 +2794,20 @@ class RealPipeline:
             candidate_name = str(profile.get("corp_name") or record.corp_name)
             address = str(profile.get("adres") or "")
             homepage = _homepage_url_for_display(profile.get("hm_url", ""))
+            alias_name = alias_name_by_code.get(corp_code, "")
+            # 이름 근접 점수는 «실제로 맞춰 본 이름»으로 잰다. AI 후보에게 사용자가
+            # 적은 별명을 들이대면 「무엇과 비교한 점수인지」가 어긋난다.
+            # ⚠️ 사실 확인(2026-09-10 재측정): 종류에 따라 점수가 «갈린다».
+            #    `_score`의 두 번째 분기가 `match_kind == "exact_name" or
+            #    (query_key == candidate_key)`라, 질의를 AI 정식명으로 두면
+            #    spacing·legal_suffix 후보도 exact_name 가지로 올라간다.
+            #      · exact_name   0.5275 대 0.5275 (같음)
+            #      · spacing      0.5275 대 0.5112
+            #      · legal_suffix 0.5275 대 0.4624
+            #    셋 다 `ALIAS_STRONG_MATCH_KINDS`에 있어 이 경로로 실제로 들어온다.
+            #    즉 이 인자는 장식이 아니라 점수와 근거 문구를 함께 정한다.
             score, _evidence = score_business_candidate(
-                query=company,
+                query=alias_name or company,
                 address_hint=address_hint,
                 candidate_name=candidate_name,
                 address=address,
@@ -2619,7 +2828,11 @@ class RealPipeline:
                         "candidate_name": candidate_name,
                         "address": address,
                         "homepage": homepage,
-                        "source_label": "전자공시(DART) 기업개황",
+                        "source_label": (
+                            DART_ALIAS_SOURCE_LABEL
+                            if alias_name
+                            else "전자공시(DART) 기업개황"
+                        ),
                         "source_url": "https://opendart.fss.or.kr/",
                         "provider_name": "DART",
                         "candidate_ref": corp_code,
@@ -2628,6 +2841,10 @@ class RealPipeline:
                         "english_name": record.corp_eng_name,
                         "name_match_kind": match.match_kind,
                         "name_similarity": match.similarity,
+                        # 이 후보가 어떤 경로로 들어왔는지 화면·시험이 구분할 수
+                        # 있게 남긴다. 사람이 고르는 절차는 두 경로가 같다.
+                        "alias_source": "ai" if alias_name else "",
+                        "alias_name": alias_name,
                     },
                 )
             )

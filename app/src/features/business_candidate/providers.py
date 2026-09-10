@@ -38,19 +38,33 @@ class PipelineProviderAdapter:
     # corpCode cold-start + local parse/index + bounded profile enrichment.
     # Google and any generic provider keep the common 8-second boundary.
     resolution_timeout_sec = LOCAL_DART_PROVIDER_TIMEOUT_SEC
+    # ★ 이 어댑터만 «별명 → 정식 법인명» 번역 ask를 받는다. resolver는 이 표시를
+    #   보고 넘길지 정하므로, 계약에 없는 공급자에 인자가 흘러가지 않는다.
+    accepts_alias_ask = True
 
     def __init__(self, search: Callable[..., Sequence[object]]) -> None:
         self._search = search
 
     def search(
-        self, *, company: str, address_hint: str, limit: int, timeout_sec: float
+        self,
+        *,
+        company: str,
+        address_hint: str,
+        limit: int,
+        timeout_sec: float,
+        alias_ask: Callable[[str], str] | None = None,
     ) -> Sequence[RawBusinessCandidate]:
-        rows = self._search(
-            company=company,
-            address_hint=address_hint,
-            limit=limit,
-            timeout_sec=timeout_sec,
-        )
+        search_kwargs: dict[str, object] = {
+            "company": company,
+            "address_hint": address_hint,
+            "limit": limit,
+            "timeout_sec": timeout_sec,
+        }
+        if alias_ask is not None:
+            # 번역을 열지 않은 요청은 기존과 «같은» 인자로 부른다. 이 기능을 모르는
+            # pipeline 구현(데모·시험 fixture)이 TypeError로 깨지지 않게 한다.
+            search_kwargs["alias_ask"] = alias_ask
+        rows = self._search(**search_kwargs)
         out: list[RawBusinessCandidate] = []
         for row in list(rows or ())[:limit]:
             if isinstance(row, RawBusinessCandidate):
@@ -82,6 +96,9 @@ class PipelineProviderAdapter:
                         if isinstance(row.get("name_similarity", 0.0), (int, float))
                         else 0.0
                     ),
+                    # 어떤 경로로 들어온 후보인지. resolver가 다시 한 번 검사한다.
+                    alias_source=str(row.get("alias_source", "")),
+                    alias_name=str(row.get("alias_name", "")),
                 )
             )
         return out
