@@ -27,6 +27,11 @@ from src.features.composer.constants import (
     ALREADY_WRITTEN_MAX_SENTENCES,
     CITATION_RULES_GUIDE,
     CLAIM_SLOTS_BY_SECTION,
+    DOCUMENT_LIST_GUIDE,
+    DOCUMENT_LIST_HEAD,
+    EVIDENCE_LABEL_DOCUMENT_HEADER,
+    EVIDENCE_LABEL_OMIT_NUMERIC_LOCATION,
+    EVIDENCE_LABEL_SHORT_KIND,
     FORBIDDEN_TOPICS_GUIDE,
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
@@ -46,6 +51,7 @@ from src.features.composer.constants import (
     PROMPT_FRAGMENT_LOCATION_LABEL,
     PROMPT_HEADER,
     PROMPT_TABLE_HEAD,
+    SOURCE_KIND_DISPLAY_NAMES,
     RESPONSE_CITATIONS_KEY,
     RESPONSE_FLOW_KEY,
     RESPONSE_FLOW_ROW_CELLS_KEY,
@@ -241,27 +247,123 @@ if any(
 # ══════════════════════════════════════════════════════════
 
 
+#: 원문위치가 typed DART 수집기의 글자 오프셋(``f"{start}-{end}"``, 예
+#: ``"18656-19172"``)인지 판정한다. analysis_engine의
+#: ``evidence_collection/collect.py``가 만드는 이 모양만 숫자로만 이뤄진다 —
+#: 사람이 쓴 제목·문단 경로(``"II. 사업의 내용"``·``"PDF p.1 1문단"`` 등)는
+#: 전부 글자를 섞어 쓰므로 걸리지 않는다.
+_NUMERIC_OFFSET_LOCATION_RE = re.compile(r"\d+(-\d+)?")
+
+
+def _is_numeric_offset_location(location: str) -> bool:
+    """작가가 못 읽는 숫자 오프셋 원문위치인가 (글자로 된 위치는 False)."""
+    return bool(_NUMERIC_OFFSET_LOCATION_RE.fullmatch(location))
+
+
+def _document_symbol(index: int) -> str:
+    """1부터 시작하는 순번을 엑셀 열 이름 방식 기호로 바꾼다.
+
+    1→A, 2→B, …, 26→Z, 27→AA, 28→AB … 같은 (kind, document_title) 조합은
+    같은 기호를 받으므로, 여러 조각이 같은 문서에서 나왔으면 문서 목록에는
+    한 번만, 조각 줄에는 기호만 남는다.
+    """
+    letters: list[str] = []
+    remaining = index
+    while remaining > 0:
+        remaining, remainder = divmod(remaining - 1, 26)
+        letters.append(chr(ord("A") + remainder))
+    return "".join(reversed(letters))
+
+
 def _render_fragments(
     fragments: Sequence[CollectedFragment],
     *,
     show_supported_claim_slots: bool = False,
 ) -> str:
-    """조각 전체를 id·종류와 함께 나열한다 — 작가가 이 id로 인용한다."""
+    """조각 전체를 id와 함께 나열한다 — 작가가 이 id로 인용한다.
+
+    라벨 다이어트 세 가지(②③④, `EVIDENCE_LABEL_*` 상수 참고)는 각각
+    독립적으로 켜고 끌 수 있다 — 유료 비교 실행에서 품질이 떨어지면 하나씩
+    되돌려 원인을 가르기 위해서다(2026-09-10 팀장 지시). ③이 꺼지면
+    ②(짧은 표시명)는 문서 목록이 아니라 조각 줄에 «인라인»으로 적용된다.
+    셋 다 꺼지면 이 함수는 2026-09-10 이전과 글자 그대로 같은 문자열을
+    낸다(숫자 원문위치 제거만 별개 — ④ 자체를 끄면 그마저 없다).
+
+    ★ 종류 판정 — 어느 다이어트든 «원래» 종류 문자열(``raw_kind`` =
+      ``formal_source_kind or kind``)을 기준으로 한다. typed 조각의
+      ``kind``는 운반 지문(``typed-evidence-v3:<hex>``)이라 작가에게 아무
+      뜻이 없다 — 닫힌 출처 종류는 ``formal_source_kind``에만 봉인돼 있다.
+      raw 조각은 그 필드가 비어 있고 ``kind``가 곧 「종류」다. flat 렌더
+      경로(``fragments_from_raw``)와 packet 렌더 경로
+      (``evidence_transport._collected_fragment_from_raw``)는 서로 다른
+      필드에 종류를 담을 뿐(전자는 항상 ``formal_source_kind`` 비움, typed
+      raw dict면 후자만 채움) 최종 ``raw_kind`` 값은 두 경로에서 같다 —
+      `test_evidence_label_compact.py`의 실제 변환 함수 왕복 시험으로 확인.
+    """
+    use_header = EVIDENCE_LABEL_DOCUMENT_HEADER
+    use_short_kind = EVIDENCE_LABEL_SHORT_KIND
+    omit_numeric_location = EVIDENCE_LABEL_OMIT_NUMERIC_LOCATION
+
+    def _kind_label(raw_kind: str) -> str:
+        return SOURCE_KIND_DISPLAY_NAMES.get(raw_kind, raw_kind) if use_short_kind else raw_kind
+
+    symbol_by_key: dict[tuple[str, str], str] = {}
+    order: list[tuple[str, str]] = []
+    if use_header:
+        for fragment in fragments:
+            raw_kind = fragment.formal_source_kind or fragment.kind or "자료"
+            # ★ 기호 배정 키는 표시용으로 줄인 이름이 아니라 «원래» 종류
+            #   문자열이다 — 여러 DART 세부 종류가 전부 「공시」로 겹쳐
+            #   보여도, 실제로 다른 종류의 문서를 같은 기호로 잘못 합치지
+            #   않기 위함이다.
+            key = (raw_kind, fragment.document_title)
+            if key not in symbol_by_key:
+                order.append(key)
+                symbol_by_key[key] = _document_symbol(len(order))
+
     lines: list[str] = [PROMPT_FRAGMENTS_HEAD]
+    if use_header and order:
+        lines.append(DOCUMENT_LIST_HEAD)
+        entry_by_key: dict[tuple[str, str], str] = {}
+        entry_counts: dict[str, int] = {}
+        for key in order:
+            raw_kind, title = key
+            kind_label = _kind_label(raw_kind)
+            entry = f"{title} · {kind_label}" if title else kind_label
+            entry_by_key[key] = entry
+            entry_counts[entry] = entry_counts.get(entry, 0) + 1
+        for key in order:
+            raw_kind, title = key
+            entry = entry_by_key[key]
+            if entry_counts[entry] > 1:
+                # ★ 표시명이 같아져 두 줄의 글자가 겹치는 경우(DART 다섯
+                #   종류가 전부 「공시」로 겹치는 게 대표 사례) — 원래 종류
+                #   문자열을 괄호로 덧붙여 구분한다(2026-09-10 독립 검토 P2).
+                #   기호 배정 키가 이미 raw_kind 기준이라 이 표시만 바뀌고
+                #   결정성은 그대로다.
+                entry = f"{entry}({raw_kind})"
+            lines.append(f"{symbol_by_key[key]}: {entry}\n")
+        lines.append(DOCUMENT_LIST_GUIDE)
+
     for fragment in fragments:
-        # ★ 왜 formal_source_kind가 먼저인가 — typed 조각의 ``kind``는 운반
-        #   지문(``typed-evidence-v3:<hex>``)이라 작가에게 아무 뜻이 없다.
-        #   닫힌 출처 종류는 ``formal_source_kind``에만 봉인돼 있다. raw 조각은
-        #   그 필드가 비어 있고 ``kind``가 곧 「종류」라 옛 프롬프트와 글자가
-        #   같다 — 지문이 라벨로 새는 경우만 고친다.
-        label = fragment.formal_source_kind or fragment.kind or "자료"
+        raw_kind = fragment.formal_source_kind or fragment.kind or "자료"
+        if use_header:
+            label = f"문서 {symbol_by_key[(raw_kind, fragment.document_title)]}"
+        else:
+            label = _kind_label(raw_kind)
         if _is_news_fragment(fragment):
             label += " · 메타데이터 " + news_metadata(fragment)
-        if fragment.document_title:
+        if not use_header and fragment.document_title:
             label = f"{label}·{fragment.document_title}"
-        if fragment.location:
+        show_location = fragment.location and (
+            not omit_numeric_location
+            or not _is_numeric_offset_location(fragment.location)
+        )
+        if show_location:
             # 안내문이 「원문위치에 … 표기가 있는 조각」을 고르라고 지시하므로
-            # 그 값을 실제로 보여 준다. 없는 조각(홈페이지 일부)은 그대로 둔다.
+            # 그 값을 실제로 보여 준다. 숫자 오프셋은 작가가 읽을 수 없는
+            # typed DART 내부 좌표라 대신 뺀다(위 정규식 주석 참고). 없는
+            # 조각(홈페이지 일부)은 그대로 둔다.
             label = (
                 f"{label} · {PROMPT_FRAGMENT_LOCATION_LABEL}: {fragment.location}"
             )
@@ -444,15 +546,20 @@ def build_section_prompt(
 # ══════════════════════════════════════════════════════════
 
 
-#: 문장 «글» 안에 흉내낸 인용 표기 — [숫자]·[인용: …]·[조각 …].
+#: 문장 «글» 안에 흉내낸 인용 표기 — [숫자]·[인용: …]·[조각 …]·(문서 X).
 #: ★ 정식 인용은 citations 배열이 유일한 정본이고, 부록(render.py)도 그
 #:   배열에서만 만들어진다. 작가 프롬프트가 자료를 「[조각 n]」·「[인용: 1, 2]」
 #:   모양으로 보여주므로 모델이 산문 속에도 같은 모양을 흉내 내는 사고가
 #:   실재한다(critical 결함 — validate.py의 인용-부록 1:1 검사가 이 숫자를
 #:   진짜 인용으로 오인해 유료 실행 전체를 GATE_STOPPED로 죽인다). 이건 내용
 #:   검열 게이트가 아니라 출력 «형식» 정리다 — 값을 판단하지 않고 모양만 본다.
+#: ★ ``(문서 X)``도 같은 위험이다(2026-09-10 독립 검토 P2) — 조각 줄이
+#:   ``[조각 N] (문서 A)`` 모양을 보여주므로, 괄호 안 기호를 산문에 그대로
+#:   베낄 수 있다. 실제 렌더는 항상 ASCII 소괄호 ``(문서 {기호})``만 쓰므로
+#:   (``_render_fragments``) 이 모양만 좁게 잡는다.
 _INLINE_CITATION_MARKER_RE: Final[re.Pattern[str]] = re.compile(
     r"\[(?:\d+|인용\s*:[^\]]*|조각[^\]]*)\]"
+    r"|\(문서\s*[A-Z]+\)"
 )
 
 #: packet 모드의 구조 citations 우회를 찾는 더 넓은 규칙. legacy flat 응답은
@@ -464,8 +571,32 @@ _PACKET_INLINE_CITATION_MARKER_RE: Final[re.Pattern[str]] = re.compile(
 )
 
 
+#: 조각 줄의 문서 기호 흉내 — ``(문서 A)``·``(문서 AA)`` 등. 숫자 인용 흉내와
+#: 같은 구멍이라 ``contains_inline_citation_marker``의 일반 괄호 스캐너가
+#: 같은 자리에서 함께 찾는다(2026-09-10 독립 검토 P2).
+_DOCUMENT_SYMBOL_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"문서\s*[A-Z]+")
+
+
+def _match_citation_group(text: str, start: int) -> Optional[int]:
+    """``start`` 위치에서 인용 흉내 «한 조각»을 읽고 끝 위치를 돌려준다.
+
+    두 모양 중 하나만 인정한다 — 1~3자리 숫자(``contains_inline_citation_marker``
+    원래 규칙) 또는 「문서」+대문자 기호(``(문서 A)`` 흉내). 어느 쪽도 아니면
+    ``None``.
+    """
+    cursor = start
+    while cursor < len(text) and text[cursor].isdecimal():
+        cursor += 1
+    if 1 <= cursor - start <= 3:
+        return cursor
+    symbol_match = _DOCUMENT_SYMBOL_MARKER_RE.match(text, start)
+    if symbol_match is not None:
+        return symbol_match.end()
+    return None
+
+
 def contains_inline_citation_marker(text: str) -> bool:
-    """NFKC 뒤 모든 Ps/Pe 혼합 괄호의 1~3자리 인용 흉내를 찾는다.
+    """NFKC 뒤 모든 Ps/Pe 혼합 괄호의 인용 흉내(숫자 또는 문서 기호)를 찾는다.
 
     괄호 쌍의 종류를 닫힌 목록으로 두지 않는다. 여는 문자가 Unicode Ps이고
     닫는 문자가 Pe이면 서로 다른 괄호를 섞은 경우도 막는다. 네 자리 숫자는
@@ -484,10 +615,10 @@ def contains_inline_citation_marker(text: str) -> bool:
             while cursor < len(normalized) and normalized[cursor].isspace():
                 cursor += 1
             start = cursor
-            while cursor < len(normalized) and normalized[cursor].isdecimal():
-                cursor += 1
-            if not 1 <= cursor - start <= 3:
+            matched_end = _match_citation_group(normalized, start)
+            if matched_end is None:
                 break
+            cursor = matched_end
             parsed_group = True
             while cursor < len(normalized) and normalized[cursor].isspace():
                 cursor += 1
