@@ -6,11 +6,14 @@
 `executive_status_guard` 는 날짜 문턱 없이 이탈 «표지» 존재만으로 판정한다.
 「기준일 이후에 물러날 예정」인 임원을 현직으로 쓴 정상 문장까지 빠진다.
 
-여기서 지키는 것 — 세 겹을 «각각» 확인한다. 한 겹만 보면 위에서 안 넘겨도,
+여기서 지키는 것 — 네 겹을 «각각» 확인한다. 한 겹만 보면 위에서 안 넘겨도,
 아래에서 안 받아도 초록불이 된다.
   ① 운영 진입 `run_v2` 가 `as_of_date` 를 검증기·도식검사에 넘긴다.
   ② `verify_report` 가 받은 값을 근거 결속의 임원 가드까지 흘린다.
   ③ `check_diagrams` 도 같은 값을 같은 가드까지 흘린다.
+  ④ `verify_sentences`(SHADOW 요약 재검증)도 «같은» 값을 받는다. 요약은 본문에서
+     고른 문장을 다시 검수하므로, 여기만 비면 본문에서 살아남은 임원 문장이
+     요약에서만 빠져 한 보고서 안에 두 잣대가 생긴다.
 
 ⚠️ 시험 안에서 값을 따로 만들어 검사하지 않는다 — 가드가 «실제로 받은» 인자를
    그대로 기록해 단정한다. 그러지 않으면 배선이 끊겨도 초록불이 된다.
@@ -181,6 +184,63 @@ def test_run_v2_hands_its_as_of_date_to_both_verification_stages(monkeypatch):
     assert diagram_seen, "check_diagrams 가 안 불렸다 — 이 시험이 아무것도 못 잰다"
     assert set(verify_seen) == {BASELINE}, verify_seen
     assert set(diagram_seen) == {BASELINE}, diagram_seen
+
+
+def test_run_v2_gives_the_summary_recheck_the_same_baseline_date(monkeypatch):
+    """④ SHADOW 요약 재검증도 본문과 «같은» 기준일을 받는다.
+
+    ★ 이 겹이 빠지면 한 보고서 안에 잣대가 둘이 된다 — 본문에서 살아남은 임원
+      문장이 요약에서만 근거 없음으로 빠진다. SHADOW 는 보완조사·DART 부분
+      보고서 갈래에서 실제로 도는 운영 경로다(legacy 전용이 아니다).
+    """
+
+    body_seen: list[object] = []
+    summary_seen: list[object] = []
+    real_verify = pipeline.verify_report
+    real_sentences = pipeline.verify_sentences
+
+    def verify_spy(*args, **kwargs):
+        body_seen.append(kwargs.get("baseline_date"))
+        return real_verify(*args, **kwargs)
+
+    def sentences_spy(*args, **kwargs):
+        summary_seen.append(kwargs.get("baseline_date"))
+        return real_sentences(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "verify_report", verify_spy)
+    monkeypatch.setattr(pipeline, "verify_sentences", sentences_spy)
+
+    pipeline.run_v2(
+        "가나다전자",
+        _raw_fragments(),
+        None,
+        writer_ask=_FakeWriter(),
+        reviewer_ask=_FakeReviewer(),
+        corp_type="상장사",
+        as_of_date=BASELINE,
+    )
+
+    assert summary_seen, "verify_sentences 가 안 불렸다 — 이 시험이 아무것도 못 잰다"
+    assert set(summary_seen) == {BASELINE}, summary_seen
+    # 본문과 요약이 «같은» 값을 본다는 것까지 못 박는다.
+    assert set(summary_seen) == set(body_seen), (body_seen, summary_seen)
+
+
+def test_verify_sentences_passes_the_baseline_date_to_the_executive_guard(guard_calls):
+    """④-b 진입 함수가 받은 값이 실제로 가드까지 간다."""
+
+    from src.features.composer.verify import verify_sentences
+
+    verify_sentences(
+        (ComposedSentence(CANDIDATE, (FRAGMENT,), GRADE_CONFIRMED),),
+        _fragments(),
+        None,
+        _approving_ask(),
+        baseline_date=BASELINE,
+    )
+
+    assert guard_calls, "임원 가드가 한 번도 안 불렸다"
+    assert set(guard_calls) == {BASELINE}, guard_calls
 
 
 def test_run_v2_without_an_as_of_date_keeps_none(monkeypatch):

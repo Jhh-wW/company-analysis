@@ -539,6 +539,7 @@ def _legacy_summary_stage(
     review_diagnostics: list[dict] | None = None,
     summary_diagnostics: list[dict] | None = None,
     protocol_diagnostics: list[dict] | None = None,
+    baseline_date: str | None = None,
 ) -> tuple[ComposedReport, int, NumericSafetyFiltering]:
     """기존 SHADOW 요약 경로를 글자·호출 순서까지 그대로 보존한다.
 
@@ -597,6 +598,9 @@ def _legacy_summary_stage(
                 summary, fragments, performance_table, reviewer_ask,
                 diagnostics=review_diagnostics,
                 protocol_diagnostics=protocol_diagnostics,
+                # 본문 검증과 «같은» 기준일을 준다. 여기만 비우면 본문에서
+                # 살아남은 임원 문장이 요약에서만 빠져 두 잣대가 된다.
+                baseline_date=baseline_date,
             )
         except AskFatalError as error:
             if not getattr(error, "degradable", False):
@@ -1372,6 +1376,7 @@ def run_v2(
             review_diagnostics=review_diagnostics,
             summary_diagnostics=composition_diagnostics,
             protocol_diagnostics=composition_diagnostics,
+            baseline_date=baseline_date,
         )
     else:
         body_rendered = render_report(
