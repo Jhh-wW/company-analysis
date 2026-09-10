@@ -8,12 +8,18 @@
 
 from __future__ import annotations
 
+import calendar
 from collections import Counter
 from dataclasses import dataclass, replace
+from datetime import date
 from typing import Final, Mapping, Optional, Sequence
 
 from src.features.composer.constants import SECTION_IDS
-from src.features.composer.news_constants import NEWS_BODY_DUPLICATE_PREVIEW_CHARS, NEWS_BODY_REFERENCE_SUFFIX
+from src.features.composer.news_constants import (
+    NEWS_BODY_DUPLICATE_PREVIEW_CHARS,
+    NEWS_BODY_REFERENCE_SUFFIX,
+    NEWS_PERIOD_MONTHS,
+)
 from src.features.composer.port import (
     ComposedReport,
     ComposedSection,
@@ -54,6 +60,13 @@ NEWS_BLOCK_HEADERS: Final[tuple[str, ...]] = ("발행일", "매체 · 기사", "
 #: 조각 수와 혼동하지 않도록 기사 단위를 표시한다.
 NEWS_BLOCK_CAPTION_TEMPLATE: Final[str] = "최근 보도 (보조, {count}기사)"
 
+#: 표에 실린 기사 중 1차 기간창(``NEWS_PERIOD_MONTHS[0]`` = 12개월)보다 오래된
+#: 발행일이 섞였을 때 쓴다. 「최근」이라는 말이 몇 년 전 기사에도 그대로
+#: 붙는 것을 막기 위해 가장 오래된 기사의 발행연도를 덧붙인다.
+NEWS_BLOCK_CAPTION_TEMPLATE_WITH_YEAR: Final[str] = (
+    "최근 보도 (보조, {count}기사 · {year}년 보도 포함)"
+)
+
 #: 공개 표현. 도식이 아니라 «그냥 표»다 — 세 칸이 흐름으로 이어지지 않으므로
 #: 화살표·카드로 그리면 뜻이 없는 그림이 된다(`report_standard.visualization`은
 #: 이 값이 "table"이면 도식을 만들지 않고 일반 표로 그린다).
@@ -90,10 +103,79 @@ BLOCKED_DUPLICATE_ARTICLE: Final[str] = "article_listed_in_another_section"
 BLOCKED_ARTICLE_META: Final[str] = "inconsistent_article_metadata"
 
 
-def news_block_caption(row_count: int) -> str:
-    """표 캡션 — 캡션 글자를 두 곳에서 따로 만들지 않는다."""
+def news_block_caption(row_count: int, oldest_stale_year: Optional[int] = None) -> str:
+    """표 캡션 — 캡션 글자를 두 곳에서 따로 만들지 않는다.
 
+    Args:
+        row_count: 표에 실제로 실은 기사 수.
+        oldest_stale_year: 표에 실린 기사 중 가장 오래된 발행연도가 1차
+            기간창(12개월)보다 앞서 있을 때만 그 연도를 준다. 그 밖에는
+            ``None`` — 「최근」이라는 말과 실제 기사 시점이 어긋날 때만
+            표시를 늘리고, 나머지는 기존 문구를 그대로 지킨다.
+    """
+
+    if oldest_stale_year is not None:
+        return NEWS_BLOCK_CAPTION_TEMPLATE_WITH_YEAR.format(
+            count=int(row_count), year=int(oldest_stale_year)
+        )
     return NEWS_BLOCK_CAPTION_TEMPLATE.format(count=int(row_count))
+
+
+def _month_boundary(as_of: date, months: int) -> date:
+    """윤년과 월말을 보존하는 달력 기준 기간 경계.
+
+    ★ ``news_intake.search_snapshot.month_boundary``와 같은 계산이다. 이
+      파일 위쪽의 shared import 주석대로 feature끼리는 직접 import하지
+      않으므로 가져다 쓸 수 없고, 같은 이유로 이 파일이 속한 `composer`
+      안의 `news_usage.py`도 이미 같은 계산을 따로 들고 있다
+      (``news_usage_diagnostics``). 값을 바꾸려면 세 자리
+      (``news_intake.search_snapshot``·``composer.news_usage``·여기)를
+      함께 맞춰야 한다.
+    """
+
+    month_index = as_of.year * 12 + as_of.month - 1 - months
+    year, month_zero = divmod(month_index, 12)
+    month = month_zero + 1
+    return date(year, month, min(as_of.day, calendar.monthrange(year, month)[1]))
+
+
+def oldest_stale_report_year(rows: Sequence[NewsRow], as_of_date: str) -> Optional[int]:
+    """표에 실제로 실린 행 중 가장 오래된 발행일의 연도 — 1차 기간창보다 오래됐을 때만.
+
+    ★ fail-safe — 기준일이 비었거나 형식이 다르거나, 행 발행일 중 하나라도
+      ``YYYY-MM-DD``가 아니면 «모른다»로 보고 ``None``을 돌려준다(예외를
+      던져 보고서 전체를 막지 않는다). 알 수 없는 연도를 지어내는 것보다
+      표시를 생략하고 기존 문구를 유지하는 쪽이 안전하다.
+
+    Args:
+        rows: 표에 실제로 실린 행(citation이 살아남아 인쇄되는 행만 — 인용
+            번호를 못 찾아 빠진 행은 넣지 않는다).
+        as_of_date: 보고서 기준일. ``YYYY-MM-DD`` 형식이 아니면 ``None``.
+
+    Returns:
+        가장 오래된 발행일이 기준일보다 1차 기간창(``NEWS_PERIOD_MONTHS[0]``
+        = 12개월) 이상 앞설 때만 그 발행연도. 그 밖에는 ``None``.
+    """
+
+    if not rows:
+        return None
+    try:
+        as_of = date.fromisoformat(str(as_of_date).strip())
+    except (TypeError, ValueError):
+        return None
+    oldest: Optional[date] = None
+    for row in rows:
+        if not row.cells:
+            return None
+        try:
+            published = date.fromisoformat(str(row.cells[0]).strip())
+        except (TypeError, ValueError):
+            return None
+        if oldest is None or published < oldest:
+            oldest = published
+    if oldest is None or oldest >= _month_boundary(as_of, NEWS_PERIOD_MONTHS[0]):
+        return None
+    return oldest.year
 
 
 def _normalized(text: str) -> str:
@@ -472,6 +554,7 @@ __all__ = [
     "BLOCKED_TEXT_MISMATCH",
     "NEWS_BLOCK_BLOCKED_STEP",
     "NEWS_BLOCK_CAPTION_TEMPLATE",
+    "NEWS_BLOCK_CAPTION_TEMPLATE_WITH_YEAR",
     "NEWS_BLOCK_HEADERS",
     "NEWS_BLOCK_PRESENTATION",
     "NEWS_BLOCK_STEP",
@@ -480,4 +563,5 @@ __all__ = [
     "news_block_caption",
     "news_block_steps",
     "news_ownership_from_claim_slots",
+    "oldest_stale_report_year",
 ]
