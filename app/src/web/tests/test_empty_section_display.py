@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from jinja2 import ChoiceLoader, DictLoader, Environment, FileSystemLoader
 
-from src.core.citations import citation_number, split_citation_markers, split_interpretation_marker
+from src.core.citations import citation_number, location_display, split_citation_markers, split_interpretation_marker
 from src.core.report_display import empty_section_notice
 from src.features.pipeline.port import Grade, Report, ReportSection
 from src.features.report_standard.cover_metrics import cover_metrics
@@ -33,7 +33,7 @@ def render_result(report, *, template_source=None, notice_fn=empty_section_notic
         report=report, job=SimpleNamespace(job_id="offline-empty-section"),
         engine_v2_schema_version=ENGINE_V2_SCHEMA_VERSION, legacy_readonly=True,
         public_citations=report.citations, empty_section_notice=notice_fn,
-        citation_number=citation_number, split_citation_markers=split_citation_markers,
+        citation_number=citation_number, location_display=location_display, split_citation_markers=split_citation_markers,
         split_interpretation_marker=split_interpretation_marker, interpretation_label="해석",
         cover_metrics=cover_metrics, masthead_lines=masthead_lines,
         section_content_blocks=section_content_blocks, source_verification_label=source_verification_label,

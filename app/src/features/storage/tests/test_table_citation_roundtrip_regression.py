@@ -140,8 +140,22 @@ def test_composer_source_only_cites_survive_first_json_db_validation_and_pdf(tmp
     appendix = "\n".join(text for text in page_texts if "본문의 번호가 아래 원문을 가리킵니다." in text)
     appendix_numbers = [int(line.strip()) for line in appendix.splitlines() if line.strip().isdigit()]
     assert appendix_numbers[-6:] == [1, 2, 3, 4, 41, 42]
-    assert "news-fragment-41" in _compact(appendix)
-    assert "news-fragment-42" in _compact(appendix)
+    # ★ 2026-09-10 갱신 — 예전에는 부록 글자에서 `news-fragment-41`을 직접
+    #   찾았다. `984bcacf`(「산문 자기 인용 검수와 PDF 웹 출처 표시 보완」)가
+    #   `core.citations.location_display`로 「원문 위치」 칸의 내부 조각 id를
+    #   «일부러» 지웠다 — 근거는 `docs/reviews/2026-09-10-night-review.md`의
+    #   「뉴스 위치는 저장된 사람용 접두부만 표시하고 내부 조각 ID를 지우며,
+    #   원래 저장값과 봉인 해시는 유지한다」이다.
+    # ★ 그래서 이 시험이 지키던 것을 «저장»과 «표시» 두 겹으로 나눠 그대로
+    #   지킨다. 저장값 단정을 따로 두는 이유: 누가 id를 작성·저장 단계에서
+    #   지워 버리면 `original`도 같이 바뀌어 위쪽 `restored == original`은
+    #   초록으로 남는다 — 그 경우를 이 리터럴만 잡는다.
+    stored_locations = {item.number: item.location for item in from_db.citations}
+    assert stored_locations[41] == "기사 본문 · news-fragment-41"
+    assert stored_locations[42] == "기사 본문 · news-fragment-42"
+    # 표시 겹: 사람이 읽는 접두부는 두 행 모두에 남고, 내부 id는 인쇄되지 않는다.
+    assert _compact(appendix).count(_compact("기사 본문")) == 2
+    assert "news-fragment" not in _compact(appendix)
     for table in (names, news):
         for row in table.rows:
             for value in row:
