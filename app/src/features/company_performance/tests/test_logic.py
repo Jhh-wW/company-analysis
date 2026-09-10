@@ -68,6 +68,11 @@ def _financials(
         "128260000000",
         "169440000000",
     ),
+    net_income: tuple[str, str, str] = (
+        "160560000000",
+        "97710000000",
+        "105020000000",
+    ),
 ) -> dict[str, Any]:
     return {
         "status": "000",
@@ -89,9 +94,7 @@ def _financials(
             _row(
                 "ifrs-full_ProfitLoss",
                 "당기순이익",
-                "160560000000",
-                "97710000000",
-                "105020000000",
+                *net_income,
                 fs_div=scope,
                 periods=periods,
             ),
@@ -151,13 +154,56 @@ def test_억원_표시는_양수와_음수의_절반에서_ROUND_HALF_UP한다()
     )
 
     assert table is not None
-    assert [row[1] for row in table.rows] == ["1", "-1", "0"]
-    assert [row[2] for row in table.rows] == ["1", "-1", "0"]
+    # 2026-09-11 자리수 규칙 도입으로 기대 문자열을 갱신했다 — 이 표의 가장 작은
+    # 값 0.5억은 정수로 찍으면 「0」·「1」이 되어 크기가 통째로 사라진다. 이
+    # 시험의 뜻(양수·음수 절반의 HALF_UP)은 그대로다: 0.49999999억이 0.50으로,
+    # 1.49999999억이 1.50으로 올라가는 것이 그 증거다.
+    assert table.scale_places == 2
+    assert [row[1] for row in table.rows] == ["0.50", "-0.50", "0.50"]
+    assert [row[2] for row in table.rows] == ["1.50", "-1.50", "0.00"]
     assert [row[1] for row in table.raw_rows] == [
         "50,000,000",
         "-50,000,000",
         "49,999,999",
     ]
+
+
+def test_작은_값이_섞이면_소수_자리를_늘려_0으로_지우지_않는다() -> None:
+    """감사보고서 파서와 «같은 잣대»를 재무 API 경로도 쓴다.
+
+    0.83억(82,552,618원)이 표에 1로 찍히면 독자가 읽는 변동이 -75%가 되지만
+    원값 변동은 -77.45%다.
+    """
+
+    table = build_three_year_table(
+        _financials(
+            revenue=("27351053389", "25811194484", "24000000000"),
+            operating_income=("436660956", "583314634", "700000000"),
+            net_income=("82552618", "366016342", "300000000"),
+        ),
+        cite="조각 9·재무",
+    )
+
+    assert table is not None
+    assert table.scale_places == 2
+    assert table.rows[0] == ["2025", "273.51", "4.37", "0.83"]
+    assert table.rows[1] == ["2024", "258.11", "5.83", "3.66"]
+    assert table.raw_rows[0] == [
+        "2025",
+        "27,351,053,389",
+        "436,660,956",
+        "82,552,618",
+    ]
+
+
+def test_값이_모두_크면_기존_정수_표시를_그대로_쓴다() -> None:
+    """바이트 불변 회귀 — 큰 회사 표는 자리수 규칙이 들어와도 안 바뀐다."""
+
+    table = build_three_year_table(_financials(), cite="조각 9·재무")
+
+    assert table is not None
+    assert table.scale_places == 0
+    assert table.rows[0] == ["2025", "8,219", "1,553", "1,606"]
 
 
 def test_원값과_억원_표시값이_FactRecord_numeric_checks까지_결속된다() -> None:

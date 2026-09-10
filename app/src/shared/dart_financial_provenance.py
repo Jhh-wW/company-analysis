@@ -12,8 +12,14 @@ import json
 import logging
 import re
 from datetime import date
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation
 from typing import Protocol, Sequence
+
+from src.shared.display_scale import (
+    MAX_DISPLAY_PLACES,
+    display_places,
+    format_display_value,
+)
 
 
 class FinancialTableInput(Protocol):
@@ -93,7 +99,14 @@ def _normalized_name(value: object) -> str:
     return re.sub(r"\s+", "", str(value or ""))
 
 
-def _amount(value: object) -> tuple[str, str] | None:
+#: 원 단위 값을 억원으로 줄이는 나눗수. 아래 분기 7이 표가 주장하는
+#: ``scale_divisor``도 이 값과 같은지 따로 확인한다.
+_DISPLAY_DIVISOR = Decimal(100_000_000)
+
+
+def _amount(value: object) -> tuple[str, Decimal] | None:
+    """원 단위 표기와 그 값. 표시 문자열은 «표 전체 자리수»가 정해진 뒤 만든다."""
+
     if value is None or isinstance(value, bool):
         return None
     raw = str(value).strip()
@@ -105,10 +118,7 @@ def _amount(value: object) -> tuple[str, str] | None:
         return None
     if parsed == 0:
         parsed = Decimal(0)
-    shown = (parsed / Decimal(100_000_000)).quantize(
-        Decimal("1"), rounding=ROUND_HALF_UP
-    )
-    return f"{parsed:,.0f}", f"{shown:,.0f}"
+    return f"{parsed:,.0f}", parsed
 
 
 def _period_year(value: object) -> int | None:
@@ -313,9 +323,14 @@ def dart_payload_matches_table(
         return _no_match(6)
     if (
         tuple(table.headers[:1]) != ("사업연도",)
-        or table.scale_divisor != "100000000"
+        or table.scale_divisor != f"{_DISPLAY_DIVISOR:.0f}"
         or isinstance(table.scale_places, bool)
-        or table.scale_places != 0
+        # ★ 자리수는 더 이상 0 고정이 아니다 — 작은 값이 섞인 표는 소수 자리를
+        #   늘려야 0으로 지워지지 않는다(`shared.display_scale`). 여기서는 허용
+        #   범위만 보고, 실제로 «몇 자리여야 하는가»는 아래에서 원 payload로
+        #   다시 구해 표가 주장하는 값과 대조한다(분기 15). 범위만 넓히고 재구성
+        #   대조를 안 하면, 자리수를 임의로 적어 다른 표시값을 승격시킬 수 있다.
+        or not 0 <= table.scale_places <= MAX_DISPLAY_PLACES
         or table.unit != "억원"
         or table.raw_unit != "원"
         or table.unit_dimension != "currency"
@@ -347,12 +362,12 @@ def dart_payload_matches_table(
 
     expected_years: list[str] = []
     expected_raw_columns: list[list[str]] = []
-    expected_display_columns: list[list[str]] = []
+    expected_value_columns: list[list[Decimal]] = []
     reference_periods: tuple[int, ...] | None = None
     for row in metric_rows:
         periods: list[int] = []
         raw_values: list[str] = []
-        display_values: list[str] = []
+        values: list[Decimal] = []
         for amount_key, date_key in _PERIOD_FIELDS:
             year = _period_year(row.get(date_key))
             amount = _amount(row.get(amount_key))
@@ -360,7 +375,7 @@ def dart_payload_matches_table(
                 return _no_match(11)
             periods.append(year)
             raw_values.append(amount[0])
-            display_values.append(amount[1])
+            values.append(amount[1])
         period_tuple = tuple(periods)
         if (
             len(set(period_tuple)) != 3
@@ -380,7 +395,23 @@ def dart_payload_matches_table(
         elif period_tuple != reference_periods:
             return _no_match(14)
         expected_raw_columns.append(raw_values)
-        expected_display_columns.append(display_values)
+        expected_value_columns.append(values)
+
+    # 표가 적어 낸 자리수를 믿지 않고 원 payload 값에서 다시 구한다. 표시값은
+    # 그 자리수로 우리가 직접 만들어 아래에서 글자 단위로 대조한다.
+    expected_places = display_places(
+        [value for column in expected_value_columns for value in column],
+        _DISPLAY_DIVISOR,
+    )
+    if table.scale_places != expected_places:
+        return _no_match(15)
+    expected_display_columns = [
+        [
+            format_display_value(value, _DISPLAY_DIVISOR, expected_places)
+            for value in column
+        ]
+        for column in expected_value_columns
+    ]
 
     expected_raw_rows = tuple(
         tuple(

@@ -3512,6 +3512,25 @@ class RealPipeline:
                     "DART부분보고서전환": (
                         official_preflight.dart_partial_fallback
                     ),
+                    # ★ 부분 보고서로 전환하면 「사유코드」는 판단상 정상적으로
+                    #   빈다(`official_evidence_preflight`). 2026-09-11 실측에서
+                    #   그 빈 칸 때문에 「robots.txt를 못 읽어 필수 장이 UNKNOWN
+                    #   으로 남았다」는 원인이 진단에서 통째로 사라졌고, 검수자가
+                    #   어느 요청이 막혔는지 찾을 수 없었다. 판단 값(detail_code)
+                    #   은 그대로 두고 진단 값을 «옆»에 남긴다.
+                    "불명장수": len(
+                        official_preflight.decision.unknown_section_ids
+                    ),
+                    "불명장목록": list(
+                        official_preflight.decision.unknown_section_ids
+                    ),
+                    "미달장수": len(
+                        official_preflight.decision.insufficient_section_ids
+                    ),
+                    "전환갈래": official_preflight.dart_partial_reason,
+                    "차단사유코드": list(
+                        official_preflight.decision.reason_codes
+                    )[: observability_constants.PREFLIGHT_REASON_CODE_LIMIT],
                 }
             )
             supplementary_research_required = (

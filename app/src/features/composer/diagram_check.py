@@ -97,6 +97,10 @@ from src.features.composer.future_plan_guard import (
 from src.features.composer.direct_support_constants import (
     FLOW_CELL_JOIN, RELATION_REVIEW_GUIDE,
 )
+from src.features.composer.portfolio_name_constants import (
+    PORTFOLIO_NAME_MIN_PART_CHARS,
+    PORTFOLIO_NAME_PART_SPLIT_RE,
+)
 from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
 from src.features.composer.scope_guard import flow_scope_problem
 from src.features.composer.culture_guard import (
@@ -186,10 +190,20 @@ def _compact_surface(value: str) -> str:
     return "".join(compact)
 
 
+def _portfolio_name_parts(name: str) -> tuple[str, ...]:
+    """이름을 괄호로 갈라 «압축된 부분»들로 돌려준다. 빈 부분은 버린다."""
+
+    return tuple(
+        compact
+        for part in PORTFOLIO_NAME_PART_SPLIT_RE.split(name)
+        if (compact := _compact_surface(part))
+    )
+
+
 def portfolio_name_is_grounded(
     name: str, source_texts: Sequence[str]
 ) -> bool:
-    """3장 이름이 인용한 조각 하나의 표면 부분문자열인지 확인한다.
+    """3장 이름을 괄호로 갈라 «부분마다» 한 근거 글 안에서 확인한다.
 
     ★ 공개 함수인 이유 — 3장에 «결정적으로» 덧붙이는 이름 표
       (`portfolio_name_table.py`)도 같은 잣대로 자기 이름을 검사해야 한다.
@@ -197,16 +211,32 @@ def portfolio_name_is_grounded(
       칸이 생긴다.
     ★ 빈 이름에 ``True``를 주는 것은 «검사 대상이 아니다»라는 뜻이다.
       「이름이 있어야 한다」는 요구는 부르는 쪽이 따로 확인한다.
+
+    ★ 왜 통짜가 아니라 부분인가 (2026-09-11 소규모 회사 실측) — 작가는 이름을
+      ``분류(원문 표현)`` 모양으로 적는다. 「제품(전기전자 제품 및 산업용
+      장비)」은 두 부분이 공시 원문에 따로따로 있는데도 압축된 통짜 이름이
+      원문 어디에도 없어 카드가 통째로 버려졌다.
+
+    ★ 근거 글을 «이어 붙이지 않는다». 각 부분은 하나의 근거 글 안에 그대로
+      있어야 한다. 이어 붙이면 서로 다른 조각의 끝과 시작에 걸친 이름
+      (「카카오」+「T를 운영한다」)이 통과해 없는 이름이 만들어진다.
+      부분끼리는 서로 다른 근거 글에 있어도 된다 — 그것이 이 수정의 요점이다.
     """
 
     if not name.strip():
         return True
-    compact_name = _compact_surface(name)
-    if not compact_name:
+    parts = _portfolio_name_parts(name)
+    if not parts:
         return False
-    return any(
-        compact_name in _compact_surface(source_text)
+    if max(len(part) for part in parts) < PORTFOLIO_NAME_MIN_PART_CHARS:
+        return False
+    compact_sources = tuple(
+        compact
         for source_text in source_texts
+        if (compact := _compact_surface(source_text))
+    )
+    return all(
+        any(part in source for source in compact_sources) for part in parts
     )
 
 
@@ -271,6 +301,69 @@ def _source_texts(row: FlowRow, texts: Mapping[str, str]) -> tuple[str, ...]:
     )
 
 
+def _document_key(fragment: CollectedFragment) -> str:
+    """조각이 속한 «문서»를 가리키는 열쇠. 모르면 빈 문자열."""
+
+    return (
+        str(getattr(fragment, "document_identity", "") or "").strip()
+        or str(getattr(fragment, "source_document_id", "") or "").strip()
+    )
+
+
+def _document_scoped_texts(
+    fragments: Sequence[CollectedFragment],
+) -> dict[str, tuple[str, ...]]:
+    """조각 id → «같은 문서에 속한» 조각 원문들.
+
+    ★ 왜 인용 조각만으로는 부족한가 (2026-09-11 실측) — 공시 하나에서 잘린
+      조각들은 같은 문서인데도 서로를 못 본다. 제품명은 12,901자 부근, 손익
+      계산서는 7,057자 부근이라 5,844자 떨어져 서로 다른 조각이 됐고, 이름의
+      한 부분이 «인용하지 않은 같은 문서 조각»에만 있어 카드가 버려졌다.
+
+    ★ 문서 신원을 모르는 조각(legacy SHADOW)은 «자기 원문만» 본다. 신원이
+      없다고 전체를 한 문서로 뭉치면, 서로 다른 공시에서 이름을 빌려오는
+      느슨한 판정이 옛 경로에 조용히 생긴다.
+    """
+
+    by_document: dict[str, list[str]] = {}
+    for fragment in fragments:
+        key = _document_key(fragment)
+        if key:
+            by_document.setdefault(key, []).append(fragment.text)
+    scoped: dict[str, tuple[str, ...]] = {}
+    for fragment in fragments:
+        key = _document_key(fragment)
+        scoped[str(fragment.fragment_id)] = (
+            tuple(by_document[key]) if key else (fragment.text,)
+        )
+    return scoped
+
+
+def _name_source_texts(
+    row: FlowRow,
+    texts: Mapping[str, str],
+    document_texts: Mapping[str, Sequence[str]],
+) -> tuple[str, ...]:
+    """이름 검사에 댈 근거 글 — 인용 조각과 «같은 문서»의 조각들.
+
+    조각을 이어 붙이지 않으므로 각 글은 따로 남긴다. 같은 글이 두 인용에서
+    겹쳐 들어오면 한 번만 남겨 비교 횟수를 늘리지 않는다.
+    """
+
+    collected: list[str] = []
+    seen: set[str] = set()
+    for citation in row.citations:
+        key = str(citation).strip()
+        candidates = document_texts.get(key)
+        if candidates is None:
+            candidates = (texts.get(key, ""),)
+        for text in candidates:
+            if text and text not in seen:
+                seen.add(text)
+                collected.append(text)
+    return tuple(collected)
+
+
 def _source_text(row: FlowRow, texts: Mapping[str, str]) -> str:
     return " ".join(_source_texts(row, texts))
 
@@ -281,15 +374,25 @@ def _source_text(row: FlowRow, texts: Mapping[str, str]) -> str:
 
 
 def _drop_ungrounded_portfolio_rows(
-    rows: Sequence[FlowRow], texts: Mapping[str, str]
+    rows: Sequence[FlowRow],
+    texts: Mapping[str, str],
+    document_texts: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> tuple[tuple[FlowRow, ...], list[str]]:
-    """대상을 식별할 이름이 없는 카드만 제외하고 정상 카드·본문은 보존한다."""
+    """대상을 식별할 이름이 없는 카드만 제외하고 정상 카드·본문은 보존한다.
+
+    ``document_texts``를 주면 이름을 «인용 조각과 같은 문서»의 조각들에도
+    대본다. 주지 않으면 종전처럼 인용 조각만 본다 — 수는 이 넓힘을 쓰지
+    않으므로(`_drop_invented_numbers`) 잣대가 갈리지 않게 인자를 나눈다.
+    """
 
     grounded: list[FlowRow] = []
     rejected: list[str] = []
+    scoped: Mapping[str, Sequence[str]] = document_texts or {}
     for row in rows:
         name = row.cells[0] if row.cells else ""
-        if name.strip() and portfolio_name_is_grounded(name, _source_texts(row, texts)):
+        if name.strip() and portfolio_name_is_grounded(
+            name, _name_source_texts(row, texts, scoped)
+        ):
             grounded.append(row)
             continue
         rejected.append(
@@ -662,7 +765,9 @@ def check_diagram_numbers(
             continue
         rows = section.flow_rows
         if section.section_id == PORTFOLIO_TABLE_SECTION_ID:
-            rows, rejected = _drop_ungrounded_portfolio_rows(rows, texts)
+            rows, rejected = _drop_ungrounded_portfolio_rows(
+                rows, texts, _document_scoped_texts(fragments)
+            )
             problems.extend(
                 f"[{section.section_id}] {reason}" for reason in rejected
             )

@@ -8,7 +8,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from src.features.audit_financials.constants import (
@@ -18,7 +18,6 @@ from src.features.audit_financials.constants import (
     DIAGNOSTIC_STATEMENT_NOT_FOUND,
     DIAGNOSTIC_UNIT_NOT_FOUND,
     DIAGNOSTIC_YEAR_NOT_FOUND,
-    DISPLAY_PLACES,
     DISPLAY_UNIT,
     EVIDENCE_MAX_CHARS,
     KOREAN_MONTHS,
@@ -28,6 +27,7 @@ from src.features.audit_financials.constants import (
     PLAIN_METRIC_WINDOW_CHARS,
     UNIT_DIVISORS,
 )
+from src.shared.display_scale import display_places, format_display_value
 
 
 _TAG_RE = re.compile(r"<[^>]+>", re.DOTALL)
@@ -479,13 +479,6 @@ def _metric_anchor(text: str) -> int:
     return min(indexes) if indexes else len(text)
 
 
-def _display_value(value: Decimal, divisor: Decimal) -> str:
-    shown = (value / divisor).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-    if shown == 0:
-        shown = Decimal(0)
-    return f"{shown:,.0f}"
-
-
 def _evidence(candidate: _StatementCandidate) -> AuditEvidence:
     payload = candidate.evidence_text
     return AuditEvidence(
@@ -540,20 +533,32 @@ def _attempt_candidate(candidate: _StatementCandidate, *, cite: str) -> _Attempt
     selected_periods = periods[:OUTPUT_YEAR_COUNT]
     years = [str(period.fiscal_year) for period in selected_periods]
     evidence = _evidence(candidate)
+    # 표 하나가 «한 자리수»를 함께 쓴다. 가장 작은 값이 유효숫자 두 자리를 갖는
+    # 최소 자리수라서, 값이 큰 회사는 종전과 같은 정수 표시가 그대로 나온다.
+    places = display_places(
+        [
+            observations[metric][period_index].value
+            for period_index in range(len(years))
+            for metric in metrics
+        ],
+        divisor,
+    )
     rows: list[list[str]] = []
     raw_rows: list[list[str]] = []
     checks: list[list[str]] = []
     for period_index, year in enumerate(years):
         raw_values = [observations[metric][period_index].raw for metric in metrics]
         shown_values = [
-            _display_value(observations[metric][period_index].value, divisor)
+            format_display_value(
+                observations[metric][period_index].value, divisor, places
+            )
             for metric in metrics
         ]
         rows.append([year, *shown_values])
         raw_rows.append([year, *raw_values])
         checks.append(
             [
-                f"{raw}|{divisor:.0f}|{DISPLAY_PLACES}|{shown}"
+                f"{raw}|{divisor:.0f}|{places}|{shown}"
                 for raw, shown in zip(raw_values, shown_values)
             ]
         )
@@ -572,7 +577,7 @@ def _attempt_candidate(candidate: _StatementCandidate, *, cite: str) -> _Attempt
         numeric=True,
         raw_rows=raw_rows,
         scale_divisor=f"{divisor:.0f}",
-        scale_places=DISPLAY_PLACES,
+        scale_places=places,
         display_unit=DISPLAY_UNIT,
         evidence_rows=[
             _row_evidence_payload(evidence, headers, raw_row) for raw_row in raw_rows

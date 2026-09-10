@@ -7,12 +7,19 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from typing import Any, Optional
 
 from src.features.pipeline.port import ReportTable
+from src.shared.display_scale import display_places, format_display_value
 
 logger = logging.getLogger(__name__)
+
+#: 원 단위 값을 억원으로 줄이는 나눗수. 표시 자리수는 상수가 아니라 표에 실릴
+#: 값 중 가장 작은 것을 보고 `shared.display_scale`이 정한다 — 감사보고서 파서
+#: (`features/audit_financials`)와 같은 잣대를 쓴다.
+_DISPLAY_DIVISOR: Decimal = Decimal(100_000_000)
+_DISPLAY_UNIT = "억원"
 
 
 _ACCOUNT_IDS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
@@ -102,26 +109,25 @@ class _MetricObservation:
     label: str
     periods: tuple[_FiscalPeriod, _FiscalPeriod, _FiscalPeriod]
     raw_values: tuple[str, str, str]
-    display_values: tuple[str, str, str]
+    #: 억원 표시로 줄이기 «전»의 원 단위 값. 표시 자리수는 표 전체가 함께
+    #: 정하므로 여기서는 값만 들고 있는다.
+    values: tuple[Decimal, Decimal, Decimal]
     business_year: int
 
 
-def _amount(raw: Any) -> tuple[str, str]:
-    """원 단위 정수를 보존하고 억원 정수 표시는 ``ROUND_HALF_UP``한다."""
+def _amount(raw: Any) -> tuple[str, Optional[Decimal]]:
+    """원 단위 정수를 보존한다. 못 읽으면 ``("", None)``."""
 
     if raw is None or isinstance(raw, bool):
-        return "", ""
+        return "", None
     text = str(raw).strip()
     if not _AMOUNT_RE.fullmatch(text):
-        return "", ""
+        return "", None
     value = Decimal(text.replace(",", ""))
     # ``-0``은 수치상 0과 같지만 표시·해시가 불필요하게 갈라지므로 정규화한다.
     if value == 0:
         value = Decimal(0)
-    shown = (value / Decimal(100_000_000)).quantize(
-        Decimal("1"), rounding=ROUND_HALF_UP
-    )
-    return f"{value:,.0f}", f"{shown:,.0f}"
+    return f"{value:,.0f}", value
 
 
 def _period(raw: Any) -> _FiscalPeriod | None:
@@ -287,13 +293,13 @@ def _metric_observation(
     amounts = tuple(
         _amount(row.get(amount_key)) for amount_key, _date_key in _PERIOD_FIELDS
     )
-    if not all(raw and shown for raw, shown in amounts):
+    if not all(raw and value is not None for raw, value in amounts):
         return None
     return _MetricObservation(
         label=label,
         periods=periods,
-        raw_values=tuple(raw for raw, _shown in amounts),
-        display_values=tuple(shown for _raw, shown in amounts),
+        raw_values=tuple(raw for raw, _value in amounts),
+        values=tuple(value for _raw, value in amounts),
         business_year=business_year,
     )
 
@@ -446,6 +452,16 @@ def build_three_year_table(
         return None
     years = [str(period.fiscal_year) for period in reference_periods]
     closing_month = _KOREAN_MONTHS[reference_periods[0].end.month]
+    # 표 하나가 «한 자리수»를 함께 쓴다. 가장 작은 값이 유효숫자 두 자리를 갖는
+    # 최소 자리수라서, 값이 큰 회사는 종전과 같은 정수 표시가 그대로 나온다.
+    places = display_places(
+        [
+            observations[label].values[index]
+            for label in metric_labels
+            for index in range(3)
+        ],
+        _DISPLAY_DIVISOR,
+    )
 
     table = ReportTable(
         # 숫자로 쓴 "3개년"·"3월"은 표 FactRecord의 수치 장부 밖 숫자가 된다.
@@ -458,7 +474,12 @@ def build_three_year_table(
         rows=[
             [
                 years[index],
-                *(observations[label].display_values[index] for label in metric_labels),
+                *(
+                    format_display_value(
+                        observations[label].values[index], _DISPLAY_DIVISOR, places
+                    )
+                    for label in metric_labels
+                ),
             ]
             for index in range(3)
         ],
@@ -471,9 +492,9 @@ def build_three_year_table(
             ]
             for index in range(3)
         ],
-        scale_divisor="100000000",
-        scale_places=0,
-        display_unit="억원",
+        scale_divisor=f"{_DISPLAY_DIVISOR:.0f}",
+        scale_places=places,
+        display_unit=_DISPLAY_UNIT,
         presentation="trend",
         entity_scope=("consolidated" if scope == "연결" else "separate"),
         raw_unit="원",

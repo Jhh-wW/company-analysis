@@ -165,6 +165,91 @@ def test_못_찾으면_빈_결과와_구체적_진단을_돌려준다(
     assert result.diagnostic_reason == reason
 
 
+#: 2026-09-11 소규모 회사 실측 손익계산서. 당기순이익 82,552,618원은 0.83억이라
+#: 자리수를 0으로 못 박아 두면 표에 1이 찍히고, 전기 366,016,342원(3.66억)은 4가
+#: 찍혀 독자가 -75%로 읽는다(실제 -77.45%).
+_SMALL_COMPANY_INCOME_XML = """
+<TABLE><TR><TD>손 익 계 산 서</TD></TR>
+<TR><TD>2025.01.01부터 2025.12.31까지</TD></TR>
+<TR><TD>2024.01.01부터 2024.12.31까지</TD></TR>
+<TR><TD>(단위: 원)</TD></TR></TABLE>
+<TABLE>
+<TR><TD>매출액</TD><TD>27,351,053,389</TD><TD>25,811,194,484</TD></TR>
+<TR><TD>영업이익</TD><TD>436,660,956</TD><TD>583,314,634</TD></TR>
+<TR><TD>당기순이익</TD><TD>82,552,618</TD><TD>366,016,342</TD></TR>
+</TABLE>
+<TABLE><TR><TD>현 금 흐 름 표</TD></TR></TABLE>
+"""
+
+#: 표시값으로 읽은 변동과 원값으로 계산한 변동의 허용 차이(%p).
+#: ★ 리터럴로 둔다 — 생산 상수를 import해 기대값을 만들면 자리수 상한이
+#:   낮아지는 회귀를 못 잡는 순환 검증이 된다.
+#: ★ 옛 정수 표시(1 / 4)의 차이는 2.45%p였다. 이 하한은 그것을 확실히 걸러낸다.
+_MAX_DISPLAY_CHANGE_GAP_POINTS = 1.0
+
+
+def test_작은_값이_섞이면_소수_자리를_늘려_0으로_지우지_않는다() -> None:
+    result = parse_audit_financials("", xml_text=_SMALL_COMPANY_INCOME_XML)
+
+    table = result.performance_table
+    assert table is not None
+    assert table.scale_places == 2
+    assert table.rows == [
+        ["2025", "273.51", "4.37", "0.83"],
+        ["2024", "258.11", "5.83", "3.66"],
+    ]
+    assert table.raw_rows[0] == ["2025", "27,351,053,389", "436,660,956", "82,552,618"]
+    # 하류 재검산 계약(`composer.public_manifest`)이 읽는 자리수도 함께 바뀐다.
+    assert table.numeric_checks[0][2] == "82,552,618|100000000|2|0.83"
+
+
+def test_증감률은_표시값이_아니라_원값으로_계산한다() -> None:
+    """표에서 읽은 변동과 원값 변동이 어긋나지 않는지 함께 잰다.
+
+    누적 증감률 claim(`composer.structured_claims`)은 ``raw_rows``만 쓰므로
+    표시 자리수가 그 값을 바꾸지 않는다. 그래도 독자는 «표를 보고» 변동을
+    읽으므로, 두 값이 벌어지면 화면이 거짓말을 한다.
+    """
+
+    result = parse_audit_financials("", xml_text=_SMALL_COMPANY_INCOME_XML)
+    table = result.performance_table
+    assert table is not None
+
+    def _number(value: str) -> float:
+        return float(value.replace(",", ""))
+
+    # 당기순이익 열(마지막)의 전기 → 당기 변동.
+    raw_change = (
+        (_number(table.raw_rows[0][3]) - _number(table.raw_rows[1][3]))
+        / _number(table.raw_rows[1][3])
+        * 100
+    )
+    shown_change = (
+        (_number(table.rows[0][3]) - _number(table.rows[1][3]))
+        / _number(table.rows[1][3])
+        * 100
+    )
+
+    assert round(raw_change, 2) == -77.45
+    assert abs(shown_change - raw_change) <= _MAX_DISPLAY_CHANGE_GAP_POINTS
+
+
+def test_값이_모두_크면_기존_정수_표시를_그대로_쓴다() -> None:
+    """바이트 불변 회귀 — 큰 회사 표는 자리수 규칙이 들어와도 안 바뀐다."""
+
+    result = parse_audit_financials(
+        "",
+        xml_text=_fixture("20260320000802_income.xml"),
+        cite="하이브 사업보고서",
+    )
+
+    table = result.performance_table
+    assert table is not None
+    assert table.scale_places == 0
+    assert table.rows[0] == ["2025", "26,499", "493", "-2,544"]
+    assert table.numeric_checks[0][0] == "2,649,870,246|100000|0|26,499"
+
+
 def test_괄호_삼각형_마이너스와_HALF_UP을_처리한다() -> None:
     xml = """
     <TABLE><TR><TD>손 익 계 산 서</TD></TR>
@@ -183,8 +268,13 @@ def test_괄호_삼각형_마이너스와_HALF_UP을_처리한다() -> None:
 
     table = result.performance_table
     assert table is not None
+    # 2026-09-11 자리수 규칙 도입으로 기대 문자열을 갱신했다 — 이 표의 가장
+    # 작은 값 0.5억은 정수로 찍으면 「0」·「1」이 되어 부호와 크기가 함께
+    # 사라진다. 이 시험의 뜻(괄호·△ 음수 읽기와 HALF_UP)은 그대로다:
+    # 0.49999999억이 0.50으로 올라가는 것이 HALF_UP의 증거다.
+    assert table.scale_places == 2
     assert table.rows == [
-        ["2025", "1", "-1", "0"],
-        ["2024", "-1", "-1", "0"],
+        ["2025", "0.50", "-0.50", "0.50"],
+        ["2024", "-0.50", "-0.50", "-0.50"],
     ]
     assert table.raw_rows[1][1:] == ["-50,000,000", "-50,000,000", "-49,999,999"]

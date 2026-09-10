@@ -306,3 +306,66 @@ def test_지표가_하나뿐인_표는_여전히_대조에서_막힌다() -> Non
 def test_두_모듈의_최소_지표_수가_같다() -> None:
     """★ 표는 만들어지는데 대조만 실패하는 어긋남을 막는다."""
     assert MIN_METRICS_FOR_MATCH == MIN_METRICS_FOR_TABLE
+
+
+# ══════════════════════════════════════════════════════════
+# ④ 표시 자리수 — 표를 만드는 쪽과 «세 번째 생산자»가 같은 잣대를 쓴다
+# ══════════════════════════════════════════════════════════
+
+#: 2026-09-11 소규모 회사 실측 값. 당기순이익 0.83억이 섞여 표가 소수 두 자리를
+#: 쓴다. 대조기가 예전처럼 「자리수 0 고정」이면 이 표는 통째로 막혀 4장 누적
+#: 증감률 문장이 다시 0개가 된다.
+_작은_매출액 = ("27351053389", "25811194484", "24000000000")
+_작은_영업이익 = ("436660956", "583314634", "700000000")
+_작은_당기순이익 = ("82552618", "366016342", "300000000")
+
+
+def _작은_회사_payload() -> dict[str, Any]:
+    return _payload(
+        [
+            _행("ifrs-full_Revenue", "매출액", _작은_매출액),
+            _행("dart_OperatingIncomeLoss", "영업이익", _작은_영업이익),
+            _행("ifrs-full_ProfitLoss", "당기순이익", _작은_당기순이익),
+        ]
+    )
+
+
+def test_소수_자리를_늘린_작은_회사_표도_원_payload와_대조된다() -> None:
+    payload = _작은_회사_payload()
+    표 = _표(payload)
+
+    assert 표 is not None
+    assert 표.scale_places == 2, "시험 전제 — 작은 값이 섞이면 자리수가 는다"
+    assert list(표.rows[0]) == ["2025", "273.51", "4.37", "0.83"]
+    assert dart_payload_matches_table(표, _봉인(payload)) is True, (
+        "★ 자리수가 늘었다는 이유로 대조가 실패했다"
+    )
+
+
+def test_자리수를_임의로_적은_표는_대조에서_막힌다() -> None:
+    """★ 안전선 — 허용 범위만 넓히고 재구성 대조를 빠뜨리면 여기서 걸린다.
+
+    자리수를 손으로 바꾸면 표시값과 자리수가 서로 안 맞으므로, 대조기가 원
+    payload에서 다시 구한 자리수와 어긋나 막혀야 한다.
+    """
+
+    payload = _작은_회사_payload()
+    표 = _표(payload)
+    assert 표 is not None
+
+    바꾼표 = 표.__class__(
+        caption=표.caption,
+        headers=표.headers,
+        rows=표.rows,
+        unit=표.unit,
+        cite=표.cite,
+        raw_rows=표.raw_rows,
+        scale_divisor=표.scale_divisor,
+        scale_places=1,
+        evidence_rows=표.evidence_rows,
+        entity_scope=표.entity_scope,
+        raw_unit=표.raw_unit,
+        unit_dimension=표.unit_dimension,
+    )
+
+    assert dart_payload_matches_table(바꾼표, _봉인(payload)) is False

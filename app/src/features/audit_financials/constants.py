@@ -6,7 +6,9 @@ from decimal import Decimal
 
 
 DISPLAY_UNIT = "억원"
-DISPLAY_PLACES = 0
+#: 소수 자리수는 상수가 아니다 — 표에 실릴 «가장 작은 값»이 유효숫자 두 자리를
+#: 갖는 최소 자리수를 `shared.display_scale.display_places`가 표마다 정한다.
+#: 0으로 못 박아 두었던 동안 0.83억(82,552,618원)이 표에 1로 찍혔다.
 OUTPUT_YEAR_COUNT = 2
 EVIDENCE_MAX_CHARS = 64_000
 PLAIN_METRIC_WINDOW_CHARS = 260
