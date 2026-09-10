@@ -70,7 +70,22 @@ SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
     #   (constants.COLLECTOR_SLOTS_BY_SECTION 주석 참고).
     "past_changes:completed_execution": ("완료", "준공", "출시했다", "확대했다"),
     "past_changes:cumulative_change": ("증가", "감소", "전년 대비", "누적"),
-    "past_changes:change_context": ("배경", "이유", "요인"),
+    # ★ 등기임원 변경(대표이사 해임·사임·임기만료·후임 선임)이 실측에서 두 갈래로
+    #   샜다(멀티캠퍼스 접수번호 20260316000476 원문으로 직접 관찰·재현).
+    #   ① 「나. 경영진 및 감사의 중요한 변동」 표제 문단은 culture:leadership
+    #      (「경영진」·「대표이사」— «지금» 리더십을 말하는 슬롯)로 새어, «변경
+    #      이력»이 아니라 현재 리더십 서술 자리에 잘못 실릴 근거가 됐다.
+    #   ② 「다.등기임원 선임 후보자 및 해임 대상자 현황」 표(정작 해임 대상자
+    #      이름이 있는 표)는 표제도 「경영진」·「대표이사」도 없이 「2026년」
+    #      한 낱말만 걸려 future_strategy:plan_timing(6장 «성장 전략»의 시점
+    #      슬롯)로 잘못 채점됐다 — 해임 예정일이 우연히 「YYYY년」 꼴이라서다.
+    #   두 표 모두 실제로 쓰는 표제·낱말(「경영진 및 감사의 중요한 변동」·
+    #   「해임」·「사임」·「퇴임」·「임기만료」)을 직접 넣어 past_changes로
+    #   되돌린다 — «과거 3개년의 실제 변화·실행»이라는 4장 계약과도 맞다.
+    "past_changes:change_context": (
+        "배경", "이유", "요인",
+        "경영진 및 감사의 중요한 변동", "해임", "사임", "퇴임", "임기만료",
+    ),
     "past_changes:change_limit": ("제한적", "한계", "제약이 있었다"),
 
     "current_challenges:issue": ("과제", "위험", "리스크", "규제"),
@@ -133,7 +148,11 @@ SECTION_HEADING_HINTS: dict[str, tuple[str, ...]] = {
     # 같은 표제다(은행 원문 「다. 주요 상품 및 서비스의 내용」). 표제 힌트는
     # 새 신호를 만들지 않고 이미 맞은 슬롯의 점수만 올린다.
     "portfolio": ("주요 제품", "제품 및 서비스", "상품 및 서비스"),
-    "past_changes": ("재무에 관한 사항", "요약재무정보"),
+    "past_changes": (
+        "재무에 관한 사항", "요약재무정보",
+        # DART 서식 공통 표제(직접 관찰 — 위 change_context 주석 참고).
+        "경영진 및 감사의 중요한 변동",
+    ),
     "current_challenges": ("경영진단", "위험관리"),
     "future_strategy": ("향후 계획",),
     "operations_partners": ("계약 및 협력관계", "생산 및 설비"),

@@ -299,12 +299,25 @@ def _future_strategy_evidence(index: int, fragment_id: str) -> dict:
 
 
 def _section_sentence(section_id: str, mark: str, ending_index: int, ending: str) -> str:
-    """일반·보충 작성 응답과 시험용 원문에 같은 장별 문장을 쓴다."""
+    """일반·보충 작성 응답과 시험용 원문에 같은 장별 문장을 쓴다.
+
+    ★ 장 표시(mark)를 문장 안에 여러 번 흩는다. 예전에는 맨 앞 한 글자만
+      달라서 아홉 장의 문장이 글자 3-그램 기준 0.9722까지 닮아 있었다. 실물
+      보고서에서 그 정도로 닮은 «서로 다른 장»의 문장은 같은 사실의 재진술이라
+      장 간 중복 제거가 지우는 것이 맞다 — 즉 예전 픽스처는 실물에서 나올 수
+      없는 모양이었고, 아홉 장이 한 문서를 공유하는 시험(독립문서수 부족)에서
+      중복 제거가 여덟 장을 비워 다른 사유로 먼저 걸리게 만들었다.
+      지금 모양의 장 간 최대 겹침은 0.6977로, 실물 보고서 6건에서 잰
+      «지우면 안 되는 짝»의 최고치(0.7843)보다도 낮다.
+    ★ 낱말 목록(회사·사업·고객·제품·전략·운영·문화·경쟁·과제·대응·협력·실적)과
+      꼬리(공식 자료에서 확인했다)는 그대로 둔다 — 다른 시험이 이 어휘로
+      근거 결속을 확인한다.
+    """
     if section_id == "future_strategy":
         return _FUTURE_STRATEGY_SENTENCES[ending_index]
     return (
-        f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 대응 협력 실적 "
-        f"{ending} 공식 자료에서 확인했다."
+        f"{mark} 회사 {mark}사업 {mark}고객 {mark}제품 전략 운영 문화 경쟁 "
+        f"과제 대응 협력 실적 {ending} {mark}부문을 공식 자료에서 확인했다."
     )
 
 
@@ -313,9 +326,11 @@ def _fragment_text(mark: str) -> str:
         common = _FUTURE_STRATEGY_SENTENCES[0]
         sentences = " ".join(_FUTURE_STRATEGY_SENTENCES)
     else:
+        # ★ _section_sentence 와 같은 모양을 유지한다 (꼬리 표현만 없다).
+        #   원문이 후보 문장의 어휘를 담고 있어야 근거 결속이 성립한다.
         common = (
-            f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 대응 협력 실적 "
-            "공식 자료에서 확인했다."
+            f"{mark} 회사 {mark}사업 {mark}고객 {mark}제품 전략 운영 문화 경쟁 "
+            f"과제 대응 협력 실적 {mark}부문을 공식 자료에서 확인했다."
         )
         sentences = " ".join(
             _section_sentence("", mark, index, ending)

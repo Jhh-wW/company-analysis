@@ -86,6 +86,10 @@ REVIEW_SCOPE_ITEMS = {
     "future_plan_denied_in_source": "미래 계획 근거",
     "future_plan_second_claim_unproven": "미래 계획 근거",
     "future_plan_claim_cell_inconsistent": "미래 계획 근거",
+    # ★ 임원 직함 시점 가드(composer.executive_status_guard). 코드 문자열은 그
+    #   모듈의 EXECUTIVE_STATUS_* 상수와 «반드시 같은 값»이어야 진단이 표에서
+    #   새지 않는다.
+    "executive_status_outdated": "임원 재직 확인",
 }
 REVIEW_REASONS = (
     "semantic_grounding_missing", "semantic_grounding_invalid", *REVIEW_SCOPE_ITEMS,

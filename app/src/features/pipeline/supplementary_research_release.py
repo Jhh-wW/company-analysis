@@ -105,7 +105,22 @@ def _citation_registry(
     dict[str, tuple[object, SourceVerification]],
     dict[str, tuple[object, SourceVerification]],
 ] | None:
-    """기존 정본 검증을 통과하고 ID·번호가 모호하지 않은 등록부."""
+    """기존 정본 검증을 통과한 출처만 ID·번호로 모호함 없이 색인한 등록부.
+
+    등록부에는 typed 공식 출처만 있는 것이 아니다. 같은 보고서가 v2 legacy
+    조각 출처(공시 원문 조각·재무 API 응답)도 함께 싣는데, 그 출처들은 v3
+    출처표의 필수 필드(``source_type``·``fact_status``·발행일)가 없어
+    ``is_canonical_valid``가 거짓이고 검증자가 ``None``을 돌려준다. 그것은
+    「이 회사 자료가 깨졌다」가 아니라 「본문 근거로 셀 수 없는 출처다」라는
+    뜻이므로 색인에서만 뺀다. 전체를 거절하면 legacy 조각이 한 줄만 있어도
+    내부 계약 오류가 되어, legacy 조각이 늘 섞이는 보완조사 경로가 자료
+    유무와 무관하게 항상 막힌다.
+
+    색인에서 빠진 출처는 아래 본문 판정에서 «없는 번호»가 되어 그 번호를 쓴
+    문장·표 행이 통째로 제외된다. 판정은 좁아질 뿐 넓어지지 않는다. 등록부
+    자체가 모호하거나(중복 ID·번호) 검증자가 형식이 깨진 값을 돌려주거나
+    한 줄도 통과하지 못하면 예전처럼 그대로 닫는다.
+    """
 
     if type(report.citations) is not list or not report.citations:
         return None
@@ -119,6 +134,8 @@ def _citation_registry(
             reference_date=report.as_of_date,
             evidence_text="",
         )
+        if verified is None:
+            continue
         if (
             type(verified) is not SourceVerification
             or not verified.source_id.strip()
@@ -132,6 +149,8 @@ def _citation_registry(
         item = (source, verified)
         by_id[verified.source_id] = item
         by_number[str(verified.number)] = item
+    if not by_id:
+        return None
     return registry, by_id, by_number
 
 

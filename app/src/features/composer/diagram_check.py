@@ -74,7 +74,11 @@ from src.features.composer.constants import (
     STRATEGY_TABLE_SECTION_ID,
 )
 from src.features.composer.logic import extract_json_payload
+from src.features.composer.verdict_number import coerce_verdict_number
 from src.features.composer.challenge_guard import challenge_response_problem
+from src.features.composer.challenge_response_evidence import (
+    challenge_response_evidence_problem,
+)
 from src.features.composer.diagram_review_constants import (
     DIAGRAM_CITATIONS_PREFIX,
     DIAGRAM_EVIDENCE_GUIDE,
@@ -416,6 +420,7 @@ def _review_prompt(
         (
             "",
             "형식: 설명 없이 아래 JSON만 출력한다.",
+            "번호는 따옴표 없는 정수로 쓴다.",
             DIAGRAM_REASON_GUIDE,
             '{"' + _VERDICT_KEY + '": [{"' + _VERDICT_NUMBER_KEY + '": 1, "'
             + DIAGRAM_REASON_KEY + '": "원문과 칸 내용의 대조 근거", "'
@@ -485,15 +490,13 @@ def _parse_verdicts(raw: str) -> dict[int, str]:
     for item in items:
         if not isinstance(item, Mapping):
             continue
-        number = item.get(_VERDICT_NUMBER_KEY)
-        result = item.get(_VERDICT_RESULT_KEY)
         # ★ 파이썬에서 True는 int다 — 막지 않으면 «"번호": true»가 1번 줄로
         #   읽혀 엉뚱한 경로가 지워진다. verify.py도 같은 함정을 막는다.
-        if (
-            isinstance(number, int)
-            and not isinstance(number, bool)
-            and isinstance(result, str)
-        ):
+        #   순수 숫자 문자열("3")은 표현형만 넓혀 받는다 — composer.verdict_
+        #   number 공용, verify.py와 같은 규칙.
+        number = coerce_verdict_number(item.get(_VERDICT_NUMBER_KEY))
+        result = item.get(_VERDICT_RESULT_KEY)
+        if number is not None and isinstance(result, str):
             verdicts[number] = result.strip()
     return verdicts
 
@@ -579,7 +582,12 @@ def _review_rows(
             sources = candidates[number][1]
             flow_problem = flow_scope_problem(row.cells, sources)
             if not flow_problem and section_id == CHALLENGE_FLOW_SECTION_ID:
-                flow_problem = challenge_response_problem(row.cells)
+                # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 앞의 검사가
+                # 「비었는가」만 보므로, 채워졌지만 원문에 없는 말은 여기서만
+                # 걸린다(검수 AI가 «참»이라고 답해도 마찬가지다).
+                flow_problem = challenge_response_problem(
+                    row.cells
+                ) or challenge_response_evidence_problem(row.cells, sources)
             if not flow_problem and section_id == "culture":
                 # 축약된 칸은 원문을 줄여 적어 산문 검사의 세 표지 결합에 걸리지
                 # 않는다. 그 행이 «인용한 원문»의 순수 회계 절과 결속됐을 때만 막는다.

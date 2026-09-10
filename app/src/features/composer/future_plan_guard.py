@@ -102,6 +102,7 @@ from src.features.composer.future_plan_constants import (
     TARGET_ACTIVITY_BRIDGE_RE,
     THING_HEAD_NOUNS,
     THIRD_PARTY_SUBJECTS,
+    TIME_TOPIC_RE,
     TOPIC_RE,
     VERBALIZER,
     VERB_ENDING_HEAD,
@@ -315,10 +316,14 @@ def _subject_problem(sentence: str, target: str, activity_start: int,
       말하는 대상이거나 이 줄의 칸에 그대로 적혀 있다.
     ⚠️ 회사 이름 목록을 쓰지 않는다 — 어떤 고유명사인지 «알아보는» 것이 아니라,
        명시된 주어가 이 줄에 결속돼 있는지만 본다. 그래서 모든 회사·업종에 같다.
+    ⚠️ 시간만으로 된 주제(「26년은」·「내년은」)는 주어가 아니라 시점 부사다.
+       그래서 «건너뛴다» — 빼는 것이 아니라 다음 주제를 보게 하는 것이므로,
+       「26년은 경쟁사가 …할 계획입니다」의 「경쟁사」는 그대로 걸린다.
     """
 
     topics = [topic for topic in TOPIC_RE.finditer(sentence)
-              if topic.end() <= activity_start]
+              if topic.end() <= activity_start
+              and not TIME_TOPIC_RE.fullmatch(topic.group(1).strip())]
     if not topics:
         return ""
     nearest = topics[-1].group(1)

@@ -28,13 +28,19 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from typing import Final
+from collections.abc import Sequence
+from typing import Final, Optional
 
 from src.features.composer.constants import (
     NOTICE_DUPLICATE_MOVED,
     SECTION_IDS,
 )
-from src.features.composer.port import ComposedReport, ComposedSection, ComposedSentence
+from src.features.composer.port import (
+    CollectedFragment,
+    ComposedReport,
+    ComposedSection,
+    ComposedSentence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +51,72 @@ _NGRAM_SIZE: Final[int] = 3
 
 #: 두 문장을 «같은 사실»로 볼 겹침 비율. 겹침 = 교집합 ÷ 짧은 쪽 크기.
 #: 0.6은 보수적인 값이다 — 애매하면 남긴다(잘못 지우는 쪽이 더 나쁘다).
+#: 이 값은 «근거 조각을 공유하는» 짝에만 쓴다.
 _OVERLAP_THRESHOLD: Final[float] = 0.6
+
+#: 조각은 다르지만 «같은 원문 문서»를 근거로 든 짝에 쓰는 더 높은 겹침 기준.
+#:
+#: ★ 왜 필요한가 (실측) — 교육서비스 회사 실측에서 같은 수주 사실이 3장과
+#:   7장에 거의 같은 문장으로 실렸는데(겹침 0.8889) 한 문장도 빠지지 않았다.
+#:   두 문장이 «같은 사업보고서의 서로 다른 조각»을 인용했기 때문이다:
+#:     · 3장 v2-frag-8   ← rcept_no 20260316000476
+#:     · 7장 v2-frag-26·28 ← rcept_no 20260316000476 (같은 문서)
+#:   «조각이 다르면 다른 자료»라는 기존 조건의 «뜻»은 옳지만 «단위»가 틀렸다.
+#:   한 공시를 수십 개 조각으로 쪼개는 수집 구조에서 다른 자료의 단위는
+#:   조각이 아니라 «문서»다. 그래서 조건을 없애지 않고 단위만 바로잡는다.
+#: ★ 문서까지 다르면 여전히 비교하지 않는다 — 정말 다른 자료에서 온 두 사실이
+#:   표현만 닮았다고 지워지는 일을 만들지 않기 위해서다.
+#: ★ 값의 근거 (실측) — 저장본 픽스처 5건 + 위 실행 1건에서 «조각을 공유하지
+#:   않고 장이 다르고 길이 하한을 넘는» 짝 2,652개를 전수로 쟀다.
+#:     · 진짜 중복 1쌍 = 0.8889 (위 수주 문장)
+#:     · 그다음으로 높은 짝 = 0.7843 — 엔터사 저장본의
+#:       «수익은 여섯 부문에서 발생한다»(2장) ↔ «핵심 제품은 여섯 부문으로
+#:       구성된다»(3장). 여섯 부문 «목록»이 길어서 글자가 겹칠 뿐 주장이
+#:       서로 다르다. 이건 지우면 안 되는 짝이다.
+#:     · 세 번째 = 0.6957
+#:   0.7843~0.8889 사이에는 관측이 하나도 없다. 0.85는 그 빈 구간 안이고,
+#:   지우면 안 되는 최고치보다 0.066 위, 지워야 할 중복보다 0.039 아래다.
+#:   «애매하면 남긴다»는 이 파일의 원칙대로 빈 구간 밖으로 내리지 않는다.
+_SAME_DOCUMENT_OVERLAP_THRESHOLD: Final[float] = 0.85
 
 #: 이 길이 미만의 문장은 비교하지 않는다. 짧은 문장은 우연히 많이 겹친다.
 _MIN_COMPARE_CHARS: Final[int] = 20
 
 #: 글자만 남긴다 — 한글·영문·숫자. 공백·문장부호는 표기 차이라 무시한다.
 _KEEP_CHARS_RE: Final[re.Pattern[str]] = re.compile(r"[^0-9A-Za-z가-힣]+")
+
+
+def _document_keys(
+    fragments: Optional[Sequence[CollectedFragment]],
+) -> dict[str, str]:
+    """조각 id → «어느 원문 문서에서 왔나» 열쇠.
+
+    ★ 열쇠가 없는 조각은 «자기 자신»을 열쇠로 갖는다 — 빈 값끼리 묶여 서로
+      무관한 조각이 «같은 문서»가 되는 사고를 막는다(fail-closed). 지문·신원·
+      주소·문서명 순으로 있는 것을 쓰고, 하나도 없으면 조각 id를 쓴다.
+    """
+
+    keys: dict[str, str] = {}
+    for fragment in fragments or ():
+        fragment_id = str(fragment.fragment_id)
+        for candidate in (
+            fragment.document_content_sha256,
+            fragment.document_identity,
+            fragment.source_url,
+            fragment.document_title,
+        ):
+            if candidate:
+                keys[fragment_id] = candidate
+                break
+        else:
+            keys[fragment_id] = f"조각:{fragment_id}"
+    return keys
+
+
+def _documents_of(citations: frozenset[str], keys: dict[str, str]) -> frozenset[str]:
+    """그 문장이 근거로 든 문서 열쇠 집합. 모르는 조각은 자기 id로 남는다."""
+
+    return frozenset(keys.get(citation, f"조각:{citation}") for citation in citations)
 
 
 def _signature(text: str) -> frozenset[str]:
@@ -135,17 +200,32 @@ def _log_chapter_sentence_counts(before: ComposedReport, after: ComposedReport) 
 
 def drop_cross_section_duplicates(
     report: ComposedReport,
+    *,
+    fragments: Optional[Sequence[CollectedFragment]] = None,
 ) -> tuple[ComposedReport, int]:
     """여러 장에 반복된 같은 사실을 «소유 장 하나»만 남기고 뺀다.
 
-    두 문장을 같은 사실로 보는 조건은 «둘 다» 만족할 때뿐이다:
-      ① 근거 조각을 하나 이상 공유한다 (서로 다른 자료면 다른 사실이다)
-      ② 글자 3-그램 겹침이 기준치 이상이다 (표현만 바꾼 같은 말이다)
+    두 문장을 같은 사실로 보는 조건은 글자 3-그램 겹침 하나이고, 문턱은
+    «근거가 얼마나 가까운가»로 갈린다:
+      ① 근거 조각을 하나 이상 공유하면 — 낮은 문턱(_OVERLAP_THRESHOLD)
+      ② 조각은 달라도 같은 원문 문서를 근거로 들었으면 —
+         높은 문턱(_SAME_DOCUMENT_OVERLAP_THRESHOLD)
+      ③ 문서까지 다르면 — 비교하지 않는다 (정말 다른 자료면 다른 사실이다)
+    ②가 필요한 이유는 한 공시 문서가 수십 개 조각으로 쪼개져, 같은 사실이
+    서로 다른 조각을 인용한 채 두 장에 실릴 수 있기 때문이다(상수 주석의 실측).
+
+    장 쌍을 가리지 않는다 — 3장↔7장이든 4장↔2장이든 같은 규칙이 걸린다.
 
     소유 장은 «그 사실을 가장 많이 다룬 장»이다. 같으면 정본 목차에서 앞선 장.
+    이 결정 규칙은 ②로 새로 걸린 짝에도 그대로 쓴다 — 무리의 인용을 모두
+    모아(group_citations) 그 근거를 가장 여러 문장으로 다룬 장이 이긴다.
 
     Args:
         report: 검증(verify_report)까지 끝난 보고서.
+        fragments: 이 보고서가 인용한 조각들. ②를 판정하려면 «어느 조각이 어느
+            문서에서 왔는지»가 있어야 한다. 넘기지 않으면 ②가 꺼지고 ①만
+            남는다 — 예전 동작 그대로다. 운영 호출부는 반드시 넘긴다
+            (시험: test_dedupe_unshared_citations.py 의 배선 단정).
 
     Returns:
         (중복이 빠진 보고서, 뺀 문장 수).
@@ -163,6 +243,9 @@ def drop_cross_section_duplicates(
 
     signatures = [_signature(item[2].text) for item in flat]
     citation_sets = [frozenset(item[2].citations) for item in flat]
+    document_keys = _document_keys(fragments)
+    document_sets = [_documents_of(citations, document_keys)
+                     for citations in citation_sets]
     comparable = [
         bool(citation_sets[index]) and len(item[2].text) >= _MIN_COMPARE_CHARS
         for index, item in enumerate(flat)
@@ -177,9 +260,16 @@ def drop_cross_section_duplicates(
         for right in range(left + 1, len(flat)):
             if not comparable[right]:
                 continue
-            if not (citation_sets[left] & citation_sets[right]):
+            # 조각을 공유하면 기존 문턱, 조각은 달라도 같은 문서를 근거로 들면
+            # 더 높은 문턱, 문서까지 다르면 아예 비교하지 않는다.
+            # 장 쌍을 가리지 않는다 — 모든 장 쌍에 같은 규칙이 걸린다.
+            if citation_sets[left] & citation_sets[right]:
+                threshold = _OVERLAP_THRESHOLD
+            elif fragments is not None and (document_sets[left] & document_sets[right]):
+                threshold = _SAME_DOCUMENT_OVERLAP_THRESHOLD
+            else:
                 continue
-            if _overlap(signatures[left], signatures[right]) >= _OVERLAP_THRESHOLD:
+            if _overlap(signatures[left], signatures[right]) >= threshold:
                 similar.setdefault(left, set()).add(right)
                 similar.setdefault(right, set()).add(left)
 

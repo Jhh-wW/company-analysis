@@ -1208,7 +1208,11 @@ def run_v2(
         verified, _normalize_fragments(verification_fragments),
         review_input=draft, diagnostics=news_review_rejections,
     )
-    verified, moved_sentences = drop_cross_section_duplicates(verified)
+    # ★ 조각을 함께 넘긴다. 안 넘기면 «같은 문서의 다른 조각» 중복(3장↔7장
+    #   수주 문장 실측)이 그대로 남는다 — 문서 열쇠가 없으면 그 판정을 못 한다.
+    verified, moved_sentences = drop_cross_section_duplicates(
+        verified, fragments=_normalize_fragments(verification_fragments),
+    )
     if moved_sentences:
         logger.info("장 간 중복 %d문장을 소유 장으로 모았습니다", moved_sentences)
     if prepared_evidence is not None:
@@ -1598,7 +1602,10 @@ def run_v2(
                 retain_verified_news(
                     supplement_verified, _normalize_fragments(verification_fragments),
                     review_input=supplement_draft, diagnostics=news_review_rejections,
-                )
+                ),
+                # ★ 본 경로와 같은 조각을 넘긴다 — 보충 경로만 문서 열쇠가
+                #   없으면 같은 중복이 보충 장에서만 살아남는다.
+                fragments=_normalize_fragments(verification_fragments),
             )
             if supplement_moved:
                 logger.info(

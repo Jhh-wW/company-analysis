@@ -1522,7 +1522,9 @@ SUMMARY_RULES_GUIDE: Final[str] = (
     f"1. 아래 본문 전체를 근거로 핵심 요약 {SUMMARY_MIN_SENTENCES}~"
     f"{SUMMARY_MAX_SENTENCES}문장을 «새로» 쓴다.\n"
     "2. 본문 문장을 글자 그대로 옮겨 적지 않는다 — 여러 장을 종합한 "
-    "새 문장으로 쓴다.\n"
+    "새 문장으로 쓴다. 조사·어미·꼬리말만 바꿔 옮기는 것도 «옮겨 적기»다. "
+    "한 장의 한 문장을 다시 쓰지 말고, 서로 다른 장의 사실을 묶어 그 뜻을 "
+    "말하는 문장으로 쓴다.\n"
     "3. 모든 문장에 인용(조각 id 배열)과 등급을 붙인다. 인용 id는 본문 문장 뒤 "
     "[인용: …]에 표시된 조각 번호를 그대로 쓴다.\n"
     f"   - 등급 «{GRADE_CONFIRMED}»: 인용한 조각 원문에 직접 근거가 있는 "
@@ -1548,9 +1550,25 @@ SUMMARY_BODY_HEAD: Final[str] = "\n방금 완성된 보고서 본문 (전체):\n
 
 #: 재탕 검출 후 재요청에 덧붙이는 안내 — 계획(04장 3-3): 재요청은 1회.
 SUMMARY_DUPLICATE_REMINDER: Final[str] = (
-    "\n(직전 응답에 본문 문장을 글자 그대로 옮겨 적은 문장이 있었다. "
-    "본문 재탕 없이, 종합한 새 문장으로만 다시 요약하라.)\n"
+    "\n(직전 응답에 본문 문장을 그대로 옮겨 적었거나 거의 그대로 옮긴 문장이 "
+    "있었다. 본문 재탕 없이, 종합한 새 문장으로만 다시 요약하라.)\n"
 )
+
+#: «거의 그대로»를 재탕으로 볼 닮음 비율(difflib 기준, 0~1).
+#:
+#: ★ 왜 필요한가 (실측) — 기존 검출은 공백만 지운 «정확히 같은 문자열»만
+#:   잡았다. 그래서 조사 하나·어미 하나만 바꿔 옮긴 문장은 재탕 재요청
+#:   경로를 그대로 지나간다. 교육서비스 회사 실행에서 본문 3장과 7장에
+#:   실린 같은 수주 문장이 꼬리만 달랐던 것처럼(«교육서비스 포트폴리오의»
+#:   ↔ «회사의»), 사람이 보면 같은 문장인데 코드만 다르다고 본다.
+#: ★ 0.95는 «거의 글자 그대로»만 가리키는 값이다. 어휘 목록·어미 패턴을
+#:   쓰지 않는 순수 모양 비교라 닫힌 게이트 금지 원칙을 그대로 지킨다.
+SUMMARY_NEAR_COPY_RATIO: Final[float] = 0.95
+
+#: 닮음 비교를 적용할 최소 글자 수. 짧은 문장은 우연히 많이 닮는다
+#: («매출은 감소했다»·«매출이 감소했다»). 이 길이 미만이면 정확히 같은
+#: 문자열일 때만 재탕으로 본다 — dedupe의 _MIN_COMPARE_CHARS와 같은 이유다.
+SUMMARY_NEAR_COPY_MIN_CHARS: Final[int] = 20
 
 
 def _normalized_text(text: str) -> str:
@@ -1600,10 +1618,43 @@ def _body_sentence_keys(report: ComposedReport) -> frozenset[str]:
     )
 
 
+def _is_body_near_copy(text: str, body_keys: frozenset[str]) -> bool:
+    """본문 문장을 그대로 또는 «거의 그대로» 옮겨 적었는지 본다.
+
+    ① 공백만 지운 문자열이 본문 문장과 같으면 길이와 무관하게 재탕이다.
+    ② 충분히 긴 문장은 본문 문장과의 닮음이 SUMMARY_NEAR_COPY_RATIO 이상일
+       때도 재탕으로 본다 — 조사·어미만 바꾼 옮겨 적기를 잡기 위해서다.
+
+    ★ 어휘 목록·어미 패턴·출처 종류를 보지 않는다. 두 문자열이 얼마나 닮았나
+      라는 «모양»만 본다(닫힌 게이트 금지 원칙).
+    """
+
+    # 지역 import — 이 수정을 요약 단계 함수 안에만 가두기 위해서다.
+    from difflib import SequenceMatcher
+
+    key = _normalized_text(text)
+    if key in body_keys:
+        return True
+    if len(key) < SUMMARY_NEAR_COPY_MIN_CHARS:
+        return False
+    for body_key in body_keys:
+        if len(body_key) < SUMMARY_NEAR_COPY_MIN_CHARS:
+            continue
+        matcher = SequenceMatcher(None, key, body_key)
+        # 값이 싼 상한부터 본다 — 대부분의 짝은 여기서 걸러진다.
+        if matcher.real_quick_ratio() < SUMMARY_NEAR_COPY_RATIO:
+            continue
+        if matcher.quick_ratio() < SUMMARY_NEAR_COPY_RATIO:
+            continue
+        if matcher.ratio() >= SUMMARY_NEAR_COPY_RATIO:
+            return True
+    return False
+
+
 def _split_out_duplicates(
     sentences: Sequence[ComposedSentence], body_keys: frozenset[str]
 ) -> tuple[tuple[ComposedSentence, ...], bool]:
-    """본문을 글자 그대로 옮겨 적은 문장을 골라낸다.
+    """본문을 그대로·거의 그대로 옮겨 적은 문장을 골라낸다.
 
     Returns:
         (재탕이 아닌 문장들, 재탕이 하나라도 있었는가)
@@ -1611,7 +1662,7 @@ def _split_out_duplicates(
     kept = tuple(
         sentence
         for sentence in sentences
-        if _normalized_text(sentence.text) not in body_keys
+        if not _is_body_near_copy(sentence.text, body_keys)
     )
     return kept, len(kept) != len(sentences)
 

@@ -31,6 +31,9 @@ def test_transport_contract_matches_the_actual_producer():
     )
 
     from src.features.composer.role_binding_constants import ROLE_BINDING_REASON_TEXTS
+    from src.features.composer.executive_status_constants import (
+        EXECUTIVE_STATUS_REASON_TEXTS,
+    )
 
     assert set(REVIEW_SCOPE_ITEMS) == {
         MODALITY_PLAN_ASSERTED, SCOPE_CONDITION_UNBOUND, CULTURE_EVIDENCE_SCOPE_MISMATCH,
@@ -42,6 +45,7 @@ def test_transport_contract_matches_the_actual_producer():
         CHALLENGE_RESPONSE_MISSING,
         CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,
         *PROSE_OWN_SOURCE_REASON_CODES,
+        *EXECUTIVE_STATUS_REASON_TEXTS,
     }
     assert set(REVIEW_ITEMS) == {NUMERIC_KEY, TIME_KEY, TREND_KEY, *REVIEW_SCOPE_ITEMS.values()}
     assert set(REVIEW_REASONS) == {GROUNDING_INVALID, GROUNDING_MISSING, *REVIEW_SCOPE_ITEMS}

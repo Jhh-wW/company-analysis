@@ -334,3 +334,54 @@ def test_금융업_표제_상품_및_서비스도_portfolio_가산점을_받는�
     assert with_hint.score_millis > without_hint.score_millis
     assert "heading_match:portfolio" in with_hint.reason_codes
     assert not any(code.startswith("heading_match:") for code in without_hint.reason_codes)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 등기임원 변경(해임·사임·임기만료) 회귀 — 실제 원문으로 재현한 두 오분류.
+#
+# 멀티캠퍼스 사업보고서 정정(접수번호 20260316000476)의 실제 원문 발췌다.
+# 조사 보고서(.local-artifacts/exec-currency/보고서.md) 참고.
+# ─────────────────────────────────────────────────────────────────────
+
+#: 「다.등기임원 선임 후보자 및 해임 대상자 현황」 표의 실제 발췌(정석목 행).
+#: 이 수정 전에는 표제도 「경영진」·「대표이사」도 없이 「2026년」 한 낱말만 걸려
+#: future_strategy:plan_timing(6장 시점 슬롯)로 잘못 채점됐다(해임 예정일이
+#: 우연히 「YYYY년」 꼴이라서).
+_DART_DISMISSAL_CANDIDATE_TABLE = (
+    "해임 정석목 남 1966년 06월 해당없음 삼성SDS 인사팀장 겸 안전환경센터장 "
+    "(부사장)삼성SDS 인사팀장 겸 사회공헌단장 (전무)삼성SDS 인사팀장 (상무)"
+    "삼성SDS 솔루션사업부문 지원팀장 (상무)삼성SDS 인사팀 인사지원그룹장 (상무) "
+    "2026년 03월 18일 계열회사 임원(당사 임원)"
+)
+
+#: 「나. 경영진 및 감사의 중요한 변동」 표제 문단의 실제 발췌. 이 수정 전에는
+#: 「경영진」·「대표이사」 낱말 때문에 culture:leadership(현재 리더십 서술
+#: 자리)로 새어, «임원이 바뀌었다»는 변경 이력이 실릴 자리가 없었다.
+_DART_LEADERSHIP_CHANGE_TABLE = (
+    "나. 경영진 및 감사의 중요한 변동 변동일자 주총종류 선임 임기만료또는 해임 "
+    "2023년 03월 15일 정기주총 대표이사 정석목사내이사 정석목 감사 조석준 "
+    "대표이사 박성태사내이사 박성태"
+)
+
+
+def test_해임_대상자_표는_더_이상_미래_시점_슬롯으로_새지_않는다() -> None:
+    score = score_fragment_text(_DART_DISMISSAL_CANDIDATE_TABLE)
+    assert score is not None
+    assert score.section_id == "past_changes"
+    assert score.slot_id == "past_changes:change_context"
+
+
+def test_경영진_변동_표제_문단은_현재_리더십_슬롯이_아니라_변경_이력_슬롯으로_간다() -> None:
+    score = score_fragment_text(_DART_LEADERSHIP_CHANGE_TABLE)
+    assert score is not None
+    assert score.section_id == "past_changes"
+    assert score.slot_id == "past_changes:change_context"
+
+
+def test_현재_리더십을_말하는_문장은_여전히_culture로_간다() -> None:
+    """이탈 표지가 없는 «지금» 리더십 서술까지 past_changes로 끌어오면 안 된다."""
+
+    score = score_fragment_text("경영진은 강력한 리더십을 바탕으로 조직을 이끈다.")
+    assert score is not None
+    assert score.section_id == "culture"
+    assert score.slot_id == "culture:leadership"

@@ -398,6 +398,9 @@ def support_entries_by_number(raw: str | None) -> dict[int, object]:
         GROUNDING_KEY, REVIEW_ENTRIES_KEY, REVIEW_NUMBER_KEY,
     )
     from src.features.composer.logic import extract_json_payload
+    # verify.py의 검수 파서와 같은 번호 보정 규칙을 쓴다 — 이 함수도 raw를
+    # 독자적으로 다시 읽으므로 파서를 고쳐도 이 자리는 저절로 안 따라온다.
+    from src.features.composer.verdict_number import coerce_verdict_number
 
     payload = extract_json_payload(raw or "")
     if not isinstance(payload, Mapping):
@@ -410,8 +413,8 @@ def support_entries_by_number(raw: str | None) -> dict[int, object]:
     for entry in entries:
         if not isinstance(entry, Mapping):
             continue
-        number = entry.get(REVIEW_NUMBER_KEY)
-        if isinstance(number, bool) or not isinstance(number, int):
+        number = coerce_verdict_number(entry.get(REVIEW_NUMBER_KEY))
+        if number is None:
             continue
         if number in seen:
             # ★ 같은 번호가 두 번 오면 «마지막이 이기지» 않는다. 어느 쪽이 그 후보의
