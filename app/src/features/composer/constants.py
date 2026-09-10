@@ -14,6 +14,18 @@ from collections.abc import Iterator, Mapping
 from typing import Final
 
 from src.core.revenue_table_switch import revenue_table_v2_enabled
+from src.shared.report_evidence.constants import (
+    SOURCE_KIND_DART_AUDIT_REPORT,
+    SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT,
+    SOURCE_KIND_DART_QUARTERLY_REPORT,
+    SOURCE_KIND_DART_SEMIANNUAL_REPORT,
+    SOURCE_KIND_NEWS,
+    SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
+    SOURCE_KIND_OFFICIAL_IR_PDF,
+    SOURCE_KIND_OFFICIAL_RECRUIT_PAGE,
+    SOURCE_KIND_OFFICIAL_WEB_PAGE,
+)
 from src.shared.report_quality.constants import (
     MAX_INTERPRETED_CLAIMS_PER_SECTION,
 )
@@ -270,6 +282,69 @@ PROMPT_TABLE_HEAD: Final[str] = "\n프로그램이 검증해 만든 실적표:\n
 #:   `지원 주장슬롯: ([^)]+)\)` 로 읽는 기존 시험이 원문위치까지 슬롯으로
 #:   읽는다.
 PROMPT_FRAGMENT_LOCATION_LABEL: Final[str] = "원문위치"
+
+#: 조각 줄의 «종류» 자리에 실제 source_kind 문자열 대신 찍는 짧은 한글 표시명.
+#:
+#: ★ 왜 생겼나 (corpus-measure 실측, 2026-09-10) — flat 모드는 아홉 장이 같은
+#:   조각 블록을 공유해 조각마다 종류·문서명이 그대로 반복된다. SM 실행
+#:   기준 공유 원문 블록(71,312토큰)에서 종류 문자열 반복만 5.8%, 문서명
+#:   반복 4.5%였다(우리은행은 더 크다) — 작가에게 의미 없는 반복 글자다.
+#:   ``DOCUMENT_LIST_HEAD`` 목록이 종류·문서명을 «한 번»만 보여 주고, 조각
+#:   줄은 그 목록의 기호만 가리킨다(``_document_symbol``, composer/logic.py).
+#: ★ 여기 값은 표시용일 뿐이다 — 검증·판정은 여전히
+#:   ``fragment.formal_source_kind``/``fragment.kind`` 원문 문자열을 그대로
+#:   쓴다(verify.py 등). 이 표에 없는 종류는 원래 문자열을 그대로 보여 준다
+#:   (```SOURCE_KIND_DISPLAY_NAMES.get(raw, raw)```) — 새 종류가 추가돼도
+#:   조용히 깨지지 않는다.
+#: ★ DART 다섯 종류를 전부 「공시」하나로 묶는다 — 어떤 보고서인지는
+#:   문서명(예: 「사업보고서 (2025.12)」)이 이미 말해 준다. 종류칸은 「이게
+#:   어떤 «부류»의 출처인가」만 구분하면 된다.
+SOURCE_KIND_DISPLAY_NAMES: Final[dict[str, str]] = {
+    SOURCE_KIND_DART_BUSINESS_REPORT: "공시",
+    SOURCE_KIND_DART_AUDIT_REPORT: "공시",
+    SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT: "공시",
+    SOURCE_KIND_DART_SEMIANNUAL_REPORT: "공시",
+    SOURCE_KIND_DART_QUARTERLY_REPORT: "공시",
+    SOURCE_KIND_OFFICIAL_WEB_PAGE: "홈페이지",
+    SOURCE_KIND_OFFICIAL_RECRUIT_PAGE: "채용페이지",
+    SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE: "공식페이지",
+    SOURCE_KIND_OFFICIAL_IR_PDF: "IR",
+    SOURCE_KIND_NEWS: "보도",
+}
+
+#: 조각 블록 맨 앞에 한 번만 붙는 「문서 목록」 머리말. 조각 줄이 반복해 찍던
+#: 종류·문서명을 문서당 한 번으로 줄인 자리다 — 자세한 이유는
+#: ``SOURCE_KIND_DISPLAY_NAMES`` 주석 참고.
+DOCUMENT_LIST_HEAD: Final[str] = "문서 목록\n"
+
+#: 문서 목록 뒤에 한 번 붙는 안내 — 조각 줄의 ``(문서 X)``가 무엇을 가리키는지
+#: 설명한다.
+#:
+#: ★ 왜 생겼나 (2026-09-10 독립 검토 P2) — 「문서 목록」이라는 제목만으로는
+#:   조각 줄의 ``(문서 A)``가 그 목록을 가리킨다는 연결이 프롬프트 어디에도
+#:   적혀 있지 않았다. 작가가 그 연결을 못 지으면 공시·홈페이지·IR을 구분해야
+#:   하는 규칙(``NEWS_WRITER_GUIDE`` 등)이 약해진다. 글자 값은 공유 앞부분
+#:   30자 내외라 절감을 사실상 깎지 않는다.
+#: ★ ``EVIDENCE_LABEL_DOCUMENT_HEADER``가 꺼지면 이 줄도 함께 빠진다 —
+#:   문서 목록 자체가 없으면 설명할 대상도 없다(별도 토글을 두지 않는다).
+DOCUMENT_LIST_GUIDE: Final[str] = "조각 라벨의 (문서 X)는 문서 목록의 X를 가리킨다.\n"
+
+#: 라벨 다이어트 세 가지(②③④)를 각각 독립적으로 끌 수 있는 코드 상수 —
+#: 셋 다 기본값 True.
+#:
+#: ★ 왜 환경변수가 아니라 코드 상수인가 — 환경변수는 프로세스·배포본마다
+#:   값이 달라질 수 있어 프롬프트 캐시 신원을 흔든다(캐시는 프롬프트
+#:   앞부분이 «바이트 그대로» 같아야 맞는다 — `CacheablePrompt`,
+#:   `cache_prefix_chars`). 같은 회사라도 이 값이 실행마다 다르면 캐시가
+#:   어긋난다. 코드 상수는 배포 시점에 고정되므로 이 문제가 없다.
+#: ★ 왜 세 개로 나눴나 (2026-09-10 팀장 지시) — ④(숫자 원문위치 제거)는
+#:   작가 안내문(`PORTFOLIO_TABLE_GUIDE_V2` 등)이 «글자로 된» 위치만
+#:   요구한다는 근거가 코드로 확인되지만, ②(짧은 표시명)·③(문서 목록)은
+#:   "작가가 원래 라벨 전체를 안 써도 상관없을 것"이라는 추정이다. 유료
+#:   비교 실행에서 보고서 품질이 떨어지면 하나씩 꺼서 원인을 가른다.
+EVIDENCE_LABEL_OMIT_NUMERIC_LOCATION: Final[bool] = True  # ④ 숫자 원문위치 제거
+EVIDENCE_LABEL_SHORT_KIND: Final[bool] = True  # ② 종류 짧은 표시명
+EVIDENCE_LABEL_DOCUMENT_HEADER: Final[bool] = True  # ③ 문서 목록 머리말+기호
 
 #: JSON 파싱 실패 후 재요청에 덧붙이는 안내
 RETRY_REMINDER: Final[str] = (

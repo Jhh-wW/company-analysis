@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 from types import SimpleNamespace
 from typing import Any
 
@@ -425,7 +426,11 @@ def test_조각_라벨은_운반_지문_대신_닫힌_출처_종류를_쓴다():
     prompt = build_section_prompt("가나다전자", "past_changes", (typed,), None)
     line = next(line for line in prompt.splitlines() if "[조각 1]" in line)
 
-    assert "(news · 메타데이터" in line, line
+    # 2026-09-10 라벨 다이어트 — 조각 줄은 문서 기호만 쓰고, 실제 닫힌 종류는
+    # 문서 목록(맨 앞, 문서당 한 번)에 찍힌다. 지문이 아니라 ``formal_source_kind``
+    # ("news")가 문서 목록 표시명("보도")으로 나온다는 본래 취지는 그대로다.
+    assert "A: 보도" in prompt
+    assert "(문서 A · 메타데이터" in line, line
     assert '"기사날짜": "2026-09-01"' in line
     assert '"발행처": "가나다경제"' in line
     assert '"보도종류": "reported_fact"' in line
@@ -433,7 +438,12 @@ def test_조각_라벨은_운반_지문_대신_닫힌_출처_종류를_쓴다():
 
 
 def test_닫힌_종류가_없는_조각은_예전처럼_kind를_라벨로_쓴다():
-    """raw dict 경로의 조각은 ``kind``가 곧 「종류」다 — 글자가 안 바뀐다."""
+    """raw dict 경로의 조각은 ``kind``가 곧 「종류」다 — 글자가 안 바뀐다.
+
+    2026-09-10 라벨 다이어트 — 조각 줄 자체는 이제 문서 기호만 쓰지만,
+    표시명 표에 없는 값은 «원래 문자열 그대로» 문서 목록에 남는다는 본래
+    취지(``kind``가 그대로 종류다)는 그대로다.
+    """
 
     legacy = CollectedFragment(
         fragment_id="1",
@@ -444,11 +454,12 @@ def test_닫힌_종류가_없는_조각은_예전처럼_kind를_라벨로_쓴다
     prompt = build_section_prompt("가나다전자", "past_changes", (legacy,), None)
     line = next(line for line in prompt.splitlines() if "[조각 1]" in line)
 
-    assert "(회사 공식 자료)" in line, line
+    assert "A: 회사 공식 자료" in prompt
+    assert re.match(r"^\[조각 1\] \(문서 [A-Z]+\) ", line), line
 
 
 def test_종류를_하나도_모르는_조각은_자료로_적는다():
-    """라벨 자리를 비우면 괄호가 빈 채로 나가 프롬프트 모양이 깨진다."""
+    """종류를 하나도 모르면 문서 목록에 「자료」로 적는다 — 라벨 자리를 비우지 않는다."""
 
     unknown = CollectedFragment(
         fragment_id="1",
@@ -459,7 +470,8 @@ def test_종류를_하나도_모르는_조각은_자료로_적는다():
     prompt = build_section_prompt("가나다전자", "past_changes", (unknown,), None)
     line = next(line for line in prompt.splitlines() if "[조각 1]" in line)
 
-    assert "(자료)" in line, line
+    assert "A: 자료" in prompt
+    assert re.match(r"^\[조각 1\] \(문서 [A-Z]+\) ", line), line
 
 
 def test_프롬프트에_회사명과_조각_전체와_실적표가_실린다():
