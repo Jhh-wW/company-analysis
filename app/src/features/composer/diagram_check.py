@@ -101,7 +101,6 @@ from src.features.composer.portfolio_name_constants import (
     PORTFOLIO_NAME_BRACKET_SPAN_RE,
     PORTFOLIO_NAME_ENTITY_MARKERS,
     PORTFOLIO_NAME_MIN_PART_CHARS,
-    PORTFOLIO_NAME_PART_SPLIT_RE,
 )
 from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
 from src.features.composer.scope_guard import flow_scope_problem
@@ -203,26 +202,13 @@ def _normalize_before_split(value: str) -> str:
     return unicodedata.normalize("NFKC", str(value or ""))
 
 
-def _portfolio_name_parts(name: str) -> tuple[str, ...]:
-    """이름을 괄호로 갈라 «압축된 부분»들로 돌려준다. 빈 부분은 버린다.
-
-    진단·조사용이다. 판정은 «머리»(`_bracket_free_surface`)와 «괄호 안»
-    (`_bracketed_surfaces`)을 따로 보는 아래 함수들이 한다.
-    """
-
-    return tuple(
-        compact
-        for part in PORTFOLIO_NAME_PART_SPLIT_RE.split(_normalize_before_split(name))
-        if (compact := _compact_surface(part))
-    )
-
-
 def _bracket_free_surface(value: str) -> str:
     """괄호 «구간»을 통째로 지운 나머지의 압축 표면.
 
-    이름과 근거 글에 «같은 방식»을 쓴다. 그래야 「기타(A/S) 등」의 머리
-    「기타 등」이 원문 「기타(A/S) 등」에서 확인된다 — 꼬리 「등」을 따로 떼어
-    한 글자라고 버리지 않는다.
+    ★ «이름»에만 쓴다. 근거 글에 쓰면 지운 자리에서 앞뒤가 붙어 원문에 없던
+      이음매가 생긴다(`portfolio_name_is_grounded` ②의 설명).
+    ★ 쓰는 이유는 꼬리를 따로 재지 않기 위해서다 — 「기타(A/S) 등」을 가르면
+      꼬리 「등」이 한 글자라 정당한 이름이 막힌다. 머리는 「기타 등」 하나로 본다.
     """
 
     normalized = _normalize_before_split(value)
@@ -303,16 +289,19 @@ def portfolio_name_is_grounded(
     if any(whole in source for source in cited):
         return True
 
-    # ② 머리 — 괄호 안을 지운 나머지를, 근거에서도 «같은 방식»으로 지우고 본다.
+    # ② 머리 — 이름에서만 괄호 안을 지우고, 근거 글은 «있는 그대로» 본다.
+    #
+    # ★ 근거 쪽에서도 지우면 원문에 없던 이음매가 생긴다 (2026-09-11 재검토
+    #   실측). 지운 자리는 공백이 되고 압축에서 공백이 사라지므로, 괄호를
+    #   사이에 두고 떨어져 있던 앞뒤가 붙는다 — 원문 「제품(단위:천원)매출」이
+    #   「제품매출」이라는 이름을 통과시켰다. 공시 표는 「매출액(단위:천원)」
+    #   같은 머리말을 늘 쓰므로 흔한 모양이다.
+    # ★ 이름 쪽만 지우면 「기타(A/S) 등」의 꼬리 「등」을 따로 재지 않으면서도
+    #   근거는 글자 그대로 남는다. 그런 이름은 대개 ①에서 이미 통과한다.
     head = _bracket_free_surface(name)
     if not head:
         return False
-    head_sources = tuple(
-        surface
-        for text in source_texts
-        if (surface := _bracket_free_surface(text))
-    )
-    if not any(head in source for source in head_sources):
+    if not any(head in source for source in cited):
         return False
 
     # ③ 괄호 안 설명 — 같은 문서 어디든 글자 그대로.

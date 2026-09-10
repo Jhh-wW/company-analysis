@@ -471,6 +471,38 @@ def test_같은_뜻의_법인격_표기는_한_글자든_세_글자든_같은_�
     assert portfolio_name_is_grounded("(주)수퍼톤", 뒤집힌_원문) is True
 
 
+@pytest.mark.parametrize(
+    ("name", "source"),
+    (
+        # 공시 표는 「매출액(단위:천원)」 같은 머리말을 늘 쓴다 — 가장 현실적인 모양.
+        ("제품매출", "제품(단위:천원)매출"),
+        ("카카오T", "카카오(주요)T를 운영한다."),
+        ("제품 및 산업용 장비", "전기전자 제품 및(주요) 산업용 장비"),
+    ),
+)
+def test_근거_원문의_괄호를_사이에_둔_앞뒤를_이어_붙이지_않는다(
+    name: str, source: str
+) -> None:
+    """★ 근거 글에서도 괄호 구간을 지우면 이 시험이 빨간불이 된다.
+
+    지운 자리는 공백이 되고 압축에서 공백이 사라진다. 그래서 괄호를 사이에 두고
+    떨어져 있던 앞뒤가 붙어, 원문에 없던 이름이 「글자 그대로 있다」로 읽힌다.
+    괄호 구간 제거는 «이름 쪽에만» 준다.
+    """
+
+    row = FlowRow(
+        cells=(name, "매출 구분", "운영 확대", "주력"), citations=("70",)
+    )
+
+    checked, problems = check_diagram_numbers(
+        _report(row),
+        (_fragment("70", source, document_identity=_ENTITY_DOCUMENT),),
+    )
+
+    assert checked.sections[0].flow_rows == ()
+    assert any(PORTFOLIO_NAME_NOT_IN_SOURCE_CODE in item for item in problems)
+
+
 def test_이름_전체가_인용_조각에_있으면_괄호_안이_한_글자여도_통과한다() -> None:
     """★ 빠른 길 — 원문에 «글자 그대로» 있는 이름은 하한으로 막지 않는다.
 
