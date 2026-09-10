@@ -507,6 +507,7 @@ def _review_rows(
     ask: Callable[[str], str],
     *,
     diagnostics: Optional[list[dict]] = None,
+    baseline_date: Optional[str] = None,
 ) -> tuple[dict[str, tuple[FlowRow, ...]], list[str]]:
     """모든 장의 경로를 «한 묶음»으로 검수한다 (AI 1회)."""
     items: list[tuple[int, str, FlowRow]] = []
@@ -570,6 +571,9 @@ def _review_rows(
     verdicts, grounding_problems = constrain_verdicts(
         raw, verdicts, candidates,
         cells_by_number={number: row.cells for number, _section, row in items},
+        # ★ 보고서 기준일. 안 넘기면 executive_status_guard 가 날짜 문턱 없이
+        #   이탈 «표지» 존재만으로 판정한다(가드 머리말 참고).
+        baseline_date=baseline_date,
     )
     # 같은 파서로 미래 근거를 읽고, 중복 번호는 근거 없음으로 처리한다.
     future_evidence = future_plan_entries_by_number(raw)
@@ -681,6 +685,7 @@ def check_diagrams(
     ask: Optional[Callable[[str], str]] = None,
     *,
     diagnostics: Optional[list[dict]] = None,
+    baseline_date: Optional[str] = None,
 ) -> tuple[ComposedReport, tuple[str, ...]]:
     """관계 도식의 각 줄이 근거에 맞는지 보고, 맞지 않는 줄을 뺀다.
 
@@ -689,6 +694,8 @@ def check_diagrams(
         fragments: 수집 조각 — 칸을 대조할 원문.
         ask: 검수 AI. 생략하면 숫자 검사는 수행하되, 관계 안전을
             확인할 수 없으므로 남은 화살표는 공개하지 않는다.
+        baseline_date: 보고서 기준일 (ISO ``YYYY-MM-DD``). 근거 결속의
+            executive_status_guard 에만 쓴다. 생략하면 종전과 같다.
 
     Returns:
         (근거 없는 줄이 빠진 보고서, 뺀 사유 목록).
@@ -710,7 +717,8 @@ def check_diagrams(
     # ② 의미 검수 — 관계는 글자로 알 수 없다
     if ask is not None and any(rows for _sid, rows in after_numbers):
         reviewed, dropped = _review_rows(
-            after_numbers, texts, ask, diagnostics=diagnostics
+            after_numbers, texts, ask, diagnostics=diagnostics,
+            baseline_date=baseline_date,
         )
         problems.extend(dropped)
     else:
