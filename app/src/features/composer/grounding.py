@@ -30,6 +30,10 @@ from src.features.composer.grounding_constants import (
     GROUNDING_SOURCE_FIELD,
     GROUNDING_MISSING,
     MAGNITUDE_SCALES, SOURCE_UNIT_HEADER_RE,
+    CELL_BOUNDARY_RE, NON_AMOUNT_METRIC_RE, NON_AMOUNT_UNIT_RE,
+    COUNT_UNIT_TAIL_RE, FOREIGN_CURRENCY_HEAD_RE, FOREIGN_CURRENCY_TAIL_RE,
+    DIMENSION_AMOUNT, DIMENSION_COUNT, DIMENSION_FOREIGN,
+    DIMENSION_MULTIPLE, DIMENSION_RATIO,
     MIN_CONTINUOUS_POINTS, MIN_TREND_POINTS, NUMERIC_KEY, PARENTHETICAL_RE,
     PARTICLE_RE, PLANNED_END_RE, RETROSPECTIVE_RE, SENTENCE_SPLIT_RE, TIME_KEY,
     TREND_DIRECTIONS, TREND_KEY, YEAR_RE, PAIR_SEPARATOR_RE, PRESENT_PERIOD,
@@ -210,18 +214,81 @@ def _unit_header_scale(text: str, position: int) -> Decimal | None:
     """`position` «앞»에 놓인 가장 가까운 「(단위: …원)」 머리말의 배율.
 
     ★ 왜 필요한가 — 공시 표는 「(단위: 천원)」 머리말 한 줄을 두고 칸에는 맨
-      숫자만 적는다(보관 원문 29건 전부 이 모양). 머리말을 읽지 않으면 그 표의
-      값은 «단위 없는 수»라 결속 대상에서 통째로 빠지고, 그러면 천원·백만원
-      금액을 인용한 «맞는 문장»까지 조용히 근거 없음으로 떨어진다.
+      숫자만 적는다. 머리말을 읽지 않으면 그 표의 값은 «단위 없는 수»라 결속
+      대상에서 통째로 빠지고, 그러면 천원·백만원 금액을 인용한 «맞는 문장»까지
+      조용히 근거 없음으로 떨어진다.
     ⚠️ 값보다 뒤에 있는 머리말은 다른 표의 것이므로 보지 않는다.
+    ⚠️ 도달 범위 실측(2026-09-11, 보관 공시 29건을 운영 경로로 조각화) — 머리말과
+       맨 숫자가 «같은 절»에 있는 자리는 0건이다. 운영 평문화가 태그를 개행으로
+       바꿔 표의 칸이 줄마다 갈리기 때문이다. 즉 이 함수는 오늘 운영에서 발화하지
+       않는다. 남겨 두는 이유는 세그먼트 방식이 바뀌면 곧바로 필요한 규칙이고,
+       발화하지 않는 동안에도 값을 만들어 내지 않기 때문이다(fail-closed).
     """
 
     scale: Decimal | None = None
     for match in SOURCE_UNIT_HEADER_RE.finditer(text, 0, position):
-        magnitude = match.group("unit").removesuffix("원")
+        # 「천 원」처럼 배율과 「원」 사이에 공백이 든 표기가 실제로 있다.
+        magnitude = re.sub(r"\s+", "", match.group("unit")).removesuffix("원")
         # 「(단위: 원)」은 배율 1, 아는 배율은 그 값, 모르는 어휘는 None(결속 안 함).
         scale = Decimal(1) if not magnitude else MAGNITUDE_SCALES.get(magnitude)
+    if scale is None:
+        return None
+    # 머리말 배율은 그 표의 «금액» 칸에만 해당한다. 같은 표에 섞인 직원수·
+    # 발행주식총수·매출비중 칸에 붙이면 「직원수 1,200」이 「120만원」의 근거가 된다.
+    label = _cell_label(text, position)
+    if NON_AMOUNT_METRIC_RE.search(label) or NON_AMOUNT_UNIT_RE.search(label):
+        return None
     return scale
+
+
+def _value_span_end(text: str, end: int) -> int:
+    """수 뒤에 붙은 개수 꼬리까지 값의 끝을 늘린다 (_amount_spans와 같은 잣대).
+
+    ⚠️ 여기서 범위를 더 늘리면 검수가 「349만」이라고 적은 정상 결속이 깨진다.
+       «표지가 붙어 있느냐»는 범위가 아니라 차원(_dimension_at)으로 가른다.
+    """
+
+    tail = COUNT_UNIT_RE.match(text, end)
+    return tail.end() if tail else end
+
+
+def _dimension_at(text: str, start: int, end: int) -> str:
+    """`text[start:end]` 수의 차원을 «둘레까지 보고» 정한다.
+
+    ★ 차원은 검수가 적어 낸 글자가 아니라 «원문에서 그 수가 무엇이었나»의 성질이다.
+      값의 범위 안만 보면 「1,851천개이며」·「9,937백만달러를」의 원문값을
+      「1,851천」·「9,937백만」으로 잘라 적는 것만으로 수량·외화가 원 금액의
+      근거가 된다(2026-09-11 독립 검토 P2-1, 실제 코퍼스 문장으로 재현).
+    """
+
+    base = _dimension(text[start:end])
+    if base != DIMENSION_AMOUNT:
+        return base
+    if (FOREIGN_CURRENCY_TAIL_RE.match(text, end)
+            or FOREIGN_CURRENCY_HEAD_RE.search(text, 0, start)):
+        return DIMENSION_FOREIGN
+    if COUNT_UNIT_TAIL_RE.match(text, end):
+        return DIMENSION_COUNT
+    return base
+
+
+def _cell_label(text: str, position: int) -> str:
+    """`position`의 수 바로 앞 «칸 이름».
+
+    줄·절 경계, 단위 머리말의 끝, 그리고 «바로 앞 수의 끝» 중 가장 뒤에서 읽는다.
+    한 줄에 여러 칸이 늘어선 표에서 앞 칸의 이름이 뒤 칸까지 번지지 않게 하려는 것이다.
+    """
+
+    from src.features.composer.verify import _NUMBER_UNIT_RE
+
+    start = 0
+    for match in CELL_BOUNDARY_RE.finditer(text, 0, position):
+        start = max(start, match.end())
+    for match in SOURCE_UNIT_HEADER_RE.finditer(text, 0, position):
+        start = max(start, match.end())
+    for match in _NUMBER_UNIT_RE.finditer(text, 0, position):
+        start = max(start, _value_span_end(text, match.end()))
+    return text[min(start, position):position]
 
 
 def _bare_amount_token(value: str) -> Decimal | None:
@@ -259,10 +326,7 @@ def _amount_spans(text: str) -> tuple[_BoundAmount, ...]:
             continue
         if any(match.start() < end and start < match.end() for start, end in (*spans, *dates)):
             continue
-        end = match.end()
-        count_unit = COUNT_UNIT_RE.match(text, end)
-        if count_unit:
-            end = count_unit.end()
+        end = _value_span_end(text, match.end())
         start = match.start() - 1 if _negative_at(text, match.start()) else match.start()
         spans.append((start, end))
     spans = [(start - 1 if _negative_at(text, start) else start, end) for start, end in spans]
@@ -271,7 +335,9 @@ def _amount_spans(text: str) -> tuple[_BoundAmount, ...]:
         value_text = text[start:end]
         values = _amount_values(value_text)
         if sum(values.values()) == 1:
-            result.append(_BoundAmount(start, end, value_text, next(iter(values)), _dimension(value_text)))
+            result.append(_BoundAmount(
+                start, end, value_text, next(iter(values)), _dimension_at(text, start, end)
+            ))
     for start, end in bare:
         if any(start < other_end and other_start < end
                for other_start, other_end in (*spans, *dates)):
@@ -284,7 +350,9 @@ def _amount_spans(text: str) -> tuple[_BoundAmount, ...]:
             continue
         if _negative_at(text, start):
             start, token = start - 1, -token
-        result.append(_BoundAmount(start, end, text[start:end], token * scale, "금액"))
+        result.append(
+            _BoundAmount(start, end, text[start:end], token * scale, DIMENSION_AMOUNT)
+        )
     return tuple(sorted(result, key=lambda amount: (amount.start, amount.end)))
 
 
@@ -340,7 +408,7 @@ def _metric_value_spans(metric: str, value: str, text: str) -> tuple[_BoundAmoun
                 for previous in reversed(_amount_spans(remainder)):
                     remainder = remainder[:previous.start] + remainder[previous.end:]
                 remainder = ORDINAL_RE.sub("", remainder)
-                if number.dimension == "비율":
+                if number.dimension == DIMENSION_RATIO:
                     remainder = RATIO_QUALIFIER_RE.sub("", remainder)
                 remainder = NUMERIC_BRIDGE_RE.sub("", remainder)
                 remainder = PAIR_SEPARATOR_RE.sub("", remainder)
@@ -357,9 +425,9 @@ def _bound_period(metric: str, number: _BoundAmount, text: str) -> tuple[int, in
     # 금액 비교 뒤의 변화율은 직전 비교대상 연도가 아닌 주지표 기간이다.
     # 비율 자체를 비교하는 '2024년 3.4% -> 2025년 7.9%'에는 적용하지 않는다.
     anchors = [m for m in re.finditer(re.escape(metric), text[:number.start])]
-    if anchors and number.dimension == "비율":
+    if anchors and number.dimension == DIMENSION_RATIO:
         previous = [n for n in _amount_spans(text[anchors[-1].end():number.start])
-                    if n.dimension == "금액"]
+                    if n.dimension == DIMENSION_AMOUNT]
         if previous:
             period_position = anchors[-1].end() + previous[0].start
     return _period_at(text, period_position)
@@ -403,13 +471,32 @@ def _bound_value(entry: Mapping, quote: str) -> Decimal | None:
 
 
 def _dimension(text: str) -> str:
+    """이 값이 «무엇의» 수인지. same_dimension 비교가 이 값을 본다.
+
+    ★ 꼬리 단위(원·%·배)만 보면 꼬리가 없는 「1,851천개」·「9,937백만불」이 전부
+      «금액»이 된다. 그러면 원문의 생산수량·외화가 「…원」 주장의 근거로 결속된다
+      (2026-09-11 독립 검토 P2-1, 실제 코퍼스 문장으로 재현).
+    ★ 개수 꼬리는 _amount_spans 가 span 끝을 늘릴 때 쓰는 목록(COUNT_UNIT_RE)을
+      그대로 본다 — 잣대를 두 벌로 두지 않는다.
+    """
+
     from src.features.composer.verify import _NUMBER_UNIT_RE
+
     units = {m.group("tail") for m in _NUMBER_UNIT_RE.finditer(text) if m.group("tail")}
     if units.intersection({"%", "퍼센트"}):
-        return "비율"
+        return DIMENSION_RATIO
     if "배" in units:
-        return "배수"
-    return "금액"
+        return DIMENSION_MULTIPLE
+    for match in _NUMBER_UNIT_RE.finditer(text):
+        if match.group("tail"):
+            continue
+        if FOREIGN_CURRENCY_TAIL_RE.match(text, match.end()):
+            return DIMENSION_FOREIGN
+        if FOREIGN_CURRENCY_HEAD_RE.search(text, 0, match.start()):
+            return DIMENSION_FOREIGN
+        if COUNT_UNIT_RE.match(text, match.end()):
+            return DIMENSION_COUNT
+    return DIMENSION_AMOUNT
 
 
 def _numeric_valid(text: str, entries: object, sources: Mapping[str, str]) -> bool:
@@ -444,9 +531,16 @@ def _numeric_valid(text: str, entries: object, sources: Mapping[str, str]) -> bo
         value = _bound_value(entry, quote)
         values = _amount_values(candidate_value)
         from src.features.composer.verify import _number_matches_by_math
-        same_dimension = _dimension(candidate_value) == _dimension(entry["원문값"])
+        # 차원은 «검수가 적어 낸 글자»가 아니라 원문에서 그 수가 무엇이었나로 본다.
+        # 글자만 보면 「1,851천개」·「9,937백만달러」의 표지를 떼어 적는 것만으로
+        # 수량·외화가 원 금액의 근거가 된다(2026-09-11 실측).
+        source_dimensions = {
+            number.dimension
+            for number in _metric_value_spans(source_metric, entry["원문값"], quote)
+        } or {_dimension(entry["원문값"])}
+        same_dimension = candidate.dimension in source_dimensions
         ratio_conversion = (RATIO_METRIC_RE.search(_label(metric))
-                            and not _amounts(entry["원문값"]) and _dimension(candidate_value) == "비율")
+                            and not _amounts(entry["원문값"]) and _dimension(candidate_value) == DIMENSION_RATIO)
         if (value is None or sum(values.values()) != 1
             or not _number_matches_by_math(_amounts(candidate_value)[0], frozenset({value}))
             or not (same_dimension or ratio_conversion)):
@@ -625,7 +719,7 @@ def _reported_comparison_valid(text: str, entries: object, sources: Mapping[str,
     if not claims:
         return False
     for claim in claims:
-        rates = [number for number in _amount_spans(claim) if number.dimension == "비율"]
+        rates = [number for number in _amount_spans(claim) if number.dimension == DIMENSION_RATIO]
         if CONTINUOUS_RE.search(claim) or len(rates) != 1:
             return False
         claim_direction = (bool(UP_RE.search(claim)), bool(DOWN_RE.search(claim)))
@@ -653,7 +747,7 @@ def _reported_comparison_valid(text: str, entries: object, sources: Mapping[str,
                     continue
                 if bool(RELATIVE_YEAR_RE.search(claim)) != bool(RELATIVE_YEAR_RE.search(reported)):
                     continue
-                reported_rates = [n for n in _amount_spans(reported) if n.dimension == "비율"]
+                reported_rates = [n for n in _amount_spans(reported) if n.dimension == DIMENSION_RATIO]
                 if len(reported_rates) != 1 or reported_rates[0].value != rates[0].value:
                     continue
                 positions = [match.span() for match in re.finditer(re.escape(reported), quote)]

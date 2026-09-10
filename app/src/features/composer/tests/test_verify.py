@@ -1401,3 +1401,41 @@ def test_검수_지침이_수급_방향_역전과_합계_귀속을_금지한다(
     assert "«제공받은·수령한·차입한·담보로 제공받은»" in prompt
     assert "«제공한·설정한·대여한·담보로 제공한»" in prompt
     assert "전체 합계를 한 거래처에 귀속시키면 거짓이다." in prompt
+
+
+def test_배율_어휘_목록과_배율표의_열쇠가_같고_긴_어휘가_앞선다():
+    """어휘만 더하고 배율표에 안 더하면 «조용히 배율 1»로 읽혀 값이 틀린 채 통과한다.
+
+    ★ 기대값은 생산 배율표를 베끼지 않고 한글 수사 구성으로 «따로» 구한다 —
+      배율표를 그대로 읽어 비교하면 값이 틀려도 초록불이 되는 순환 검증이 된다.
+    ⚠️ 정규식 교대는 먼저 적힌 것을 고른다. 앞선 어휘가 뒤 어휘의 앞부분이면
+      「천만원」이 「천」으로 읽혀 값이 1/10,000이 된다.
+    """
+    from decimal import Decimal
+
+    from src.features.composer.grounding_constants import (
+        MAGNITUDE_SCALES,
+        MAGNITUDE_TOKENS,
+    )
+
+    syllable_scale = {
+        "십": Decimal(10) ** 1,
+        "백": Decimal(10) ** 2,
+        "천": Decimal(10) ** 3,
+        "만": Decimal(10) ** 4,
+        "억": Decimal(10) ** 8,
+        "조": Decimal(10) ** 12,
+    }
+    assert set(MAGNITUDE_TOKENS) == set(MAGNITUDE_SCALES)
+    assert len(MAGNITUDE_TOKENS) == len(set(MAGNITUDE_TOKENS))
+    for token in MAGNITUDE_TOKENS:
+        expected = Decimal(1)
+        for syllable in token:
+            assert syllable in syllable_scale, token
+            expected *= syllable_scale[syllable]
+        assert MAGNITUDE_SCALES[token] == expected, token
+    for earlier in range(len(MAGNITUDE_TOKENS)):
+        for later in range(earlier + 1, len(MAGNITUDE_TOKENS)):
+            assert not MAGNITUDE_TOKENS[later].startswith(MAGNITUDE_TOKENS[earlier]), (
+                MAGNITUDE_TOKENS[earlier], MAGNITUDE_TOKENS[later]
+            )

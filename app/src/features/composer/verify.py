@@ -1551,6 +1551,10 @@ def _table_grounding_source(table: Optional[PerformanceTable]) -> str:
         # 아래 header 쪽과 같은 잣대다 — 맨 「2025」는 날짜 표기가 아니라서
         # _period_at 이 못 읽고, 그러면 「2025년 …」이라고 쓴 후보의 기간이
         # 원문 기간과 어긋나 표시값·원값 모두 결속에 실패한다(2026-09-11 실측).
+        # ★ 이 줄은 판정을 «넓힌다». 전에는 표를 근거로 연도를 밝힌 문장이 해가
+        #   맞든 틀리든 전부 떨어졌다. 이제 맞는 해는 통과하고 틀린 해는 떨어진다 —
+        #   기간 검사가 비로소 작동하는 것이다. 이 표 모양은 운영에서 유일하게
+        #   쓰이는 모양이다(company_performance·audit_financials 둘 다 행 머리가 연도).
         if metric.isdigit() and len(metric) == 4:
             metric += "년"
         raw_row = _raw_table_row(table, index)
