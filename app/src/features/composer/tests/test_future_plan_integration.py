@@ -276,7 +276,11 @@ def test_diagrams_in_other_sections_are_not_asked_for_future_evidence(grouped):
 
 
 def test_prose_in_the_same_section_is_not_asked_for_future_evidence():
-    """flat 문장 경로에는 칸이 없다 — 6장의 정확한 «현재 전략» 산문은 대상이 아니다."""
+    """flat 문장 경로에는 칸이 없다 — «미래 근거» 요구 대상이 아니다.
+
+    ⚠️ 다만 6장 장 계약이 생긴 뒤로는 앞으로의 이야기가 없는 이 문장이 그 계약에
+      걸려 공개에서 빠진다. 이 시험은 «미래 근거를 묻지 않는다»만 확인한다.
+    """
 
     sentence = ComposedSentence(
         text="K컬처 여행 상품을 런칭하여 매출 증대가 이뤄지고 있습니다.",
@@ -294,10 +298,18 @@ def test_prose_in_the_same_section_is_not_asked_for_future_evidence():
 
     result = verify_report(draft, FRAGMENTS, None, ask)
     kept = result.sections[0].sentences
-    # 검증기가 상태 라벨만 «검증됨»으로 바꾼다 — 문장 자체는 그대로 남아야 한다.
-    assert len(kept) == 1 and len(calls) == 1
-    assert kept[0].text == sentence.text and kept[0].citations == sentence.citations
-    assert kept[0].grade == sentence.grade
+    # 검수는 «1회» 그대로이고 미래 근거를 묻지도 않는다 — 이 시험의 원래 요점이다.
+    assert len(calls) == 1
+    # ⚠️ 계약 변경(6장 장 계약): 앞으로의 이야기가 없는 이 문장은 이제 그 계약에
+    #   걸려 공개에서 빠진다. 미래 근거 결속이 뺀 것이 «아니다».
+    from src.features.composer.future_plan_guard import future_section_prose_problem
+    from src.features.composer.future_plan_constants import (
+        FUTURE_SECTION_NO_FORWARD_STATEMENT,
+    )
+    assert future_section_prose_problem(sentence.text) == (
+        FUTURE_SECTION_NO_FORWARD_STATEMENT
+    )
+    assert len(kept) == 0
 
 
 # ══════════════════════════════════════════════════════════

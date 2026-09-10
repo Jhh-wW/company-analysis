@@ -6,6 +6,10 @@ import re
 
 CULTURE_EVIDENCE_SCOPE_MISMATCH: Final[str] = "culture_evidence_scope_mismatch"
 CULTURE_ACCOUNTING_POLICY_MISPLACED: Final[str] = "culture_accounting_policy_misplaced"
+# ★ review_diagnostic_constants.REVIEW_SCOPE_ITEMS와 반드시 같은 값이어야
+#   진단이 UI 표("장별 작성범위")에서 새지 않는다 — culture_accounting_policy_
+#   misplaced와 같은 UI 범주를 쓴다(둘 다 "잘못된 장에 실린 내용").
+CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED: Final[str] = "culture_financial_risk_scope_misplaced"
 
 # 공백을 정규화한 문장에만 적용한다. 회사·상품·출시 시점은 조건이 아니다.
 ORGANIZATIONAL_CLAIM_RE: Final[re.Pattern[str]] = re.compile(
@@ -70,4 +74,42 @@ CULTURE_ACCOUNTING_GOVERNANCE_VERB_RE: Final[re.Pattern[str]] = re.compile(
 CULTURE_ACCOUNTING_GOVERNANCE_NEGATION_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:검토|승인|감독)(?:하지않|하지못|되지않|되지못)|받지않|받지못|"
     r"미(?:검토|승인|감독)"
+)
+
+# ── 재무 위험관리 "일반 목표/노출" 서술이 culture 장에 잘못 들어간 경우만
+#    좁게 잡는다(culture_accounting_*와 같은 절 단위·같은 면제 설계) ──
+# «금융시장 변동성에 초점을 맞춘 위험관리정책·재무성과에 미치는 부정적 영향
+# 최소화» 같은 일반 목표 서술과, «환율 변동 위험 노출·파생상품 이용» 자체
+# (절차 없이)는 업무 절차·인재상 설명이 아니고 current_challenges 장과
+# 중복되므로 막는다. 같은 절에 검토/승인/감독/회의/보고/교육/주관 동사가
+# 활용형으로 결속돼 있으면(예: 이사회 감독·재무 부서 주관) 일하는 방식
+# 자료이므로 보존한다. 회사명·산업·인용 ID·글자수는 조건이 아니다 —
+# "재무"라는 낱말 하나로 일괄 차단하지도 않는다.
+CULTURE_FINANCIAL_RISK_POLICY_GOAL_RE: Final[re.Pattern[str]] = re.compile(
+    r"위험관리정책"
+)
+CULTURE_FINANCIAL_RISK_GOAL_CONTEXT_RE: Final[re.Pattern[str]] = re.compile(
+    r"금융시장의?변동성|재무성과에?미치는?부정적영향"
+)
+CULTURE_FINANCIAL_RISK_EXPOSURE_RE: Final[re.Pattern[str]] = re.compile(
+    r"환율변동위험|통화의?환율변동"
+)
+CULTURE_FINANCIAL_RISK_DERIVATIVE_RE: Final[re.Pattern[str]] = re.compile(
+    r"파생상품을?(?:이용|활용)"
+)
+# 검토·승인·감독뿐 아니라 회의·보고·교육·주관 동사도 활용형(하다/한다/받다
+# 등)으로 쓰였으면 실제 업무 절차로 보고 보존한다. "사업보고서"(문서명)의
+# "보고"나 "감독당국"(외부 기관 명사)의 "감독"처럼 활용되지 않은 채 다른
+# 낱말 속에 들어 있는 경우는 동사가 아니므로 제외한다 — 명사 하나만
+# 추가해서 순수 노출·목표 문장을 잘못 면제받지 않게 하는 좁힘이다.
+CULTURE_FINANCIAL_RISK_GOVERNANCE_VERB_RE: Final[re.Pattern[str]] = re.compile(
+    r"검토(?:하|한|함|받)|승인(?:하|한|함|받)|"
+    r"감독(?!당국)(?:하|한|함|받|을|를|의)|"
+    r"회의(?:에서|를|에)|"
+    r"보고(?!서)(?:하|한|함|받)|"
+    r"교육(?:하|한|함|받)|주관(?:하|한|함)"
+)
+CULTURE_FINANCIAL_RISK_GOVERNANCE_NEGATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:검토|승인|감독|회의|보고|교육|주관)(?:하지않|하지못|되지않|되지못)|"
+    r"받지않|받지못|미(?:검토|승인|감독|보고|교육)"
 )

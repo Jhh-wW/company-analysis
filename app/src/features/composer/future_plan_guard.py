@@ -62,6 +62,8 @@ from src.features.composer.future_plan_constants import (
     FUTURE_QUOTE_NOT_IN_SOURCE,
     FUTURE_QUOTE_TOO_SHORT,
     FUTURE_SECOND_CLAIM_UNPROVEN,
+    FUTURE_SECTION_FORWARD_RE,
+    FUTURE_SECTION_NO_FORWARD_STATEMENT,
     FUTURE_SLOTS_DEGENERATE,
     FUTURE_SLOTS_MISSING,
     FUTURE_SLOTS_SPLIT_ACROSS_CELLS,
@@ -611,6 +613,27 @@ def future_plan_problem(
     if any(index not in covered for index in range(len(_segments(claim_cell)))):
         return FUTURE_SECOND_CLAIM_UNPROVEN
     return ""
+
+
+def future_section_prose_problem(text: str) -> str:
+    """명시적 진행·완료만 있고 미래 구문이 없는 본문을 미래 장에서 제외한다.
+
+    양태 표지가 없는 문장과 현재+미래 혼합 문장은 기존 의미 검수에 남긴다.
+    이 검사는 장 배치만 다루며 자기 인용·대상·활동·양태 근거를 대신하지 않는다.
+    """
+    surface = _normalized(text)
+    if FUTURE_SECTION_FORWARD_RE.search(surface):
+        return ""
+    ongoing_or_done = False
+    for sentence in _sentences(surface):
+        for match in MODALITY_RE.finditer(sentence):
+            kind = _modality_kind(match)
+            if kind in MODALITY_FUTURE_KINDS:
+                return ""
+            ongoing_or_done = True
+    if not ongoing_or_done:
+        return ""
+    return FUTURE_SECTION_NO_FORWARD_STATEMENT
 
 
 def _prose_plan_claims(text: str) -> tuple[tuple[int, str, int, int], ...]:

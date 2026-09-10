@@ -16,6 +16,13 @@ from src.features.composer.culture_constants import (
     CULTURE_ACCOUNTING_RECOGNITION_RE,
     CULTURE_ATTRIBUTION_RE,
     CULTURE_EVIDENCE_SCOPE_MISMATCH,
+    CULTURE_FINANCIAL_RISK_DERIVATIVE_RE,
+    CULTURE_FINANCIAL_RISK_EXPOSURE_RE,
+    CULTURE_FINANCIAL_RISK_GOAL_CONTEXT_RE,
+    CULTURE_FINANCIAL_RISK_GOVERNANCE_NEGATION_RE,
+    CULTURE_FINANCIAL_RISK_GOVERNANCE_VERB_RE,
+    CULTURE_FINANCIAL_RISK_POLICY_GOAL_RE,
+    CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,
     CULTURE_FLOW_CELL_COUNT,
     CURRENT_CULTURE_DENIAL_RE,
     EXPLICIT_CULTURE_RE,
@@ -128,6 +135,44 @@ def _recognition_terms(surface_text: str) -> frozenset[str]:
 
     return frozenset(match.group(0) for match
                      in CULTURE_ACCOUNTING_RECOGNITION_RE.finditer(surface_text))
+
+
+def culture_financial_risk_goal_problem(text: str) -> str:
+    """문화 본문의 순수 재무위험 목표·노출 설명을 제외한다.
+
+    같은 절에 부정되지 않은 업무 절차 구문이 있으면 보존한다. 절차의
+    주체나 사실성은 기존 인용 검수가 맡으며 이 함수는 장 배치만 검사한다.
+    """
+    return (CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED
+            if _pure_financial_risk_goal_clauses(text) else "")
+
+
+def _pure_financial_risk_goal_clauses(text: str) -> tuple[str, ...]:
+    """«순수 재무위험 목표·노출» 절만 표면형으로 모아 준다.
+
+    ★ 판단 경계는 «같은 절»이다. 뒤 절의 이사회 언급이나 부정된 승인으로는
+      면제가 만들어지지 않는다 — culture_accounting과 같은 경계 규칙.
+    """
+
+    found: list[str] = []
+    for clause in SOURCE_CLAUSE_SPLIT_RE.split(text):
+        surface_clause = _surface(clause)
+        if not surface_clause:
+            continue
+        is_goal = (CULTURE_FINANCIAL_RISK_POLICY_GOAL_RE.search(surface_clause)
+                   and CULTURE_FINANCIAL_RISK_GOAL_CONTEXT_RE.search(surface_clause))
+        is_exposure = (CULTURE_FINANCIAL_RISK_EXPOSURE_RE.search(surface_clause)
+                       or CULTURE_FINANCIAL_RISK_DERIVATIVE_RE.search(surface_clause))
+        if not (is_goal or is_exposure):
+            continue
+        governance_bound = (
+            CULTURE_FINANCIAL_RISK_GOVERNANCE_VERB_RE.search(surface_clause)
+            and not CULTURE_FINANCIAL_RISK_GOVERNANCE_NEGATION_RE.search(surface_clause)
+        )
+        if governance_bound:
+            continue
+        found.append(surface_clause)
+    return tuple(found)
 
 
 def culture_accounting_flow_problem(

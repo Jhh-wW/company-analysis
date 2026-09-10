@@ -64,6 +64,7 @@ from dataclasses import replace
 from typing import Callable, Final, Optional
 
 from src.features.composer.constants import (
+    CHALLENGE_FLOW_SECTION_ID,
     FLOW_ARROW_SECTION_IDS,
     FLOW_HEADERS_BY_SECTION,
     FLOW_RELATION_REVIEW_GUIDE,
@@ -73,6 +74,7 @@ from src.features.composer.constants import (
     STRATEGY_TABLE_SECTION_ID,
 )
 from src.features.composer.logic import extract_json_payload
+from src.features.composer.challenge_guard import challenge_response_problem
 from src.features.composer.diagram_review_constants import (
     DIAGRAM_CITATIONS_PREFIX,
     DIAGRAM_EVIDENCE_GUIDE,
@@ -576,6 +578,8 @@ def _review_rows(
         if result == VERDICT_TRUE and number not in grounding_problems:
             sources = candidates[number][1]
             flow_problem = flow_scope_problem(row.cells, sources)
+            if not flow_problem and section_id == CHALLENGE_FLOW_SECTION_ID:
+                flow_problem = challenge_response_problem(row.cells)
             if not flow_problem and section_id == "culture":
                 # 축약된 칸은 원문을 줄여 적어 산문 검사의 세 표지 결합에 걸리지
                 # 않는다. 그 행이 «인용한 원문»의 순수 회계 절과 결속됐을 때만 막는다.

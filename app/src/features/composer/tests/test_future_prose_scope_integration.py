@@ -50,9 +50,8 @@ ACTUAL_FRAGMENT = _CASE["fragment_id"]
 GOOD_SOURCE = "당사는 향후 팬 플랫폼 사업을 확대할 계획입니다."
 GOOD_PROSE = "회사는 팬 플랫폼 사업을 확대할 계획이다."
 GOOD_FRAGMENT = "77"
-#: 6장에 있어도 «현재 진행» 서술이면 이 검사는 아무것도 요구하지 않는다.
-#: 원문도 진행형이어야 한다 — 계획 원문에 진행 서술을 붙이면 기존 양태 가드가
-#: (이 검사와 무관하게) 먼저 막는다.
+#: 현재 진행 서술에는 미래 근거 배열을 요구하지 않는다. 다만 미래 장에
+#: 현재 사실만 싣는 것은 장 범위 검사에서 제외된다.
 PRESENT_SOURCE = "당사는 팬 플랫폼 사업을 확대하고 있습니다."
 PRESENT_PROSE = "회사는 팬 플랫폼 사업을 확대하고 있다."
 PRESENT_FRAGMENT = "78"
@@ -223,8 +222,13 @@ def test_a_company_plan_backed_by_its_own_source_is_published(grouped):
 
 
 @pytest.mark.parametrize("grouped", (False, True))
-def test_present_progress_prose_in_the_same_chapter_is_published(grouped):
-    """6장에 있어도 진행 서술이면 미래 근거를 요구하지 않는다."""
+def test_present_progress_prose_in_the_same_chapter_is_dropped_by_the_section_contract(grouped):
+    """6장 «장 계약» 변경: 앞으로의 이야기가 없는 진행 서술은 이 장에 남지 않는다.
+
+    예전 계약은 「진행 서술이면 미래 근거를 요구하지 않는다」였고 그대로 실렸다.
+    실측(새 SM 6장 두 문장)에서 그것이 «분류 누락»으로 드러나 계약을 바꾼다.
+    미래 근거를 요구하지 않는다는 점은 그대로다 — 요구하는 것은 «자격»이다.
+    """
 
     calls, diagnostics = [], []
     checked = _run(
@@ -232,7 +236,7 @@ def test_present_progress_prose_in_the_same_chapter_is_published(grouped):
         (ComposedSentence(PRESENT_PROSE, (PRESENT_FRAGMENT,), "확인"),),
         _reviewer(calls, omit_future=True), grouped, diagnostics,
     )
-    assert _kept(checked) == [PRESENT_PROSE]
+    assert PRESENT_PROSE not in _kept(checked)
 
 
 @pytest.mark.parametrize("grouped", (False, True))

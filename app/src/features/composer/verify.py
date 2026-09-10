@@ -31,17 +31,20 @@ from src.features.composer.news_usage import attribution_prefix, news_metadata
 from src.features.composer.news_block import _is_news_fragment
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_accounting_policy_problem,
+    culture_financial_risk_goal_problem,
     culture_flow_problem, culture_problem,
 )
 from src.features.composer.prose_own_source import (
     prose_own_source_problem,
 )
 from src.features.composer.scope_guard import flow_scope_problem
-from src.features.composer.constants import STRATEGY_TABLE_SECTION_ID
+from src.features.composer.challenge_guard import challenge_response_problem
+from src.features.composer.constants import CHALLENGE_FLOW_SECTION_ID, STRATEGY_TABLE_SECTION_ID
 from src.features.composer.future_plan_constants import (
     FUTURE_PLAN_REVIEW_GUIDE,
 )
 from src.features.composer.future_plan_guard import (
+    future_section_prose_problem,
     future_plan_entries_by_number, future_plan_problem,
     future_plan_prose_problem,
 )
@@ -1151,7 +1154,8 @@ def _apply_grounding(
         # 실제 소유 장을 따른다. 오래된 주장 슬롯만으로 요약이나 다른 장의
         # 정상 회계 설명까지 문화 장의 배치 제한에 넣지 않는다.
         if context and context[:2] == ("culture", DIAGNOSTIC_KIND_BODY):
-            problem = culture_accounting_policy_problem(text)
+            problem = (culture_accounting_policy_problem(text)
+                       or culture_financial_risk_goal_problem(text))
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
@@ -1161,6 +1165,11 @@ def _apply_grounding(
         # 표 계약은 바뀌지 않는다. 다른 장의 산문은 이 조건에 들어오지 않는다.
         if (context and context[:2] == (STRATEGY_TABLE_SECTION_ID, DIAGNOSTIC_KIND_BODY)
                 and not (flow_cells_by_number and number in flow_cells_by_number)):
+            problem = future_section_prose_problem(text)
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
             problem = future_plan_prose_problem(
                 text, sources, future_evidence.get(number)
             )
@@ -1171,6 +1180,8 @@ def _apply_grounding(
         if flow_cells_by_number is not None and number in flow_cells_by_number:
             cells = flow_cells_by_number[number]
             problem = flow_scope_problem(cells, sources)
+            if not problem and context and context[0] == CHALLENGE_FLOW_SECTION_ID:
+                problem = challenge_response_problem(cells)
             if not problem and context and context[0] == "culture":
                 # 축약된 칸은 원문을 줄여 적어 산문 검사의 세 표지 결합에 걸리지
                 # 않는다. 그 행이 «인용한 원문»의 순수 회계 절과 결속됐을 때만 막는다.
