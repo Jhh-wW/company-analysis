@@ -40,9 +40,12 @@ def test_인이지_평문에서_당기와_전기_세_계정을_읽는다() -> No
     table = result.performance_table
     assert table is not None
     assert table.headers == ["사업연도", "매출액", "영업이익", "당기순이익"]
+    # 2026-09-11 자리수 규칙 갱신 — 가장 작은 값 21.66억이 100억 미만이라
+    # 소수 한 자리를 쓴다. 정수로 찍으면 -23.8과 -24.0이 똑같이 «-24»가 된다.
+    assert table.scale_places == 1
     assert table.rows == [
-        ["2025", "43", "-24", "-22"],
-        ["2024", "29", "-24", "-33"],
+        ["2025", "42.7", "-23.8", "-21.7"],
+        ["2024", "28.7", "-24.0", "-33.1"],
     ]
     assert table.raw_rows[0] == [
         "2025",
@@ -54,9 +57,9 @@ def test_인이지_평문에서_당기와_전기_세_계정을_읽는다() -> No
     assert table.raw_unit == "원"
     assert table.scale_divisor == "100000000"
     assert table.numeric_checks[0] == [
-        "4,274,313,429|100000000|0|43",
-        "-2,381,829,906|100000000|0|-24",
-        "-2,166,028,141|100000000|0|-22",
+        "4,274,313,429|100000000|1|42.7",
+        "-2,381,829,906|100000000|1|-23.8",
+        "-2,166,028,141|100000000|1|-21.7",
     ]
 
 
@@ -95,8 +98,10 @@ def test_하이브_천원_원문은_API_대조값과_같고_최근_두_해만_�
 
     table = result.performance_table
     assert table is not None
-    assert table.rows[0] == ["2025", "26,499", "493", "-2,544"]
-    assert table.rows[1] == ["2024", "22,556", "1,840", "-34"]
+    # 2026-09-11 자리수 규칙 갱신 — 2024 당기순이익 -34.3억이 100억 미만이다.
+    assert table.scale_places == 1
+    assert table.rows[0] == ["2025", "26,498.7", "493.2", "-2,543.9"]
+    assert table.rows[1] == ["2024", "22,556.5", "1,840.5", "-34.3"]
     assert table.raw_rows[0] == [
         "2025",
         "2,649,870,246",
@@ -106,9 +111,9 @@ def test_하이브_천원_원문은_API_대조값과_같고_최근_두_해만_�
     assert table.raw_unit == "천원"
     assert table.scale_divisor == "100000"
     assert table.numeric_checks[0] == [
-        "2,649,870,246|100000|0|26,499",
-        "49,318,276|100000|0|493",
-        "-254,385,318|100000|0|-2,544",
+        "2,649,870,246|100000|1|26,498.7",
+        "49,318,276|100000|1|493.2",
+        "-254,385,318|100000|1|-2,543.9",
     ]
 
 
@@ -184,7 +189,8 @@ _SMALL_COMPANY_INCOME_XML = """
 #: 표시값으로 읽은 변동과 원값으로 계산한 변동의 허용 차이(%p).
 #: ★ 리터럴로 둔다 — 생산 상수를 import해 기대값을 만들면 자리수 상한이
 #:   낮아지는 회귀를 못 잡는 순환 검증이 된다.
-#: ★ 옛 정수 표시(1 / 4)의 차이는 2.45%p였다. 이 하한은 그것을 확실히 걸러낸다.
+#: ★ 이 문턱이 걸러 낸 실측 두 건: 옛 정수 표시(1 / 4)는 2.45%p, 유효숫자
+#:   방식이 남긴 「1.0 / 1.0」 구간은 8.65%p 어긋났다.
 _MAX_DISPLAY_CHANGE_GAP_POINTS = 1.0
 
 
@@ -239,15 +245,58 @@ def test_값이_모두_크면_기존_정수_표시를_그대로_쓴다() -> None
 
     result = parse_audit_financials(
         "",
-        xml_text=_fixture("20260320000802_income.xml"),
-        cite="하이브 사업보고서",
+        xml_text=_fixture("20260410001926_income.xml"),
+        cite="우아한형제들 연결감사보고서",
     )
 
     table = result.performance_table
     assert table is not None
     assert table.scale_places == 0
-    assert table.rows[0] == ["2025", "26,499", "493", "-2,544"]
-    assert table.numeric_checks[0][0] == "2,649,870,246|100000|0|26,499"
+    assert table.rows[0] == ["2025", "52,830", "5,929", "4,406"]
+    assert (
+        table.numeric_checks[0][0] == "5,282,986,749,183|100000000|0|52,830"
+    )
+
+
+def test_최소값이_1억_언저리여도_표시로_변동을_읽을_수_있다() -> None:
+    """★ 독립 검토 반례 — 1.04억과 0.95억이 둘 다 「1.0」으로 찍히면 안 된다.
+
+    앞선 판은 반올림한 표시값의 «유효숫자 개수»로 자리수를 정했다. 십진수는
+    반올림하며 생긴 뒤따르는 0도 자릿수로 세므로 1.0을 두 자리로 봤고, 자리수가
+    1에서 멈춰 두 해가 같은 글자로 찍혔다. 독자가 읽는 변동 0%, 실제 -8.65%다.
+    """
+
+    xml = """
+    <TABLE><TR><TD>손 익 계 산 서</TD></TR>
+    <TR><TD>2025.01.01부터 2025.12.31까지</TD></TR>
+    <TR><TD>2024.01.01부터 2024.12.31까지</TD></TR>
+    <TR><TD>(단위: 원)</TD></TR></TABLE>
+    <TABLE>
+    <TR><TD>매출액</TD><TD>27,351,053,389</TD><TD>25,811,194,484</TD></TR>
+    <TR><TD>영업이익</TD><TD>436,660,956</TD><TD>583,314,634</TD></TR>
+    <TR><TD>당기순이익</TD><TD>95,000,000</TD><TD>104,000,000</TD></TR>
+    </TABLE>
+    <TABLE><TR><TD>현 금 흐 름 표</TD></TR></TABLE>
+    """
+
+    result = parse_audit_financials("", xml_text=xml)
+    table = result.performance_table
+    assert table is not None
+    assert table.scale_places == 2
+    assert [row[3] for row in table.rows] == ["0.95", "1.04"]
+
+    def _number(value: str) -> float:
+        return float(value.replace(",", ""))
+
+    raw_change = (95_000_000 - 104_000_000) / 104_000_000 * 100
+    shown_change = (
+        (_number(table.rows[0][3]) - _number(table.rows[1][3]))
+        / _number(table.rows[1][3])
+        * 100
+    )
+
+    assert round(raw_change, 2) == -8.65
+    assert abs(shown_change - raw_change) <= _MAX_DISPLAY_CHANGE_GAP_POINTS
 
 
 def test_괄호_삼각형_마이너스와_HALF_UP을_처리한다() -> None:
@@ -257,9 +306,9 @@ def test_괄호_삼각형_마이너스와_HALF_UP을_처리한다() -> None:
     <TR><TD>2024.01.01부터 2024.12.31까지</TD></TR>
     <TR><TD>(단위: 원)</TD></TR></TABLE>
     <TABLE>
-    <TR><TD>매출액</TD><TD>50,000,000</TD><TD>(50,000,000)</TD></TR>
-    <TR><TD>영업이익(손실)</TD><TD>△50,000,000</TD><TD>-50,000,000</TD></TR>
-    <TR><TD>당기순이익(손실)</TD><TD>49,999,999</TD><TD>(49,999,999)</TD></TR>
+    <TR><TD>매출액</TD><TD>124,500,000</TD><TD>(124,500,000)</TD></TR>
+    <TR><TD>영업이익(손실)</TD><TD>△124,500,000</TD><TD>-124,500,000</TD></TR>
+    <TR><TD>당기순이익(손실)</TD><TD>500,000</TD><TD>(500,000)</TD></TR>
     </TABLE>
     <TABLE><TR><TD>현 금 흐 름 표</TD></TR></TABLE>
     """
@@ -268,13 +317,16 @@ def test_괄호_삼각형_마이너스와_HALF_UP을_처리한다() -> None:
 
     table = result.performance_table
     assert table is not None
-    # 2026-09-11 자리수 규칙 도입으로 기대 문자열을 갱신했다 — 이 표의 가장
-    # 작은 값 0.5억은 정수로 찍으면 「0」·「1」이 되어 부호와 크기가 함께
-    # 사라진다. 이 시험의 뜻(괄호·△ 음수 읽기와 HALF_UP)은 그대로다:
-    # 0.49999999억이 0.50으로 올라가는 것이 HALF_UP의 증거다.
+    # 2026-09-11 갱신 — 자리수 규칙이 들어와 기대 문자열이 바뀌었고, 값도
+    # «반올림 방식이 실제로 갈리는» 것으로 바꿨다. 소수 둘째 자리에서
+    # HALF_UP과 HALF_EVEN이 갈리려면 셋째 자리가 정확히 5여야 한다:
+    #   1.245억 → HALF_UP 1.25 / HALF_EVEN 1.24
+    #   0.005억 → HALF_UP 0.01 / HALF_EVEN 0.00
+    # 옛 값(0.49999999억)은 어떤 방식으로도 0.50이라 HALF_UP을 못 가렸다.
+    # 괄호·△ 음수 읽기를 재는 이 시험의 뜻은 그대로다.
     assert table.scale_places == 2
     assert table.rows == [
-        ["2025", "0.50", "-0.50", "0.50"],
-        ["2024", "-0.50", "-0.50", "-0.50"],
+        ["2025", "1.25", "-1.25", "0.01"],
+        ["2024", "-1.25", "-1.25", "-0.01"],
     ]
-    assert table.raw_rows[1][1:] == ["-50,000,000", "-50,000,000", "-49,999,999"]
+    assert table.raw_rows[1][1:] == ["-124,500,000", "-124,500,000", "-500,000"]

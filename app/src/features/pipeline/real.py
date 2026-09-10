@@ -3531,6 +3531,13 @@ class RealPipeline:
                     "차단사유코드": list(
                         official_preflight.decision.reason_codes
                     )[: observability_constants.PREFLIGHT_REASON_CODE_LIMIT],
+                    # ★ 잘렸다는 표시를 «우리가» 남긴다. 요약 계층은 자기가
+                    #   자를 때만 표식을 붙이므로, 여기서 12개로 자른 13개와
+                    #   원래 12개가 화면에서 구분되지 않는다. 필수 장이 여럿
+                    #   막히면 쉽게 넘는 수라 진단을 고치며 새 소실을 만든다.
+                    "차단사유코드총수": len(
+                        official_preflight.decision.reason_codes
+                    ),
                 }
             )
             supplementary_research_required = (

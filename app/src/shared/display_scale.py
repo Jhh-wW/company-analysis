@@ -21,26 +21,30 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Final, Sequence
 
 
-#: 표시값이 못 지키면 자리를 늘리는 «유효숫자» 하한.
+#: 표시 단위로 줄인 «가장 작은 값»의 크기 문턱 → 그 표가 쓸 소수 자리수.
+#: 위에서부터 처음 맞는 문턱을 쓰고, 어느 것에도 안 걸리면 정수로 찍는다.
 #:
-#: ★ 왜 2인가 — 유효숫자가 하나면 독자가 두 값의 «변동»을 읽을 수 없다. 1과
-#:   4는 -75%로 읽히지만 실제 0.83과 3.66은 -77.45%다. 두 자리면 표에서 읽는
-#:   변동과 원값의 변동이 소수 첫째 자리까지 일치한다.
-MIN_SIGNIFICANT_DIGITS: Final[int] = 2
+#: ★ 왜 «유효숫자 개수»가 아니라 크기 문턱인가 (2026-09-11 독립 검토 반례) —
+#:   앞선 판은 반올림한 표시값의 유효숫자를 셌다. 그런데 십진수는 반올림하면서
+#:   생긴 뒤따르는 0도 자릿수로 들고 있다(``Decimal("1.0")``의 자릿수는 두 개).
+#:   그래서 가장 작은 값이 0.95억~1.05억이면 자리수가 1에서 멈췄고, 1.04억과
+#:   0.95억이 둘 다 ``1.0``으로 찍혀 독자가 읽는 변동이 0%가 됐다. 실제 변동은
+#:   -8.65%로, 이번에 고치려던 오차(2.45%p)보다 오히려 컸다.
+#: ★ 크기 문턱은 반올림 결과를 다시 해석하지 않으므로 그런 구간이 생기지 않는다.
+#:   자리 하나가 지우는 몫은 최대 0.5이므로, 값이 10 이상이면 1자리에서 상대오차
+#:   0.5% 이하, 100 이상이면 0자리에서 0.5% 이하가 된다.
+DISPLAY_PLACE_THRESHOLDS: Final[tuple[tuple[Decimal, int], ...]] = (
+    (Decimal(10), 2),
+    (Decimal(100), 1),
+)
 
-#: 자리수 상한. 더 늘리면 표가 읽히지 않는다.
-MAX_DISPLAY_PLACES: Final[int] = 2
-
-#: 시작 자리수. 값이 충분히 크면 여기서 멈춰 «종전과 같은 정수 표시»가 된다.
+#: 시작 자리수. 값이 충분히 크면 여기를 써서 «종전과 같은 정수 표시»가 된다.
 BASE_DISPLAY_PLACES: Final[int] = 0
 
-
-def _significant_digits(value: Decimal) -> int:
-    """0이 아닌 십진수의 유효숫자 개수. 0은 0으로 센다."""
-
-    if value == 0:
-        return 0
-    return len(value.as_tuple().digits)
+#: 자리수 상한. 문턱 표에서 끌어낸다 — 두 곳에 따로 적으면 한쪽만 고쳐진다.
+MAX_DISPLAY_PLACES: Final[int] = max(
+    places for _threshold, places in DISPLAY_PLACE_THRESHOLDS
+)
 
 
 def quantum_for(places: int) -> Decimal:
@@ -64,6 +68,7 @@ def display_places(values: Sequence[Decimal], divisor: Decimal) -> int:
     ★ 표 전체가 «한 자리수»를 쓴다. 칸마다 다른 자리수를 쓰면 열이 어긋나
       읽기 어렵고, 표시값을 원값으로 되돌리는 하류 재검산
       (`composer.public_manifest`)이 칸마다 다른 규칙을 알아야 한다.
+    ★ 반올림한 «표시값»을 다시 보고 판단하지 않는다. 줄이기 «전»의 크기만 본다.
     """
 
     if divisor is None or divisor == 0:
@@ -71,16 +76,11 @@ def display_places(values: Sequence[Decimal], divisor: Decimal) -> int:
     non_zero = [abs(value) for value in values if value != 0]
     if not non_zero:
         return BASE_DISPLAY_PLACES
-    smallest = min(non_zero)
-    places = BASE_DISPLAY_PLACES
-    while places < MAX_DISPLAY_PLACES:
-        shown = (smallest / divisor).quantize(
-            quantum_for(places), rounding=ROUND_HALF_UP
-        )
-        if _significant_digits(shown) >= MIN_SIGNIFICANT_DIGITS:
-            break
-        places += 1
-    return places
+    smallest = min(non_zero) / divisor
+    for threshold, places in DISPLAY_PLACE_THRESHOLDS:
+        if smallest < threshold:
+            return places
+    return BASE_DISPLAY_PLACES
 
 
 def format_display_value(value: Decimal, divisor: Decimal, places: int) -> str:

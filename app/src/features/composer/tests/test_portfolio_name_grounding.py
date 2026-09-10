@@ -126,9 +126,26 @@ def test_호환문자_대소문자_공백_구두점_차이는_같은_이름이�
     assert problems == ()
 
 
-def test_서로_다른_인용_조각의_경계에_걸친_이름은_접지가_아니다() -> None:
+@pytest.mark.parametrize(
+    "name",
+    (
+        "카카오T",
+        # ★ 괄호를 넣는 것만으로 이 방어가 뚫리면 안 된다 (2026-09-11 독립 검토).
+        #   머리 「카카오」는 조각 1에, 괄호 안 「T」는 조각 2에 있으므로 부분
+        #   단위 검사만으로는 통과해 버렸다. 머리는 인용 조각에서 확인하고
+        #   모든 부분이 최소 길이를 넘어야 한다는 두 규칙이 함께 막는다.
+        "카카오(T)",
+        "카카오 (T)",
+        "카카오[T]",
+        # 괄호 안이 최소 길이를 넘어도, 그 표현이 근거 어디에도 없으면 막힌다.
+        "카카오(TV)",
+    ),
+)
+def test_서로_다른_인용_조각의_경계에_걸친_이름은_접지가_아니다(
+    name: str,
+) -> None:
     row = FlowRow(
-        cells=("카카오T", "서비스 범위", "운영 확대", "주력"),
+        cells=(name, "서비스 범위", "운영 확대", "주력"),
         citations=("1", "2"),
     )
 
@@ -207,10 +224,9 @@ _OTHER_COMPANY_CASES = (
     ("hybe_subsidiaries.txt", "㈜수퍼톤"),
 )
 
-#: 이 회사 공시에 실제로 근거가 있는 이름.
+#: 이 회사 공시에 실제로 근거가 있고 «머리»가 인용 조각에 있는 이름.
 _GROUNDED_NAMES = (
     "제품(전기전자 제품 및 산업용 장비)",
-    "전기전자 제품 및 산업용 장비",
     "상품",
     "제품매출",
 )
@@ -326,6 +342,89 @@ def test_공시에_없는_이름은_카드를_제외한다(name: str) -> None:
     assert any(PORTFOLIO_NAME_NOT_IN_SOURCE_CODE in item for item in problems)
 
 
+def test_괄호_없는_이름은_인용하지_않은_조각에서_빌려오지_않는다() -> None:
+    """머리 부분은 완화 대상이 아니다 — 조합 금지 원칙을 그대로 지킨다.
+
+    같은 문서 넓힘은 «괄호 안 설명»에만 준다. 괄호가 없는 이름은 통째로 머리라
+    인용한 조각에 글자 그대로 있어야 한다.
+    """
+
+    name = "전기전자 제품 및 산업용 장비"
+    fragments = _same_document_fragments()
+
+    빌려온_카드 = FlowRow(
+        cells=(name, "전력전자 제품 제조·판매", "매출 확대", "주력"),
+        citations=("45",),
+    )
+    checked, problems = check_diagram_numbers(_report(빌려온_카드), fragments)
+    assert checked.sections[0].flow_rows == ()
+    assert any(PORTFOLIO_NAME_NOT_IN_SOURCE_CODE in item for item in problems)
+
+    # 그 이름이 실제로 있는 조각을 인용하면 통과한다.
+    인용한_카드 = FlowRow(
+        cells=(name, "전력전자 제품 제조·판매", "매출 확대", "주력"),
+        citations=("46",),
+    )
+    checked, problems = check_diagram_numbers(_report(인용한_카드), fragments)
+    assert _portfolio_row(checked) == 인용한_카드
+    assert problems == ()
+
+
+def test_괄호_안_설명은_같은_문서에_있을_때만_통과한다() -> None:
+    """같은 자료로 «있을 때»와 «없을 때»를 나란히 잰다.
+
+    ★ 이 두 단정이 함께 있어야 규칙이 못 박힌다. 차단만 재면 「무엇이든 막는」
+      구현도 초록불이고, 통과만 재면 「무엇이든 통과시키는」 구현도 초록불이다.
+    """
+
+    row = FlowRow(
+        cells=("카카오(TV)", "서비스 범위", "운영 확대", "주력"),
+        citations=("1",),
+    )
+    문서 = "document:dart.fss.or.kr:20260101000001"
+
+    없을_때, problems = check_diagram_numbers(
+        _report(row),
+        (
+            _fragment("1", "카카오", document_identity=문서),
+            _fragment("2", "T를 운영한다.", document_identity=문서),
+        ),
+    )
+    assert 없을_때.sections[0].flow_rows == ()
+    assert any(PORTFOLIO_NAME_NOT_IN_SOURCE_CODE in item for item in problems)
+
+    있을_때, problems = check_diagram_numbers(
+        _report(row),
+        (
+            _fragment("1", "카카오", document_identity=문서),
+            _fragment("2", "TV 서비스를 운영한다.", document_identity=문서),
+        ),
+    )
+    assert _portfolio_row(있을_때) == row
+    assert problems == ()
+
+
+def test_한_글자_부분만_다른_이름은_회사를_못_가려서_막는다() -> None:
+    """★ `PORTFOLIO_NAME_MIN_PART_CHARS`를 1로 낮추면 이 시험이 깨진다.
+
+    아래 이름들의 한 글자 부분은 «근거 원문에 실제로 있다»(「주」는 「주식회사」
+    에, 「1」은 「1. 당사의 개요」에). 그래서 길이 하한이 사라지는 순간 전부
+    통과한다 — 느슨해지는 방향을 막는 것이 이 시험의 목적이다.
+    """
+
+    fragments = _same_document_fragments()
+    for name in ("제품(주)", "제품(1)", "제품(A)"):
+        row = FlowRow(
+            cells=(name, "전력전자 제품 제조·판매", "매출 확대", "주력"),
+            citations=("45",),
+        )
+
+        checked, problems = check_diagram_numbers(_report(row), fragments)
+
+        assert checked.sections[0].flow_rows == (), name
+        assert any(PORTFOLIO_NAME_NOT_IN_SOURCE_CODE in item for item in problems)
+
+
 @pytest.mark.parametrize(("fixture_name", "own_name"), _OTHER_COMPANY_CASES)
 def test_다른_회사_원문에서는_이_회사_고유_이름이_접지되지_않는다(
     fixture_name: str, own_name: str
@@ -362,6 +461,9 @@ def test_3장_새_안내문은_이름_접지_네_문장과_숫자_금지를_함�
 
     assert "인용한 근거 조각에 글자 그대로 있는 이름만 쓴다" in guide
     assert "줄임·번역·조합 금지" in guide
+    # 안내문과 검사 잣대가 반대면 「비워진다」는 약속이 괄호 이름에 대해
+    # 거짓이 된다. 괄호 안 설명에만 문서 범위를 허용한다는 것을 함께 적는다.
+    assert "괄호 안 설명은 같은 공시 문서에 글자 그대로 있는 표현만 쓴다" in guide
     assert (
         "원문위치에 이름 표 표기(제품·브랜드·사업부문·종속회사·주요 계약)가 "
         "있는 조각이 있으면 그 이름을 우선 쓴다"

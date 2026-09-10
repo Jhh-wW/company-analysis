@@ -191,7 +191,11 @@ def _compact_surface(value: str) -> str:
 
 
 def _portfolio_name_parts(name: str) -> tuple[str, ...]:
-    """이름을 괄호로 갈라 «압축된 부분»들로 돌려준다. 빈 부분은 버린다."""
+    """이름을 괄호로 갈라 «압축된 부분»들로 돌려준다. 빈 부분은 버린다.
+
+    첫 부분이 «머리»(괄호 앞 본체)이고 나머지가 «설명»이다. 부르는 쪽이 둘을
+    서로 다른 범위로 검사한다.
+    """
 
     return tuple(
         compact
@@ -200,10 +204,26 @@ def _portfolio_name_parts(name: str) -> tuple[str, ...]:
     )
 
 
+def _compact_surfaces(texts: Sequence[str]) -> tuple[str, ...]:
+    """근거 글들을 압축 표면으로 바꾼다. 빈 글은 비교 대상에서 뺀다."""
+
+    return tuple(
+        compact for text in texts if (compact := _compact_surface(text))
+    )
+
+
 def portfolio_name_is_grounded(
-    name: str, source_texts: Sequence[str]
+    name: str,
+    source_texts: Sequence[str],
+    document_texts: Optional[Sequence[str]] = None,
 ) -> bool:
-    """3장 이름을 괄호로 갈라 «부분마다» 한 근거 글 안에서 확인한다.
+    """이름의 «머리»는 인용 조각에서, «괄호 안 설명»은 같은 문서에서 확인한다.
+
+    Args:
+        name: 3장 이름 칸.
+        source_texts: 그 줄이 «인용한» 조각 원문들.
+        document_texts: 인용 조각과 «같은 문서»에 속한 조각 원문들. 생략하면
+            인용 조각만 본다(옛 경로·이름 표는 조각 하나만 넘긴다).
 
     ★ 공개 함수인 이유 — 3장에 «결정적으로» 덧붙이는 이름 표
       (`portfolio_name_table.py`)도 같은 잣대로 자기 이름을 검사해야 한다.
@@ -212,15 +232,19 @@ def portfolio_name_is_grounded(
     ★ 빈 이름에 ``True``를 주는 것은 «검사 대상이 아니다»라는 뜻이다.
       「이름이 있어야 한다」는 요구는 부르는 쪽이 따로 확인한다.
 
-    ★ 왜 통짜가 아니라 부분인가 (2026-09-11 소규모 회사 실측) — 작가는 이름을
-      ``분류(원문 표현)`` 모양으로 적는다. 「제품(전기전자 제품 및 산업용
-      장비)」은 두 부분이 공시 원문에 따로따로 있는데도 압축된 통짜 이름이
-      원문 어디에도 없어 카드가 통째로 버려졌다.
-
-    ★ 근거 글을 «이어 붙이지 않는다». 각 부분은 하나의 근거 글 안에 그대로
-      있어야 한다. 이어 붙이면 서로 다른 조각의 끝과 시작에 걸친 이름
-      (「카카오」+「T를 운영한다」)이 통과해 없는 이름이 만들어진다.
-      부분끼리는 서로 다른 근거 글에 있어도 된다 — 그것이 이 수정의 요점이다.
+    ★ 머리 부분은 «완화하지 않는다» (2026-09-11 독립 검토) — 괄호 앞 본체는
+      종전대로 인용한 조각 하나에 글자 그대로 있어야 한다. 그러지 않으면 이름에
+      괄호를 넣는 것만으로 「조각 경계에 걸친 조합」이 통과해, 「카카오」+
+      「T를 운영한다」를 막던 방어가 「카카오(T)」로 그대로 뚫린다.
+    ★ 완화는 «괄호 안 설명»에만 준다 (2026-09-11 소규모 회사 실측) — 작가는
+      이름을 ``분류(원문 표현)`` 모양으로 적는데, 실측 이름
+      「제품(전기전자 제품 및 산업용 장비)」은 머리 「제품」이 인용 조각에,
+      괄호 안이 같은 공시의 다른 조각에 있었다. 그래서 카드가 통째로 버려졌다.
+    ★ 어느 경우에도 근거 글을 «이어 붙이지 않는다». 각 부분은 하나의 글 안에
+      그대로 있어야 한다.
+    ★ 모든 부분이 ``PORTFOLIO_NAME_MIN_PART_CHARS`` 이상이어야 한다. 한 글자
+      부분은 웬만한 문서 어디에나 있어서 「제품(주)」·「제품(1)」처럼 회사를
+      전혀 못 가리는 이름을 통과시킨다.
     """
 
     if not name.strip():
@@ -228,15 +252,17 @@ def portfolio_name_is_grounded(
     parts = _portfolio_name_parts(name)
     if not parts:
         return False
-    if max(len(part) for part in parts) < PORTFOLIO_NAME_MIN_PART_CHARS:
+    if any(len(part) < PORTFOLIO_NAME_MIN_PART_CHARS for part in parts):
         return False
-    compact_sources = tuple(
-        compact
-        for source_text in source_texts
-        if (compact := _compact_surface(source_text))
+    cited = _compact_surfaces(source_texts)
+    described = cited if document_texts is None else _compact_surfaces(
+        document_texts
     )
+    head, *described_parts = parts
+    if not any(head in source for source in cited):
+        return False
     return all(
-        any(part in source for source in compact_sources) for part in parts
+        any(part in source for source in described) for part in described_parts
     )
 
 
@@ -344,10 +370,13 @@ def _name_source_texts(
     texts: Mapping[str, str],
     document_texts: Mapping[str, Sequence[str]],
 ) -> tuple[str, ...]:
-    """이름 검사에 댈 근거 글 — 인용 조각과 «같은 문서»의 조각들.
+    """이름의 «괄호 안 설명»에 댈 근거 글 — 인용 조각과 같은 문서의 조각들.
 
     조각을 이어 붙이지 않으므로 각 글은 따로 남긴다. 같은 글이 두 인용에서
     겹쳐 들어오면 한 번만 남겨 비교 횟수를 늘리지 않는다.
+
+    ★ 머리 부분은 이 넓힌 집합을 쓰지 않는다 — 인용 조각만 본다
+      (`portfolio_name_is_grounded`).
     """
 
     collected: list[str] = []
@@ -380,9 +409,10 @@ def _drop_ungrounded_portfolio_rows(
 ) -> tuple[tuple[FlowRow, ...], list[str]]:
     """대상을 식별할 이름이 없는 카드만 제외하고 정상 카드·본문은 보존한다.
 
-    ``document_texts``를 주면 이름을 «인용 조각과 같은 문서»의 조각들에도
-    대본다. 주지 않으면 종전처럼 인용 조각만 본다 — 수는 이 넓힘을 쓰지
-    않으므로(`_drop_invented_numbers`) 잣대가 갈리지 않게 인자를 나눈다.
+    ``document_texts``를 주면 이름의 «괄호 안 설명»을 인용 조각과 같은 문서의
+    조각들에도 대본다. 머리 부분은 어느 경우에도 인용 조각만 본다. 주지 않으면
+    종전처럼 전부 인용 조각만 본다 — 수는 이 넓힘을 쓰지 않으므로
+    (`_drop_invented_numbers`) 잣대가 갈리지 않게 인자를 나눈다.
     """
 
     grounded: list[FlowRow] = []
@@ -391,7 +421,9 @@ def _drop_ungrounded_portfolio_rows(
     for row in rows:
         name = row.cells[0] if row.cells else ""
         if name.strip() and portfolio_name_is_grounded(
-            name, _name_source_texts(row, texts, scoped)
+            name,
+            _source_texts(row, texts),
+            _name_source_texts(row, texts, scoped),
         ):
             grounded.append(row)
             continue

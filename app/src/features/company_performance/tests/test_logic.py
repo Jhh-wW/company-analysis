@@ -147,24 +147,26 @@ def test_비십이월_결산은_기간_종료연도를_FY로_쓰고_실제_결�
 def test_억원_표시는_양수와_음수의_절반에서_ROUND_HALF_UP한다() -> None:
     table = build_three_year_table(
         _financials(
-            revenue=("50000000", "-50000000", "49999999"),
-            operating_income=("149999999", "-149999999", "0"),
+            revenue=("124500000", "-124500000", "500000"),
+            operating_income=("124500000", "-124500000", "0"),
         ),
         cite="조각 9·재무",
     )
 
     assert table is not None
-    # 2026-09-11 자리수 규칙 도입으로 기대 문자열을 갱신했다 — 이 표의 가장 작은
-    # 값 0.5억은 정수로 찍으면 「0」·「1」이 되어 크기가 통째로 사라진다. 이
-    # 시험의 뜻(양수·음수 절반의 HALF_UP)은 그대로다: 0.49999999억이 0.50으로,
-    # 1.49999999억이 1.50으로 올라가는 것이 그 증거다.
+    # 2026-09-11 갱신 — 자리수 규칙이 들어와 기대 문자열이 바뀌었고, 값도
+    # «반올림 방식이 실제로 갈리는» 것으로 바꿨다. 소수 둘째 자리에서
+    # HALF_UP과 HALF_EVEN이 갈리려면 셋째 자리가 정확히 5여야 한다:
+    #   1.245억 → HALF_UP 1.25 / HALF_EVEN 1.24
+    #   0.005억 → HALF_UP 0.01 / HALF_EVEN 0.00
+    # 옛 값(0.49999999억)은 어떤 방식으로도 0.50이라 HALF_UP을 못 가렸다.
     assert table.scale_places == 2
-    assert [row[1] for row in table.rows] == ["0.50", "-0.50", "0.50"]
-    assert [row[2] for row in table.rows] == ["1.50", "-1.50", "0.00"]
+    assert [row[1] for row in table.rows] == ["1.25", "-1.25", "0.01"]
+    assert [row[2] for row in table.rows] == ["1.25", "-1.25", "0.00"]
     assert [row[1] for row in table.raw_rows] == [
-        "50,000,000",
-        "-50,000,000",
-        "49,999,999",
+        "124,500,000",
+        "-124,500,000",
+        "500,000",
     ]
 
 

@@ -18,6 +18,8 @@ import pytest
 
 from src.core import deployment_identity
 from src.features.business_candidate.dart_identity import DartCompanyRecord
+from src.features.observability import constants as observability_constants
+from src.features.observability import run_diagnostics
 from src.features.company_comparison import (
     ComparisonSourceConfigurationError,
     ComparisonSourceInternalError,
@@ -145,6 +147,8 @@ def _official_result(
     first_state: CollectionState | None = None,
     first_source_kind: str = SOURCE_KIND_OFFICIAL_WEB_PAGE,
     first_reason_code: str = "fixture_state",
+    #: ``first_state``를 몇 «개» 장에 적용할지. 기본 1이라 옛 동작 그대로다.
+    failed_section_count: int = 1,
     variant: str = "기본",
     unclassified_evidence: UnclassifiedEvidenceObservation | None = None,
     profile: dict[str, Any] | None = None,
@@ -179,7 +183,7 @@ def _official_result(
     candidates: list[ChapterEvidenceCandidates] = []
     for index, section_id in enumerate(REQUIRED_EVIDENCE_SECTION_IDS):
         slots = collector_slots_for(section_id)
-        if index == 0 and first_state is not None:
+        if index < failed_section_count and first_state is not None:
             candidates.append(
                 ChapterEvidenceCandidates(
                     company_id=CORP_ID,
@@ -189,7 +193,7 @@ def _official_result(
                     attempts=(
                         CollectionAttempt(
                             company_id=CORP_ID,
-                            attempt_id=f"attempt-{variant}-first",
+                            attempt_id=f"attempt-{variant}-first-{index}",
                             source_kind=first_source_kind,
                             requirement=SourceRequirement.REQUIRED,
                             state=first_state,
@@ -1596,6 +1600,7 @@ def test_우리은행_운영모양은_FULL패킷전에_문서하한_부분보고
         "미달장수": 0,
         "전환갈래": "too_few_documents_for_full",
         "차단사유코드": [],
+        "차단사유코드총수": 0,
     }
     assert {
         "step": "6_수집_DART부분보고서전환",
@@ -1694,6 +1699,54 @@ def test_일시장애_부분보고서_전환도_불명_장과_사유코드를_�
         f"{blocked_section_id}:required_path_failed:{slot_id}"
         for slot_id in collector_slots_for(blocked_section_id)
     ]
+    # 상한에 안 걸린 실행은 총수와 실린 수가 같다 — 「잘렸다」로 안 읽힌다.
+    assert formal_step["차단사유코드총수"] == len(formal_step["차단사유코드"])
+
+
+def test_막힌_사유_코드가_상한을_넘으면_잘렸다는_표시를_남긴다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 진단 소실을 고치면서 «새 조용한 소실»을 만들지 않는다.
+
+    요약 계층은 자기가 자를 때만 표식을 붙인다. 여기서 상한으로 자른 목록은
+    표식 없이 짧아져, 화면에서 「원래 그만큼이었다」와 구분되지 않는다.
+    """
+
+    official = _official_result(
+        first_state=CollectionState.FAILED,
+        first_source_kind=SOURCE_KIND_ROBOTS_TXT,
+        first_reason_code="robots_unreachable",
+        failed_section_count=len(REQUIRED_EVIDENCE_SECTION_IDS),
+    )
+    preflight = real.assess_official_evidence(official)
+    total = len(preflight.decision.reason_codes)
+    assert total > observability_constants.PREFLIGHT_REASON_CODE_LIMIT, (
+        "시험 전제 — 사유 코드가 상한을 넘어야 잘림을 잴 수 있다"
+    )
+
+    _freeze_runtime(
+        monkeypatch,
+        mode=real.engine_mode.EngineMode.V2,
+        release_mode=ReleaseMode.FULL,
+    )
+    _wire_runtime(monkeypatch, engine=FakeEngine())
+
+    with run_diagnostics.capture() as captured:
+        result = _run(_Collector([official]))
+
+    assert result.outcome is Outcome.GATE_STOPPED
+    formal_step = next(
+        step
+        for step in captured.steps
+        if step.get("step") == "6_수집_공식근거사전검사"
+    )
+
+    assert formal_step["차단사유코드총수"] == total
+    assert len(formal_step["차단사유코드"]) < total, "잘렸다는 사실"
+    assert (
+        len(formal_step["차단사유코드"])
+        == observability_constants.PREFLIGHT_REASON_CODE_LIMIT
+    )
 
 
 def test_문서를_모은_뒤_일부만_실패하면_오류가_아니라_부분으로_남는다() -> None:
