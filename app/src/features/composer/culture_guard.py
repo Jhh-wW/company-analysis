@@ -22,6 +22,7 @@ from src.features.composer.culture_constants import (
     CULTURE_ACCOUNTING_RECOGNITION_RE,
     CULTURE_ATTRIBUTION_RE,
     CULTURE_EVIDENCE_SCOPE_MISMATCH,
+    CULTURE_EXTERNAL_AUDIT_RE,
     CULTURE_FINANCIAL_RISK_CATEGORY_RE,
     CULTURE_FINANCIAL_RISK_DERIVATIVE_RE,
     CULTURE_FINANCIAL_RISK_EXPOSURE_RE,
@@ -136,6 +137,10 @@ def _clause_carries_section_subject(surface_clause: str) -> bool:
 
     ① 「그 소재를 공시하지 않는다」고 적은 절은 근거가 아니다 — 없다는 말은
        자료가 아니다(culture_problem과 같은 경계).
+    ①' «외부 감사 절차» 절도 이 장의 소재가 아니다. 조직 주체 검사보다 «먼저»
+       본다 — 「회사측 : 감사위원회 위원 3명 … 감사인 : 업무수행이사 외 2명」
+       같은 참석자 표가 위원회와 절차 동사를 함께 담고 있어 ②로 통과하던
+       자리다(실측 29건).
     ② 조직 주체 + 부정되지 않은 절차 동사 = 「누가 맡는지」를 말한 절. 8장
        안내문이 밝힌 예외(재무 위험을 누가 맡는지 조직으로 설명한 문장)가
        여기다. 동사만으로는 인정하지 않는다 — 「손상여부를 검토하는」 같은
@@ -147,6 +152,8 @@ def _clause_carries_section_subject(surface_clause: str) -> bool:
     """
 
     if SOURCE_UNAVAILABLE_RE.search(surface_clause):
+        return False
+    if CULTURE_EXTERNAL_AUDIT_RE.search(surface_clause):
         return False
     if (CULTURE_FINANCIAL_RISK_ORG_ACTOR_RE.search(surface_clause)
             and CULTURE_SECTION_ORG_ACTION_RE.search(surface_clause)
