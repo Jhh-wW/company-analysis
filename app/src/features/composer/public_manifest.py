@@ -1060,6 +1060,11 @@ def _news_table_payload(
         #   news라고 적으면 어느 실행에서도 대조가 실패한다. 표의 «출처»는
         #   행별 결속(source_fragment_ids)이 이미 정확히 말한다.
         kind="program",
+        # ★ 봉인은 «전체 행»(news_rows, 이 함수 위쪽), 렌더는 «인쇄되는
+        #   행»(render._news_report_table의 included_rows, citation이
+        #   numbers에 없으면 빠진 행)으로 연도를 잰다. 두 행 집합이 이미
+        #   같다는 전제 위에서만 연도도 같다 — 어긋나면 캡션이 갈리기 전에
+        #   행 수·행 내용 대조(위 rows/row_bindings 비교)가 먼저 막는다.
         caption=news_block_caption(
             len(rows), oldest_stale_report_year(news_rows, as_of_date)
         ),
