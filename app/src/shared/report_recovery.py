@@ -65,8 +65,10 @@ SUMMARY_REVIEW_CALLS: Final[int] = 0
 #   요약 고르기는 재요청하지 않는다(`composer/logic.py`
 #   `select_summary_sentences`) — 번호를 못 읽으면 검증된 본문 문장으로
 #   채우는 편이 결과가 같고 싸기 때문이다. 즉 최악은 3회다.
-#   `검수한도도달`·「의미 검수 불능」 발생 빈도를 실행 기록으로 계속 세어
-#   이 전제가 유지되는지 확인한다.
+#   실행 기록으로 계속 셀 지표는 「의미 검수 불능」(도식)과 요약 단계의
+#   `작성한도도달`이다. `검수한도도달`은 요약 재검증이 사라지면서 영구히
+#   False가 됐으므로 더는 세지 않는다 — 없는 단계의 빈도를 세면 «0건이라
+#   안전하다»는 거짓 신호가 된다.
 MANDATORY_TAIL_AI_CALLS: Final[int] = (
     DIAGRAM_REVIEW_CALLS + SUMMARY_WRITER_CALLS + SUMMARY_REVIEW_CALLS
 )

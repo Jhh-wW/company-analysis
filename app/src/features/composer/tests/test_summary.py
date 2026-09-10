@@ -14,7 +14,7 @@
   ① 후보 만들기 — 요약 잣대를 통과한 본문 문장만, 같은 문장은 한 번만.
   ② 프롬프트 — 번호·장 이름·문장과 고르는 규칙이 실린다.
   ③ 응답 판독 — «번호»만 인정한다. 범위 밖·중복·비JSON·참거짓은 버린다.
-  ④ 결속의 구성상 보장 — 돌려주는 것은 후보로 받은 «그 문장 객체»다.
+  ④ 결속은 본문과 «같은 수준» — 돌려주는 것은 후보로 받은 «그 문장 객체»다.
      응답이 문장 글자를 담아 와도 그 글자는 요약에 실리지 않는다
      (예전 재탕 검출 `test_summary_near_copy.py`가 지키던 자리를 대신한다 —
       AI가 글자를 만들 수 없게 됐으므로 «옮겨 적기»가 원리적으로 불가능하다).
@@ -163,19 +163,30 @@ def test_프롬프트에_번호와_장_이름과_후보_문장이_실린다():
 
 
 def test_프롬프트가_고르는_규칙을_말한다():
+    """★ 4항이 뒤집힌 근거 (2026-09-11 독립 검토 P2-1).
+
+    예전 지시는 「수치나 고유명사가 들어 있는 문장을 먼저」였다. 출고 계약
+    (`docs/출력물 기준/00_핵심_요약/README.md` 조사 절차 3·제외 기준)은 그
+    반대다 — 같은 장에서는 숫자 없는 문장을 먼저 고르고, 날짜·출처 번호의
+    재기재를 막는다. 그래서 프롬프트를 계약 쪽으로 뒤집고 이 시험도 뒤집는다.
+    """
+
     prompt = build_summary_selection_prompt(
         summary_candidates(_full_report())
     )
 
     assert f"{SUMMARY_MIN_SENTENCES}~{SUMMARY_MAX_SENTENCES}개의 번호" in prompt
     assert "취업준비생" in prompt
-    assert "서로 다른 장에서 고른다" in prompt
-    assert "수치나 고유명사" in prompt
+    assert "한 장에서 하나씩만 고른다" in prompt
+    assert "숫자가 없는 문장을 먼저 고른다" in prompt
+    assert "수익 구조" in prompt and "성장 방향" in prompt
     assert "번호만 답한다" in prompt
-    assert "JSON 배열" in prompt
+    assert f'{{"{SUMMARY_SELECTION_NUMBERS_KEY}": [1, 4, 7]}}' in prompt
     assert FORBIDDEN_TOPICS_GUIDE in prompt
     # 새로 쓰라는 말이 남아 있으면 안 된다 — 그게 결속을 깨뜨린 원인이었다
     assert "새로» 쓴다" not in prompt
+    # 계약과 반대 방향인 옛 지시가 되살아나면 안 된다
+    assert "수치나 고유명사" not in prompt
 
 
 def test_빈_장은_후보에도_프롬프트에도_없다():
@@ -215,6 +226,28 @@ def test_코드_펜스가_붙은_객체도_읽는다():
     assert parse_summary_selection(raw, 9) == (3, 1)
 
 
+def test_펜스_유무와_모양을_가리지_않고_같은_번호를_읽는다():
+    """★ 유료 호출 1회가 통째로 버려지던 자리 (2026-09-11 독립 검토 P1).
+
+    공용 회수기(`extract_json_payload`)는 펜스가 붙으면 «첫 { ~ 마지막 }»만
+    자른다. 중괄호가 없는 «맨 배열»은 한 번도 회수되지 않아, 실측에서
+    "```json\\n[1, 4, 7]\\n```" 가 번호 0개로 읽혔다. 그러면 곧장 규칙 보충으로
+    돌아가고 그 실행의 고르기 호출은 0문장 기여로 사라진다.
+    안내문은 객체형을 요구하지만, 모델이 어느 모양으로 답해도 읽어야 한다.
+    """
+
+    같은답 = (
+        '{"번호": [1, 4, 7]}',
+        '```json\n{"번호": [1, 4, 7]}\n```',
+        "[1, 4, 7]",
+        "```json\n[1, 4, 7]\n```",
+        "고른 번호: [1, 4, 7]",
+    )
+
+    for raw in 같은답:
+        assert parse_summary_selection(raw, 9) == (1, 4, 7), raw
+
+
 def test_범위_밖_번호와_중복은_버린다():
     assert parse_summary_selection("[0, 1, 1, 10, 3, -2]", 9) == (1, 3)
 
@@ -246,15 +279,19 @@ def test_다섯_개를_넘게_고르면_다섯에서_끊는다():
 
 
 # ══════════════════════════════════════════════════════════
-# ④ 고르기 — 결속은 «구성상» 보장된다
+# ④ 고르기 — 결속은 본문 문장과 «같은 수준»이다
 # ══════════════════════════════════════════════════════════
 
 
 def test_고른_문장은_후보로_받은_그_객체_그대로다():
     """글자를 새로 만들지 않으므로 인용·등급·구조화 사실이 본문과 같다.
 
-    이것이 결속(bound_summary_fact_id)의 구성상 보장이다 — 복사본이 아니라
-    같은 객체를 돌려주므로 나중에 필드가 하나 늘어도 어긋날 자리가 없다.
+    그래서 요약은 그 본문 문장의 결속(bound_summary_fact_id)과 «같은 수준»이
+    된다 — 복사본이 아니라 같은 객체를 돌려주므로 나중에 필드가 하나 늘어도
+    어긋날 자리가 없다.
+    ⚠️ 「구성상 보장」이라고는 말하지 않는다 (2026-09-11 독립 검토) — 본문
+      문장이 FactRecord를 못 만든 실행에서는 요약도 결속 0건이다. 요약이 본문보다
+      느슨해지지 않을 뿐, 없는 결속을 만들어 주지는 않는다.
     """
     report = _full_report()
     candidates = summary_candidates(report)
@@ -287,6 +324,38 @@ def test_응답이_문장_글자를_담아_와도_그_글자는_실리지_않는
 
     assert [s.text for s in chosen] == [candidates[1].sentence.text]
     assert all("지어낸" not in sentence.text for sentence in chosen)
+
+
+def test_한_장에서_여러_개를_고르면_그_장의_첫_번호만_남는다():
+    """★ 계약 「장당 최대 1개」를 프롬프트가 아니라 코드가 지킨다 (P2-2).
+
+    실측 재현 — 1장에 후보 3개를 두고 [1, 2, 3]을 답하게 하면 예전에는 요약
+    3건이 전부 1장에서 나왔다. 막는 코드도 경고도 없었고, 지시 한 줄이
+    유일한 방어였다. 빈자리는 부르는 쪽의 규칙 보충이 «다른 장»에서 채운다.
+    """
+
+    report = ComposedReport(
+        sections=(
+            ComposedSection(
+                "identity",
+                tuple(
+                    ComposedSentence(f"개요 {n}번 문장이다.", ("1",), GRADE_CONFIRMED)
+                    for n in (1, 2, 3)
+                ),
+            ),
+            ComposedSection(
+                "business_model",
+                (ComposedSentence("사업 문장이다.", ("2",), GRADE_CONFIRMED),),
+            ),
+        )
+    )
+    candidates = summary_candidates(report)
+    ask = _FakeAsk([json.dumps({"번호": [1, 2, 3]}, ensure_ascii=False)])
+
+    chosen = select_summary_sentences(candidates, ask)
+
+    assert [sentence.text for sentence in chosen] == ["개요 1번 문장이다."]
+    assert len(ask.prompts) == 1  # 골라 낸 것을 다시 물어보지 않는다
 
 
 def test_번호를_하나도_못_읽으면_빈_결과로_보충에_넘긴다():

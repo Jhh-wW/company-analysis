@@ -57,6 +57,9 @@ from src.features.composer.logic import (
     SectionEvidencePackets,
     _assert_composed_report_evidence_invariant,
     _normalize_fragments,
+    # 요약 «장당 최대 1개» 열쇠는 보충 쪽과 «같은» 정규화를 써야 한다 —
+    # 다른 정규화를 쓰면 같은 문장이 다른 열쇠가 되어 제한이 조용히 빗나간다.
+    _normalized_text,
     _prepare_section_evidence_packets,
     _sanitize_report_to_section_evidence,
     record_flow_row_counts,
@@ -498,6 +501,7 @@ def _supplement_safe_summary(
     *,
     excluded_keys: frozenset[str] = frozenset(),
     accept: Callable[[ComposedSentence], bool] | None = None,
+    section_by_key: Mapping[str, str] | None = None,
 ) -> tuple[ComposedSentence, ...]:
     """AI가 고른 요약이 짧으면 안전한 본문 문장으로 최소치만 채운다.
 
@@ -520,15 +524,19 @@ def _supplement_safe_summary(
     그 문장이 이 보충으로 되살아나는 자리를 막는다.
     ``accept``: 후보가 «요약 잣대»를 통과하는지 보는 술어. 본문 잣대와 요약
     잣대가 다르기 때문에, 본문에 남았다는 사실만으로 요약에 실을 수 없다.
+    ``section_by_key``: 정규화 본문 → 소유 장. 주면 «장당 최대 1개» 계약을
+    두 경로 모두에서 지킨다(`docs/출력물 기준/00_핵심_요약/README.md` 절차 4).
     """
 
     chosen = _supplement_summary(
-        summary, report, excluded_keys=excluded_keys, accept=accept
+        summary, report, excluded_keys=excluded_keys, accept=accept,
+        section_by_key=section_by_key,
     )
     if len(chosen) >= SUMMARY_MIN_SENTENCES:
         return chosen
     return _supplement_summary_any_grade(
-        chosen, report, excluded_keys=excluded_keys, accept=accept
+        chosen, report, excluded_keys=excluded_keys, accept=accept,
+        section_by_key=section_by_key,
     )
 
 
@@ -598,31 +606,41 @@ def _legacy_summary_stage(
         )
 
     candidates = summary_candidates(verified, accept=_summary_ready)
+    #: 정규화 본문 → 소유 장. «장당 최대 1개» 계약을 규칙 보충에서도 지킨다.
+    section_by_key = {
+        _normalized_text(candidate.sentence.text): candidate.section_id
+        for candidate in candidates
+    }
+    selected: tuple[ComposedSentence, ...] = ()
     if len(candidates) < SUMMARY_MIN_SENTENCES:
+        # ★ 후보가 최소 문장 수에 못 미치면 AI를 «부르지 않는다». 무엇을 골라도
+        #   요약이 3문장을 못 채워 출고 검증이 보고서 전체를 막기 때문이다
+        #   (계약: 근거가 충분한 결론이 3개 미만이면 억지로 채우지 않는다).
+        #   부르면 그 실행의 유료 1회가 결과를 바꾸지 못한 채 사라진다.
         # 계약 필드에 «후보 수» 칸이 없어 로그로 남긴다 — 요약이 짧게 끝난
         # 실행에서 「본문이 얇아서」인지 「고르기가 실패해서」인지 가른다.
         logger.warning(
-            "요약 후보가 %d문장뿐이다(본문 %d문장 중) — 요약이 최소 %d문장에 "
-            "못 미칠 수 있다",
+            "요약 후보가 %d문장뿐이다(본문 %d문장 중) — 최소 %d문장을 채울 수 "
+            "없어 고르기 호출을 건너뛴다",
             len(candidates),
             sum(len(section.sentences) for section in verified.sections),
             SUMMARY_MIN_SENTENCES,
         )
-
-    # 호출 «횟수» 상한과 요청 로컬 «예약액» 소진을 함께 뜻한다 — 둘 다
-    # «이 요청 몫을 다 썼다»일 뿐 돈·계정 장애가 아니라서 처리가 같다.
-    try:
-        selected = select_summary_sentences(candidates, writer_ask)
-    except AskFatalError as error:
-        if not getattr(error, "degradable", False):
-            raise
-        selected = ()
-        if record is not None:
-            record["작성한도도달"] = True
-        logger.warning(
-            "요청 AI 한도에 닿아 핵심 요약 문장을 «고르지» 못했다 — "
-            "검증을 마친 본문 문장으로 채운다"
-        )
+    else:
+        # 호출 «횟수» 상한과 요청 로컬 «예약액» 소진을 함께 뜻한다 — 둘 다
+        # «이 요청 몫을 다 썼다»일 뿐 돈·계정 장애가 아니라서 처리가 같다.
+        try:
+            selected = select_summary_sentences(candidates, writer_ask)
+        except AskFatalError as error:
+            if not getattr(error, "degradable", False):
+                raise
+            selected = ()
+            if record is not None:
+                record["작성한도도달"] = True
+            logger.warning(
+                "요청 AI 한도에 닿아 핵심 요약 문장을 «고르지» 못했다 — "
+                "검증을 마친 본문 문장으로 채운다"
+            )
     summary_draft_count = len(selected)
     if record is not None:
         record["초안수"] = summary_draft_count
@@ -633,8 +651,12 @@ def _legacy_summary_stage(
         # 보충도 «요약 잣대»를 통과한 문장만 쓴다. 본문에 남았다는 사실만으로
         # 요약에 실을 수 없다 — 본문은 「검수 통과 표식」만으로도 남지만
         # 요약은 구조화 사실과 소유 장 일치를 요구한다.
+        # 그리고 «장당 최대 1개»도 여기서 함께 지킨다 — 안 그러면 AI가 고른
+        # 장의 다른 문장이 보충으로 다시 들어와 계약이 깨진다.
         summary = _supplement_safe_summary(
-            summary, verified, accept=_summary_ready
+            summary, verified,
+            accept=_summary_ready,
+            section_by_key=section_by_key,
         )
         if record is not None:
             record["첫보충후수"] = len(summary)
@@ -1433,8 +1455,10 @@ def run_v2(
     # ③ 요약. 두 갈래 모두 «본문에 없던 말을 새로 만들지 않는다». SHADOW는
     # 검증된 본문 문장 중 AI가 고른 3~5문장을 쓰고(AI 1회), 엄격 모드는
     # 렌더러가 만든 검증 FactRecord에 정확히 결속된 본문 문장을 0원으로
-    # 재사용한다. 고른 문장은 본문 문장 그 자체라 결속이 구성상 보장되고,
-    # 그래서 요약 재검증 호출이 없다.
+    # 재사용한다. 고른 문장은 본문 문장 그 자체라 요약은 그 본문 문장의
+    # 결속과 «같은 수준»으로 결속되고, 그래서 요약 재검증 호출이 없다.
+    # (본문이 결속을 못 만든 실행에서는 요약도 결속되지 않는다 — 요약이
+    #  본문보다 느슨해지지 않을 뿐, 없는 결속을 만들어 주지는 않는다.)
     if release_mode is ReleaseMode.SHADOW:
         final, summary_draft_count, numeric_filtering = _legacy_summary_stage(
             verified,

@@ -1692,8 +1692,11 @@ def compose_selected_sections(
 #      2건이 그대로 출고됐다.
 #   두 결말은 같은 모순의 양면이다 — 작성기는 축자 재사용을 «재탕»으로 버리고
 #   결속기는 축자만 인정한다. 그래서 «고른다»로 바꾼다. 고른 문장은 본문
-#   문장 그 자체이므로 결속이 «구성상» 보장되고, 새 문장이 없으니 요약을
-#   다시 검수할 이유도 없다.
+#   문장 그 자체이므로 요약은 «그 본문 문장의 결속과 같은 수준»으로
+#   결속되고, 새 문장이 없으니 요약을 다시 검수할 이유도 없다.
+#   ⚠️ 「구성상 보장」은 과한 말이다 (2026-09-11 독립 검토) — 본문 문장이
+#     FactRecord를 못 만든 실행에서는 요약도 결속 0건이다. 나빠지지는
+#     않지만(요약은 늘 본문과 같은 수준), 결속을 새로 만들어 주지도 않는다.
 
 SUMMARY_PROMPT_HEADER: Final[str] = (
     "당신은 «공식 근거 기반 기업분석 보고서»의 본문을 모두 읽고, "
@@ -1707,21 +1710,38 @@ SUMMARY_PROMPT_HEADER: Final[str] = (
 SUMMARY_SELECTION_NUMBERS_KEY: Final[str] = "번호"
 
 #: 고르는 규칙 — 무엇을 우선하는지만 말하고, 글자를 만들라고 하지 않는다.
+#:
+#: ★ 4항이 뒤집힌 근거 (2026-09-11 독립 검토 P2-1) — 예전에는 「수치나 고유명사가
+#:   들어 있는 문장을 먼저」였다. 그 지시는 출고 계약
+#:   (`docs/출력물 기준/00_핵심_요약/README.md` 조사 절차 3·제외 기준)과 정반대다.
+#:   계약은 「같은 장에서는 숫자 없는 문장을 먼저 고르되, 숫자 문장뿐이면 글자
+#:   변경 없이 허용」이고 「구체적인 날짜·실행 사례·출처 번호의 재기재」를 막는다.
+#:   게다가 골든 fixture 실측에서 본문 52문장 중 숫자 문장 15건이 «전부» 후보에서
+#:   빠져(결속 없는 숫자 문장은 요약 잣대를 못 넘는다) 그 지시는 공회전했다.
 SUMMARY_SELECTION_RULES_GUIDE: Final[str] = (
     "고르는 규칙:\n"
     f"1. 아래 후보 문장 중 {SUMMARY_MIN_SENTENCES}~"
     f"{SUMMARY_MAX_SENTENCES}개의 번호를 고른다.\n"
     "2. 회사를 처음 보는 취업준비생에게 가장 중요한 순서로 고른다.\n"
-    "3. 서로 다른 장에서 고른다 — 고를 장이 모자랄 때만 같은 장에서 둘을 "
-    "고른다.\n"
-    "4. 수치나 고유명사가 들어 있는 문장을 먼저 고른다.\n"
+    "3. 한 장에서 하나씩만 고른다 — 같은 장에서 둘 이상 고르지 않는다.\n"
+    "4. 숫자가 없는 문장을 먼저 고른다. 그 장에 숫자 없는 문장이 없을 때만 "
+    "숫자가 든 문장을 고른다. 무엇을 하는 회사인지·수익 구조·최근 변화·"
+    "과제와 대응·성장 방향처럼 회사를 처음 보는 독자에게 핵심인 사실을 "
+    "장별로 하나씩 고른다.\n"
     "5. 문장을 고치거나 새로 쓰지 않는다. 번호만 답한다.\n"
 )
 
 #: 출력 형식 — 번호 배열 하나뿐이라 출력 토큰이 아주 작다.
+#:
+#: ★ 객체 모양으로 바꾼 근거 (2026-09-11 독립 검토 P1) — 예전에는 «맨 배열»
+#:   `[1, 4, 7]`을 요구했다. 그런데 공용 회수기(`extract_json_payload`)는 코드
+#:   펜스·머리말이 붙으면 «첫 { ~ 마지막 }»만 잘라 내므로 중괄호가 없는 배열은
+#:   한 번도 회수되지 않는다(실측: "```json\n[1, 4, 7]\n```" → 번호 0개).
+#:   그러면 유료 호출 1회가 통째로 버려지고 규칙 보충으로 되돌아간다.
+#:   안내문을 객체형으로 바꾸고, 파서는 두 모양을 «둘 다» 읽는다.
 SUMMARY_SELECTION_JSON_GUIDE: Final[str] = (
-    "출력 형식 — 설명·머리말 없이 고른 번호만 담은 JSON 배열 하나만 출력한다:\n"
-    "[1, 4, 7]\n"
+    "출력 형식 — 설명·머리말 없이 고른 번호만 담은 JSON 하나만 출력한다:\n"
+    f'{{"{SUMMARY_SELECTION_NUMBERS_KEY}": [1, 4, 7]}}\n'
 )
 
 SUMMARY_CANDIDATE_HEAD: Final[str] = (
@@ -1813,17 +1833,54 @@ def _selection_number(item: Any) -> Optional[int]:
     return None
 
 
+def _bracketed_array_payload(raw: str) -> Optional[Any]:
+    """코드 펜스·머리말이 붙은 «맨 배열» 응답에서 배열만 회수한다.
+
+    ★ 왜 여기서 따로 회수하나 (2026-09-11 독립 검토 P1) — 공용 회수기
+      `extract_json_payload`는 펜스가 붙으면 «첫 { ~ 마지막 }»만 자른다. 배열에는
+      중괄호가 없어 한 번도 회수되지 않았다. 공용 함수에 «[ ~ ]» 자르기를 더하면
+      장별 응답·검수 응답까지 영향을 받으므로, 번호만 읽는 이 자리에만 둔다.
+    ★ 자른 뒤에도 «JSON으로 읽히는가»만 본다. 글자를 해석하지 않는다.
+    """
+
+    text = (raw or "").strip()
+    start, end = text.find("["), text.rfind("]")
+    if start < 0 or end <= start:
+        return None
+    try:
+        return json.loads(text[start : end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def _selection_numbers_payload(raw: str) -> Optional[Any]:
+    """응답에서 번호 배열이 될 수 있는 값을 꺼낸다 — 객체형·맨 배열 둘 다."""
+
+    payload = extract_json_payload(raw)
+    if isinstance(payload, Mapping):
+        keyed = payload.get(SUMMARY_SELECTION_NUMBERS_KEY)
+        if keyed is not None:
+            return keyed
+        # 객체는 왔는데 번호 칸이 없다 — 펜스 안의 맨 배열을 한 번 더 본다.
+        payload = None
+    if payload is None:
+        return _bracketed_array_payload(raw)
+    return payload
+
+
 def parse_summary_selection(raw: str, candidate_count: int) -> tuple[int, ...]:
     """응답에서 «후보 번호»만 읽는다 — 그 밖의 것은 전부 버린다.
+
+    객체형 ``{"번호": [1, 4, 7]}``와 맨 배열 ``[1, 4, 7]``을 모두 읽으며,
+    코드 펜스나 머리말이 붙어 있어도 읽는다. 안내문이 요구하는 모양은
+    객체형이지만, 모델이 둘 중 어느 쪽으로 답해도 호출이 버려지지 않는다.
 
     ★ 글자를 읽지 않는다. 범위 밖 번호·중복·JSON 아님은 모두 «그만큼 못
       골랐다»로 처리하고, 모자란 자리는 부르는 쪽의 규칙 보충이 메운다.
       응답이 문장을 담아 와도 그 글자는 보고서에 실리지 않는다.
     """
 
-    payload = extract_json_payload(raw)
-    if isinstance(payload, Mapping):
-        payload = payload.get(SUMMARY_SELECTION_NUMBERS_KEY)
+    payload = _selection_numbers_payload(raw)
     if isinstance(payload, (str, bytes)) or not isinstance(payload, Sequence):
         return ()
     numbers: list[int] = []
@@ -1899,11 +1956,16 @@ def _fill_summary(
     *,
     excluded_keys: frozenset[str],
     accept: Optional[Callable[[ComposedSentence], bool]] = None,
+    section_by_key: Optional[Mapping[str, str]] = None,
 ) -> tuple[ComposedSentence, ...]:
     """이미 고른 요약에 후보를 순서대로 채워 최소 문장 수를 맞춘다.
 
     ``accept``: 후보가 «요약 잣대»를 통과하는지 보는 술어. 통과하지 못한
     후보는 건너뛰고 다음 후보로 간다.
+
+    ``section_by_key``: 정규화 본문 → 그 문장을 소유한 장. 주면 «장당 최대
+    1개» 계약(`docs/출력물 기준/00_핵심_요약/README.md` 조사 절차 4)을
+    여기서도 지킨다. 이미 쓴 장의 문장은 건너뛴다. 안 주면 예전 동작 그대로다.
 
     ★ 왜 필요한가 (실측) — 본문 잣대와 요약 잣대가 다르다. 본문에 남아 있는
       문장이라고 요약에 실을 수 있는 것은 아니다. 술어 없이 채우면 방금
@@ -1916,6 +1978,11 @@ def _fill_summary(
 
     chosen: list[ComposedSentence] = list(summary)
     seen = {_normalized_text(sentence.text) for sentence in chosen}
+    used_sections: set[str] = set()
+    if section_by_key is not None:
+        used_sections = {
+            section_by_key[key] for key in seen if key in section_by_key
+        }
     for candidate in ordered:
         if len(chosen) >= SUMMARY_MIN_SENTENCES:
             break
@@ -1924,8 +1991,15 @@ def _fill_summary(
             continue
         if accept is not None and not accept(candidate):
             continue
+        section_id = ""
+        if section_by_key is not None:
+            section_id = section_by_key.get(key, "")
+            if section_id and section_id in used_sections:
+                continue
         chosen.append(candidate)
         seen.add(key)
+        if section_id:
+            used_sections.add(section_id)
     return tuple(chosen)
 
 
@@ -1935,6 +2009,7 @@ def _supplement_summary(
     *,
     excluded_keys: frozenset[str] = frozenset(),
     accept: Optional[Callable[[ComposedSentence], bool]] = None,
+    section_by_key: Optional[Mapping[str, str]] = None,
 ) -> tuple[ComposedSentence, ...]:
     """요약이 최소 문장 수에 못 미치면 본문 «확인» 문장으로 보충한다.
 
@@ -1947,6 +2022,7 @@ def _supplement_summary(
     return _fill_summary(
         summary, _confirmed_by_section_rounds(report),
         excluded_keys=excluded_keys, accept=accept,
+        section_by_key=section_by_key,
     )
 
 
@@ -1956,11 +2032,13 @@ def _supplement_summary_any_grade(
     *,
     excluded_keys: frozenset[str] = frozenset(),
     accept: Optional[Callable[[ComposedSentence], bool]] = None,
+    section_by_key: Optional[Mapping[str, str]] = None,
 ) -> tuple[ComposedSentence, ...]:
     """«확인» 문장이 모자랄 때 등급을 가리지 않고 같은 순서로 보충한다."""
     return _fill_summary(
         summary, _any_grade_by_section_rounds(report),
         excluded_keys=excluded_keys, accept=accept,
+        section_by_key=section_by_key,
     )
 
 
@@ -1971,8 +2049,15 @@ def select_summary_sentences(
     """후보 중에서 AI가 고른 문장을 «글자 그대로» 돌려준다 (AI 호출 1회).
 
     돌려주는 것은 후보로 받은 그 ``ComposedSentence`` 객체다 — 글자·인용·
-    등급·구조화 사실이 본문과 완전히 같으므로 요약 결속이 구성상 보장된다.
+    등급·구조화 사실이 본문과 완전히 같으므로, 요약은 «그 본문 문장의 결속과
+    같은 수준»으로 결속된다. 본문 문장이 결속되지 않은 실행에서는 요약도
+    결속되지 않는다(그때도 본문보다 느슨해지지는 않는다).
 
+    ★ «장당 최대 1개»는 프롬프트가 아니라 여기서 지킨다 (계약
+      `docs/출력물 기준/00_핵심_요약/README.md` 조사 절차 4). AI가 한 장에서
+      둘 이상 고르면 그 장의 첫 번호만 남기고 나머지는 버린다 — 빈자리는
+      부르는 쪽의 규칙 보충이 «다른 장»에서 채운다. 지시만으로 두면 실측처럼
+      한 장에서 세 개가 그대로 실린다(1장 후보 3개에 [1,2,3] 응답 재현).
     ★ 재요청하지 않는다. 응답이 번호가 아니면 «그만큼 못 골랐다»로 두고
       부르는 쪽의 규칙 보충이 메운다 — 번호 하나 받자고 호출을 한 번 더
       쓰는 것보다, 검증된 본문 문장으로 채우는 편이 결과가 같고 싸다.
@@ -1982,7 +2067,8 @@ def select_summary_sentences(
         ask: 프롬프트 문자열 → 응답 문자열 주입 함수 (시험은 가짜 함수 사용).
 
     Returns:
-        AI가 고른 본문 문장들. 재료가 없거나 못 골랐으면 빈 튜플.
+        AI가 고른 본문 문장들(장마다 최대 하나). 재료가 없거나 못 골랐으면
+        빈 튜플.
 
     Raises:
         AskFatalError: 요청 전역 장애(예산 소진·한도)는 삼키지 않고 그대로
@@ -2007,4 +2093,20 @@ def select_summary_sentences(
             "요약 선택 응답에서 후보 번호를 하나도 읽지 못했다 — "
             "검증된 본문 문장으로 채운다"
         )
-    return tuple(candidates[number - 1].sentence for number in numbers)
+    chosen: list[ComposedSentence] = []
+    used_sections: set[str] = set()
+    dropped = 0
+    for number in numbers:
+        candidate = candidates[number - 1]
+        if candidate.section_id in used_sections:
+            dropped += 1
+            continue
+        used_sections.add(candidate.section_id)
+        chosen.append(candidate.sentence)
+    if dropped:
+        logger.warning(
+            "요약 선택이 한 장에서 %d개를 더 골라 버렸다 — 장당 하나만 싣고 "
+            "나머지는 다른 장의 검증된 본문 문장으로 채운다",
+            dropped,
+        )
+    return tuple(chosen)

@@ -196,7 +196,8 @@ def test_complete_summary_skips_supplement() -> None:
     assert len(final.summary) == 3
     assert draft_count == 3
     assert selector.calls == 1, "고르기는 정확히 1회다 — 재요청도, 재검증도 없다"
-    # 고른 문장은 본문 문장 «그 객체» 그대로다 — 결속이 구성상 보장된다.
+    # 고른 문장은 본문 문장 «그 객체» 그대로다 — 요약은 그 본문 문장의
+    # 결속과 같은 수준으로 결속된다(없는 결속을 만들어 주지는 않는다).
     본문문장 = [section.sentences[0] for section in _BODY_THREE.sections]
     assert list(final.summary) == 본문문장
 
@@ -264,7 +265,10 @@ def test_insufficient_body_stays_below_summary_minimum() -> None:
 
     record = diagnostics[0]
     assert record["본문후보수"] == 2
-    assert record["초안수"] == 0  # 범위 밖 번호는 하나도 인정하지 않는다
+    # ★ 0인 이유가 바뀌었다 (2026-09-11) — 예전에는 「범위 밖 번호를 하나도
+    #   인정하지 않아서」였고, 지금은 후보가 최소 문장 수에 못 미쳐 «고르기를
+    #   아예 안 불러서»다. 범위 밖 번호 판독은 `test_summary.py`가 지킨다.
+    assert record["초안수"] == 0
     assert record["최종수"] == 2
     assert record["첫보충후수"] == 2
     assert record["도달단계"] == "최종"
@@ -297,6 +301,77 @@ def test_unreadable_selection_uses_confirmed_body() -> None:
     assert record["도달단계"] == "최종"
     _assert_contract_valid(record)
     _assert_no_leaked_content(record)
+
+
+def test_한_장에서_몰아_고르면_나머지는_다른_장으로_채운다() -> None:
+    """★ 계약 「장당 최대 1개」를 운영 진입점에서 못 박는다 (P2-2).
+
+    실측 재현 — 1장에 후보 3개를 두고 [1, 2, 3]을 답하게 하면 예전에는 요약
+    3건이 전부 1장에서 나왔다. 이제는 그 장의 첫 번호만 남고, 빈자리는
+    규칙 보충이 «다른 장»에서 채운다. 보충 쪽에도 같은 제한이 걸려 있어야
+    한다 — 안 그러면 방금 버린 그 장의 다른 문장이 보충으로 되돌아온다.
+    """
+
+    본문 = ComposedReport(
+        sections=(
+            ComposedSection("identity", (
+                _body_sentence("가나다전자 개요 첫 문단이다.", "1"),
+                _body_sentence("가나다전자 개요 둘째 문단이다.", "1"),
+                _body_sentence("가나다전자 개요 셋째 문단이다.", "1"),
+            )),
+            ComposedSection("business_model", (
+                _body_sentence("가나다전자 사업모델 문단이다.", "2"),
+            )),
+            ComposedSection("portfolio", (
+                _body_sentence("가나다전자 포트폴리오 문단이다.", "3"),
+            )),
+        )
+    )
+    장_by_text = {
+        sentence.text: section.section_id
+        for section in 본문.sections
+        for sentence in section.sentences
+    }
+
+    (final, draft_count, _numeric), diagnostics, selector = _run(
+        본문, numbers=[1, 2, 3],
+    )
+
+    assert selector.calls == 1
+    assert draft_count == 1, "한 장에서 고른 셋 중 하나만 인정해야 한다"
+    장들 = [장_by_text[sentence.text] for sentence in final.summary]
+    assert len(final.summary) == 3
+    assert len(set(장들)) == 3, f"한 장에서 여러 문장이 실렸다: {장들}"
+    assert final.summary[0].text == "가나다전자 개요 첫 문단이다."
+
+    record = diagnostics[0]
+    assert record["초안수"] == 1
+    assert record["첫보충후수"] == 3
+    assert record["최종수"] == 3
+
+
+def test_후보가_최소_문장_수에_못_미치면_고르기를_부르지_않는다() -> None:
+    """★ 어차피 막힐 실행에서 유료 1회를 태우지 않는다 (P3-4).
+
+    후보가 3문장 미만이면 무엇을 골라도 요약이 3문장을 못 채우고, 출고 검증이
+    보고서 전체를 막는다(그 정책은 `test_pipeline.py`의 run_v2 시험이 지킨다).
+    그러니 고르기 호출은 결과를 바꾸지 못한 채 사라질 뿐이다.
+    """
+
+    (final, draft_count, _numeric), diagnostics, selector = _run(
+        _BODY_THIN, numbers=[1, 2],
+    )
+
+    assert selector.calls == 0, "막힐 실행에서 고르기 AI를 불렀다"
+    assert selector.prompts == []
+    assert draft_count == 0
+    assert len(final.summary) == 2  # fail-closed — 억지로 채우지 않는다
+
+    record = diagnostics[0]
+    assert record["초안수"] == 0
+    assert record["작성한도도달"] is False  # 한도가 아니라 «부를 이유가 없다»
+    assert record["첫보충후수"] == 2
+    assert record["최종수"] == 2
 
 
 def test_partial_selection_is_topped_up_by_the_body() -> None:

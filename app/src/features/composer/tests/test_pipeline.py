@@ -802,6 +802,55 @@ def test_본문이_통째로_비면_V2ValidationError로_끝난다():
     assert caught.value.problem_codes == ()
 
 
+def test_요약_후보가_세_문장_미만이면_보고서_전체가_막히고_AI도_안_부른다():
+    """★ 정책을 «운영 진입점»에서 못 박는다 (2026-09-11 독립 검토 P2-3).
+
+    계약(`docs/출력물 기준/00_핵심_요약/README.md`)은 카드 3~5개 고정이고,
+    실패 시 처리가 「근거가 충분한 결론이 3개 미만이면 요약을 억지로 채우지
+    않는다」다. 그래서 후보가 3문장 미만이면 요약만 줄여 내보내지 않고
+    보고서 «전체»가 출고 검증에서 막힌다.
+
+    이 시험이 없으면 다음 사람이 「요약이 짧으면 그냥 내보내자」로 조용히
+    뒤집을 수 있다. 단계 시험은 「2문장으로 그대로 돌아온다」까지만 재고,
+    그 뒤 무슨 일이 일어나는지는 여기서만 보인다.
+
+    ★ 함께 못 박는 것 — 어차피 막힐 실행에서 고르기 AI를 «부르지 않는다».
+      불러도 결과를 바꿀 수 없어 그 실행의 유료 1회가 그냥 사라진다.
+    """
+
+    # 아홉 장이 «같은» 사실을 쓰면 소유 장 하나로 모여 본문에 1문장만 남는다.
+    한문장 = json.dumps(
+        {
+            "문장들": [
+                {
+                    "글": "가나다전자는 반도체 검사 장비 전문기업이다.",
+                    "인용": ["1"],
+                    "등급": GRADE_CONFIRMED,
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    writer = _FakeWriter(section_response=한문장)
+    reviewer = _FakeReviewer()
+
+    with pytest.raises(V2ValidationError) as caught:
+        run_v2(
+            "가나다전자",
+            _raw_fragments(),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+        )
+
+    assert any("핵심 요약" in problem for problem in caught.value.problems), (
+        caught.value.problems
+    )
+    # 요약 «고르기» 프롬프트는 한 번도 나가지 않았다 — 장 9회로 끝이다.
+    assert len(writer.prompts) == 9
+    assert not any("핵심 요약" in prompt for prompt in writer.prompts)
+
+
 # ══════════════════════════════════════════════════════════
 # ⑤ 중복 검출 경고 — 잡혀도 출고는 막지 않는다
 # ══════════════════════════════════════════════════════════
