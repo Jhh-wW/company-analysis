@@ -155,3 +155,155 @@ def test_지침이_말한_어투가_실제로_6장_배치검사를_통과한다(
         assert future_section_prose_problem(문장) == (
             "future_section_no_forward_statement"
         ), 문장
+
+
+# ══════════════════════════════════════════════════════════
+# 미래 표지 «있다/없다»는 배치 판정의 빈 문자열과 다르다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 갈라 두나 — `future_section_prose_problem`의 빈 문자열은 «반례를 못
+#   찾았다»는 뜻이지 «미래 표지가 있다»가 아니다. 양태 표지가 아예 없는 문장도
+#   빈 문자열을 받는다. 장 간 중복의 소유권을 시제로 가르는 자리(dedupe)는
+#   그 차이를 구별해야 한다 — 못 하면 시제가 없는 문장까지 6장으로 넘어간다.
+
+
+def test_양태가_없는_문장은_배치는_통과해도_미래표지는_없다():
+    from src.features.composer.future_plan_guard import (
+        future_section_prose_problem,
+        has_forward_marker,
+    )
+
+    양태_없는_문장 = "회사의 교육서비스 부문은 온라인과 집합교육 서비스로 구성된다."
+
+    assert future_section_prose_problem(양태_없는_문장) == ""
+    assert has_forward_marker(양태_없는_문장) is False
+
+
+def test_지침이_말한_어투는_미래표지로도_읽힌다():
+    """지침·배치 관문·소유권 가르기가 «같은 목록»을 쓰는지 행동으로 묶는다."""
+    from src.features.composer.future_plan_guard import has_forward_marker
+
+    for 문장 in (
+        "회사는 2026년에 AI 교육 체계를 고도화할 계획이다.",
+        "회사는 새로운 시장으로 사업 영역을 확장하겠다고 밝혔다.",
+        "회사는 진단 기반 리더십 교육을 강화하는 것을 목표로 한다.",
+        "회사는 외국어평가 시장이 지속적으로 성장할 것으로 전망한다.",
+    ):
+        assert has_forward_marker(문장) is True, 문장
+    for 문장 in (
+        "회사는 AI 교육 체계를 고도화하고 리더십 교육을 강화하고 있다.",
+        "회사는 합숙형 어학 교육 모델을 글로벌 기업 대상으로 확대하였다.",
+    ):
+        assert has_forward_marker(문장) is False, 문장
+
+
+# ══════════════════════════════════════════════════════════
+# 5장 «당면 과제와 대응» 어투 경계 — 6장 경고를 뒤집은 것
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 필요한가 (2026-09-11 멀티캠퍼스 4차 유료 실행) — 원문 사업보고서는
+#   「…확보해 나가겠습니다」라고 적었는데 5장이 그 사실을 「…확보하려 하고
+#   있다」는 진행 어투로 옮겨 담았다. 6장도 같은 근거로 계획 어투 문장을 썼고,
+#   근거가 같으니 장 간 중복 제거가 하나를 뺐다. 5장 지침에는 「아직 시작하지
+#   않은 계획(6장)」이라는 소유 경계가 이미 있었지만, 어미를 진행형으로 바꾸면
+#   그 경계가 «지금 하고 있는 대응»처럼 보여 우회된다. 그래서 6장 지침의 어투
+#   경고를 5장 쪽으로 뒤집어 넣는다.
+
+
+def test_당면과제_지침이_계획_문장을_6장에_남기라고_말한다():
+    """생산 정규식을 import하지 않는다 — 같은 값끼리 맞추면 순환 검증이 된다."""
+    지침 = SECTION_GUIDES["current_challenges"]
+
+    for 표지 in ("계획", "예정", "방침", "목표", "하겠습니다", "전망", "향후"):
+        assert 표지 in 지침, f"5장 지침에 미래 표지 «{표지}»가 없습니다"
+    assert "6장에 남긴다" in 지침, "계획 문장을 6장에 남기라는 지시가 없습니다"
+
+
+def test_당면과제_지침이_진행형으로_바꿔_담지_말라고_말한다():
+    지침 = SECTION_GUIDES["current_challenges"]
+
+    assert "하려 하고 있다" in 지침, "실측 어투 사례가 없습니다"
+    assert "하고 있다" in 지침
+    assert "원문 어미를 그대로" in 지침, "원문 어미 보존 지시가 없습니다"
+    assert "확보해 나가겠습니다" in 지침, "실측 원문 사례가 없습니다"
+
+
+def test_당면과제_어투_경계가_실제_프롬프트에_실린다():
+    """상수에만 있고 프롬프트에 안 실리면 아무 효과가 없다."""
+    prompt = build_section_prompt(
+        "가나다전자(주)", "current_challenges", _fragments(), None
+    )
+
+    assert "6장에 남긴다" in prompt
+    assert "원문 어미를 그대로" in prompt
+
+
+def test_5장_지침이_말한_두_어투가_실제_판정에서_갈린다():
+    """지침과 관문·소유권 가르기가 따로 놀지 않게 «행동»으로 묶는다.
+
+    지침은 「진행형으로 바꿔 담으면 소유가 6장으로 간다」고 말한다. 그 말이
+    참이려면 계획 어투는 미래로, 진행 어투는 미래가 아닌 것으로 읽혀야 한다.
+    """
+    from src.features.composer.future_plan_guard import has_forward_marker
+
+    계획_어투 = "회사는 진단 기반 리더십 교육을 강화해 나가겠다고 밝혔다."
+    진행_어투 = "회사는 진단 기반 리더십 교육을 강화하려 하고 있다."
+
+    assert has_forward_marker(계획_어투) is True
+    assert has_forward_marker(진행_어투) is False
+
+
+# ══════════════════════════════════════════════════════════
+# 계획이 «없다»는 문장은 미래 표지가 아니다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 필요한가 (독립 검토 지적) — 「자기주식 소각 계획은 없습니다」가 미래 표지
+#   True로 잡혔다. 계획을 밝힌 문장이 아니라 계획이 «없다»는 문장이다. 5장에
+#   그런 문장이 있으면 소유권 가르기가 「5장도 미래를 말한다」로 읽어 규칙이
+#   꺼진다(미탐 방향).
+# ★ 부정 판정은 새로 만들지 않고 표 쪽 가드가 쓰던 `_plan_denied_after_marker`
+#   하나를 그대로 쓴다. 그래서 표지 «앞»의 부정(「하지 않을 계획」)은 정상적인
+#   부정 계획으로 그대로 남는다 — 그 구분이 그 함수의 존재 이유다.
+# ★ 실측 (공시 21건·절 문장 2,331개): 표지 판정이 바뀐 문장은 2개이고 둘 다
+#   「…계획은 없습니다」다. 반대 방향(False→True)은 0개다.
+
+
+def test_계획이_없다는_문장은_미래_표지가_아니다():
+    from src.features.composer.future_plan_guard import has_forward_marker
+
+    for 문장 in (
+        "현재 예정중인 자기주식 취득·처분·소각 계획은 없습니다.",
+        "당사는 신규 공장을 증설할 계획은 없습니다.",
+    ):
+        assert has_forward_marker(문장) is False, 문장
+
+
+def test_부정_계획은_여전히_미래_표지다():
+    """「하지 않을 계획」은 계획이 없는 것이 아니라 «안 하겠다는 계획»이다."""
+    from src.features.composer.future_plan_guard import has_forward_marker
+
+    assert has_forward_marker("당사는 당분간 신규 출점을 하지 않을 계획이다.") is True
+
+
+def test_정당한_계획_문장은_그대로_미래_표지다():
+    """부정 규칙이 정상 계획까지 끄지 않는지 확인한다."""
+    from src.features.composer.future_plan_guard import has_forward_marker
+
+    for 문장 in (
+        "회사는 2026년에 AI 교육 체계를 고도화할 계획이다.",
+        "회사는 신규 민자사업 참여를 추진할 예정입니다.",
+        "회사는 새로운 시장으로 사업 영역을 확장하겠다고 밝혔다.",
+    ):
+        assert has_forward_marker(문장) is True, 문장
+
+
+def test_계획_서술어만으로도_미래_표지가_된다():
+    """★ 독립 검토 뮤테이션 M8 — `FUTURE_SECTION_FORWARD_RE` 갈래를 꺼도
+    composer 시험이 전부 통과했다. 그 갈래로만 잡히는 어투를 못 박는다.
+
+    「계획하고 있다」는 양태 목록에서는 진행(「하고 있」)으로만 읽혀 미래로
+    잡히지 않는다. 이 갈래가 꺼지면 정상 계획 문장이 통째로 미래가 아니게 된다.
+    """
+    from src.features.composer.future_plan_guard import has_forward_marker
+
+    assert has_forward_marker("회사는 신규 공장 건설을 계획하고 있다.") is True

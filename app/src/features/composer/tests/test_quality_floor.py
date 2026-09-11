@@ -41,6 +41,7 @@ from src.features.composer.logic import (
 )
 from src.features.composer.pipeline import V2RunOutput, run_v2
 from src.features.composer.render import INTERPRETATION_MARKER
+from src.features.composer.tests.test_pipeline import _summary_selection_json
 from src.features.composer.verify import (
     NOTICE_ALL_SENTENCES_REJECTED,
     REVIEW_PROMPT_HEADER,
@@ -134,8 +135,18 @@ def _fixture_body_sentences() -> list[dict[str, Any]]:
 
 
 def _fixture_summary_sentences() -> list[dict[str, Any]]:
-    """fixture가 약속한 핵심 요약 초안 문장 전부."""
+    """fixture가 약속한 핵심 요약 초안 문장 전부.
+
+    ★ 이 문장들은 이제 보고서에 실리지 않는다 (2026-09-11) — 요약이 «고르기»가
+      되면서 AI가 문장을 만들 수 없기 때문이다. fixture 자체의 품질 하한
+      (확인 등급 비율)을 재는 데만 남겨 둔다.
+    """
     return list(_RESPONSES_FIXTURE["핵심요약_응답"]["문장들"])
+
+
+#: 요약 «고르기»가 돌려주는 문장 수. 가짜 AI(`_summary_selection_json`)가 서로
+#: 다른 장에서 세 개를 고른다. 생산 상수를 빌려 오지 않고 글자로 적는다.
+_SUMMARY_PICKS = 3
 
 
 # ══════════════════════════════════════════════════════════
@@ -148,9 +159,8 @@ class _GoldenWriter:
 
     def __call__(self, prompt: str) -> str:
         if SUMMARY_PROMPT_HEADER in prompt:
-            return json.dumps(
-                _RESPONSES_FIXTURE["핵심요약_응답"], ensure_ascii=False
-            )
+            # 요약은 이제 «고르기»다 — fixture 문장을 지어내지 않고 번호만 답한다.
+            return _summary_selection_json(prompt)
         for section_id in SECTION_IDS:
             if SECTION_GUIDES[section_id] in prompt:
                 return json.dumps(
@@ -286,13 +296,25 @@ def test_핵심_요약과_1_8장이_실질_내용으로_존재한다(
 
 
 # ══════════════════════════════════════════════════════════
-# 4-A-2. 요약 3~5문장 + 본문 재탕 아님
+# 4-A-2. 요약 3~5문장 + 서로 다른 장에서 고른 검증 본문 문장
 # ══════════════════════════════════════════════════════════
 
 
-def test_요약은_3에서_5문장이고_본문_재탕이_아니다(
+def test_요약은_3에서_5문장이고_서로_다른_장에서_고른_본문_문장이다(
     floor_run: tuple[V2RunOutput, _AllTrueReviewer],
 ) -> None:
+    """★ 기준이 뒤집힌 근거 (2026-09-11).
+
+    예전 하한은 「요약 전 문장이 본문과 동일하면 재탕이라 실패」였다. 그
+    기준은 요약을 AI가 «새로 쓴다»는 전제 위에 있었다. 그런데 새로 쓴 문장은
+    어느 본문 사실과도 축자로 맞지 않아 결속이 붙지 않았고, 실측 실행에서
+    그 문장들이 전부 지워지거나(4차 멀티캠퍼스) 결속 없이 출고됐다(2차
+    인텍에프에이).
+    이제 요약은 검증된 본문 문장을 «고른다». 본문과 축자 동일한 것이 설계이며,
+    유사도 1.0은 결함이 아니다. 그래서 검수 기준을 「본문 복제가 아님」에서
+    「서로 다른 장에서 왔고 어느 장 이야기인지 표시된다」로 바꾼다.
+    """
+
     output, _reviewer = floor_run
     report = output.report
 
@@ -307,8 +329,17 @@ def test_요약은_3에서_5문장이고_본문_재탕이_아니다(
         for text in _substantive_texts(section)
     }
     summary_texts = [item.text for item in report.summary_items]
-    # 하한: 요약 전 문장이 본문과 동일하면 «재탕» — 실패다 (05장 4-A-2)
-    assert not all(text in body_texts for text in summary_texts)
+    # 하한: 요약 문장은 «전부» 검증된 본문 문장이어야 한다 — 새 글자 금지.
+    bare_summary = [_CITATION_MARKER_RE.sub("", text).strip() for text in summary_texts]
+    bare_body = {_CITATION_MARKER_RE.sub("", text).strip() for text in body_texts}
+    assert all(text in bare_body for text in bare_summary), (
+        f"본문에 없는 요약 문장이 있다: "
+        f"{[t for t in bare_summary if t not in bare_body]}"
+    )
+    # 하한: 한 장에서 몰아 고르지 않는다 — 어느 장 이야기인지도 실린다.
+    section_ids = [item.section_id for item in report.summary_items]
+    assert all(section_ids), f"요약 카드의 장 표시가 비었다: {section_ids}"
+    assert len(set(section_ids)) == len(section_ids), section_ids
     # 옛 골든 fixture의 AI 요약 수치는 의미 결속이 없으므로 새 생성 안전
     # 경계가 제외하고, 부족분은 이미 검증된 본문으로 보충할 수 있다. 보충을
     # 금지해 미결속 수치를 되살리는 것보다 최종 요약에 숫자가 없는지가 정본이다.
@@ -438,7 +469,10 @@ def test_기준문서_하한은_낮추지_않고_미결속_수치를_제외한_�
         - DEDUPE_MOVED_IN_FIXTURE
     )
     assert SUMMARY_MIN_SENTENCES <= len(report.summary_items) <= SUMMARY_MAX_SENTENCES
-    assert output.composed_sentences == len(fixture_all)
+    # ★ 초안 합은 「본문 + 고른 요약」이다 (2026-09-11). 예전에는 fixture의
+    #   요약 4문장이 그대로 초안이었다 — AI가 요약을 새로 썼기 때문이다.
+    #   지금은 검증된 본문에서 세 문장을 고르므로 초안에 새 글자가 없다.
+    assert output.composed_sentences == len(fixture_body) + _SUMMARY_PICKS
     assert output.verified_sentences == len(body_texts) + len(report.summary_items)
     assert reviewer.rewrite_prompts == []
 

@@ -104,9 +104,14 @@ from src.features.composer.portfolio_name_constants import (
 )
 from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
 from src.features.composer.scope_guard import flow_scope_problem
-from src.features.composer.absence_claim_guard import absence_claim_problem
+from src.features.composer.absence_claim_guard import (
+    absence_claim_problem,
+    with_absence_scope_guidance,
+)
+from src.features.composer.absence_claim_constants import ABSENCE_CLAIM_UNSUPPORTED
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_financial_risk_goal_problem,
+    culture_flow_cells_evidence_problem,
     culture_flow_problem, culture_problem, culture_section_evidence_problem,
 )
 from src.features.composer.verify import (
@@ -118,6 +123,12 @@ from src.features.composer.verify import (
     _number_found,
     _number_matches_by_math,
     _year_found,
+)
+from src.features.composer.derived_ratio import (
+    DerivedRatioResult,
+    append_derived_ratio_diagnostic,
+    recompute_percent,
+    stated_percent,
 )
 from src.features.composer.port import (
     AskFatalError,
@@ -329,7 +340,13 @@ def portfolio_name_is_grounded(
     return True
 
 
-def _numbers_are_grounded(cell: str, source_text: str) -> Optional[str]:
+def _numbers_are_grounded(
+    cell: str,
+    source_texts: Sequence[str] | str,
+    *,
+    stated_numbers: Sequence[_SentenceNumber] = (),
+    derived_notes: Optional[list[DerivedRatioResult]] = None,
+) -> Optional[str]:
     """칸 안의 수가 인용 원문에 있는가. 없으면 그 수를 돌려준다.
 
     ★ 잣대를 «문장 검증과 같은 것»으로 쓴다 (verify._extract_numbers ·
@@ -341,12 +358,32 @@ def _numbers_are_grounded(cell: str, source_text: str) -> Optional[str]:
 
     ★ 근거 원문이 비어 있으면 «없음»이 아니라 «판단 불가»다 — 문장 쪽이
       같은 상황에서 제거가 아니라 강등에 그치는 것과 같은 원칙으로 남긴다.
+
+    Args:
+        cell: 검사할 칸.
+        source_texts: 그 줄이 인용한 조각 원문들. 문자열 하나를 주면 «조각
+            하나»로 본다(옛 서명 호환). 기존 대조는 종전처럼
+            «이어 붙인 하나»로 보고, 파생 비율 재계산만 조각별로 따로 본다
+            (조각을 가로질러 원값을 빌려오지 않기 위해서다).
+        stated_numbers: 그 «줄 전체»가 적어 낸 수. 파생 비율의 한쪽 끝을
+            못 박는 데만 쓴다(`derived_ratio.anchor_values`). 주지 않으면
+            이 칸이 적어 낸 수만 본다.
+        derived_notes: 파생 비율 판정을 담아 갈 목록. 주면 인정·상한초과를
+            모두 기록한다.
     """
-    if not (source_text or "").strip():
+    # ★ 문자열 하나를 넘겨도 «글자 단위로 쪼개지지» 않게 한 조각으로 본다
+    #   (2026-09-11 독립 검토 P2) — 이 함수의 2번째 인자는 원래 `str`이었다.
+    #   목록으로 바꾼 뒤에도 옛 서명으로 부르는 곳이 있었고, `str`은 그 자체가
+    #   Sequence[str]이라 예외 없이 «한 글자짜리 조각 수백 개»가 되어 모든
+    #   수가 조용히 «없는 수»가 됐다. 조용한 오작동이 가장 나쁘다.
+    texts = (source_texts,) if isinstance(source_texts, str) else tuple(source_texts)
+    source_text = " ".join(text for text in texts if text)
+    if not source_text.strip():
         return None
     numbers = _extract_numbers(cell)
     if not numbers:
         return None
+    anchors = tuple(stated_numbers) or numbers
     raw_values, absolute_values, has_unit_context, years = _evidence_number_pools(
         [source_text]
     )
@@ -360,6 +397,18 @@ def _numbers_are_grounded(cell: str, source_text: str) -> Optional[str]:
         elif number.unit_marked:
             if _number_matches_by_math(number, absolute_values):
                 continue
+            # ★ 파생 비율 갈래 — 인용 조각 «안»의 두 원값으로 되짚어지는
+            #   백분율은 지어낸 수가 아니다(`derived_ratio` 머리말의 실측).
+            #   기존 대조가 «없는 수»라고 한 뒤에만 보므로 종전 판정을
+            #   뒤집지 않고, 되짚어지지 않으면 그대로 «없는 수»로 남는다.
+            percent = stated_percent(number)
+            if percent is not None:
+                derived = recompute_percent(percent, texts, anchors)
+                if derived is not None:
+                    if derived_notes is not None:
+                        derived_notes.append(derived)
+                    if derived.accepted:
+                        continue
             # ★ 여기서 «문장 규칙과 갈라진다». 문장은 근거에 단위 정보가
             #   아예 없을 때 제거가 아니라 «해석 강등»으로 남긴다 — 독자가
             #   배지를 보고 확정 사실이 아님을 안다. 도식에는 그 배지가
@@ -456,10 +505,6 @@ def _name_source_texts(
     return tuple(collected)
 
 
-def _source_text(row: FlowRow, texts: Mapping[str, str]) -> str:
-    return " ".join(_source_texts(row, texts))
-
-
 # ══════════════════════════════════════════════════════════
 # ① 이름·숫자 검사 (기계, AI 0회)
 # ══════════════════════════════════════════════════════════
@@ -499,15 +544,48 @@ def _drop_ungrounded_portfolio_rows(
 
 
 def _drop_invented_numbers(
-    rows: Sequence[FlowRow], texts: Mapping[str, str]
+    rows: Sequence[FlowRow],
+    texts: Mapping[str, str],
+    *,
+    section_id: str = "",
+    derived_ratio_diagnostics: Optional[list[dict]] = None,
 ) -> tuple[tuple[FlowRow, ...], list[str]]:
+    """지어낸 수가 든 줄만 뺀다. 파생 비율 판정은 «전용» 진단에 남긴다.
+
+    ★ 왜 의미 검수 진단(`diagnostics`)과 «같은 목록»을 쓰지 않나 —
+      그 목록은 «검수에서 빠진 후보»의 장부다. 화면 안내문이 그 목록을
+      kind 별로 세어 「…개를 뺐습니다」라고 독자에게 말한다
+      (`pipeline._reader_notice` 계열). 여기서 «인정»한 기록을 그 목록에
+      넣으면 아무것도 빠지지 않았는데 뺐다고 말하게 된다.
+
+    ★ 파생 비율의 한쪽 끝은 «그 줄이 적어 낸 금액»이다. 그래서 칸 하나가
+      아니라 «줄 전체»의 수를 모아 넘긴다 — 작성기가 금액과 비율을 다른 칸에
+      나눠 적는 카드가 실제로 있기 때문이다(3장은 4칸 카드다).
+    """
+
     kept: list[FlowRow] = []
     dropped: list[str] = []
     for row in rows:
-        source_text = _source_text(row, texts)
+        source_texts = _source_texts(row, texts)
+        row_numbers = _extract_numbers(" ".join(row.cells))
         invented: list[str] = []
+        blocked_codes: list[str] = []
         for cell in row.cells:
-            missing = _numbers_are_grounded(cell, source_text)
+            notes: list[DerivedRatioResult] = []
+            missing = _numbers_are_grounded(
+                cell,
+                source_texts,
+                stated_numbers=row_numbers,
+                derived_notes=notes,
+            )
+            for note in notes:
+                append_derived_ratio_diagnostic(
+                    derived_ratio_diagnostics,
+                    section_id=section_id,
+                    result=note,
+                )
+                if not note.accepted and note.reason_code not in blocked_codes:
+                    blocked_codes.append(note.reason_code)
             if missing is not None:
                 invented.append(f"「{cell}」의 수 {missing}")
         if invented:
@@ -516,6 +594,7 @@ def _drop_invented_numbers(
                 + " → ".join(row.cells)
                 + "»: 인용 원문에 없는 수 — "
                 + ", ".join(invented)
+                + ("" if not blocked_codes else f" ({', '.join(blocked_codes)})")
             )
             continue
         kept.append(row)
@@ -706,8 +785,13 @@ def _review_rows(
     *,
     diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
+    absence_sections: Optional[set[str]] = None,
 ) -> tuple[dict[str, tuple[FlowRow, ...]], list[str]]:
-    """모든 장의 경로를 «한 묶음»으로 검수한다 (AI 1회)."""
+    """모든 장의 경로를 «한 묶음»으로 검수한다 (AI 1회).
+
+    ``absence_sections``: 부재 단언 가드가 «행»을 뺀 장 id 수집기(선택).
+    문장 경로(verify.py)와 같은 이유로 그 장에 확인 범위 안내문을 남긴다.
+    """
     items: list[tuple[int, str, FlowRow]] = []
     owner: dict[int, str] = {}
     blank_dropped: list[str] = []
@@ -802,9 +886,11 @@ def _review_rows(
                 # ★ 재무위험 «규정» 규칙과 원문 절 계약을 도식에도 건다. 예전에는
                 #   본문에만 걸려 있어서 산문에서 빠진 재무 서술이 표의 칸으로
                 #   옮겨 적히면 그대로 통과했다 — 같은 보고서 안의 두 잣대였다.
-                # ⚠️ 새로 건 두 검사는 칸마다 «따로» 건다(cellwise_problem
-                #   머리말). 기존 culture_problem 은 이 커밋 이전부터 이어
-                #   붙인 문자열을 쓰던 계약이라 그대로 둔다.
+                # ⚠️ 재무위험 «규정» 검사는 칸마다 «따로» 건다(cellwise_problem
+                #   머리말) — 그 검사는 후보 어휘의 결합을 보기 때문이다.
+                # ★ 원문 절 계약은 «판정 대상 칸»만 따로 본다 — 행 전체로 보면
+                #   재무 규정 칸이 옆 칸에 업혀 통과한다(독립 검토 P1-5). 내용어가
+                #   하나뿐인 칸은 판단을 보류해 정상 행이 지워지지 않게 한다.
                 flow_problem = (
                     culture_flow_problem(row.cells, sources)
                     or culture_accounting_flow_problem(row.cells, sources)
@@ -812,12 +898,7 @@ def _review_rows(
                     or cellwise_problem(
                         row.cells, culture_financial_risk_goal_problem
                     )
-                    or cellwise_problem(
-                        row.cells,
-                        lambda cell: culture_section_evidence_problem(
-                            cell, sources
-                        ),
-                    )
+                    or culture_flow_cells_evidence_problem(row.cells, sources)
                 )
             # 6장 성장 계획 표만 미래 근거를 결속한다 — 이 장의 산문과 다른 장의
             # 도식은 그대로 기존 검수만 거친다.
@@ -827,6 +908,9 @@ def _review_rows(
                 )
             if flow_problem:
                 grounding_problems[number] = flow_problem
+        if (absence_sections is not None
+                and grounding_problems.get(number) == ABSENCE_CLAIM_UNSUPPORTED):
+            absence_sections.add(section_id)
         if number in grounding_problems:
             candidate_text, sources = candidates[number]
             _append_grounding_diagnostic(
@@ -865,11 +949,19 @@ def _review_rows(
 def check_diagram_numbers(
     report: ComposedReport,
     fragments: Sequence[CollectedFragment],
+    *,
+    derived_ratio_diagnostics: Optional[list[dict]] = None,
 ) -> tuple[ComposedReport, tuple[str, ...]]:
     """도식 수치와 3장 이름이 인용 원문에 있는지 AI 없이 검사한다.
 
     strict bundled reviewer와 legacy ``check_diagrams``가 이 한 구현을 함께
     쓴다. 결정론 검사를 strict용으로 복제하면 두 경로의 처분이 다시 갈라진다.
+
+    Args:
+        derived_ratio_diagnostics: 주면 파생 비율 재계산 판정을 여기 남긴다
+            (원문 없이 사유 코드와 근거 쌍만). 의미 검수 진단과 «다른» 목록을
+            쓴다 — 위 `_drop_invented_numbers` 머리말 참조. 생략하면 종전과
+            동작이 같다.
     """
 
     texts = _fragment_texts(fragments)
@@ -887,7 +979,12 @@ def check_diagram_numbers(
             problems.extend(
                 f"[{section.section_id}] {reason}" for reason in rejected
             )
-        kept, dropped = _drop_invented_numbers(rows, texts)
+        kept, dropped = _drop_invented_numbers(
+            rows,
+            texts,
+            section_id=section.section_id,
+            derived_ratio_diagnostics=derived_ratio_diagnostics,
+        )
         problems.extend(f"[{section.section_id}] {reason}" for reason in dropped)
         rebuilt.append(
             replace(section, flow_rows=kept)
@@ -906,6 +1003,7 @@ def check_diagrams(
     ask: Optional[Callable[[str], str]] = None,
     *,
     diagnostics: Optional[list[dict]] = None,
+    derived_ratio_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
 ) -> tuple[ComposedReport, tuple[str, ...]]:
     """관계 도식의 각 줄이 근거에 맞는지 보고, 맞지 않는 줄을 뺀다.
@@ -915,6 +1013,9 @@ def check_diagrams(
         fragments: 수집 조각 — 칸을 대조할 원문.
         ask: 검수 AI. 생략하면 숫자 검사는 수행하되, 관계 안전을
             확인할 수 없으므로 남은 화살표는 공개하지 않는다.
+        diagnostics: 의미 검수에서 «빠진» 후보를 남길 목록. 화면 안내문이
+            이 목록을 세어 독자에게 말하므로 «인정» 기록을 넣지 않는다.
+        derived_ratio_diagnostics: 파생 비율 재계산 판정을 남길 «별도» 목록.
         baseline_date: 보고서 기준일 (ISO ``YYYY-MM-DD``). 근거 결속의
             executive_status_guard 에만 쓴다. 생략하면 종전과 같다.
 
@@ -925,7 +1026,9 @@ def check_diagrams(
     ★ 장을 지우지 않는다. 도식이 사라져도 본문 문장은 그대로다.
     """
     texts = _fragment_texts(fragments)
-    number_checked, number_problems = check_diagram_numbers(report, fragments)
+    number_checked, number_problems = check_diagram_numbers(
+        report, fragments, derived_ratio_diagnostics=derived_ratio_diagnostics
+    )
     problems: list[str] = list(number_problems)
 
     # ① 숫자 검사 결과 — 위 공용 helper가 지어낸 수를 이미 걷어냈다.
@@ -936,10 +1039,12 @@ def check_diagrams(
     ]
 
     # ② 의미 검수 — 관계는 글자로 알 수 없다
+    absence_sections: set[str] = set()
     if ask is not None and any(rows for _sid, rows in after_numbers):
         reviewed, dropped = _review_rows(
             after_numbers, texts, ask, diagnostics=diagnostics,
             baseline_date=baseline_date,
+            absence_sections=absence_sections,
         )
         problems.extend(dropped)
     else:
@@ -954,7 +1059,17 @@ def check_diagrams(
         return number_checked, ()
 
     rebuilt = tuple(
-        replace(section, flow_rows=reviewed.get(section.section_id, section.flow_rows))
+        replace(
+            section,
+            flow_rows=reviewed.get(section.section_id, section.flow_rows),
+            # 부재 단언을 뺀 장에는 확인 범위를 남긴다 — 문장 경로와 같은
+            # 안내문·같은 중복 금지 규칙이다.
+            **(
+                {"notice": with_absence_scope_guidance(section.notice)}
+                if section.section_id in absence_sections
+                else {}
+            ),
+        )
         for section in number_checked.sections
     )
     logger.info("도식 검증: 근거에 맞지 않는 경로 %d줄을 뺐습니다", len(problems))

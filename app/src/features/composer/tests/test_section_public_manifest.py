@@ -283,6 +283,26 @@ _FUTURE_STRATEGY_SENTENCES: Final[tuple[str, ...]] = tuple(
     sentence for _target, _activity, sentence in _FUTURE_STRATEGY_PLANS
 )
 
+#: 8장(인재상·조직문화·일하는 방식) 전용 문장 — 6장과 «같은 방식»으로 둔다.
+#:
+#: ★ 왜 장 전용 문장이 필요한가 — 8장 계약(culture_section_evidence_problem)은
+#:   후보가 «기댄 원문 절»에 이 장의 소재가 있어야 공개한다. 예전 픽스처는 아홉
+#:   장이 같은 일반 문장을 쓰고 8장 문서 «끝»에만 사람 어휘 절을 덧붙였는데,
+#:   그러면 후보가 기대는 절은 언제나 그 일반 문장 쪽이라 8장이 통째로 비었다.
+#:   실물 사업보고서의 8장 근거는 「직원 등의 현황」·「복리후생」 절 자체이므로,
+#:   후보 문장도 그 절을 바꿔 쓴 모양이어야 한다 — 즉 예전 픽스처가 실물에서
+#:   나올 수 없는 모양이었다(6장에서 이미 같은 판단을 했다).
+#: ★ 여섯 문장은 서로 다른 소재를 말한다 — 장 간·장 안 중복 제거에 걸리지
+#:   않게 하려는 것이다.
+_CULTURE_SENTENCES: Final[tuple[str, ...]] = (
+    "회사는 임직원 교육훈련 과정을 정기적으로 운영한다.",
+    "회사는 복리후생 제도로 임직원의 주택자금을 지원한다.",
+    "회사의 인재상은 도전과 협업을 실천하는 인재다.",
+    "인사위원회가 승진 기준과 인사 평가 절차를 심의한다.",
+    "회사는 직원 현황과 평균 근속연수를 공시한다.",
+    "회사는 조직개편으로 부서 구성을 다시 정했다.",
+)
+
 
 def _future_strategy_evidence(index: int, fragment_id: str) -> dict:
     """시험용 원문과 후보가 공유하는 계획 문장을 근거로 제공한다."""
@@ -315,6 +335,8 @@ def _section_sentence(section_id: str, mark: str, ending_index: int, ending: str
     """
     if section_id == "future_strategy":
         return _FUTURE_STRATEGY_SENTENCES[ending_index]
+    if section_id == "culture":
+        return _CULTURE_SENTENCES[ending_index]
     return (
         f"{mark} 회사 {mark}사업 {mark}고객 {mark}제품 전략 운영 문화 경쟁 "
         f"과제 대응 협력 실적 {ending} {mark}부문을 공식 자료에서 확인했다."
@@ -325,6 +347,10 @@ def _fragment_text(mark: str) -> str:
     if mark == _MARKS[SECTION_IDS.index("future_strategy")]:
         common = _FUTURE_STRATEGY_SENTENCES[0]
         sentences = " ".join(_FUTURE_STRATEGY_SENTENCES)
+    elif mark == _MARKS[SECTION_IDS.index("culture")]:
+        # 8장 문서도 그 장의 후보와 «같은 절»을 담는다 — 6장과 같은 방식이다.
+        common = _CULTURE_SENTENCES[0]
+        sentences = " ".join(_CULTURE_SENTENCES)
     else:
         # ★ _section_sentence 와 같은 모양을 유지한다 (꼬리 표현만 없다).
         #   원문이 후보 문장의 어휘를 담고 있어야 근거 결속이 성립한다.
@@ -347,6 +373,10 @@ def _fragment_text(mark: str) -> str:
     #   낱말 하나뿐이어서 실물 사업보고서의 「임원 및 직원 등의 현황」에
     #   해당하는 절이 없었다 — 즉 실물에서 나올 수 없는 모양이었다. 그 절을
     #   8장 문서에만 덧붙인다(2장 실적표 원문을 그 장에만 붙이는 것과 같은 방식).
+    # ⚠️ 이제 8장 후보·문서가 _CULTURE_SENTENCES 를 쓰므로 이 절은 «덤»이다 —
+    #   계약이 후보가 기댄 절을 보게 된 뒤로는 문서 끝의 이 한 절만으로는
+    #   후보가 살아나지 않는다. 지우지 않는 이유는 실물 8장 문서에도 이런
+    #   요약 절이 함께 있기 때문이다.
     people_source = (
         " 임직원 대상 교육제도와 복리후생 제도를 운영하며 평균 근속연수를 공시한다."
         if mark == _MARKS[SECTION_IDS.index("culture")]
@@ -1425,8 +1455,10 @@ def test_SHADOW_flat은_legacy_요약과_검수호출을_유지하고_manifest�
         release_mode=ReleaseMode.SHADOW,
     )
 
-    assert len(writer.prompts) == 10  # 본문 9 + legacy AI 요약 1
-    assert len(reviewer.prompts) == 2  # 본문 1 + legacy 요약 검수 1
+    assert len(writer.prompts) == 10  # 본문 9 + legacy 요약 «고르기» 1
+    # ★ 2026-09-11 이전에는 2였다 (본문 1 + 요약 검수 1). 요약이 검증된 본문
+    #   문장을 글자 그대로 싣게 되면서 요약 재검증 호출이 사라졌다.
+    assert len(reviewer.prompts) == 1  # 본문 검수 1
     assert diagram.calls == 0
     assert output.report.public_structure_manifest == ""
     assert "public_structure_manifest" not in report_to_dict(output.report)

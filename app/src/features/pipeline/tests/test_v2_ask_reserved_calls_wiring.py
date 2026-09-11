@@ -35,8 +35,11 @@ from src.features.pipeline.tests.test_report_company_id_release_mode import (
 from src.shared.report_evidence.constants import ReleaseMode
 
 # ★ 리터럴 오라클 — 생산 상수를 import해 비교하면 값이 내려가도 초록이다.
-_필수후속 = 3
-_재작성예약 = 4  # 필수 후속 3 + 재검수 1
+# ★ 3에서 2로 내린 근거 (2026-09-11) — 요약이 「AI가 새로 쓴다」에서 「검증된
+#   본문 문장 중 고른다」로 바뀌면서 «요약 검수» 단계가 사라졌다. 남은 필수
+#   후속은 도식 검수 1 + 요약 고르기 1이다.
+_필수후속 = 2
+_재작성예약 = 3  # 필수 후속 2 + 재검수 1
 
 
 @pytest.fixture(autouse=True)

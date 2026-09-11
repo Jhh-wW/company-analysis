@@ -197,6 +197,7 @@ def _supplement(
     section_sha256s: tuple[tuple[str, str], ...] | None = None,
     evidence_packet_sha256s: tuple[tuple[str, str], ...] | None = None,
     section_block_sha256s: tuple[tuple[str, str], ...] | None = None,
+    unchanged_sections: tuple[tuple[str, str], ...] = (),
 ) -> GenerationValidationReceipt:
     completed = section_ids or authorization.section_ids
     if section_sha256s is None:
@@ -229,6 +230,7 @@ def _supplement(
         base_receipt_sha256=(base_receipt_sha256 or primary.receipt_sha256),
         supplemented_section_ids=completed,
         section_block_sha256s=section_block_sha256s,
+        unchanged_sections=unchanged_sections,
     )
 
 

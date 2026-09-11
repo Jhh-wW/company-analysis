@@ -69,3 +69,30 @@ DIAGRAM_ROW_COUNT_STAGES = frozenset((
     DIAGRAM_STAGE_PARSED, DIAGRAM_STAGE_SECTION_EVIDENCE,
 ))
 DIAGRAM_ROW_COUNT_SECTION_IDS = frozenset(STRICT_REQUIRED_QUALITY_SECTION_IDS)
+
+# ── 도식 수치 관문의 «파생 비율» 판정 ──────────────────────────────────────
+#
+# ★ 왜 실행 기록까지 올리나 — 이 판정은 「글자로 없는 수를 계산으로 인정했다」는
+#   뜻이다. 어떤 근거 쌍으로 인정했는지가 남지 않으면, 나중에 그 카드가 틀렸을 때
+#   무엇을 보고 통과시켰는지 되짚을 방법이 없다.
+# ★ 원문 글자는 담지 않는다 — 장 이름·닫힌 사유 코드·수만 통과시킨다.
+# ★ 이 기록은 «검수 제외» 장부와 다른 곳에 남는다. 인정 기록을 제외 장부에
+#   넣으면 화면 안내문이 아무것도 빠지지 않았는데 「…개를 뺐습니다」라고 말한다.
+DERIVED_RATIO_STEP = "8_도식_파생비율"
+#: 인용 조각 안의 두 원값으로 되짚어 인정한 경우.
+DERIVED_RATIO_RECOMPUTED = "derived_ratio_recomputed"
+#: 조합 수가 상한을 넘어 «보지 않기로» 한 경우(인정 아님).
+DERIVED_RATIO_PAIR_LIMIT = "derived_ratio_pair_limit"
+DERIVED_RATIO_REASONS = frozenset((
+    DERIVED_RATIO_RECOMPUTED, DERIVED_RATIO_PAIR_LIMIT,
+))
+#: 재계산 종류. 인정하지 않은 기록은 빈 문자열이다.
+DERIVED_RATIO_SHARE_KIND = "구성비"
+DERIVED_RATIO_KINDS = frozenset((DERIVED_RATIO_SHARE_KIND, ""))
+#: 십진수 칸 — 후보가 «적어 낸» 백분율. 보고서에 이미 인쇄된 수다.
+#: 부호·지수·쉼표 표기는 받지 않는다.
+DERIVED_RATIO_DECIMAL_FIELDS = ("백분율",)
+#: 근거 쌍은 «지문»으로만 남긴다 — 원문 금액을 기록 칸에 싣지 않는다.
+#: 빈 문자열은 «근거 쌍 없음»(상한 초과 기록)이다.
+DERIVED_RATIO_FINGERPRINT_FIELD = "근거지문"
+DERIVED_RATIO_SECTION_IDS = frozenset(STRICT_REQUIRED_QUALITY_SECTION_IDS)

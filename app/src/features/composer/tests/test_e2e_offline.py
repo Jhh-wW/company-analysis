@@ -59,6 +59,7 @@ from src.features.composer.render import (
     SECTION_DISPLAY_NUMBERS,
 )
 from src.features.composer.verify import REVIEW_PROMPT_HEADER, REWRITE_PROMPT_HEADER
+from src.features.composer.tests.test_pipeline import _summary_selection_json
 from src.features.composer.tests.review_evidence_fixture import (
     grounded_flow_response,
     grounded_review_response,
@@ -116,13 +117,21 @@ def _fixture_fragments() -> dict[int, dict[str, str]]:
     }
 
 
+#: 요약 «고르기»가 돌려주는 문장 수. 가짜 AI(`_summary_selection_json`)가 서로
+#: 다른 장에서 세 개를 고른다.
+#: ★ 2026-09-11 이전에는 fixture의 «핵심요약_응답» 문장 수를 그대로 썼다.
+#:   그때는 AI가 요약을 새로 썼기 때문이다. 이제는 검증된 본문 문장을 고르므로
+#:   초안 수는 «고른 개수»다. 생산 상수를 빌려 오지 않고 글자로 적는다.
+_SUMMARY_PICKS = 3
+
+
 def _expected_sentence_total() -> int:
-    """fixture가 약속한 초안 문장 수 (본문 9장 + 요약) — 매직 넘버 대신 실측."""
+    """fixture가 약속한 초안 문장 수 (본문 9장 + 고른 요약) — 매직 넘버 대신 실측."""
     body = sum(
         len(payload["문장들"])
         for payload in _RESPONSES_FIXTURE["장별_응답"].values()
     )
-    return body + len(_RESPONSES_FIXTURE["핵심요약_응답"]["문장들"])
+    return body + _SUMMARY_PICKS
 
 
 def _fixture_unbound_numeric_by_section() -> dict[str, tuple[str, ...]]:
@@ -222,7 +231,8 @@ class _JypFakeMessages(_FakeMessages):
             return ""
         if SUMMARY_PROMPT_HEADER in prompt:
             self.summary_calls += 1
-            return json.dumps(_RESPONSES_FIXTURE["핵심요약_응답"], ensure_ascii=False)
+            # 요약은 이제 «고르기»다 — fixture 문장을 지어내지 않고 번호만 답한다.
+            return _summary_selection_json(prompt)
         for section_id in SECTION_IDS:
             if SECTION_GUIDES[section_id] in prompt:
                 self.section_calls[section_id] = (
@@ -418,7 +428,9 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
     fixture_sections = _RESPONSES_FIXTURE["장별_응답"]
     assert set(fixture_sections) == set(SECTION_IDS)
     assert all(len(payload["문장들"]) == 6 for payload in fixture_sections.values())
-    assert _expected_sentence_total() == 58
+    # 본문 54 + 고른 요약 3 = 57. (2026-09-11 이전에는 요약 초안 4를 더해 58이었다.
+    # 그때는 AI가 요약을 새로 썼고, 지금은 검증된 본문에서 세 문장을 고른다.)
+    assert _expected_sentence_total() == 57
 
     # 이 골든 입력의 숫자는 원문 문자열 대조는 통과하지만 AI JSON에는 지표·
     # 기간·공식의 NumericBinding이 없다. 본문 16문장과 요약 2문장이 그 대상임을
@@ -533,8 +545,12 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
     # 부록: 인용된 조각 1~11 전부, 번호는 조각 번호 그대로 (본문 [n]과 1:1)
     assert sorted(source.number for source in report.citations) == list(range(1, 12))
 
-    # 핵심 요약도 같은 계약이다. 미결속 수치 2문장은 빠지고, 숫자 없는 원래
-    # 요약 2문장은 보존되며 안전한 본문 한 문장으로 최소 3문장을 채운다.
+    # 핵심 요약은 «검증된 본문 문장»에서만 온다 (2026-09-11).
+    # ★ 예전 계약 — AI가 요약을 새로 쓰고, 그중 미결속 수치 2문장이 빠지고,
+    #   숫자 없는 2문장이 보존되며, 본문 한 문장으로 최소 3문장을 채웠다.
+    #   이제 AI는 문장을 쓰지 않고 후보 «번호»만 고르므로 fixture의 요약
+    #   문장은 보고서에 실릴 수 없다. 그래서 「fixture 요약 2문장이 보인다」를
+    #   「요약 문장이 전부 본문에 있는 문장이다」로 바꾼다.
     assert (
         SUMMARY_MIN_SENTENCES
         <= len(report.summary_items)
@@ -543,44 +559,55 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
     visible_summary = [item.text for item in report.summary_items]
     for unsafe_text in unbound_summary:
         assert all(unsafe_text not in text for text in visible_summary)
-    safe_fixture_summary = [
-        str(sentence["글"])
-        for sentence in _RESPONSES_FIXTURE["핵심요약_응답"]["문장들"]
-        if not has_public_numeric_token(str(sentence["글"]))
+    body_texts = [
+        text
+        for section in report.sections
+        for text, _cite in section.prose_lines
     ]
-    assert len(safe_fixture_summary) == 2
-    assert all(
-        any(safe_text in visible for visible in visible_summary)
-        for safe_text in safe_fixture_summary
-    )
+    for summary_text in visible_summary:
+        bare = summary_text.split(" [")[0].split(INTERPRETATION_MARKER)[0]
+        assert any(bare in body for body in body_texts), (
+            f"요약 문장이 본문에 없다 — 새 글자가 생겼다: {summary_text}"
+        )
+    # 고른 문장은 서로 다른 장에서 왔고, 어느 장 이야기인지도 실린다.
+    section_ids = [item.section_id for item in report.summary_items]
+    assert all(section_ids) and len(set(section_ids)) == len(section_ids), section_ids
 
-    # 관측 수치도 입력 하한 58을 숨기지 않고 처분별로 계산한다.
+    # 관측 수치도 입력 하한을 숨기지 않고 처분별로 계산한다.
     assert result.charged is True
     assert result.fragments_collected == 11
     assert result.fragments_cited == 11
-    assert result.sentences_made == _expected_sentence_total()
-    safe_summary_before_supplement = (
-        len(_RESPONSES_FIXTURE["핵심요약_응답"]["문장들"])
-        - len(unbound_summary)
+    # ★ 분모(pipeline `composed_item_count`)는 «초안 합»과 «최종 보고서 문장
+    #   수» 중 큰 값이다. 2026-09-11 이전에는 요약 초안 4가 더해져 둘 다
+    #   58로 같았다. 요약이 «고르기»가 되면서 초안 합은 57(본문 54 + 고른 3)이
+    #   됐고, 이제는 최종 문장 수가 분모를 정한다.
+    최종_본문줄 = sum(
+        1
+        for section in report.sections
+        for text, _cite in section.prose_lines
+        if not text.startswith("확인 범위:")
     )
-    summary_supplements = len(report.summary_items) - safe_summary_before_supplement
+    최종_문장수 = 최종_본문줄 + len(report.summary_items)
+    assert _expected_sentence_total() < 최종_문장수
+    assert result.sentences_made == 최종_문장수
     # 제품 결정 ③ 이후 본문에서 실제로 빠지는 수치 문장은
     # unbound_by_section 전체가 아니라 «해석» 등급뿐이다(위 루프와 같은 근거).
     interpreted_removed_total = sum(interpreted_counts_by_section.values())
+    fixture_body_total = sum(
+        len(payload["문장들"]) for payload in fixture_sections.values()
+    )
+    # ★ 요약 몫은 이제 «고른 문장 수» 그대로다. 예전에는 「fixture 요약 4건 −
+    #   미결속 2건 + 보충 1건」으로 셌다 — 요약이 본문에서 오는 지금은 뺄
+    #   것도 보충할 것도 없다.
     expected_passed = (
-        _expected_sentence_total()
+        fixture_body_total
         - interpreted_removed_total
-        - len(unbound_summary)
         - sum(_DEDUPE_REMOVED_BY_SECTION.values())
         + len(report.fact_records)
-        + summary_supplements
-    )
-    assert result.sentences_passed == expected_passed
-    assert result.sentences_passed == (
-        sum(1 for section in report.sections for text, _ in section.prose_lines
-            if not text.startswith("확인 범위:"))
         + len(report.summary_items)
     )
+    assert result.sentences_passed == expected_passed
+    assert result.sentences_passed == 최종_문장수
 
 
 # ══════════════════════════════════════════════════════════
@@ -594,11 +621,13 @@ def test_유료_호출은_없고_가짜_ask_횟수만_증가한다(
     result = _run(engine)
 
     messages = engine.client.messages
-    # 작가: 장 9회(각 1회, 재요청 0회) + 요약 1회
+    # 작가: 장 9회(각 1회, 재요청 0회) + 요약 «고르기» 1회
     assert messages.section_calls == {section_id: 1 for section_id in SECTION_IDS}
     assert messages.summary_calls == 1
-    # 검수: 본문 1회 + 요약 1회. 전부 «참»이라 재작성은 0회다.
-    assert messages.review_calls == 2
+    # 검수: 본문 1회뿐이다. 전부 «참»이라 재작성은 0회다.
+    # ★ 2026-09-11 이전에는 요약 검수가 붙어 2회였다. 요약이 검증된 본문
+    #   문장을 글자 그대로 싣게 되면서 다시 검수할 새 글자가 없어졌다.
+    assert messages.review_calls == 1
     assert messages.rewrite_prompts == []
     # v1 생성·검증 AI는 한 번도 나가지 않았다 (v2 분기가 전담)
     assert engine.generate_ai_calls == 0

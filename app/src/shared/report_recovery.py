@@ -12,7 +12,7 @@ AI 호출 전 사전 게이트(자료 부족·조회 장애로 아예 시작하�
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Final
@@ -51,19 +51,24 @@ MAX_TOTAL_AI_CALLS: Final[int] = (
 # 본문 검수 «뒤»에 반드시 남아 있어야 하는 호출. 하나라도 못 부르면 보고서가
 # 「도식 없음 + 본문 재활용 요약」으로 조용히 줄어든다(2026-09-10 실측).
 DIAGRAM_REVIEW_CALLS: Final[int] = 1
+#: 핵심 요약 «고르기» 1회 — 검증된 본문 문장의 번호만 답하게 한다.
 SUMMARY_WRITER_CALLS: Final[int] = 1
-SUMMARY_REVIEW_CALLS: Final[int] = 1
+#: 0회다. 요약이 본문 문장을 글자 그대로 싣게 바뀌면서(2026-09-11) 다시
+#: 검수할 «새 글자»가 사라졌다. 예전에는 여기 1회를 예약해 두고도 그 호출이
+#: 최종 요약에 0문장 기여한 실행이 있었다(4차 멀티캠퍼스: 초안 4 → 검수 후 1
+#: → 수치 검사 후 0). 예약을 남겨 두면 그만큼 앞 단계(뉴스·다듬기)가 굶는다.
+SUMMARY_REVIEW_CALLS: Final[int] = 0
 
 # ⚠️ 이 값은 «파싱 재요청을 포함하지 않은 최소치»다 (독립 검토 지적).
-#   세 단계는 각자 응답을 못 읽으면 1회씩 더 부른다
-#   (도식 `composer/diagram_check.py`, 요약 작성 `composer/logic.py`,
-#    요약 검수 `composer/verify.py` — 모두 PARSE_RETRY_LIMIT = 1).
-#   즉 최악은 6회이고, 3으로는 «본문 검수가 재요청을 한 번 쓴» 실행에서
-#   요약 검수가 여전히 굶을 수 있다(그때 진단에 `검수한도도달=True`가 남는다).
-#   그래도 6으로 올리지 않는다 — 뉴스 몫이 5에서 2로 급감해 보도 근거가
-#   먼저 사라지기 때문이다. 재요청은 «드물게 일어나는 일»이라는 전제 위에
-#   서 있는 값이므로, `검수한도도달`·「의미 검수 불능」 발생 빈도를 실행
-#   기록으로 계속 세어 이 전제가 유지되는지 확인한다.
+#   도식 검수는 응답을 못 읽으면 1회 더 부른다
+#   (`composer/diagram_check.py` — PARSE_RETRY_LIMIT = 1).
+#   요약 고르기는 재요청하지 않는다(`composer/logic.py`
+#   `select_summary_sentences`) — 번호를 못 읽으면 검증된 본문 문장으로
+#   채우는 편이 결과가 같고 싸기 때문이다. 즉 최악은 3회다.
+#   실행 기록으로 계속 셀 지표는 「의미 검수 불능」(도식)과 요약 단계의
+#   `작성한도도달`이다. `검수한도도달`은 요약 재검증이 사라지면서 영구히
+#   False가 됐으므로 더는 세지 않는다 — 없는 단계의 빈도를 세면 «0건이라
+#   안전하다»는 거짓 신호가 된다.
 MANDATORY_TAIL_AI_CALLS: Final[int] = (
     DIAGRAM_REVIEW_CALLS + SUMMARY_WRITER_CALLS + SUMMARY_REVIEW_CALLS
 )
@@ -377,6 +382,48 @@ def _decide_first_validation(
     )
 
 
+def supplement_unchanged_sections(
+    *,
+    approved_section_ids: Iterable[str],
+    base_section_sha256s: Iterable[tuple[str, str]],
+    result_section_sha256s: Iterable[tuple[str, str]],
+    review_diagnostics: Iterable[Mapping[str, object]],
+) -> tuple[tuple[str, str], ...]:
+    """보충 회차가 «후보를 전부 잃어» 그대로인 장과 그 사유 코드를 모은다.
+
+    보충 단계가 영수증을 만들 때 부른다. 두 조건을 «둘 다» 만족할 때만 적는다.
+
+    ① 승인한 장인데 공개 내용 지문이 그대로다.
+    ② 그 장에서 근거 결속 제외가 실제로 일어났다(진단에 사유 코드가 있다).
+
+    ②가 없으면 적지 않는다 — 그러면 결속 검사가 종전대로 «무동작 보충»으로
+    보고 닫는다. 즉 이 함수는 면제를 «만들지» 않고, 실제로 일어난 제외를
+    영수증에 옮겨 적을 뿐이다.
+
+    사유 코드가 여럿이면 처음 것을 적는다. 이 값은 «왜 비었는지»를 사람이
+    읽으려고 남기는 것이고, 결속 검사는 기록의 유무만 본다.
+    """
+
+    approved = tuple(dict.fromkeys(approved_section_ids))
+    base = dict(base_section_sha256s)
+    result = dict(result_section_sha256s)
+    reason_by_section: dict[str, str] = {}
+    for event in review_diagnostics:
+        section_id = event.get("section_id")
+        reason_code = event.get("reason_code")
+        if (isinstance(section_id, str) and isinstance(reason_code, str)
+                and section_id and reason_code
+                and section_id not in reason_by_section):
+            reason_by_section[section_id] = reason_code
+    return tuple(
+        (section_id, reason_by_section[section_id])
+        for section_id in approved
+        if section_id in reason_by_section
+        and section_id in base
+        and base[section_id] == result.get(section_id)
+    )
+
+
 def _validate_supplement_binding(
     *,
     primary_receipt: GenerationValidationReceipt,
@@ -414,9 +461,19 @@ def _validate_supplement_binding(
     base_sections = dict(primary_receipt.section_sha256s)
     result_sections = dict(supplement_receipt.section_sha256s)
     approved = set(authorization.section_ids)
+    # ★ 후보를 «전부 잃어» 그대로인 장은 위조가 아니다 (2026-09-11).
+    #   근거 결속 계약이 그 장의 후보를 모두 제외하면 내용이 안 바뀌는 것이
+    #   정당한 결과다 — 맞는 내용이 없으면 안 채운다(fail-closed). 그 사실을
+    #   보충 단계가 영수증에 «사유 코드와 함께» 적었을 때만 지문 불변을
+    #   허용한다. 기록 없이 지문만 같으면 종전대로 닫는다.
+    unchanged_by_receipt = {
+        section_id
+        for section_id, _reason_code in supplement_receipt.unchanged_sections
+    }
     for section_id in REQUIRED_EVIDENCE_SECTION_IDS:
         changed = base_sections[section_id] != result_sections[section_id]
-        if section_id in approved and not changed:
+        if (section_id in approved and not changed
+                and section_id not in unchanged_by_receipt):
             raise ValueError("승인된 보충 장의 내용 지문이 바뀌지 않았습니다")
         if section_id not in approved and changed:
             raise ValueError("승인하지 않은 장이 보충 중 바뀌었습니다")
@@ -435,7 +492,8 @@ def _validate_supplement_binding(
     result_blocks = dict(supplement_receipt.section_block_sha256s)
     for section_id in REQUIRED_EVIDENCE_SECTION_IDS:
         changed = base_blocks[section_id] != result_blocks[section_id]
-        if section_id in approved and not changed:
+        if (section_id in approved and not changed
+                and section_id not in unchanged_by_receipt):
             raise ValueError(
                 "승인된 보충 장의 봉인 블록 지문이 바뀌지 않았습니다"
             )
