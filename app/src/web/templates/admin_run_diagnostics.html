@@ -30,6 +30,16 @@
   저장하지 않았습니다. 앞쪽 {{ diagnostics_step_count }}단계만 아래에 있습니다.</span>
 </div>
 {% endif %}
+{% if diagnostics_stage_elapsed_rows %}
+<div class="card" style="margin-bottom:16px">
+  <p class="muted">단계별 소요 시간</p>
+  <ul>
+    {% for stage, seconds in diagnostics_stage_elapsed_rows %}
+    <li>{{ stage }} · {{ seconds }}초</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
 <div class="card">
   <p class="muted">단계 {{ diagnostics_step_count }}개</p>
   <pre style="white-space:pre-wrap;word-break:break-all;overflow-x:auto">{{ diagnostics_steps_json }}</pre>

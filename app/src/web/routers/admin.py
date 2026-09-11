@@ -9,6 +9,7 @@ import re
 import secrets
 import string
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Form, Request
@@ -1673,6 +1674,26 @@ async def admin_link_generated_report(request: Request, report_id: str):
 _RUN_ID_PATTERN = re.compile(rf"^[A-Za-z0-9_-]{{1,{RUN_ID_MAX_CHARS}}}$")
 
 
+def _stage_elapsed_rows(steps: list[dict[str, Any]]) -> list[tuple[str, float]]:
+    """steps 원본에서 «단계 · 소요 초» 로 바로 읽을 수 있는 목록만 뽑는다.
+
+    ★ 최소 표시 — 기존 원본 <pre> 출력은 그대로 두고, 이 목록은 그 위에
+      사람이 바로 읽을 수 있는 요약으로만 더한다. 모양이 다른 항목은
+      조용히 건너뛴다 — 옛 실행 기록에는 이 항목 자체가 없다.
+    """
+
+    rows: list[tuple[str, float]] = []
+    for item in steps:
+        if not isinstance(item, dict) or item.get("step") != obs_constants.STAGE_ELAPSED_STEP:
+            continue
+        stage = str(item.get("단계") or "").strip()
+        elapsed_ms = item.get(obs_constants.STAGE_ELAPSED_MS_KEY)
+        if not stage or type(elapsed_ms) is not int or elapsed_ms < 0:
+            continue
+        rows.append((stage, round(elapsed_ms / 1000, 1)))
+    return rows
+
+
 @router.get("/admin/runs/{run_id}/diagnostics", response_class=HTMLResponse)
 async def admin_run_diagnostics(request: Request, run_id: str):
     """실행 하나의 진단 기록(steps) 전체를 관리자에게 그대로 보여 준다.
@@ -1707,6 +1728,7 @@ async def admin_run_diagnostics(request: Request, run_id: str):
                     diagnostics_step_count=0,
                     diagnostics_omitted_count=0,
                     diagnostics_recorded_at_label="",
+                    diagnostics_stage_elapsed_rows=[],
                     diagnostics_error="실행 진단 기록을 읽지 못했습니다.",
                 ),
                 status_code=503,
@@ -1717,6 +1739,7 @@ async def admin_run_diagnostics(request: Request, run_id: str):
         step_count = 0
         omitted_count = 0
         recorded_at_label = ""
+        stage_elapsed_rows: list[tuple[str, float]] = []
     else:
         steps_json = json.dumps(
             saved.steps,
@@ -1726,6 +1749,7 @@ async def admin_run_diagnostics(request: Request, run_id: str):
         step_count = saved.step_count
         omitted_count = saved.omitted_count
         recorded_at_label = _kst_timestamp_label(saved.recorded_at)
+        stage_elapsed_rows = _stage_elapsed_rows(saved.steps)
     return _admin_response(
         request,
         request_helpers.templates.TemplateResponse(
@@ -1738,6 +1762,7 @@ async def admin_run_diagnostics(request: Request, run_id: str):
                 diagnostics_step_count=step_count,
                 diagnostics_omitted_count=omitted_count,
                 diagnostics_recorded_at_label=recorded_at_label,
+                diagnostics_stage_elapsed_rows=stage_elapsed_rows,
                 diagnostics_error="",
             ),
         ),

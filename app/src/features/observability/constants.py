@@ -283,3 +283,14 @@ RECENT_RUN_STEPS_LIMIT: Final[int] = 20
 #: 화면에 실행 번호를 줄여 적을 때 남기는 앞자리 수. 실행끼리 구분하기에 충분하고
 #: 표 한 칸을 넘지 않는 길이다.
 RUN_ID_SHORT_CHARS: Final[int] = 12
+
+# ══════════════════════════════════════════════════════════
+# 실행 진단 — 단계별 소요 시간 (파이프라인이 만드는 값의 사본)
+# ══════════════════════════════════════════════════════════
+
+#: `features/pipeline/constants.py`의 `STAGE_ELAPSED_STEP`과 **값이 같아야
+#: 한다.** feature 간 직접 import는 금지라 값만 여기 다시 적는다 — 어긋나면
+#: 관리자 화면이 파이프라인이 남긴 단계별 소요 시간을 조용히 못 찾는다.
+STAGE_ELAPSED_STEP: Final[str] = "단계소요"
+#: `features/pipeline/constants.py`의 `STAGE_ELAPSED_MS_KEY`와 값이 같아야 한다.
+STAGE_ELAPSED_MS_KEY: Final[str] = "소요ms"
