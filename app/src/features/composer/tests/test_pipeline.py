@@ -174,28 +174,68 @@ def _section_json(mark: str) -> str:
     )
 
 
-#: 배선 시험의 요약도 실제 조각 1에서 확인할 수 있는 내용으로 작성한다.
-_SUMMARY_TEXTS = [
-    "가나다전자는 반도체 검사 장비 전문기업이다.",
-    "가나다전자의 전문 분야는 반도체 검사 장비다.",
-    "반도체 검사 장비는 가나다전자의 사업 분야다.",
-]
+#: 요약 «고르기» 프롬프트의 후보 줄 모양 — `logic.build_summary_selection_prompt`
+#: 이 만드는 «번호. [장 이름] 문장» 한 줄.
+_SUMMARY_CANDIDATE_RE = re.compile(r"^(\d+)\. \[([^\]]+)\] ", re.MULTILINE)
+
+#: 한 번에 고르는 요약 문장 수 — 실제 AI가 따르는 지시(3~5) 중 최소치다.
+_SUMMARY_PICKS = 3
 
 
-def _summary_json() -> str:
-    return json.dumps(
-        {
-            "문장들": [
-                {"글": text, "인용": ["1"], "등급": GRADE_CONFIRMED}
-                for text in _SUMMARY_TEXTS
-            ]
-        },
-        ensure_ascii=False,
-    )
+def _summary_selection_json(prompt: str) -> str:
+    """후보 목록을 읽어 «서로 다른 장에서 하나씩» 번호를 고른 응답을 만든다.
+
+    ★ 왜 프롬프트를 읽나 — 요약이 「AI가 새로 쓴다」에서 「검증된 본문 문장
+      중 고른다」로 바뀌었다(2026-09-11). 응답에 문장 글자를 담아도 그 글자는
+      보고서에 실리지 않으므로, 가짜 작가도 «번호»를 골라야 실제 배선을
+      지난다. 고정 번호를 박으면 후보 수가 달라질 때 조용히 범위 밖이 되어
+      배선이 끊겨도 초록불이 된다.
+    """
+
+    첫번호_by_장: dict[str, int] = {}
+    for number, title in _SUMMARY_CANDIDATE_RE.findall(prompt):
+        첫번호_by_장.setdefault(title, int(number))
+    고른번호 = list(첫번호_by_장.values())[:_SUMMARY_PICKS]
+    return json.dumps(고른번호, ensure_ascii=False)
+
+
+def section_id_in_prompt(prompt: str) -> str:
+    """장 작성 프롬프트가 어느 장의 것인지 읽는다. 못 가리면 빈 문자열."""
+
+    found = [
+        section_id for section_id in SECTION_IDS if f"{section_id}:" in prompt
+    ]
+    return found[0] if len(found) == 1 else ""
+
+
+def summary_candidate_filler(prompt: str) -> dict[str, object] | None:
+    """장마다 «다른» 해석 문장 하나 — 요약 후보를 3개 이상 만드는 재료.
+
+    ★ 왜 필요한가 (2026-09-11) — 여러 시험의 가짜 작가가 아홉 장에 «같은»
+      확인 문장을 써 왔다. 같은 사실은 소유 장 하나로 모이므로 본문에 결국
+      1문장만 남는데, 예전에는 그래도 요약이 3문장이었다 — AI가 본문에 없는
+      문장을 «새로 썼기» 때문이다. 요약이 「검증된 본문 문장 중 고르기」로
+      바뀐 뒤로는 후보 1개로 3문장을 만들 수 없고, 그러면 출고 검증
+      (요약 3~5문장)이 그 시험의 주제와 무관한 이유로 실행을 막는다.
+      그래서 «장마다 다른» 문장을 하나씩 더해 후보를 만든다.
+    ★ 인용은 조각 1 그대로다 — 부록 번호 계약을 건드리지 않기 위해서다.
+
+    Returns:
+        장을 못 가리면 None (부르는 쪽이 아무것도 더하지 않는다).
+    """
+
+    section_id = section_id_in_prompt(prompt)
+    if not section_id:
+        return None
+    return {
+        "글": f"{section_id} 장의 해석 서술이다.",
+        "인용": ["1"],
+        "등급": GRADE_INTERPRETED,
+    }
 
 
 class _FakeWriter:
-    """작성 프롬프트만 받아 장·요약 JSON을 돌려주는 가짜 작가."""
+    """작성 프롬프트만 받아 장 JSON·요약 «번호»를 돌려주는 가짜 작가."""
 
     def __init__(self, section_response=None):
         self.prompts: list[str] = []
@@ -205,7 +245,7 @@ class _FakeWriter:
     def __call__(self, prompt: str) -> str:
         self.prompts.append(prompt)
         if "핵심 요약" in prompt:
-            return _summary_json()
+            return _summary_selection_json(prompt)
         # 장 프롬프트는 v3 정본 순서로 들어온다 (compose_sections 계약)
         mark = _SECTION_MARKS[self.section_calls % len(_SECTION_MARKS)]
         self.section_calls += 1
@@ -437,11 +477,13 @@ def test_작가와_검수는_서로_다른_프롬프트만_받는다():
         reviewer_ask=reviewer,
     )
 
-    # 작가: 장 9회 + 요약 1회. 판정 프롬프트는 한 번도 받지 않는다.
+    # 작가: 장 9회 + 요약 고르기 1회. 판정 프롬프트는 한 번도 받지 않는다.
     assert len(writer.prompts) == 10
     assert not any("판정" in prompt for prompt in writer.prompts)
-    # 검수: 본문 1회 + 요약 1회. 작성 프롬프트는 한 번도 받지 않는다.
-    assert len(reviewer.prompts) == 2
+    # 검수: 본문 1회뿐이다. 요약 재검증은 없어졌다 (2026-09-11) — 요약이
+    # 검증된 본문 문장을 글자 그대로 싣게 되면서 다시 검수할 «새 글자»가
+    # 사라졌다. 예전의 2회 중 하나가 요약 검수였다.
+    assert len(reviewer.prompts) == 1
     assert all("판정" in prompt for prompt in reviewer.prompts)
     assert not any("핵심 요약" in prompt for prompt in reviewer.prompts)
 
@@ -615,7 +657,7 @@ def test_인라인_대괄호_인용_흉내는_출고검증을_막지_않는다()
 
     def writer(prompt: str) -> str:
         if "핵심 요약" in prompt:
-            return _summary_json()
+            return _summary_selection_json(prompt)
         mark = _SECTION_MARKS[writer.calls % len(_SECTION_MARKS)]
         writer.calls += 1
         return json.dumps(
@@ -625,7 +667,19 @@ def test_인라인_대괄호_인용_흉내는_출고검증을_막지_않는다()
                         "글": f"{mark} 장: 가나다전자는 반도체 [2] 검사 장비 전문기업이다.",
                         "인용": ["1"],
                         "등급": GRADE_CONFIRMED,
-                    }
+                    },
+                    # ★ 장마다 다른 «해석» 한 문장을 더 둔다 (2026-09-11). 위
+                    #   확인 문장은 장마다 같은 사실이라 소유 장 하나로 모여
+                    #   본문에 1문장만 남는다. 요약이 「검증된 본문 문장 중에서
+                    #   고르기」로 바뀐 뒤로는 후보가 1개면 3문장을 못 채워
+                    #   출고 검증에서 막힌다 — 이 시험의 주제(대괄호 흉내 제거)
+                    #   와 무관한 이유로 죽지 않게 재료만 늘린다.
+                    #   인용은 조각 1 그대로라 부록 번호 계약은 바뀌지 않는다.
+                    {
+                        "글": f"{mark} 장의 해석 서술이다.",
+                        "인용": ["1"],
+                        "등급": GRADE_INTERPRETED,
+                    },
                 ]
             },
             ensure_ascii=False,
@@ -746,6 +800,109 @@ def test_본문이_통째로_비면_V2ValidationError로_끝난다():
     # 이 raise는 STRICT 품질 게이트가 아니라 validate_v2의 구조 검사다
     # (release_mode 기본값 SHADOW) — 품질 코드를 지어내지 않는다(task 022).
     assert caught.value.problem_codes == ()
+
+
+def test_요약_후보가_세_문장_미만이면_보고서_전체가_막히고_AI도_안_부른다():
+    """★ 정책을 «운영 진입점»에서 못 박는다 (2026-09-11 독립 검토 P2-3).
+
+    계약(`docs/출력물 기준/00_핵심_요약/README.md`)은 카드 3~5개 고정이고,
+    실패 시 처리가 「근거가 충분한 결론이 3개 미만이면 요약을 억지로 채우지
+    않는다」다. 그래서 후보가 3문장 미만이면 요약만 줄여 내보내지 않고
+    보고서 «전체»가 출고 검증에서 막힌다.
+
+    이 시험이 없으면 다음 사람이 「요약이 짧으면 그냥 내보내자」로 조용히
+    뒤집을 수 있다. 단계 시험은 「2문장으로 그대로 돌아온다」까지만 재고,
+    그 뒤 무슨 일이 일어나는지는 여기서만 보인다.
+
+    ★ 함께 못 박는 것 — 어차피 막힐 실행에서 고르기 AI를 «부르지 않는다».
+      불러도 결과를 바꿀 수 없어 그 실행의 유료 1회가 그냥 사라진다.
+    """
+
+    # 아홉 장이 «같은» 사실을 쓰면 소유 장 하나로 모여 본문에 1문장만 남는다.
+    한문장 = json.dumps(
+        {
+            "문장들": [
+                {
+                    "글": "가나다전자는 반도체 검사 장비 전문기업이다.",
+                    "인용": ["1"],
+                    "등급": GRADE_CONFIRMED,
+                }
+            ]
+        },
+        ensure_ascii=False,
+    )
+    writer = _FakeWriter(section_response=한문장)
+    reviewer = _FakeReviewer()
+
+    with pytest.raises(V2ValidationError) as caught:
+        run_v2(
+            "가나다전자",
+            _raw_fragments(),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+        )
+
+    assert any("핵심 요약" in problem for problem in caught.value.problems), (
+        caught.value.problems
+    )
+    # 요약 «고르기» 프롬프트는 한 번도 나가지 않았다 — 장 9회로 끝이다.
+    assert len(writer.prompts) == 9
+    assert not any("핵심 요약" in prompt for prompt in writer.prompts)
+
+
+def test_후보가_두_장에만_있으면_많아도_막히고_AI도_안_부른다():
+    """★ 가드는 «후보 수»가 아니라 «서로 다른 장 수»로 본다 (재검토 P3-1).
+
+    장당 최대 1개가 코드 강제라, 요약이 채울 수 있는 문장 수의 상한은 후보가
+    걸쳐 있는 장의 수다. 예전 가드는 후보 «개수»만 봐서, 후보 4개가 두 장에만
+    있는 실행이 유료 1회를 쓰고도 2문장으로 끝나 어차피 막혔다(실측 재현).
+    """
+
+    class _두_장만_쓰는_작가(_FakeWriter):
+        """앞 두 장에만 서로 다른 문장을 쓰고 나머지는 «쓸 문장이 없다»."""
+
+        def __call__(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            if "핵심 요약" in prompt:
+                return _summary_selection_json(prompt)
+            section_id = section_id_in_prompt(prompt)
+            if section_id not in SECTION_IDS[:2]:
+                return json.dumps({"문장들": []}, ensure_ascii=False)
+            # ⚠️ 문장에 숫자를 넣지 않는다 — 구조화 결속 없는 숫자 문장은
+            #   수치 안전 검사가 본문에서 빼 버려, 이 시험이 재려는 「두 장에
+            #   후보 4개」가 아니라 「후보 0개」가 된다(실측으로 확인).
+            return json.dumps(
+                {
+                    "문장들": [
+                        {
+                            "글": f"{section_id} 장의 {차례} 해석 서술이다.",
+                            "인용": ["1"],
+                            "등급": GRADE_INTERPRETED,
+                        }
+                        for 차례 in ("첫", "둘째")
+                    ]
+                },
+                ensure_ascii=False,
+            )
+
+    writer = _두_장만_쓰는_작가()
+
+    with pytest.raises(V2ValidationError) as caught:
+        run_v2(
+            "가나다전자",
+            _raw_fragments(),
+            None,
+            writer_ask=writer,
+            reviewer_ask=_FakeReviewer(),
+        )
+
+    assert any("핵심 요약" in problem for problem in caught.value.problems), (
+        caught.value.problems
+    )
+    assert not any("핵심 요약" in prompt for prompt in writer.prompts), (
+        "두 장뿐인데 고르기 AI를 불렀다 — 그 호출은 결과를 바꾸지 못한다"
+    )
 
 
 # ══════════════════════════════════════════════════════════
@@ -942,21 +1099,31 @@ def test_한문장_장이_있으면_COMPLETE가_아니라_PARTIAL과_이유가_�
 
         def __call__(self, prompt: str) -> str:
             if "핵심 요약" in prompt:
-                return _summary_json()
+                return _summary_selection_json(prompt)
             mark = _SECTION_MARKS[self.section_calls]
+            # ★ 첫 장만 «확인» 문장을 쓰고 나머지는 장마다 다른 «해석» 한
+            #   문장을 쓴다 (2026-09-11). 예전에는 아홉 장이 모두 같은 확인
+            #   문장이라 소유 장 하나로 모여 본문에 1문장만 남았고, 그래도
+            #   요약은 AI가 3문장을 «지어내» 채웠다. 요약이 「검증된 본문
+            #   문장 중에서 고르기」로 바뀐 뒤로는 후보 1개로 3문장을 만들 수
+            #   없다 — 지어내지 않는다는 것이 이 설계의 요점이다. 장마다
+            #   «한 문장»이라는 이 시험의 주제는 그대로다.
+            첫_장 = self.section_calls == 0
             self.section_calls += 1
-            return json.dumps(
+            문장 = (
                 {
-                    "문장들": [
-                        {
-                            "글": f"{mark} 장: 가나다전자는 반도체 검사 장비 전문기업이다.",
-                            "인용": ["1"],
-                            "등급": GRADE_CONFIRMED,
-                        }
-                    ]
-                },
-                ensure_ascii=False,
+                    "글": f"{mark} 장: 가나다전자는 반도체 검사 장비 전문기업이다.",
+                    "인용": ["1"],
+                    "등급": GRADE_CONFIRMED,
+                }
+                if 첫_장
+                else {
+                    "글": f"{mark} 장의 해석 서술이다.",
+                    "인용": ["1"],
+                    "등급": GRADE_INTERPRETED,
+                }
             )
+            return json.dumps({"문장들": [문장]}, ensure_ascii=False)
 
     output = run_v2(
         "가나다전자",
@@ -1066,11 +1233,11 @@ def _한도에_닿은_작가():
     return writer_ask
 
 
-def _불려서는_안_되는_검수():
-    def reviewer_ask(_prompt: str) -> str:  # pragma: no cover - 불리면 시험 실패
-        raise AssertionError("작성 한도에 닿았으면 요약 검수는 호출되지 않는다")
-
-    return reviewer_ask
+#: ★ 검수 호출자를 넘길 자리가 «구조적으로» 없다 (2026-09-11). 예전에는
+#:   `_불려서는_안_되는_검수()`를 넘겨 「요약 검수는 안 불린다」를 지켰는데,
+#:   이제 `_legacy_summary_stage`에 reviewer 매개변수 자체가 없어서 부를 방법이
+#:   없다. 「한 번도 안 부른다」는 정의 모듈 spy로
+#:   `test_legacy_summary_diagnostics.py`가 못 박는다.
 
 
 def test_작성한도에_닿아도_요약이_본문_첫문장_서명을_만들지_않는다() -> None:
@@ -1086,9 +1253,8 @@ def test_작성한도에_닿아도_요약이_본문_첫문장_서명을_만들�
     ]
 
     final, draft_count, _filtering = _legacy_summary_stage(
-        verified, (), None,
+        verified,
         writer_ask=_한도에_닿은_작가(),
-        reviewer_ask=_불려서는_안_되는_검수(),
         body_numeric_filtering=NumericSafetyFiltering(),
     )
 
@@ -1104,10 +1270,18 @@ def test_수치_안전_검사가_뺀_문장은_요약_보충으로_되돌아오�
 
     실측 단계 기록: 수치검사후수 2 → 최종수 3이고, 되돌아온 그 한 문장이 바로
     수치 검사가 뺀 문장이었다. 수치 검사는 그 뒤로 다시 돌지 않는다.
+
+    ★ 의도가 강해진 근거 (2026-09-11) — 이제 이 잣대를 요약을 다 만든 «뒤»가
+      아니라 «후보 단계»에서 먼저 건다. 그래서 지키는 것이 「뺀 문장이
+      돌아오지 않는다」에서 「애초에 들어가지 않아 뺄 일이 없다」로 바뀌었다.
+      전제 단정도 그에 맞춰 뒤집는다 — 요약에서 «뺀 개수»가 0이어야 한다.
+      이 숫자가 1 이상으로 돌아오면 후보 거르기가 끊겼다는 뜻이다.
     """
+    from src.features.composer.logic import summary_candidates
     from src.features.composer.pipeline import _legacy_summary_stage
     from src.features.composer.structured_claims import (
         NumericSafetyFiltering, has_public_numeric_token,
+        is_release_ready_summary_sentence, safe_numeric_owners_by_fact_id,
     )
 
     수치_문장 = _요약용_문장(
@@ -1115,19 +1289,33 @@ def test_수치_안전_검사가_뺀_문장은_요약_보충으로_되돌아오�
         numeric_verified=True,
     )
     assert has_public_numeric_token(수치_문장.text), "이 시험의 전제 — 공개 숫자 문장"
-    # 장에 문장이 하나뿐이라 보충이 «반드시» 이 문장을 먼저 집는다.
+    # 장에 문장이 하나뿐이라, 거르기가 끊기면 보충이 «반드시» 이 문장을 집는다.
     verified = _요약용_본문(identity_sentences=(수치_문장,))
 
+    # 전제 — 이 문장은 요약 잣대를 못 넘고, 그래서 후보 목록에 없다.
+    소유장 = safe_numeric_owners_by_fact_id(verified.sections)
+    assert not is_release_ready_summary_sentence(
+        수치_문장, safe_owner_by_fact_id=소유장
+    ), "이 시험의 전제 — 요약 잣대를 못 넘는 문장이다"
+    후보 = summary_candidates(
+        verified,
+        accept=lambda sentence: is_release_ready_summary_sentence(
+            sentence, safe_owner_by_fact_id=소유장
+        ),
+    )
+    assert 수치_문장.text not in [c.sentence.text for c in 후보], (
+        "요약 잣대를 못 넘는 문장이 후보로 나갔다"
+    )
+
     final, _draft_count, filtering = _legacy_summary_stage(
-        verified, (), None,
+        verified,
         writer_ask=_한도에_닿은_작가(),
-        reviewer_ask=_불려서는_안_되는_검수(),
         body_numeric_filtering=NumericSafetyFiltering(),
     )
 
     texts = [sentence.text for sentence in final.summary]
-    assert filtering.removed_summary_count >= 1, (
-        "이 시험의 전제 — 수치 안전 검사가 요약에서 문장을 실제로 뺐다"
+    assert filtering.removed_summary_count == 0, (
+        "요약에서 뺀 문장이 있다 — 후보를 미리 거르지 못했다는 뜻이다"
     )
     assert 수치_문장.text not in texts, "뺀 문장이 보충으로 되돌아왔다"
     assert len(texts) == _요약_최소, "제외 때문에 요약이 짧아지면 안 된다"
@@ -1169,9 +1357,8 @@ def test_보충으로_채운_요약을_다시_검사해도_아무것도_빠지�
     assert has_public_numeric_token(verified.sections[0].sentences[1].text)
 
     final, _draft, _filtering = _legacy_summary_stage(
-        verified, (), None,
+        verified,
         writer_ask=_한도에_닿은_작가(),
-        reviewer_ask=_불려서는_안_되는_검수(),
         body_numeric_filtering=NumericSafetyFiltering(),
     )
 
@@ -1213,9 +1400,8 @@ def test_보충이_요약_잣대를_놓치면_뒷문이_그_문장을_뺀다(mon
     )
 
     final, _draft, filtering = pipeline_under_test._legacy_summary_stage(
-        verified, (), None,
+        verified,
         writer_ask=_한도에_닿은_작가(),
-        reviewer_ask=_불려서는_안_되는_검수(),
         body_numeric_filtering=NumericSafetyFiltering(),
     )
 

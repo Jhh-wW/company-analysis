@@ -1,33 +1,51 @@
-"""핵심 요약 생성을 못 박는다 (엔진 v2 소단계 3-3).
+"""핵심 요약 «고르기»를 못 박는다 (엔진 v2 소단계 3-3).
+
+★ 의도가 바뀐 근거 (2026-09-11) — 예전 이 파일은 「AI가 요약을 새로 쓴다」를
+  지켰다. 그 계약이 실측에서 두 가지 결말로 갈렸다.
+    · 결속을 요구하는 실행(4차 멀티캠퍼스 run e193846f): 새로 쓴 초안 4문장이
+      어느 본문 사실과도 축자로 맞지 않아 검수·수치 안전 검사에 전부 지워졌고
+      (수치검사후수 0) 본문 재활용으로 되돌아갔다.
+    · 결속을 요구하지 않는 실행(2차 인텍에프에이): 결속 없는 AI 요약 2건이
+      그대로 출고됐다.
+  작성기는 축자 재사용을 «재탕»으로 버리고 결속기는 축자만 인정하는 모순이라,
+  요약을 「검증된 본문 문장 중에서 고른다」로 바꿨다.
 
 ★ 여기서 지키는 것:
-  ① 정상 생성 — 요약이 새 문장으로 채워지고 본문(sections)은 그대로다.
-  ② 재탕 검출 — 본문 문장을 글자 그대로 옮기면 1회 재요청한다.
-  ③ 보충 경로 — 재요청 후에도 3문장 미만이면 본문 «확인» 문장으로 보충한다
-     (서로 다른 장 우선). 빈 요약으로 인한 차단은 없다.
-  ④ 분량 보장 — 재료가 있으면 요약은 3~5문장 사이다.
+  ① 후보 만들기 — 요약 잣대를 통과한 본문 문장만, 같은 문장은 한 번만.
+  ② 프롬프트 — 번호·장 이름·문장과 고르는 규칙이 실린다.
+  ③ 응답 판독 — «번호»만 인정한다. 범위 밖·중복·비JSON·참거짓은 버린다.
+  ④ 결속은 본문과 «같은 수준» — 돌려주는 것은 후보로 받은 «그 문장 객체»다.
+     응답이 문장 글자를 담아 와도 그 글자는 요약에 실리지 않는다
+     (예전 재탕 검출 `test_summary_near_copy.py`가 지키던 자리를 대신한다 —
+      AI가 글자를 만들 수 없게 됐으므로 «옮겨 적기»가 원리적으로 불가능하다).
+  ⑤ 실패해도 보고서를 멈추지 않는다. 다만 요청 전역 장애는 그대로 올린다.
 """
 
 from __future__ import annotations
 
 import json
 
+import pytest
+
 from src.features.composer.constants import (
     FORBIDDEN_TOPICS_GUIDE,
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
-    RETRY_REMINDER,
     SECTION_IDS,
     SECTION_TITLES,
 )
 from src.features.composer.logic import (
-    SUMMARY_DUPLICATE_REMINDER,
     SUMMARY_MAX_SENTENCES,
     SUMMARY_MIN_SENTENCES,
-    build_summary_prompt,
-    compose_summary,
+    SUMMARY_SELECTION_NUMBERS_KEY,
+    SummaryCandidate,
+    build_summary_selection_prompt,
+    parse_summary_selection,
+    select_summary_sentences,
+    summary_candidates,
 )
 from src.features.composer.port import (
+    AskFatalError,
     ComposedReport,
     ComposedSection,
     ComposedSentence,
@@ -35,7 +53,7 @@ from src.features.composer.port import (
 
 
 # ══════════════════════════════════════════════════════════
-# 시험 재료 — compose_sections가 만든 본문을 흉내 낸 보고서
+# 시험 재료 — compose_sections·verify_report가 만든 본문을 흉내 낸 보고서
 # ══════════════════════════════════════════════════════════
 
 
@@ -63,16 +81,8 @@ def _full_report() -> ComposedReport:
     return ComposedReport(sections=tuple(sections))
 
 
-def _summary_json(texts: list[str]) -> str:
-    """주어진 문장들로 요약 JSON 응답을 만든다 (전부 확인 등급·인용 ["1"])."""
-    items = [
-        {"글": text, "인용": ["1"], "등급": GRADE_CONFIRMED} for text in texts
-    ]
-    return json.dumps({"문장들": items}, ensure_ascii=False)
-
-
 class _FakeAsk:
-    """프롬프트를 기록하고 준비된 답을 차례로 돌려주는 가짜 작가."""
+    """프롬프트를 기록하고 준비된 답을 차례로 돌려주는 가짜 AI."""
 
     def __init__(self, responses: list[str]):
         self.responses = responses
@@ -85,63 +95,114 @@ class _FakeAsk:
 
 
 # ══════════════════════════════════════════════════════════
-# ① 정상 생성
+# ① 후보 만들기
 # ══════════════════════════════════════════════════════════
 
 
-def test_정상_생성이면_요약이_새_문장으로_채워진다():
-    report = _full_report()
-    texts = ["요약 하나다.", "요약 둘이다.", "요약 셋이다.", "요약 넷이다."]
-    ask = _FakeAsk([_summary_json(texts)])
-
-    result = compose_summary(report, ask)
-
-    assert len(ask.prompts) == 1  # 정상이면 1회 호출로 끝
-    assert [s.text for s in result.summary] == texts
-    assert result.sections == report.sections  # 본문은 손대지 않는다
-    # 인용·등급 계약이 그대로 실린다
-    assert result.summary[0].citations == ("1",)
-    assert result.summary[0].grade == GRADE_CONFIRMED
-
-
-def test_프롬프트에_본문_전체와_규칙이_실린다():
+def test_후보는_본문_순서대로_모든_장에서_모인다():
     report = _full_report()
 
-    prompt = build_summary_prompt(report)
+    candidates = summary_candidates(report)
 
-    # 장 제목·본문 문장·인용 번호가 재료로 실린다
-    for section_id in SECTION_IDS:
-        assert SECTION_TITLES[section_id] in prompt
-    assert "기업 정체성 장의 확인 사실 1번이다." in prompt
-    assert "[인용: 1]" in prompt
-    # 재탕 금지·인용/등급 규칙·JSON 강제·금지 주제
-    assert "글자 그대로" in prompt
-    assert GRADE_CONFIRMED in prompt
-    assert GRADE_INTERPRETED in prompt
-    assert "JSON" in prompt
-    assert FORBIDDEN_TOPICS_GUIDE in prompt
-    # 목표 분량 3~5문장이 안내된다
-    assert f"{SUMMARY_MIN_SENTENCES}~{SUMMARY_MAX_SENTENCES}문장" in prompt
+    assert len(candidates) == 2 * len(SECTION_IDS)
+    assert candidates[0].section_id == SECTION_IDS[0]
+    assert candidates[0].sentence is report.sections[0].sentences[0]
+    assert [c.section_id for c in candidates[:2]] == [SECTION_IDS[0]] * 2
 
 
-def test_빈_장은_요약_재료에서_빠진다():
+def test_후보는_요약_잣대를_통과한_문장만_담는다():
+    """수치 안전 검사를 뒤가 아니라 «앞»에 건다 — 이게 이 설계의 핵심이다."""
+    report = _full_report()
+    막을_문장 = report.sections[1].sentences[0].text
+
+    candidates = summary_candidates(
+        report, accept=lambda sentence: sentence.text != 막을_문장
+    )
+
+    assert 막을_문장 not in [c.sentence.text for c in candidates]
+    assert len(candidates) == 2 * len(SECTION_IDS) - 1
+
+
+def test_같은_문장이_두_장에_있어도_후보에는_한_번만_담긴다():
+    같은_문장 = "두 장에 똑같이 실린 문장이다."
     report = ComposedReport(
         sections=(
             ComposedSection(
-                section_id="identity",
-                sentences=(
-                    ComposedSentence(
-                        text="확인 문장이다.", citations=("1",), grade=GRADE_CONFIRMED
-                    ),
-                ),
+                "identity",
+                (ComposedSentence(같은_문장, ("1",), GRADE_CONFIRMED),),
             ),
             ComposedSection(
-                section_id="culture", sentences=(), notice="자료 부족 안내"
+                "business_model",
+                (ComposedSentence(f"  {같은_문장}  ", ("1",), GRADE_CONFIRMED),),
             ),
         )
     )
 
-    prompt = build_summary_prompt(report)
+    candidates = summary_candidates(report)
+
+    assert len(candidates) == 1
+    assert candidates[0].section_id == "identity"
+
+
+# ══════════════════════════════════════════════════════════
+# ② 프롬프트 — 번호·장 이름·문장 + 고르는 규칙
+# ══════════════════════════════════════════════════════════
+
+
+def test_프롬프트에_번호와_장_이름과_후보_문장이_실린다():
+    report = _full_report()
+    candidates = summary_candidates(report)
+
+    prompt = build_summary_selection_prompt(candidates)
+
+    assert "1. [기업 정체성] 기업 정체성 장의 확인 사실 1번이다." in prompt
+    for section_id in SECTION_IDS:
+        assert SECTION_TITLES[section_id] in prompt
+    # 마지막 후보까지 번호가 이어진다
+    assert f"{len(candidates)}. [" in prompt
+
+
+def test_프롬프트가_고르는_규칙을_말한다():
+    """★ 4항이 뒤집힌 근거 (2026-09-11 독립 검토 P2-1).
+
+    예전 지시는 「수치나 고유명사가 들어 있는 문장을 먼저」였다. 출고 계약
+    (`docs/출력물 기준/00_핵심_요약/README.md` 조사 절차 3·제외 기준)은 그
+    반대다 — 같은 장에서는 숫자 없는 문장을 먼저 고르고, 날짜·출처 번호의
+    재기재를 막는다. 그래서 프롬프트를 계약 쪽으로 뒤집고 이 시험도 뒤집는다.
+    """
+
+    prompt = build_summary_selection_prompt(
+        summary_candidates(_full_report())
+    )
+
+    assert f"{SUMMARY_MIN_SENTENCES}~{SUMMARY_MAX_SENTENCES}개의 번호" in prompt
+    assert "취업준비생" in prompt
+    assert "한 장에서 하나씩만 고른다" in prompt
+    assert "숫자가 없는 문장을 먼저 고른다" in prompt
+    assert "수익 구조" in prompt and "성장 방향" in prompt
+    # 9장(비교 차이)도 계약 포함 기준에 있다 — 열거에서 빠지면 안 된다.
+    assert "동종업계와 비교해 확인된 차이" in prompt
+    assert "번호만 답한다" in prompt
+    assert f'{{"{SUMMARY_SELECTION_NUMBERS_KEY}": [1, 4, 7]}}' in prompt
+    assert FORBIDDEN_TOPICS_GUIDE in prompt
+    # 새로 쓰라는 말이 남아 있으면 안 된다 — 그게 결속을 깨뜨린 원인이었다
+    assert "새로» 쓴다" not in prompt
+    # 계약과 반대 방향인 옛 지시가 되살아나면 안 된다
+    assert "수치나 고유명사" not in prompt
+
+
+def test_빈_장은_후보에도_프롬프트에도_없다():
+    report = ComposedReport(
+        sections=(
+            ComposedSection(
+                "identity",
+                (ComposedSentence("확인 문장이다.", ("1",), GRADE_CONFIRMED),),
+            ),
+            ComposedSection("culture", (), notice="자료 부족 안내"),
+        )
+    )
+
+    prompt = build_summary_selection_prompt(summary_candidates(report))
 
     assert SECTION_TITLES["identity"] in prompt
     assert SECTION_TITLES["culture"] not in prompt
@@ -149,236 +210,234 @@ def test_빈_장은_요약_재료에서_빠진다():
 
 
 # ══════════════════════════════════════════════════════════
-# ② 재탕 검출 → 재요청
+# ③ 응답 판독 — 번호만 인정한다
 # ══════════════════════════════════════════════════════════
 
 
-def test_재탕을_검출하면_한_번_재요청한다():
-    report = _full_report()
-    dup_text = report.sections[0].sentences[0].text
-    retry_texts = ["다시 쓴 요약 하나다.", "다시 쓴 요약 둘이다.", "다시 쓴 요약 셋이다."]
-    ask = _FakeAsk(
-        [
-            _summary_json([dup_text, "새 요약 하나다.", "새 요약 둘이다."]),
-            _summary_json(retry_texts),
-        ]
+def test_번호_배열을_그대로_읽는다():
+    assert parse_summary_selection("[1, 4, 7]", 9) == (1, 4, 7)
+
+
+def test_번호_키를_가진_객체도_읽는다():
+    raw = json.dumps({SUMMARY_SELECTION_NUMBERS_KEY: [2, 5]}, ensure_ascii=False)
+    assert parse_summary_selection(raw, 9) == (2, 5)
+
+
+def test_코드_펜스가_붙은_객체도_읽는다():
+    raw = "```json\n{\"번호\": [3, 1]}\n```"
+    assert parse_summary_selection(raw, 9) == (3, 1)
+
+
+def test_펜스_유무와_모양을_가리지_않고_같은_번호를_읽는다():
+    """★ 유료 호출 1회가 통째로 버려지던 자리 (2026-09-11 독립 검토 P1).
+
+    공용 회수기(`extract_json_payload`)는 펜스가 붙으면 «첫 { ~ 마지막 }»만
+    자른다. 중괄호가 없는 «맨 배열»은 한 번도 회수되지 않아, 실측에서
+    "```json\\n[1, 4, 7]\\n```" 가 번호 0개로 읽혔다. 그러면 곧장 규칙 보충으로
+    돌아가고 그 실행의 고르기 호출은 0문장 기여로 사라진다.
+    안내문은 객체형을 요구하지만, 모델이 어느 모양으로 답해도 읽어야 한다.
+    """
+
+    같은답 = (
+        '{"번호": [1, 4, 7]}',
+        '```json\n{"번호": [1, 4, 7]}\n```',
+        "[1, 4, 7]",
+        "```json\n[1, 4, 7]\n```",
+        "```\n[1, 4, 7]\n```",
     )
 
-    result = compose_summary(report, ask)
-
-    assert len(ask.prompts) == 2  # 재탕 재요청은 정확히 1회
-    assert SUMMARY_DUPLICATE_REMINDER in ask.prompts[1]
-    assert [s.text for s in result.summary] == retry_texts
+    for raw in 같은답:
+        assert parse_summary_selection(raw, 9) == (1, 4, 7), raw
 
 
-def test_공백만_다른_재탕도_잡는다():
-    report = _full_report()
-    dup_text = report.sections[0].sentences[0].text
-    spaced_dup = dup_text.replace(" ", "   ")  # 공백만 다른 같은 문장
-    ask = _FakeAsk(
-        [
-            _summary_json([spaced_dup, "새 요약 하나다."]),
-            _summary_json(["다시 쓴 하나다.", "다시 쓴 둘이다.", "다시 쓴 셋이다."]),
-        ]
+def test_산문에_섞인_대괄호는_번호로_읽지_않는다():
+    """★ 「못 읽었다」가 「하나 골랐다」로 기록되던 자리 (2026-09-11 재검토 P3-3).
+
+    처음 회수기는 첫 «[»부터 마지막 «]»까지 잘랐다. 그래서 "본문 [3] 문단을
+    참고했습니다" 가 번호 (3,)으로 읽혔다. 고를 수 있는 것이 검증된 본문
+    문장뿐이라 안전 문제는 아니지만, 단계 진단의 초안수가 0 대신 1이 되어
+    「응답을 못 읽었다」와 「하나만 골랐다」를 구분할 수 없게 된다.
+    이제 «응답 전체»(펜스를 걷어낸 뒤)가 배열이거나 객체일 때만 인정한다.
+    """
+
+    못_읽는답 = (
+        "본문 [3] 문단을 참고했습니다",
+        "고른 번호: [1, 4, 7]",
+        "[1, 4, 7] 을 골랐습니다",
+        "설명이 먼저 옵니다. [2]",
     )
 
-    result = compose_summary(report, ask)
-
-    assert len(ask.prompts) == 2
-    assert spaced_dup not in [s.text for s in result.summary]
+    for raw in 못_읽는답:
+        assert parse_summary_selection(raw, 9) == (), raw
 
 
-def test_재요청_결과에서도_재탕은_버린다():
-    report = _full_report()
-    dup_text = report.sections[0].sentences[0].text
-    ask = _FakeAsk(
-        [
-            _summary_json([dup_text, "일차 새 문장이다."]),
-            _summary_json(
-                [dup_text, "이차 하나다.", "이차 둘이다.", "이차 셋이다."]
-            ),
-        ]
-    )
-
-    result = compose_summary(report, ask)
-
-    texts = [s.text for s in result.summary]
-    assert len(ask.prompts) == 2  # 재요청은 1회로 끝, 더 조르지 않는다
-    assert dup_text not in texts
-    assert texts == ["이차 하나다.", "이차 둘이다.", "이차 셋이다."]
+def test_범위_밖_번호와_중복은_버린다():
+    assert parse_summary_selection("[0, 1, 1, 10, 3, -2]", 9) == (1, 3)
 
 
-def test_재요청이_전부_재탕이면_일차_생존_문장에_보충한다():
-    report = _full_report()
-    dup_text = report.sections[0].sentences[0].text
-    ask = _FakeAsk(
-        [
-            _summary_json([dup_text, "일차 새 문장이다."]),
-            _summary_json([dup_text]),  # 재요청도 전부 재탕
-        ]
-    )
+def test_참거짓은_번호로_읽지_않는다():
+    """파이썬에서 True는 int라 그냥 두면 1번 후보로 읽힌다."""
+    assert parse_summary_selection("[true, false, 2]", 9) == (2,)
 
-    result = compose_summary(report, ask)
 
-    texts = [s.text for s in result.summary]
-    assert len(texts) == SUMMARY_MIN_SENTENCES
-    assert texts[0] == "일차 새 문장이다."
-    # 보충분은 본문 «확인» 문장이고, 서로 다른 장에서 왔다
-    supplemented = result.summary[1:]
-    assert all(s.grade == GRADE_CONFIRMED for s in supplemented)
-    assert [s.text for s in supplemented] == [
-        report.sections[0].sentences[0].text,
-        report.sections[1].sentences[0].text,
-    ]
+def test_숫자_문자열도_번호로_읽는다():
+    assert parse_summary_selection('["1", "3"]', 9) == (1, 3)
+
+
+def test_아주_긴_숫자_문자열은_버린다():
+    """자릿수 상한 때문에 int() 자체가 예외를 던지는 자리를 미리 막는다."""
+    assert parse_summary_selection(f'["{"9" * 5000}", 2]', 9) == (2,)
+
+
+def test_비JSON과_문장_응답은_아무_번호도_못_읽는다():
+    assert parse_summary_selection("이건 JSON이 아니다", 9) == ()
+    assert parse_summary_selection('{"문장들": [{"글": "새 요약이다."}]}', 9) == ()
+    assert parse_summary_selection("", 9) == ()
+
+
+def test_다섯_개를_넘게_고르면_다섯에서_끊는다():
+    numbers = parse_summary_selection("[1, 2, 3, 4, 5, 6, 7]", 9)
+    assert numbers == (1, 2, 3, 4, 5)
+    assert len(numbers) == SUMMARY_MAX_SENTENCES
 
 
 # ══════════════════════════════════════════════════════════
-# ③ 보충 경로 — 빈 요약으로 인한 차단 없음
+# ④ 고르기 — 결속은 본문 문장과 «같은 수준»이다
 # ══════════════════════════════════════════════════════════
 
 
-def test_짧은_정상_응답은_본문_확인_문장으로_보충한다():
+def test_고른_문장은_후보로_받은_그_객체_그대로다():
+    """글자를 새로 만들지 않으므로 인용·등급·구조화 사실이 본문과 같다.
+
+    그래서 요약은 그 본문 문장의 결속(bound_summary_fact_id)과 «같은 수준»이
+    된다 — 복사본이 아니라 같은 객체를 돌려주므로 나중에 필드가 하나 늘어도
+    어긋날 자리가 없다.
+    ⚠️ 「구성상 보장」이라고는 말하지 않는다 (2026-09-11 독립 검토) — 본문
+      문장이 FactRecord를 못 만든 실행에서는 요약도 결속 0건이다. 요약이 본문보다
+      느슨해지지 않을 뿐, 없는 결속을 만들어 주지는 않는다.
+    """
     report = _full_report()
-    ask = _FakeAsk([_summary_json(["새 요약 하나다.", "새 요약 둘이다."])])
+    candidates = summary_candidates(report)
+    ask = _FakeAsk([json.dumps([1, 3, 5])])
 
-    result = compose_summary(report, ask)
+    chosen = select_summary_sentences(candidates, ask)
 
-    assert len(ask.prompts) == 1  # 재탕이 없으면 재요청 없이 바로 보충
-    assert len(result.summary) == SUMMARY_MIN_SENTENCES
-    assert result.summary[2].text == report.sections[0].sentences[0].text
-    assert result.summary[2].grade == GRADE_CONFIRMED
-
-
-def test_보충은_서로_다른_장을_우선한다():
-    report = _full_report()
-    # 작가가 «쓸 문장이 없다»고 정상 응답한 경우
-    ask = _FakeAsk([json.dumps({"문장들": []}, ensure_ascii=False)])
-
-    result = compose_summary(report, ask)
-
-    expected = [report.sections[i].sentences[0].text for i in range(3)]
-    assert [s.text for s in result.summary] == expected
+    assert len(ask.prompts) == 1  # 재요청 없이 1회로 끝난다
+    assert chosen == (
+        candidates[0].sentence,
+        candidates[2].sentence,
+        candidates[4].sentence,
+    )
+    assert all(
+        any(sentence is c.sentence for c in candidates) for sentence in chosen
+    )
 
 
-def test_확인이_한_장에_몰려_있어도_장을_돌며_고른다():
-    def _confirmed(text: str) -> ComposedSentence:
-        return ComposedSentence(text=text, citations=("1",), grade=GRADE_CONFIRMED)
+def test_응답이_문장_글자를_담아_와도_그_글자는_실리지_않는다():
+    """예전 «재탕 검출»이 지키던 자리 — 이제는 구조가 대신 지킨다."""
+    candidates = summary_candidates(_full_report())
+    ask = _FakeAsk([
+        json.dumps(
+            {"번호": [2], "문장들": [{"글": "AI가 지어낸 새 요약 문장이다."}]},
+            ensure_ascii=False,
+        )
+    ])
+
+    chosen = select_summary_sentences(candidates, ask)
+
+    assert [s.text for s in chosen] == [candidates[1].sentence.text]
+    assert all("지어낸" not in sentence.text for sentence in chosen)
+
+
+def test_한_장에서_여러_개를_고르면_그_장의_첫_번호만_남는다():
+    """★ 계약 「장당 최대 1개」를 프롬프트가 아니라 코드가 지킨다 (P2-2).
+
+    실측 재현 — 1장에 후보 3개를 두고 [1, 2, 3]을 답하게 하면 예전에는 요약
+    3건이 전부 1장에서 나왔다. 막는 코드도 경고도 없었고, 지시 한 줄이
+    유일한 방어였다. 빈자리는 부르는 쪽의 규칙 보충이 «다른 장»에서 채운다.
+    """
 
     report = ComposedReport(
         sections=(
             ComposedSection(
-                section_id="identity",
-                sentences=(_confirmed("A1이다."), _confirmed("A2이다."), _confirmed("A3이다.")),
+                "identity",
+                tuple(
+                    ComposedSentence(f"개요 {n}번 문장이다.", ("1",), GRADE_CONFIRMED)
+                    for n in (1, 2, 3)
+                ),
             ),
             ComposedSection(
-                section_id="business_model", sentences=(_confirmed("B1이다."),)
+                "business_model",
+                (ComposedSentence("사업 문장이다.", ("2",), GRADE_CONFIRMED),),
             ),
-            ComposedSection(section_id="culture", sentences=(), notice="비었다"),
         )
     )
-    ask = _FakeAsk([json.dumps({"문장들": []}, ensure_ascii=False)])
+    candidates = summary_candidates(report)
+    ask = _FakeAsk([json.dumps({"번호": [1, 2, 3]}, ensure_ascii=False)])
 
-    result = compose_summary(report, ask)
+    chosen = select_summary_sentences(candidates, ask)
 
-    # 한 바퀴: A2, B1 → 다음 바퀴: A3 (같은 장 연속 선택보다 다른 장 우선)
-    # ★ 의도가 바뀐 근거 — 장마다 «첫» 문장부터 집으면 이 경로가 걸릴 때마다
-    #   요약이 「각 장 첫 문장」이라는 똑같은 서명이 되어 본문 축자 복제가
-    #   된다(실측 실행의 요약 3건이 정확히 그 모양이었다). 그래서 장마다
-    #   시작점을 한 칸 옮겼다. «장을 번갈아 고른다»는 이 시험의 본래 의도는
-    #   그대로다 — A 다음에 B가 온다.
-    assert [s.text for s in result.summary] == ["A2이다.", "B1이다.", "A3이다."]
+    assert [sentence.text for sentence in chosen] == ["개요 1번 문장이다."]
+    assert len(ask.prompts) == 1  # 골라 낸 것을 다시 물어보지 않는다
 
 
-def test_파싱_실패는_한_번_재시도하고_보충으로_간다():
-    report = _full_report()
+def test_번호를_하나도_못_읽으면_빈_결과로_보충에_넘긴다():
+    candidates = summary_candidates(_full_report())
     ask = _FakeAsk(["이건 JSON이 아니다"])
 
-    result = compose_summary(report, ask)
+    chosen = select_summary_sentences(candidates, ask)
 
-    assert len(ask.prompts) == 2  # 원요청 1 + 파싱 재요청 1
-    assert RETRY_REMINDER in ask.prompts[1]
-    assert len(result.summary) == SUMMARY_MIN_SENTENCES
-    assert all(s.grade == GRADE_CONFIRMED for s in result.summary)
+    assert chosen == ()
+    assert len(ask.prompts) == 1  # 번호 하나 받자고 재요청하지 않는다
 
 
-def test_ask가_예외를_던져도_보충으로_요약이_나온다():
-    report = _full_report()
+def test_후보가_없으면_AI를_부르지_않는다():
+    ask = _FakeAsk(["[1]"])
+
+    chosen = select_summary_sentences((), ask)
+
+    assert chosen == ()
+    assert ask.prompts == []
+
+
+# ══════════════════════════════════════════════════════════
+# ⑤ 실패 처리
+# ══════════════════════════════════════════════════════════
+
+
+def test_ask가_예외를_던져도_빈_결과로_돌아온다():
+    candidates = summary_candidates(_full_report())
 
     def _dying_ask(prompt: str) -> str:
         raise RuntimeError("provider 죽음")
 
-    result = compose_summary(report, _dying_ask)
-
-    assert len(result.summary) == SUMMARY_MIN_SENTENCES
-    assert result.sections == report.sections
+    assert select_summary_sentences(candidates, _dying_ask) == ()
 
 
-def test_본문이_통째로_비면_호출_없이_빈_요약이다():
-    report = ComposedReport(
-        sections=tuple(
-            ComposedSection(section_id=sid, sentences=(), notice="비었다")
-            for sid in SECTION_IDS
-        )
-    )
-    ask = _FakeAsk(["{}"])
+def test_요청_전역_장애는_삼키지_않고_그대로_올린다():
+    """한도·예산 소진은 «이 요청 몫을 다 썼다»라 부르는 쪽이 기록해야 한다."""
+    candidates = summary_candidates(_full_report())
+    fatal = AskFatalError(RuntimeError("요청 한도 시험 사유"), call_limit=True)
 
-    result = compose_summary(report, ask)
+    def _limited_ask(prompt: str) -> str:
+        raise fatal
 
-    assert ask.prompts == []  # 재료가 없으면 작가를 부르지 않는다
-    assert result.summary == ()
-    assert result.sections == report.sections
+    with pytest.raises(AskFatalError):
+        select_summary_sentences(candidates, _limited_ask)
 
 
-def test_본문에_확인이_없으면_짧아도_그대로_통과한다():
-    """보충 재료(확인 문장)가 없어도 예외·차단 없이 있는 만큼만 돌려준다."""
-    report = ComposedReport(
-        sections=(
-            ComposedSection(
-                section_id="identity",
-                sentences=(
-                    ComposedSentence(
-                        text="해석뿐인 본문이다.", citations=(), grade=GRADE_INTERPRETED
-                    ),
-                ),
-            ),
-        )
-    )
-    ask = _FakeAsk([_summary_json(["요약 한 문장이다."])])
-
-    result = compose_summary(report, ask)
-
-    assert [s.text for s in result.summary] == ["요약 한 문장이다."]
-
-
-# ══════════════════════════════════════════════════════════
-# ④ 분량 보장 — 3~5문장
-# ══════════════════════════════════════════════════════════
-
-
-def test_다섯_문장을_넘으면_다섯으로_자른다():
-    report = _full_report()
-    texts = [f"넘치는 요약 {n}번이다." for n in range(1, 9)]  # 8문장
-    ask = _FakeAsk([_summary_json(texts)])
-
-    result = compose_summary(report, ask)
-
-    assert len(result.summary) == SUMMARY_MAX_SENTENCES
-    assert [s.text for s in result.summary] == texts[:SUMMARY_MAX_SENTENCES]
-
-
-def test_재료가_있으면_요약은_항상_3에서_5문장이다():
-    report = _full_report()
-    cases = [
-        _FakeAsk([_summary_json(["하나다."])]),  # 부족 → 보충
-        _FakeAsk([_summary_json(["하나다.", "둘이다.", "셋이다.", "넷이다."])]),  # 정상
-        _FakeAsk([_summary_json([f"문장 {n}이다." for n in range(1, 11)])]),  # 초과
-        _FakeAsk(["JSON 아님"]),  # 파싱 실패 → 보충
+def test_고른_문장은_후보_범위를_절대_벗어나지_않는다():
+    """번호가 어떻게 오든 색인 오류나 «없는 문장»이 나오지 않는다."""
+    candidates = summary_candidates(_full_report())
+    응답들 = [
+        "[0]", "[-1]", f"[{len(candidates) + 1}]", "[1.5]", "[[1]]",
+        '{"번호": "1"}', "null", "[]",
     ]
 
-    for ask in cases:
-        result = compose_summary(report, ask)
-        assert (
-            SUMMARY_MIN_SENTENCES
-            <= len(result.summary)
-            <= SUMMARY_MAX_SENTENCES
-        )
+    for raw in 응답들:
+        chosen = select_summary_sentences(candidates, _FakeAsk([raw]))
+        assert all(
+            any(sentence is c.sentence for c in candidates)
+            for sentence in chosen
+        ), raw
+        assert len(chosen) <= SUMMARY_MAX_SENTENCES

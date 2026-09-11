@@ -24,6 +24,10 @@ from src.features.composer.diagram_check import (
     FLOW_REVIEW_ROW_NUMBER_PATTERN,
 )
 from src.features.composer.pipeline import run_v2
+from src.features.composer.tests.test_pipeline import (
+    _summary_selection_json,
+    summary_candidate_filler,
+)
 from src.features.composer.portfolio_name_table import (
     BLOCKED_NAME_NOT_IN_SOURCE,
     PORTFOLIO_NAME_TABLE_BLOCKED_STEP,
@@ -80,19 +84,8 @@ def _fragments(*, names_in_text: bool) -> dict[int, dict[str, str]]:
 
 def _writer(prompt: str) -> str:
     if "핵심 요약" in prompt:
-        return json.dumps(
-            {
-                "문장들": [
-                    {"글": text, "인용": ["1"], "등급": "확인"}
-                    for text in (
-                        "가나다회사는 사업부문 하나를 운영한다.",
-                        "가나다회사는 하나의 사업부문을 운영한다.",
-                        "사업부문 하나를 운영하는 회사는 가나다회사다.",
-                    )
-                ]
-            },
-            ensure_ascii=False,
-        )
+        # 요약은 이제 «고르기»다 — 문장을 지어내지 않고 후보 번호만 답한다.
+        return _summary_selection_json(prompt)
     payload: dict[str, object] = {
         "문장들": [
             {
@@ -102,6 +95,12 @@ def _writer(prompt: str) -> str:
             }
         ]
     }
+    # 장마다 다른 문장을 하나 더 둬야 요약 후보가 3개 이상 생긴다
+    # (근거는 `summary_candidate_filler` docstring).
+    문장들 = payload["문장들"]
+    보충 = summary_candidate_filler(prompt)
+    if isinstance(문장들, list) and 보충 is not None:
+        문장들.append(보충)
     if PORTFOLIO_TABLE_HEADERS[0] in prompt:
         # ★ 이름을 한 글자도 안 쓴 «부문 카드»만 낸다.
         payload["경로표"] = [
