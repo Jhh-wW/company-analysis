@@ -57,6 +57,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import re
 from bisect import bisect_right
@@ -133,6 +134,22 @@ class DerivedRatioResult:
     numerator: Optional[Decimal] = None
     denominator: Optional[Decimal] = None
 
+    def fingerprint(self) -> str:
+        """근거 쌍의 지문 = ``sha256("분자/분모")``. 근거 쌍이 없으면 빈 문자열.
+
+        ★ 왜 금액 자체를 안 남기나 — 진단은 «원문을 담지 않는다»가 이 저장소의
+          규칙이다(`verify._machine_check` 머리말, 자매 함수
+          `dedupe._log_chapter_sentence_counts`). 금액은 공시에 인쇄된 수이지만,
+          기록 칸에 임의의 수를 싣기 시작하면 그 칸으로 원문이 새어 나간다.
+        ★ 지문이면 «어느 쌍으로 인정했나»를 사후에 대조할 수 있다 — 그 조각에서
+          두 값을 다시 뽑아 같은 지문이 나오는지 보면 된다.
+        """
+
+        if self.numerator is None or self.denominator is None:
+            return ""
+        pair = f"{self.numerator}/{self.denominator}"
+        return hashlib.sha256(pair.encode("utf-8")).hexdigest()
+
     def as_diagnostic(self) -> dict:
         """운영 기록의 «수 칸». 없는 값은 빈 문자열이다(None 아님).
 
@@ -140,11 +157,7 @@ class DerivedRatioResult:
           None을 담으면 항목 전체가 버려져 상한 초과 기록이 사라진다.
         """
 
-        return {
-            "백분율": str(self.percent),
-            "분자": "" if self.numerator is None else str(self.numerator),
-            "분모": "" if self.denominator is None else str(self.denominator),
-        }
+        return {"백분율": str(self.percent), "근거지문": self.fingerprint()}
 
 
 def append_derived_ratio_diagnostic(

@@ -89,6 +89,10 @@ DERIVED_RATIO_REASONS = frozenset((
 #: 재계산 종류. 인정하지 않은 기록은 빈 문자열이다.
 DERIVED_RATIO_SHARE_KIND = "구성비"
 DERIVED_RATIO_KINDS = frozenset((DERIVED_RATIO_SHARE_KIND, ""))
-#: 수 칸 — 십진수 문자열만 받는다(부호·지수 표기 금지). 빈 문자열은 «없음»이다.
-DERIVED_RATIO_VALUE_FIELDS = ("백분율", "분자", "분모")
+#: 십진수 칸 — 후보가 «적어 낸» 백분율. 보고서에 이미 인쇄된 수다.
+#: 부호·지수·쉼표 표기는 받지 않는다.
+DERIVED_RATIO_DECIMAL_FIELDS = ("백분율",)
+#: 근거 쌍은 «지문»으로만 남긴다 — 원문 금액을 기록 칸에 싣지 않는다.
+#: 빈 문자열은 «근거 쌍 없음»(상한 초과 기록)이다.
+DERIVED_RATIO_FINGERPRINT_FIELD = "근거지문"
 DERIVED_RATIO_SECTION_IDS = frozenset(STRICT_REQUIRED_QUALITY_SECTION_IDS)
