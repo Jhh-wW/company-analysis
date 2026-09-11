@@ -374,6 +374,66 @@ def test_후보가_최소_문장_수에_못_미치면_고르기를_부르지_않
     assert record["최종수"] == 2
 
 
+def test_후보가_두_장에만_있으면_많아도_고르기를_부르지_않는다() -> None:
+    """★ 가드 조건이 «후보 수»가 아니라 «장 수»여야 하는 근거 (재검토 P3-1).
+
+    장당 최대 1개가 코드 강제이므로 요약이 채울 수 있는 문장 수의 상한은
+    «서로 다른 장 수»다. 후보 4개가 두 장에만 있으면 후보 수로는 가드를
+    통과해 유료 1회를 쓰고도 2문장으로 끝나 보고서가 막혔다(실측 재현).
+    """
+
+    두_장 = ComposedReport(
+        sections=(
+            ComposedSection("identity", (
+                _body_sentence("가나다전자 개요 첫 문단이다.", "1"),
+                _body_sentence("가나다전자 개요 둘째 문단이다.", "1"),
+            )),
+            ComposedSection("business_model", (
+                _body_sentence("가나다전자 사업모델 첫 문단이다.", "2"),
+                _body_sentence("가나다전자 사업모델 둘째 문단이다.", "2"),
+            )),
+        )
+    )
+
+    (final, draft_count, _numeric), diagnostics, selector = _run(
+        두_장, numbers=[1, 3],
+    )
+
+    assert selector.calls == 0, (
+        "후보 4개가 두 장에만 있는데 고르기 AI를 불렀다 — 무엇을 골라도 "
+        "장당 하나씩 3문장을 만들 수 없다"
+    )
+    assert draft_count == 0
+    # fail-closed — 2문장으로 돌아가고 출고 검증이 보고서 전체를 막는다.
+    assert len(final.summary) == 2
+
+    record = diagnostics[0]
+    assert record["본문후보수"] == 4
+    assert record["초안수"] == 0
+    assert record["최종수"] == 2
+
+
+def test_산문에_섞인_대괄호는_고른_것으로_기록되지_않는다() -> None:
+    """★ 진단 초안수가 0 대신 1이 되던 자리 (재검토 P3-3).
+
+    응답이 "본문 [3] 문단을 참고했습니다"면 아무것도 못 고른 것이다. 그때
+    초안수가 1로 남으면 「응답을 못 읽었다」와 「하나만 골랐다」를 구분할 수
+    없어 다음 실행의 원인 판별이 흐려진다.
+    """
+
+    (final, draft_count, _numeric), diagnostics, selector = _run(
+        _BODY_THREE, raw="본문 [3] 문단을 참고했습니다",
+    )
+
+    assert selector.calls == 1  # 후보는 충분해서 실제로 물어봤다
+    assert draft_count == 0, "산문 속 대괄호를 번호로 읽었다"
+    assert len(final.summary) == 3  # 규칙 보충이 채운다
+
+    record = diagnostics[0]
+    assert record["초안수"] == 0
+    assert record["첫보충후수"] == 3
+
+
 def test_partial_selection_is_topped_up_by_the_body() -> None:
     """하나만 골라도 나머지는 검증된 본문 문장이 채운다 — 호출은 여전히 1회."""
 

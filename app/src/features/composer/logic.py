@@ -1726,8 +1726,8 @@ SUMMARY_SELECTION_RULES_GUIDE: Final[str] = (
     "3. 한 장에서 하나씩만 고른다 — 같은 장에서 둘 이상 고르지 않는다.\n"
     "4. 숫자가 없는 문장을 먼저 고른다. 그 장에 숫자 없는 문장이 없을 때만 "
     "숫자가 든 문장을 고른다. 무엇을 하는 회사인지·수익 구조·최근 변화·"
-    "과제와 대응·성장 방향처럼 회사를 처음 보는 독자에게 핵심인 사실을 "
-    "장별로 하나씩 고른다.\n"
+    "과제와 대응·성장 방향·동종업계와 비교해 확인된 차이처럼 회사를 처음 "
+    "보는 독자에게 핵심인 사실을 장별로 하나씩 고른다.\n"
     "5. 문장을 고치거나 새로 쓰지 않는다. 번호만 답한다.\n"
 )
 
@@ -1833,22 +1833,46 @@ def _selection_number(item: Any) -> Optional[int]:
     return None
 
 
+def _fence_stripped(raw: str) -> str:
+    """코드 펜스(```json … ```)만 걷어낸 본문을 돌려준다.
+
+    펜스가 없으면 공백만 다듬어 그대로 돌려준다. 글자를 해석하지 않는다.
+    """
+
+    text = (raw or "").strip()
+    if not text.startswith("```"):
+        return text
+    body = text[3:]
+    newline = body.find("\n")
+    if newline >= 0:
+        # 첫 줄의 언어 표시(```json 등)를 버린다.
+        body = body[newline + 1 :]
+    body = body.rstrip()
+    if body.endswith("```"):
+        body = body[:-3]
+    return body.strip()
+
+
 def _bracketed_array_payload(raw: str) -> Optional[Any]:
-    """코드 펜스·머리말이 붙은 «맨 배열» 응답에서 배열만 회수한다.
+    """응답 «전체»가 맨 배열일 때만 그 배열을 회수한다.
 
     ★ 왜 여기서 따로 회수하나 (2026-09-11 독립 검토 P1) — 공용 회수기
       `extract_json_payload`는 펜스가 붙으면 «첫 { ~ 마지막 }»만 자른다. 배열에는
       중괄호가 없어 한 번도 회수되지 않았다. 공용 함수에 «[ ~ ]» 자르기를 더하면
       장별 응답·검수 응답까지 영향을 받으므로, 번호만 읽는 이 자리에만 둔다.
+    ★ 왜 «전체»만 인정하나 (2026-09-11 재검토 P3-3) — 처음에는 첫 «[»부터 마지막
+      «]»까지 잘랐다. 그러면 산문 속 대괄호가 번호가 된다 — "본문 [3] 문단을
+      참고했습니다" 가 번호 (3,)으로 읽혔다. 고를 수 있는 것이 검증된 본문
+      문장뿐이라 안전 문제는 아니지만, 「못 읽었다」가 「하나 골랐다」로 기록돼
+      단계 진단의 초안수가 0 대신 1이 되고 원인 판별이 흐려진다.
     ★ 자른 뒤에도 «JSON으로 읽히는가»만 본다. 글자를 해석하지 않는다.
     """
 
-    text = (raw or "").strip()
-    start, end = text.find("["), text.rfind("]")
-    if start < 0 or end <= start:
+    text = _fence_stripped(raw)
+    if not text.startswith("[") or not text.endswith("]"):
         return None
     try:
-        return json.loads(text[start : end + 1])
+        return json.loads(text)
     except (json.JSONDecodeError, ValueError):
         return None
 

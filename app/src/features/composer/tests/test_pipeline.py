@@ -851,6 +851,60 @@ def test_요약_후보가_세_문장_미만이면_보고서_전체가_막히고_
     assert not any("핵심 요약" in prompt for prompt in writer.prompts)
 
 
+def test_후보가_두_장에만_있으면_많아도_막히고_AI도_안_부른다():
+    """★ 가드는 «후보 수»가 아니라 «서로 다른 장 수»로 본다 (재검토 P3-1).
+
+    장당 최대 1개가 코드 강제라, 요약이 채울 수 있는 문장 수의 상한은 후보가
+    걸쳐 있는 장의 수다. 예전 가드는 후보 «개수»만 봐서, 후보 4개가 두 장에만
+    있는 실행이 유료 1회를 쓰고도 2문장으로 끝나 어차피 막혔다(실측 재현).
+    """
+
+    class _두_장만_쓰는_작가(_FakeWriter):
+        """앞 두 장에만 서로 다른 문장을 쓰고 나머지는 «쓸 문장이 없다»."""
+
+        def __call__(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            if "핵심 요약" in prompt:
+                return _summary_selection_json(prompt)
+            section_id = section_id_in_prompt(prompt)
+            if section_id not in SECTION_IDS[:2]:
+                return json.dumps({"문장들": []}, ensure_ascii=False)
+            # ⚠️ 문장에 숫자를 넣지 않는다 — 구조화 결속 없는 숫자 문장은
+            #   수치 안전 검사가 본문에서 빼 버려, 이 시험이 재려는 「두 장에
+            #   후보 4개」가 아니라 「후보 0개」가 된다(실측으로 확인).
+            return json.dumps(
+                {
+                    "문장들": [
+                        {
+                            "글": f"{section_id} 장의 {차례} 해석 서술이다.",
+                            "인용": ["1"],
+                            "등급": GRADE_INTERPRETED,
+                        }
+                        for 차례 in ("첫", "둘째")
+                    ]
+                },
+                ensure_ascii=False,
+            )
+
+    writer = _두_장만_쓰는_작가()
+
+    with pytest.raises(V2ValidationError) as caught:
+        run_v2(
+            "가나다전자",
+            _raw_fragments(),
+            None,
+            writer_ask=writer,
+            reviewer_ask=_FakeReviewer(),
+        )
+
+    assert any("핵심 요약" in problem for problem in caught.value.problems), (
+        caught.value.problems
+    )
+    assert not any("핵심 요약" in prompt for prompt in writer.prompts), (
+        "두 장뿐인데 고르기 AI를 불렀다 — 그 호출은 결과를 바꾸지 못한다"
+    )
+
+
 # ══════════════════════════════════════════════════════════
 # ⑤ 중복 검출 경고 — 잡혀도 출고는 막지 않는다
 # ══════════════════════════════════════════════════════════

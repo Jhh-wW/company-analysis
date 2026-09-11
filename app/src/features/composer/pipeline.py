@@ -611,17 +611,27 @@ def _legacy_summary_stage(
         _normalized_text(candidate.sentence.text): candidate.section_id
         for candidate in candidates
     }
+    #: 후보가 «몇 개 장»에 걸쳐 있는가. 장당 최대 1개라 요약이 채울 수 있는
+    #: 문장 수의 상한이 곧 이 값이다.
+    candidate_section_count = len({
+        candidate.section_id for candidate in candidates
+    })
     selected: tuple[ComposedSentence, ...] = ()
-    if len(candidates) < SUMMARY_MIN_SENTENCES:
-        # ★ 후보가 최소 문장 수에 못 미치면 AI를 «부르지 않는다». 무엇을 골라도
+    if candidate_section_count < SUMMARY_MIN_SENTENCES:
+        # ★ 후보가 «서로 다른 장» 최소 문장 수만큼 없으면 AI를 «부르지 않는다».
+        #   장당 최대 1개가 코드 강제이므로(계약 조사 절차 4), 무엇을 골라도
         #   요약이 3문장을 못 채워 출고 검증이 보고서 전체를 막기 때문이다
         #   (계약: 근거가 충분한 결론이 3개 미만이면 억지로 채우지 않는다).
         #   부르면 그 실행의 유료 1회가 결과를 바꾸지 못한 채 사라진다.
+        # ★ 조건이 «후보 수»가 아니라 «장 수»인 근거 (2026-09-11 재검토 P3-1) —
+        #   후보 4개가 두 장에만 있으면 후보 수로는 통과해 유료 1회를 쓰고도
+        #   2문장으로 끝나 어차피 막혔다(실측 재현).
         # 계약 필드에 «후보 수» 칸이 없어 로그로 남긴다 — 요약이 짧게 끝난
         # 실행에서 「본문이 얇아서」인지 「고르기가 실패해서」인지 가른다.
         logger.warning(
-            "요약 후보가 %d문장뿐이다(본문 %d문장 중) — 최소 %d문장을 채울 수 "
-            "없어 고르기 호출을 건너뛴다",
+            "요약 후보가 %d개 장에만 있다(후보 %d문장·본문 %d문장 중) — 장당 "
+            "하나씩 %d문장을 채울 수 없어 고르기 호출을 건너뛴다",
+            candidate_section_count,
             len(candidates),
             sum(len(section.sentences) for section in verified.sections),
             SUMMARY_MIN_SENTENCES,
