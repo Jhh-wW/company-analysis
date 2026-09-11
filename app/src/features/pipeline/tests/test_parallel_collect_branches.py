@@ -3,9 +3,11 @@
 단위 계약만 초록불이면 «동시에 돈다»를 증명하지 못한다. 이 파일은 가짜 DART
 엔진과 메모리 수집기로 실제 ``RealPipeline.run``을 끝까지 돌려서 다음을 못 박는다.
 
-- 스위치를 켜면 두 갈래가 **실제로 겹쳐서** 시작한다(진입 시각 실측).
-- 켜든 끄든 보고서 입력·캐시 열쇠·단계 기록·DART 호출이 **같다**.
+- 스위치를 켜면 두 갈래가 **같은 약속 지점에서 서로를 만난다**(시계 없이 판정).
+- 켜든 끄든 보고서 입력·캐시 열쇠·단계 기록·DART 호출·비용이 **같다**.
 - 비교가 막히면 켜든 끄든 같은 사유로 멈추고 뉴스 단계는 남지 않는다.
+- 비교 지문을 못 만들어도 예전처럼 「내부 근거 계약」 관문으로 멈춘다.
+- 갈래 «안»에서 남긴 단계가 완료 순서가 아니라 정해진 차례로 놓인다.
 - 다만 비교가 막히는 실행에서 **켜면 뉴스 검색 호출이 이미 나간다** — 이
   스위치가 만드는 유일한 외부 호출 증가 지점이라 여기서 함께 못 박는다.
 - 갈래 스레드에 실행 문맥이 복사된다(`copy_context`를 빼면 실패해야 한다).
@@ -15,7 +17,7 @@
 
 from __future__ import annotations
 
-import time
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,15 +46,29 @@ from src.features.pipeline.tests.test_official_evidence_runtime import (
 )
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared.final_gate_diagnostics import (
+    FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
 )
 from src.shared.report_evidence.constants import ReleaseMode
 
 
-#: 두 갈래가 겹쳤는지 사람 눈이 아니라 시계로 가른다. 갈래마다 이 시간을 한 번
-#: 자고, 진입 시각 차이가 이보다 작으면 겹친 것이고 크거나 같으면 차례로 돈 것이다.
-#: 느린 기계에서도 두 판정이 섞이지 않을 만큼 넉넉해야 해서 0.5초로 둔다.
-BRANCH_PROBE_SLEEP_SECONDS = 0.5
+#: 약속 지점에서 서로를 기다릴 갈래 수. **생산 상수를 쓰지 않는다** — worker 수를
+#: 1로 낮추면 경쟁이 사라지는데 상수를 따라가면 그때도 초록불이 되기 때문이다.
+#: 이 시험이 지키려는 것은 「정확히 두 갈래가 동시에 산다」이므로 리터럴 2다.
+BRANCH_MEETING_PARTIES = 2
+
+#: 차례로 도는 실행에서 첫 갈래가 혼자 기다리다 포기하기까지의 시간. 동시에 도는
+#: 실행은 밀리초 안에 만나므로 이 값이 판정을 흔들지 않는다 — OFF 실행 한 번의
+#: 비용일 뿐이다.
+BRANCH_MEETING_TIMEOUT_SECONDS = 3.0
+
+#: 비교 갈래가 「뉴스가 단계를 먼저 남겼다」는 신호를 기다리는 시간.
+STEP_ORDER_WAIT_SECONDS = 3.0
+
+#: 갈래 «안»에서 `current_steps()`로 남기는 탐침 단계. 갈래별 목록을 거쳐
+#: 합류 지점이 정한 차례(비교 → 뉴스)로 공용 목록에 놓여야 한다.
+COMPARISON_PROBE_STEP = "탐침_비교갈래_단계"
+NEWS_PROBE_STEP = "탐침_뉴스갈래_단계"
 
 #: 비교 갈래가 같은 접수번호로 원문을 요청하는 횟수. 요청 단위 정본 artifact가
 #: 실제로 한 번만 내려받는지 보려면 2회 이상이어야 한다.
@@ -63,12 +79,23 @@ SAME_RECEIPT_REQUEST_COUNT = 2
 NEWS_SEARCH_SNAPSHOT_STEP = "5b_뉴스_검색스냅샷"
 NEWS_STEP_PREFIX = "5b_뉴스"
 COMPARISON_BLOCKED_STEP = "v2_FULL_회사차별점사전검사_차단"
+COMPARISON_TRANSPORT_BLOCKED_STEP = "v2_FULL_공식비교transport_차단"
 
 #: 비교 갈래가 원문을 요청할 접수번호. FakeEngine의 최신 공시와 같은 값이다.
 PROBE_RECEIPT_NUMBER = "20260315000123"
 
 #: 가짜 비교 생산물. 실행마다 같은 값이어야 ON/OFF 산출물을 그대로 비교할 수 있다.
 COMPARISON_SENTINEL = "가짜-비교-생산물"
+
+
+class _UnserializableComparison:
+    """캐시 지문을 만들 수 없는 비교 생산물.
+
+    `canonical_sha256`은 이런 값에 `TypeError`를 낸다. 예전 코드는 지문 접기가
+    비교 생산과 같은 `try` 안이라 그 오류도 「내부 근거 계약」 GATE_STOPPED로
+    끝났다 — 갈래로 나누면서 그 덮개가 사라지지 않았는지 이 값으로 확인한다.
+    """
+
 
 #: 비교 결과를 캐시 열쇠에 접는 «생산» 함수. 공용 배선 helper가 이 자리를
 #: 항등함수로 바꿔 두기 때문에, 그대로 두면 비교가 열쇠에 기여하는지 아닌지를
@@ -166,16 +193,28 @@ def _provider_budget_visible() -> bool:
 
 @dataclass
 class _BranchProbe:
-    """두 갈래가 언제 들어왔고 무엇을 봤는지 모으는 관측 기록."""
+    """두 갈래가 무엇을 봤는지 모으는 관측 기록.
 
-    comparison_entered_at: float | None = None
-    news_entered_at: float | None = None
+    시계로 «겹쳤다»를 재지 않는다. 부하가 걸린 기계에서는 스레드를 띄우는 데만
+    수백 밀리초가 끼어 거짓 실패가 난다. 대신 두 갈래가 **같은 약속 지점**
+    (`threading.Barrier`)에서 서로를 기다리게 한다 — 동시에 돌면 반드시 만나고,
+    차례로 돌면 첫 갈래가 혼자 기다리다 `BrokenBarrierError`로 깨진다.
+    """
+
     comparison_calls: int = 0
     search_calls: int = 0
     comparison_budget_visible: bool | None = None
     news_budget_visible: bool | None = None
     same_receipt_requests: int = 0
     comparison_error: BaseException | None = None
+    comparison_result: Any = COMPARISON_SENTINEL
+    #: 두 갈래가 약속 지점에서 실제로 만났는가. None이면 그 갈래가 아예 안 왔다.
+    meeting_point: "threading.Barrier | None" = None
+    comparison_met: bool | None = None
+    news_met: bool | None = None
+    #: 뉴스 갈래가 단계를 먼저 남겼다는 신호. 비교 갈래가 이걸 기다렸다 남긴다.
+    step_order_gate: "threading.Event | None" = None
+    comparison_waited_for_news_step: bool | None = None
 
 
 @dataclass
@@ -193,10 +232,9 @@ def _install_branch_probes(
     monkeypatch: pytest.MonkeyPatch,
     probe: _BranchProbe,
 ) -> None:
-    """비교 생산기를 진입 시각·문맥·원문 요청을 기록하는 대역으로 바꾼다."""
+    """비교 생산기를 약속 지점·문맥·원문 요청을 기록하는 대역으로 바꾼다."""
 
     def prepare_comparison(**kwargs: Any) -> Any:
-        probe.comparison_entered_at = time.monotonic()
         probe.comparison_calls += 1
         probe.comparison_budget_visible = _provider_budget_visible()
         download = kwargs["dart_download_document"]
@@ -204,10 +242,18 @@ def _install_branch_probes(
         for _ in range(SAME_RECEIPT_REQUEST_COUNT):
             download(PROBE_RECEIPT_NUMBER, kwargs["engine"].RAW_DIR, kwargs["counter"])
             probe.same_receipt_requests += 1
-        time.sleep(BRANCH_PROBE_SLEEP_SECONDS)
+        if probe.step_order_gate is not None:
+            # 뉴스 갈래가 «먼저» 단계를 남기게 두고, 그 뒤에 이쪽이 남긴다.
+            # 완료 순서와 기록 순서가 반대가 되는 상황을 일부러 만든다.
+            probe.comparison_waited_for_news_step = probe.step_order_gate.wait(
+                STEP_ORDER_WAIT_SECONDS
+            )
+            run_diagnostics.current_steps().append({"step": COMPARISON_PROBE_STEP})
+        if probe.meeting_point is not None:
+            probe.comparison_met = _meet(probe.meeting_point)
         if probe.comparison_error is not None:
             raise probe.comparison_error
-        return COMPARISON_SENTINEL
+        return probe.comparison_result
 
     monkeypatch.setattr(real, "_prepare_v2_comparison_result", prepare_comparison)
     monkeypatch.setattr(
@@ -215,15 +261,30 @@ def _install_branch_probes(
     )
 
 
+def _meet(meeting_point: threading.Barrier) -> bool:
+    """약속 지점에서 다른 갈래를 기다린다. 혼자면 깨진 채로 돌아온다."""
+
+    try:
+        meeting_point.wait()
+    except threading.BrokenBarrierError:
+        return False
+    return True
+
+
 def _probe_search_news(probe: _BranchProbe):
-    """첫 호출에만 자고 진입 시각을 남기는 가짜 뉴스 검색."""
+    """첫 호출에서만 약속 지점·문맥·단계 기록을 남기는 가짜 뉴스 검색."""
 
     def search_news(_query: str, **_kwargs: object) -> Any:
         probe.search_calls += 1
         if probe.search_calls == 1:
-            probe.news_entered_at = time.monotonic()
             probe.news_budget_visible = _provider_budget_visible()
-            time.sleep(BRANCH_PROBE_SLEEP_SECONDS)
+            if probe.step_order_gate is not None:
+                # 갈래 안에서 «운영 방식»으로 단계를 남긴다. 갈래별 목록으로
+                # 가지 않으면 이 줄이 공용 목록에 먼저 박혀 순서가 뒤집힌다.
+                run_diagnostics.current_steps().append({"step": NEWS_PROBE_STEP})
+                probe.step_order_gate.set()
+            if probe.meeting_point is not None:
+                probe.news_met = _meet(probe.meeting_point)
             return _grounded_runtime_result([_grounded_runtime_item()])
         return _grounded_runtime_result([])
 
@@ -234,6 +295,9 @@ def _run_research(
     *,
     parallel: bool,
     comparison_error: BaseException | None = None,
+    comparison_result: Any = COMPARISON_SENTINEL,
+    meet_at_barrier: bool = False,
+    record_branch_steps: bool = False,
 ) -> _BranchRun:
     """운영 배선 그대로 본조사를 한 번 돌리고 관측을 모아 온다."""
 
@@ -260,7 +324,19 @@ def _run_research(
         engine = _ProbeEngine()
         collector = _Collector([_official_result()])
         calls = _wire_runtime(monkeypatch, engine=engine)
-        probe = _BranchProbe(comparison_error=comparison_error)
+        probe = _BranchProbe(
+            comparison_error=comparison_error,
+            comparison_result=comparison_result,
+            meeting_point=(
+                threading.Barrier(
+                    BRANCH_MEETING_PARTIES,
+                    timeout=BRANCH_MEETING_TIMEOUT_SECONDS,
+                )
+                if meet_at_barrier
+                else None
+            ),
+            step_order_gate=threading.Event() if record_branch_steps else None,
+        )
         _install_branch_probes(monkeypatch, probe)
 
         user_input, card = _request()
@@ -296,26 +372,33 @@ def _step_names(steps: list[dict[str, Any]]) -> list[str]:
     return [str(step.get("step") or "") for step in steps]
 
 
-def test_스위치를_켜면_비교와_뉴스검색이_실제로_겹쳐_시작한다() -> None:
-    """진입 시각으로 «동시»를 판정한다. 켜면 겹치고, 끄면 차례로 돈다."""
+def test_스위치를_켜면_두_갈래가_같은_약속_지점에서_만난다() -> None:
+    """시계 없이 «동시»를 판정한다.
 
-    serial = _run_research(parallel=False)
-    parallel = _run_research(parallel=True)
+    두 갈래가 같은 약속 지점에서 서로를 기다린다. 동시에 살아 있어야만 둘 다
+    통과하므로, 켜면 반드시 만나고 끄면 첫 갈래가 혼자 기다리다 깨진다. 부하가
+    판정을 흔들 수 없다 — 기다리는 쪽은 상대가 올 때까지 기다리기 때문이다.
+    """
 
-    for run, label in ((serial, "차례"), (parallel, "동시")):
-        assert run.probe.comparison_entered_at is not None, label
-        assert run.probe.news_entered_at is not None, label
+    parallel = _run_research(parallel=True, meet_at_barrier=True)
+    serial = _run_research(parallel=False, meet_at_barrier=True)
 
-    serial_gap = serial.probe.news_entered_at - serial.probe.comparison_entered_at
-    parallel_gap = abs(
-        parallel.probe.news_entered_at - parallel.probe.comparison_entered_at
+    assert parallel.probe.comparison_met is True, (
+        "스위치를 켰는데 비교 갈래가 약속 지점에서 뉴스 갈래를 못 만났습니다"
     )
-    assert serial_gap >= BRANCH_PROBE_SLEEP_SECONDS, (
-        "스위치가 꺼졌는데 뉴스 검색이 비교를 기다리지 않았습니다"
+    assert parallel.probe.news_met is True, (
+        "스위치를 켰는데 뉴스 갈래가 약속 지점에서 비교 갈래를 못 만났습니다"
     )
-    assert parallel_gap < BRANCH_PROBE_SLEEP_SECONDS, (
-        "스위치를 켰는데 두 갈래가 겹쳐 시작하지 않았습니다"
+
+    assert serial.probe.comparison_met is False, (
+        "스위치가 꺼졌는데 비교 갈래가 약속 지점에서 누군가를 만났습니다"
     )
+    # 뒤늦게 온 뉴스 갈래는 이미 깨진 약속 지점을 본다 — 둘이 동시에 산 적이 없다.
+    assert serial.probe.news_met is False
+    # 약속이 깨져도 보고서 경로는 그대로다. 탐침이 실패를 만들지 않는다.
+    assert parallel.result.outcome is Outcome.REPORT
+    assert serial.result.outcome is Outcome.REPORT
+    assert serial.probe.search_calls > 0
 
 
 def test_켜고_꺼도_보고서입력과_캐시열쇠와_단계기록이_같다() -> None:
@@ -329,6 +412,10 @@ def test_켜고_꺼도_보고서입력과_캐시열쇠와_단계기록이_같다
     assert serial.result.report == parallel.result.report
     assert serial.result.message == parallel.result.message
     assert serial.result.final_gate_reason == parallel.result.final_gate_reason
+    # 지금은 두 갈래 다 AI를 안 써서 0이지만, 어느 한쪽에 유료 호출이 생기면
+    # 값이 갈리는 것을 여기서 본다.
+    assert serial.result.cost_krw == parallel.result.cost_krw
+    assert serial.result.charged == parallel.result.charged
 
     assert _composer_identity(serial) == _composer_identity(parallel)
     assert serial.steps == parallel.steps
@@ -405,3 +492,59 @@ def test_비교가_막히면_켜든_꺼든_같은_사유로_멈추고_뉴스단�
     # 이 스위치가 만드는 유일한 외부 호출 증가 지점 — 켜면 되돌릴 수 없다.
     assert serial.probe.search_calls == 0
     assert parallel.probe.search_calls >= 1
+
+
+def test_비교지문을_못만들면_켜든_꺼든_내부계약_사유로_멈춘다() -> None:
+    """지문 접기가 터져도 예전처럼 fail-closed 관문으로 끝나야 한다.
+
+    예전 코드는 비교 생산과 지문 접기가 같은 `try` 안이라 직렬화 오류도
+    「내부 근거 계약」 GATE_STOPPED가 됐다. 갈래로 나누면서 접기를 합류 지점으로
+    빼면 그 덮개가 사라져 처리되지 않은 실패로 바뀐다 — 그 회귀를 막는다.
+    """
+
+    serial = _run_research(
+        parallel=False, comparison_result=_UnserializableComparison()
+    )
+    parallel = _run_research(
+        parallel=True, comparison_result=_UnserializableComparison()
+    )
+
+    for run, label in ((serial, "차례"), (parallel, "동시")):
+        assert run.result.outcome is Outcome.GATE_STOPPED, label
+        assert (
+            run.result.final_gate_reason
+            == FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+        ), label
+        assert run.calls.composers == [], label
+        recorded = _step_names(run.steps)
+        assert recorded.count(COMPARISON_TRANSPORT_BLOCKED_STEP) == 1, label
+
+    assert serial.result.message == parallel.result.message
+    # 비교 생산기는 정상적으로 끝났다 — 멈춘 것은 지문 접기다.
+    assert serial.probe.comparison_calls == parallel.probe.comparison_calls == 1
+
+
+def test_갈래_안에서_남긴_단계가_완료순서가_아니라_정해진_차례로_놓인다() -> None:
+    """뉴스가 먼저 기록해도 공용 목록에는 비교가 먼저 와야 한다.
+
+    탐침은 «운영 방식»으로 `current_steps()`에 남긴다. 갈래마다 자기 목록을 쓰지
+    않으면 이 두 줄이 완료 순서 그대로 공용 목록에 박혀 순서가 뒤집힌다.
+
+    ★ 이 시험이 결정적으로 지키는 것은 «뉴스 갈래»의 갈래별 목록이다. 비교 갈래
+      쪽은 합류가 어차피 비교를 먼저 붙이므로 순서로는 구분되지 않는다(방어용).
+    """
+
+    run = _run_research(parallel=True, record_branch_steps=True)
+
+    assert run.result.outcome is Outcome.REPORT
+    # 완료 순서는 실제로 뒤집혀 있었다 — 비교가 뉴스 기록을 기다린 뒤 남겼다.
+    assert run.probe.comparison_waited_for_news_step is True
+
+    recorded = _step_names(run.steps)
+    assert recorded.count(COMPARISON_PROBE_STEP) == 1
+    assert recorded.count(NEWS_PROBE_STEP) == 1
+    assert recorded.index(COMPARISON_PROBE_STEP) < recorded.index(NEWS_PROBE_STEP), (
+        "갈래가 남긴 단계가 완료 순서대로 놓였습니다 — 갈래별 목록이 풀렸습니다"
+    )
+    # 뉴스 갈래 탐침은 검색 스냅샷 단계와 «같은 묶음»으로 옮겨져야 한다.
+    assert recorded.index(NEWS_PROBE_STEP) < recorded.index(NEWS_SEARCH_SNAPSHOT_STEP)

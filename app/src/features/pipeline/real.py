@@ -3741,6 +3741,9 @@ class RealPipeline:
                 filing=filing,
                 business_date=business_date,
                 dart_download_document=download_document_once,
+                # 지문 접기까지 갈래 안에서 끝낸다 — 예전처럼 같은 `try`가
+                # 덮어야 직렬화 오류도 GATE_STOPPED로 끝난다.
+                source_identity_digest=generation_source_identity_digest,
             )
         # 뉴스는 공식 자료의 빈칸 여부와 무관한 현재성 입력이다. 검색은 AI 없이
         # 먼저 고정하고, 본문 분석은 아래 owner 선정 뒤에만 실행한다. 이렇게 해야
@@ -3777,16 +3780,14 @@ class RealPipeline:
                     corp_type=corp_type,
                     source_identity=source_identity,
                 )
-            v2_comparison_result = comparison_outcome.value
-            generation_source_identity_digest = _comparison_generation_digest(
-                generation_source_identity_digest,
-                v2_comparison_result,
-            )
+            assert isinstance(comparison_outcome.value, _ComparisonOutcome)
+            v2_comparison_result = comparison_outcome.value.result
+            generation_source_identity_digest = comparison_outcome.value.folded_digest
         if news_outcome is not None:
-            if news_outcome.error is not None:
-                # 뉴스 갈래는 `Exception`을 자기 안에서 삼킨다. 여기까지 오는 것은
-                # 그보다 바깥의 중단뿐이므로 예전처럼 그대로 위로 올린다.
-                raise news_outcome.error
+            # 뉴스 갈래는 `Exception`을 자기 안에서 삼키고, 그보다 바깥의 중단은
+            # 애초에 담지 않는다(스레드 경계에서 `result()`가 다시 던진다).
+            assert news_outcome.error is None
+            assert isinstance(news_outcome.value, _NewsSearchOutcome)
             steps.extend(news_outcome.steps)
             news_session = news_outcome.value.session
             news_preparation_failed = news_outcome.value.preparation_failed
@@ -5430,21 +5431,37 @@ def _packet_document_preflight_final_gate_reason(detail_code: str) -> str:
 class _BranchOutcome:
     """동시에 돌린 갈래 하나가 만든 값·예외·단계 기록.
 
-    ★ 예외를 던지지 않고 «담아» 돌려준다 — 스레드 안에서 그대로 던지면 원래
-      코드가 가진 사유 분류·화면 문구 경로를 못 타고, 합류한 쪽이 두 갈래의
-      기록 순서를 정할 기회도 사라진다.
+    ★ `Exception`을 던지지 않고 «담아» 돌려준다 — 스레드 안에서 그대로 던지면
+      원래 코드가 가진 사유 분류·화면 문구 경로를 못 타고, 합류한 쪽이 두 갈래의
+      기록 순서를 정할 기회도 사라진다. 반대로 취소·종료처럼 `Exception`이 아닌
+      중단은 담지 않는다 — 삼키면 예전에 멈추던 신호가 조용히 사라진다.
     """
 
-    value: Any
-    error: BaseException | None
+    value: "_ComparisonOutcome | _NewsSearchOutcome | None"
+    error: Exception | None
     steps: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class _ComparisonOutcome:
+    """비교 갈래가 만든 두 값 — 비교 생산물과 그것까지 접은 캐시 지문.
+
+    ★ 지문 접기를 왜 갈래 안에 두나 — 예전 코드는 비교 생산과 지문 접기가 같은
+      `try` 안이라, 직렬화 불가 값 때문에 접기가 터져도 「내부 근거 계약」
+      GATE_STOPPED로 끝났다. 합류 지점으로 빼면 그 덮개가 사라져 같은 입력이
+      처리되지 않은 실패가 된다. 그래서 값과 지문을 함께 만들어 함께 돌려준다.
+    """
+
+    #: `_prepare_v2_comparison_result`의 반환값. 생산기 자체가 `Any`다.
+    result: Any
+    folded_digest: str
 
 
 @dataclass(frozen=True)
 class _NewsSearchOutcome:
     """뉴스 검색 갈래가 만든 세 값 — 세션·지문·준비 실패 여부."""
 
-    session: Any
+    session: "news_research_adapter.NewsResearchSession | None"
     digest: str
     preparation_failed: bool
 
@@ -5462,6 +5479,7 @@ def _run_comparison_branch(
     filing: Optional[dict[str, Any]],
     business_date: Any,
     dart_download_document: Any,
+    source_identity_digest: str,
 ) -> _BranchOutcome:
     """공식 양사 비교 갈래. 실패는 합류 지점이 원래 분류로 처리한다."""
 
@@ -5471,7 +5489,7 @@ def _run_comparison_branch(
     # 옮겨 붙이므로 완료 순서가 기록 순서를 흔들지 않는다.
     with run_diagnostics.use_steps(branch_steps):
         try:
-            value = _prepare_v2_comparison_result(
+            comparison = _prepare_v2_comparison_result(
                 engine=engine,
                 counter=counter,
                 profile=profile,
@@ -5484,7 +5502,15 @@ def _run_comparison_branch(
                 business_date=business_date,
                 dart_download_document=dart_download_document,
             )
-        except BaseException as error:  # noqa: BLE001 - 합류 지점이 원래대로 분류한다
+            # 예전과 같은 `try` 안이다. 여기서 터지는 직렬화 오류도 합류 지점이
+            # 「내부 근거 계약」 GATE_STOPPED로 바꾼다.
+            value = _ComparisonOutcome(
+                result=comparison,
+                folded_digest=_comparison_generation_digest(
+                    source_identity_digest, comparison
+                ),
+            )
+        except Exception as error:  # noqa: BLE001 - 합류 지점이 원래대로 분류한다
             return _BranchOutcome(value=None, error=error, steps=branch_steps)
     return _BranchOutcome(value=value, error=None, steps=branch_steps)
 
@@ -5493,15 +5519,15 @@ def _run_news_search_branch(
     *,
     engine: Any,
     profile: dict[str, Any],
-    official_evidence: Any,
+    official_evidence: OfficialEvidenceCollectionResult | None,
     company_name: str,
     business_date: Any,
-    pipeline_news_search: Any,
+    pipeline_news_search: Optional[Callable[..., Any]],
 ) -> _BranchOutcome:
     """뉴스 검색 스냅샷 갈래. 뉴스 장애는 예전처럼 보고서를 멈추지 않는다."""
 
     branch_steps: list[dict[str, Any]] = []
-    news_session: Any = None
+    news_session: news_research_adapter.NewsResearchSession | None = None
     news_preparation_failed = False
     # 두 갈래 모두 값을 채우지 못하는 경로가 생기면 «뉴스 없음»이 아니라
     # «확인 못 함»으로 굳혀 캐시 열쇠가 정상 실행과 겹치지 않게 한다.
@@ -5555,7 +5581,7 @@ def _run_news_search_branch(
                     NEWS_INTAKE_INTERNAL_ERROR_CODE,
                     type(error).__name__,
                 )
-        except BaseException as error:  # noqa: BLE001 - 원래처럼 합류 지점이 올린다
+        except Exception as error:  # noqa: BLE001 - 원래처럼 합류 지점이 올린다
             return _BranchOutcome(value=None, error=error, steps=branch_steps)
     return _BranchOutcome(
         value=_NewsSearchOutcome(
@@ -5600,11 +5626,15 @@ def _run_collection_branches(
         news_future = pool.submit(contextvars.copy_context().run, news)
         # 기다리는 시간에 상한을 걸지 않는다. 각 갈래는 이미 자기 시간 계약을
         # 갖고 있고(뉴스 검색 예산 등), 그보다 짧게 자르면 없던 실패를 만든다.
-        return comparison_future.result(), news_future.result()
+        # 갈래가 담지 않는 중단(`Exception`이 아닌 것)은 `result()`가 여기서 그대로
+        # 다시 던진다 — 비교가 실패한 실행에서도 취소 신호가 묻히지 않게 뉴스
+        # 쪽부터 먼저 확인한다.
+        news_outcome = news_future.result()
+        return comparison_future.result(), news_outcome
 
 
 def _comparison_branch_gate_result(
-    error: BaseException,
+    error: Exception,
     *,
     steps: list[dict[str, Any]],
     engine: Any,
