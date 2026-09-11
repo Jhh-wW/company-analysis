@@ -111,6 +111,7 @@ from src.features.composer.absence_claim_guard import (
 from src.features.composer.absence_claim_constants import ABSENCE_CLAIM_UNSUPPORTED
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_financial_risk_goal_problem,
+    culture_flow_cells_evidence_problem,
     culture_flow_problem, culture_problem, culture_section_evidence_problem,
 )
 from src.features.composer.verify import (
@@ -887,11 +888,9 @@ def _review_rows(
                 #   옮겨 적히면 그대로 통과했다 — 같은 보고서 안의 두 잣대였다.
                 # ⚠️ 재무위험 «규정» 검사는 칸마다 «따로» 건다(cellwise_problem
                 #   머리말) — 그 검사는 후보 어휘의 결합을 보기 때문이다.
-                # ★ 원문 절 계약만 «행 전체»를 후보로 넘긴다. 그 계약은 후보
-                #   어휘를 검사하지 않고 «후보가 기댄 절»을 고르는 데만 쓰므로
-                #   칸을 이어 붙여도 표지 결합 사고가 나지 않는다. 반대로 칸마다
-                #   따로 걸면 한 낱말짜리 칸이 기댈 절을 못 찾아 정상 행이 통째로
-                #   지워진다 — 행 하나가 한 «주장»이다(묶음 진입점과 같은 규칙).
+                # ★ 원문 절 계약은 «판정 대상 칸»만 따로 본다 — 행 전체로 보면
+                #   재무 규정 칸이 옆 칸에 업혀 통과한다(독립 검토 P1-5). 내용어가
+                #   하나뿐인 칸은 판단을 보류해 정상 행이 지워지지 않게 한다.
                 flow_problem = (
                     culture_flow_problem(row.cells, sources)
                     or culture_accounting_flow_problem(row.cells, sources)
@@ -899,9 +898,7 @@ def _review_rows(
                     or cellwise_problem(
                         row.cells, culture_financial_risk_goal_problem
                     )
-                    or culture_section_evidence_problem(
-                        FLOW_CELL_JOIN.join(row.cells), sources
-                    )
+                    or culture_flow_cells_evidence_problem(row.cells, sources)
                 )
             # 6장 성장 계획 표만 미래 근거를 결속한다 — 이 장의 산문과 다른 장의
             # 도식은 그대로 기존 검수만 거친다.

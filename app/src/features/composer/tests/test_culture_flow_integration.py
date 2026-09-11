@@ -62,15 +62,31 @@ def _check(report, fragments, grouped, diagnostics):
 @pytest.mark.parametrize("grouped", (False, True), ids=("legacy", "grouped"))
 @pytest.mark.parametrize("record_diagnostics", (False, True))
 def test_actual_goal_is_removed_and_two_actual_procedures_remain(grouped, record_diagnostics):
+    """★ 2026-09-11: 남는 행이 2개에서 1개로 줄었다 (독립 검토 P1-5 확정 규칙).
+
+    2번 행의 1칸 「위험 대비 수익 극대화」와 2칸 「위험의 인식·측정·통제·보고
+    절차 운영」은 «단독으로는» 재무 서술이라 제외된다. 예전에는 행 전체를 한
+    후보로 봐서 3칸의 「리스크관리위원회 의사결정」에 업혀 통과했다. 이제
+    판정 대상 칸 하나라도 제외면 행을 뺀다 — 부재 단언과 같은 잣대다.
+    남는 1번 행(직업윤리·준법정신·조직문화 정착)은 그대로다.
+    """
+
     draft, fragments = _actual_inputs()
     diagnostics = [] if record_diagnostics else None
     checked = _check(draft, fragments, grouped, diagnostics)
-    assert checked.sections[0].flow_rows == draft.sections[0].flow_rows[:2]
+    assert checked.sections[0].flow_rows == draft.sections[0].flow_rows[:1]
     if diagnostics is not None:
         outcomes = final_review_outcomes(checked, diagnostics)
-        assert len(outcomes) == 1
-        assert outcomes[0]["reason_code"] == "culture_evidence_scope_mismatch"
-        assert outcomes[0]["verification_items"] == ("공식 조직설명",)
+        assert len(outcomes) == 2
+        # 사유는 행마다 다르다 — 2번 행은 칸이 기댈 절을 못 찾아 원문 절 계약에,
+        # 3번 행은 예전처럼 목표 격상(공식 조직설명)에 걸린다.
+        assert sorted(item["reason_code"] for item in outcomes) == [
+            "culture_evidence_scope_mismatch",
+            "culture_section_evidence_offcontract",
+        ]
+        assert any(
+            item["verification_items"] == ("공식 조직설명",) for item in outcomes
+        )
         assert "금융 취약층" not in repr(outcomes)
 
 

@@ -5,6 +5,7 @@
 """
 
 from collections.abc import Mapping, Sequence
+import math
 import unicodedata
 
 from src.features.composer.culture_constants import (
@@ -23,6 +24,7 @@ from src.features.composer.culture_constants import (
     CULTURE_ATTRIBUTION_RE,
     CULTURE_EVIDENCE_SCOPE_MISMATCH,
     CULTURE_EXTERNAL_AUDIT_RE,
+    CULTURE_ORG_UNIT_STOPWORDS,
     CULTURE_FINANCIAL_RISK_CATEGORY_RE,
     CULTURE_FINANCIAL_RISK_DERIVATIVE_RE,
     CULTURE_FINANCIAL_RISK_EXPOSURE_RE,
@@ -36,12 +38,15 @@ from src.features.composer.culture_constants import (
     CULTURE_FINANCIAL_RISK_RULE_RE,
     CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,
     CULTURE_FLOW_CELL_COUNT,
+    CULTURE_FLOW_CELL_MIN_TOKENS,
     CULTURE_PEOPLE_INSTITUTION_RE,
     CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
     CULTURE_SECTION_ORG_ACTION_NEGATION_RE,
     CULTURE_SECTION_ORG_ACTION_RE,
+    CULTURE_SECTION_ORG_UNIT_RE,
     CULTURE_SUPPORT_CLAUSE_LIMIT,
     CULTURE_SUPPORT_MIN_OVERLAP,
+    CULTURE_SUPPORT_MIN_OVERLAP_RATIO,
     CULTURE_SUPPORT_MIN_TOKEN_LENGTH,
     CULTURE_SUPPORT_PARTICLES,
     CULTURE_SUPPORT_STOPWORDS,
@@ -113,6 +118,13 @@ def _supporting_clauses(
     """
 
     candidate_tokens = _content_tokens(text)
+    # ★ 수와 비율을 «둘 다» 넘어야 지지 절이다 (독립 검토 P1-3). 수만 보면
+    #   긴 후보가 낱말 두 개로 아무 절이나 고르고, 비율만 보면 짧은 후보가
+    #   한 낱말로 100%를 만든다.
+    문턱 = max(
+        CULTURE_SUPPORT_MIN_OVERLAP,
+        math.ceil(CULTURE_SUPPORT_MIN_OVERLAP_RATIO * len(candidate_tokens)),
+    )
     scored: list[tuple[int, int, str]] = []
     for source in sources_mapping.values():
         for clause in SOURCE_CLAUSE_SPLIT_RE.split(source):
@@ -120,13 +132,37 @@ def _supporting_clauses(
             if not surface_clause:
                 continue
             overlap = len(candidate_tokens & _content_tokens(clause))
-            if overlap >= CULTURE_SUPPORT_MIN_OVERLAP:
+            if overlap >= 문턱:
                 # 겹침 내림차순 · 원문 순서 오름차순으로 줄을 세운다. 두 값이
                 # 모두 같은 절은 원문에 나온 차례대로 — 판정은 결정적이다.
                 scored.append((-overlap, len(scored), surface_clause))
     scored.sort()
     return tuple(
         clause for _rank, _order, clause in scored[:CULTURE_SUPPORT_CLAUSE_LIMIT]
+    )
+
+
+def _has_org_actor(surface_clause: str) -> bool:
+    """그 절이 «누가»를 말했는가 — 기존 주체 목록 + 부서 이름 꼴.
+
+    ★ 부서 이름 꼴을 따로 보는 이유 (독립 검토 P1-4) — 실제 공시는
+      「신용리스크관리부가 담당한다」·「IT그룹을 재편했다」처럼 조직 «이름»으로
+      쓴다. 기존 목록은 「부서」·「팀+조사」만 알아서 이런 절이 「누가 맡는지」
+      예외를 못 열었다.
+    ★ 「일부가」·「전부는」 같은 말이 조직으로 둔갑하지 않게 두 겹으로 막는다 —
+      이름이 두 글자 이상일 것, 그리고 닫힌 «끝말» 불용어 목록에 없을 것.
+      끝말로 보는 이유는 공백을 지운 표면에서 이름의 «시작»을 알 수 없기
+      때문이다(「기 설정된 내부의」가 「기설정된내부」로 잡히던 자리).
+    """
+
+    if CULTURE_FINANCIAL_RISK_ORG_ACTOR_RE.search(surface_clause):
+        return True
+    return any(
+        not any(
+            match.group("name").endswith(stopword)
+            for stopword in CULTURE_ORG_UNIT_STOPWORDS
+        )
+        for match in CULTURE_SECTION_ORG_UNIT_RE.finditer(surface_clause)
     )
 
 
@@ -155,7 +191,7 @@ def _clause_carries_section_subject(surface_clause: str) -> bool:
         return False
     if CULTURE_EXTERNAL_AUDIT_RE.search(surface_clause):
         return False
-    if (CULTURE_FINANCIAL_RISK_ORG_ACTOR_RE.search(surface_clause)
+    if (_has_org_actor(surface_clause)
             and CULTURE_SECTION_ORG_ACTION_RE.search(surface_clause)
             and not CULTURE_SECTION_ORG_ACTION_NEGATION_RE.search(surface_clause)):
         return True
@@ -520,3 +556,31 @@ def culture_flow_problem(cells: Sequence[str], sources_mapping: Mapping[str, str
             # 명시한 현재 절차가 있으면 그 의미·주체 검증은 기존 검수에 남긴다.
             return ""
     return CULTURE_EVIDENCE_SCOPE_MISMATCH
+
+
+def culture_flow_cells_evidence_problem(
+    cells: Sequence[str], sources_mapping: Mapping[str, str]
+) -> str:
+    """도식 행의 «판정 대상 칸»만 따로 8장 계약에 건다.
+
+    ★ 왜 행 전체가 아닌가 (독립 검토 P1-5 실측) — 「신용여신 한도 | 신용위험
+      관리규정에 따라 집행」 칸은 단독으로는 제외인데, 정상 인사 칸과 한 행으로
+      이어 붙이면 통과했다. 재무 규정 칸이 옆 칸에 업혀 나간다. 같은 행에서
+      부재 단언은 「칸 하나라도 걸리면 제외」인데 이 계약만 반대 잣대였다.
+
+    ★ 왜 «판정 대상 칸»만인가 — 내용어가 하나뿐인 칸(「교육훈련」)은 기댈 절을
+      고를 수 없어 무조건 제외로 떨어지고, 그러면 정상 행이 통째로 지워진다.
+      그런 칸은 판단을 «보류»한다. 판정 대상 칸이 하나도 없으면 이 계약은
+      그 행에 대해 아무 말도 하지 않는다 — 다른 가드가 그대로 판정한다.
+
+    ⚠️ 칸을 이어 붙이지 않는다. 서로 다른 칸의 표지가 결합해 없던 판정이
+      생기는 사고(cellwise_problem 머리말)를 그대로 피한다.
+    """
+
+    for cell in cells:
+        if len(_content_tokens(str(cell))) < CULTURE_FLOW_CELL_MIN_TOKENS:
+            continue
+        problem = culture_section_evidence_problem(str(cell), sources_mapping)
+        if problem:
+            return problem
+    return ""
