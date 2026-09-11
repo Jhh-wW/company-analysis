@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import functools
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -503,6 +505,85 @@ def test_corpCode_catalog은_후보정렬용_종목코드와_갱신일을_보존
         )
     finally:
         real._company_catalog.cache_clear()
+
+
+def test_동시에_처음_색인을_요청해도_카탈로그_함수는_한번만_실행된다(monkeypatch):
+    """``_company_candidate_index()``가 catalog 조회를 잠금 «안»에서 부르는지 보는 배선 시험.
+
+    ``functools.lru_cache``는 캐시가 비어 있을 때(cache miss) 원본 함수를
+    **잠금을 놓은 채** 실행하는 구현이다(CPython ``Lib/functools.py``의
+    ``_lru_cache_wrapper``, 실측: 같은 lru_cache 함수를 두 스레드에서 동시에
+    처음 부르면 ``cache_info().misses == 2``). catalog 조회
+    (``real._company_catalog()``)를 ``_COMPANY_CANDIDATE_INDEX_LOCK`` 밖에서
+    부르면(예전 코드), 기동 예열 스레드와 첫 검색 요청이 동시에 들어올 때
+    두 스레드가 동시에 30MB corpCode XML을 내려받아 파싱한다. 이 시험은
+    catalog 조회를 진짜 ``functools.lru_cache``로 감싼 가짜 함수로 바꿔
+    끼워, 두 번째 호출자가 첫 번째가 이미 채운 lru_cache를 기다렸다가
+    재사용하는지(= catalog 함수 몸체가 한 번만 실행되는지) 확인한다.
+    """
+
+    calls: list[int] = []
+    catalog_entered = threading.Event()
+    release_catalog = threading.Event()
+
+    @functools.lru_cache(maxsize=1)
+    def slow_catalog():
+        calls.append(1)
+        catalog_entered.set()
+        assert release_catalog.wait(timeout=2.0), "시험 스레드 조율에 실패했다"
+        return (("00000001", "회사"),)
+
+    monkeypatch.setattr(real, "_company_catalog", slow_catalog)
+    monkeypatch.setattr(real, "_COMPANY_CANDIDATE_INDEX_SOURCE", None)
+    monkeypatch.setattr(real, "_COMPANY_CANDIDATE_INDEX", None)
+
+    results: list[object] = []
+
+    def worker():
+        results.append(real._company_candidate_index())
+
+    first = threading.Thread(target=worker)
+    first.start()
+    assert catalog_entered.wait(timeout=2.0), "첫 호출이 catalog 함수에 들어가지 않았다"
+
+    # 첫 스레드가 catalog 함수 «안»에 멈춰 있는 동안 두 번째 호출을 시작한다.
+    # 잠금이 catalog 조회까지 감싸면 두 번째 스레드는 잠금 대기에서 멈추고
+    # slow_catalog는 다시 불리지 않아야 한다(= calls는 계속 [1]).
+    second = threading.Thread(target=worker)
+    second.start()
+    time.sleep(0.1)
+    assert len(calls) == 1, (
+        "catalog 조회가 잠금 밖에서 불려 두 번째 스레드가 또 실행했다 "
+        "(_company_candidate_index가 회귀했을 수 있다)"
+    )
+
+    release_catalog.set()
+    first.join(timeout=2.0)
+    second.join(timeout=2.0)
+    assert not first.is_alive()
+    assert not second.is_alive()
+
+    assert len(calls) == 1
+    assert len(results) == 2
+    assert results[0] is results[1]
+
+
+def test_기동_예열_진입점은_첫_검색과_같은_색인을_채운다(monkeypatch):
+    """``prewarm_business_candidate_index()``가 검색과 같은 lru_cache를 채우는지 본다."""
+
+    catalog = (("00000001", "예열회사"),)
+    monkeypatch.setattr(real, "_company_catalog", lambda: catalog)
+    monkeypatch.setattr(real, "_COMPANY_CANDIDATE_INDEX_SOURCE", None)
+    monkeypatch.setattr(real, "_COMPANY_CANDIDATE_INDEX", None)
+    monkeypatch.setattr(real, "_COMPANY_CATALOG_RECORDS", ())
+
+    count = real.prewarm_business_candidate_index()
+
+    # 예열이 채운 색인을, 검색이 쓰는 바로 그 함수로 다시 불러도 새로 만들지 않는다
+    # (catalog identity가 같아 재사용된다) — 예열과 검색이 같은 캐시를 본다는 증거다.
+    assert real._company_candidate_index() is real._COMPANY_CANDIDATE_INDEX
+    assert real._COMPANY_CANDIDATE_INDEX_SOURCE is catalog
+    assert count == 0  # _COMPANY_CATALOG_RECORDS는 fake _company_catalog가 채우지 않는다
 
 
 # ── 후보 AI 보조 재정렬 ask ────────────────────────────────

@@ -6,7 +6,10 @@ import datetime as dt
 import logging
 import os
 import sqlite3
+import threading
+import time
 from contextlib import asynccontextmanager, closing
+from typing import Final
 
 from fastapi import FastAPI
 
@@ -39,6 +42,14 @@ logger = logging.getLogger(__name__)
 #: ``run_stop_reason_labels``가 이 값을 사람이 읽을 라벨로 보여준다.
 _STALE_DELIVERY_LINK_STOP_STEP = "server_restart_recovery"
 _STALE_DELIVERY_LINK_STOP_REASON = "server_restart_delivery_incomplete"
+
+#: 기동 때 후보 검색 색인을 미리 만들지 끌지 결정한다. 정확히 "0"일 때만 끈다
+#: (기본은 켜짐) — 이 모듈의 다른 on/off 환경변수와 같은 관례를 따른다.
+#: ``app/src/web/``에는 공용 ``constants.py``가 없고, 환경변수 상수는 각자
+#: 쓰는 모듈이 스스로 들고 있는 게 이 저장소의 기존 관례다(``evaluation_mode.py``의
+#: ``GOOGLE_PLACES_KEY_ENV`` 등) — 이 상수도 그 관례를 따라 실제 쓰는 곳(``_lifespan``)
+#: 옆에 둔다.
+CANDIDATE_INDEX_PREWARM_ENV: Final[str] = "CANDIDATE_INDEX_PREWARM"
 
 
 def make_pipeline() -> object:
@@ -374,6 +385,39 @@ def _reconcile_report_retirements() -> None:
         )
 
 
+def _candidate_index_prewarm_enabled() -> bool:
+    """예열 스레드를 띄울지 결정한다. 기본은 켜짐, ``"0"``일 때만 끈다."""
+
+    return os.environ.get(CANDIDATE_INDEX_PREWARM_ENV, "") != "0"
+
+
+def _prewarm_candidate_index() -> None:
+    """기동 백그라운드 스레드에서 후보 색인을 미리 만든다(서비스 오픈을 막지 않음).
+
+    ``src.features.pipeline.real.prewarm_business_candidate_index``는 첫
+    후보 검색(``search_business_candidates``)이 쓰는 것과 같은 함수를 그대로
+    불러 lru_cache를 채운다. 실패(DART 키 없음·네트워크 오류·XML 손상 등)해도
+    서비스는 이미 ``yield``로 열려 있으므로 경고 로그만 남기고 조용히 끝낸다 —
+    첫 실제 검색 요청이 기존처럼 자기 요청 안에서 새로 만든다.
+    """
+    from src.features.pipeline.real import (  # noqa: PLC0415 — 순환 import 회피
+        prewarm_business_candidate_index,
+    )
+
+    started = time.monotonic()
+    try:
+        company_count = prewarm_business_candidate_index()
+    except Exception:  # noqa: BLE001 — 예열 실패로 서비스 기동을 막지 않는다
+        # 키·URL·스택은 로그에 남기지 않는다(브리핑 요구사항) — 원인은
+        # 첫 실제 검색 요청이 같은 예외를 다시 만들 때 그 요청 로그에서 본다.
+        logger.warning("후보 색인 예열이 실패했습니다 — 첫 검색 요청에서 새로 만듭니다.")
+        return
+    elapsed_sec = time.monotonic() - started
+    logger.info(
+        "후보 색인 예열 완료 %.1f초, %d건", elapsed_sec, company_count
+    )
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """시작 상태를 복구하고 종료 시 실행 중 조사를 안전하게 마감한다."""
@@ -411,6 +455,18 @@ async def _lifespan(_app: FastAPI):
     from src.web import job_runtime  # noqa: PLC0415
 
     job_runtime._start_job_runtime()
+    # 서비스가 열린 뒤(요청을 받을 수 있는 상태) 색인 예열을 시작한다. 데몬
+    # 스레드라 종료(``_begin_job_shutdown``) 중에도 프로세스 종료를 막지 않고,
+    # PIPELINE=real이 아니면(데모·시험) 외부 호출이 없으므로 돌리지 않는다.
+    if (
+        os.environ.get(PIPELINE_ENV, "").strip().lower() == PIPELINE_REAL
+        and _candidate_index_prewarm_enabled()
+    ):
+        threading.Thread(
+            target=_prewarm_candidate_index,
+            name="candidate-index-prewarm",
+            daemon=True,
+        ).start()
     try:
         yield
     finally:

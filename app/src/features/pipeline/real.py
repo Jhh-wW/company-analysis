@@ -1560,16 +1560,50 @@ def _records_from_candidate_catalog(
 
 
 def _company_candidate_index():
-    """Cache normalized aliases against the cached catalog tuple identity."""
-    catalog = _company_catalog()
+    """Cache normalized aliases against the cached catalog tuple identity.
+
+    ★ catalog 조회(``_company_catalog()``)를 잠금 «안」으로 옮겼다. 원래는
+    잠금 밖에서 불렀는데, ``functools.lru_cache``는 캐시가 비어 있을 때
+    (cache miss) 원본 함수를 **잠금을 놓은 채** 실행하는 구현이다(CPython
+    ``Lib/functools.py``의 ``_lru_cache_wrapper``). 실측: 같은 lru_cache
+    함수를 두 스레드에서 동시에 처음 호출하면 원본 함수 몸체가 두 번 다
+    실행된다(``cache_info().misses == 2``). 즉 기동 예열 스레드와 첫 검색
+    요청이 동시에 들어오면 두 스레드가 동시에 30MB corpCode XML을 내려받아
+    파싱하면서 ``_COMPANY_CATALOG_METADATA``·``_COMPANY_CATALOG_ENGLISH_NAMES``
+    전역 dict를 동시에 clear/update해 값이 섞일 수 있었다. catalog 조회까지
+    이 잠금으로 감싸면 두 번째 호출자는 첫 호출자가 이미 채운 lru_cache
+    결과를 그대로 재사용해 색인을 두 번 만들지 않는다.
+    """
     global _COMPANY_CANDIDATE_INDEX_SOURCE, _COMPANY_CANDIDATE_INDEX
     with _COMPANY_CANDIDATE_INDEX_LOCK:
+        catalog = _company_catalog()
         if _COMPANY_CANDIDATE_INDEX_SOURCE is not catalog:
             _COMPANY_CANDIDATE_INDEX = build_dart_company_index(
                 _records_from_candidate_catalog(catalog)
             )
             _COMPANY_CANDIDATE_INDEX_SOURCE = catalog
         return _COMPANY_CANDIDATE_INDEX
+
+
+def prewarm_business_candidate_index() -> int:
+    """기동 예열 전용 진입점 — 첫 검색과 «같은» 색인을 미리 만든다.
+
+    ``search_business_candidates``가 첫 후보 검색에서 쓰는 함수를 그대로
+    호출해(아래 참고) ``_company_catalog``·``_company_candidate_index``의
+    lru_cache/전역 상태를 채운다. 다른 경로(예: 직접 XML을 내려받아 파싱)로
+    만들면 이 함수만의 결과가 따로 생기고 첫 검색 요청은 여전히 자기 캐시가
+    비어 새로 만들게 되어 예열이 헛수고가 된다.
+
+    참고: ``search_business_candidates``의 ``index = _company_candidate_index()``
+    호출부(이 파일의 ``RealPipeline.search_business_candidates``).
+
+    Returns:
+        색인에 들어간 법인 수(로그용). 실패하면 예외를 그대로 올린다 —
+        실패 처리(로그만 남기고 서비스는 계속 여는 것)는 호출자인
+        ``src.web.runtime``의 책임이다.
+    """
+    _company_candidate_index()
+    return len(_COMPANY_CATALOG_RECORDS)
 
 
 @lru_cache(maxsize=1)
