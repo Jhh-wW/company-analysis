@@ -12,7 +12,7 @@ AI 호출 전 사전 게이트(자료 부족·조회 장애로 아예 시작하�
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Final
@@ -377,6 +377,48 @@ def _decide_first_validation(
     )
 
 
+def supplement_unchanged_sections(
+    *,
+    approved_section_ids: Iterable[str],
+    base_section_sha256s: Iterable[tuple[str, str]],
+    result_section_sha256s: Iterable[tuple[str, str]],
+    review_diagnostics: Iterable[Mapping[str, object]],
+) -> tuple[tuple[str, str], ...]:
+    """보충 회차가 «후보를 전부 잃어» 그대로인 장과 그 사유 코드를 모은다.
+
+    보충 단계가 영수증을 만들 때 부른다. 두 조건을 «둘 다» 만족할 때만 적는다.
+
+    ① 승인한 장인데 공개 내용 지문이 그대로다.
+    ② 그 장에서 근거 결속 제외가 실제로 일어났다(진단에 사유 코드가 있다).
+
+    ②가 없으면 적지 않는다 — 그러면 결속 검사가 종전대로 «무동작 보충»으로
+    보고 닫는다. 즉 이 함수는 면제를 «만들지» 않고, 실제로 일어난 제외를
+    영수증에 옮겨 적을 뿐이다.
+
+    사유 코드가 여럿이면 처음 것을 적는다. 이 값은 «왜 비었는지»를 사람이
+    읽으려고 남기는 것이고, 결속 검사는 기록의 유무만 본다.
+    """
+
+    approved = tuple(dict.fromkeys(approved_section_ids))
+    base = dict(base_section_sha256s)
+    result = dict(result_section_sha256s)
+    reason_by_section: dict[str, str] = {}
+    for event in review_diagnostics:
+        section_id = event.get("section_id")
+        reason_code = event.get("reason_code")
+        if (isinstance(section_id, str) and isinstance(reason_code, str)
+                and section_id and reason_code
+                and section_id not in reason_by_section):
+            reason_by_section[section_id] = reason_code
+    return tuple(
+        (section_id, reason_by_section[section_id])
+        for section_id in approved
+        if section_id in reason_by_section
+        and section_id in base
+        and base[section_id] == result.get(section_id)
+    )
+
+
 def _validate_supplement_binding(
     *,
     primary_receipt: GenerationValidationReceipt,
@@ -414,9 +456,19 @@ def _validate_supplement_binding(
     base_sections = dict(primary_receipt.section_sha256s)
     result_sections = dict(supplement_receipt.section_sha256s)
     approved = set(authorization.section_ids)
+    # ★ 후보를 «전부 잃어» 그대로인 장은 위조가 아니다 (2026-09-11).
+    #   근거 결속 계약이 그 장의 후보를 모두 제외하면 내용이 안 바뀌는 것이
+    #   정당한 결과다 — 맞는 내용이 없으면 안 채운다(fail-closed). 그 사실을
+    #   보충 단계가 영수증에 «사유 코드와 함께» 적었을 때만 지문 불변을
+    #   허용한다. 기록 없이 지문만 같으면 종전대로 닫는다.
+    unchanged_by_receipt = {
+        section_id
+        for section_id, _reason_code in supplement_receipt.unchanged_sections
+    }
     for section_id in REQUIRED_EVIDENCE_SECTION_IDS:
         changed = base_sections[section_id] != result_sections[section_id]
-        if section_id in approved and not changed:
+        if (section_id in approved and not changed
+                and section_id not in unchanged_by_receipt):
             raise ValueError("승인된 보충 장의 내용 지문이 바뀌지 않았습니다")
         if section_id not in approved and changed:
             raise ValueError("승인하지 않은 장이 보충 중 바뀌었습니다")
@@ -435,7 +487,8 @@ def _validate_supplement_binding(
     result_blocks = dict(supplement_receipt.section_block_sha256s)
     for section_id in REQUIRED_EVIDENCE_SECTION_IDS:
         changed = base_blocks[section_id] != result_blocks[section_id]
-        if section_id in approved and not changed:
+        if (section_id in approved and not changed
+                and section_id not in unchanged_by_receipt):
             raise ValueError(
                 "승인된 보충 장의 봉인 블록 지문이 바뀌지 않았습니다"
             )

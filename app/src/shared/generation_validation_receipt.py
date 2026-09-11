@@ -152,6 +152,16 @@ class GenerationValidationReceipt:
     #: 바꾸는 표류는 이 값으로만 잡힌다(``report_recovery`` 결속 검사).
     #: 빈 값은 이 필드가 생기기 전 영수증이며, 보충 결속은 빈 값을 거부한다.
     section_block_sha256s: tuple[tuple[str, str], ...] = ()
+    #: 승인된 보충 장 중 «후보를 전부 잃어» 내용이 그대로인 장과 그 사유 코드.
+    #:
+    #: ★ 왜 필요한가 — 보충 결속 검사는 「승인한 장의 지문이 안 바뀌었으면
+    #:   영수증 위조·무동작」으로 읽고 닫는다. 그런데 근거 결속 계약이 그 장의
+    #:   후보를 «전부» 제외하면 내용이 그대로인 것이 정당한 결과다(맞는 내용이
+    #:   없으면 안 채운다). 그 둘을 가르는 유일한 방법은 보충 단계가 «왜»
+    #:   그대로인지 여기 적어 두는 것이다.
+    #: ⚠️ 기록이 없는 지문 불변은 종전대로 닫힌다. 이 칸은 지문 입력에 들어가
+    #:   있어(v3) 나중에 몰래 덧붙일 수 없다.
+    unchanged_sections: tuple[tuple[str, str], ...] = ()
     assessment_sha256: str = field(init=False)
     receipt_sha256: str = field(init=False)
 
@@ -251,9 +261,32 @@ class GenerationValidationReceipt:
         if set(section_ids) - set(REQUIRED_EVIDENCE_SECTION_IDS):
             raise ValueError("보충 영수증에 정책 밖 장이 있습니다")
 
+        if type(self.unchanged_sections) is not tuple or any(
+            type(item) is not tuple
+            or len(item) != 2
+            or any(
+                type(part) is not str or part != part.strip() or not part
+                for part in item
+            )
+            for item in self.unchanged_sections
+        ):
+            raise ValueError("보충 무변경 기록 형식이 손상됐습니다")
+        unchanged_sections = tuple(
+            (section_id, reason_code)
+            for section_id, reason_code in self.unchanged_sections
+        )
+        unchanged_ids = [section_id for section_id, _code in unchanged_sections]
+        if len(unchanged_ids) != len(set(unchanged_ids)):
+            raise ValueError("같은 장의 보충 무변경 기록이 두 번 있습니다")
+        if set(unchanged_ids) - set(section_ids):
+            # 승인하지 않은 장을 «그대로 뒀다»고 적어 결속 검사를 우회할 수 없다.
+            raise ValueError("보충하지 않은 장의 무변경 기록이 있습니다")
+
         if self.round is ValidationRound.PRIMARY:
             if self.base_receipt_sha256 or section_ids:
                 raise ValueError("기본 생성 영수증에는 보충 이력이 없어야 합니다")
+            if unchanged_sections:
+                raise ValueError("기본 생성 영수증에는 보충 무변경 기록이 없어야 합니다")
             base_receipt_sha256 = ""
         elif self.round is ValidationRound.SUPPLEMENT:
             if not section_ids:
@@ -273,7 +306,10 @@ class GenerationValidationReceipt:
                 # v2 — section_block_sha256s가 지문 입력에 들어갔다. 이 값이
                 # 지문 밖에 있으면 장부 지문만 바꿔치기해도 영수증 사슬이
                 # 그대로라 보충 결속 검사를 우회할 수 있다.
-                "version": 2,
+                # v3 — unchanged_sections도 같은 이유로 지문 안에 넣는다. 이
+                # 기록이 지문 밖에 있으면 «후보를 전부 잃었다»는 면제를 나중에
+                # 덧붙여 무동작 보충을 정당한 결과로 위장할 수 있다.
+                "version": 3,
                 "company_id": company_id,
                 "candidate_sha256": candidate_sha256,
                 "assessment_sha256": assessment_sha256,
@@ -288,6 +324,9 @@ class GenerationValidationReceipt:
                 "supplemented_section_ids": list(section_ids),
                 "section_block_sha256s": [
                     list(item) for item in section_block_sha256s
+                ],
+                "unchanged_sections": [
+                    list(item) for item in unchanged_sections
                 ],
             }
         )
@@ -304,6 +343,7 @@ class GenerationValidationReceipt:
         object.__setattr__(
             self, "section_block_sha256s", section_block_sha256s
         )
+        object.__setattr__(self, "unchanged_sections", unchanged_sections)
         object.__setattr__(self, "assessment_sha256", assessment_sha256)
         object.__setattr__(self, "receipt_sha256", receipt_sha256)
 

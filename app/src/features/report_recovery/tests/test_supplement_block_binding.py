@@ -143,3 +143,82 @@ def test_block_지문이_빠진_영수증은_보충_결속에서_거부된다() 
 
     with pytest.raises(ValueError, match="장별 봉인 블록 지문"):
         _decide(primary, authorization, supplement)
+
+
+# ══════════════════════════════════════════════════════════
+# 「후보를 전부 잃어 그대로인 장」과 「무동작 보충」을 가른다
+#
+# ★ 왜 (2026-09-11 실측) — 근거 결속 계약이 보충 대상 장의 후보를 전부 제외하면
+#   그 장의 내용은 그대로 남는다. 그것을 영수증 위조로 읽어 닫으면, 「맞는 내용이
+#   없어 안 채운다」는 정당한 fail-closed 결과가 보고서 전체를 무너뜨린다.
+#   실제로 pipeline 시험 20건이 이 자리에서 내부 계약 오류로 닫혔다.
+# ★ 면제는 «보충 단계가 사유 코드를 적었을 때»만이다. 기록 없는 지문 불변은
+#   종전대로 닫힌다 — 아래 두 시험이 그 둘을 짝으로 고정한다.
+# ══════════════════════════════════════════════════════════
+
+_OFFCONTRACT = "culture_section_evidence_offcontract"
+
+
+def test_사유코드를_적은_무변경_장은_보충_결속을_통과한다() -> None:
+    primary, authorization = _authorized_primary()
+    supplement = _supplement(
+        primary,
+        authorization,
+        _assessment(),
+        section_sha256s=primary.section_sha256s,
+        section_block_sha256s=primary.section_block_sha256s,
+        unchanged_sections=((_TARGET, _OFFCONTRACT),),
+    )
+
+    decision = _decide(primary, authorization, supplement)
+
+    assert decision.action is not RecoveryAction.RUN_SUPPLEMENTS
+
+
+def test_기록_없는_지문_불변은_종전대로_막힌다() -> None:
+    """음성 대조 — 면제는 «기록»이 만든다. 지문이 같다는 사실만으로는 안 된다."""
+
+    primary, authorization = _authorized_primary()
+    supplement = _supplement(
+        primary,
+        authorization,
+        _assessment(),
+        section_sha256s=primary.section_sha256s,
+        section_block_sha256s=primary.section_block_sha256s,
+    )
+
+    with pytest.raises(ValueError, match="승인된 보충 장"):
+        _decide(primary, authorization, supplement)
+
+
+def test_승인하지_않은_장의_무변경_기록은_영수증이_거부한다() -> None:
+    """면제 기록으로 «승인 밖 장»을 덮을 수 없다 — 영수증이 먼저 막는다."""
+
+    primary, authorization = _authorized_primary()
+    with pytest.raises(ValueError, match="보충하지 않은 장"):
+        _supplement(
+            primary,
+            authorization,
+            _assessment(),
+            unchanged_sections=((_UNTOUCHED, _OFFCONTRACT),),
+        )
+
+
+def test_무변경_기록은_지문_입력에_들어간다() -> None:
+    """나중에 몰래 덧붙일 수 없다 — 기록이 바뀌면 영수증 지문도 바뀐다."""
+
+    primary, authorization = _authorized_primary()
+    공통 = dict(
+        section_sha256s=primary.section_sha256s,
+        section_block_sha256s=primary.section_block_sha256s,
+    )
+    기록없음 = _supplement(primary, authorization, _assessment(), **공통)
+    기록있음 = _supplement(
+        primary,
+        authorization,
+        _assessment(),
+        unchanged_sections=((_TARGET, _OFFCONTRACT),),
+        **공통,
+    )
+
+    assert 기록없음.receipt_sha256 != 기록있음.receipt_sha256

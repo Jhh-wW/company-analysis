@@ -90,8 +90,31 @@ def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+#: 8장(인재상과 일하는 방식) 전용 문장.
+#:
+#: ★ 왜 이 장만 다른가 — 8장 원문 절 계약은 후보가 «기댄 절»에 이 장의 소재가
+#:   있어야 공개한다. 아홉 장이 같은 낱말 나열 문장을 쓰면 8장 후보가 기대는
+#:   절은 언제나 그 나열 문장이라 8장이 통째로 빈다. 실물 사업보고서의 8장
+#:   근거는 「직원 등의 현황」·「복리후생」 절 자체이므로 후보 문장도 그 절을
+#:   바꿔 쓴 모양이어야 한다 — 예전 픽스처는 실물에서 나올 수 없는 모양이었다.
+#: ★ 다섯 문장이 서로 다른 소재를 말한다 — 장 간·장 안 중복 제거에 걸리지
+#:   않게 하려는 것이다.
+_CULTURE_SENTENCE_BODIES = (
+    "회사는 임직원 교육훈련 과정을 운영한다",
+    "회사는 복리후생 제도로 임직원 주택자금을 지원한다",
+    "회사의 인재상은 도전과 협업을 실천하는 인재다",
+    "인사위원회가 승진 기준을 심의한다",
+    "회사는 직원 현황과 평균 근속연수를 공시한다",
+)
+
+
 def _section_sentences(section_index: int) -> tuple[str, ...]:
     mark = _MARKS[section_index]
+    if mark == _MARKS[SECTION_IDS.index("culture")]:
+        return tuple(
+            f"{mark} {body}고 공식 자료에서 확인했다."
+            for body in _CULTURE_SENTENCE_BODIES
+        )
     return tuple(
         f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 대응 협력 실적 "
         f"{ending} 공식 자료에서 확인했다."

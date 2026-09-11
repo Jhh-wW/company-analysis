@@ -123,6 +123,7 @@ from src.shared.report_recovery import (
     RecoveryAction,
     SupplementAuthorization,
     decide_post_validation,
+    supplement_unchanged_sections,
 )
 from src.shared.report_generation.public_projection import build_report_digest
 from src.shared.report_generation.canonical import (
@@ -1901,6 +1902,17 @@ def run_v2(
                     base_receipt_sha256=primary_receipt.receipt_sha256,
                     supplemented_section_ids=targets,
                     section_block_sha256s=supplement_block_sha256s,
+                    # 근거 결속 계약이 그 장의 후보를 «전부» 제외해 내용이
+                    # 그대로인 경우를 사유 코드와 함께 적는다. 적지 않으면
+                    # 결속 검사가 종전대로 «무동작 보충»으로 보고 닫는다.
+                    unchanged_sections=supplement_unchanged_sections(
+                        approved_section_ids=targets,
+                        base_section_sha256s=primary_receipt.section_sha256s,
+                        result_section_sha256s=(
+                            public_structure_seal.section_sha256s
+                        ),
+                        review_diagnostics=review_diagnostics,
+                    ),
                 )
                 recovery_decision = decide_post_validation(
                     primary_receipt,
