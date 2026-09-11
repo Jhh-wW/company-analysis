@@ -26,21 +26,30 @@
   요구한다(맨 숫자끼리 또는 같은 배율·꼬리끼리). 「245.14억원」과 맨 숫자
   「27,351,053,389」을 섞지 않는다 — 섞으면 단위가 약분되지 않는다.
 
-★ 우연 일치를 막는 네 겹 (상수는 `derived_ratio_constants` 참조)
-  ① **짝의 한쪽 끝을 «그 줄이 적어 낸 금액»으로 못 박는다**(`anchor_values`).
-     가장 크게 듣는 겹이다 — 이것이 없으면 지어낸 「85%」가 조각 안 다른 두
-     값과 우연히 맞아 통과했다(실측).
-  ② 원값 후보를 «금액·수량 표기»로 한정한다 — 연도(날짜 표기·맨 네 자리),
+★ 우연 일치를 막는 다섯 겹 (상수는 `derived_ratio_constants` 참조)
+  ① **분모는 «총액 성격의 줄»이어야 한다**(`is_total_row_label`). 가장 크게
+     듣는 겹이다. 구성비는 「부분 ÷ 전체」이므로 이 제약은 정의 그 자체다.
+  ② **짝의 다른 한쪽은 «그 줄이 적어 낸 금액»이다**(`anchor_values`).
+  ③ 원값 후보를 «금액·수량 표기»로 한정한다 — 연도(날짜 표기·맨 네 자리),
      주석 번호·페이지 수 같은 «쉼표 없는 맨 정수»는 후보가 아니다. 차원 판정은
      `grounding._dimension_at` 한 벌을 그대로 쓴다.
-  ③ 조각 «하나» 안의 두 값만 짝짓는다. 조각을 가로질러 빌려오지 않는다.
-  ④ 조각당 조합 수에 상한을 둔다. 넘으면 인정하지 않고 사유만 남긴다.
+  ④ 조각 «하나» 안의 두 값만 짝짓는다. 조각을 가로질러 빌려오지 않는다.
+  ⑤ 조각당 조합 수에 상한을 둔다. 넘으면 인정하지 않고 사유만 남긴다.
 
-★ 남는 위험을 숨기지 않는다 (2026-09-11 보관 공시 23건 실측) — 앵커가 있는
-  상태에서 «지어낸» 백분율이 우연히 되짚어지는 비율은 **정수 23.4% · 소수 한
-  자리 3.5% · 소수 두 자리 0.39%**다. 즉 이 갈래는 둥근 정수 백분율에 대해
-  수치 관문을 분명히 느슨하게 만든다. 그 뒤에 도식 의미 검수(AI)가 한 번 더
-  보지만, 이 수치는 관문을 다시 만질 때 반드시 다시 재야 한다.
+★ 종류는 «구성비» 하나뿐이다 — 증감률 갈래는 우연 통과율을 두 배로 만들면서
+  지켜 줄 시험이 하나도 없어 걷어냈다(2026-09-11 독립 검토).
+
+★ 남는 위험을 숨기지 않는다 (2026-09-11 독립 검토 코퍼스 DART 36건·조각
+  10,576개로 생산 함수를 직접 돌려 재측정) — 앵커가 있는 상태에서 «지어낸»
+  백분율이 우연히 되짚어지는 비율은 **정수 1.60% · 소수 한 자리 0.23% ·
+  소수 두 자리 0.026%**다. 분모를 총액 줄로 가두기 전에는 정수 34.02%였다.
+  그래도 0은 아니므로, 그 뒤에 도식 의미 검수(AI)가 한 번 더 본다. 이 수치는
+  관문을 다시 만질 때 반드시 다시 재야 한다.
+
+★ 알려진 적용 범위 한계 — 조각이 「(단위: 천원)」 «표 머리말»로만 단위를 주고
+  칸에는 맨 숫자를 쓰면, 이 파일은 그 머리말을 읽지 않으므로 앵커가 0개가 되어
+  갈래가 아예 돌지 않는다. fail-closed라 틀린 값을 만들지는 않지만, 그런 공시
+  에서는 이 수정이 무효다. 표 조각화·머리말 단위 읽기는 별도 과제다.
 
 ★ fail-closed — 되짚어지지 않으면 지금까지처럼 «없는 수»로 남는다. 이 파일은
   기존 판정을 뒤집지 않고, 기존 판정이 «없는 수»라고 한 뒤에만 불린다.
@@ -49,23 +58,28 @@
 from __future__ import annotations
 
 import itertools
+import re
+from bisect import bisect_right
 from dataclasses import dataclass
 from decimal import Decimal, DivisionByZero, InvalidOperation, Overflow
 from typing import Final, Optional, Sequence
 
 from src.features.composer.derived_ratio_constants import (
-    DERIVED_RATIO_DIAGNOSTIC_KIND,
-    DERIVED_RATIO_KIND_CHANGE,
     DERIVED_RATIO_KIND_SHARE,
-    DERIVED_RATIO_KINDS,
+    DERIVED_RATIO_LABEL_LOOKBACK_LINES,
     DERIVED_RATIO_MAX_PAIRS_PER_FRAGMENT,
     DERIVED_RATIO_PAIR_LIMIT_CODE,
     DERIVED_RATIO_RECOMPUTED_CODE,
     DERIVED_RATIO_SOURCE_DIMENSIONS,
     DERIVED_RATIO_TOLERANCE_QUANTA,
+    DERIVED_RATIO_TOTAL_ROW_NAMES,
+    DERIVED_RATIO_TOTAL_ROW_SUFFIXES,
     RATIO_FULL_SCALE,
 )
 from src.features.composer.grounding import _dimension_at, _period_at
+from src.shared.report_quality.composition_diagnostic_constants import (
+    DERIVED_RATIO_STEP,
+)
 from src.features.composer.grounding_constants import MAGNITUDE_SCALES
 
 # 숫자 표기·연도·백분율 배율은 verify 한 곳에서만 읽는다. 여기서 정규식이나
@@ -99,7 +113,9 @@ class RatioSource:
     dimension: str
     #: `grounding._period_at` 판정. 명시 기간이 없으면 None.
     period: object
-    #: 조각 안 위치. 기록에는 넣지 않고 기간 판정에만 쓴다.
+    #: 이 값이 «총액 성격의 줄»에 있는가. 구성비의 분모가 될 수 있는 조건이다.
+    is_total_row: bool
+    #: 조각 안 위치. 기록에는 넣지 않고 기간·행 이름 판정에만 쓴다.
     start: int
 
 
@@ -111,23 +127,23 @@ class DerivedRatioResult:
     reason_code: str
     #: 후보가 적어 낸 백분율 값.
     percent: Decimal
-    #: 재계산 종류(`DERIVED_RATIO_KINDS`). 인정하지 않은 경우 빈 문자열.
+    #: 재계산 종류(`DERIVED_RATIO_KIND_SHARE`). 인정하지 않은 경우 빈 문자열.
     kind: str = ""
     #: 근거 쌍 — a(작은 쪽)와 b(큰 쪽)의 절대값. 인정하지 않은 경우 None.
     numerator: Optional[Decimal] = None
     denominator: Optional[Decimal] = None
 
     def as_diagnostic(self) -> dict:
-        """운영 기록용 구조. 원문 글자는 담지 않고 수와 사유 코드만 남긴다."""
+        """운영 기록의 «수 칸». 없는 값은 빈 문자열이다(None 아님).
+
+        ⚠️ 빈 문자열을 쓰는 이유 — 실행 기록 계약이 «문자열만» 통과시킨다.
+          None을 담으면 항목 전체가 버려져 상한 초과 기록이 사라진다.
+        """
 
         return {
-            "reason_code": self.reason_code,
-            "kind": self.kind,
-            "percent": str(self.percent),
-            "numerator": None if self.numerator is None else str(self.numerator),
-            "denominator": (
-                None if self.denominator is None else str(self.denominator)
-            ),
+            "백분율": str(self.percent),
+            "분자": "" if self.numerator is None else str(self.numerator),
+            "분모": "" if self.denominator is None else str(self.denominator),
         }
 
 
@@ -137,14 +153,21 @@ def append_derived_ratio_diagnostic(
     section_id: str,
     result: DerivedRatioResult,
 ) -> None:
-    """파생 비율 판정을 운영 기록에 남긴다. 원문 글자는 담지 않는다."""
+    """파생 비율 판정을 운영 기록에 남긴다. 원문 글자는 담지 않는다.
+
+    ★ 칸 이름과 통과 규칙은 실행 기록 계약 한 곳에서 온다
+      (`composition_diagnostic_constants`). 여기서 이름을 새로 지으면 기록이
+      «단계 이름을 못 알아보는 항목»으로 조용히 버려진다.
+    """
 
     if diagnostics is None:
         return
     diagnostics.append(
         {
-            "section_id": section_id,
-            "kind": DERIVED_RATIO_DIAGNOSTIC_KIND,
+            "step": DERIVED_RATIO_STEP,
+            "장": section_id,
+            "사유코드": result.reason_code,
+            "종류": result.kind,
             **result.as_diagnostic(),
         }
     )
@@ -175,6 +198,79 @@ def _tolerance(percent: Decimal) -> Optional[Decimal]:
     return quantum * DERIVED_RATIO_TOLERANCE_QUANTA
 
 
+_HANGUL_RE: Final = re.compile(r"[가-힣]")
+#: 표의 «뼈대»만 있는 줄 — 숫자·구두점·로마숫자·공백뿐인 줄. 값 줄이 여기 든다.
+_TABLE_FILLER_RE: Final = re.compile(r"[\s\d,.\-()△▲%:;·ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]")
+#: 행 이름 앞머리의 번호 표기 — 「Ⅰ.」·「1.」·「(2)」·「가.」.
+_ROW_NUMBER_PREFIX_RE: Final = re.compile(
+    r"^(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]+|\(?\d+\)?|[가-힣])[.)]"
+)
+#: 행 이름에 붙는 괄호 주석 — 「(주석16,19)」·「(단위: 원)」.
+_ROW_BRACKET_RE: Final = re.compile(r"[(\[（][^)\]）]*[)\]）]?")
+
+
+def _line_starts(text: str) -> tuple[list[str], list[int]]:
+    """줄 목록과 각 줄의 시작 위치. 한 조각당 한 번만 만든다."""
+
+    lines = text.split("\n")
+    starts: list[int] = []
+    position = 0
+    for line in lines:
+        starts.append(position)
+        position += len(line) + 1
+    return lines, starts
+
+
+def _row_label(
+    text: str, lines: Sequence[str], starts: Sequence[int], position: int
+) -> str:
+    """그 수가 놓인 «행의 이름». 없으면 빈 문자열.
+
+    ★ 왜 앞 줄을 거슬러 읽나 (2026-09-11 독립 검토 실측) — 운영 평문화는 표
+      태그를 개행으로 바꾼다. 그래서 행 이름과 값이 «다른 줄»에 있고, 같은 줄만
+      보는 `grounding._cell_label`은 실제 평문에서 이름을 0.9%밖에 못 읽었다.
+      실제 손익계산서 조각은 이렇게 생겼다:
+
+          Ⅰ. 매출액
+           27,351,053,389      ← 당기
+           25,811,194,484      ← 전기
+
+    ★ 같은 줄에 이름이 있으면 그것을 쓴다(한 줄 표기 공시도 있다).
+    ★ 값만 있는 줄은 건너뛰고, 이름도 뼈대도 아닌 줄을 만나면 멈춘다 — 위 행의
+      이름을 이 행에 붙이지 않기 위해서다.
+    """
+
+    index = bisect_right(starts, position) - 1
+    if index < 0:
+        return ""
+    head = text[starts[index]:position]
+    if _HANGUL_RE.search(head):
+        return head
+    floor = max(-1, index - DERIVED_RATIO_LABEL_LOOKBACK_LINES)
+    for previous in range(index - 1, floor, -1):
+        line = lines[previous]
+        if _HANGUL_RE.search(line):
+            return line
+        if _TABLE_FILLER_RE.sub("", line):
+            break
+    return ""
+
+
+def is_total_row_label(label: str) -> bool:
+    """이 행 이름이 «총액 성격»인가 (`derived_ratio_constants`의 닫힌 어휘).
+
+    ★ 공시 표는 총계 줄을 「합 계」·「자 본 총 계」처럼 띄어 쓴다. 공백을 지우고
+      본다. 앞머리 번호(「Ⅰ.」)와 괄호 주석(「(주석16,19)」)도 이름이 아니다.
+    """
+
+    compact = "".join(_ROW_BRACKET_RE.sub(" ", str(label or "")).split())
+    if not compact:
+        return False
+    if compact.endswith(DERIVED_RATIO_TOTAL_ROW_SUFFIXES):
+        return True
+    return _ROW_NUMBER_PREFIX_RE.sub("", compact) in DERIVED_RATIO_TOTAL_ROW_NAMES
+
+
 def ratio_source_values(text: str) -> tuple[RatioSource, ...]:
     """조각 원문에서 «비율의 원값이 될 수 있는 수»만 뽑는다.
 
@@ -184,6 +280,7 @@ def ratio_source_values(text: str) -> tuple[RatioSource, ...]:
     """
 
     date_spans = [match.span() for match in _DATE_EXPR_RE.finditer(text)]
+    lines, starts = _line_starts(text)
     sources: list[RatioSource] = []
     for match in _NUMBER_UNIT_RE.finditer(text):
         start, end = match.span("num")
@@ -220,6 +317,9 @@ def ratio_source_values(text: str) -> tuple[RatioSource, ...]:
                 unit=f"{magnitude}{tail}",
                 dimension=dimension,
                 period=_period_at(text, match.start()),
+                is_total_row=is_total_row_label(
+                    _row_label(text, lines, starts, match.start())
+                ),
                 start=match.start(),
             )
         )
@@ -231,10 +331,12 @@ def anchor_values(
 ) -> tuple[RatioSource, ...]:
     """같은 줄이 «이미 적어 낸» 금액 표기가 가리키는 원값들.
 
-    ★ 왜 필요한가 (2026-09-11 실측) — 원값 두 개를 «아무렇게나» 짝지으면
-      조각 하나에서 28쌍이 나오고, 지어낸 「85%」가 용역매출 두 해 값
-      (1,090,244,712 ÷ 1,287,838,444 = 84.66%)과 우연히 맞아 통과했다.
-      지어낸 수를 걸러 내라고 있는 관문이 지어낸 수를 통과시키면 안 된다.
+    ★ 왜 필요한가 — 원값 두 개를 «아무렇게나» 짝지으면 조각 안 어떤 두 값이든
+      후보가 되어, 지어낸 백분율이 우연히 맞을 자리가 크게 늘어난다. 지어낸
+      수를 걸러 내라고 있는 관문이 지어낸 수를 통과시키면 안 된다.
+    ⚠️ 이 겹만으로는 모자랐다 — 앵커만 걸고 분모를 자유롭게 두면 독립 검토
+      코퍼스에서 지어낸 정수 백분율의 17.37%가 통과했다. 분모를 총액 줄로
+      가두는 겹(`is_total_row_label`)이 함께 있어야 1%대가 된다.
     ★ 그래서 «이 줄이 말한 금액»을 한쪽 끝으로 못 박는다. 카드가 말하는
       파생 비율은 언제나 「내가 방금 말한 이 금액이 저 전체의 몇 퍼센트인가」
       이므로, 이 제약은 기능을 줄이지 않으면서 조합을 n²에서 n으로 줄인다.
@@ -263,6 +365,9 @@ def _eligible_pairs(
 
     ★ 한쪽 끝은 반드시 «이 줄이 적어 낸» 값(anchor)이다. 나머지 한쪽만
       조각에서 찾는다.
+    ★ **큰 쪽(분모)은 «총액 성격의 줄»이어야 한다.** 구성비는 「부분 ÷ 전체」이고,
+      전체가 아닌 값을 분모로 쓰면 그것은 구성비가 아니다. 이 제약 없이는 지어낸
+      정수 백분율의 34.02%가 통과했다(독립 검토 실측).
     ★ 같은 단위 표기·같은 차원·같은 기간만 짝짓는다. 단위가 다르면 약분되지
       않고, 기간이 다르면 구성비가 아니라 서로 다른 해의 수를 섞는 것이다.
     """
@@ -275,41 +380,26 @@ def _eligible_pairs(
             continue
         if anchor.value == other.value:
             continue
-        low, high = sorted((anchor.value, other.value))
-        pairs.add((low, high))
+        part, whole = (
+            (anchor, other) if anchor.value < other.value else (other, anchor)
+        )
+        if not whole.is_total_row:
+            continue
+        pairs.add((part.value, whole.value))
     return tuple(sorted(pairs))
 
 
-def _candidate_percents(
-    low: Decimal, high: Decimal
-) -> tuple[tuple[str, Decimal], ...]:
-    """한 쌍에서 나오는 백분율 후보 — 구성비와 증감률.
+def _share_percent(low: Decimal, high: Decimal) -> Optional[Decimal]:
+    """부분 ÷ 전체 × 100. 계산이 안 되면 None.
 
-    ★ 증감률은 부호를 값에 담지 않는다. 글은 「25.14% 감소」처럼 방향을 «말»로
-      적고 수는 크기만 적기 때문이다. 방향 자체는 이 파일이 판정하지 않는다 —
-      도식의 의미 검수(`diagram_check` ②)와 문장 추세 검증이 따로 본다.
+    ★ 종류는 구성비 하나뿐이다 — 증감률 갈래는 우연 통과율을 두 배로 만들면서
+      지켜 줄 시험이 없어 걷어냈다(`derived_ratio_constants` 참조).
     """
 
-    candidates: list[tuple[str, Decimal]] = []
-    if DERIVED_RATIO_KIND_SHARE in DERIVED_RATIO_KINDS:
-        try:
-            candidates.append(
-                (DERIVED_RATIO_KIND_SHARE, low / high * RATIO_FULL_SCALE)
-            )
-        except (InvalidOperation, DivisionByZero, Overflow):
-            pass
-    if DERIVED_RATIO_KIND_CHANGE in DERIVED_RATIO_KINDS:
-        for base, other in ((low, high), (high, low)):
-            try:
-                candidates.append(
-                    (
-                        DERIVED_RATIO_KIND_CHANGE,
-                        abs(other - base) / base * RATIO_FULL_SCALE,
-                    )
-                )
-            except (InvalidOperation, DivisionByZero, Overflow):
-                continue
-    return tuple(candidates)
+    try:
+        return low / high * RATIO_FULL_SCALE
+    except (InvalidOperation, DivisionByZero, Overflow):
+        return None
 
 
 def recompute_percent(
@@ -350,16 +440,16 @@ def recompute_percent(
             limited = True
             continue
         for low, high in pairs:
-            for kind, candidate in _candidate_percents(low, high):
-                if abs(candidate - percent) <= tolerance:
-                    return DerivedRatioResult(
-                        accepted=True,
-                        reason_code=DERIVED_RATIO_RECOMPUTED_CODE,
-                        percent=percent,
-                        kind=kind,
-                        numerator=low,
-                        denominator=high,
-                    )
+            candidate = _share_percent(low, high)
+            if candidate is not None and abs(candidate - percent) <= tolerance:
+                return DerivedRatioResult(
+                    accepted=True,
+                    reason_code=DERIVED_RATIO_RECOMPUTED_CODE,
+                    percent=percent,
+                    kind=DERIVED_RATIO_KIND_SHARE,
+                    numerator=low,
+                    denominator=high,
+                )
     if limited:
         return DerivedRatioResult(
             accepted=False,

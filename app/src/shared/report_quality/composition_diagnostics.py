@@ -1,8 +1,14 @@
 """보고서가 차단돼도 단계별 숫자와 닫힌 코드만 실행 기록에 전달한다."""
 
+import re
 from collections.abc import Mapping
 
 from src.shared.report_quality.composition_diagnostic_constants import (
+    DERIVED_RATIO_KINDS,
+    DERIVED_RATIO_REASONS,
+    DERIVED_RATIO_SECTION_IDS,
+    DERIVED_RATIO_STEP,
+    DERIVED_RATIO_VALUE_FIELDS,
     DIAGRAM_ROW_COUNT_SECTION_IDS,
     DIAGRAM_ROW_COUNT_STAGES,
     DIAGRAM_ROW_COUNT_STEP,
@@ -97,6 +103,34 @@ def _diagram_rows(record: Mapping) -> dict[str, object] | None:
     }
 
 
+_DECIMAL_TEXT_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _derived_ratio(record: Mapping) -> dict[str, object] | None:
+    """도식 수치 관문의 파생 비율 판정 — 장·사유 코드·수만 통과시킨다.
+
+    ★ 수는 십진수 문자열로만 받는다. 문자열이면 무엇이든 담기는 칸을 두면
+      거기로 원문이 새어 나간다(다른 기록과 같은 방식으로 닫는다).
+    """
+
+    section, reason, kind = (record.get(key) for key in ("장", "사유코드", "종류"))
+    if (section not in DERIVED_RATIO_SECTION_IDS
+            or reason not in DERIVED_RATIO_REASONS
+            or kind not in DERIVED_RATIO_KINDS):
+        return None
+    result: dict[str, object] = {
+        "step": DERIVED_RATIO_STEP, "장": section, "사유코드": reason, "종류": kind,
+    }
+    for field in DERIVED_RATIO_VALUE_FIELDS:
+        value = record.get(field)
+        if not isinstance(value, str):
+            return None
+        if value and _DECIMAL_TEXT_RE.fullmatch(value) is None:
+            return None
+        result[field] = value
+    return result
+
+
 def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], ...]:
     """원문·응답·임의 오류문을 버리고 시도 순서와 단계 미도달을 보존한다.
 
@@ -113,7 +147,8 @@ def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], 
         normalized = (
             _protocol(record) if step == PROTOCOL_STEP else
             _summary(record) if step == SUMMARY_STEP else
-            _diagram_rows(record) if step == DIAGRAM_ROW_COUNT_STEP else None
+            _diagram_rows(record) if step == DIAGRAM_ROW_COUNT_STEP else
+            _derived_ratio(record) if step == DERIVED_RATIO_STEP else None
         )
         if normalized is not None:
             result.append(normalized)

@@ -337,7 +337,7 @@ def portfolio_name_is_grounded(
 
 def _numbers_are_grounded(
     cell: str,
-    source_texts: Sequence[str],
+    source_texts: Sequence[str] | str,
     *,
     stated_numbers: Sequence[_SentenceNumber] = (),
     derived_notes: Optional[list[DerivedRatioResult]] = None,
@@ -356,7 +356,8 @@ def _numbers_are_grounded(
 
     Args:
         cell: 검사할 칸.
-        source_texts: 그 줄이 인용한 조각 원문들. 기존 대조는 종전처럼
+        source_texts: 그 줄이 인용한 조각 원문들. 문자열 하나를 주면 «조각
+            하나»로 본다(옛 서명 호환). 기존 대조는 종전처럼
             «이어 붙인 하나»로 보고, 파생 비율 재계산만 조각별로 따로 본다
             (조각을 가로질러 원값을 빌려오지 않기 위해서다).
         stated_numbers: 그 «줄 전체»가 적어 낸 수. 파생 비율의 한쪽 끝을
@@ -365,7 +366,13 @@ def _numbers_are_grounded(
         derived_notes: 파생 비율 판정을 담아 갈 목록. 주면 인정·상한초과를
             모두 기록한다.
     """
-    source_text = " ".join(text for text in source_texts if text)
+    # ★ 문자열 하나를 넘겨도 «글자 단위로 쪼개지지» 않게 한 조각으로 본다
+    #   (2026-09-11 독립 검토 P2) — 이 함수의 2번째 인자는 원래 `str`이었다.
+    #   목록으로 바꾼 뒤에도 옛 서명으로 부르는 곳이 있었고, `str`은 그 자체가
+    #   Sequence[str]이라 예외 없이 «한 글자짜리 조각 수백 개»가 되어 모든
+    #   수가 조용히 «없는 수»가 됐다. 조용한 오작동이 가장 나쁘다.
+    texts = (source_texts,) if isinstance(source_texts, str) else tuple(source_texts)
+    source_text = " ".join(text for text in texts if text)
     if not source_text.strip():
         return None
     numbers = _extract_numbers(cell)
@@ -391,7 +398,7 @@ def _numbers_are_grounded(
             #   뒤집지 않고, 되짚어지지 않으면 그대로 «없는 수»로 남는다.
             percent = stated_percent(number)
             if percent is not None:
-                derived = recompute_percent(percent, source_texts, anchors)
+                derived = recompute_percent(percent, texts, anchors)
                 if derived is not None:
                     if derived_notes is not None:
                         derived_notes.append(derived)
@@ -491,7 +498,6 @@ def _name_source_texts(
                 seen.add(text)
                 collected.append(text)
     return tuple(collected)
-
 
 
 # ══════════════════════════════════════════════════════════
