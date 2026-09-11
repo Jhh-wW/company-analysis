@@ -216,7 +216,9 @@ def test_the_compact_ecl_row_is_dropped_at_both_entry_points(grouped):
     ("cells", "source_text"),
     [
         (("위험관리 책임의 명확화", "이사회 중심의 위험관리 체계 구축 및 감독", ""), OVERSIGHT_SOURCE),
-        (("신용위험 관리", "손실충당금 산출 결과를 재무 담당부서가 검토하고 이사회가 승인", ""),
+        # ★ 1칸이 원문의 낱말을 둘 이상 쓴다 — 8장 원문 절 계약이 칸마다
+        #   «기댄 절»을 고르기 때문이다(내용어 2개 미만 칸은 판단 보류).
+        (("신용위험 특성 관리", "손실충당금 산출 결과를 재무 담당부서가 검토하고 이사회가 승인", ""),
          BOUND_PROCEDURE_SOURCE),
     ],
     ids=("board-oversight", "bound-procedure"),

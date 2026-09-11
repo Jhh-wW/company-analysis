@@ -374,3 +374,49 @@ def test_안내문_자체는_이_가드에_걸리지_않는다():
     """음성 대조 — 안내문이 부재 단언으로 판정되면 유일한 통로가 막힌다."""
 
     assert absence_claim_problem(ABSENCE_SCOPE_GUIDANCE_NOTICE) == ""
+
+
+def test_묶음_진입점에서_도식_행만_빠져도_안내문이_남는다():
+    """★ 독립 검토 P1-6 — 출시 모드(FULL)에서만 안내문이 사라지던 자리.
+
+    문장 경로는 두 검수 경로 모두 안내문을 남긴다. 그런데 도식 «행»을 실제로
+    지우는 자리는 `verify.py::_apply_grounding`이고 거기엔 수집기가 없었다.
+    `check_diagrams`에만 걸었는데 그 함수는 SHADOW에서만 불린다 — 즉 FULL
+    보고서에서는 행이 지워져도 아무 말이 없었다.
+
+    그래서 이 시험은 `check_diagrams`가 아니라 «묶음 진입점»을 부른다.
+    """
+
+    import json
+    import re
+
+    from src.features.composer.port import FlowRow
+    from src.features.composer.verify import verify_report
+
+    from src.features.composer.port import ComposedReport, ComposedSection
+
+    행 = FlowRow(
+        cells=("인재상", "핵심가치 공유", "공식 자료에서 확인할 수 없다"),
+        citations=("1",),
+    )
+    보고서 = ComposedReport(
+        sections=(ComposedSection("culture", (), flow_rows=(행,)),)
+    )
+
+    def ask(prompt: str) -> str:
+        numbers = [int(n) for n in re.findall(r"^\[(\d+)\] \(", prompt, re.MULTILINE)]
+        return json.dumps(
+            {"판정": [{"번호": n, "결과": "참", "장": "culture", "근거": ["1"]}
+                     for n in numbers or [1]]},
+            ensure_ascii=False,
+        )
+
+    결과 = verify_report(
+        보고서, _조각들(), None, ask,
+        allowed_fragment_ids_by_section={"culture": frozenset({"1"})},
+    )
+
+    장 = 결과.sections[0]
+    assert 장.flow_rows == (), "부재 단언을 옮겨 적은 행이 그대로 남았다"
+    assert ABSENCE_SCOPE_GUIDANCE_NOTICE in 장.notice
+    assert 장.notice.count(ABSENCE_SCOPE_GUIDANCE_NOTICE) == 1

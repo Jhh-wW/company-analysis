@@ -37,6 +37,7 @@ from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_accounting_policy_problem,
     culture_financial_risk_goal_problem,
     culture_flow_problem, culture_problem,
+    culture_flow_cells_evidence_problem,
     culture_section_evidence_problem,
 )
 from src.features.composer.prose_own_source import (
@@ -1218,6 +1219,7 @@ def _ask_grouped_verdicts(
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
+    absence_sections: Optional[set[str]] = None,
 ) -> Optional[dict[int, str]]:
     """packet 본문·도식을 정확히 한 번에 검수한다.
 
@@ -1303,6 +1305,7 @@ def _ask_grouped_verdicts(
             and item.citations
         ),
         baseline_date=baseline_date,
+        absence_sections=absence_sections,
     )
 
 
@@ -1375,7 +1378,13 @@ def _apply_grounding(
     flow_cells_by_number: Optional[Mapping[int, Sequence[str]]] = None,
     confirmed_prose_numbers: frozenset[int] = frozenset(),
     baseline_date: Optional[str] = None,
+    absence_sections: Optional[set[str]] = None,
 ) -> dict[int, str]:
+    # ``absence_sections``: 부재 단언 가드가 «도식 행»을 뺀 장 id 수집기.
+    # ★ 왜 여기가 필요한가 (독립 검토 P1-6) — 문장 경로는 _semantic_review*가
+    #   수집기를 넘기지만, 도식 행을 실제로 지우는 자리는 여기다. FULL(packet
+    #   엄격)은 check_diagrams를 부르지 않으므로(pipeline.py) 여기 없으면 그
+    #   모드에서만 안내문이 사라진다.
     # ★ 보고서 기준일을 그대로 넘긴다. 안 넘기면 executive_status_guard 가 날짜
     #   문턱 없이 이탈 «표지» 존재만으로 판정해, 「기준일 이후에 물러날 예정」인
     #   임원 문장까지 근거 없음으로 뺀다(가드 머리말 참고).
@@ -1457,8 +1466,11 @@ def _apply_grounding(
             #   공개되므로 여기서도 같은 사유코드로 건다 — 장 무관.
             # ⚠️ 칸마다 «따로» 건다. 이어 붙인 문자열로 걸면 서로 다른 칸의
             #   표지가 결합해 정상 행이 지워진다(cellwise_problem 머리말).
-            problem = (cellwise_problem(cells, absence_claim_problem)
-                       or flow_scope_problem(cells, sources))
+            problem = cellwise_problem(cells, absence_claim_problem)
+            if problem and absence_sections is not None and context:
+                # 행을 지운 장에도 문장 경로와 «같은» 확인 범위 안내문을 남긴다.
+                absence_sections.add(context[0])
+            problem = problem or flow_scope_problem(cells, sources)
             if not problem and context and context[0] == CHALLENGE_FLOW_SECTION_ID:
                 # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 묶음 검수 경로와
                 # flat 경로가 «같은» 두 검사를 쓴다 — 한쪽만 걸면 그 경로로만
@@ -1474,12 +1486,10 @@ def _apply_grounding(
                 #   옮겨 적히면 같은 보고서 안에서 두 잣대가 됐다.
                 # ⚠️ 넓은 그물(원문 절 계약)은 마지막이다 — 사유 코드 우선순위는
                 #   본문 블록과 같다.
-                # ★ 원문 절 계약만 «행 전체»를 후보로 넘긴다(칸마다 따로가 아니다).
-                #   그 계약은 후보 어휘를 검사하지 않고 «후보가 기댄 절»을 고르는
-                #   데만 쓰므로, 칸을 이어 붙여도 서로 다른 칸의 표지가 결합하는
-                #   일이 없다(cellwise_problem 머리말이 막으려던 사고 모양이 아니다).
-                #   반대로 칸마다 따로 걸면 한 낱말짜리 칸이 기댈 절을 못 찾아
-                #   정상 행이 통째로 지워진다 — 행 하나가 한 «주장»이다.
+                # ★ 원문 절 계약은 «판정 대상 칸»만 따로 본다. 행 전체를 한
+                #   후보로 보면 재무 규정 칸이 옆의 정상 인사 칸에 업혀 통과한다
+                #   (독립 검토 P1-5 실측). 내용어가 하나뿐인 칸은 기댈 절을 고를
+                #   수 없으므로 판단을 보류한다 — 그래야 정상 행도 산다.
                 problem = (
                     culture_flow_problem(cells, sources)
                     or culture_accounting_flow_problem(cells, sources)
@@ -1487,7 +1497,7 @@ def _apply_grounding(
                         cells, culture_financial_risk_goal_problem
                     )
                     or culture_problem(text, sources)
-                    or culture_section_evidence_problem(text, sources)
+                    or culture_flow_cells_evidence_problem(cells, sources)
                 )
             # 6장 성장 계획 표만 미래 근거를 결속한다. 다른 장의 도식과 이 장의
             # 산문 문장(칸이 없다)은 이 검사를 지나가지 않는다.
@@ -2332,6 +2342,7 @@ def _semantic_review_grouped(
         initial_ask=initial_ask,
         protocol_diagnostics=protocol_diagnostics,
         baseline_date=baseline_date,
+        absence_sections=absence_sections,
     )
     sentence_by_number: dict[int, Optional[ComposedSentence]] = {}
     flow_kept_numbers: set[int] = set()
