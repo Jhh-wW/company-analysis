@@ -21,6 +21,8 @@ from src.features.composer.culture_constants import (
     CULTURE_ACCOUNTING_OVERDUE_BASIS_RE,
     CULTURE_ACCOUNTING_POLICY_MISPLACED,
     CULTURE_ACCOUNTING_RECOGNITION_RE,
+    CULTURE_ARTICLES_CONTEXT_RE,
+    CULTURE_ARTICLES_RE,
     CULTURE_ATTRIBUTION_RE,
     CULTURE_EVIDENCE_SCOPE_MISMATCH,
     CULTURE_EXTERNAL_AUDIT_RE,
@@ -38,7 +40,6 @@ from src.features.composer.culture_constants import (
     CULTURE_FINANCIAL_RISK_RULE_RE,
     CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,
     CULTURE_FLOW_CELL_COUNT,
-    CULTURE_FLOW_CELL_MIN_TOKENS,
     CULTURE_PEOPLE_INSTITUTION_RE,
     CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
     CULTURE_SECTION_ORG_ACTION_NEGATION_RE,
@@ -46,8 +47,11 @@ from src.features.composer.culture_constants import (
     CULTURE_SECTION_ORG_UNIT_RE,
     CULTURE_SUPPORT_CLAUSE_LIMIT,
     CULTURE_SUPPORT_MIN_OVERLAP,
+    CULTURE_SUPPORT_MIN_OVERLAP_SHORT,
     CULTURE_SUPPORT_MIN_OVERLAP_RATIO,
     CULTURE_SUPPORT_MIN_TOKEN_LENGTH,
+    CULTURE_SUPPORT_SHORT_CANDIDATE_TOKENS,
+    CULTURE_SUPPORT_STEM_MIN_CHARS,
     CULTURE_SUPPORT_PARTICLES,
     CULTURE_SUPPORT_STOPWORDS,
     CULTURE_SUPPORT_TOKEN_SPLIT_RE,
@@ -103,6 +107,57 @@ def _content_tokens(text: str) -> frozenset[str]:
     )
 
 
+def _overlap_count(
+    candidate_tokens: frozenset[str], clause: str, clause_surface: str
+) -> int:
+    """후보 내용어 중 그 절에 «같은 말»로 나오는 것의 수.
+
+    ★ 세 가지를 같은 말로 본다 (재검증 지시) — 글자가 똑같은 경우, 어간이
+      겹치는 경우(「운영」↔「운영합니다」), 띄어쓰기만 다른 경우(「핵심 가치」↔
+      「핵심가치」). 앞의 둘을 안 보면 실물 도식 칸 7개 중 6개가, 마지막을
+      안 보면 표에서 편 짧은 문장이 «겹침 0»으로 떨어진다.
+    ★ 어간 인정은 «접두»만이다. 가운데 글자가 우연히 같은 낱말을 같은 말로
+      세지 않기 위해서다. 최소 길이는 상수로 둔다.
+    """
+
+    clause_tokens = _content_tokens(clause)
+    센다 = 0
+    for token in candidate_tokens:
+        if token in clause_tokens:
+            센다 += 1
+            continue
+        if token in clause_surface:
+            # 띄어쓰기만 다른 경우 — 절의 공백을 지운 표면에 그대로 들어 있다.
+            센다 += 1
+            continue
+        if any(
+            min(len(token), len(other)) >= CULTURE_SUPPORT_STEM_MIN_CHARS
+            and (token.startswith(other) or other.startswith(token))
+            for other in clause_tokens
+        ):
+            센다 += 1
+    return 센다
+
+
+def _support_threshold(candidate_tokens: frozenset[str]) -> int:
+    """그 후보가 지지 절로 인정하는 최소 겹침 수.
+
+    수와 비율을 «둘 다» 넘어야 한다. 내용어가 몇 개 안 되는 짧은 후보는 수
+    쪽을 1로 낮춘다 — 표에서 편 문장이 통째로 떨어지던 자리다. 비율은 그대로라
+    관문이 낱말 하나로 열리지는 않는다.
+    """
+
+    작은가 = len(candidate_tokens) <= CULTURE_SUPPORT_SHORT_CANDIDATE_TOKENS
+    최소수 = (
+        CULTURE_SUPPORT_MIN_OVERLAP_SHORT if 작은가
+        else CULTURE_SUPPORT_MIN_OVERLAP
+    )
+    return max(
+        최소수,
+        math.ceil(CULTURE_SUPPORT_MIN_OVERLAP_RATIO * len(candidate_tokens)),
+    )
+
+
 def _supporting_clauses(
     text: str, sources_mapping: Mapping[str, str]
 ) -> tuple[str, ...]:
@@ -118,55 +173,52 @@ def _supporting_clauses(
     """
 
     candidate_tokens = _content_tokens(text)
-    # ★ 수와 비율을 «둘 다» 넘어야 지지 절이다 (독립 검토 P1-3). 수만 보면
-    #   긴 후보가 낱말 두 개로 아무 절이나 고르고, 비율만 보면 짧은 후보가
-    #   한 낱말로 100%를 만든다.
-    문턱 = max(
-        CULTURE_SUPPORT_MIN_OVERLAP,
-        math.ceil(CULTURE_SUPPORT_MIN_OVERLAP_RATIO * len(candidate_tokens)),
-    )
+    문턱 = _support_threshold(candidate_tokens)
     scored: list[tuple[int, int, str]] = []
     for source in sources_mapping.values():
         for clause in SOURCE_CLAUSE_SPLIT_RE.split(source):
             surface_clause = _surface(clause)
             if not surface_clause:
                 continue
-            overlap = len(candidate_tokens & _content_tokens(clause))
+            overlap = _overlap_count(candidate_tokens, clause, surface_clause)
             if overlap >= 문턱:
                 # 겹침 내림차순 · 원문 순서 오름차순으로 줄을 세운다. 두 값이
                 # 모두 같은 절은 원문에 나온 차례대로 — 판정은 결정적이다.
-                scored.append((-overlap, len(scored), surface_clause))
+                scored.append((-overlap, len(scored), clause))
     scored.sort()
     return tuple(
         clause for _rank, _order, clause in scored[:CULTURE_SUPPORT_CLAUSE_LIMIT]
     )
 
 
-def _has_org_actor(surface_clause: str) -> bool:
+def _has_org_actor(clause: str) -> bool:
     """그 절이 «누가»를 말했는가 — 기존 주체 목록 + 부서 이름 꼴.
 
     ★ 부서 이름 꼴을 따로 보는 이유 (독립 검토 P1-4) — 실제 공시는
       「신용리스크관리부가 담당한다」·「IT그룹을 재편했다」처럼 조직 «이름»으로
       쓴다. 기존 목록은 「부서」·「팀+조사」만 알아서 이런 절이 「누가 맡는지」
       예외를 못 열었다.
-    ★ 「일부가」·「전부는」 같은 말이 조직으로 둔갑하지 않게 두 겹으로 막는다 —
-      이름이 두 글자 이상일 것, 그리고 닫힌 «끝말» 불용어 목록에 없을 것.
-      끝말로 보는 이유는 공백을 지운 표면에서 이름의 «시작»을 알 수 없기
-      때문이다(「기 설정된 내부의」가 「기설정된내부」로 잡히던 자리).
+    ★ 이름은 «낱말 하나»에서만 찾는다 (재검증 실측). 공백을 지운 표면에서
+      찾으면 낱말 가운데가 걸린다 — 「연결그룹이 손상 여부를」이 「이손상여부」로
+      잡혀 회계 절이 조직 절이 됐다. 그래서 이 함수만 원문 절을 그대로 받는다.
+    ★ 그래도 남는 흔한 말(여부·일부·전부…)은 닫힌 끝말 불용어 목록으로 뺀다.
     """
 
-    if CULTURE_FINANCIAL_RISK_ORG_ACTOR_RE.search(surface_clause):
+    if CULTURE_FINANCIAL_RISK_ORG_ACTOR_RE.search(_surface(clause)):
         return True
-    return any(
-        not any(
-            match.group("name").endswith(stopword)
-            for stopword in CULTURE_ORG_UNIT_STOPWORDS
-        )
-        for match in CULTURE_SECTION_ORG_UNIT_RE.finditer(surface_clause)
-    )
+    normalized = unicodedata.normalize("NFKC", clause).casefold()
+    for raw in CULTURE_SUPPORT_TOKEN_SPLIT_RE.split(normalized):
+        match = CULTURE_SECTION_ORG_UNIT_RE.match(raw)
+        if match is None:
+            continue
+        name = match.group("name")
+        if not any(name.endswith(stopword)
+                   for stopword in CULTURE_ORG_UNIT_STOPWORDS):
+            return True
+    return False
 
 
-def _clause_carries_section_subject(surface_clause: str) -> bool:
+def _clause_carries_section_subject(clause: str) -> bool:
     """그 절이 8장(인재상·조직문화·일하는 방식)의 소재를 담고 있는가.
 
     검사 «순서»가 규칙의 절반이다.
@@ -187,16 +239,22 @@ def _clause_carries_section_subject(surface_clause: str) -> bool:
     ④ 사람·조직 제도 어휘(또는 기존 의사결정·승인 절차 어휘).
     """
 
+    surface_clause = _surface(clause)
     if SOURCE_UNAVAILABLE_RE.search(surface_clause):
         return False
     if CULTURE_EXTERNAL_AUDIT_RE.search(surface_clause):
         return False
-    if (_has_org_actor(surface_clause)
+    if (_has_org_actor(clause)
             and CULTURE_SECTION_ORG_ACTION_RE.search(surface_clause)
             and not CULTURE_SECTION_ORG_ACTION_NEGATION_RE.search(surface_clause)):
         return True
     if CULTURE_FINANCIAL_RISK_CATEGORY_RE.search(surface_clause):
         return False
+    if (CULTURE_ARTICLES_RE.search(surface_clause)
+            and CULTURE_ARTICLES_CONTEXT_RE.search(surface_clause)):
+        # 「정관」은 사람·기관 규정을 말한 절에서만 이 장의 소재다 — 그냥 받으면
+        # 「정관에 따라 이익잉여금을 처분한다」류 회계 절이 함께 열린다.
+        return True
     return bool(CULTURE_PEOPLE_INSTITUTION_RE.search(surface_clause)
                 or EXPLICIT_CULTURE_RE.search(surface_clause))
 
@@ -561,26 +619,27 @@ def culture_flow_problem(cells: Sequence[str], sources_mapping: Mapping[str, str
 def culture_flow_cells_evidence_problem(
     cells: Sequence[str], sources_mapping: Mapping[str, str]
 ) -> str:
-    """도식 행의 «판정 대상 칸»만 따로 8장 계약에 건다.
+    """도식 행의 칸을 따로 보되, «기댈 절을 못 찾은 칸»은 판단을 보류한다.
 
-    ★ 왜 행 전체가 아닌가 (독립 검토 P1-5 실측) — 「신용여신 한도 | 신용위험
-      관리규정에 따라 집행」 칸은 단독으로는 제외인데, 정상 인사 칸과 한 행으로
-      이어 붙이면 통과했다. 재무 규정 칸이 옆 칸에 업혀 나간다. 같은 행에서
-      부재 단언은 「칸 하나라도 걸리면 제외」인데 이 계약만 반대 잣대였다.
+    ★ 왜 행 전체가 아닌가 (독립 검토 P1-5) — 「신용여신 한도」 칸이 정상 인사
+      칸과 한 행이면 업혀 통과했다. 부재 단언은 「칸 하나라도 걸리면 제외」인데
+      이 계약만 반대 잣대였다.
 
-    ★ 왜 «판정 대상 칸»만인가 — 내용어가 하나뿐인 칸(「교육훈련」)은 기댈 절을
-      고를 수 없어 무조건 제외로 떨어지고, 그러면 정상 행이 통째로 지워진다.
-      그런 칸은 판단을 «보류»한다. 판정 대상 칸이 하나도 없으면 이 계약은
-      그 행에 대해 아무 말도 하지 않는다 — 다른 가드가 그대로 판정한다.
+    ★ 왜 «보류»인가 (재검증 실측) — 도식 칸은 「인사부서 운영」처럼 짧은 명사구다.
+      기댈 절을 못 찾았다고 제외하면 실물 8장 도식 행 7개 중 6개가 사라졌다.
+      문장과 달리 칸은 «명시적 위반»이 보일 때만 뺀다 — 기댄 절이 분명히
+      있는데 그 절이 이 장의 소재가 아닐 때다. 부재 단언·재무 규정 같은 다른
+      가드는 칸 어휘로 따로 판정하므로 이 보류가 그 방어를 열지 않는다.
 
-    ⚠️ 칸을 이어 붙이지 않는다. 서로 다른 칸의 표지가 결합해 없던 판정이
+    ⚠️ 칸을 이어 붙이지 않는다 — 서로 다른 칸의 표지가 결합해 없던 판정이
       생기는 사고(cellwise_problem 머리말)를 그대로 피한다.
     """
 
     for cell in cells:
-        if len(_content_tokens(str(cell))) < CULTURE_FLOW_CELL_MIN_TOKENS:
+        지지 = _supporting_clauses(str(cell), sources_mapping)
+        if not 지지:
+            continue  # 기댄 절을 못 찾았다 — 이 계약은 이 칸을 판정하지 않는다.
+        if any(_clause_carries_section_subject(clause) for clause in 지지):
             continue
-        problem = culture_section_evidence_problem(str(cell), sources_mapping)
-        if problem:
-            return problem
+        return CULTURE_SECTION_EVIDENCE_OFFCONTRACT
     return ""
