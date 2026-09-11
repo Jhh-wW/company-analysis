@@ -133,7 +133,8 @@
 
   {% elif is_real %}
     {# 아직 남았다 — 주소는 그대로 두고 회사 이름만 다시 받는다 #}
-    <form method="post" action="/confirm" style="margin-top:16px">
+    <form method="post" action="/confirm" style="margin-top:16px"
+          data-busy-submit data-busy-label="다시 찾는 중…">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="region" value="{{ user_input.region }}">
       <input type="hidden" name="retry" value="{{ next_retry }}">
@@ -217,3 +218,4 @@
 </div>
 {% endif %}
 {% endblock %}
+{% block scripts %}{% include "_busy_submit_script.html" %}{% endblock %}
