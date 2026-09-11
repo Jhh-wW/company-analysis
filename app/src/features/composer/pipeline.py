@@ -1276,7 +1276,8 @@ def run_v2(
         # flow 숫자는 기존 canonical 검사로 먼저 재검산한다. 관계 의미는
         # 바로 다음 bundled reviewer 한 번에 본문과 함께 판정한다.
         draft, diagram_problems = check_diagram_numbers(
-            draft, _normalize_fragments(verification_fragments)
+            draft, _normalize_fragments(verification_fragments),
+            derived_ratio_diagnostics=composition_diagnostics,
         )
         if prepared_evidence is not None:
             _assert_composed_report_evidence_invariant(
@@ -1371,6 +1372,7 @@ def run_v2(
             _normalize_fragments(verification_fragments),
             diagram_ask or reviewer_ask,
             diagnostics=review_diagnostics,
+            derived_ratio_diagnostics=composition_diagnostics,
             baseline_date=baseline_date,
         )
     elif prepared_evidence is None:
@@ -1717,6 +1719,7 @@ def run_v2(
             supplement_draft, supplement_diagram_problems = check_diagram_numbers(
                 supplement_draft,
                 _normalize_fragments(verification_fragments),
+                derived_ratio_diagnostics=composition_diagnostics,
             )
             for problem in supplement_diagram_problems:
                 logger.warning("보충 도식 검증에서 뺀 경로 — %s", problem)
