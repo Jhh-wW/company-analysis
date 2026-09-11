@@ -80,7 +80,10 @@ from src.features.composer.constants import (
     SECTION_IDS,
     SECTION_TITLES,
 )
-from src.features.composer.dedupe import drop_cross_section_duplicates
+from src.features.composer.dedupe import (
+    drop_cross_section_duplicates,
+    sections_with_program_tables,
+)
 from src.features.composer.news_usage import supplement_news_candidates, retain_verified_news, news_usage_diagnostics, append_research_notice, news_citation_ids
 from src.features.composer.review_outcomes import final_review_outcomes
 from src.features.composer.diagram_check import check_diagram_numbers, check_diagrams
@@ -1318,6 +1321,12 @@ def run_v2(
     #   수주 문장 실측)이 그대로 남는다 — 문서 열쇠가 없으면 그 판정을 못 한다.
     verified, moved_sentences = drop_cross_section_duplicates(
         verified, fragments=_normalize_fragments(verification_fragments),
+        # ★ 장이 «들고 있지 않은» 표(실적표·매출 구성표)가 어느 장에 실리는지
+        #   함께 넘긴다. 안 넘기면 그 장이 비었을 때 안내문이 「그쪽으로
+        #   모았습니다」만 말하고 바로 아래에 표가 실려 화면과 어긋난다.
+        sections_with_tables=sections_with_program_tables(
+            performance_table, composition_tables
+        ),
     )
     if moved_sentences:
         logger.info("장 간 중복 %d문장을 소유 장으로 모았습니다", moved_sentences)
@@ -1715,6 +1724,11 @@ def run_v2(
                 # ★ 본 경로와 같은 조각을 넘긴다 — 보충 경로만 문서 열쇠가
                 #   없으면 같은 중복이 보충 장에서만 살아남는다.
                 fragments=_normalize_fragments(verification_fragments),
+                # ★ 표 자리도 본 경로와 같은 값을 넘긴다. 한쪽만 넘기면
+                #   보충 경로에서만 옛 안내문이 나간다.
+                sections_with_tables=sections_with_program_tables(
+                    performance_table, composition_tables
+                ),
             )
             if supplement_moved:
                 logger.info(
