@@ -101,10 +101,33 @@ assert len(_FUTURE_STRATEGY_PLANS) == len(_SENTENCE_ENDINGS), (
 _FUTURE_SECTION_INDEX: Final[int] = SECTION_IDS.index(STRATEGY_TABLE_SECTION_ID)
 
 
+#: 8장(인재상과 일하는 방식) 순번 — 6장과 «같은 방식»으로 장 전용 문장을 쓴다.
+_CULTURE_SECTION_INDEX: Final[int] = SECTION_IDS.index("culture")
+#: 8장 전용 문장.
+#:
+#: ★ 왜 이 장만 다른가 — 8장 원문 절 계약은 후보가 «기댄 절»에 이 장의 소재가
+#:   있어야 공개한다. 아홉 장이 같은 낱말 나열 문장을 쓰면 8장 후보가 기대는
+#:   절은 언제나 그 나열 문장이라 8장이 통째로 빈다. 실물 사업보고서의 8장
+#:   근거는 「직원 등의 현황」·「복리후생」 절 자체이므로, 후보 문장도 그 절을
+#:   바꿔 쓴 모양이어야 한다.
+_CULTURE_SENTENCE_BODIES: Final[tuple[str, ...]] = (
+    "회사는 임직원 교육훈련 과정을 운영한다",
+    "회사는 복리후생 제도로 임직원 주택자금을 지원한다",
+    "회사의 인재상은 도전과 협업을 실천하는 인재다",
+    "인사위원회가 승진 기준을 심의한다",
+    "회사는 직원 현황과 평균 근속연수를 공시한다",
+)
+
+
 def _장_문장(section_index: int, mark: str, ending_index: int) -> str:
     """작가 대역과 조각 원문이 같은 장별 문장을 쓰게 한다."""
     if section_index == _FUTURE_SECTION_INDEX:
         return _FUTURE_STRATEGY_SENTENCES[ending_index]
+    if section_index == _CULTURE_SECTION_INDEX:
+        return (
+            f"{mark} {_CULTURE_SENTENCE_BODIES[ending_index]}고 "
+            "공식 자료에서 확인했다."
+        )
     return (
         f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 대응 "
         f"협력 실적 {_SENTENCE_ENDINGS[ending_index]} 공식 자료에서 확인했다."

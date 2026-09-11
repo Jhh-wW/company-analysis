@@ -22,6 +22,7 @@ from src.features.composer.culture_constants import (
     CULTURE_ACCOUNTING_RECOGNITION_RE,
     CULTURE_ATTRIBUTION_RE,
     CULTURE_EVIDENCE_SCOPE_MISMATCH,
+    CULTURE_EXTERNAL_AUDIT_RE,
     CULTURE_FINANCIAL_RISK_CATEGORY_RE,
     CULTURE_FINANCIAL_RISK_DERIVATIVE_RE,
     CULTURE_FINANCIAL_RISK_EXPOSURE_RE,
@@ -39,6 +40,12 @@ from src.features.composer.culture_constants import (
     CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
     CULTURE_SECTION_ORG_ACTION_NEGATION_RE,
     CULTURE_SECTION_ORG_ACTION_RE,
+    CULTURE_SUPPORT_CLAUSE_LIMIT,
+    CULTURE_SUPPORT_MIN_OVERLAP,
+    CULTURE_SUPPORT_MIN_TOKEN_LENGTH,
+    CULTURE_SUPPORT_PARTICLES,
+    CULTURE_SUPPORT_STOPWORDS,
+    CULTURE_SUPPORT_TOKEN_SPLIT_RE,
     CURRENT_CULTURE_DENIAL_RE,
     EXPLICIT_CULTURE_RE,
     FLOW_GOAL_QUALIFIER_RE,
@@ -53,6 +60,109 @@ from src.features.composer.culture_constants import (
 
 def _surface(text: str) -> str:
     return "".join(unicodedata.normalize("NFKC", text).casefold().split())
+
+
+def _strip_particle(token: str) -> str:
+    """낱말 끝의 조사 하나만 뗀다 — 가장 긴 것부터 맞춰 본다.
+
+    형태소 분석기가 없으므로 «조사만» 뗀다. 어미(–다·–하고)는 목록에 없다:
+    동사를 자르면 서로 다른 낱말이 같은 조각으로 붙어 겹침이 부풀려진다.
+    남는 줄기가 너무 짧아지면 떼지 않는다 — 「자료」의 「료」 같은 조각을
+    내용어로 만들지 않기 위해서다.
+    """
+
+    for particle in CULTURE_SUPPORT_PARTICLES:
+        if (token.endswith(particle)
+                and len(token) - len(particle) >= CULTURE_SUPPORT_MIN_TOKEN_LENGTH):
+            return token[: -len(particle)]
+    return token
+
+
+def _content_tokens(text: str) -> frozenset[str]:
+    """«기댄 절»을 고르는 데 쓰는 내용어(명사·숫자) 집합.
+
+    ★ 이 함수는 _surface와 달리 공백을 «남긴다» — 공백을 지우면 낱말 경계가
+      사라져 토큰을 셀 수 없다. 기존 어휘 정규식은 그대로 _surface 위에서
+      돈다(판정 규칙은 하나도 바뀌지 않는다).
+    """
+
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    return frozenset(
+        token
+        for token in (
+            _strip_particle(raw)
+            for raw in CULTURE_SUPPORT_TOKEN_SPLIT_RE.split(normalized)
+        )
+        if len(token) >= CULTURE_SUPPORT_MIN_TOKEN_LENGTH
+        and token not in CULTURE_SUPPORT_STOPWORDS
+    )
+
+
+def _supporting_clauses(
+    text: str, sources_mapping: Mapping[str, str]
+) -> tuple[str, ...]:
+    """후보가 «기댄» 원문 절만 표면형으로 고른다.
+
+    인용한 «모든» 원문의 절을 한 줄로 세워 겹침이 큰 순서로 최대
+    CULTURE_SUPPORT_CLAUSE_LIMIT개를 돌려준다. 원문마다 따로 고르지 않는
+    이유는, 조각이 여러 개면 그만큼 지지 절이 늘어 계약이 다시 느슨해지기
+    때문이다.
+
+    겹침이 0인 절은 후보와 아무 관계가 없으므로 애초에 후보군이 아니다.
+    빈 튜플은 «기댄 절을 찾지 못했다»는 뜻이다 — 호출자는 그때 제외한다.
+    """
+
+    candidate_tokens = _content_tokens(text)
+    scored: list[tuple[int, int, str]] = []
+    for source in sources_mapping.values():
+        for clause in SOURCE_CLAUSE_SPLIT_RE.split(source):
+            surface_clause = _surface(clause)
+            if not surface_clause:
+                continue
+            overlap = len(candidate_tokens & _content_tokens(clause))
+            if overlap >= CULTURE_SUPPORT_MIN_OVERLAP:
+                # 겹침 내림차순 · 원문 순서 오름차순으로 줄을 세운다. 두 값이
+                # 모두 같은 절은 원문에 나온 차례대로 — 판정은 결정적이다.
+                scored.append((-overlap, len(scored), surface_clause))
+    scored.sort()
+    return tuple(
+        clause for _rank, _order, clause in scored[:CULTURE_SUPPORT_CLAUSE_LIMIT]
+    )
+
+
+def _clause_carries_section_subject(surface_clause: str) -> bool:
+    """그 절이 8장(인재상·조직문화·일하는 방식)의 소재를 담고 있는가.
+
+    검사 «순서»가 규칙의 절반이다.
+
+    ① 「그 소재를 공시하지 않는다」고 적은 절은 근거가 아니다 — 없다는 말은
+       자료가 아니다(culture_problem과 같은 경계).
+    ①' «외부 감사 절차» 절도 이 장의 소재가 아니다. 조직 주체 검사보다 «먼저»
+       본다 — 「회사측 : 감사위원회 위원 3명 … 감사인 : 업무수행이사 외 2명」
+       같은 참석자 표가 위원회와 절차 동사를 함께 담고 있어 ②로 통과하던
+       자리다(실측 29건).
+    ② 조직 주체 + 부정되지 않은 절차 동사 = 「누가 맡는지」를 말한 절. 8장
+       안내문이 밝힌 예외(재무 위험을 누가 맡는지 조직으로 설명한 문장)가
+       여기다. 동사만으로는 인정하지 않는다 — 「손상여부를 검토하는」 같은
+       회계 동작이 면제를 만들던 자리다.
+    ③ 재무·금융 위험 «범주» 절은 ②가 아니면 여기서 끝난다. 사람 낱말 검사보다
+       «먼저» 본다 — 회계 측정 절에는 사람 낱말이 자연스럽게 섞이기 때문이다
+       (퇴직급여채무 측정의 「임금상승률」). 그 낱말 하나로 장이 열리면 안 된다.
+    ④ 사람·조직 제도 어휘(또는 기존 의사결정·승인 절차 어휘).
+    """
+
+    if SOURCE_UNAVAILABLE_RE.search(surface_clause):
+        return False
+    if CULTURE_EXTERNAL_AUDIT_RE.search(surface_clause):
+        return False
+    if (CULTURE_FINANCIAL_RISK_ORG_ACTOR_RE.search(surface_clause)
+            and CULTURE_SECTION_ORG_ACTION_RE.search(surface_clause)
+            and not CULTURE_SECTION_ORG_ACTION_NEGATION_RE.search(surface_clause)):
+        return True
+    if CULTURE_FINANCIAL_RISK_CATEGORY_RE.search(surface_clause):
+        return False
+    return bool(CULTURE_PEOPLE_INSTITUTION_RE.search(surface_clause)
+                or EXPLICIT_CULTURE_RE.search(surface_clause))
 
 
 def culture_problem(text: str, sources_mapping: Mapping[str, str]) -> str:
@@ -89,51 +199,42 @@ def culture_section_evidence_problem(
     ★ 반드시 culture 장 후보(본문 문장 또는 도식 행)일 때만 호출한다. 다른
       장은 이 계약의 대상이 아니다.
 
-    ★ 왜 후보 «표현»이 아니라 원문을 보나 (실측) — 기존 재무위험 가드는 후보
+    ★ 왜 후보 «표현»의 어휘로 판정하지 않나 (실측) — 기존 재무위험 가드는 후보
       문장의 어휘를 본다. 그래서 같은 재무 서술을 꼬리만 바꿔 적으면
       (「…원칙을 실행하고 있다」 → 「…하고 있다」) 그대로 빠져나갔고, 가드가
       2건을 새로 잡는 동안 안 걸리는 재무 문장 4개가 그 자리를 채워 순증이
       0이었다. 원문 절은 후보가 고쳐 쓸 수 없으므로 판정이 흔들리지 않는다.
 
-    보존 조건(둘 중 하나):
-      ① 사람·조직 제도 어휘가 있는 절 — CULTURE_PEOPLE_INSTITUTION_RE 또는
-         기존 EXPLICIT_CULTURE_RE(의사결정·승인 절차 어휘).
-      ② 조직 주체 + 부정되지 않은 절차 동사가 «둘 다» 있는 절 — 「누가
-         맡는지」를 말한 자료. 동사만으로는 면제하지 않는다(「손상여부를
-         검토하는」 같은 회계 동작이 면제를 만들던 자리).
+    ★ 그런데 «원문 아무 절이나»를 보면 안 된다 (4차 유료 실행 실측) — 이전
+      판은 인용 원문의 어느 한 절에라도 조직 주체 절이 있으면 통과시켰다.
+      DART 서식이 위험관리 절에 거의 언제나 담는 「○○팀의 승인·관리·감독
+      하에」 문장 하나가 그 원문 전체를 8장에 열어 줬고, 그 결과 8장 3문장이
+      «전부» 신용여신·신용한도 같은 재무 규정이 됐다. 회사·업종을 가리지
+      않는 범용 결함이다.
+
+    ★ 그래서 판정 재료는 후보가 «기댄 절»이다 — 후보와 내용어(명사·숫자)가
+      가장 많이 겹치는 절(최대 CULTURE_SUPPORT_CLAUSE_LIMIT개, `_supporting_
+      clauses`)만 본다. 어느 절에 기댔는지 가릴 수 없으면 공개하지 않는다.
+
+    보존 조건은 `_clause_carries_section_subject`가 정한다 — 지지 절 중
+    «이 장의 소재»를 담은 절이 하나라도 있어야 한다. 재무 범주 절은 「누가
+    맡는지」를 말하지 않는 한 소재로 세지 않으므로, 재무 절 하나에만 기댄
+    후보는 여기서 걸린다.
 
     ⚠️ 「공시하지 않는다」처럼 그 소재가 «없다»고 적은 절은 근거로 세지 않는다
-      (culture_problem과 같은 경계). 인용 원문이 아예 없으면 이 장의 소재를
-      확인할 방법이 없으므로 사유를 돌려준다 — fail-closed.
+      (culture_problem과 같은 경계). 그런 절도 지지 절 «후보»로는 남겨 둔다 —
+      빼면 그다음 절이 지지 절이 되어 오히려 통과가 쉬워진다.
+    ⚠️ 인용 원문이 아예 없거나 겹치는 절이 하나도 없으면 이 장의 소재를 확인할
+      방법이 없으므로 사유를 돌려준다 — fail-closed.
     ⚠️ 빈 문자열은 그 문장이 옳다는 뜻이 아니다. 주어·시점·주장 범주 일치는
       기존 의미 검수가 그대로 판정한다.
-
-    ``text``는 «판정 재료»가 아니다 — 빈 후보를 판정 대상에서 빼는 데만 쓴다.
-    이 함수의 존재 이유가 «후보 표현으로는 판정하지 않는다»이므로, 후보 문자열이
-    판정에 들어오는 자리를 일부러 남기지 않았다.
     """
 
     if not _surface(text):
         return ""  # 실을 내용이 없는 후보는 이 계약의 대상이 아니다.
-    for source in sources_mapping.values():
-        for clause in SOURCE_CLAUSE_SPLIT_RE.split(source):
-            surface_clause = _surface(clause)
-            if not surface_clause:
-                continue
-            if SOURCE_UNAVAILABLE_RE.search(surface_clause):
-                continue
-            if (CULTURE_PEOPLE_INSTITUTION_RE.search(surface_clause)
-                    or EXPLICIT_CULTURE_RE.search(surface_clause)):
-                return ""
-            governance_bound = (
-                CULTURE_FINANCIAL_RISK_ORG_ACTOR_RE.search(surface_clause)
-                and CULTURE_SECTION_ORG_ACTION_RE.search(surface_clause)
-                and not CULTURE_SECTION_ORG_ACTION_NEGATION_RE.search(
-                    surface_clause
-                )
-            )
-            if governance_bound:
-                return ""
+    if any(_clause_carries_section_subject(clause)
+           for clause in _supporting_clauses(text, sources_mapping)):
+        return ""
     return CULTURE_SECTION_EVIDENCE_OFFCONTRACT
 
 

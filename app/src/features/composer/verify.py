@@ -29,7 +29,10 @@ from __future__ import annotations
 from src.features.composer.news_constants import NEWS_REVIEW_GUIDE
 from src.features.composer.news_usage import attribution_prefix, news_metadata
 from src.features.composer.news_block import _is_news_fragment
-from src.features.composer.absence_claim_guard import absence_claim_problem
+from src.features.composer.absence_claim_guard import (
+    absence_claim_problem,
+    with_absence_scope_guidance,
+)
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_accounting_policy_problem,
     culture_financial_risk_goal_problem,
@@ -204,6 +207,7 @@ def _absence_claim_rejected(
     section_id: str,
     kind: str,
     diagnostics: Optional[list[dict]],
+    absence_sections: Optional[set[str]] = None,
 ) -> bool:
     """자료 부재를 단언한 문장인가 — 맞으면 진단을 남기고 참을 돌려준다.
 
@@ -211,11 +215,17 @@ def _absence_claim_rejected(
       문장을 대조할 자료가 없다는 이유로 통째로 건너뛰는데, 부재 단언은
       바로 그 자리에서 가장 잘 통과한다(실측: 인용 0개·등급 «해석»인
       「공식 자료에서 … 찾을 수 없다」 두 문장이 그대로 공개됐다).
+
+    ``absence_sections``: 이 가드가 문장을 «뺀» 장 id 수집기. 재조립 단계가
+    그 장에만 확인 범위 안내문을 남긴다 — 참인 부재 문장까지 지워 놓고 아무
+    말도 안 하면 독자는 그 장이 왜 그렇게 생겼는지 알 수 없다(4차 실행 실측).
     """
 
     problem = absence_claim_problem(sentence.text)
     if not problem:
         return False
+    if absence_sections is not None:
+        absence_sections.add(section_id)
     logger.warning("의미 근거 검증: %s, 장 %s 문장 공개 제외", problem, section_id)
     _append_grounding_diagnostic(
         diagnostics,
@@ -1464,6 +1474,12 @@ def _apply_grounding(
                 #   옮겨 적히면 같은 보고서 안에서 두 잣대가 됐다.
                 # ⚠️ 넓은 그물(원문 절 계약)은 마지막이다 — 사유 코드 우선순위는
                 #   본문 블록과 같다.
+                # ★ 원문 절 계약만 «행 전체»를 후보로 넘긴다(칸마다 따로가 아니다).
+                #   그 계약은 후보 어휘를 검사하지 않고 «후보가 기댄 절»을 고르는
+                #   데만 쓰므로, 칸을 이어 붙여도 서로 다른 칸의 표지가 결합하는
+                #   일이 없다(cellwise_problem 머리말이 막으려던 사고 모양이 아니다).
+                #   반대로 칸마다 따로 걸면 한 낱말짜리 칸이 기댈 절을 못 찾아
+                #   정상 행이 통째로 지워진다 — 행 하나가 한 «주장»이다.
                 problem = (
                     culture_flow_problem(cells, sources)
                     or culture_accounting_flow_problem(cells, sources)
@@ -1471,12 +1487,7 @@ def _apply_grounding(
                         cells, culture_financial_risk_goal_problem
                     )
                     or culture_problem(text, sources)
-                    or cellwise_problem(
-                        cells,
-                        lambda cell: culture_section_evidence_problem(
-                            cell, sources
-                        ),
-                    )
+                    or culture_section_evidence_problem(text, sources)
                 )
             # 6장 성장 계획 표만 미래 근거를 결속한다. 다른 장의 도식과 이 장의
             # 산문 문장(칸이 없다)은 이 검사를 지나가지 않는다.
@@ -2021,10 +2032,12 @@ def _semantic_review(
     baseline_date: Optional[str] = None,
     rewrite_ask: Optional[AskFn] = None,
     recheck_ask: Optional[AskFn] = None,
+    absence_sections: Optional[set[str]] = None,
 ) -> list[list[ComposedSentence]]:
     """인용 있는 «확인»·«해석» 문장을 같은 1회 검수 호출로 대조한다.
 
     ``initial_ask``: 최초 본문 검수 전용 호출자. 재작성·재검수는 ``ask`` 그대로다.
+    ``absence_sections``: 부재 단언 가드가 문장을 뺀 장 id 수집기(선택).
 
     검수가 통째로 불능이면 대조 대상 문장을 공개 후보에서 뺀다. 라벨만
     «해석»으로 바꾸어 의미 검사를 통과한 것처럼 보이게 하지 않는다.
@@ -2053,6 +2066,7 @@ def _semantic_review(
             if _absence_claim_rejected(
                 sentence, section_id=section_id, kind=kind,
                 diagnostics=diagnostics,
+                absence_sections=absence_sections,
             ):
                 absence_rejected_positions.add((group_index, sentence_index))
                 continue
@@ -2227,6 +2241,7 @@ def _semantic_review_grouped(
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
+    absence_sections: Optional[set[str]] = None,
 ) -> tuple[list[list[ComposedSentence]], dict[str, tuple[FlowRow, ...]]]:
     """packet 문장과 도식을 장별 근거 블록으로 묶어 AI 1회 검수한다.
 
@@ -2254,6 +2269,7 @@ def _semantic_review_grouped(
             if _absence_claim_rejected(
                 sentence, section_id=section_id, kind=DIAGNOSTIC_KIND_BODY,
                 diagnostics=diagnostics,
+                absence_sections=absence_sections,
             ):
                 rejected_sentence_positions.add((group_index, sentence_index))
                 continue
@@ -2464,6 +2480,10 @@ def _verify_report_inner(
     # 2) 의미 검수 — legacy는 flat 응답 번호·재작성 계약을 유지한다.
     # packet 엄격 모드만 문장+도식을 장별 블록으로 한 번에 본다.
     reviewed_flow_rows: Optional[dict[str, tuple[FlowRow, ...]]] = None
+    # 부재 단언 가드가 문장을 «뺀» 장 — 아래 재조립에서 그 장에만 확인 범위
+    # 안내문을 남긴다. 두 검수 경로가 «같은» 수집기를 쓴다(한쪽만 걸면 그
+    # 경로의 장에서만 안내문이 사라진다).
+    absence_sections: set[str] = set()
     if allowed_fragment_ids_by_section is None:
         reviewed_groups = _semantic_review(
             checked_groups,
@@ -2481,6 +2501,7 @@ def _verify_report_inner(
             baseline_date=baseline_date,
             rewrite_ask=rewrite_ask,
             recheck_ask=recheck_ask,
+            absence_sections=absence_sections,
         )
     else:
         allowed_for_review = dict(allowed_fragment_ids_by_section)
@@ -2507,6 +2528,7 @@ def _verify_report_inner(
             initial_ask=initial_ask,
             protocol_diagnostics=protocol_diagnostics,
             baseline_date=baseline_date,
+            absence_sections=absence_sections,
         )
     reviewed_summary = reviewed_groups.pop()
 
@@ -2517,6 +2539,11 @@ def _verify_report_inner(
         if section.sentences and not kept and not notice:
             # 초안엔 문장이 있었는데 검증이 전부 걷어낸 장 — 자료 부재로 위장하지 않는다
             notice = NOTICE_ALL_SENTENCES_REJECTED
+        if section.section_id in absence_sections:
+            # 부재 단언을 뺀 장 — 그 자리에 확인 범위를 남긴다. 문장이 남아
+            # 있어도 붙인다(뺀 사실은 남은 문장 수와 무관하다). 여러 문장이
+            # 걸려도 한 줄이다.
+            notice = with_absence_scope_guidance(notice)
         _warn_if_interpretation_heavy(section.section_id, kept)
         out_sections.append(
             ComposedSection(

@@ -10,6 +10,7 @@ import pytest
 
 import src.features.composer.pipeline as composer_pipeline
 import src.features.pipeline.tests.test_full_evidence_end_to_end as full_evidence_e2e
+import src.features.composer.verify as composer_verify
 import src.shared.report_generation.canonical as generation_canonical
 from src.core import deployment_identity
 from src.features.budget import provider_budget
@@ -26,6 +27,9 @@ from src.features.composer.future_plan_constants import (
     FUTURE_QUOTE_KEY,
     FUTURE_SOURCE_KEY,
     FUTURE_TARGET_KEY,
+)
+from src.features.composer.culture_constants import (
+    CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
 )
 from src.features.composer.grounding_constants import GROUNDING_KEY
 from src.features.pipeline import real
@@ -278,3 +282,124 @@ def test_FULL_생성후_manifest_결속형식오류는_자료부족이_아닌_�
     assert "시험 원문" not in str(steps)
     assert len(writer.prompts) == 9
     assert len(reviewer.prompts) == 1
+
+
+def test_보충_대상_장이_후보를_전부_잃어도_내부계약오류로_닫지_않는다(
+    _full_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 배선 — 「맞는 내용이 없어 안 채운 것」과 「영수증 위조」를 가른다.
+
+    근거 결속 계약이 보충 «대상 장»의 후보를 전부 제외하면 그 장의 내용은 그대로
+    남는다. 예전 결속 검사는 그것을 무동작 보충으로 읽고 ValueError를 던졌고,
+    runtime이 그 실패를 `report_recovery:supplement_receipt_invalid`
+    (내부 계약 오류)로 올려 보고서를 통째로 닫았다.
+
+    이제는 보충 단계가 «왜» 그대로인지 사유 코드와 함께 영수증에 적고, 결속
+    검사는 그 기록이 있을 때만 지문 불변을 허용한다. 기록 없는 지문 불변은
+    종전대로 닫힌다(그 음성 대조는 report_recovery 시험이 따로 지킨다).
+    """
+
+    generation_mode, build_identity = _full_runtime
+    monkeypatch.setattr(
+        full_evidence_e2e,
+        "_section_sentences",
+        _section_sentences_with_future_plans,
+    )
+    # 8장 후보를 «전부» 잃게 만든다 — 이 시험의 관심사는 그 뒤의 결속 판정이다.
+    monkeypatch.setattr(
+        composer_verify,
+        "culture_section_evidence_problem",
+        lambda _text, _sources: CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
+    )
+    fake_engine = FakeEngine()
+    financials, _years = fake_engine.fetch_financials(
+        _COMPANY_ID,
+        object(),
+        business_date=_BUSINESS_DATE,
+    )
+    revenue_fragments, revenue_tables = real._bind_revenue_table_evidence_fragments(
+        {},
+        build_revenue_mix(_FILING_TEXT),
+        filing=_FILING,
+        filing_text=_FILING_TEXT,
+    )
+    fragments, added = merge_official_evidence_fragments(
+        revenue_fragments,
+        _official_evidence(),
+    )
+    assert added == 9
+    financial_fragment = next(
+        dict(fragment)
+        for fragment in fake_engine.make_fragments("", financials).values()
+        if fragment.get("종류") == "재무"
+        and str(fragment.get("원문") or "").startswith("주요계정(DART API):")
+    )
+    fragments[max(fragments) + 1] = financial_fragment
+    writer = _ExactPacketWriter()
+    reviewer = _FuturePlanBundledReviewer()
+
+    def fake_ask_factory(
+        _engine, _client, *, stage: str, max_tokens: int, reserved_calls: int = 0,
+    ):
+        assert max_tokens > 0
+        if stage == "v2_compose":
+            return writer
+        if stage == "v2_review":
+            return reviewer
+        return lambda _prompt: ""
+
+    monkeypatch.setattr(real, "_v2_ask_via_provider", fake_ask_factory)
+    monkeypatch.setattr(real, "_v2_cache_save", lambda **_kwargs: None)
+
+    # 실제 결속 판정에 들어간 «그» 영수증을 잡는다. 시험 안에서 따로 만들어
+    # 검사하면 배선 결함을 못 잡는다.
+    보충영수증: list[object] = []
+    원래_판정 = composer_pipeline.decide_post_validation
+
+    def 기록하며_판정(primary, **kwargs):
+        receipt = kwargs.get("supplement_receipt")
+        if receipt is not None:
+            보충영수증.append(receipt)
+        return 원래_판정(primary, **kwargs)
+
+    monkeypatch.setattr(
+        composer_pipeline, "decide_post_validation", 기록하며_판정
+    )
+    steps: list[dict[str, object]] = []
+
+    with provider_budget.activate(100_000.0):
+        result = real._run_v2_composer(
+            engine=real._MeteredEngine(fake_engine),
+            client=object(),
+            company_name="가나다회사",
+            corp_type="상장사",
+            frags=fragments,
+            financials=financials,
+            filing=_FILING,
+            revenue_tables=revenue_tables,
+            sources=[],
+            business_date=_BUSINESS_DATE,
+            model="가짜모델",
+            steps=steps,
+            corp_id=_COMPANY_ID,
+            current_fiscal_year=2025,
+            source_identity_digest="a" * 64,
+            build_identity=build_identity,
+            generation_mode=generation_mode,
+            comparison_result=_v2_comparison_result(),
+        )
+
+    # ① 보충 회차가 실제로 돌았고, 그 영수증이 «왜 그대로인지»를 적었다.
+    assert 보충영수증, "보충 결속 판정이 아예 일어나지 않았습니다"
+    기록 = dict(보충영수증[-1].unchanged_sections)
+    assert 기록.get("culture") == CULTURE_SECTION_EVIDENCE_OFFCONTRACT, 기록
+    # ② 그 사실을 «내부 계약 오류»로 올리지 않는다.
+    차단사유 = [
+        reason
+        for step in steps
+        if step.get("step") == "v2_출고검증_차단"
+        for reason in step.get("사유", ())
+    ]
+    assert not any("supplement_receipt_invalid" in str(reason) for reason in 차단사유), 차단사유
+    assert result.final_gate_reason != FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
