@@ -3784,9 +3784,13 @@ class RealPipeline:
             v2_comparison_result = comparison_outcome.value.result
             generation_source_identity_digest = comparison_outcome.value.folded_digest
         if news_outcome is not None:
-            # 뉴스 갈래는 `Exception`을 자기 안에서 삼키고, 그보다 바깥의 중단은
-            # 애초에 담지 않는다(스레드 경계에서 `result()`가 다시 던진다).
-            assert news_outcome.error is None
+            # 뉴스 갈래의 바깥 `except Exception`(official_news_context 구간)이 담은
+            # 예외는 예전처럼 여기서 그대로 올린다 — assert 로 바꾸면 원래 예외가
+            # AssertionError 로 덮여 실패 분류·로그가 달라진다(독립 검토 P2).
+            # 취소·종료 같은 BaseException 은 갈래가 담지 않고 스레드 경계의
+            # `result()` 가 이미 다시 던졌다.
+            if news_outcome.error is not None:
+                raise news_outcome.error
             assert isinstance(news_outcome.value, _NewsSearchOutcome)
             steps.extend(news_outcome.steps)
             news_session = news_outcome.value.session
