@@ -7,11 +7,16 @@
   ``search_business_candidates``의 ``index = _company_candidate_index()``,
   그 함수가 부르는 ``_company_catalog()``).
 
-★ 예열은 ``_lifespan``이 연 데몬 스레드에서 돈다. 스레드 완료를
-  결정적으로 기다리기 위해 ``runtime._prewarm_candidate_index``(진짜 구현을
-  그대로 호출하는 얇은 스파이)를 감싸 완료 이벤트를 받는다 — 카탈로그
-  함수를 가짜로 바꾼 것과는 별개로, 실제 운영 코드 경로는 전부 그대로
-  실행된다.
+★ 예열은 ``_lifespan``이 연 데몬 스레드(``_candidate_index_manager_loop``)에서
+  돈다. 그 루프는 예열 한 번 다음 법인목록 7일 주기 갱신 검사를
+  무한 반복한다 — 시험에서 진짜 ``time.sleep(3600)``으로 늘어지지 않게,
+  이 파일의 모든 시험은 기본으로 검사 함수를 1회만 부르고 멈추게 한다
+  (``_stop_manager_loop_promptly`` 참고).
+
+★ 예열은 스레드 완료를 결정적으로 기다리기 위해
+  ``runtime._prewarm_candidate_index``(진짜 구현을 그대로 호출하는 얇은
+  스파이)를 감싸 완료 이벤트를 받는다 — 카탈로그 함수를 가짜로 바꾼 것과는
+  별개로, 실제 운영 코드 경로는 전부 그대로 실행된다.
 """
 
 from __future__ import annotations
@@ -26,6 +31,23 @@ from src.features.pipeline import real
 from src.web import runtime
 from src.web.main import app
 
+# 이 파일의 모든 시험은 무한 루프인 색인 관리자 스레드를 «1회 검사 뒤 예외로
+# 멈추기» 패턴으로 끝낸다(데몬 스레드 안에서 던지므로 프로세스·다른 시험은
+# 안 죽는다). pytest는 그 처리되지 않은 스레드 예외를
+# PytestUnhandledThreadExceptionWarning으로 보고하는데, 이건 버그가 아니라
+# 의도한 정지 신호이므로 이 파일 전체에서 그 경고만 끈다.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore::pytest.PytestUnhandledThreadExceptionWarning"
+)
+
+
+class _ManagerLoopStoppedForTest(Exception):
+    """시험에서 색인 관리자 루프를 1회 검사 뒤 바로 멈추려고만 쓰는 표식.
+
+    데몬 스레드 안에서 던지므로 이 예외가 나도 프로세스·다른 시험은 안 죽는다
+    (파이썬 스레드의 처리되지 않은 예외는 stderr에만 찍히고 끝난다).
+    """
+
 
 @pytest.fixture(autouse=True)
 def _reset_candidate_index_globals(monkeypatch):
@@ -33,6 +55,26 @@ def _reset_candidate_index_globals(monkeypatch):
 
     monkeypatch.setattr(real, "_COMPANY_CANDIDATE_INDEX_SOURCE", None)
     monkeypatch.setattr(real, "_COMPANY_CANDIDATE_INDEX", None)
+
+
+@pytest.fixture(autouse=True)
+def _stop_manager_loop_promptly(monkeypatch):
+    """이 파일의 모든 시험에서 관리자 루프가 진짜 sleep(3600)로 늘어지지 않게 한다.
+
+    ``_candidate_index_manager_loop``는 예열 뒤 무한 루프를 돈다. 시험이
+    끝나도 데몬 스레드는 pytest 프로세스 안에서 계속 살아 있을 수 있으므로,
+    기본값으로 검사 함수가 불리자마자 예외를 던져 스레드를 끝낸다. 개별
+    시험이 ``runtime._run_candidate_catalog_refresh_check``를 자기 것으로
+    다시 monkeypatch하면(같은 ``monkeypatch`` 객체라 나중 설정이 이긴다)
+    그 시험의 설정이 이 기본값을 덮어쓴다.
+    """
+
+    def _default_stop(*_args, **_kwargs) -> None:
+        raise _ManagerLoopStoppedForTest
+
+    monkeypatch.setattr(
+        runtime, "_run_candidate_catalog_refresh_check", _default_stop
+    )
 
 
 def _spy_prewarm(monkeypatch) -> threading.Event:
@@ -90,15 +132,47 @@ def test_PIPELINE_demo면_예열을_돌리지_않는다(monkeypatch) -> None:
 def test_CANDIDATE_INDEX_PREWARM_0이면_real모드여도_예열을_돌리지_않는다(
     monkeypatch,
 ) -> None:
-    """끄기 플래그가 정확히 "0"이면 PIPELINE=real이어도 예열을 건너뛴다."""
+    """끄기 플래그가 정확히 "0"이면 PIPELINE=real이어도 예열·갱신 검사를 건너뛴다."""
 
     called = threading.Event()
+    check_called = threading.Event()
     monkeypatch.setattr(real, "_company_catalog", lambda: (called.set(), ())[1])
+    monkeypatch.setattr(
+        runtime,
+        "_run_candidate_catalog_refresh_check",
+        lambda: check_called.set(),
+    )
     monkeypatch.setenv(PIPELINE_ENV, PIPELINE_REAL)
     monkeypatch.setenv(runtime.CANDIDATE_INDEX_PREWARM_ENV, "0")
 
     with TestClient(app):
         assert not called.wait(timeout=0.3), "끄기 플래그를 켰는데 카탈로그 함수가 불렸다"
+        assert not check_called.wait(
+            timeout=0.1
+        ), "끄기 플래그를 켰는데 갱신 검사 함수가 불렸다"
+
+
+def test_예열_뒤_색인_관리자_루프가_갱신검사_함수를_부른다(monkeypatch) -> None:
+    """``_candidate_index_manager_loop``가 예열 다음 단계로 갱신 검사를 부르는지 본다.
+
+    루프 자체는 무한이므로, 검사 함수가 불리는 순간 신호를 남기고
+    ``_ManagerLoopStoppedForTest``를 던져 시험 안에서 결정적으로 끝낸다.
+    """
+
+    monkeypatch.setattr(real, "_company_catalog", lambda: (("00000001", "회사"),))
+    prewarm_done = _spy_prewarm(monkeypatch)
+    check_called = threading.Event()
+
+    def fake_check() -> None:
+        check_called.set()
+        raise _ManagerLoopStoppedForTest
+
+    monkeypatch.setattr(runtime, "_run_candidate_catalog_refresh_check", fake_check)
+    monkeypatch.setenv(PIPELINE_ENV, PIPELINE_REAL)
+
+    with TestClient(app):
+        assert prewarm_done.wait(timeout=5.0), "예열이 끝나지 않았다"
+        assert check_called.wait(timeout=5.0), "예열 뒤 갱신 검사 함수가 불리지 않았다"
 
 
 def test_예열이_실패해도_기동은_정상으로_열리고_비밀은_로그에_남지_않는다(

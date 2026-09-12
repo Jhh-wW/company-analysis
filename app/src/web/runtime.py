@@ -18,6 +18,7 @@ from src.core import clock
 from src.features.budget import spend_store, state_machine as budget_state_machine
 from src.features.admin_dashboard import store as dashboard_store
 from src.features.observability import constants as obs
+from src.features.pipeline.constants import CORPCODE_REFRESH_CHECK_INTERVAL_SEC
 from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline import engine_mode
 from src.features.provenance import sources as provenance_sources
@@ -43,12 +44,13 @@ logger = logging.getLogger(__name__)
 _STALE_DELIVERY_LINK_STOP_STEP = "server_restart_recovery"
 _STALE_DELIVERY_LINK_STOP_REASON = "server_restart_delivery_incomplete"
 
-#: 기동 때 후보 검색 색인을 미리 만들지 끌지 결정한다. 정확히 "0"일 때만 끈다
-#: (기본은 켜짐) — 이 모듈의 다른 on/off 환경변수와 같은 관례를 따른다.
-#: ``app/src/web/``에는 공용 ``constants.py``가 없고, 환경변수 상수는 각자
-#: 쓰는 모듈이 스스로 들고 있는 게 이 저장소의 기존 관례다(``evaluation_mode.py``의
-#: ``GOOGLE_PLACES_KEY_ENV`` 등) — 이 상수도 그 관례를 따라 실제 쓰는 곳(``_lifespan``)
-#: 옆에 둔다.
+#: 기동 때 후보 검색 색인을 미리 만들지, 이후 법인목록을 7일 주기로 자동
+#: 갱신할지를 함께 끈다. 정확히 "0"일 때만 끈다(기본은 켜짐) — 이 모듈의
+#: 다른 on/off 환경변수와 같은 관례를 따른다. ``app/src/web/``에는 공용
+#: ``constants.py``가 없고, 환경변수 상수는 각자 쓰는 모듈이 스스로 들고
+#: 있는 게 이 저장소의 기존 관례다(``evaluation_mode.py``의
+#: ``GOOGLE_PLACES_KEY_ENV`` 등) — 이 상수도 그 관례를 따라 실제 쓰는 곳
+#: (``_lifespan``) 옆에 둔다.
 CANDIDATE_INDEX_PREWARM_ENV: Final[str] = "CANDIDATE_INDEX_PREWARM"
 
 
@@ -418,6 +420,39 @@ def _prewarm_candidate_index() -> None:
     )
 
 
+def _run_candidate_catalog_refresh_check() -> None:
+    """법인목록 나이를 한 번 검사하고, 오래됐으면 갱신까지 시도한다.
+
+    ``real.refresh_business_candidate_catalog_if_stale()``가 이미 실패를
+    스스로 삼키고(다운로드·파싱 실패 등) 경고 로그만 남기지만, 그 함수가
+    예상 못 한 예외를 던지더라도(예: 디스크 꽉 참) 이 검사 한 번의 실패가
+    색인 관리자 루프 전체를 끝내면 안 되므로 한 겹 더 감싼다.
+    """
+    from src.features.pipeline.real import (  # noqa: PLC0415 — 순환 import 회피
+        refresh_business_candidate_catalog_if_stale,
+    )
+
+    try:
+        refresh_business_candidate_catalog_if_stale()
+    except Exception:  # noqa: BLE001 — 검사 실패로 관리자 루프가 죽으면 안 된다
+        logger.warning("법인목록 갱신 검사가 실패했습니다 — 다음 주기에 다시 시도합니다.")
+
+
+def _candidate_index_manager_loop() -> None:
+    """기동 예열 뒤, 법인목록이 오래되면 주기적으로 뒤에서 새로 받아 바꿔 끼운다.
+
+    데몬 스레드 하나가 프로세스가 끝날 때까지 무한히 돈다. 예열을 먼저 한
+    번 하고(첫 검색 대기시간 제거), 그다음부터
+    ``CORPCODE_REFRESH_CHECK_INTERVAL_SEC``마다 법인목록 나이를 검사한다 —
+    검사 자체는 파일 mtime만 읽으므로 싸고, 실제로 오래됐을 때만
+    DART를 부른다.
+    """
+    _prewarm_candidate_index()
+    while True:
+        _run_candidate_catalog_refresh_check()
+        time.sleep(CORPCODE_REFRESH_CHECK_INTERVAL_SEC)
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """시작 상태를 복구하고 종료 시 실행 중 조사를 안전하게 마감한다."""
@@ -455,15 +490,17 @@ async def _lifespan(_app: FastAPI):
     from src.web import job_runtime  # noqa: PLC0415
 
     job_runtime._start_job_runtime()
-    # 서비스가 열린 뒤(요청을 받을 수 있는 상태) 색인 예열을 시작한다. 데몬
-    # 스레드라 종료(``_begin_job_shutdown``) 중에도 프로세스 종료를 막지 않고,
-    # PIPELINE=real이 아니면(데모·시험) 외부 호출이 없으므로 돌리지 않는다.
+    # 서비스가 열린 뒤(요청을 받을 수 있는 상태) 색인 관리자를 시작한다 —
+    # 예열 한 번 + 이후 7일 주기 법인목록 갱신 검사(CANDIDATE_INDEX_PREWARM으로
+    # 둘 다 함께 켜고 끈다). 데몬 스레드라 종료(``_begin_job_shutdown``)
+    # 중에도 프로세스 종료를 막지 않고, PIPELINE=real이 아니면(데모·시험)
+    # 외부 호출이 없으므로 돌리지 않는다.
     if (
         os.environ.get(PIPELINE_ENV, "").strip().lower() == PIPELINE_REAL
         and _candidate_index_prewarm_enabled()
     ):
         threading.Thread(
-            target=_prewarm_candidate_index,
+            target=_candidate_index_manager_loop,
             name="candidate-index-prewarm",
             daemon=True,
         ).start()

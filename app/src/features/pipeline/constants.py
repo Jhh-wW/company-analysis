@@ -10,6 +10,16 @@ DART_SUCCESS_STATUS: Final[str] = "000"
 #: 끄므로, 이 값은 단일 호출이 서버 worker를 무한정 점유하지 못하게 한다.
 ANTHROPIC_TIMEOUT_SEC: Final[float] = 180.0
 
+#: DART 법인목록(corpCode)을 몇 일마다 다시 받을지. ``download_corpcode``는
+#: 파일이 있으면 영원히 재사용하므로(운영 영속 디스크에서는 최초 배포 이후
+#: 한 번도 안 바뀜), 사용자 결정(2026-09-11)으로 7일 주기 자동 갱신을 둔다.
+#: 실측(로컬 사본, modify_date 기준): 하루 평균 17건, 7일 96건, 30일 542건.
+CORPCODE_REFRESH_INTERVAL_DAYS: Final[int] = 7
+
+#: 기동 색인 관리자 루프가 법인목록 나이를 얼마 만에 한 번씩 다시 검사할지.
+#: 검사 자체는 파일 mtime만 읽으므로 싸다 — 갱신 여부만 이 주기로 재확인한다.
+CORPCODE_REFRESH_CHECK_INTERVAL_SEC: Final[float] = 3600.0
+
 # 뉴스에서 동명이의어·계열사·제품을 구분할 공식 문맥의 상한이다.
 NEWS_IDENTITY_CONTEXT_CHARS: Final[int] = 4_000
 NEWS_IDENTITY_FRAGMENT_CHARS: Final[int] = 600

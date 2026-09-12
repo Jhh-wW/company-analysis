@@ -246,7 +246,11 @@ from src.features.writer import logic as writer_logic
 from src.features.writer import verify as writer_verify
 from src.features.grading.logic import is_accounting_policy, is_table_dump
 from src.features.cost_tracking.store import AiCostEvent
-from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC, DART_SUCCESS_STATUS
+from src.features.pipeline.constants import (
+    ANTHROPIC_TIMEOUT_SEC,
+    CORPCODE_REFRESH_INTERVAL_DAYS,
+    DART_SUCCESS_STATUS,
+)
 from src.features.pipeline.candidate_profile_constants import (
     DART_PROFILE_ENRICHMENT_LIMIT,
     DART_PROFILE_NO_DATA_STATUS,
@@ -1493,6 +1497,70 @@ def _comparison_source_failure_is_transient(error: BaseException) -> bool:
     )
 
 
+#: dart_client.CORPCODE_XML_FILENAME과 반드시 같은 이름이어야 한다. 이 값을
+#: 다시 정의하는 이유는, 이 파일이 analysis_engine을 기동 시점에 import하지
+#: 않는 격리 원칙(``_engine()`` 참고 — anthropic·presidio 같은 무거운 의존성
+#: 없이도 데모 화면이 떠야 한다) 때문이다. dart_client 모듈을 직접 import하지
+#: 않고, 요청마다 독립 namespace로 불러오는 ``_engine()``이 돌려주는 객체의
+#: ``CORPCODE_DIR``에 이 이름을 붙여서만 정본 경로를 계산한다.
+_CORPCODE_XML_FILENAME: Final[str] = "CORPCODE.xml"
+
+#: mtime 나이 계산에서만 쓰는 환산 상수(매직 넘버 금지).
+_SECONDS_PER_DAY: Final[float] = 86_400.0
+
+
+@dataclass(frozen=True)
+class _CompanyCatalog:
+    """corpCode.xml 한 벌을 통째로 담는 불변 묶음.
+
+    7일 주기 갱신이 이 객체를 통째로 새로 만들고 통째로 스왑한다. 전역 dict를
+    제자리에서 clear/update하면 갱신 도중 다른 스레드가 «새 corp_code는
+    있는데 metadata는 아직 옛 값» 같은 절반만 바뀐 상태를 읽을 수 있어서다.
+    """
+
+    records: tuple[DartCompanyRecord, ...]
+    compat_pairs: tuple[tuple[str, str], ...]
+    metadata: dict[str, tuple[str, str]]
+    english_names: dict[str, str]
+
+
+def _load_company_catalog(xml_path: Path) -> _CompanyCatalog:
+    """corpCode.xml 하나를 읽어 순수 데이터 객체로 돌려준다(전역 미접촉).
+
+    기동 때 처음 읽을 때도, 7일 주기 갱신이 새로 받은 임시 XML을 스왑 전에
+    미리 검증·파싱할 때도 이 함수 하나만 거친다 — 파싱 규칙이 두 곳으로
+    갈라지지 않게 한다.
+    """
+    records = parse_dart_company_records(xml_path)
+    return _CompanyCatalog(
+        records=records,
+        compat_pairs=tuple(
+            (record.corp_code, record.corp_name) for record in records
+        ),
+        metadata={
+            record.corp_code: (record.stock_code, record.modify_date)
+            for record in records
+        },
+        english_names={
+            record.corp_code: record.corp_eng_name for record in records
+        },
+    )
+
+
+def _build_company_candidate_index(
+    records: Iterable[DartCompanyRecord],
+):
+    """레코드 목록으로 후보 검색 색인을 새로 만든다(전역 미접촉, 순수 함수)."""
+
+    return build_dart_company_index(records)
+
+
+#: 주기 갱신이 락 밖에서 새 catalog를 이미 다 만들어 둔 경우에만 쓴다.
+#: ``_company_catalog()``가 이 값이 있으면 재다운로드·재파싱 없이 그대로
+#: 반환해, "락 보유 시간은 스왑뿐이어야 한다"는 요구를 지킨다.
+_PRELOADED_CATALOG: _CompanyCatalog | None = None
+
+
 @lru_cache(maxsize=1)
 def _company_catalog() -> tuple[tuple[str, str], ...]:
     """전자공시 전체 법인의 기존 (고유번호, 표시명) 호환 목록.
@@ -1500,27 +1568,25 @@ def _company_catalog() -> tuple[tuple[str, str], ...]:
     실제 정본은 같은 XML에서 읽은 immutable 5-field record이며, 이 2-tuple은
     기존 1판 exact-name index 계약에만 남긴다.
     """
-    engine = _engine()
-    # 기존 real 개발 실행은 analysis_engine/.env bootstrap에 의존할 수 있다.
-    # 실시간 평가 launcher는 ANALYSIS_ENGINE_DISABLE_DOTENV=1이라 이 호출 자체가
-    # no-op이고, 명시 전달된 환경변수만 사용한다.
-    engine.load_env()
-    xml = engine.download_corpcode(engine.CORPCODE_DIR, engine.UsageCounter())
-    records = parse_dart_company_records(xml)
-    global _COMPANY_CATALOG_RECORDS
-    _COMPANY_CATALOG_RECORDS = records
-    _COMPANY_CATALOG_METADATA.clear()
-    _COMPANY_CATALOG_METADATA.update(
-        {
-            record.corp_code: (record.stock_code, record.modify_date)
-            for record in records
-        }
-    )
-    _COMPANY_CATALOG_ENGLISH_NAMES.clear()
-    _COMPANY_CATALOG_ENGLISH_NAMES.update(
-        {record.corp_code: record.corp_eng_name for record in records}
-    )
-    return tuple((record.corp_code, record.corp_name) for record in records)
+    global _COMPANY_CATALOG_RECORDS, _COMPANY_CATALOG_METADATA
+    global _COMPANY_CATALOG_ENGLISH_NAMES, _PRELOADED_CATALOG
+    if _PRELOADED_CATALOG is not None:
+        catalog = _PRELOADED_CATALOG
+        _PRELOADED_CATALOG = None
+    else:
+        engine = _engine()
+        # 기존 real 개발 실행은 analysis_engine/.env bootstrap에 의존할 수 있다.
+        # 실시간 평가 launcher는 ANALYSIS_ENGINE_DISABLE_DOTENV=1이라 이 호출 자체가
+        # no-op이고, 명시 전달된 환경변수만 사용한다.
+        engine.load_env()
+        xml = engine.download_corpcode(engine.CORPCODE_DIR, engine.UsageCounter())
+        catalog = _load_company_catalog(xml)
+    _COMPANY_CATALOG_RECORDS = catalog.records
+    # 제자리 clear/update 대신 새 dict 객체로 재바인딩한다 — 갱신 스레드가
+    # 같은 dict를 손대는 동안 다른 스레드가 절반만 바뀐 값을 읽지 않게.
+    _COMPANY_CATALOG_METADATA = catalog.metadata
+    _COMPANY_CATALOG_ENGLISH_NAMES = catalog.english_names
+    return catalog.compat_pairs
 
 
 def _records_from_candidate_catalog(
@@ -1578,7 +1644,7 @@ def _company_candidate_index():
     with _COMPANY_CANDIDATE_INDEX_LOCK:
         catalog = _company_catalog()
         if _COMPANY_CANDIDATE_INDEX_SOURCE is not catalog:
-            _COMPANY_CANDIDATE_INDEX = build_dart_company_index(
+            _COMPANY_CANDIDATE_INDEX = _build_company_candidate_index(
                 _records_from_candidate_catalog(catalog)
             )
             _COMPANY_CANDIDATE_INDEX_SOURCE = catalog
@@ -1604,6 +1670,108 @@ def prewarm_business_candidate_index() -> int:
     """
     _company_candidate_index()
     return len(_COMPANY_CATALOG_RECORDS)
+
+
+def _corpcode_age_days(xml_path: Path) -> Optional[float]:
+    """정본 파일의 mtime 기준 나이(일). 파일이 없으면 None(=무조건 갱신 대상)."""
+
+    try:
+        mtime = xml_path.stat().st_mtime
+    except OSError:
+        return None
+    return (time.time() - mtime) / _SECONDS_PER_DAY
+
+
+def _discard_stale_refresh_temp_file(temp_path: Path) -> None:
+    """검증에 실패한 갱신용 임시 파일을 지운다 — 다음 검사 주기에 방해 안 되게."""
+
+    try:
+        temp_path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("법인목록 갱신용 임시 파일을 지우지 못했습니다")
+
+
+def refresh_business_candidate_catalog_if_stale() -> bool:
+    """법인목록이 ``CORPCODE_REFRESH_INTERVAL_DAYS``보다 오래됐으면 뒤에서 새로 받아 바꿔 끼운다.
+
+    ``download_corpcode``는 파일이 있으면 영원히 재사용한다(운영 영속
+    디스크에서는 최초 배포 이후 한 번도 안 바뀐다). 이 함수가 그 자리를
+    메운다 — 사용자 결정(2026-09-11)으로 주기는 7일이다.
+
+    호출 순서가 «락 밖에서 다 만들고, 락 안에서는 스왑만»을 지킨다:
+      1) (락 밖) mtime만 본다 — 안 오래됐으면 바로 반환, DART를 부르지 않는다.
+      2) (락 밖) ``download_corpcode_fresh``로 새 XML을 임시 파일에 받는다
+         (정본 ``CORPCODE.xml``은 그대로 둔다).
+      3) (락 밖) 그 임시 파일을 파싱해 새 catalog·색인을 미리 다 만든다.
+      4) (락 안, 스왑만) ``os.replace``로 정본을 바꾸고, catalog 전역
+         3개를 새 객체로 재바인딩하고(제자리 clear/update 금지 — 다른
+         스레드가 읽는 중일 수 있다), ``_company_catalog`` lru_cache를
+         비운 뒤 ``_PRELOADED_CATALOG``를 거쳐 재계산 없이 다시 채운다.
+
+    실패 격리: 다운로드 실패(DART 장애·키 오류·한도)·파싱 실패·레코드 0건은
+    모두 옛 파일·옛 색인을 그대로 두고 경고 로그 1줄만 남긴 뒤 다음 검사
+    주기(``CORPCODE_REFRESH_CHECK_INTERVAL_SEC``)에 재시도한다. 이 함수는
+    예외를 밖으로 던지지 않는다 — 호출자(``src.web.runtime``의 색인 관리자
+    루프)가 죽지 않고 계속 돌게 하기 위해서다.
+
+    Returns:
+        실제로 정본을 바꿔 끼웠으면 True. 아직 안 오래됐거나, 이번 시도가
+        실패해 옛 것을 그대로 썼으면 False.
+    """
+    global _COMPANY_CATALOG_RECORDS, _COMPANY_CATALOG_METADATA
+    global _COMPANY_CATALOG_ENGLISH_NAMES, _PRELOADED_CATALOG
+    global _COMPANY_CANDIDATE_INDEX_SOURCE, _COMPANY_CANDIDATE_INDEX
+    engine = _engine()
+    xml_path = Path(engine.CORPCODE_DIR) / _CORPCODE_XML_FILENAME
+    age_days = _corpcode_age_days(xml_path)
+    if age_days is not None and age_days < CORPCODE_REFRESH_INTERVAL_DAYS:
+        return False
+
+    started = time.monotonic()
+    try:
+        engine.load_env()
+        temp_path = engine.download_corpcode_fresh(
+            engine.CORPCODE_DIR, engine.UsageCounter()
+        )
+    except Exception:  # noqa: BLE001 — 키·URL·스택을 로그에 남기지 않는다
+        logger.warning("법인목록 갱신 다운로드가 실패했습니다 — 기존 목록을 계속 씁니다")
+        return False
+
+    try:
+        new_catalog = _load_company_catalog(temp_path)
+    except Exception:  # noqa: BLE001 — 손상된 XML도 서비스를 막지 않는다
+        logger.warning("법인목록 갱신 XML을 읽지 못했습니다 — 기존 목록을 계속 씁니다")
+        _discard_stale_refresh_temp_file(temp_path)
+        return False
+
+    if not new_catalog.records:
+        logger.warning("법인목록 갱신 응답에 레코드가 없어 기존 목록을 계속 씁니다")
+        _discard_stale_refresh_temp_file(temp_path)
+        return False
+
+    new_index = _build_company_candidate_index(new_catalog.records)
+    previous_count = len(_COMPANY_CATALOG_RECORDS)
+
+    with _COMPANY_CANDIDATE_INDEX_LOCK:
+        # 락 보유 구간은 여기부터 락이 풀릴 때까지 — 파일 스왑과 전역 재바인딩뿐이다.
+        os.replace(temp_path, xml_path)
+        _PRELOADED_CATALOG = new_catalog
+        _company_catalog.cache_clear()
+        # _PRELOADED_CATALOG를 그대로 재사용하므로(O(1)) 여기서 재다운로드·재파싱이
+        # 일어나지 않는다 — _company_catalog() 본문의 분기를 참고.
+        refreshed_compat_pairs = _company_catalog()
+        _COMPANY_CANDIDATE_INDEX = new_index
+        _COMPANY_CANDIDATE_INDEX_SOURCE = refreshed_compat_pairs
+
+    elapsed_sec = time.monotonic() - started
+    logger.info(
+        "법인목록 갱신 완료 %.1f초, %d건(이전 %d건), 파일 나이 %s일",
+        elapsed_sec,
+        len(new_catalog.records),
+        previous_count,
+        "?" if age_days is None else f"{age_days:.0f}",
+    )
+    return True
 
 
 @lru_cache(maxsize=1)

@@ -217,6 +217,12 @@ CORPCODE_XML_MAX_BYTES = 64 * 1024 * 1024
 CORPCODE_ZIP_TOTAL_UNCOMPRESSED_MAX_BYTES = 64 * 1024 * 1024
 CORPCODE_ZIP_MAX_MEMBERS = 8
 CORPCODE_ZIP_CENTRAL_DIRECTORY_MAX_BYTES = 256 * 1024
+# 정본·임시 파일 이름을 한 곳에서만 정의한다 — download_corpcode(정본, 이미
+# 있으면 재사용)와 download_corpcode_fresh(항상 새로 받아 임시 파일에 쓰기)가
+# 같은 이름 규칙을 따라야 호출자(real.py의 주기 갱신)가 os.replace로 둘을
+# 맞바꿀 수 있다.
+CORPCODE_XML_FILENAME = "CORPCODE.xml"
+CORPCODE_XML_TEMP_FILENAME = "CORPCODE.xml.new"
 DOCUMENT_ZIP_RESPONSE_MAX_BYTES = 32 * 1024 * 1024
 DOCUMENT_MEMBER_MAX_BYTES = 64 * 1024 * 1024
 DOCUMENT_ZIP_TOTAL_UNCOMPRESSED_MAX_BYTES = 128 * 1024 * 1024
@@ -1051,14 +1057,15 @@ def _download_document_uncached(
     return out_path
 
 
-def download_corpcode(dest_dir: Path, counter: UsageCounter | None = None) -> Path:
-    """corpCode.xml(전체 회사 고유번호 목록)을 내려받아 푼다. 이미 있으면 재사용 — 호출 절약.
+def _fetch_corpcode_xml_bytes(counter: UsageCounter | None = None) -> bytes:
+    """DART corpCode ZIP을 내려받아 검증하고 안의 XML 바이트를 돌려준다.
+
+    ``download_corpcode``(있으면 재사용)와 ``download_corpcode_fresh``(항상
+    새로 받기)가 이 검증 로직을 공유한다 — zip 크기 상한·멤버 수·오류 응답
+    판정을 한 곳에서만 정의해 두 함수가 서로 다른 경계로 갈라지지 않게 한다.
 
     오류 응답(잘못된 키 등)은 zip이 아니라 XML로 오므로, 그 경우 상태 코드만 노출한다(키 노출 금지).
     """
-    xml_path = dest_dir / "CORPCODE.xml"
-    if xml_path.exists():
-        return xml_path
     key = api_key()
     query = urllib.parse.urlencode({"crtfc_key": key})
     (counter or UsageCounter()).tick()
@@ -1089,15 +1096,44 @@ def download_corpcode(dest_dir: Path, counter: UsageCounter | None = None) -> Pa
             member_max_count=CORPCODE_ZIP_MAX_MEMBERS,
             archive_label="corpCode ZIP",
         )
-        corpcode_infos = [info for info in files if info.filename == "CORPCODE.xml"]
+        corpcode_infos = [
+            info for info in files if info.filename == CORPCODE_XML_FILENAME
+        ]
         if len(corpcode_infos) != 1:
             raise DartResponseError("corpCode ZIP의 필수 항목 구성이 올바르지 않습니다")
-        corpcode_xml = _read_zip_member(
+        return _read_zip_member(
             archive,
             corpcode_infos[0],
             max_bytes=CORPCODE_XML_MAX_BYTES,
             archive_label="corpCode ZIP",
         )
+
+
+def download_corpcode(dest_dir: Path, counter: UsageCounter | None = None) -> Path:
+    """corpCode.xml(전체 회사 고유번호 목록)을 내려받아 푼다. 이미 있으면 재사용 — 호출 절약.
+
+    나이는 보지 않는다 — 주기적으로 새로 받고 싶으면 ``download_corpcode_fresh``를
+    따로 쓴다(이 함수의 «있으면 재사용» 계약은 기존 호출부를 위해 그대로 둔다).
+    """
+    xml_path = dest_dir / CORPCODE_XML_FILENAME
+    if xml_path.exists():
+        return xml_path
+    corpcode_xml = _fetch_corpcode_xml_bytes(counter)
     dest_dir.mkdir(parents=True, exist_ok=True)
     xml_path.write_bytes(corpcode_xml)
     return xml_path
+
+
+def download_corpcode_fresh(dest_dir: Path, counter: UsageCounter | None = None) -> Path:
+    """corpCode.xml을 기존 파일 유무와 무관하게 항상 새로 내려받는다.
+
+    정본 ``CORPCODE.xml``은 건드리지 않고, 검증까지 끝낸 내용을 같은 폴더의
+    임시 파일(``CORPCODE.xml.new``)에 원자적으로 써서 그 경로를 돌려준다.
+    ``os.replace``로 정본과 맞바꾸는 것은 호출자(주기 갱신 스레드)의 책임이다
+    — 그래야 호출자가 자기 락 범위 안에서만 스왑해, 다른 스레드가 절반만
+    바뀐 정본을 읽는 일이 없다.
+    """
+    corpcode_xml = _fetch_corpcode_xml_bytes(counter)
+    temp_path = dest_dir / CORPCODE_XML_TEMP_FILENAME
+    _write_private_bytes_atomic(temp_path, corpcode_xml)
+    return temp_path

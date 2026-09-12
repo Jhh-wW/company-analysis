@@ -4,17 +4,22 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import threading
 import time
 from pathlib import Path
 
 import pytest
 
+from src.features.business_candidate.dart_identity import (
+    generate_dart_company_matches,
+)
 from src.features.pipeline import real
 from src.features.pipeline.candidate_profile_constants import (
     DART_PROFILE_ENRICHMENT_LIMIT,
     DART_PROFILE_WORKERS,
 )
+from src.features.pipeline.constants import CORPCODE_REFRESH_INTERVAL_DAYS
 from src.features.pipeline.port import UserInput
 from src.shared.company_identity import verified_official_company_names_equivalent
 
@@ -584,6 +589,253 @@ def test_기동_예열_진입점은_첫_검색과_같은_색인을_채운다(mon
     assert real._company_candidate_index() is real._COMPANY_CANDIDATE_INDEX
     assert real._COMPANY_CANDIDATE_INDEX_SOURCE is catalog
     assert count == 0  # _COMPANY_CATALOG_RECORDS는 fake _company_catalog가 채우지 않는다
+
+
+# ── 법인목록 7일 주기 자동 갱신 ────────────────────────────
+
+
+def _corpcode_xml(entries: list[tuple[str, str]]) -> bytes:
+    """corp_code·corp_name 쌍만으로 최소 유효 corpCode.xml 바이트를 만든다."""
+
+    items = "".join(
+        f"<list><corp_code>{code}</corp_code><corp_name>{name}</corp_name>"
+        "<corp_eng_name></corp_eng_name><stock_code></stock_code>"
+        "<modify_date>20260101</modify_date></list>"
+        for code, name in entries
+    )
+    return f"<result>{items}</result>".encode("utf-8")
+
+
+class _FakeRefreshEngine:
+    """corpCode 다운로드만 흉내 내는 가짜 엔진 — 네트워크 없이 파일로만 오간다."""
+
+    class UsageCounter:
+        pass
+
+    def __init__(
+        self,
+        corpcode_dir: Path,
+        *,
+        fresh_xml: bytes | None = None,
+        fail: Exception | None = None,
+    ):
+        self.CORPCODE_DIR = corpcode_dir
+        self._fresh_xml = fresh_xml
+        self._fail = fail
+        self.fresh_calls = 0
+
+    def load_env(self):
+        return None
+
+    def download_corpcode(self, dest_dir, _counter):
+        # 정본이 이미 있다고 가정한다(시험이 미리 파일을 써 둔다) — 운영
+        # download_corpcode의 «있으면 재사용» 계약과 같은 모양이다.
+        return Path(dest_dir) / "CORPCODE.xml"
+
+    def download_corpcode_fresh(self, dest_dir, _counter):
+        self.fresh_calls += 1
+        if self._fail is not None:
+            raise self._fail
+        temp_path = Path(dest_dir) / "CORPCODE.xml.new"
+        temp_path.write_bytes(self._fresh_xml)
+        return temp_path
+
+
+def _clear_catalog_globals() -> None:
+    real._company_catalog.cache_clear()
+    real._COMPANY_CANDIDATE_INDEX_SOURCE = None
+    real._COMPANY_CANDIDATE_INDEX = None
+    real._PRELOADED_CATALOG = None
+    real._COMPANY_CATALOG_RECORDS = ()
+    real._COMPANY_CATALOG_METADATA = {}
+    real._COMPANY_CATALOG_ENGLISH_NAMES = {}
+
+
+@pytest.fixture
+def _fresh_catalog_state():
+    """7일 주기 갱신 시험이 lru_cache·전역 catalog 상태를 다른 시험과 안 섞이게 한다."""
+
+    _clear_catalog_globals()
+    yield
+    _clear_catalog_globals()
+
+
+def test_법인목록_나이가_6점9일이면_갱신_안하고_7점1일이면_한다(
+    tmp_path, monkeypatch, _fresh_catalog_state
+):
+    """``refresh_business_candidate_catalog_if_stale``의 나이 경계를 실제 함수로 본다."""
+
+    assert CORPCODE_REFRESH_INTERVAL_DAYS == 7, (
+        "이 시험의 6.9일/7.1일 리터럴은 7일 주기를 가정한다 — 상수가 바뀌면 "
+        "이 시험의 리터럴도 함께 맞춘다"
+    )
+    corpcode_dir = tmp_path / "corpcode"
+    corpcode_dir.mkdir()
+    xml_path = corpcode_dir / "CORPCODE.xml"
+    xml_path.write_bytes(_corpcode_xml([("00000001", "옛회사")]))
+
+    fake_engine = _FakeRefreshEngine(
+        corpcode_dir, fresh_xml=_corpcode_xml([("00000002", "새회사")])
+    )
+    monkeypatch.setattr(real, "_engine", lambda: fake_engine)
+
+    now = time.time()
+    six_point_nine_days_ago = now - 6.9 * 86_400
+    os.utime(xml_path, (six_point_nine_days_ago, six_point_nine_days_ago))
+    assert real.refresh_business_candidate_catalog_if_stale() is False
+    assert fake_engine.fresh_calls == 0
+
+    seven_point_one_days_ago = now - 7.1 * 86_400
+    os.utime(xml_path, (seven_point_one_days_ago, seven_point_one_days_ago))
+    assert real.refresh_business_candidate_catalog_if_stale() is True
+    assert fake_engine.fresh_calls == 1
+
+
+def test_법인목록_갱신_사이클은_옛회사를_빼고_새회사를_찾으며_임시파일을_안남긴다(
+    tmp_path, monkeypatch, _fresh_catalog_state
+):
+    """갱신 뒤 ``_company_candidate_index()``가 새 회사를 찾고 옛 회사는 못 찾는다.
+
+    ``search_business_candidates``가 실제로 쓰는 함수
+    (``generate_dart_company_matches`` + ``_company_candidate_index()``)를
+    그대로 불러 단정한다 — 운영 함수 그대로 통과.
+    """
+
+    corpcode_dir = tmp_path / "corpcode"
+    corpcode_dir.mkdir()
+    xml_path = corpcode_dir / "CORPCODE.xml"
+    xml_path.write_bytes(_corpcode_xml([("00000001", "옛회사이름")]))
+    stale_mtime = time.time() - 8 * 86_400
+    os.utime(xml_path, (stale_mtime, stale_mtime))
+
+    fake_engine = _FakeRefreshEngine(
+        corpcode_dir, fresh_xml=_corpcode_xml([("00000002", "새회사이름")])
+    )
+    monkeypatch.setattr(real, "_engine", lambda: fake_engine)
+
+    old_index = real._company_candidate_index()
+    old_matches = generate_dart_company_matches(old_index, "옛회사이름", limit=5)
+    assert any(match.record.corp_name == "옛회사이름" for match in old_matches)
+
+    replaced = real.refresh_business_candidate_catalog_if_stale()
+
+    assert replaced is True
+    assert fake_engine.fresh_calls == 1
+    assert not (corpcode_dir / "CORPCODE.xml.new").exists()
+    assert xml_path.read_bytes() == _corpcode_xml([("00000002", "새회사이름")])
+
+    new_index = real._company_candidate_index()
+    assert new_index is not old_index
+    new_matches = generate_dart_company_matches(new_index, "새회사이름", limit=5)
+    assert any(match.record.corp_name == "새회사이름" for match in new_matches)
+    stale_matches = generate_dart_company_matches(new_index, "옛회사이름", limit=5)
+    assert not any(match.record.corp_name == "옛회사이름" for match in stale_matches)
+
+
+def test_스왑_전까지는_옛_색인이_계속_서비스된다(
+    tmp_path, monkeypatch, _fresh_catalog_state
+):
+    """락 밖에서 내려받는 동안, 다른 스레드가 색인을 불러도 옛 색인이 나온다."""
+
+    corpcode_dir = tmp_path / "corpcode"
+    corpcode_dir.mkdir()
+    xml_path = corpcode_dir / "CORPCODE.xml"
+    xml_path.write_bytes(_corpcode_xml([("00000001", "옛회사")]))
+    stale_mtime = time.time() - 8 * 86_400
+    os.utime(xml_path, (stale_mtime, stale_mtime))
+
+    download_entered = threading.Event()
+    release_download = threading.Event()
+
+    class _BlockingEngine(_FakeRefreshEngine):
+        def download_corpcode_fresh(self, dest_dir, counter):
+            download_entered.set()
+            assert release_download.wait(timeout=2.0), "시험이 다운로드를 안 풀어줬다"
+            return super().download_corpcode_fresh(dest_dir, counter)
+
+    fake_engine = _BlockingEngine(
+        corpcode_dir, fresh_xml=_corpcode_xml([("00000002", "새회사")])
+    )
+    monkeypatch.setattr(real, "_engine", lambda: fake_engine)
+
+    old_index = real._company_candidate_index()
+
+    refresh_thread = threading.Thread(
+        target=real.refresh_business_candidate_catalog_if_stale
+    )
+    refresh_thread.start()
+    assert download_entered.wait(timeout=2.0), "갱신 스레드가 다운로드에 들어가지 않았다"
+
+    # 다운로드가 아직 안 끝났다 — 락 밖이므로 다른 스레드는 안 막히고 옛 색인을 받는다.
+    during_index = real._company_candidate_index()
+    assert during_index is old_index
+
+    release_download.set()
+    refresh_thread.join(timeout=2.0)
+    assert not refresh_thread.is_alive()
+
+    after_index = real._company_candidate_index()
+    assert after_index is not old_index
+
+
+def test_다운로드가_실패하면_파일과_색인이_그대로고_비밀이_로그에_없다(
+    tmp_path, monkeypatch, caplog, _fresh_catalog_state
+):
+    """실패 격리: 옛 파일·옛 색인을 그대로 쓰고, 경고 로그에 비밀이 없다."""
+
+    corpcode_dir = tmp_path / "corpcode"
+    corpcode_dir.mkdir()
+    xml_path = corpcode_dir / "CORPCODE.xml"
+    xml_path.write_bytes(_corpcode_xml([("00000001", "옛회사")]))
+    stale_mtime = time.time() - 8 * 86_400
+    os.utime(xml_path, (stale_mtime, stale_mtime))
+
+    secret = "절대-로그에-남으면-안되는-DART-키-문자열"
+    fake_engine = _FakeRefreshEngine(corpcode_dir, fail=RuntimeError(secret))
+    monkeypatch.setattr(real, "_engine", lambda: fake_engine)
+
+    old_index = real._company_candidate_index()
+    old_bytes = xml_path.read_bytes()
+
+    with caplog.at_level("WARNING", logger=real.logger.name):
+        replaced = real.refresh_business_candidate_catalog_if_stale()
+
+    assert replaced is False
+    assert xml_path.read_bytes() == old_bytes
+    assert real._company_candidate_index() is old_index
+    assert secret not in caplog.text
+    assert not (corpcode_dir / "CORPCODE.xml.new").exists()
+
+
+@pytest.mark.parametrize(
+    ("fresh_xml", "label"),
+    [
+        (b"<not-well-formed", "파싱실패"),
+        (b"<result></result>", "레코드0건"),
+    ],
+)
+def test_파싱실패_또는_레코드0건이면_바꿔끼우지_않는다(
+    tmp_path, monkeypatch, _fresh_catalog_state, fresh_xml, label
+):
+    corpcode_dir = tmp_path / "corpcode"
+    corpcode_dir.mkdir()
+    xml_path = corpcode_dir / "CORPCODE.xml"
+    xml_path.write_bytes(_corpcode_xml([("00000001", "옛회사")]))
+    stale_mtime = time.time() - 8 * 86_400
+    os.utime(xml_path, (stale_mtime, stale_mtime))
+
+    fake_engine = _FakeRefreshEngine(corpcode_dir, fresh_xml=fresh_xml)
+    monkeypatch.setattr(real, "_engine", lambda: fake_engine)
+
+    old_index = real._company_candidate_index()
+    old_bytes = xml_path.read_bytes()
+
+    replaced = real.refresh_business_candidate_catalog_if_stale()
+
+    assert replaced is False, label
+    assert xml_path.read_bytes() == old_bytes, label
+    assert real._company_candidate_index() is old_index, label
+    assert not (corpcode_dir / "CORPCODE.xml.new").exists(), label
 
 
 # ── 후보 AI 보조 재정렬 ask ────────────────────────────────
