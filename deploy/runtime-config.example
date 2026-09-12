@@ -7,6 +7,12 @@ DEPLOYMENT_PLATFORM=local
 DEPLOYMENT_RUNTIME_CONTRACT=local-web-v1
 FORWARDED_ALLOW_IPS=127.0.0.1
 
+# [동시 수집 선택] PARALLEL_COLLECT가 정확히 1일 때만 경쟁사 비교와 뉴스 검색
+# 스냅샷을 동시에 돌립니다. 결과와 캐시 열쇠는 같고 순서만 바뀝니다.
+# 배포(render.yaml)와 같은 1로 둡니다 — 로컬에서 운영과 다른 갈래를 돌면
+# 동시 실행에서만 나는 문제를 로컬에서 영영 못 봅니다. 끄려면 0으로 바꿉니다.
+PARALLEL_COLLECT=1
+
 # 공개 배포 입력 예시다. Render Docker는 검증 가능한 ingress peer CIDR이 없어
 # 어떤 값을 채워도 BLOCKED이며, Kubernetes 역시 signed canary verifier가 설치되기
 # 전에는 BLOCKED다. 아래 SHA-256 문자열만으로는 운영 증명이 되지 않는다.

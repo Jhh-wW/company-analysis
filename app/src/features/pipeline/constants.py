@@ -54,3 +54,7 @@ PROVIDER_MONTHLY_SPEND_CATEGORY: Final[str] = "organization_monthly_spend_cap"
 #: 없어서 따로 둔다. 화면 단계 목록(`core.constants.PROGRESS_STEPS`)에는
 #: 넣지 않는다 — 진단 전용이지 사용자에게 보여줄 화면 문구가 아니다.
 STAGE_BOOT: Final[str] = "시동"
+
+#: 본조사에서 «경쟁사 비교»와 «뉴스 검색 스냅샷»을 동시에 돌릴 때 쓰는 worker 수.
+#: 서로 결과를 읽지 않는 갈래가 정확히 둘이라 둘이다 — 늘려도 돌릴 일이 없다.
+PARALLEL_COLLECT_BRANCH_WORKERS: Final[int] = 2
