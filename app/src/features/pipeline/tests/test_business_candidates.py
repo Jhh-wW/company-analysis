@@ -1042,6 +1042,114 @@ def test_os_replace가_실패하면_임시파일을_지우고_옛것을_유지�
     ), "os.replace 실패 WARNING 로그가 남지 않았다"
 
 
+def test_갱신_중_다른_스레드가_catalog를_불러도_preload가_먼저_소비돼_재파싱하지_않는다(
+    tmp_path, monkeypatch, _fresh_catalog_state
+):
+    """2차 검토 신규 P2-a: ``_PRELOADED_CATALOG``를 ``cache_clear()`` «앞»에 둬야 하는 이유.
+
+    색인 생성(운영에서 약 16초)이 도는 동안 락 밖 소비자가
+    ``_company_catalog()``를 불러도 이미 놓인 preload를 그대로 받아야
+    한다 — 순서가 바뀌면(먼저 캐시를 비우고 나중에 preload를 놓으면)
+    그 소비자가 30MB를 다시 파싱하고, 그 결과가 lru_cache를 선점해
+    이 갱신의 preload가 끝내 소비되지 못한 채 catalog 한 벌(63.5MB)을
+    다음 주기까지 누수시켰다(2차 검토 실측).
+    """
+
+    corpcode_dir = tmp_path / "corpcode"
+    corpcode_dir.mkdir()
+    xml_path = corpcode_dir / "CORPCODE.xml"
+    xml_path.write_bytes(_corpcode_xml([("00000001", "옛회사")]))
+    stale_mtime = time.time() - 8 * 86_400
+    os.utime(xml_path, (stale_mtime, stale_mtime))
+
+    fake_engine = _FakeRefreshEngine(
+        corpcode_dir, fresh_xml=_corpcode_xml([("00000002", "새회사")])
+    )
+    monkeypatch.setattr(real, "_engine", lambda: fake_engine)
+
+    real._company_candidate_index()  # 옛 세대를 먼저 만들어 둔다.
+
+    parse_calls: list[int] = []
+    original_load = real._load_company_catalog
+
+    def counting_load(xml_path_arg):
+        parse_calls.append(1)
+        return original_load(xml_path_arg)
+
+    monkeypatch.setattr(real, "_load_company_catalog", counting_load)
+
+    building_started = threading.Event()
+    release_building = threading.Event()
+    original_builder = real._build_company_candidate_index
+
+    def slow_builder(records):
+        building_started.set()
+        assert release_building.wait(timeout=2.0), "시험 스레드 조율에 실패했다"
+        return original_builder(records)
+
+    monkeypatch.setattr(real, "_build_company_candidate_index", slow_builder)
+
+    refresh_thread = threading.Thread(
+        target=real.refresh_business_candidate_catalog_if_stale
+    )
+    refresh_thread.start()
+    assert building_started.wait(timeout=2.0), "색인 생성이 시작되지 않았다"
+    # 이 시점에서 parse_calls는 갱신 자신이 새 XML을 읽은 몫(1)만 담고 있다.
+    calls_before_intruder = len(parse_calls)
+
+    # 색인이 아직 만들어지는 중이다(락은 갱신 스레드가 쥐고 있다) — 이때
+    # 다른 스레드가 catalog를 불러도 재파싱 없이, 오래 걸리지 않고 끝나야 한다.
+    intruder_result: dict[str, object] = {}
+
+    def intruder() -> None:
+        started = time.monotonic()
+        intruder_result["catalog"] = real._company_catalog()
+        intruder_result["elapsed"] = time.monotonic() - started
+
+    intruder_thread = threading.Thread(target=intruder)
+    intruder_thread.start()
+    intruder_thread.join(timeout=2.0)
+
+    assert not intruder_thread.is_alive(), "끼어든 호출이 색인 생성이 끝날 때까지 막혔다"
+    assert intruder_result["elapsed"] < 1.0, "끼어든 호출이 재파싱만큼 오래 걸렸다"
+    assert len(parse_calls) == calls_before_intruder, (
+        "끼어든 호출이 재파싱을 일으켰다 — preload가 cache_clear()보다 늦게 "
+        "놓여 캐시가 빈 채로 남아 있었다는 뜻이다"
+    )
+    assert intruder_result["catalog"] == (("00000002", "새회사"),)
+
+    release_building.set()
+    refresh_thread.join(timeout=2.0)
+    assert not refresh_thread.is_alive()
+
+    assert len(parse_calls) == calls_before_intruder, "갱신 전체를 통틀어 새 XML은 한 번만 읽어야 한다"
+
+
+def test_DART_키가_환경변수엔_없고_dotenv에만_있으면_참을_돌려준다(
+    tmp_path, monkeypatch
+):
+    """2차 검토 신규 P2-3: ``서버켜기.ps1`` 진짜 조사 모드처럼 dotenv로만 키가 들어오는 경우.
+
+    ``analysis_engine/.env``는 자식 프로세스 환경변수로 주입되지 않고
+    요청 시점에 엔진이 읽어 채운다. 게이트가 ``os.environ``만 보면 이
+    모드에서 예열·갱신이 원인 로그 한 줄 없이 통째로 꺼진다(2차 검토
+    실측). ``dotenv_path``로 진짜 ``analysis_engine/.env``는 건드리지
+    않고 임시 파일(가짜 값)만으로 검증한다.
+    """
+
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+    fake_env_path = tmp_path / "fake.env"
+    fake_env_path.write_text("DART_API_KEY=fake-value-for-test\n", encoding="utf-8")
+
+    try:
+        assert real.dart_api_key_configured(dotenv_path=fake_env_path) is True
+        assert os.environ.get("DART_API_KEY") == "fake-value-for-test"
+    finally:
+        # load_env()가 os.environ.setdefault로 직접 채운 값이라 monkeypatch가
+        # 모르는 변경이다 — 다음 시험에 새지 않게 손으로 지운다.
+        os.environ.pop("DART_API_KEY", None)
+
+
 # ── 후보 AI 보조 재정렬 ask ────────────────────────────────
 
 

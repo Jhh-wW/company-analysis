@@ -401,18 +401,26 @@ def _candidate_index_manager_should_run() -> bool:
        «real pipeline은 불러왔지만 외부 호출은 잠겨 있습니다»라고 적어
        두고도(``make_pipeline()`` 참고), 이 관리자 스레드는 그 상태와
        무관하게 떠서 DART corpCode를 실제로 내려받아 그 약속을 깬다.
+       이 경우는 조용히 건너뛴다.
     2) ``DART_API_KEY``가 아예 없으면 갱신 검사는 매 주기 반드시
        실패한다. 실패 자체는 무해하지만(옛 목록 유지), 경고 로그가
-       시간마다 쌓인다(``배포리허설켜기.ps1``처럼 키를 아직 안 넣은
-       로컬 실행에서 특히 그렇다).
-
-    두 경우 다 조용히 건너뛴다 — 첫 실제 검색 요청이 그때 가서 필요하면
-    똑같은 이유로 실패하고 그 요청 로그에서 원인을 보게 된다.
+       시간마다 쌓인다. ``real.dart_api_key_configured()``는
+       ``os.environ``뿐 아니라 ``analysis_engine/.env``까지 본다 —
+       ``서버켜기.ps1``의 진짜 조사 모드는 키를 자식 환경에 주입하지
+       않고 요청 시점에 엔진이 그 파일을 읽어 채우므로(2차 검토
+       실측), ``os.environ``만 보면 이 모드에서 예열·갱신이 원인
+       로그 한 줄 없이 통째로 꺼진다. 정말 키가 없으면 INFO 로그를
+       남긴다 — 운영자가 원인을 알 수 있게.
     """
 
     if evaluation_mode.enabled() and not evaluation_mode.paid_providers_enabled():
         return False
-    if not os.environ.get("DART_API_KEY", "").strip():
+    from src.features.pipeline.real import (  # noqa: PLC0415 — 순환 import 회피
+        dart_api_key_configured,
+    )
+
+    if not dart_api_key_configured():
+        logger.info("DART 키가 없어 후보 색인 예열·갱신을 건너뜁니다.")
         return False
     return True
 
@@ -444,22 +452,28 @@ def _prewarm_candidate_index() -> None:
     )
 
 
-def _run_candidate_catalog_refresh_check() -> None:
+def _run_candidate_catalog_refresh_check() -> bool:
     """법인목록 나이를 한 번 검사하고, 오래됐으면 갱신까지 시도한다.
 
     ``real.refresh_business_candidate_catalog_if_stale()``가 이미 실패를
     스스로 삼키고(다운로드·파싱 실패 등) 경고 로그만 남기지만, 그 함수가
     예상 못 한 예외를 던지더라도(예: 디스크 꽉 참) 이 검사 한 번의 실패가
     색인 관리자 루프 전체를 끝내면 안 되므로 한 겹 더 감싼다.
+
+    Returns:
+        실제로 갱신(스왑)했으면 True. 안 오래됐거나 이번 시도가 실패했으면
+        False — 기동 분기(``_candidate_index_manager_loop``)가 이 값으로
+        예열 대체 실행 여부를 판단한다.
     """
     from src.features.pipeline.real import (  # noqa: PLC0415 — 순환 import 회피
         refresh_business_candidate_catalog_if_stale,
     )
 
     try:
-        refresh_business_candidate_catalog_if_stale()
+        return refresh_business_candidate_catalog_if_stale()
     except Exception:  # noqa: BLE001 — 검사 실패로 관리자 루프가 죽으면 안 된다
         logger.warning("법인목록 갱신 검사가 실패했습니다 — 다음 주기에 다시 시도합니다.")
+        return False
 
 
 def _candidate_index_manager_loop() -> None:
@@ -478,14 +492,24 @@ def _candidate_index_manager_loop() -> None:
       OOM 재시작 이력이 있는 서비스라 위험하다. 파일이 안 오래됐으면
       (최근에 갱신됐거나 예열이 이미 받아 둔 경우) 평소처럼 예열 한 번만
       한다 — 어느 쪽이든 기동 때는 1세대만 만든다.
+
+    ★ 갱신을 시도했는데 실패하면(DART 장애·한도 등) 예열로 넘어간다
+      (2차 검토, 2026-09-12) — «낡음»은 이 기능이 정상으로 상정하는
+      상태(7일마다 반드시 참이 된다)라서, 갱신 실패와 겹치면 아무도
+      색인을 안 만들어 프로세스 수명 내내 후보 검색이 0건이 될 뻔했다
+      (실측: 기동 뒤 법인 수 0). 예열은 옛(갱신을 못 받았으니) 파일로
+      1세대만 만들 뿐이라 P1-2(두 세대 금지)와 충돌하지 않는다 — 갱신이
+      성공했으면(``refreshed=True``) 이미 1세대가 있으므로 예열을 또
+      돌리지 않는다.
     """
     from src.features.pipeline.real import (  # noqa: PLC0415 — 순환 import 회피
         business_candidate_catalog_needs_refresh,
     )
 
+    refreshed = False
     if business_candidate_catalog_needs_refresh():
-        _run_candidate_catalog_refresh_check()
-    else:
+        refreshed = _run_candidate_catalog_refresh_check()
+    if not refreshed:
         _prewarm_candidate_index()
     while True:
         _run_candidate_catalog_refresh_check()

@@ -1522,6 +1522,39 @@ def _engine() -> Any:
     return _load_isolated_engine_module(root / "tools" / "run_pilot.py")
 
 
+def dart_api_key_configured(*, dotenv_path: Path | None = None) -> bool:
+    """``DART_API_KEY``가 환경변수나 ``analysis_engine/.env``에 있는지 싸게 본다.
+
+    ★ 왜 ``_engine()``을 안 쓰나 — ``서버켜기.ps1``의 진짜 조사 모드는 키를
+      자식 프로세스 환경에 주입하지 않고, 요청이 올 때마다 엔진이
+      ``core.env.load_env()``로 ``analysis_engine/.env``를 읽어 채운다
+      (독립 검토 2차, 2026-09-12). 그런데 ``_engine()``은 ``run_pilot.py``
+      전체(anthropic·presidio 등 무거운 의존성)를 불러오는데, 첫 호출은
+      냉시동 수 초가 걸린다(실측 18.09초) — 기동을 막지 않는다는 이
+      기능의 목표와 맞지 않는다. ``core.env``는 ``os``만 쓰는 가벼운
+      모듈이라(``load_env`` 자체가 «키 이름만 돌려주고 값은 절대
+      출력·반환하지 않는다» 계약을 지키는 기존 함수) 이 확인 하나만을
+      위해 무거운 엔진을 통째로 부르지 않는다.
+
+    Args:
+        dotenv_path: 시험 전용. 지정하면 ``analysis_engine/.env`` 대신 이
+            경로를 읽는다. ``core.env.load_env``의 기본 인자값은 함수
+            정의 시점에 한 번 고정되므로(late-binding 안 됨), 모듈 상수를
+            monkeypatch해도 소용없다 — 그래서 이 함수가 경로를 직접
+            받아 넘긴다. 운영 호출부(``runtime.py``)는 이 인자를 안 쓴다.
+    """
+    if os.environ.get("DART_API_KEY", "").strip():
+        return True
+    engine_src_dir = paths.PROJECT_ROOT / "analysis_engine" / "src"
+    if str(engine_src_dir) not in sys.path:
+        sys.path.insert(0, str(engine_src_dir))
+    from core.env import load_env as _load_dotenv  # noqa: PLC0415
+
+    # os.environ.setdefault로만 채운다 — 반환값(키 이름 목록)은 쓰지 않는다.
+    _load_dotenv() if dotenv_path is None else _load_dotenv(dotenv_path)
+    return bool(os.environ.get("DART_API_KEY", "").strip())
+
+
 def _exception_chain(error: BaseException) -> tuple[BaseException, ...]:
     """예외 문자열을 읽지 않고 cause/context 체인을 한 번만 순회한다."""
 
@@ -1860,12 +1893,18 @@ def refresh_business_candidate_catalog_if_stale() -> bool:
          (정본 ``CORPCODE.xml``은 그대로 둔다).
       3) (락 밖) 그 임시 파일을 파싱해 새 catalog를 미리 다 만든다(색인은
          아직 안 만든다 — 색인 생성이 이 함수에서 가장 비싼 단계다).
-      4) (락 안) ``os.replace``로 정본을 바꾼 뒤, **먼저** 옛
-         ``_COMPANY_CANDIDATE_INDEX``·``_COMPANY_CATALOG_RECORDS``와 두
-         lru_cache(``_load_or_download_company_catalog``·``_company_index``
-         — 후자는 식별 AI 경로 전용 이름 색인, 안 비우면 그 경로가
-         프로세스 수명 내내 옛 법인목록을 쓴다)를 **놓아준 다음**, 새
-         catalog로 색인을 만들고 전역·캐시를 다시 채운다.
+      4) (락 안) ``os.replace``로 정본을 바꾼다(이 한 줄만 실패를 따로
+         처리한다 — 아래 실패 격리 참고). **그 다음** ``_PRELOADED_CATALOG``에
+         새 catalog를 먼저 놓고, 옛 ``_COMPANY_CANDIDATE_INDEX``·
+         ``_COMPANY_CATALOG_RECORDS``와 두 lru_cache
+         (``_load_or_download_company_catalog``·``_company_index`` — 후자는
+         식별 AI 경로 전용 이름 색인, 안 비우면 그 경로가 프로세스 수명
+         내내 옛 법인목록을 쓴다)를 놓아준 뒤에야 새 색인을 만들고
+         전역·캐시를 다시 채운다. ``_PRELOADED_CATALOG``를 캐시 비우기
+         «전에» 두는 순서가 중요하다 — 반대로 하면 색인 생성 16초 동안
+         락 밖 소비자가 캐시 미스로 끼어들어 재파싱하고, 그 결과가
+         캐시를 선점해 이 함수의 preload가 끝내 소비되지 못한 채 catalog
+         한 벌을 다음 주기까지 누수시킨다(2차 검토 실측).
 
     실패 격리: 다운로드 실패(DART 장애·키 오류·한도)·파싱 실패·레코드
     0건·``os.replace`` 실패(Windows에서 정본을 다른 핸들이 열고 있으면
@@ -1912,40 +1951,56 @@ def refresh_business_candidate_catalog_if_stale() -> bool:
 
     previous_count = len(_COMPANY_CATALOG_RECORDS)
 
-    try:
-        with _COMPANY_CANDIDATE_INDEX_LOCK:
+    with _COMPANY_CANDIDATE_INDEX_LOCK:
+        try:
             os.replace(temp_path, xml_path)
-            # 두 세대 동시 보유를 막는다 — 위 docstring의 실측(1,225MB→612MB)
-            # 참고. 옛 색인·옛 레코드 참조를 전부 놓아준 «다음»에만 아래에서
-            # 새 색인을 만든다. _COMPANY_CATALOG_METADATA·ENGLISH_NAMES는
-            # 여기서 비우지 않는다 — 두 dict는 법인마다 수십 바이트뿐이라
-            # 메모리에 미치는 영향이 무시할 만한 반면, 비워 두면 16초 동안
-            # 락 밖의 무보호 소비자(``_records_from_candidate_catalog`` at
-            # 4431·5252)가 종목코드·영문명을 전부 빈 값으로 보게 된다 —
-            # 그 대가가 더 크다고 판단했다(아래 이어지는 몇 줄 안에 새
-            # 값으로 다시 채워진다).
-            _COMPANY_CANDIDATE_INDEX = None
-            _COMPANY_CANDIDATE_INDEX_SOURCE = None
-            _COMPANY_CATALOG_RECORDS = ()
-            _load_or_download_company_catalog.cache_clear()
-            _company_index.cache_clear()  # 식별 AI 경로(find_company_metered)도 함께 무효화
+        except OSError:
+            # 대표 사례: Windows에서 정본을 다른 프로세스·핸들이 읽기로 열고
+            # 있으면 os.replace가 PermissionError(WinError 5)를 낸다(실측).
+            # 이 한 줄만 감싼다 — 아래 색인 생성 단계의 OSError(예: 디스크
+            # 꽉 참)까지 여기서 삼키면 "정본 교체 실패"라는 잘못된 원인을
+            # 로그에 남기고, 실제로는 정본이 이미 바뀌었는데 옛 색인이
+            # 남았다는(또는 그 반대) 거짓 상태 서술이 된다(2차 검토 실측).
+            # 아직 아무 전역도 손대지 않았으므로 옛 파일·옛 색인은 그대로다.
+            logger.warning("법인목록 정본 교체가 실패했습니다 — 기존 목록을 계속 씁니다")
+            _discard_stale_refresh_temp_file(temp_path)
+            return False
 
-            new_index = _build_company_candidate_index(new_catalog.records)
+        # 두 세대 동시 보유를 막는다 — 위 docstring의 실측(1,225MB→612MB)
+        # 참고. 옛 색인·옛 레코드 참조를 전부 놓아준 «다음»에만 아래에서
+        # 새 색인을 만든다. _COMPANY_CATALOG_METADATA·ENGLISH_NAMES는
+        # 여기서 비우지 않는다 — 두 dict는 법인마다 수십 바이트뿐이라
+        # 메모리에 미치는 영향이 무시할 만한 반면, 비워 두면 16초 동안
+        # 락 밖의 무보호 소비자(``_records_from_candidate_catalog`` at
+        # 4431·5252)가 종목코드·영문명을 전부 빈 값으로 보게 된다 —
+        # 그 대가가 더 크다고 판단했다(아래 이어지는 몇 줄 안에 새
+        # 값으로 다시 채워진다).
+        #
+        # ★ _PRELOADED_CATALOG는 반드시 cache_clear() «전에» 놓는다(2차
+        # 검토 실측, 2026-09-12) — cache_clear() 뒤 16초 색인 생성이
+        # 끝나야 preload를 놓는 순서였을 때는, 그 16초 동안
+        # _load_or_download_company_catalog의 캐시가 비어 있고
+        # preload도 아직 없어 락 밖 소비자(``_company_index()`` 등)가
+        # 끼어들면 캐시 미스로 30MB를 통째로 재파싱했다. 더 나쁜 건 그
+        # 소비자의 결과가 먼저 캐시에 들어가 버려 이 함수의 재사용
+        # 의도(preload)가 끝내 소비되지 못하고 catalog 한 벌(63.5MB)을
+        # 다음 주간 갱신까지 영구 점유했다(실측: 끼어든 소비자 대기
+        # 22.15초→0.10초, 재파싱 2회→1회, 상주 +63.2MB 누수→0).
+        _PRELOADED_CATALOG = new_catalog
+        _COMPANY_CANDIDATE_INDEX = None
+        _COMPANY_CANDIDATE_INDEX_SOURCE = None
+        _COMPANY_CATALOG_RECORDS = ()
+        _load_or_download_company_catalog.cache_clear()
+        _company_index.cache_clear()  # 식별 AI 경로(find_company_metered)도 함께 무효화
 
-            _PRELOADED_CATALOG = new_catalog
-            # _PRELOADED_CATALOG를 그대로 재사용하므로 여기서 재다운로드·
-            # 재파싱이 일어나지 않는다 — _load_or_download_company_catalog
-            # 본문의 분기를 참고.
-            refreshed_compat_pairs = _company_catalog()
-            _COMPANY_CANDIDATE_INDEX = new_index
-            _COMPANY_CANDIDATE_INDEX_SOURCE = refreshed_compat_pairs
-    except OSError:
-        # 대표 사례: Windows에서 정본을 다른 프로세스·핸들이 읽기로 열고
-        # 있으면 os.replace가 PermissionError(WinError 5)를 낸다(실측).
-        # 옛 파일·옛 색인은 위 with 블록에 아직 손대지 않았으므로 그대로다.
-        logger.warning("법인목록 정본 교체가 실패했습니다 — 기존 목록을 계속 씁니다")
-        _discard_stale_refresh_temp_file(temp_path)
-        return False
+        new_index = _build_company_candidate_index(new_catalog.records)
+
+        # _PRELOADED_CATALOG를 그대로 재사용하므로 여기서 재다운로드·
+        # 재파싱이 일어나지 않는다 — _load_or_download_company_catalog
+        # 본문의 분기를 참고.
+        refreshed_compat_pairs = _company_catalog()
+        _COMPANY_CANDIDATE_INDEX = new_index
+        _COMPANY_CANDIDATE_INDEX_SOURCE = refreshed_compat_pairs
 
     elapsed_sec = time.monotonic() - started
     logger.info(

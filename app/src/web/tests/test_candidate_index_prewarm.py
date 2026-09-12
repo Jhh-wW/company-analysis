@@ -227,6 +227,45 @@ def test_기동시_법인목록이_이미_낡았으면_예열을_생략하고_�
     assert not prewarm_called.is_set(), "낡았는데 예열도 함께 돌아 2세대가 겹칠 수 있었다"
 
 
+def test_기동갱신이_실패하면_예열로_넘어간다(monkeypatch) -> None:
+    """2차 검토 신규 P2-b: 낡음+갱신실패가 겹치면 예열로 최소 1세대를 만든다.
+
+    수정 전에는 ``if needs_refresh(): refresh() else: prewarm()`` 구조라,
+    기동 시 파일이 낡은데(정상 상태 — 7일마다 반드시 그렇게 된다) DART
+    장애로 갱신까지 실패하면 **어느 쪽도** 색인을 안 만들어 프로세스
+    수명 내내 후보 검색이 0건이 될 뻔했다(2차 검토 실측: 기동 뒤 법인
+    수 0). 갱신이 실패(False)를 돌려주면 예열로 넘어가 옛 파일로라도
+    1세대는 만들어야 한다.
+    """
+
+    monkeypatch.setattr(
+        real, "business_candidate_catalog_needs_refresh", lambda: True
+    )
+    prewarm_called = threading.Event()
+    monkeypatch.setattr(
+        runtime, "_prewarm_candidate_index", lambda: prewarm_called.set()
+    )
+
+    check_calls: list[int] = []
+
+    def fake_check() -> bool:
+        check_calls.append(1)
+        if len(check_calls) >= 2:
+            # 기동 분기의 첫 호출(실패 흉내) 다음, while 루프의 두 번째
+            # 호출에서 시험을 결정적으로 끝낸다.
+            raise _ManagerLoopStoppedForTest
+        return False  # 갱신 실패를 흉내낸다(DART 장애 등)
+
+    monkeypatch.setattr(runtime, "_run_candidate_catalog_refresh_check", fake_check)
+    monkeypatch.setenv(PIPELINE_ENV, PIPELINE_REAL)
+
+    with TestClient(app):
+        assert prewarm_called.wait(timeout=5.0), (
+            "갱신이 실패했는데 예열로 넘어가지 않았다 — 색인이 0건으로 "
+            "남을 수 있었다"
+        )
+
+
 def test_실시간성능시험_외부호출잠김_미리보기면_예열도_갱신도_건너뛴다(
     monkeypatch,
 ) -> None:
