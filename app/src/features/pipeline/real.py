@@ -196,6 +196,7 @@ from src.shared.report_recovery import (
 )
 from src.shared import runtime_failure_constants as failure_constants
 from src.shared import runtime_failure_diagnostic as runtime_failure
+from src.shared.stage_elapsed_constants import STAGE_ELAPSED_MS_KEY, STAGE_ELAPSED_STEP
 from src.features.pipeline.provider_error_diagnostics import safe_provider_error_metadata
 from src.features.pipeline.v2_response_constants import (
     V2_RESPONSE_STEP,
@@ -258,6 +259,7 @@ from src.features.pipeline.constants import (
     ANTHROPIC_TIMEOUT_SEC,
     CORPCODE_REFRESH_INTERVAL_DAYS,
     DART_SUCCESS_STATUS,
+    STAGE_BOOT,
     PARALLEL_COLLECT_BRANCH_WORKERS,
 )
 from src.features.pipeline.candidate_profile_constants import (
@@ -813,6 +815,10 @@ class _MeteredEngine:
         object.__setattr__(self, "_reserved_calls", 0)
         object.__setattr__(self, "_provider_call_count", 0)
         object.__setattr__(self, "_provider_call_lock", threading.Lock())
+        # 화면 단계가 바뀔 때마다 직전 단계 소요 시간을 재는 시계. 아직 어느
+        # 단계도 지나지 않았으면 None — 「닫을 구간이 없다」는 뜻이다.
+        object.__setattr__(self, "_stage_clock_key", None)
+        object.__setattr__(self, "_stage_clock_start", 0.0)
 
     def __getattr__(self, name: str) -> Any:
         if name == "MODEL":
@@ -830,6 +836,8 @@ class _MeteredEngine:
             "_reserved_calls",
             "_provider_call_count",
             "_provider_call_lock",
+            "_stage_clock_key",
+            "_stage_clock_start",
         }:
             object.__setattr__(self, name, value)
         elif name == "MODEL":
@@ -860,6 +868,68 @@ class _MeteredEngine:
     def set_stage(self, stage: str) -> None:
         clean = str(stage).strip()
         object.__setattr__(self, "_stage", clean or "unspecified")
+
+    def stage_elapsed_mark(self, stage: str, *, steps: list[dict[str, Any]]) -> None:
+        """화면 단계가 바뀌는 순간 직전 단계의 소요 시간(ms)을 steps에 남긴다.
+
+        ★ 같은 키로 다시 불릴 수 있다 — 예를 들어 「output」은 재사용 종료·
+          1층 캐시 종료·최종 종료에서 각각 불린다. 그건 전환이 아니므로
+          무시한다. 합쳐서 적으면 아주 짧은 구간과 진짜 구간이 섞여 실제보다
+          훨씬 크게 보인다.
+        ★ 진단은 본조사를 막지 않는다 — 시계 갱신까지 통째로 삼킨다
+          (기존 V2 응답 진단 `steps.append` 자리와 같은 원칙).
+        """
+        try:
+            now = time.monotonic()
+            previous_key = self._stage_clock_key
+            if previous_key is not None and previous_key != stage:
+                steps.append({
+                    "step": STAGE_ELAPSED_STEP,
+                    "단계": previous_key,
+                    STAGE_ELAPSED_MS_KEY: int((now - self._stage_clock_start) * 1000),
+                })
+            if previous_key != stage:
+                object.__setattr__(self, "_stage_clock_key", stage)
+                object.__setattr__(self, "_stage_clock_start", now)
+        except Exception:  # noqa: BLE001 — 진단 실패는 본 기능에 전파하지 않는다
+            pass
+
+    def stage_elapsed_finish(self, *, steps: list[dict[str, Any]]) -> None:
+        """요청이 정상·예외 어느 쪽으로 끝나도 마지막 단계의 소요 시간을 닫는다.
+
+        ★ `stage_elapsed_mark`는 «다음 전환»이 있어야 직전 단계를 적는다.
+          마지막 단계는 다음 전환이 영원히 없으므로, 요청이 끝나는 자리
+          (`RealPipeline.run`의 finally)에서 한 번 더 불러야 한다.
+        """
+        try:
+            if self._stage_clock_key is None:
+                return
+            steps.append({
+                "step": STAGE_ELAPSED_STEP,
+                "단계": self._stage_clock_key,
+                STAGE_ELAPSED_MS_KEY: int(
+                    (time.monotonic() - self._stage_clock_start) * 1000
+                ),
+            })
+            object.__setattr__(self, "_stage_clock_key", None)
+        except Exception:  # noqa: BLE001 — 진단 실패는 본 기능에 전파하지 않는다
+            pass
+
+    def stage_elapsed_seed(self, stage: str, *, start: float) -> None:
+        """요청이 시작된(=`start`) 시각부터 시계를 미리 채워 둔다.
+
+        ★ 왜 `stage_elapsed_mark`로는 안 되나 — 그 메서드는 호출 «그 순간»을
+          `time.monotonic()`으로 다시 잰다. `run()` 진입 직후~engine 생성
+          사이(1판 모듈 import)처럼 «이미 지난» 구간을 재려면 그 구간의
+          시작 시각을 밖에서 그대로 받아야 한다. 첫 전환(01 식별) 때
+          `stage_elapsed_mark`가 이 구간을 평범하게 닫는다 — 별도 처리가
+          필요 없다.
+        """
+        try:
+            object.__setattr__(self, "_stage_clock_key", stage)
+            object.__setattr__(self, "_stage_clock_start", start)
+        except Exception:  # noqa: BLE001 — 진단 실패는 본 기능에 전파하지 않는다
+            pass
 
     def reserve_provider_call(self, *, reserved_calls: int = 0) -> int:
         """요청 전체 AI 호출 상한을 실제 전송 경계에서 원자적으로 강제한다.
@@ -3328,10 +3398,20 @@ class RealPipeline:
         on_step: Optional[StepReporter] = None,
     ) -> RunResult:
         """5 판정부터 13 출력까지 돌리고 예외 때도 이미 쓴 비용을 보존한다."""
+        # 「시동」구간의 시작 시각 — 반드시 `_engine()` 호출(1판 모듈을 처음
+        # 불러오는 자리) «앞»에서 잡는다. 냉시동은 이 import 하나가 수 초 걸린다
+        # (실측: bytecode 캐시 없는 완전 냉시동 53.7초, 있어도 4.1초). engine을
+        # 만든 «뒤»에 시계를 시작하면 이 구간이 어느 단계 진단에도 안 잡혀
+        # 「어느 단계가 느린지」가 시작 지연만큼 항상 틀린 답을 준다.
+        boot_started_at = time.monotonic()
         # lifespan을 거치지 않는 CLI·단위시험도 요청을 시작하는 이 자리에서
         # exact 모드를 한 번만 동결한다. 아래 캐시·분기에는 이 값만 운반한다.
         generation_mode = engine_mode.process_engine_mode()
         engine = _MeteredEngine(_engine())
+        # 첫 화면 단계(01 식별)로 넘어가는 순간 이 구간이 「시동」항목으로
+        # steps에 남는다 — 화면 단계 목록(PROGRESS_STEPS)에는 안 넣는다,
+        # 진단 전용이다.
+        engine.stage_elapsed_seed(STAGE_BOOT, start=boot_started_at)
         frozen_identity = generation_coordination.frozen_engine_build_identity()
         if frozen_identity is None:
             build_identity = engine_build_identity.process_engine_build_identity()
@@ -3452,6 +3532,11 @@ class RealPipeline:
                 message=_message(Outcome.FAILED),
             )
         finally:
+            # _run_metered의 tell()은 «다음 전환»이 있어야 직전 단계를 적는다.
+            # 마지막으로 머물던 단계는 정상 종료든 예외든 여기서 한 번 닫아야
+            # 「마지막 단계가 몇 초 걸렸는지」가 사라지지 않는다. 요약 로그보다
+            # 먼저 불러야 diagnostics.finish가 이 항목까지 함께 넘긴다.
+            engine.stage_elapsed_finish(steps=diagnostics.steps)
             # 성공·실패·요청 전역 중단을 가리지 않고 여기 한 곳에서만 남긴다.
             # 갈래마다 적으면 새 종료가 늘 때 한 곳은 반드시 빠진다.
             diagnostics.finish(corp_code=card.ref)
@@ -3482,17 +3567,26 @@ class RealPipeline:
         """
         generation_mode = engine_mode.assert_engine_mode_current(generation_mode)
 
+        # `run`이 열어 둔 자리에 그대로 쌓는다. 자리가 없는 옛 호출부는 예전처럼
+        # 자기만 쓰는 새 목록을 받는다 — 진단이 본 기능을 막지 않는다.
+        # ★ 아래 `tell()`이 이 이름을 클로저로 읽으므로 반드시 그 정의보다
+        #   앞에서 대입한다. 순서가 바뀌면(누가 `tell`을 이 대입보다 위로
+        #   옮기면) 첫 호출에서 `UnboundLocalError`가 나 본조사 전체가
+        #   죽는다 — 정의 시점의 순서 문제라 try/except로 못 막는다.
+        steps: list[dict[str, Any]] = run_diagnostics.current_steps()
+
         def tell(key: str) -> None:
             _set_meter_stage(engine, key)
             if on_step is not None:
                 on_step(key)
+            # 단계 전환마다 직전 단계 소요 시간(ms)을 steps에 남긴다 — 어느
+            # 단계가 느린지 다음 실행부터 실측으로 바로 보인다. 마지막 단계는
+            # 이 함수가 다시 안 불리므로 `run()`의 finally에서 따로 닫는다.
+            engine.stage_elapsed_mark(key, steps=steps)
 
         engine.load_env()
         client = _metered_client(engine, engine._client())
         counter = engine.UsageCounter()
-        # `run`이 열어 둔 자리에 그대로 쌓는다. 자리가 없는 옛 호출부는 예전처럼
-        # 자기만 쓰는 새 목록을 받는다 — 진단이 본 기능을 막지 않는다.
-        steps: list[dict[str, Any]] = run_diagnostics.current_steps()
         model = getattr(engine, "MODEL", "")
 
         tell("identify")   # 이미 끝났다 — 화면에는 지나간 단계로 표시된다
