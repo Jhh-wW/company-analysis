@@ -22,14 +22,30 @@ from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.features.budget import provider_budget
 from src.features.observability import constants as obs
 from src.features.observability import run_diagnostics
+from src.features.pipeline import constants as pipeline_constants
 from src.features.pipeline import real
 from src.features.pipeline.port import CompanyCard, Outcome, RunResult, UserInput
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared import generation_coordination
+from src.shared.stage_elapsed_constants import STAGE_ELAPSED_MS_KEY, STAGE_ELAPSED_STEP
 
 
 #: 파이프라인이 뉴스 수집 결과를 남길 때 쓰는 단계 이름.
 NEWS_INTAKE_STEP = "5b_뉴스_수집"
+
+def _assert_boot_elapsed_entry(item: dict) -> None:
+    """`run()`이 engine 생성 직후 미리 채워 두는 「시동」시계가 finally에서
+    닫히며 남기는 항목인지 본다.
+
+    `_run_metered`를 통째로 stub으로 바꿔 `tell()`이 한 번도 안 불려도 이
+    항목만은 항상 남는다 — 이 파일의 시험 다수가 `captured.steps`를
+    완전일치로 단정하므로, 그 고정 항목의 모양을 여기서 한 번만 정의한다.
+    """
+
+    assert item["step"] == STAGE_ELAPSED_STEP
+    assert item["단계"] == pipeline_constants.STAGE_BOOT
+    ms = item[STAGE_ELAPSED_MS_KEY]
+    assert type(ms) is int and ms >= 0
 
 
 @pytest.fixture(autouse=True)
@@ -127,10 +143,14 @@ def test_실행이_끝나면_단계기록_원본이_수집칸으로_넘어온다
         real.RealPipeline().run(_user_input(), _card())
 
     assert captured.filled is True
+    # 세 번째 항목은 `_run_metered`가 stub이라 `tell()`이 안 돌아도 run()의
+    # finally가 항상 닫는 「시동」소요 시간이다.
     assert [item["step"] for item in captured.steps] == [
         "5b_뉴스_수집",
         "6_수집_홈페이지",
+        STAGE_ELAPSED_STEP,
     ]
+    _assert_boot_elapsed_entry(captured.steps[-1])
 
 
 def test_waiter는_원owner의_닫힌사유를_실행진단에_남긴다(
@@ -156,7 +176,10 @@ def test_waiter는_원owner의_닫힌사유를_실행진단에_남긴다(
         with pytest.raises(generation_coordination.GenerationOwnerFailed):
             real.RealPipeline().run(_user_input(), _card())
 
-    failure = captured.steps[-1]
+    # 마지막 항목은 이제 runtime_failure가 아니라, run()의 finally가 예외
+    # 경로에서도 항상 닫는 「시동」소요 시간이다 — 위치가 아니라 내용으로 찾는다.
+    _assert_boot_elapsed_entry(captured.steps[-1])
+    failure = next(item for item in captured.steps if item.get("step") == "runtime_failure")
     assert failure == {
         "step": "runtime_failure",
         "phase": "coordination",
@@ -183,16 +206,19 @@ def test_예상밖_pipeline실패는_예외메시지없이_경계와_종류만_�
         result = real.RealPipeline().run(_user_input(), _card())
 
     assert result.outcome is Outcome.FAILED
-    assert captured.steps == [
-        {
-            "step": "runtime_failure",
-            "phase": "pipeline",
-            "state": "failed",
-            "role": "worker",
-            "exception_class": "RuntimeError",
-            "reason_code": "unexpected_pipeline_failure",
-        }
-    ]
+    # 두 번째 항목은 run()의 finally가 예외 경로에서도 항상 닫는 「시동」
+    # 소요 시간이다 — 값이 실행마다 달라지는 ms까지 완전일치로 못 박을 수
+    # 없어 첫 항목만 완전일치, 둘째는 모양만 확인한다.
+    assert len(captured.steps) == 2
+    assert captured.steps[0] == {
+        "step": "runtime_failure",
+        "phase": "pipeline",
+        "state": "failed",
+        "role": "worker",
+        "exception_class": "RuntimeError",
+        "reason_code": "unexpected_pipeline_failure",
+    }
+    _assert_boot_elapsed_entry(captured.steps[1])
     assert secret not in repr(captured.steps)
 
 
@@ -206,8 +232,11 @@ def test_실행이_끝나면_자리를_닫아_다음_실행과_섞이지_않는�
     with run_diagnostics.capture() as second:
         real.RealPipeline().run(_user_input(), _card())
 
-    assert len(first.steps) == 2
-    assert len(second.steps) == 2
+    # 2건(stub) + 1건(run()의 finally가 닫는 「시동」소요 시간).
+    assert len(first.steps) == 3
+    assert len(second.steps) == 3
+    _assert_boot_elapsed_entry(first.steps[-1])
+    _assert_boot_elapsed_entry(second.steps[-1])
     assert run_diagnostics.current_steps() == []
 
 

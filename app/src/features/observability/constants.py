@@ -283,3 +283,8 @@ RECENT_RUN_STEPS_LIMIT: Final[int] = 20
 #: 화면에 실행 번호를 줄여 적을 때 남기는 앞자리 수. 실행끼리 구분하기에 충분하고
 #: 표 한 칸을 넘지 않는 길이다.
 RUN_ID_SHORT_CHARS: Final[int] = 12
+
+# 실행 진단 — 단계별 소요 시간 항목의 "step"·필드 열쇠는
+# `shared.stage_elapsed_constants`에 한 벌만 있다(`RUNTIME_FAILURE_STEP`과
+# 같은 이유). 여기 사본을 두지 않는다 — 소비처(`web/routers/admin.py`)는
+# feature가 아니라 `src/web`이고, 이미 `pipeline` feature를 직접 import한다.
