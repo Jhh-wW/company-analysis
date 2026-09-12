@@ -45,12 +45,12 @@ PROVIDER_MONTHLY_SPEND_CATEGORY: Final[str] = "organization_monthly_spend_cap"
 
 # ── 실행 진단 — 단계별 소요 시간 ─────────────────────────
 #: 화면 단계(`core.constants.PROGRESS_STEPS`)가 바뀔 때마다 직전 단계의
-#: 소요 시간을 담는 진단 항목의 "step" 값. 400~600초 걸리는 본조사 하나가
-#: 어느 단계에서 느린지 실행마다 실측으로 남기기 위해 둔다.
-#: ★ 관리자 화면(`web/routers/admin.py`)도 이 값으로 항목을 가려 읽는다.
-#:   feature 간 직접 import는 금지라 같은 문자열을
-#:   `features/observability/constants.py`에도 따로 두고, 시험이 둘이
-#:   같은지 못 박는다(`CACHE_HIT_LAYER1`과 같은 방식).
-STAGE_ELAPSED_STEP: Final[str] = "단계소요"
-#: 위 진단 항목에서 소요 시간을 담는 필드 이름. 값은 밀리초, 0 이상 정수다.
-STAGE_ELAPSED_MS_KEY: Final[str] = "소요ms"
+#: 소요 시간을 진단(`shared.stage_elapsed_constants.STAGE_ELAPSED_STEP`)으로
+#: 남긴다. 그 값은 파이프라인(생산자)·관리자 화면(소비자)이 함께 읽어야
+#: 해서 `shared`에 두지만(`runtime_failure_constants.py`와 같은 이유), 이
+#: 「시동」키는 이 feature 안에서만 쓰는 값이라 여기 그대로 둔다.
+#: 첫 화면 단계(01 식별) «앞»의 구간 — `_engine()`의 1판 모듈 import가 여기
+#: 안에 들어간다. 냉시동에서 수 초가 걸리는데 다른 단계 키로는 잡을 자리가
+#: 없어서 따로 둔다. 화면 단계 목록(`core.constants.PROGRESS_STEPS`)에는
+#: 넣지 않는다 — 진단 전용이지 사용자에게 보여줄 화면 문구가 아니다.
+STAGE_BOOT: Final[str] = "시동"

@@ -15,12 +15,12 @@ from types import SimpleNamespace
 import pytest
 
 from src.core import deployment_identity
-from src.features.observability import constants as obs_constants
 from src.features.observability import run_diagnostics
 from src.features.pipeline import constants as pipeline_constants
 from src.features.pipeline import real
 from src.features.pipeline.port import CompanyCard, Outcome, UserInput
 from src.shared import engine_build_identity as build_identity_contract
+from src.shared.stage_elapsed_constants import STAGE_ELAPSED_MS_KEY, STAGE_ELAPSED_STEP
 
 
 @pytest.fixture(autouse=True)
@@ -52,20 +52,8 @@ def _elapsed_entries(steps: list) -> list[dict]:
     return [
         item
         for item in steps
-        if isinstance(item, dict) and item.get("step") == obs_constants.STAGE_ELAPSED_STEP
+        if isinstance(item, dict) and item.get("step") == STAGE_ELAPSED_STEP
     ]
-
-
-def test_두_상수는_pipeline과_observability에서_값이_같다():
-    """`STAGE_ELAPSED_STEP`·`STAGE_ELAPSED_MS_KEY`는 두 feature에 값만 복제해 둔다.
-
-    ★ feature 간 직접 import 금지라 값을 두 곳에 다시 적는다(`CACHE_HIT_LAYER1`과
-      같은 방식). 값이 어긋나면 관리자 화면이 파이프라인이 남긴 항목을
-      조용히 못 찾는다 — 그래서 여기서 못 박는다.
-    """
-
-    assert pipeline_constants.STAGE_ELAPSED_STEP == obs_constants.STAGE_ELAPSED_STEP
-    assert pipeline_constants.STAGE_ELAPSED_MS_KEY == obs_constants.STAGE_ELAPSED_MS_KEY
 
 
 def test_같은_키로_연속_호출하면_전환이_아니라_기록하지_않는다():
@@ -87,9 +75,9 @@ def test_같은_키로_연속_호출하면_전환이_아니라_기록하지_않�
     engine.stage_elapsed_mark("collect", steps=steps)
     assert len(steps) == 1
     entry = steps[0]
-    assert entry["step"] == pipeline_constants.STAGE_ELAPSED_STEP
+    assert entry["step"] == STAGE_ELAPSED_STEP
     assert entry["단계"] == "judge"
-    ms = entry[pipeline_constants.STAGE_ELAPSED_MS_KEY]
+    ms = entry[STAGE_ELAPSED_MS_KEY]
     assert type(ms) is int and ms >= 0
 
 
@@ -137,9 +125,18 @@ class _JudgeRejectEngine:
         return SimpleNamespace(status="거부A", corp_type="비상장 외감")
 
 
-def test_실제_본조사가_두_단계를_지나면_단계소요를_순서대로_남긴다(
+def test_실제_본조사가_시동부터_두_단계를_지나면_단계소요를_순서대로_남긴다(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """`run()` 진입부터 첫 `tell()`까지(1판 모듈 import)도 「시동」으로 잡힌다.
+
+    ★ 왜 필요한가 — `_engine()` 호출은 냉시동에서 수 초가 걸리는데
+      `engine = _MeteredEngine(_engine())` «뒤»에 시계를 시작하면 이 구간이
+      어느 단계 진단에도 안 잡혔다(격리 실측). `run()`이 `engine` 생성 전에
+      잡은 시각으로 시계를 미리 채워 두면 첫 `tell("identify")`가 그 구간을
+      평범한 전환으로 닫는다.
+    """
+
     monkeypatch.setattr(real, "_engine", lambda: _JudgeRejectEngine())
 
     with run_diagnostics.capture() as captured:
@@ -147,9 +144,13 @@ def test_실제_본조사가_두_단계를_지나면_단계소요를_순서대�
 
     assert result.outcome is Outcome.REJECT_PUBLIC
     elapsed = _elapsed_entries(captured.steps)
-    assert [item["단계"] for item in elapsed] == ["identify", "judge"]
+    assert [item["단계"] for item in elapsed] == [
+        pipeline_constants.STAGE_BOOT,
+        "identify",
+        "judge",
+    ]
     for item in elapsed:
-        ms = item[obs_constants.STAGE_ELAPSED_MS_KEY]
+        ms = item[STAGE_ELAPSED_MS_KEY]
         assert type(ms) is int and ms >= 0
 
 
@@ -179,6 +180,9 @@ def test_예외로_끝나도_마지막_단계_소요시간이_기록된다(monke
 
     assert result.outcome is Outcome.FAILED
     elapsed = _elapsed_entries(captured.steps)
-    assert [item["단계"] for item in elapsed] == ["identify"]
-    ms = elapsed[0][obs_constants.STAGE_ELAPSED_MS_KEY]
-    assert type(ms) is int and ms >= 0
+    # 예외는 tell("identify") 다음(tell("judge") 전)에서 나므로, 시동→식별
+    # 두 구간만 닫히고 마지막(식별)은 run()의 finally가 닫는다.
+    assert [item["단계"] for item in elapsed] == [pipeline_constants.STAGE_BOOT, "identify"]
+    for item in elapsed:
+        ms = item[STAGE_ELAPSED_MS_KEY]
+        assert type(ms) is int and ms >= 0

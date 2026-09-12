@@ -284,13 +284,7 @@ RECENT_RUN_STEPS_LIMIT: Final[int] = 20
 #: 표 한 칸을 넘지 않는 길이다.
 RUN_ID_SHORT_CHARS: Final[int] = 12
 
-# ══════════════════════════════════════════════════════════
-# 실행 진단 — 단계별 소요 시간 (파이프라인이 만드는 값의 사본)
-# ══════════════════════════════════════════════════════════
-
-#: `features/pipeline/constants.py`의 `STAGE_ELAPSED_STEP`과 **값이 같아야
-#: 한다.** feature 간 직접 import는 금지라 값만 여기 다시 적는다 — 어긋나면
-#: 관리자 화면이 파이프라인이 남긴 단계별 소요 시간을 조용히 못 찾는다.
-STAGE_ELAPSED_STEP: Final[str] = "단계소요"
-#: `features/pipeline/constants.py`의 `STAGE_ELAPSED_MS_KEY`와 값이 같아야 한다.
-STAGE_ELAPSED_MS_KEY: Final[str] = "소요ms"
+# 실행 진단 — 단계별 소요 시간 항목의 "step"·필드 열쇠는
+# `shared.stage_elapsed_constants`에 한 벌만 있다(`RUNTIME_FAILURE_STEP`과
+# 같은 이유). 여기 사본을 두지 않는다 — 소비처(`web/routers/admin.py`)는
+# feature가 아니라 `src/web`이고, 이미 `pipeline` feature를 직접 import한다.

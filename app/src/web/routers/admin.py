@@ -40,6 +40,7 @@ from src.features.sharelink import tracks as share_tracks
 from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.features.storage import sessions as session_store
+from src.shared.stage_elapsed_constants import STAGE_ELAPSED_MS_KEY, STAGE_ELAPSED_STEP
 from src.web import (
     deployment_mode,
     job_runtime,
@@ -1684,10 +1685,10 @@ def _stage_elapsed_rows(steps: list[dict[str, Any]]) -> list[tuple[str, float]]:
 
     rows: list[tuple[str, float]] = []
     for item in steps:
-        if not isinstance(item, dict) or item.get("step") != obs_constants.STAGE_ELAPSED_STEP:
+        if not isinstance(item, dict) or item.get("step") != STAGE_ELAPSED_STEP:
             continue
         stage = str(item.get("단계") or "").strip()
-        elapsed_ms = item.get(obs_constants.STAGE_ELAPSED_MS_KEY)
+        elapsed_ms = item.get(STAGE_ELAPSED_MS_KEY)
         if not stage or type(elapsed_ms) is not int or elapsed_ms < 0:
             continue
         rows.append((stage, round(elapsed_ms / 1000, 1)))
