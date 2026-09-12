@@ -290,12 +290,19 @@ def test_DART_응답이_다른_host로_바뀌면_본문을_읽기전에_거부�
     ("download", "cap_name"),
     [
         (dart_client.download_corpcode, "CORPCODE_ZIP_RESPONSE_MAX_BYTES"),
+        (dart_client.download_corpcode_fresh, "CORPCODE_ZIP_RESPONSE_MAX_BYTES"),
         (dart_client.download_document, "DOCUMENT_ZIP_RESPONSE_MAX_BYTES"),
     ],
 )
 def test_DART_ZIP응답은_용도별_압축크기_상한을_지킨다(
     tmp_path, monkeypatch, download, cap_name
 ):
+    """``download_corpcode_fresh``가 ``download_corpcode``와 같은 검증 경계를 공유하는지 본다.
+
+    둘 다 ``_fetch_corpcode_xml_bytes``를 거치므로, 압축 크기 상한이
+    ``download_corpcode_fresh``에서만 따로 느슨해지지 않았는지 이 하나의
+    parametrize로 함께 확인한다.
+    """
     response = _Response(b"provider-body-secret")
     monkeypatch.setattr(dart_client, cap_name, 8)
     monkeypatch.setenv("DART_API_KEY", "fake-key")
@@ -312,6 +319,31 @@ def test_DART_ZIP응답은_용도별_압축크기_상한을_지킨다(
 
     assert response.read_sizes == [9]
     assert "provider-body-secret" not in str(caught.value)
+
+
+def test_download_corpcode_fresh는_정본은_안건드리고_임시파일에만_쓴다(
+    tmp_path, monkeypatch
+):
+    """항상 새로 받고, 기존 파일 유무와 무관하며, 정본은 건드리지 않는다."""
+
+    monkeypatch.setenv("DART_API_KEY", "fake-key")
+    body = _zip_bytes({"CORPCODE.xml": b"<result><list/></result>"})
+    monkeypatch.setattr(
+        dart_client, "_urlopen", lambda *_args, **_kwargs: _Response(body)
+    )
+    dest_dir = tmp_path / "corpcode"
+    dest_dir.mkdir()
+    canonical_path = dest_dir / dart_client.CORPCODE_XML_FILENAME
+    canonical_path.write_bytes(b"<result><list><corp_code>x</corp_code></list></result>")
+    canonical_before = canonical_path.read_bytes()
+
+    temp_path = dart_client.download_corpcode_fresh(
+        dest_dir, UsageCounter(path=tmp_path / "usage.json", limit=10)
+    )
+
+    assert temp_path == dest_dir / dart_client.CORPCODE_XML_TEMP_FILENAME
+    assert temp_path.read_bytes() == b"<result><list/></result>"
+    assert canonical_path.read_bytes() == canonical_before
 
 
 def test_corpCode_ZIP의_선언_해제크기_초과를_파일생성전에_막는다(
