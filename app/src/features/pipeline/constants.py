@@ -52,3 +52,8 @@ PROVIDER_SPEND_LIMIT_PREFIXES: Final[tuple[tuple[str, str], ...]] = (
 PROVIDER_ERROR_PREFIX_BOUNDARIES: Final[tuple[str, ...]] = (".", ":", " ")
 PROVIDER_ENFORCED_SPEND_LIMIT_CODE: Final[str] = "enforced_spend_limit_reached"
 PROVIDER_MONTHLY_SPEND_CATEGORY: Final[str] = "organization_monthly_spend_cap"
+
+
+#: 본조사에서 «경쟁사 비교»와 «뉴스 검색 스냅샷»을 동시에 돌릴 때 쓰는 worker 수.
+#: 서로 결과를 읽지 않는 갈래가 정확히 둘이라 둘이다 — 늘려도 돌릴 일이 없다.
+PARALLEL_COLLECT_BRANCH_WORKERS: Final[int] = 2

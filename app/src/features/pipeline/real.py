@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import copy
 import hashlib
 import importlib
@@ -27,14 +28,21 @@ import sys
 import threading
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Callable, Final, Iterable, Mapping, Optional
 
-from src.core import news_intake_switch, news_research_adapter, paths, typed_collector_switch
+from src.core import (
+    news_intake_switch,
+    news_research_adapter,
+    parallel_collect_switch,
+    paths,
+    typed_collector_switch,
+)
 from src.core.clock import subtract_years, today_kst
 from src.core.provider_gateway import attempt_context, gateway
 from src.core.provider_gateway.anthropic_adapter import AnthropicAdapter
@@ -250,6 +258,7 @@ from src.features.pipeline.constants import (
     ANTHROPIC_TIMEOUT_SEC,
     CORPCODE_REFRESH_INTERVAL_DAYS,
     DART_SUCCESS_STATUS,
+    PARALLEL_COLLECT_BRANCH_WORKERS,
 )
 from src.features.pipeline.candidate_profile_constants import (
     DART_PROFILE_ENRICHMENT_LIMIT,
@@ -3540,6 +3549,12 @@ class RealPipeline:
         # artifact로 합친다. 엔진 내부 디스크 캐시에 숨지 않고,
         # ``download_document`` 호출 자체가 접수번호당 1회만 발생한다.
         downloaded_document_artifacts: dict[str, Any] = {}
+        # 「있나 보고 없으면 받는다」는 두 동작 사이에 다른 스레드가 끼어들면
+        # 같은 접수번호를 두 번 받아 DART 호출 수가 두 배가 된다. 비교 갈래가
+        # 뉴스 검색과 동시에 도는 경로가 생겼으므로 확인과 저장을 한 자물쇠
+        # 안에 묶는다. 내려받는 동안 자물쇠를 놓지 않는 이유도 같다 — 놓으면
+        # 같은 접수번호의 두 번째 요청이 그 틈에 또 나간다.
+        downloaded_document_lock = threading.Lock()
 
         def download_document_once(
             receipt_number: str,
@@ -3549,18 +3564,19 @@ class RealPipeline:
             require_official_url_sidecar: bool = False,
         ) -> Any:
             receipt = str(receipt_number or "").strip()
-            if receipt not in downloaded_document_artifacts:
-                # FULL은 첫 요청이 비교/legacy의 약한 호출이어도
-                # 항상 sidecar 검증까지 한 강한 artifact를 만든다. 그렇지
-                # 않으면 non-strict path를 나중의 strict 수집에 재사용해
-                # 공식 URL 출처 검사를 통과한 척하게 된다.
-                downloaded_document_artifacts[receipt] = engine.download_document(
-                    receipt,
-                    directory,
-                    request_counter,
-                    require_official_url_sidecar=True,
-                )
-            return downloaded_document_artifacts[receipt]
+            with downloaded_document_lock:
+                if receipt not in downloaded_document_artifacts:
+                    # FULL은 첫 요청이 비교/legacy의 약한 호출이어도
+                    # 항상 sidecar 검증까지 한 강한 artifact를 만든다. 그렇지
+                    # 않으면 non-strict path를 나중의 strict 수집에 재사용해
+                    # 공식 URL 출처 검사를 통과한 척하게 된다.
+                    downloaded_document_artifacts[receipt] = engine.download_document(
+                        receipt,
+                        directory,
+                        request_counter,
+                        require_official_url_sidecar=True,
+                    )
+                return downloaded_document_artifacts[receipt]
 
         source_identity = ReportSourceIdentity.capture(
             filing=filing,
@@ -3896,6 +3912,12 @@ class RealPipeline:
                     corp_type=corp_type,
                     final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
                 )
+        # ── 6·7 경쟁사 비교와 뉴스 검색 (서로의 결과를 읽지 않는다) ─────
+        # 두 갈래는 재분류(AI 소비)가 끝난 «뒤»에만 시작한다 — 그 호출 수가
+        # 뉴스 예산과 캐시 열쇠에 들어가기 때문이다. 비교는 DART(engine·counter)
+        # 만 쓰고 AI client를 받지 않으므로, 뉴스가 읽는 남은 호출 수를 바꾸지
+        # 않는다. 그래서 둘을 어느 순서로 돌려도 같은 값이 나온다.
+        comparison_branch: Callable[[], _BranchOutcome] | None = None
         if (
             generation_mode is engine_mode.EngineMode.V2
             and requested_release_mode is ReleaseMode.FULL
@@ -3905,228 +3927,76 @@ class RealPipeline:
             # 자사 cache key가 그대로 남는다. 실제 공식 비교를 여기서 먼저
             # 만들고 그 snapshot을 생성 신원에 포함한다.
             assert official_evidence is not None
-            try:
-                v2_comparison_result = _prepare_v2_comparison_result(
-                    engine=engine,
-                    counter=counter,
-                    profile=profile,
-                    official_evidence=official_evidence,
-                    corp_code=corp_code,
-                    company_name=company_name,
-                    corp_type=corp_type,
-                    financials=financials,
-                    filing=filing,
-                    business_date=business_date,
-                    dart_download_document=download_document_once,
-                )
-                generation_source_identity_digest = _comparison_generation_digest(
-                    generation_source_identity_digest,
-                    v2_comparison_result,
-                )
-            except ComparisonBlockedError:
-                logger.info("엔진 v2 회사 차별점 사전검사 차단", exc_info=True)
-                steps.append(
-                    {
-                        "step": "v2_FULL_회사차별점사전검사_차단",
-                        "사유코드": FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
-                    }
-                )
-                return RunResult(
-                    outcome=Outcome.GATE_STOPPED,
-                    message=(
-                        "회사 공식 자료에서 자기 선언형 차별점을 확인하지 못해 "
-                        "AI 작성 전에 멈췄습니다."
-                        + _stop_reason_note(
-                            FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT
-                        )
-                    ),
-                    sources=[
-                        SourceStatus(
-                            "회사 공식 차별점",
-                            "none",
-                            "회사 주어와 선언 표지가 있는 공식 원문이 부족합니다",
-                        )
-                    ],
-                    corp_type=corp_type,
-                    cost_krw=_request_spent_krw(engine),
-                    model=model,
-                    final_gate_reason=FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
-                    dart_receipt_numbers=source_identity.dart_receipt_numbers,
-                    financial_payload_digest=source_identity.financial_payload_digest,
-                )
-            except Exception as error:  # noqa: BLE001 - 아래서 외부 장애를 제한 분류
-                if _comparison_source_failure_is_configuration(error):
-                    # 인증키·권한은 사용자의 회사나 일시 네트워크 문제가 아니다.
-                    # 원문 예외문은 로그·화면·영속 사유 어디에도 복사하지 않는다.
-                    logger.error(
-                        "엔진 v2 공식 양사 비교 DART 접근 설정 오류 kind=%s",
-                        type(error).__name__,
-                    )
-                    steps.append(
-                        {
-                            "step": "v2_FULL_공식비교접근설정_차단",
-                            "사유코드": (
-                                FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION
-                            ),
-                        }
-                    )
-                    return RunResult(
-                        outcome=Outcome.GATE_STOPPED,
-                        message=(
-                            "공식 양사 자료의 접근 설정을 확인하지 못해 "
-                            "AI 작성 전에 멈췄습니다."
-                            + _stop_reason_note(
-                                FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION
-                            )
-                        ),
-                        sources=[
-                            SourceStatus(
-                                "공식 양사 비교",
-                                "failed",
-                                "운영자의 DART 접근 설정 확인이 필요합니다",
-                            )
-                        ],
-                        corp_type=corp_type,
-                        cost_krw=_request_spent_krw(engine),
-                        model=model,
-                        final_gate_reason=(
-                            FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION
-                        ),
-                        dart_receipt_numbers=source_identity.dart_receipt_numbers,
-                        financial_payload_digest=(
-                            source_identity.financial_payload_digest
-                        ),
-                    )
-                if _comparison_source_failure_is_transient(error):
-                    # 예외 문자열·URL·응답 원문은 로그·결과에 싣지 않는다.
-                    logger.warning(
-                        "엔진 v2 공식 양사 비교 DART 일시 장애 kind=%s",
-                        type(error).__name__,
-                    )
-                    steps.append(
-                        {
-                            "step": "v2_FULL_공식비교일시장애_차단",
-                            "사유코드": FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT,
-                        }
-                    )
-                    return RunResult(
-                        outcome=Outcome.GATE_STOPPED,
-                        message=(
-                            "공식 양사 자료를 확인하는 중 일시 장애가 발생해 "
-                            "AI 작성 전에 멈췄습니다."
-                            + _stop_reason_note(
-                                FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT
-                            )
-                        ),
-                        sources=[
-                            SourceStatus(
-                                "공식 양사 비교",
-                                "failed",
-                                "DART 공식 자료 확인을 지금 완료하지 못했습니다",
-                            )
-                        ],
-                        corp_type=corp_type,
-                        cost_krw=_request_spent_krw(engine),
-                        model=model,
-                        final_gate_reason=(
-                            FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT
-                        ),
-                        dart_receipt_numbers=source_identity.dart_receipt_numbers,
-                        financial_payload_digest=(
-                            source_identity.financial_payload_digest
-                        ),
-                    )
-                # 내부 계약 오류도 traceback을 남기지 않는다. 원인이 가진 외부
-                # 원문이나 URL이 예외 체인에 섞였을 수 있기 때문이다.
-                logger.error(
-                    "엔진 v2 공식 양사 비교 내부 연결 오류 kind=%s",
-                    type(error).__name__,
-                )
-                steps.append(
-                    {
-                        "step": "v2_FULL_공식비교transport_차단",
-                        "사유코드": FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
-                    }
-                )
-                return RunResult(
-                    outcome=Outcome.GATE_STOPPED,
-                    message=(
-                        "공식 양사 자료를 보고서 근거에 연결하는 내부 검사를 "
-                        "통과하지 못해 AI 작성 전에 멈췄습니다."
-                        + _stop_reason_note(
-                            FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
-                        )
-                    ),
-                    sources=[
-                        SourceStatus(
-                            "공식 양사 비교",
-                            "failed",
-                            "내부 비교 근거 연결을 확인하지 못했습니다",
-                        )
-                    ],
-                    corp_type=corp_type,
-                    cost_krw=_request_spent_krw(engine),
-                    model=model,
-                    final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
-                    dart_receipt_numbers=source_identity.dart_receipt_numbers,
-                    financial_payload_digest=source_identity.financial_payload_digest,
-                )
+            comparison_branch = partial(
+                _run_comparison_branch,
+                engine=engine,
+                counter=counter,
+                profile=profile,
+                official_evidence=official_evidence,
+                corp_code=corp_code,
+                company_name=company_name,
+                corp_type=corp_type,
+                financials=financials,
+                filing=filing,
+                business_date=business_date,
+                dart_download_document=download_document_once,
+                # 지문 접기까지 갈래 안에서 끝낸다 — 예전처럼 같은 `try`가
+                # 덮어야 직렬화 오류도 GATE_STOPPED로 끝난다.
+                source_identity_digest=generation_source_identity_digest,
+            )
         # 뉴스는 공식 자료의 빈칸 여부와 무관한 현재성 입력이다. 검색은 AI 없이
         # 먼저 고정하고, 본문 분석은 아래 owner 선정 뒤에만 실행한다. 이렇게 해야
         # 공시가 같아도 새 보도가 나왔을 때 과거 PDF를 새 조사로 돌려주지 않는다.
-        news_session: news_research_adapter.NewsResearchSession | None = None
-        news_preparation_failed = False
+        news_branch: Callable[[], _BranchOutcome] | None = None
         if (
             generation_mode is engine_mode.EngineMode.V2
             and news_intake_switch.news_intake_enabled()
         ):
-            verified_domain, identity_context = official_news_context(
-                profile, official_evidence
+            news_branch = partial(
+                _run_news_search_branch,
+                engine=engine,
+                profile=profile,
+                official_evidence=official_evidence,
+                company_name=company_name,
+                business_date=business_date,
+                pipeline_news_search=self._news_search,
             )
-            try:
-                # FULL의 기본 작성·검수와 허용된 보충 검수 몫을 먼저 보호한다.
-                # 부분 모드도 같은 여유를 남기되 기존 선택적 다듬기 한도 저하는
-                # 유지한다. 재시도가 많은 모든 입력의 성공을 보장하는 값은 아니다.
-                news_analysis_call_budget = engine.available_provider_calls(
-                    reserved_calls=COMPOSER_RUNTIME_CALL_RESERVE
+        comparison_outcome, news_outcome = _run_collection_branches(
+            comparison_branch, news_branch
+        )
+        news_session: news_research_adapter.NewsResearchSession | None = None
+        news_preparation_failed = False
+        if comparison_outcome is not None:
+            steps.extend(comparison_outcome.steps)
+            if comparison_outcome.error is not None:
+                # 비교가 멈추면 보고서가 나가지 않는다. 같이 돌린 뉴스의 결과·
+                # 단계·지문은 여기서 버린다 — 차례로 돌 때와 같은 결과다.
+                return _comparison_branch_gate_result(
+                    comparison_outcome.error,
+                    steps=steps,
+                    engine=engine,
+                    model=model,
+                    corp_type=corp_type,
+                    source_identity=source_identity,
                 )
-                news_session = news_research_adapter.prepare_news_research(
-                    search_news=self._news_search or getattr(engine, "search_news", None),
-                    company_name=company_name,
-                    aliases=_official_company_aliases(profile),
-                    domain=verified_domain,
-                    executive_names=tuple(
-                        name.strip()
-                        for name in re.split(r"[,/·ㆍ]", str(profile.get("ceo_nm") or ""))
-                        if name.strip()
-                    ),
-                    identity_context=identity_context,
-                    as_of=business_date,
-                    max_analysis_calls=news_analysis_call_budget,
-                )
-                news_digest = news_session.snapshot.digest
-                steps.append(
-                    {
-                        "step": "5b_뉴스_검색스냅샷",
-                        "상태": news_session.snapshot.status,
-                        "사유코드": list(news_session.snapshot.reason_codes),
-                        "캐시재사용가능": news_session.snapshot.cache_eligible,
-                        "AI분석호출상한": news_session.policy.max_analysis_calls,
-                        "본문작성예약호출": COMPOSER_RUNTIME_CALL_RESERVE,
-                        **news_session.snapshot.transport_diagnostics,
-                    }
-                )
-            except Exception as error:  # 뉴스 장애가 확인된 공식 사실을 폐기하지 않는다
-                news_preparation_failed = True
-                news_digest = NEWS_INTAKE_INTERNAL_ERROR_CODE
-                logger.warning(
-                    "뉴스 검색 입력을 준비하지 못했습니다 code=%s kind=%s",
-                    NEWS_INTAKE_INTERNAL_ERROR_CODE,
-                    type(error).__name__,
-                )
+            assert isinstance(comparison_outcome.value, _ComparisonOutcome)
+            v2_comparison_result = comparison_outcome.value.result
+            generation_source_identity_digest = comparison_outcome.value.folded_digest
+        if news_outcome is not None:
+            # 뉴스 갈래의 바깥 `except Exception`(official_news_context 구간)이 담은
+            # 예외는 예전처럼 여기서 그대로 올린다 — assert 로 바꾸면 원래 예외가
+            # AssertionError 로 덮여 실패 분류·로그가 달라진다(독립 검토 P2).
+            # 취소·종료 같은 BaseException 은 갈래가 담지 않고 스레드 경계의
+            # `result()` 가 이미 다시 던졌다.
+            if news_outcome.error is not None:
+                raise news_outcome.error
+            assert isinstance(news_outcome.value, _NewsSearchOutcome)
+            steps.extend(news_outcome.steps)
+            news_session = news_outcome.value.session
+            news_preparation_failed = news_outcome.value.preparation_failed
             generation_source_identity_digest = news_generation_digest(
                 generation_source_identity_digest,
-                news_snapshot_digest=news_digest,
+                news_snapshot_digest=news_outcome.value.digest,
                 as_of=business_date.isoformat(),
             )
 
@@ -5758,6 +5628,380 @@ def _packet_document_preflight_final_gate_reason(detail_code: str) -> str:
     if detail_code == FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID:
         return FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
     return FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT
+
+
+@dataclass(frozen=True)
+class _BranchOutcome:
+    """동시에 돌린 갈래 하나가 만든 값·예외·단계 기록.
+
+    ★ `Exception`을 던지지 않고 «담아» 돌려준다 — 스레드 안에서 그대로 던지면
+      원래 코드가 가진 사유 분류·화면 문구 경로를 못 타고, 합류한 쪽이 두 갈래의
+      기록 순서를 정할 기회도 사라진다. 반대로 취소·종료처럼 `Exception`이 아닌
+      중단은 담지 않는다 — 삼키면 예전에 멈추던 신호가 조용히 사라진다.
+    """
+
+    value: "_ComparisonOutcome | _NewsSearchOutcome | None"
+    error: Exception | None
+    steps: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class _ComparisonOutcome:
+    """비교 갈래가 만든 두 값 — 비교 생산물과 그것까지 접은 캐시 지문.
+
+    ★ 지문 접기를 왜 갈래 안에 두나 — 예전 코드는 비교 생산과 지문 접기가 같은
+      `try` 안이라, 직렬화 불가 값 때문에 접기가 터져도 「내부 근거 계약」
+      GATE_STOPPED로 끝났다. 합류 지점으로 빼면 그 덮개가 사라져 같은 입력이
+      처리되지 않은 실패가 된다. 그래서 값과 지문을 함께 만들어 함께 돌려준다.
+    """
+
+    #: `_prepare_v2_comparison_result`의 반환값. 생산기 자체가 `Any`다.
+    result: Any
+    folded_digest: str
+
+
+@dataclass(frozen=True)
+class _NewsSearchOutcome:
+    """뉴스 검색 갈래가 만든 세 값 — 세션·지문·준비 실패 여부."""
+
+    session: "news_research_adapter.NewsResearchSession | None"
+    digest: str
+    preparation_failed: bool
+
+
+def _run_comparison_branch(
+    *,
+    engine: Any,
+    counter: Any,
+    profile: dict[str, Any],
+    official_evidence: OfficialEvidenceCollectionResult,
+    corp_code: str,
+    company_name: str,
+    corp_type: str,
+    financials: Optional[dict[str, Any]],
+    filing: Optional[dict[str, Any]],
+    business_date: Any,
+    dart_download_document: Any,
+    source_identity_digest: str,
+) -> _BranchOutcome:
+    """공식 양사 비교 갈래. 실패는 합류 지점이 원래 분류로 처리한다."""
+
+    branch_steps: list[dict[str, Any]] = []
+    # 갈래가 부르는 하위 함수가 `current_steps()`로 기록을 남기더라도 공용
+    # 목록이 아니라 이 갈래 목록에 쌓이게 한다. 합류한 쪽이 정해진 차례로
+    # 옮겨 붙이므로 완료 순서가 기록 순서를 흔들지 않는다.
+    with run_diagnostics.use_steps(branch_steps):
+        try:
+            comparison = _prepare_v2_comparison_result(
+                engine=engine,
+                counter=counter,
+                profile=profile,
+                official_evidence=official_evidence,
+                corp_code=corp_code,
+                company_name=company_name,
+                corp_type=corp_type,
+                financials=financials,
+                filing=filing,
+                business_date=business_date,
+                dart_download_document=dart_download_document,
+            )
+            # 예전과 같은 `try` 안이다. 여기서 터지는 직렬화 오류도 합류 지점이
+            # 「내부 근거 계약」 GATE_STOPPED로 바꾼다.
+            value = _ComparisonOutcome(
+                result=comparison,
+                folded_digest=_comparison_generation_digest(
+                    source_identity_digest, comparison
+                ),
+            )
+        except Exception as error:  # noqa: BLE001 - 합류 지점이 원래대로 분류한다
+            return _BranchOutcome(value=None, error=error, steps=branch_steps)
+    return _BranchOutcome(value=value, error=None, steps=branch_steps)
+
+
+def _run_news_search_branch(
+    *,
+    engine: Any,
+    profile: dict[str, Any],
+    official_evidence: OfficialEvidenceCollectionResult | None,
+    company_name: str,
+    business_date: Any,
+    pipeline_news_search: Optional[Callable[..., Any]],
+) -> _BranchOutcome:
+    """뉴스 검색 스냅샷 갈래. 뉴스 장애는 예전처럼 보고서를 멈추지 않는다."""
+
+    branch_steps: list[dict[str, Any]] = []
+    news_session: news_research_adapter.NewsResearchSession | None = None
+    news_preparation_failed = False
+    # 두 갈래 모두 값을 채우지 못하는 경로가 생기면 «뉴스 없음»이 아니라
+    # «확인 못 함»으로 굳혀 캐시 열쇠가 정상 실행과 겹치지 않게 한다.
+    news_digest = NEWS_INTAKE_INTERNAL_ERROR_CODE
+    with run_diagnostics.use_steps(branch_steps):
+        try:
+            verified_domain, identity_context = official_news_context(
+                profile, official_evidence
+            )
+            try:
+                # FULL의 기본 작성·검수와 허용된 보충 검수 몫을 먼저 보호한다.
+                # 부분 모드도 같은 여유를 남기되 기존 선택적 다듬기 한도 저하는
+                # 유지한다. 재시도가 많은 모든 입력의 성공을 보장하는 값은 아니다.
+                news_analysis_call_budget = engine.available_provider_calls(
+                    reserved_calls=COMPOSER_RUNTIME_CALL_RESERVE
+                )
+                news_session = news_research_adapter.prepare_news_research(
+                    search_news=(
+                        pipeline_news_search
+                        or getattr(engine, "search_news", None)
+                    ),
+                    company_name=company_name,
+                    aliases=_official_company_aliases(profile),
+                    domain=verified_domain,
+                    executive_names=tuple(
+                        name.strip()
+                        for name in re.split(r"[,/·ㆍ]", str(profile.get("ceo_nm") or ""))
+                        if name.strip()
+                    ),
+                    identity_context=identity_context,
+                    as_of=business_date,
+                    max_analysis_calls=news_analysis_call_budget,
+                )
+                news_digest = news_session.snapshot.digest
+                branch_steps.append(
+                    {
+                        "step": "5b_뉴스_검색스냅샷",
+                        "상태": news_session.snapshot.status,
+                        "사유코드": list(news_session.snapshot.reason_codes),
+                        "캐시재사용가능": news_session.snapshot.cache_eligible,
+                        "AI분석호출상한": news_session.policy.max_analysis_calls,
+                        "본문작성예약호출": COMPOSER_RUNTIME_CALL_RESERVE,
+                        **news_session.snapshot.transport_diagnostics,
+                    }
+                )
+            except Exception as error:  # 뉴스 장애가 확인된 공식 사실을 폐기하지 않는다
+                news_preparation_failed = True
+                news_digest = NEWS_INTAKE_INTERNAL_ERROR_CODE
+                logger.warning(
+                    "뉴스 검색 입력을 준비하지 못했습니다 code=%s kind=%s",
+                    NEWS_INTAKE_INTERNAL_ERROR_CODE,
+                    type(error).__name__,
+                )
+        except Exception as error:  # noqa: BLE001 - 원래처럼 합류 지점이 올린다
+            return _BranchOutcome(value=None, error=error, steps=branch_steps)
+    return _BranchOutcome(
+        value=_NewsSearchOutcome(
+            session=news_session,
+            digest=news_digest,
+            preparation_failed=news_preparation_failed,
+        ),
+        error=None,
+        steps=branch_steps,
+    )
+
+
+def _run_collection_branches(
+    comparison: Optional[Callable[[], _BranchOutcome]],
+    news: Optional[Callable[[], _BranchOutcome]],
+) -> tuple[Optional[_BranchOutcome], Optional[_BranchOutcome]]:
+    """비교·뉴스 검색 갈래를 스위치에 따라 동시에 또는 차례로 돌린다.
+
+    한쪽만 돌 때는 나눌 것이 없다. 스위치가 꺼져 있으면 예전과 똑같이 비교를
+    끝낸 뒤 뉴스를 시작한다 — 비교가 멈추는 실행에서는 뉴스 검색 호출이 아예
+    나가지 않는다는 뜻이다. 켜면 그 호출이 이미 떠난 뒤일 수 있다.
+    """
+
+    if comparison is None or news is None or not parallel_collect_switch.enabled():
+        comparison_outcome = None if comparison is None else comparison()
+        if comparison_outcome is not None and comparison_outcome.error is not None:
+            # 차례로 돌 때 비교가 멈추면 보고서는 거기서 끝난다. 예전 코드가
+            # 그 자리에서 바로 돌아갔듯 뉴스 검색을 아예 시작하지 않는다 —
+            # 여기서 그냥 이어 부르면 끈 상태에서도 헛호출이 나간다.
+            return comparison_outcome, None
+        return comparison_outcome, (None if news is None else news())
+    with ThreadPoolExecutor(max_workers=PARALLEL_COLLECT_BRANCH_WORKERS) as pool:
+        # ContextVar는 스레드마다 따로다. 문맥을 복사해 넘기지 않으면 safe_http
+        # 마감·provider 예산·attempt callback이 «설치 안 됨»으로 보여 갈래가
+        # 조용히 막힌다.
+        # ★ 공유 캐시 경쟁은 여기서 생기지 않는다(실측). 합류 시점에
+        #   ``safe_http._ACTIVE_CACHE``·``_ACTIVE_DEADLINE``이 둘 다 None이다 —
+        #   ``collection_cache_scope()``를 여는 자리는 legacy 수집과 뉴스 본문
+        #   수집뿐이고 셋 다 이 합류보다 «뒤»에 있다. 그래서 두 갈래가 같은
+        #   robots·DNS 딕셔너리를 나눠 쓰지 않고, 각자 자기 scope를 새로 연다.
+        comparison_future = pool.submit(contextvars.copy_context().run, comparison)
+        news_future = pool.submit(contextvars.copy_context().run, news)
+        # 기다리는 시간에 상한을 걸지 않는다. 각 갈래는 이미 자기 시간 계약을
+        # 갖고 있고(뉴스 검색 예산 등), 그보다 짧게 자르면 없던 실패를 만든다.
+        # 갈래가 담지 않는 중단(`Exception`이 아닌 것)은 `result()`가 여기서 그대로
+        # 다시 던진다 — 비교가 실패한 실행에서도 취소 신호가 묻히지 않게 뉴스
+        # 쪽부터 먼저 확인한다.
+        news_outcome = news_future.result()
+        return comparison_future.result(), news_outcome
+
+
+def _comparison_branch_gate_result(
+    error: Exception,
+    *,
+    steps: list[dict[str, Any]],
+    engine: Any,
+    model: str,
+    corp_type: str,
+    source_identity: Any,
+) -> RunResult:
+    """비교 갈래의 실패를 예전과 똑같은 사유·문구·단계 기록으로 바꾼다.
+
+    ★ 예외를 여기서 다시 던져 원래 `except` 절을 그대로 태운다 — 분류 조건과
+      화면 문구를 옮겨 적으면 한쪽만 바뀌어 표류하기 때문이다. `exc_info`도
+      이 `raise` 덕분에 예전과 같은 예외를 가리킨다.
+    """
+
+    try:
+        raise error
+    except ComparisonBlockedError:
+        logger.info("엔진 v2 회사 차별점 사전검사 차단", exc_info=True)
+        steps.append(
+            {
+                "step": "v2_FULL_회사차별점사전검사_차단",
+                "사유코드": FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
+            }
+        )
+        return RunResult(
+            outcome=Outcome.GATE_STOPPED,
+            message=(
+                "회사 공식 자료에서 자기 선언형 차별점을 확인하지 못해 "
+                "AI 작성 전에 멈췄습니다."
+                + _stop_reason_note(
+                    FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT
+                )
+            ),
+            sources=[
+                SourceStatus(
+                    "회사 공식 차별점",
+                    "none",
+                    "회사 주어와 선언 표지가 있는 공식 원문이 부족합니다",
+                )
+            ],
+            corp_type=corp_type,
+            cost_krw=_request_spent_krw(engine),
+            model=model,
+            final_gate_reason=FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
+            dart_receipt_numbers=source_identity.dart_receipt_numbers,
+            financial_payload_digest=source_identity.financial_payload_digest,
+        )
+    except Exception as error:  # noqa: BLE001 - 아래서 외부 장애를 제한 분류
+        if _comparison_source_failure_is_configuration(error):
+            # 인증키·권한은 사용자의 회사나 일시 네트워크 문제가 아니다.
+            # 원문 예외문은 로그·화면·영속 사유 어디에도 복사하지 않는다.
+            logger.error(
+                "엔진 v2 공식 양사 비교 DART 접근 설정 오류 kind=%s",
+                type(error).__name__,
+            )
+            steps.append(
+                {
+                    "step": "v2_FULL_공식비교접근설정_차단",
+                    "사유코드": (
+                        FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION
+                    ),
+                }
+            )
+            return RunResult(
+                outcome=Outcome.GATE_STOPPED,
+                message=(
+                    "공식 양사 자료의 접근 설정을 확인하지 못해 "
+                    "AI 작성 전에 멈췄습니다."
+                    + _stop_reason_note(
+                        FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION
+                    )
+                ),
+                sources=[
+                    SourceStatus(
+                        "공식 양사 비교",
+                        "failed",
+                        "운영자의 DART 접근 설정 확인이 필요합니다",
+                    )
+                ],
+                corp_type=corp_type,
+                cost_krw=_request_spent_krw(engine),
+                model=model,
+                final_gate_reason=(
+                    FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION
+                ),
+                dart_receipt_numbers=source_identity.dart_receipt_numbers,
+                financial_payload_digest=(
+                    source_identity.financial_payload_digest
+                ),
+            )
+        if _comparison_source_failure_is_transient(error):
+            # 예외 문자열·URL·응답 원문은 로그·결과에 싣지 않는다.
+            logger.warning(
+                "엔진 v2 공식 양사 비교 DART 일시 장애 kind=%s",
+                type(error).__name__,
+            )
+            steps.append(
+                {
+                    "step": "v2_FULL_공식비교일시장애_차단",
+                    "사유코드": FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT,
+                }
+            )
+            return RunResult(
+                outcome=Outcome.GATE_STOPPED,
+                message=(
+                    "공식 양사 자료를 확인하는 중 일시 장애가 발생해 "
+                    "AI 작성 전에 멈췄습니다."
+                    + _stop_reason_note(
+                        FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT
+                    )
+                ),
+                sources=[
+                    SourceStatus(
+                        "공식 양사 비교",
+                        "failed",
+                        "DART 공식 자료 확인을 지금 완료하지 못했습니다",
+                    )
+                ],
+                corp_type=corp_type,
+                cost_krw=_request_spent_krw(engine),
+                model=model,
+                final_gate_reason=(
+                    FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT
+                ),
+                dart_receipt_numbers=source_identity.dart_receipt_numbers,
+                financial_payload_digest=(
+                    source_identity.financial_payload_digest
+                ),
+            )
+        # 내부 계약 오류도 traceback을 남기지 않는다. 원인이 가진 외부
+        # 원문이나 URL이 예외 체인에 섞였을 수 있기 때문이다.
+        logger.error(
+            "엔진 v2 공식 양사 비교 내부 연결 오류 kind=%s",
+            type(error).__name__,
+        )
+        steps.append(
+            {
+                "step": "v2_FULL_공식비교transport_차단",
+                "사유코드": FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
+            }
+        )
+        return RunResult(
+            outcome=Outcome.GATE_STOPPED,
+            message=(
+                "공식 양사 자료를 보고서 근거에 연결하는 내부 검사를 "
+                "통과하지 못해 AI 작성 전에 멈췄습니다."
+                + _stop_reason_note(
+                    FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+                )
+            ),
+            sources=[
+                SourceStatus(
+                    "공식 양사 비교",
+                    "failed",
+                    "내부 비교 근거 연결을 확인하지 못했습니다",
+                )
+            ],
+            corp_type=corp_type,
+            cost_krw=_request_spent_krw(engine),
+            model=model,
+            final_gate_reason=FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
+            dart_receipt_numbers=source_identity.dart_receipt_numbers,
+            financial_payload_digest=source_identity.financial_payload_digest,
+        )
 
 
 def _prepare_v2_comparison_result(
