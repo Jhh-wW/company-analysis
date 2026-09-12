@@ -50,6 +50,7 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
 )
 from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.stage_elapsed_constants import STAGE_ELAPSED_MS_KEY, STAGE_ELAPSED_STEP
 
 
 #: 약속 지점에서 서로를 기다릴 갈래 수. **생산 상수를 쓰지 않는다** — worker 수를
@@ -363,9 +364,24 @@ def _composer_identity(run: _BranchRun) -> dict[str, Any]:
     assert len(run.calls.composers) == 1
     composer = run.calls.composers[0]
     identity = {key: composer[key] for key in COMPOSER_IDENTITY_KEYS}
+    # composer 에 넘기는 진단 목록에는 단계별 소요 시간이 실려 있고 그 값은
+    # 실행마다 다르다. 항목·순서는 그대로 비교하고 시간 값만 지운다.
+    identity["steps"] = _without_elapsed_ms(identity["steps"])
     # SourceStatus는 값 비교가 되지만 목록 순서까지 함께 고정한다.
     identity["sources"] = [repr(source) for source in composer["sources"]]
     return identity
+
+
+def _without_elapsed_ms(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """단계소요 항목의 소요ms 값만 지운 사본. 시간은 비결정이라 동일성 비교에서 뺀다."""
+
+    stripped: list[dict[str, Any]] = []
+    for item in steps:
+        if item.get("step") == STAGE_ELAPSED_STEP:
+            stripped.append({k: v for k, v in item.items() if k != STAGE_ELAPSED_MS_KEY})
+        else:
+            stripped.append(item)
+    return stripped
 
 
 def _step_names(steps: list[dict[str, Any]]) -> list[str]:
@@ -418,7 +434,9 @@ def test_켜고_꺼도_보고서입력과_캐시열쇠와_단계기록이_같다
     assert serial.result.charged == parallel.result.charged
 
     assert _composer_identity(serial) == _composer_identity(parallel)
-    assert serial.steps == parallel.steps
+    # 단계별 소요 시간(단계소요·소요ms)은 실행마다 당연히 달라서 값만 지우고
+    # 비교한다. 항목의 존재·순서는 그대로 같아야 한다.
+    assert _without_elapsed_ms(serial.steps) == _without_elapsed_ms(parallel.steps)
     assert NEWS_SEARCH_SNAPSHOT_STEP in _step_names(serial.steps)
 
     assert len(serial.calls.coordinates) == len(parallel.calls.coordinates) == 1

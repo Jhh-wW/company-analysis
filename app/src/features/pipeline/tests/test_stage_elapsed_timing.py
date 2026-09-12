@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -21,6 +22,11 @@ from src.features.pipeline import real
 from src.features.pipeline.port import CompanyCard, Outcome, UserInput
 from src.shared import engine_build_identity as build_identity_contract
 from src.shared.stage_elapsed_constants import STAGE_ELAPSED_MS_KEY, STAGE_ELAPSED_STEP
+
+#: 가짜 엔진 로드에 일부러 넣는 지연. 시동 구간이 이 값 이상으로 잡혀야 한다.
+_SLOW_ENGINE_LOAD_SEC = 0.05
+#: int() 버림과 타이머 해상도를 감안한 하한(ms). 지연 50ms 에 여유 10ms.
+_SLOW_ENGINE_LOAD_MIN_MS = 40
 
 
 @pytest.fixture(autouse=True)
@@ -137,7 +143,14 @@ def test_실제_본조사가_시동부터_두_단계를_지나면_단계소요�
       평범한 전환으로 닫는다.
     """
 
-    monkeypatch.setattr(real, "_engine", lambda: _JudgeRejectEngine())
+    # 엔진 로드가 실제로 시간을 먹게 해서, 시계 시작을 «엔진 생성 뒤»로 옮기는
+    # 변이(시동이 0ms 로 남아도 항목은 생기므로 순서 단정만으로는 못 잡는다)를
+    # 잡는다. 독립 검토에서 그 변이가 시험 11개를 전부 통과하는 것이 확인됐다.
+    def _slow_engine_load():
+        time.sleep(_SLOW_ENGINE_LOAD_SEC)
+        return _JudgeRejectEngine()
+
+    monkeypatch.setattr(real, "_engine", _slow_engine_load)
 
     with run_diagnostics.capture() as captured:
         result = real.RealPipeline().run(_user_input(), _card())
@@ -152,6 +165,8 @@ def test_실제_본조사가_시동부터_두_단계를_지나면_단계소요�
     for item in elapsed:
         ms = item[STAGE_ELAPSED_MS_KEY]
         assert type(ms) is int and ms >= 0
+    boot_ms = elapsed[0][STAGE_ELAPSED_MS_KEY]
+    assert boot_ms >= _SLOW_ENGINE_LOAD_MIN_MS, boot_ms
 
 
 class _BrokenProfileEngine:
