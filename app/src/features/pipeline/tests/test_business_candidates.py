@@ -640,9 +640,21 @@ class _FakeRefreshEngine:
         temp_path.write_bytes(self._fresh_xml)
         return temp_path
 
+    @staticmethod
+    def build_index(corps):
+        # 진짜 name_match.logic.build_index는 이름을 정규화하지만, 이 가짜는
+        # _engine()이 실제로 로드되지 않는(analysis_engine sys.path 미등록)
+        # 시험 환경에서 그 정규화 없이도 정확한 회사명 키만으로 충분한
+        # P1-1 시험(식별 AI 경로용 _company_index 무효화) 전용이다.
+        index: dict[str, list[str]] = {}
+        for corp_id, name in corps:
+            index.setdefault(name, []).append(corp_id)
+        return index
+
 
 def _clear_catalog_globals() -> None:
     real._company_catalog.cache_clear()
+    real._company_index.cache_clear()
     real._COMPANY_CANDIDATE_INDEX_SOURCE = None
     real._COMPANY_CANDIDATE_INDEX = None
     real._PRELOADED_CATALOG = None
@@ -836,6 +848,198 @@ def test_파싱실패_또는_레코드0건이면_바꿔끼우지_않는다(
     assert xml_path.read_bytes() == old_bytes, label
     assert real._company_candidate_index() is old_index, label
     assert not (corpcode_dir / "CORPCODE.xml.new").exists(), label
+
+
+def test_갱신후_식별AI_경로의_이름색인도_새_법인목록을_돌려준다(
+    tmp_path, monkeypatch, _fresh_catalog_state
+):
+    """P1-1: ``_company_index()``(식별 AI 경로)도 갱신 뒤 새 법인을 찾는다.
+
+    이 lru_cache를 안 비우면 ``find_company_metered``가 프로세스 수명
+    내내 옛 법인목록을 쓴다(독립 검토 실측 E9) — 후보 검색만 새 목록을
+    보고 식별 경로는 영영 갱신 전 목록을 보는 반쪽짜리 기능이 된다.
+    """
+
+    corpcode_dir = tmp_path / "corpcode"
+    corpcode_dir.mkdir()
+    xml_path = corpcode_dir / "CORPCODE.xml"
+    xml_path.write_bytes(_corpcode_xml([("00000001", "옛회사")]))
+    stale_mtime = time.time() - 8 * 86_400
+    os.utime(xml_path, (stale_mtime, stale_mtime))
+
+    fake_engine = _FakeRefreshEngine(
+        corpcode_dir, fresh_xml=_corpcode_xml([("00000002", "새회사")])
+    )
+    monkeypatch.setattr(real, "_engine", lambda: fake_engine)
+
+    before_index = real._company_index()
+    assert "옛회사" in before_index
+
+    replaced = real.refresh_business_candidate_catalog_if_stale()
+
+    assert replaced is True
+    after_index = real._company_index()
+    assert "새회사" in after_index
+    assert "옛회사" not in after_index, "식별 AI 경로가 갱신 뒤에도 옛 법인목록을 계속 쓴다"
+
+
+def test_갱신_중_옛색인_해제가_새색인_생성보다_먼저_일어난다(
+    tmp_path, monkeypatch, _fresh_catalog_state
+):
+    """P1-2: 두 세대를 동시에 들고 있지 않는다(설계 확정).
+
+    가짜 색인 빌더가 «불리는 바로 그 순간» 전역이 이미 ``None``인지
+    기록해, 옛 색인 해제가 새 색인 생성 시작보다 먼저 일어남을 실제
+    운영 함수의 실행 순서로 단정한다. 그렇지 않으면 색인 두 벌
+    (실측 1벌 549MB)이 겹쳐 과거 OOM 재시작 이력을 반복할 수 있다.
+    """
+
+    corpcode_dir = tmp_path / "corpcode"
+    corpcode_dir.mkdir()
+    xml_path = corpcode_dir / "CORPCODE.xml"
+    xml_path.write_bytes(_corpcode_xml([("00000001", "옛회사")]))
+    stale_mtime = time.time() - 8 * 86_400
+    os.utime(xml_path, (stale_mtime, stale_mtime))
+
+    fake_engine = _FakeRefreshEngine(
+        corpcode_dir, fresh_xml=_corpcode_xml([("00000002", "새회사")])
+    )
+    monkeypatch.setattr(real, "_engine", lambda: fake_engine)
+
+    old_index = real._company_candidate_index()
+    assert old_index is not None
+
+    old_index_already_released_when_building: list[bool] = []
+    original_builder = real._build_company_candidate_index
+
+    def spy_builder(records):
+        old_index_already_released_when_building.append(
+            real._COMPANY_CANDIDATE_INDEX is None
+        )
+        return original_builder(records)
+
+    monkeypatch.setattr(real, "_build_company_candidate_index", spy_builder)
+
+    replaced = real.refresh_business_candidate_catalog_if_stale()
+
+    assert replaced is True
+    assert old_index_already_released_when_building == [True], (
+        "새 색인을 만들기 시작하는 순간 옛 색인이 아직 살아 있었다 "
+        "— 두 세대가 겹칠 수 있다"
+    )
+
+
+def test_두_스레드가_동시에_처음_catalog를_불러도_파서는_한번만_실행된다(
+    monkeypatch,
+):
+    """P2-1: ``_company_catalog()``의 miss 경로가 ``_COMPANY_CATALOG_LOCK``으로 직렬화되는지 본다.
+
+    이전에는(자체 락 없이 ``_PRELOADED_CATALOG``만 있던 버전)
+    ``functools.lru_cache``가 동시 miss를 잠금 없이 실행해, 이 함수를
+    락 없이 직접 부르는 소비자(``_company_index()``·
+    ``_records_from_candidate_catalog(_company_catalog())`` at 4431·5252)가
+    끼어들면 재파싱이 일어나거나 서로 다른 catalog 객체를 돌려받을 수
+    있었다(독립 검토 실측 E6·E7). double-checked ``_COMPANY_CATALOG_LOCK``이
+    이를 막는지 직접 검증한다.
+    """
+
+    parse_calls: list[int] = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def fake_load_company_catalog(_xml_path):
+        parse_calls.append(1)
+        entered.set()
+        assert release.wait(timeout=2.0), "시험 스레드 조율에 실패했다"
+        return real._CompanyCatalog(
+            records=(),
+            compat_pairs=(("00000001", "회사"),),
+            metadata={},
+            english_names={},
+        )
+
+    class _MinimalFirstLoadEngine:
+        class UsageCounter:
+            pass
+
+        CORPCODE_DIR = Path("unused-dir")
+
+        def load_env(self):
+            return None
+
+        def download_corpcode(self, dest_dir, _counter):
+            return Path(dest_dir) / "CORPCODE.xml"
+
+    monkeypatch.setattr(real, "_load_company_catalog", fake_load_company_catalog)
+    monkeypatch.setattr(real, "_engine", lambda: _MinimalFirstLoadEngine())
+    real._load_or_download_company_catalog.cache_clear()
+    monkeypatch.setattr(real, "_PRELOADED_CATALOG", None)
+
+    results: list[object] = []
+
+    def worker():
+        results.append(real._company_catalog())
+
+    first = threading.Thread(target=worker)
+    first.start()
+    assert entered.wait(timeout=2.0), "첫 스레드가 파서에 들어가지 않았다"
+
+    second = threading.Thread(target=worker)
+    second.start()
+    time.sleep(0.1)
+    assert len(parse_calls) == 1, "두 번째 스레드가 락 없이 또 파싱을 시작했다"
+
+    release.set()
+    first.join(timeout=2.0)
+    second.join(timeout=2.0)
+    assert not first.is_alive()
+    assert not second.is_alive()
+
+    assert len(parse_calls) == 1
+    assert len(results) == 2
+    assert results[0] is results[1]
+
+
+def test_os_replace가_실패하면_임시파일을_지우고_옛것을_유지한다(
+    tmp_path, monkeypatch, caplog, _fresh_catalog_state
+):
+    """P2-2: Windows에서 정본을 다른 핸들이 열고 있으면 ``os.replace``가
+    ``PermissionError``(WinError 5)를 낸다(독립 검토 실측 E10). 이 함수
+    밖으로 던지지 않고, 임시 파일을 지우고 옛 파일·옛 색인을 그대로
+    유지해야 한다.
+    """
+
+    corpcode_dir = tmp_path / "corpcode"
+    corpcode_dir.mkdir()
+    xml_path = corpcode_dir / "CORPCODE.xml"
+    xml_path.write_bytes(_corpcode_xml([("00000001", "옛회사")]))
+    stale_mtime = time.time() - 8 * 86_400
+    os.utime(xml_path, (stale_mtime, stale_mtime))
+
+    fake_engine = _FakeRefreshEngine(
+        corpcode_dir, fresh_xml=_corpcode_xml([("00000002", "새회사")])
+    )
+    monkeypatch.setattr(real, "_engine", lambda: fake_engine)
+
+    def boom_replace(_src, _dst):
+        raise PermissionError(5, "다른 핸들이 파일을 열고 있습니다(시험)")
+
+    monkeypatch.setattr(real.os, "replace", boom_replace)
+
+    old_index = real._company_candidate_index()
+    old_bytes = xml_path.read_bytes()
+
+    with caplog.at_level("WARNING", logger=real.logger.name):
+        replaced = real.refresh_business_candidate_catalog_if_stale()
+
+    assert replaced is False
+    assert xml_path.read_bytes() == old_bytes
+    assert real._company_candidate_index() is old_index
+    assert not (corpcode_dir / "CORPCODE.xml.new").exists()
+    assert any(
+        "법인목록 정본 교체가 실패했습니다" in record.message
+        for record in caplog.records
+    ), "os.replace 실패 WARNING 로그가 남지 않았다"
 
 
 # ── 후보 AI 보조 재정렬 ask ────────────────────────────────

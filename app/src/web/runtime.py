@@ -393,6 +393,30 @@ def _candidate_index_prewarm_enabled() -> bool:
     return os.environ.get(CANDIDATE_INDEX_PREWARM_ENV, "") != "0"
 
 
+def _candidate_index_manager_should_run() -> bool:
+    """``PIPELINE=real``만으로는 못 거르는 두 경우를 추가로 막는다(독립 검토).
+
+    1) 실시간 성능시험 미리보기(``REALTIME_EVALUATION_MODE=1``이고 유료
+       provider는 안 켠 상태, ``실시간성능시험켜기.ps1``)는 화면에
+       «real pipeline은 불러왔지만 외부 호출은 잠겨 있습니다»라고 적어
+       두고도(``make_pipeline()`` 참고), 이 관리자 스레드는 그 상태와
+       무관하게 떠서 DART corpCode를 실제로 내려받아 그 약속을 깬다.
+    2) ``DART_API_KEY``가 아예 없으면 갱신 검사는 매 주기 반드시
+       실패한다. 실패 자체는 무해하지만(옛 목록 유지), 경고 로그가
+       시간마다 쌓인다(``배포리허설켜기.ps1``처럼 키를 아직 안 넣은
+       로컬 실행에서 특히 그렇다).
+
+    두 경우 다 조용히 건너뛴다 — 첫 실제 검색 요청이 그때 가서 필요하면
+    똑같은 이유로 실패하고 그 요청 로그에서 원인을 보게 된다.
+    """
+
+    if evaluation_mode.enabled() and not evaluation_mode.paid_providers_enabled():
+        return False
+    if not os.environ.get("DART_API_KEY", "").strip():
+        return False
+    return True
+
+
 def _prewarm_candidate_index() -> None:
     """기동 백그라운드 스레드에서 후보 색인을 미리 만든다(서비스 오픈을 막지 않음).
 
@@ -441,13 +465,28 @@ def _run_candidate_catalog_refresh_check() -> None:
 def _candidate_index_manager_loop() -> None:
     """기동 예열 뒤, 법인목록이 오래되면 주기적으로 뒤에서 새로 받아 바꿔 끼운다.
 
-    데몬 스레드 하나가 프로세스가 끝날 때까지 무한히 돈다. 예열을 먼저 한
-    번 하고(첫 검색 대기시간 제거), 그다음부터
-    ``CORPCODE_REFRESH_CHECK_INTERVAL_SEC``마다 법인목록 나이를 검사한다 —
-    검사 자체는 파일 mtime만 읽으므로 싸고, 실제로 오래됐을 때만
-    DART를 부른다.
+    데몬 스레드 하나가 프로세스가 끝날 때까지 무한히 돈다.
+
+    ★ 기동 직후 파일이 이미 오래됐으면 예열을 건너뛰고 갱신 경로로 «한
+      번만» 만든다(독립 검토, 2026-09-12) — 운영 영속 디스크의
+      corpCode.xml은 최초 배포 뒤 한 번도 안 바뀌므로(``download_corpcode``의
+      «있으면 재사용» 계약), 이 기능이 처음 올라가는 부팅에서는 파일이
+      거의 확실히 7일보다 오래됐다. 그런데 예열이 1세대(색인 549MB·
+      catalog 63.5MB, 실측)를 만들자마자 곧바로 갱신 검사가 낡음을 보고
+      락 밖에서 2세대를 또 만들면, 옛 색인이 아직 살아 있는 채로 겹쳐
+      실측 최고 1,360MB까지 치솟는다 — 과거 512MB에서 이 색인 때문에
+      OOM 재시작 이력이 있는 서비스라 위험하다. 파일이 안 오래됐으면
+      (최근에 갱신됐거나 예열이 이미 받아 둔 경우) 평소처럼 예열 한 번만
+      한다 — 어느 쪽이든 기동 때는 1세대만 만든다.
     """
-    _prewarm_candidate_index()
+    from src.features.pipeline.real import (  # noqa: PLC0415 — 순환 import 회피
+        business_candidate_catalog_needs_refresh,
+    )
+
+    if business_candidate_catalog_needs_refresh():
+        _run_candidate_catalog_refresh_check()
+    else:
+        _prewarm_candidate_index()
     while True:
         _run_candidate_catalog_refresh_check()
         time.sleep(CORPCODE_REFRESH_CHECK_INTERVAL_SEC)
@@ -498,6 +537,7 @@ async def _lifespan(_app: FastAPI):
     if (
         os.environ.get(PIPELINE_ENV, "").strip().lower() == PIPELINE_REAL
         and _candidate_index_prewarm_enabled()
+        and _candidate_index_manager_should_run()
     ):
         threading.Thread(
             target=_candidate_index_manager_loop,

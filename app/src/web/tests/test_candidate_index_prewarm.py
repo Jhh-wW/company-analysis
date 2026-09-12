@@ -58,6 +58,23 @@ def _reset_candidate_index_globals(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _default_manager_loop_environment(monkeypatch):
+    """기본값: DART 키는 있고, 법인목록은 안 오래됐다고 본다(예열 경로 위주 시험용).
+
+    ``_candidate_index_manager_loop``는 이제 (1) ``DART_API_KEY``가 있어야
+    하고(P2-3), (2) 법인목록이 안 오래됐어야 예열 분기를 탄다(P1-2). 이
+    두 조건을 시험마다 반복해서 세팅하지 않도록 기본값으로 깔아 두고,
+    그 반대(키 없음·이미 낡음·평가 모드 잠김)를 보는 시험은 자기 안에서
+    다시 덮어쓴다(같은 ``monkeypatch`` 객체라 나중 설정이 이긴다).
+    """
+
+    monkeypatch.setenv("DART_API_KEY", "fake-key")
+    monkeypatch.setattr(
+        real, "business_candidate_catalog_needs_refresh", lambda: False
+    )
+
+
+@pytest.fixture(autouse=True)
 def _stop_manager_loop_promptly(monkeypatch):
     """이 파일의 모든 시험에서 관리자 루프가 진짜 sleep(3600)로 늘어지지 않게 한다.
 
@@ -173,6 +190,81 @@ def test_예열_뒤_색인_관리자_루프가_갱신검사_함수를_부른다(
     with TestClient(app):
         assert prewarm_done.wait(timeout=5.0), "예열이 끝나지 않았다"
         assert check_called.wait(timeout=5.0), "예열 뒤 갱신 검사 함수가 불리지 않았다"
+
+
+def test_기동시_법인목록이_이미_낡았으면_예열을_생략하고_갱신경로로_한번만_만든다(
+    monkeypatch,
+) -> None:
+    """P1-2(a): 두 세대를 겹치지 않으려고 예열 대신 갱신 경로 «한 번만» 탄다.
+
+    운영 영속 디스크는 최초 배포 뒤 파일이 한 번도 안 바뀌므로, 이 기능이
+    처음 올라가는 부팅에서는 파일이 거의 확실히 낡아 있다. 이때 예열
+    (``_prewarm_candidate_index``)이 1세대를 만들고 곧바로 갱신 검사가
+    2세대를 또 만들면 색인 두 벌이 겹친다(실측 최고 1,360MB) — 그래서
+    ``business_candidate_catalog_needs_refresh()``가 참이면 예열을 아예
+    건너뛰고 갱신 경로 하나로만 만들어야 한다.
+    """
+
+    prewarm_called = threading.Event()
+    monkeypatch.setattr(
+        runtime, "_prewarm_candidate_index", lambda: prewarm_called.set()
+    )
+    monkeypatch.setattr(
+        real, "business_candidate_catalog_needs_refresh", lambda: True
+    )
+    check_called = threading.Event()
+
+    def fake_check() -> None:
+        check_called.set()
+        raise _ManagerLoopStoppedForTest
+
+    monkeypatch.setattr(runtime, "_run_candidate_catalog_refresh_check", fake_check)
+    monkeypatch.setenv(PIPELINE_ENV, PIPELINE_REAL)
+
+    with TestClient(app):
+        assert check_called.wait(timeout=5.0), "갱신 경로가 불리지 않았다"
+
+    assert not prewarm_called.is_set(), "낡았는데 예열도 함께 돌아 2세대가 겹칠 수 있었다"
+
+
+def test_실시간성능시험_외부호출잠김_미리보기면_예열도_갱신도_건너뛴다(
+    monkeypatch,
+) -> None:
+    """P2-3: «외부 호출은 잠겨 있습니다» 미리보기에서 DART 다운로드가 나가면 안 된다.
+
+    ``실시간성능시험켜기.ps1``이 ``PIPELINE=real`` + ``REALTIME_EVALUATION_MODE=1``을
+    켜지만 유료 provider는 안 켠 상태(기본값)가 이 시나리오다.
+    """
+
+    from src.features.auth import constants as auth_constants  # noqa: PLC0415
+    from src.web import evaluation_mode  # noqa: PLC0415
+
+    called = threading.Event()
+    monkeypatch.setattr(real, "_company_catalog", lambda: (called.set(), ())[1])
+    monkeypatch.setenv(PIPELINE_ENV, PIPELINE_REAL)
+    monkeypatch.setenv(evaluation_mode.ENV_MODE, "1")
+    monkeypatch.delenv(evaluation_mode.ENV_PAID_PROVIDERS, raising=False)
+    # 실시간 평가 launcher가 항상 같이 켜는 값들 — 없으면 evaluation_mode
+    # 자체 시작 검증(``validate_startup_configuration``)이 lifespan을 거절한다.
+    monkeypatch.setenv(evaluation_mode.ENV_DISABLE_ENGINE_DOTENV, "1")
+    monkeypatch.setenv(auth_constants.ENV_COOKIE_INSECURE, "1")
+
+    with TestClient(app):
+        assert not called.wait(
+            timeout=0.3
+        ), "외부 호출 잠김 미리보기인데 카탈로그 함수가 불렸다(DART 다운로드가 나갔다)"
+
+
+def test_DART_API_KEY가_없으면_예열도_갱신도_건너뛴다(monkeypatch) -> None:
+    """P2-3: 키가 아예 없는 로컬 실행(예: 배포 리허설 초기 설정)에서 매시간 실패 경고가 쌓이지 않게 한다."""
+
+    called = threading.Event()
+    monkeypatch.setattr(real, "_company_catalog", lambda: (called.set(), ())[1])
+    monkeypatch.setenv(PIPELINE_ENV, PIPELINE_REAL)
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+
+    with TestClient(app):
+        assert not called.wait(timeout=0.3), "DART_API_KEY가 없는데 카탈로그 함수가 불렸다"
 
 
 def test_예열이_실패해도_기동은_정상으로_열리고_비밀은_로그에_남지_않는다(

@@ -1566,36 +1566,76 @@ def _build_company_candidate_index(
 
 #: 주기 갱신이 락 밖에서 새 catalog를 이미 다 만들어 둔 경우에만 쓴다.
 #: ``_company_catalog()``가 이 값이 있으면 재다운로드·재파싱 없이 그대로
-#: 반환해, "락 보유 시간은 스왑뿐이어야 한다"는 요구를 지킨다.
+#: 반환한다.
 _PRELOADED_CATALOG: _CompanyCatalog | None = None
+
+#: ``_company_catalog()``의 catalog 생성 자체를 직렬화하는 전용 락.
+#:
+#: ★ 왜 필요한가(독립 검토 실측, 2026-09-12) — ``functools.lru_cache``는
+#:   캐시가 비어 있을 때(cache miss) 원본 함수를 **잠금 없이** 실행하고,
+#:   동시에 두 스레드가 미스를 내면 **먼저 끝난 쪽 결과만 캐시에 남고
+#:   나중 쪽 호출자는 자기가 따로 계산한(캐시에 없는) 값을 돌려받는다.**
+#:   이 파일에는 ``_company_catalog()``를 락 없이 직접 부르는 곳이
+#:   ``_company_index()``·``_records_from_candidate_catalog(_company_catalog())``
+#:   (식별 AI 경로, 비교 배경 스레드) 여러 곳 있어, 주기 갱신이
+#:   ``_PRELOADED_CATALOG``를 채우고 ``cache_clear()``를 부르는 바로 그
+#:   틈에 그 소비자들이 끼어들면 preload를 가로채 락 밖에서 재파싱하거나
+#:   ``_COMPANY_CANDIDATE_INDEX_SOURCE``와 어긋난 객체를 캐시에 남겨
+#:   다음 검색이 16초 색인을 다시 만들게 만들 수 있었다(실측).
+#:   ``_company_catalog()``가 실제 계산(``_load_or_download_company_catalog``
+#:   호출)을 **오직 이 락을 쥔 채로만** 하게 만들면, 그 안쪽 lru_cache는
+#:   절대 동시에 미스를 내지 않는다 — 두 번째 호출자는 락을 기다렸다가
+#:   이미 채워진 캐시를 안전하게 재사용한다(double-checked locking).
+_COMPANY_CATALOG_LOCK = threading.Lock()
 
 
 @lru_cache(maxsize=1)
+def _load_or_download_company_catalog() -> _CompanyCatalog:
+    """실제 catalog 생성(다운로드+파싱 또는 preload 재사용).
+
+    ``_company_catalog()``가 ``_COMPANY_CATALOG_LOCK``을 쥔 채로만 이
+    함수를 부르므로, 이 lru_cache는 절대 동시 miss를 내지 않는다 — 두
+    번째 이후 호출은 항상 이미 채워진 캐시를 즉시 돌려받는다.
+    """
+    global _PRELOADED_CATALOG
+    if _PRELOADED_CATALOG is not None:
+        catalog = _PRELOADED_CATALOG
+        _PRELOADED_CATALOG = None
+        return catalog
+    engine = _engine()
+    # 기존 real 개발 실행은 analysis_engine/.env bootstrap에 의존할 수 있다.
+    # 실시간 평가 launcher는 ANALYSIS_ENGINE_DISABLE_DOTENV=1이라 이 호출 자체가
+    # no-op이고, 명시 전달된 환경변수만 사용한다.
+    engine.load_env()
+    xml = engine.download_corpcode(engine.CORPCODE_DIR, engine.UsageCounter())
+    return _load_company_catalog(xml)
+
+
 def _company_catalog() -> tuple[tuple[str, str], ...]:
     """전자공시 전체 법인의 기존 (고유번호, 표시명) 호환 목록.
 
     실제 정본은 같은 XML에서 읽은 immutable 5-field record이며, 이 2-tuple은
-    기존 1판 exact-name index 계약에만 남긴다.
+    기존 1판 exact-name index 계약에만 남긴다. ``@lru_cache``를 이 함수
+    자신이 아니라 안쪽 ``_load_or_download_company_catalog``에 붙인 이유는
+    위 ``_COMPANY_CATALOG_LOCK`` 설명을 참고 — 이 함수는 그 락으로 감싼
+    얇은 겉껍데기다.
     """
     global _COMPANY_CATALOG_RECORDS, _COMPANY_CATALOG_METADATA
-    global _COMPANY_CATALOG_ENGLISH_NAMES, _PRELOADED_CATALOG
-    if _PRELOADED_CATALOG is not None:
-        catalog = _PRELOADED_CATALOG
-        _PRELOADED_CATALOG = None
-    else:
-        engine = _engine()
-        # 기존 real 개발 실행은 analysis_engine/.env bootstrap에 의존할 수 있다.
-        # 실시간 평가 launcher는 ANALYSIS_ENGINE_DISABLE_DOTENV=1이라 이 호출 자체가
-        # no-op이고, 명시 전달된 환경변수만 사용한다.
-        engine.load_env()
-        xml = engine.download_corpcode(engine.CORPCODE_DIR, engine.UsageCounter())
-        catalog = _load_company_catalog(xml)
-    _COMPANY_CATALOG_RECORDS = catalog.records
-    # 제자리 clear/update 대신 새 dict 객체로 재바인딩한다 — 갱신 스레드가
-    # 같은 dict를 손대는 동안 다른 스레드가 절반만 바뀐 값을 읽지 않게.
-    _COMPANY_CATALOG_METADATA = catalog.metadata
-    _COMPANY_CATALOG_ENGLISH_NAMES = catalog.english_names
+    global _COMPANY_CATALOG_ENGLISH_NAMES
+    with _COMPANY_CATALOG_LOCK:
+        catalog = _load_or_download_company_catalog()
+        _COMPANY_CATALOG_RECORDS = catalog.records
+        # 제자리 clear/update 대신 새 dict 객체로 재바인딩한다 — 갱신 스레드가
+        # 같은 dict를 손대는 동안 다른 스레드가 절반만 바뀐 값을 읽지 않게.
+        _COMPANY_CATALOG_METADATA = catalog.metadata
+        _COMPANY_CATALOG_ENGLISH_NAMES = catalog.english_names
     return catalog.compat_pairs
+
+
+# 기존 호출부·시험이 ``real._company_catalog.cache_clear()``를 부른다(1판
+# lru_cache 계약과 호환). 실제 캐시는 안쪽 함수에 있으므로 그 메서드를
+# 그대로 이 이름에 얹는다 — 일반 함수도 임의 속성을 가질 수 있다.
+_company_catalog.cache_clear = _load_or_download_company_catalog.cache_clear
 
 
 def _records_from_candidate_catalog(
@@ -1637,17 +1677,15 @@ def _records_from_candidate_catalog(
 def _company_candidate_index():
     """Cache normalized aliases against the cached catalog tuple identity.
 
-    ★ catalog 조회(``_company_catalog()``)를 잠금 «안」으로 옮겼다. 원래는
-    잠금 밖에서 불렀는데, ``functools.lru_cache``는 캐시가 비어 있을 때
-    (cache miss) 원본 함수를 **잠금을 놓은 채** 실행하는 구현이다(CPython
-    ``Lib/functools.py``의 ``_lru_cache_wrapper``). 실측: 같은 lru_cache
-    함수를 두 스레드에서 동시에 처음 호출하면 원본 함수 몸체가 두 번 다
-    실행된다(``cache_info().misses == 2``). 즉 기동 예열 스레드와 첫 검색
-    요청이 동시에 들어오면 두 스레드가 동시에 30MB corpCode XML을 내려받아
-    파싱하면서 ``_COMPANY_CATALOG_METADATA``·``_COMPANY_CATALOG_ENGLISH_NAMES``
-    전역 dict를 동시에 clear/update해 값이 섞일 수 있었다. catalog 조회까지
-    이 잠금으로 감싸면 두 번째 호출자는 첫 호출자가 이미 채운 lru_cache
-    결과를 그대로 재사용해 색인을 두 번 만들지 않는다.
+    ★ catalog 조회(``_company_catalog()``)를 이 함수의 잠금 «안」에서 부른다.
+    ``_company_catalog()`` 자신은 ``_COMPANY_CATALOG_LOCK``으로 동시 미스를
+    이미 직렬화하지만(그 락 설명 참고), 이 함수가 필요한 건 «또 다른»
+    직렬화다 — catalog가 새로 바뀌었을 때(``_COMPANY_CANDIDATE_INDEX_SOURCE
+    is not catalog``) 색인을 다시 만드는 16초짜리 작업 자체가 두 번 일어나지
+    않게 막는 것이다. 두 요청이 같은 새 catalog를 동시에 보면, 이 락이
+    없으면 둘 다 각자 16초 색인을 만들어 CPU·메모리를 두 배로 쓴다. 이
+    잠금으로 감싸면 두 번째 호출자는 첫 호출자가 이미 채운 색인을 그대로
+    재사용한다.
     """
     global _COMPANY_CANDIDATE_INDEX_SOURCE, _COMPANY_CANDIDATE_INDEX
     with _COMPANY_CANDIDATE_INDEX_LOCK:
@@ -1691,6 +1729,30 @@ def _corpcode_age_days(xml_path: Path) -> Optional[float]:
     return (time.time() - mtime) / _SECONDS_PER_DAY
 
 
+def _corpcode_xml_path() -> Path:
+    """정본 corpCode.xml 경로. ``_engine()``을 실제로 부른다 — 주석 참고."""
+
+    return Path(_engine().CORPCODE_DIR) / _CORPCODE_XML_FILENAME
+
+
+def business_candidate_catalog_needs_refresh() -> bool:
+    """법인목록 정본이 없거나 ``CORPCODE_REFRESH_INTERVAL_DAYS``보다 오래됐는가.
+
+    기동 색인 관리자가 «예열이냐 갱신이냐»를 고르는 데 쓴다(``runtime.py``의
+    ``_candidate_index_manager_loop``). 둘 다 하면 1세대 색인을 미처 못
+    버린 채 2세대를 또 만들어 메모리가 겹친다 — 아래
+    ``refresh_business_candidate_catalog_if_stale`` docstring의 실측 참고.
+
+    ★ 이 함수는 ``_engine()``을 무조건 먼저 부른다(냉시동 시 수 초, 이후는
+    ``sys.modules`` 재사용으로 사실상 0에 가깝다) — mtime 검사 자체는
+    파일 하나를 ``stat()``하는 것뿐이라 훨씬 싸지만, 경로를 구하려면
+    ``engine.CORPCODE_DIR``이 필요해 엔진 로드를 피할 수 없다.
+    """
+
+    age_days = _corpcode_age_days(_corpcode_xml_path())
+    return age_days is None or age_days >= CORPCODE_REFRESH_INTERVAL_DAYS
+
+
 def _discard_stale_refresh_temp_file(temp_path: Path) -> None:
     """검증에 실패한 갱신용 임시 파일을 지운다 — 다음 검사 주기에 방해 안 되게."""
 
@@ -1707,18 +1769,38 @@ def refresh_business_candidate_catalog_if_stale() -> bool:
     디스크에서는 최초 배포 이후 한 번도 안 바뀐다). 이 함수가 그 자리를
     메운다 — 사용자 결정(2026-09-11)으로 주기는 7일이다.
 
-    호출 순서가 «락 밖에서 다 만들고, 락 안에서는 스왑만»을 지킨다:
-      1) (락 밖) mtime만 본다 — 안 오래됐으면 바로 반환, DART를 부르지 않는다.
+    ── 두 세대를 동시에 들고 있지 않는다(설계 확정, 독립 검토 뒤 2026-09-12) ──
+    실측(검토, Python 3.13.15/win32, 법인 118,747건): catalog 1벌 63.5MB,
+    색인 1벌 **549.0MB**(생성 16.24초) → 1세대 합계 612.5MB. 옛 색인을 쥔
+    채 새 색인을 만들면 두 세대가 겹쳐 **1,225.0MB(추적 최고 1,360.1MB)**
+    까지 치솟는다. 운영은 Render Standard 2GiB지만, 과거 512MB에서 이
+    색인 때문에 `/confirm` 처리 중 OOM으로 인스턴스가 재시작된 실측
+    이력이 있다(``deploy/README.md``). 그래서 이 함수는 **옛 색인·옛
+    catalog 전역을 먼저 놓아준 다음에만** 새 색인을 만든다 — 아래 순서
+    4번이 그 부분이다. 대가는 색인 재구축(약 16초)이 스왑 락 «안»에서
+    일어나 그동안 후보 검색이 락을 기다린다는 것이다. 갱신은 **주 1회
+    뿐**이고, 대기 상한은 다운로드 뒤 파싱 0.79초 + 색인 16.24초 ≈
+    **최대 약 17초**로 후보 검색 예산(``LOCAL_DART_PROVIDER_TIMEOUT_SEC``
+    60초) 안에 들어온다.
+
+    순서:
+      1) (락 밖) mtime만 본다(``business_candidate_catalog_needs_refresh``)
+         — 안 오래됐으면 바로 반환, DART를 부르지 않는다.
       2) (락 밖) ``download_corpcode_fresh``로 새 XML을 임시 파일에 받는다
          (정본 ``CORPCODE.xml``은 그대로 둔다).
-      3) (락 밖) 그 임시 파일을 파싱해 새 catalog·색인을 미리 다 만든다.
-      4) (락 안, 스왑만) ``os.replace``로 정본을 바꾸고, catalog 전역
-         3개를 새 객체로 재바인딩하고(제자리 clear/update 금지 — 다른
-         스레드가 읽는 중일 수 있다), ``_company_catalog`` lru_cache를
-         비운 뒤 ``_PRELOADED_CATALOG``를 거쳐 재계산 없이 다시 채운다.
+      3) (락 밖) 그 임시 파일을 파싱해 새 catalog를 미리 다 만든다(색인은
+         아직 안 만든다 — 색인 생성이 이 함수에서 가장 비싼 단계다).
+      4) (락 안) ``os.replace``로 정본을 바꾼 뒤, **먼저** 옛
+         ``_COMPANY_CANDIDATE_INDEX``·``_COMPANY_CATALOG_RECORDS``와 두
+         lru_cache(``_load_or_download_company_catalog``·``_company_index``
+         — 후자는 식별 AI 경로 전용 이름 색인, 안 비우면 그 경로가
+         프로세스 수명 내내 옛 법인목록을 쓴다)를 **놓아준 다음**, 새
+         catalog로 색인을 만들고 전역·캐시를 다시 채운다.
 
-    실패 격리: 다운로드 실패(DART 장애·키 오류·한도)·파싱 실패·레코드 0건은
-    모두 옛 파일·옛 색인을 그대로 두고 경고 로그 1줄만 남긴 뒤 다음 검사
+    실패 격리: 다운로드 실패(DART 장애·키 오류·한도)·파싱 실패·레코드
+    0건·``os.replace`` 실패(Windows에서 정본을 다른 핸들이 열고 있으면
+    ``PermissionError``)는 모두 옛 파일·옛 색인을 그대로 두고(``os.replace``
+    실패 갈래는 임시 파일도 지운다) 경고 로그 1줄만 남긴 뒤 다음 검사
     주기(``CORPCODE_REFRESH_CHECK_INTERVAL_SEC``)에 재시도한다. 이 함수는
     예외를 밖으로 던지지 않는다 — 호출자(``src.web.runtime``의 색인 관리자
     루프)가 죽지 않고 계속 돌게 하기 위해서다.
@@ -1731,7 +1813,7 @@ def refresh_business_candidate_catalog_if_stale() -> bool:
     global _COMPANY_CATALOG_ENGLISH_NAMES, _PRELOADED_CATALOG
     global _COMPANY_CANDIDATE_INDEX_SOURCE, _COMPANY_CANDIDATE_INDEX
     engine = _engine()
-    xml_path = Path(engine.CORPCODE_DIR) / _CORPCODE_XML_FILENAME
+    xml_path = _corpcode_xml_path()
     age_days = _corpcode_age_days(xml_path)
     if age_days is not None and age_days < CORPCODE_REFRESH_INTERVAL_DAYS:
         return False
@@ -1758,19 +1840,42 @@ def refresh_business_candidate_catalog_if_stale() -> bool:
         _discard_stale_refresh_temp_file(temp_path)
         return False
 
-    new_index = _build_company_candidate_index(new_catalog.records)
     previous_count = len(_COMPANY_CATALOG_RECORDS)
 
-    with _COMPANY_CANDIDATE_INDEX_LOCK:
-        # 락 보유 구간은 여기부터 락이 풀릴 때까지 — 파일 스왑과 전역 재바인딩뿐이다.
-        os.replace(temp_path, xml_path)
-        _PRELOADED_CATALOG = new_catalog
-        _company_catalog.cache_clear()
-        # _PRELOADED_CATALOG를 그대로 재사용하므로(O(1)) 여기서 재다운로드·재파싱이
-        # 일어나지 않는다 — _company_catalog() 본문의 분기를 참고.
-        refreshed_compat_pairs = _company_catalog()
-        _COMPANY_CANDIDATE_INDEX = new_index
-        _COMPANY_CANDIDATE_INDEX_SOURCE = refreshed_compat_pairs
+    try:
+        with _COMPANY_CANDIDATE_INDEX_LOCK:
+            os.replace(temp_path, xml_path)
+            # 두 세대 동시 보유를 막는다 — 위 docstring의 실측(1,225MB→612MB)
+            # 참고. 옛 색인·옛 레코드 참조를 전부 놓아준 «다음»에만 아래에서
+            # 새 색인을 만든다. _COMPANY_CATALOG_METADATA·ENGLISH_NAMES는
+            # 여기서 비우지 않는다 — 두 dict는 법인마다 수십 바이트뿐이라
+            # 메모리에 미치는 영향이 무시할 만한 반면, 비워 두면 16초 동안
+            # 락 밖의 무보호 소비자(``_records_from_candidate_catalog`` at
+            # 4431·5252)가 종목코드·영문명을 전부 빈 값으로 보게 된다 —
+            # 그 대가가 더 크다고 판단했다(아래 이어지는 몇 줄 안에 새
+            # 값으로 다시 채워진다).
+            _COMPANY_CANDIDATE_INDEX = None
+            _COMPANY_CANDIDATE_INDEX_SOURCE = None
+            _COMPANY_CATALOG_RECORDS = ()
+            _load_or_download_company_catalog.cache_clear()
+            _company_index.cache_clear()  # 식별 AI 경로(find_company_metered)도 함께 무효화
+
+            new_index = _build_company_candidate_index(new_catalog.records)
+
+            _PRELOADED_CATALOG = new_catalog
+            # _PRELOADED_CATALOG를 그대로 재사용하므로 여기서 재다운로드·
+            # 재파싱이 일어나지 않는다 — _load_or_download_company_catalog
+            # 본문의 분기를 참고.
+            refreshed_compat_pairs = _company_catalog()
+            _COMPANY_CANDIDATE_INDEX = new_index
+            _COMPANY_CANDIDATE_INDEX_SOURCE = refreshed_compat_pairs
+    except OSError:
+        # 대표 사례: Windows에서 정본을 다른 프로세스·핸들이 읽기로 열고
+        # 있으면 os.replace가 PermissionError(WinError 5)를 낸다(실측).
+        # 옛 파일·옛 색인은 위 with 블록에 아직 손대지 않았으므로 그대로다.
+        logger.warning("법인목록 정본 교체가 실패했습니다 — 기존 목록을 계속 씁니다")
+        _discard_stale_refresh_temp_file(temp_path)
+        return False
 
     elapsed_sec = time.monotonic() - started
     logger.info(
