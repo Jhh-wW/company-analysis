@@ -1150,6 +1150,47 @@ def test_DART_키가_환경변수엔_없고_dotenv에만_있으면_참을_돌려
         os.environ.pop("DART_API_KEY", None)
 
 
+def test_색인생성_단계의_OSError는_정본교체실패로_오인되지_않는다(
+    tmp_path, monkeypatch, caplog, _fresh_catalog_state
+):
+    """3차 검토 P3: ``except OSError`` 범위가 ``os.replace`` 한 줄로 좁혀졌는지 지킨다.
+
+    범위를 좁히기 전에는 색인 생성 단계에서 난 ``OSError``(예: 디스크
+    꽉 참)까지 «정본 교체가 실패했습니다»로 잘못 보고했다 — 실제로는
+    정본이 이미 새 파일로 바뀌었는데 로그는 반대로 말했다(2차 검토
+    실측). 이 시험은 뮤테이션(그 ``except``를 ``with`` 블록 전체로
+    다시 넓히는 변경)이 생기면 잡아야 한다.
+    """
+
+    corpcode_dir = tmp_path / "corpcode"
+    corpcode_dir.mkdir()
+    xml_path = corpcode_dir / "CORPCODE.xml"
+    xml_path.write_bytes(_corpcode_xml([("00000001", "옛회사")]))
+    stale_mtime = time.time() - 8 * 86_400
+    os.utime(xml_path, (stale_mtime, stale_mtime))
+
+    fake_engine = _FakeRefreshEngine(
+        corpcode_dir, fresh_xml=_corpcode_xml([("00000002", "새회사")])
+    )
+    monkeypatch.setattr(real, "_engine", lambda: fake_engine)
+
+    def boom_builder(_records):
+        raise OSError(28, "디스크 꽉 참(시험)")  # ENOSPC 흉내
+
+    monkeypatch.setattr(real, "_build_company_candidate_index", boom_builder)
+
+    with caplog.at_level("WARNING", logger=real.logger.name):
+        with pytest.raises(OSError):
+            real.refresh_business_candidate_catalog_if_stale()
+
+    assert not any(
+        "법인목록 정본 교체가 실패했습니다" in record.message
+        for record in caplog.records
+    ), "색인 생성 실패가 정본 교체 실패로 잘못 보고됐다 — except 범위가 다시 넓어졌다"
+    # 정본은 이미 바뀌었어야 한다(os.replace 자체는 성공했으므로).
+    assert xml_path.read_bytes() == _corpcode_xml([("00000002", "새회사")])
+
+
 # ── 후보 AI 보조 재정렬 ask ────────────────────────────────
 
 

@@ -411,18 +411,33 @@ def _candidate_index_manager_should_run() -> bool:
        실측), ``os.environ``만 보면 이 모드에서 예열·갱신이 원인
        로그 한 줄 없이 통째로 꺼진다. 정말 키가 없으면 INFO 로그를
        남긴다 — 운영자가 원인을 알 수 있게.
+
+    ★ 이 함수 전체를 fail-open으로 감싼다(3차 검토, 2026-09-12) —
+      ``dart_api_key_configured()``는 ``analysis_engine/.env``를
+      읽는데, 그 파일이 UTF-8이 아닌 바이트를 담고 있거나 디렉터리로
+      바뀌어 있으면 ``UnicodeDecodeError``·``PermissionError``를
+      던진다(실측). 예열·갱신 자체의 실패는 전부 fail-open인데(경고
+      로그만 남기고 서비스는 연다), 그걸 켤지 «판정»하는 이 보조
+      검사 하나가 예외를 던져 ``_lifespan``을 통째로 죽이면 원칙이
+      깨진다. 실패하면 경로·바이트 값은 로그에 남기지 않는다 —
+      정확한 원인은 첫 실제 검색 요청이 같은 예외를 다시 만들 때 그
+      요청 로그에서 본다.
     """
 
-    if evaluation_mode.enabled() and not evaluation_mode.paid_providers_enabled():
-        return False
-    from src.features.pipeline.real import (  # noqa: PLC0415 — 순환 import 회피
-        dart_api_key_configured,
-    )
+    try:
+        if evaluation_mode.enabled() and not evaluation_mode.paid_providers_enabled():
+            return False
+        from src.features.pipeline.real import (  # noqa: PLC0415 — 순환 import 회피
+            dart_api_key_configured,
+        )
 
-    if not dart_api_key_configured():
-        logger.info("DART 키가 없어 후보 색인 예열·갱신을 건너뜁니다.")
+        if not dart_api_key_configured():
+            logger.info("DART 키가 없어 후보 색인 예열·갱신을 건너뜁니다.")
+            return False
+        return True
+    except Exception:  # noqa: BLE001 — 판정 실패로 서버 기동 자체가 죽으면 안 된다
+        logger.warning("후보 색인 예열·갱신 여부 판정이 실패해 건너뜁니다.")
         return False
-    return True
 
 
 def _prewarm_candidate_index() -> None:

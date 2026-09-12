@@ -306,6 +306,58 @@ def test_DART_API_KEY가_없으면_예열도_갱신도_건너뛴다(monkeypatch)
         assert not called.wait(timeout=0.3), "DART_API_KEY가 없는데 카탈로그 함수가 불렸다"
 
 
+def test_analysis_engine_env이_깨져도_기동이_막히지_않고_예열이_건너뛰어진다(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """3차 검토 신규 P2: 깨진 ``analysis_engine/.env``가 서버 기동 자체를 막던 결함.
+
+    ``dart_api_key_configured()`` 안의 ``core.env.load_env()``가 UTF-8이
+    아닌 바이트가 담긴 ``.env``를 만나면 ``UnicodeDecodeError``를 던진다
+    (실측). 이 기능은 예열·갱신 실패를 전부 fail-open으로 허용하는데,
+    그걸 켤지 판정하는 보조 검사 하나가 예외를 던져 서버 기동 자체를
+    죽이면 원칙이 깨진다. 진짜 ``analysis_engine/.env``는 건드리지
+    않고, 그 파일이 깨졌을 때와 같은 예외가 실제로 이 함수를 타고
+    올라오는지 임시 파일로 재현한다.
+    """
+
+    # 이 파일의 _default_manager_loop_environment 기본값이 DART_API_KEY를
+    # 이미 채워 둔다 — 그 값이 있으면 dart_api_key_configured()가 dotenv를
+    # 아예 안 보고 즉시 True를 돌려준다. 이 시험은 정확히 dotenv 경로를
+    # 타야 하므로 그 기본값을 지운다.
+    monkeypatch.delenv("DART_API_KEY", raising=False)
+
+    broken_env_path = tmp_path / "broken.env"
+    broken_env_path.write_bytes(b"\xff")
+
+    real_dart_api_key_configured = real.dart_api_key_configured
+
+    # 사전 확인: 이 임시 파일이 실제로 review가 재현한 예외를 낸다(가짜
+    # 게이트가 아니라 진짜 실패 경로를 통과시킨다는 근거).
+    with pytest.raises(UnicodeDecodeError):
+        real_dart_api_key_configured(dotenv_path=broken_env_path)
+
+    def broken_check() -> bool:
+        return real_dart_api_key_configured(dotenv_path=broken_env_path)
+
+    monkeypatch.setattr(real, "dart_api_key_configured", broken_check)
+
+    called = threading.Event()
+    monkeypatch.setattr(real, "_company_catalog", lambda: (called.set(), ())[1])
+    monkeypatch.setenv(PIPELINE_ENV, PIPELINE_REAL)
+
+    with caplog.at_level("WARNING", logger=runtime.logger.name):
+        with TestClient(app) as client:
+            response = client.get("/readyz")
+
+    assert response.status_code != 500, "깨진 .env가 서버 기동 자체를 막았다"
+    assert not called.wait(timeout=0.3), "게이트 판정이 실패했는데도 예열이 돌았다"
+    assert str(broken_env_path) not in caplog.text, "임시 파일 경로가 로그에 남았다"
+    assert "0xff" not in caplog.text, "깨진 바이트 값이 로그에 남았다"
+    assert any(
+        "예열·갱신 여부 판정이 실패" in record.message for record in caplog.records
+    ), "게이트 실패 WARNING 로그가 남지 않았다"
+
+
 def test_예열이_실패해도_기동은_정상으로_열리고_비밀은_로그에_남지_않는다(
     monkeypatch, caplog
 ) -> None:
