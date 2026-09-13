@@ -52,9 +52,9 @@ def _엔진과_사용량(*usages: dict[str, Any]) -> real._MeteredEngine:
     return engine
 
 
-def _사용량(stage: str, out: Any) -> dict[str, Any]:
+def _사용량(stage: str, out: Any, *, failed: bool = False) -> dict[str, Any]:
     return {"in": _입력토큰, "out": out, "stage": stage, "cost_krw": 0.0,
-            "failed": False}
+            "failed": failed}
 
 
 @pytest.mark.parametrize("usages,expected", [
@@ -75,6 +75,26 @@ def _사용량(stage: str, out: Any) -> dict[str, Any]:
     ((_사용량("v2_review", None),), 24000),
     ((_사용량("v2_review", "7000"),), 24000),
     ((_사용량("v2_review", 8000), _사용량("v2_compose", 3000)), 12000),
+    # 실패 응답에 붙은 usage 는 «답이 이만큼 나왔다»가 아니다 — 중간에 끊긴
+    # 출력일 수 있으므로 그 값으로 상한을 낮추지 않고 예전 상한으로 돌아간다.
+    ((_사용량("v2_review", 7000, failed=True),), 24000),
+    ((_사용량("v2_review", 500, failed=True),), 24000),
+    # 실패 «뒤»에 정상 응답이 오면 그 정상 것이 기준이다.
+    (
+        (
+            _사용량("v2_review", 7000, failed=True),
+            _사용량("v2_review", 10000),
+        ),
+        15000,
+    ),
+    # 정상 «뒤»에 실패가 와도 마지막 정상 것을 그대로 쓴다.
+    (
+        (
+            _사용량("v2_review", 10000),
+            _사용량("v2_review", 400, failed=True),
+        ),
+        15000,
+    ),
 ])
 def test_재요청_상한은_첫_답_실제_출력에서_나온다(usages, expected) -> None:
     engine = _엔진과_사용량(*usages)

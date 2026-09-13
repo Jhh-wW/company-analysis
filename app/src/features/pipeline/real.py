@@ -5441,6 +5441,11 @@ def _initial_review_retry_max_tokens(metered: _MeteredEngine) -> int:
     for usage in metered.usages:
         if usage.get("stage") != "v2_review":
             continue
+        # 실패 응답에 붙은 usage 는 «답이 이만큼 나왔다»가 아니다 — 중간에
+        # 끊긴 출력일 수 있어 그 값으로 상한을 낮추면 재요청 답이 잘린다.
+        # 실패분만 있으면 아래에서 예전 상한으로 되돌아간다.
+        if usage.get("failed") is True:
+            continue
         out = usage.get("out")
         # bool은 int의 하위형이라 type() 으로 못 박는다 (다른 계량 경계와 동일).
         if type(out) is int and out > 0:

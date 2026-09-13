@@ -23,6 +23,7 @@ import pytest
 
 import src.features.composer.pipeline as composer_pipeline
 from src.core import deployment_identity
+from src.features.composer.constants import RETRY_REMINDER
 from src.core.provider_gateway import attempt_context
 from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.features.budget import provider_budget
@@ -36,6 +37,7 @@ from src.features.pipeline.tests.test_report_company_id_release_mode import (
     _frags,
     _frozen_v2_mode,
     _가짜_ask를_끼운다,
+    _가짜검수,
 )
 from src.shared.report_evidence.constants import ReleaseMode
 
@@ -76,11 +78,18 @@ def engine(monkeypatch: pytest.MonkeyPatch) -> FakeEngine:
 
 
 def _돌린다(
-    engine_fake: FakeEngine, monkeypatch: pytest.MonkeyPatch,
+    engine_fake: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reviewer: Any = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """SHADOW 경로로 v2 분기를 끝까지 돌리고 배선 기록을 돌려준다."""
+    """SHADOW 경로로 v2 분기를 끝까지 돌리고 배선 기록을 돌려준다.
+
+    ``reviewer``: 검수 가짜 응답을 바꾸고 싶을 때만 준다(예: 첫 답을 깨진 JSON
+    으로 돌려 파싱 재요청을 실제로 일으키는 경우). 주지 않으면 기본 가짜 검수.
+    """
     monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.SHADOW.value)
-    _가짜_ask를_끼운다(monkeypatch)
+    _가짜_ask를_끼운다(monkeypatch, reviewer=reviewer)
     가짜팩토리 = real._v2_ask_via_provider
     만든호출자: list[dict[str, Any]] = []
 
@@ -102,12 +111,19 @@ def _돌린다(
         #   객체를 돌려주므로, 그대로 기록하면 v2_review 호출자 넷이 전부
         #   같은 것이 되어 아래 동일성 단정이 «항상 참»이 된다 —
         #   rewrite_ask 와 recheck_ask 를 뒤바꿔 넘겨도 초록이었다(실측).
-        def 감싼다(prompt: str, _속=속) -> str:
+        # ★ 프롬프트를 «호출자별로» 모은다. 가짜 검수는 어느 호출자가 자기를
+        #   불렀는지 모르므로(같은 객체를 돌려준다), «누가 몇 번 불렸는가»는
+        #   여기서만 잡힌다.
+        프롬프트들: list[str] = []
+
+        def 감싼다(prompt: str, _속=속, _프롬프트들=프롬프트들) -> str:
+            _프롬프트들.append(prompt)
             return _속(prompt)
 
         만든호출자.append(
             {"stage": stage, "max_tokens": max_tokens,
-             "reserved_calls": reserved_calls, "ask": 감싼다}
+             "reserved_calls": reserved_calls, "ask": 감싼다,
+             "프롬프트들": 프롬프트들}
         )
         return 감싼다
 
@@ -236,6 +252,77 @@ def test_최초검수_재요청_호출자만_보낼때_푸는_상한을_받는�
     assert 상한계산() == 24000, (
         "검수 응답 사용량이 없을 때는 예전 상한을 그대로 써야 합니다"
     )
+
+
+class _첫답이_깨진_검수:
+    """첫 본문 검수 답만 «JSON 문법이 깨진» 문자열로 돌려주는 가짜 검수.
+
+    2026-09-13 실측 사고와 같은 모양이다 — 정상 종료였는데 문법 오류로 한 행도
+    읽히지 않아 규칙대로 파싱 재요청이 걸렸다. 어느 호출인지는 «순번»으로만
+    가른다(가짜 응답 분기). «어느 호출자로 나갔는가»는 이 가짜가 아니라 팩토리가
+    호출자별로 모은 프롬프트로 단정한다 — 같은 객체를 모든 호출자에게 돌려주므로
+    가짜 자신은 누가 불렀는지 모른다.
+    """
+
+    #: 정상 종료인데 판정 배열이 닫히지 않은 응답.
+    깨진답 = '{"판정": ['
+
+    def __init__(self) -> None:
+        self._속 = _가짜검수()
+        self.호출수 = 0
+
+    def __call__(self, prompt: str) -> str:
+        self.호출수 += 1
+        if self.호출수 == 1:
+            return self.깨진답
+        return self._속(prompt)
+
+
+def test_첫_검수가_깨지면_재요청은_상한을_줄인_호출자로_나간다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """운영 배선을 통째로 지나 «재요청이 그 호출자로» 나가는지 본다.
+
+    ★ 이 시험이 없으면 `composer/pipeline.py` 가 `verify_report` 에 넘기는
+      `initial_retry_ask=` 두 줄을 통째로 지워도 전부 초록이었다 — SHADOW 배선
+      시험은 재요청을 일으키지 않고, composer 시험은 `verify_report` 를 직접
+      부르기 때문이다(독립 검토 지적).
+    """
+    검수 = _첫답이_깨진_검수()
+    만든호출자, 받은인자 = _돌린다(engine, monkeypatch, reviewer=검수)
+
+    검수자들 = [항목 for 항목 in 만든호출자 if 항목["stage"] == "v2_review"]
+    푸는호출자 = [항목 for 항목 in 검수자들 if callable(항목["max_tokens"])]
+    assert len(푸는호출자) == 1, (
+        "v2_review 호출자 중 «보낼 때 상한을 푸는» 것이 정확히 하나여야 합니다"
+    )
+    최초검수 = 검수자들[1]
+    재요청자 = 푸는호출자[0]
+    assert 최초검수 is not 재요청자, "1차 검수와 재요청이 같은 기록입니다"
+
+    # ① 재요청이 실제로 일어났다 — 안 일어나면 이 시험은 아무것도 못 본다.
+    assert 검수.호출수 == 2, (
+        f"검수 AI가 두 번 불리지 않았습니다(파싱 재요청 미발생): {검수.호출수}"
+    )
+    # ② 첫 검수는 큰 상한 호출자로 «한 번만» 나갔다.
+    assert len(최초검수["프롬프트들"]) == 1, 최초검수["프롬프트들"]
+    assert 최초검수["max_tokens"] == 24000
+    assert RETRY_REMINDER not in 최초검수["프롬프트들"][0]
+    # ③ 재요청은 상한을 줄이는 그 호출자로 «한 번» 나갔다 (객체 동일성으로 단정).
+    assert len(재요청자["프롬프트들"]) == 1, (
+        "재요청이 상한 축소 호출자로 나가지 않았습니다 — pipeline.py 가 "
+        f"initial_retry_ask 를 넘기지 않았을 수 있습니다: {재요청자['프롬프트들']}"
+    )
+    assert 받은인자["initial_retry_reviewer_ask"] is 재요청자["ask"]
+    # 재요청 프롬프트는 첫 프롬프트 + 형식 상기문이다 (내용 요구는 그대로).
+    재요청프롬프트 = 재요청자["프롬프트들"][0]
+    assert RETRY_REMINDER in 재요청프롬프트
+    assert 재요청프롬프트.startswith(최초검수["프롬프트들"][0])
+    # ④ 나머지 검수 호출자(검수·재작성·재검수)는 한 번도 쓰이지 않았다.
+    쓰인기록 = [항목 for 항목 in 검수자들 if 항목["프롬프트들"]]
+    assert [id(항목["ask"]) for 항목 in 쓰인기록] == [
+        id(최초검수["ask"]), id(재요청자["ask"]),
+    ], "1차 검수와 그 재요청 말고 다른 검수 호출자가 쓰였습니다"
 
 
 def test_재작성_예약이_재검수_예약보다_정확히_한_회_크다(
