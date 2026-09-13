@@ -119,3 +119,31 @@ def test_저장한_기록과_화면의_JSON이_같다(admin: TestClient):
     # 화면은 HTML 이스케이프를 거치므로 따옴표만 되돌려 비교한다.
     restored = shown.replace("&#34;", '"').replace("&quot;", '"').replace("&amp;", "&")
     assert json.loads(restored) == _STEPS
+
+
+def test_단계별_소요시간이_있으면_사람이_읽을_요약이_따로_보인다(admin: TestClient):
+    steps_with_timing = _STEPS + [
+        {"step": "단계소요", "단계": "identify", "소요ms": 1200},
+        {"step": "단계소요", "단계": "judge", "소요ms": 340},
+    ]
+    _seed(steps=steps_with_timing)
+
+    body = admin.get(f"/admin/runs/{_RUN_ID}/diagnostics").text
+
+    assert "단계별 소요 시간" in body
+    assert "identify · 1.2초" in body
+    assert "judge · 0.3초" in body
+    # 기존 원본 <pre> 출력은 그대로 유지한다 — 요약이 원본을 대신하지 않는다.
+    start = body.index("<pre")
+    start = body.index(">", start) + 1
+    shown = body[start : body.index("</pre>", start)]
+    restored = shown.replace("&#34;", '"').replace("&quot;", '"').replace("&amp;", "&")
+    assert json.loads(restored) == steps_with_timing
+
+
+def test_단계별_소요시간이_없으면_요약_블록도_없다(admin: TestClient):
+    _seed()
+
+    body = admin.get(f"/admin/runs/{_RUN_ID}/diagnostics").text
+
+    assert "단계별 소요 시간" not in body

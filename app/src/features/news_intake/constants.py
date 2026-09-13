@@ -343,7 +343,7 @@ URL_VARIANT_ORDER: Final[tuple[str, ...]] = (
 MAX_URL_VARIANTS: Final[int] = 3
 
 # 새 수집 경로의 상한은 기사 수를 채우는 목표가 아니라 요청 비용의 경계다.
-COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v6"
+COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v7"
 NAME_ACRONYM_MIN_CHARS: Final[int] = 2
 NAME_ACRONYM_MAX_CHARS: Final[int] = 8
 NAME_RETAINED_SUFFIX_MIN_CHARS: Final[int] = 2
@@ -412,7 +412,7 @@ FINAL_FRAGMENT_CHARS_BUDGET: Final[int] = 12_000
 SUFFICIENT_DISTINCT_EVENTS: Final[int] = 6
 SUFFICIENT_DISTINCT_TOPICS: Final[int] = 3
 WINDOW_MONTHS: Final[tuple[int, ...]] = (12, 24, 36)
-# 기본 시도 배분이다. 후보가 없는 창의 몫은 전체 기사 상한 안에서 재사용한다.
+# 기본 시도 배분이다. 실제 후보 수보다 남는 몫은 전체 기사 상한 안에서 재사용한다.
 WINDOW_ARTICLE_BUDGETS: Final[tuple[int, ...]] = (16, 4, 4)
 CONTENT_DUPLICATE_SIMILARITY: Final[float] = 0.88
 EVENT_DUPLICATE_SIMILARITY: Final[float] = 0.84
@@ -454,6 +454,13 @@ GROUNDED_SOURCE_TYPES: Final[tuple[str, ...]] = (
 )
 # 매체 도메인은 회사별 예외가 아니다. 확인된 전문 매체는 정책의 추가 목록으로
 # 확장하되 검색 결과에 URL이 있다는 이유만으로 자동 승격하지 않는다.
+# 2026-09-13 공식 회사소개·운영 주체·신문 등록정보를 확인한 추가 매체.
+# 매체 확인은 기사 사실 검증이나 본문 접근 허가를 대신하지 않는다.
+ADDITIONAL_PUBLISHER_REFERENCES: Final[tuple[tuple[str, str, str], ...]] = (
+    ("etoday.co.kr", "이투데이", "https://company.etoday.co.kr/"),
+    ("inews24.com", "아이뉴스24", "https://www.inews24.com/customer/company/overview/"),
+    ("nocutnews.co.kr", "CBS노컷뉴스", "https://www.nocutnews.co.kr/about/contents.aspx"),
+)
 TRUSTED_PUBLISHER_DOMAINS: Final[tuple[str, ...]] = (
     "yna.co.kr", "yonhapnews.co.kr", "newsis.com", "news1.kr", "reuters.com",
     "apnews.com", "bloomberg.com", "ft.com", "wsj.com", "hankyung.com",
@@ -467,6 +474,7 @@ TRUSTED_PUBLISHER_DOMAINS: Final[tuple[str, ...]] = (
     "newsway.co.kr", "businesswatch.co.kr", "sisajournal-e.com",
     "sportschosun.com", "osen.co.kr", "xportsnews.com", "hangyo.com",
     "fashionbiz.co.kr", "klnews.co.kr",
+    *(domain for domain, _, _ in ADDITIONAL_PUBLISHER_REFERENCES),
 )
 # 전문 매체 확장 근거. 발행자 확인은 본문 정확성 보증이 아니므로 모든 기사가
 # 같은 법인·실질내용·원문범위 검수를 거친다. 미확인 도메인은 진단에 보류한다.

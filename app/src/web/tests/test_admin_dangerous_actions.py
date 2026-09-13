@@ -299,9 +299,9 @@ def test_한도_변경_확인화면은_전후_값과_이유를_보인다(admin: 
     )
 
     assert 확인화면.status_code == 200
-    # 전 값(기본 3건·3,000원)과 후 값(7건·9,000원)이 함께 보여야 한다.
+    # 전 값(기본 3건·6,000원)과 후 값(7건·9,000원)이 함께 보여야 한다.
     assert "3건" in 확인화면.text and "7건" in 확인화면.text
-    assert "3,000원" in 확인화면.text and "9,000원" in 확인화면.text
+    assert "6,000원" in 확인화면.text and "9,000원" in 확인화면.text
     assert 'name="reason"' in 확인화면.text
     _확인표(확인화면.text)
 

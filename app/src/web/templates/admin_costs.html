@@ -64,7 +64,7 @@
     <span>
       <b>전체 상한이 없습니다.</b>
       지금 구성의 <strong>호출 전 예상비용 차단 기준 합계는 {{ "{:,.0f}".format(configured_stop_threshold_krw) }}원</strong>입니다
-      — 살아 있는 링크 {{ active_link_count }}개 × 3,000원 + {% if member_budget_customized %}초대한 친구 {{ members|length }}명 합계 {{ "{:,.0f}".format(member_budget_total_krw) }}원{% else %}초대한 친구 {{ members|length }}명 × {{ member_default_budget_label }}{% endif %} + 관리자 5,000원입니다.
+      — 살아 있는 링크 {{ active_link_count }}개 × {{ link_daily_budget_label }} + {% if member_budget_customized %}초대한 친구 {{ members|length }}명 합계 {{ "{:,.0f}".format(member_budget_total_krw) }}원{% else %}초대한 친구 {{ members|length }}명 × {{ member_default_budget_label }}{% endif %} + 관리자 {{ admin_daily_budget_label }}입니다.
       유료 호출 전에 예상비용을 예약하고 각 통장 기준에 닿으면 새 호출을 차단합니다.
       MEMBER는 이 금액 제한에 더해 한국시간 기준 성공 보고서 건수로도 제한하며, 따로 정하지 않은 친구는 성공 보고서 {{ member_default_success_limit }}건입니다.
       다만 이 값은 실제 청구의 최댓값이 아닙니다. 실제 provider 토큰 집계와 가격·환율 차이로

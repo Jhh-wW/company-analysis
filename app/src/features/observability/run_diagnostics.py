@@ -248,6 +248,27 @@ def current_steps() -> list[dict[str, Any]]:
 
 
 @contextlib.contextmanager
+def use_steps(steps: list[dict[str, Any]]) -> Iterator[list[dict[str, Any]]]:
+    """이 블록 안에서 `current_steps()`가 돌려줄 목록을 잠시 갈아 끼운다.
+
+    ★ 왜 필요한가 — 한 실행의 일부를 갈래로 나눠 «동시에» 돌리면, 두 갈래가
+      같은 목록에 append 하는 순간 기록 순서가 완료 순서에 흔들린다. 그 순서를
+      `public_news_research_status`가 `reversed(steps)`로 읽으므로, 순서가
+      흔들리면 화면에 뜨는 상태까지 실행마다 달라진다. 갈래마다 자기 목록을
+      받아 두고, 합류한 쪽이 정해진 차례로 옮겨 붙이면 순서가 고정된다.
+
+    ``begin_run()``과 달리 요약 로그를 남기지 않는다 — 실행 하나의 «자리»를
+    여는 것이 아니라, 이미 열린 자리를 잠깐 다른 목록으로 가리키는 것뿐이다.
+    """
+
+    token = _STEPS.set(steps)
+    try:
+        yield steps
+    finally:
+        _STEPS.reset(token)
+
+
+@contextlib.contextmanager
 def capture() -> Iterator[StepsCapture]:
     """이 블록 안에서 끝난 실행의 단계 기록을 받아 둔다.
 

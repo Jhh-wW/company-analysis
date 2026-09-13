@@ -1398,6 +1398,7 @@ def run_v2(
     writer_ask: AskFn,
     reviewer_ask: AskFn,
     initial_reviewer_ask: Optional[AskFn] = None,
+    initial_retry_reviewer_ask: Optional[AskFn] = None,
     rewrite_ask: Optional[AskFn] = None,
     recheck_ask: Optional[AskFn] = None,
     diagram_ask: Optional[AskFn] = None,
@@ -1467,6 +1468,12 @@ def run_v2(
             재검수·요약 검수보다 큰 출력 여유가 필요하다. 넘기지 않으면
             (None) 예전과 똑같이 reviewer_ask 하나로 전부 처리한다 —
             기존 호출 계약이 그대로 유지된다.
+        initial_retry_reviewer_ask: «최초 본문 검수의 파싱 재요청»만 쓰는 별도
+            호출자. 재요청은 같은 질문을 형식만 고쳐 다시 받는 것이라 첫 답보다
+            크게 길어지지 않는데, 부르는 쪽의 예약액은 «출력 상한»으로 잡힌다.
+            첫 답의 실제 출력에 맞춘 작은 상한을 가진 호출자를 여기에 넣으면
+            그 한 번의 예약액만 줄어든다(답의 내용·형식 요구는 그대로다).
+            (None) 예전과 똑같이 initial_reviewer_ask 로 재요청한다.
         rewrite_ask: «거짓» 판정 문장 재작성 전용 호출자. 재작성은 선택적
             다듬기라 못 해도 그 문장이 제거될 뿐이지만, 뒤따르는 도식 검수·
             요약 작성·요약 검수는 못 하면 보고서에서 통째로 빠진다. 부르는
@@ -1547,6 +1554,7 @@ def run_v2(
     writer_for_run = writer_ask
     reviewer_for_run = reviewer_ask
     initial_reviewer_for_run = initial_reviewer_ask
+    initial_retry_reviewer_for_run = initial_retry_reviewer_ask
     rewrite_for_run = rewrite_ask
     recheck_for_run = recheck_ask
     normalized_build_identity_sha256 = ""
@@ -1607,6 +1615,18 @@ def run_v2(
             # 감싸지 않으면 FULL 장부에서 검수 1회가 통째로 빠진다.
             initial_reviewer_for_run = call_recorder.wrap(
                 initial_reviewer_ask,
+                role="reviewer",
+                validation_round=ValidationRound.PRIMARY,
+                section_ids=("bundled",),
+            )
+        if initial_retry_reviewer_ask is not None:
+            # 재요청 호출자도 «똑같이» 감싼다. 장부의 role 계수가 FULL의
+            # 「검수 1회 고정」을 지키는 장치이므로(두 번째 reviewer 호출은
+            # 장부에서 RuntimeError → _safe_ask 가 None 으로 삼킨다), 여기만
+            # 감싸지 않으면 FULL에서 재요청이 «영수증 없이» 나가 그 고정이
+            # 풀린다. 감싸 두면 지금 동작이 그대로 유지된다.
+            initial_retry_reviewer_for_run = call_recorder.wrap(
+                initial_retry_reviewer_ask,
                 role="reviewer",
                 validation_round=ValidationRound.PRIMARY,
                 section_ids=("bundled",),
@@ -1734,6 +1754,7 @@ def run_v2(
                         writer_ask=writer_ask,
                         reviewer_ask=reviewer_ask,
                         initial_reviewer_ask=initial_reviewer_ask,
+                        initial_retry_reviewer_ask=initial_retry_reviewer_ask,
                         rewrite_ask=rewrite_ask,
                         recheck_ask=recheck_ask,
                         diagram_ask=diagram_ask,
@@ -1843,6 +1864,7 @@ def run_v2(
                 draft, verification_fragments, performance_table, reviewer_for_run,
                 diagnostics=review_diagnostics,
                 initial_ask=initial_reviewer_for_run,
+                initial_retry_ask=initial_retry_reviewer_for_run,
                 rewrite_ask=rewrite_for_run,
                 recheck_ask=recheck_for_run,
                 protocol_diagnostics=composition_diagnostics,
@@ -1859,6 +1881,7 @@ def run_v2(
                 ),
                 diagnostics=review_diagnostics,
                 initial_ask=initial_reviewer_for_run,
+                initial_retry_ask=initial_retry_reviewer_for_run,
                 rewrite_ask=rewrite_for_run,
                 recheck_ask=recheck_for_run,
                 protocol_diagnostics=composition_diagnostics,

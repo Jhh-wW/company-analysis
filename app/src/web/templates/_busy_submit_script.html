@@ -1,0 +1,125 @@
+{# 제출 처리 중 표시 — data-busy-submit 폼 전용 공용 스크립트.
+   ★ base.html이 아니라 이 자리에 둔 이유 — 예전에는 base.html에 바로 넣어
+     모든 화면(관리자 화면 포함)에 항상 실렸다. 이 스크립트 안의
+     "button.disabled" 문자열이 관리자 화면 회귀시험
+     (test_admin_information_architecture.py의 "disabled"가 화면에 없어야
+     한다는 단정)과 충돌해 실측으로 깨졌다. data-busy-submit 을 실제로 쓰는
+     화면(input.html·not_found.html·company_candidates.html·confirm.html)의
+     {% block scripts %}에서만 {% include %} 해 그 문제를 피한다. #}
+<span id="busySubmitStatus" class="sr-only" role="status" aria-live="polite"></span>
+<script>
+  // 제출에 시간이 걸리는 폼(DART 조회·외부 조사 시작 등)에서 사용자가
+  // 버튼을 두 번 눌러 중복 제출하지 못하게 막는다.
+  // 대상: data-busy-submit 속성이 붙은 폼만. HTML5 검증(required 등)에
+  // 걸리면 submit 이벤트 자체가 뜨지 않으므로, 이 코드는 검증을 통과해
+  // 실제로 서버에 전송될 때만 실행된다.
+  (function () {
+    var DEFAULT_BUSY_LABEL = '처리 중…';
+    // ★ 이 화면에서 data-busy-submit 이 붙은 «모든» 폼의 제출 버튼.
+    //   company_candidates.html은 후보 수만큼 폼이 반복되고, confirm.html은
+    //   「맞습니다」·「아닙니다」가 서로 다른 폼이다. 두 폼 모두 서버의
+    //   candidate_attempt_token·paid_attempt_token 처럼 1회용 토큰을 공유해
+    //   먼저 낸 요청이 그 토큰을 pop 해 버린다(analysis.py). 그래서 한 폼만
+    //   잠그면 «A를 누르고 기다리다 B를 누르는» 사고를 못 막는다 — 이
+    //   화면의 busy 폼 전부를 잠근다.
+    var BUSY_SUBMIT_SELECTOR =
+      'form[data-busy-submit] button[type="submit"], ' +
+      'form[data-busy-submit] input[type="submit"]';
+
+    function submitButtonsOf(form) {
+      return Array.prototype.slice.call(
+        form.querySelectorAll('button[type="submit"], input[type="submit"]')
+      );
+    }
+
+    function allBusySubmitButtons() {
+      return Array.prototype.slice.call(document.querySelectorAll(BUSY_SUBMIT_SELECTOR));
+    }
+
+    function labelOf(el) {
+      return el.tagName === 'INPUT' ? el.value : el.textContent;
+    }
+
+    function setLabel(el, text) {
+      if (el.tagName === 'INPUT') { el.value = text; } else { el.textContent = text; }
+    }
+
+    function announceBusy(text) {
+      var status = document.getElementById('busySubmitStatus');
+      if (status) status.textContent = text;
+    }
+
+    // 눌린(또는 엔터로 제출된) 폼의 버튼: 라벨을 바꾸고 잠근다.
+    function markBusy(button, busyLabel) {
+      if (button.disabled) return; // 서버가 이미 잠가 둔 버튼(예: 미리보기 잠김)은 건드리지 않는다
+      button.setAttribute('data-original-label', labelOf(button));
+      setLabel(button, busyLabel);
+      button.disabled = true;
+      button.setAttribute('aria-busy', 'true');
+      button.setAttribute('data-busy-locked', 'true');
+    }
+
+    // 이 화면의 다른 busy 폼(또는 같은 폼의 안 눌린 버튼): 라벨은 그대로, 잠그기만 한다.
+    function lockOnly(button) {
+      if (button.disabled) return;
+      button.disabled = true;
+      button.setAttribute('data-busy-locked', 'true');
+    }
+
+    // 우리가 직접 잠근 버튼만 되돌린다 — 서버가 원래 disabled로 그린
+    // 버튼(예: 미리보기 · 외부 조사 잠김)은 손대지 않는다.
+    function restoreButton(button) {
+      if (!button.hasAttribute('data-busy-locked')) return;
+      var original = button.getAttribute('data-original-label');
+      if (original !== null) {
+        setLabel(button, original);
+        button.removeAttribute('data-original-label');
+      }
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+      button.removeAttribute('data-busy-locked');
+    }
+
+    document.addEventListener('submit', function (event) {
+      var form = event.target;
+      if (!(form instanceof HTMLFormElement) || !form.hasAttribute('data-busy-submit')) return;
+      // 다른 스크립트가 이미 이 전송을 막았다면(예: 자체 검증 실패) 버튼은
+      // 건드리지 않는다 — 막힌 전송인데 버튼만 잠기면 사용자가 다시 시도할
+      // 방법이 없어진다.
+      if (event.defaultPrevented) return;
+
+      var formButtons = submitButtonsOf(form);
+      var submitter = event.submitter;
+      var pressed = submitter && formButtons.indexOf(submitter) !== -1 ? submitter : null;
+      var busyLabel = (pressed && pressed.getAttribute('data-busy-label'))
+        || form.getAttribute('data-busy-label')
+        || DEFAULT_BUSY_LABEL;
+
+      // 이벤트 처리 중 바로 disabled 하면 일부 브라우저에서 그 버튼의
+      // name/value 가 전송 데이터에서 빠지거나 전송 자체가 취소될 수 있어,
+      // 전송이 시작된 뒤(다음 tick)로 미룬다.
+      window.setTimeout(function () {
+        allBusySubmitButtons().forEach(function (button) {
+          // 눌린 버튼이 있으면 그 버튼만 라벨을 바꾼다. 눌린 버튼을 모르면
+          // (예: 엔터 키 제출) 지금 전송되는 폼의 버튼들에는 라벨을 바꾸고,
+          // 이 화면의 다른 busy 폼은 잠그기만 한다.
+          var isPrimaryOfThisSubmit = pressed ? button === pressed : formButtons.indexOf(button) !== -1;
+          if (isPrimaryOfThisSubmit) {
+            markBusy(button, busyLabel);
+          } else {
+            lockOnly(button);
+          }
+        });
+        announceBusy(busyLabel);
+      }, 0);
+    });
+
+    // 뒤로 가기로 돌아온 화면(bfcache)은 폼이 다시 그려지지 않으므로
+    // 버튼이 계속 잠긴 채로 남는다 — 여기서 원래 상태로 되돌린다.
+    window.addEventListener('pageshow', function (event) {
+      if (!event.persisted) return;
+      allBusySubmitButtons().forEach(restoreButton);
+      announceBusy('');
+    });
+  })();
+</script>

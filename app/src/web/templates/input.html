@@ -70,7 +70,8 @@
 {% endif %}
 
 <form class="card analysis-form" id="analysisForm" method="post" action="/confirm"
-      aria-labelledby="analysis-form-title">
+      aria-labelledby="analysis-form-title"
+      data-busy-submit data-busy-label="회사를 찾는 중…">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   {% if evaluation_workflow_id %}
   <input type="hidden" name="evaluation_workflow_id"
@@ -209,3 +210,4 @@
   });
 </script>
 {% endblock %}
+{% block scripts %}{% include "_busy_submit_script.html" %}{% endblock %}

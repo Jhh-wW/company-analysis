@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import copy
 import hashlib
 import importlib
@@ -21,20 +22,28 @@ import importlib.util
 import itertools
 import json
 import logging
+import math
 import os
 import re
 import sys
 import threading
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Callable, Final, Iterable, Mapping, Optional
 
-from src.core import news_intake_switch, news_research_adapter, paths, typed_collector_switch
+from src.core import (
+    news_intake_switch,
+    news_research_adapter,
+    parallel_collect_switch,
+    paths,
+    typed_collector_switch,
+)
 from src.core.clock import subtract_years, today_kst
 from src.core.provider_gateway import attempt_context, gateway
 from src.core.provider_gateway.anthropic_adapter import AnthropicAdapter
@@ -188,6 +197,7 @@ from src.shared.report_recovery import (
 )
 from src.shared import runtime_failure_constants as failure_constants
 from src.shared import runtime_failure_diagnostic as runtime_failure
+from src.shared.stage_elapsed_constants import STAGE_ELAPSED_MS_KEY, STAGE_ELAPSED_STEP
 from src.features.pipeline.provider_error_diagnostics import safe_provider_error_metadata
 from src.features.pipeline.v2_response_constants import (
     V2_RESPONSE_STEP,
@@ -246,7 +256,13 @@ from src.features.writer import logic as writer_logic
 from src.features.writer import verify as writer_verify
 from src.features.grading.logic import is_accounting_policy, is_table_dump
 from src.features.cost_tracking.store import AiCostEvent
-from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC, DART_SUCCESS_STATUS
+from src.features.pipeline.constants import (
+    ANTHROPIC_TIMEOUT_SEC,
+    CORPCODE_REFRESH_INTERVAL_DAYS,
+    DART_SUCCESS_STATUS,
+    STAGE_BOOT,
+    PARALLEL_COLLECT_BRANCH_WORKERS,
+)
 from src.features.pipeline.candidate_profile_constants import (
     DART_PROFILE_ENRICHMENT_LIMIT,
     DART_PROFILE_NO_DATA_STATUS,
@@ -639,6 +655,29 @@ V2_REVIEWER_MAX_TOKENS: Final[int] = 16000
 #: 통과해야 하며, 실제 비용은 응답 usage로 정산한다.
 V2_INITIAL_REVIEWER_MAX_TOKENS: Final[int] = 24000
 
+#: 1차 검수 «재요청»의 출력 상한 = 첫 답의 실제 출력 token × 이 배수.
+#:
+#: ★ 2026-09-13 실측(키움증권·claude-haiku-4-5) — 본조사 예약액 1000원 중
+#:   713원을 쓴 뒤 1차 검수 답이 정상 종료(end_turn)했는데 JSON 문법 오류로
+#:   68문장 중 0행만 읽혔다. 규칙대로 재요청(PARSE_RETRY_LIMIT=1)을 걸었지만
+#:   호출 «전» 예약액이 출력 상한 24000토큰(약 168원)으로 잡혀 남은 287원을
+#:   넘겼고(ProviderBudgetExceeded), 1차 검수는 강등 대상이 아니라 조사 전체가
+#:   「AI 예산 소진」으로 멈췄다. 첫 답의 실제 출력은 약 7000토큰이었다.
+#: · 예약은 «상한»으로 계산되므로(위 V2_REVIEWER_MAX_TOKENS 주석) 재요청
+#:   호출에만 상한을 낮추면 그 호출의 예약액이 같은 비율로 줄어든다.
+#: · 재요청은 «같은 질문을 형식만 고쳐 다시 써 달라»는 것이라 답 길이가 첫 답과
+#:   비슷하다. 1.5배는 형식을 고치며 조금 길어지는 몫의 여유다.
+#: · 답의 내용·형식 요구는 그대로다 — 검사 품질은 바뀌지 않는다.
+#: ⚠️ 첫 답이 상한(24000)에서 잘린 경우에는 1.5배가 상한에 걸려 예전과 같은
+#:   값이 되고, 재요청 답이 이 상한보다 길면 다시 잘려 못 읽는다. 재요청은
+#:   1회뿐이라 그때는 예전처럼 멈춘다(감수한 한계).
+V2_INITIAL_REVIEW_RETRY_OUTPUT_HEADROOM: Final[float] = 1.5
+
+#: 재요청 출력 상한의 하한. 첫 답이 극단적으로 짧아도(중간에 끊긴 응답 등)
+#: 정상 크기의 판정 배열을 받을 수 있어야 한다. 실측 68행 답이 약 7000토큰
+#: 이었으므로 24000의 절반(12000)이면 같은 크기의 답에 여유가 있다.
+V2_INITIAL_REVIEW_RETRY_MIN_TOKENS: Final[int] = V2_INITIAL_REVIEWER_MAX_TOKENS // 2
+
 #: 도식은 모든 장의 판정·짧은 대조 근거·수치 결속 배열을 함께 돌려준다.
 #: 실제 24행 검수에서 512토큰 출력 뒤 파싱 재요청이 관측돼 전용 상한을
 #: 2048로 두었다. 본문 검수와 분리하고 기존 1000원 단계 예약은 유지한다.
@@ -818,6 +857,10 @@ class _MeteredEngine:
         object.__setattr__(self, "_reserved_calls", 0)
         object.__setattr__(self, "_provider_call_count", 0)
         object.__setattr__(self, "_provider_call_lock", threading.Lock())
+        # 화면 단계가 바뀔 때마다 직전 단계 소요 시간을 재는 시계. 아직 어느
+        # 단계도 지나지 않았으면 None — 「닫을 구간이 없다」는 뜻이다.
+        object.__setattr__(self, "_stage_clock_key", None)
+        object.__setattr__(self, "_stage_clock_start", 0.0)
 
     def __getattr__(self, name: str) -> Any:
         if name == "MODEL":
@@ -835,6 +878,8 @@ class _MeteredEngine:
             "_reserved_calls",
             "_provider_call_count",
             "_provider_call_lock",
+            "_stage_clock_key",
+            "_stage_clock_start",
         }:
             object.__setattr__(self, name, value)
         elif name == "MODEL":
@@ -865,6 +910,68 @@ class _MeteredEngine:
     def set_stage(self, stage: str) -> None:
         clean = str(stage).strip()
         object.__setattr__(self, "_stage", clean or "unspecified")
+
+    def stage_elapsed_mark(self, stage: str, *, steps: list[dict[str, Any]]) -> None:
+        """화면 단계가 바뀌는 순간 직전 단계의 소요 시간(ms)을 steps에 남긴다.
+
+        ★ 같은 키로 다시 불릴 수 있다 — 예를 들어 「output」은 재사용 종료·
+          1층 캐시 종료·최종 종료에서 각각 불린다. 그건 전환이 아니므로
+          무시한다. 합쳐서 적으면 아주 짧은 구간과 진짜 구간이 섞여 실제보다
+          훨씬 크게 보인다.
+        ★ 진단은 본조사를 막지 않는다 — 시계 갱신까지 통째로 삼킨다
+          (기존 V2 응답 진단 `steps.append` 자리와 같은 원칙).
+        """
+        try:
+            now = time.monotonic()
+            previous_key = self._stage_clock_key
+            if previous_key is not None and previous_key != stage:
+                steps.append({
+                    "step": STAGE_ELAPSED_STEP,
+                    "단계": previous_key,
+                    STAGE_ELAPSED_MS_KEY: int((now - self._stage_clock_start) * 1000),
+                })
+            if previous_key != stage:
+                object.__setattr__(self, "_stage_clock_key", stage)
+                object.__setattr__(self, "_stage_clock_start", now)
+        except Exception:  # noqa: BLE001 — 진단 실패는 본 기능에 전파하지 않는다
+            pass
+
+    def stage_elapsed_finish(self, *, steps: list[dict[str, Any]]) -> None:
+        """요청이 정상·예외 어느 쪽으로 끝나도 마지막 단계의 소요 시간을 닫는다.
+
+        ★ `stage_elapsed_mark`는 «다음 전환»이 있어야 직전 단계를 적는다.
+          마지막 단계는 다음 전환이 영원히 없으므로, 요청이 끝나는 자리
+          (`RealPipeline.run`의 finally)에서 한 번 더 불러야 한다.
+        """
+        try:
+            if self._stage_clock_key is None:
+                return
+            steps.append({
+                "step": STAGE_ELAPSED_STEP,
+                "단계": self._stage_clock_key,
+                STAGE_ELAPSED_MS_KEY: int(
+                    (time.monotonic() - self._stage_clock_start) * 1000
+                ),
+            })
+            object.__setattr__(self, "_stage_clock_key", None)
+        except Exception:  # noqa: BLE001 — 진단 실패는 본 기능에 전파하지 않는다
+            pass
+
+    def stage_elapsed_seed(self, stage: str, *, start: float) -> None:
+        """요청이 시작된(=`start`) 시각부터 시계를 미리 채워 둔다.
+
+        ★ 왜 `stage_elapsed_mark`로는 안 되나 — 그 메서드는 호출 «그 순간»을
+          `time.monotonic()`으로 다시 잰다. `run()` 진입 직후~engine 생성
+          사이(1판 모듈 import)처럼 «이미 지난» 구간을 재려면 그 구간의
+          시작 시각을 밖에서 그대로 받아야 한다. 첫 전환(01 식별) 때
+          `stage_elapsed_mark`가 이 구간을 평범하게 닫는다 — 별도 처리가
+          필요 없다.
+        """
+        try:
+            object.__setattr__(self, "_stage_clock_key", stage)
+            object.__setattr__(self, "_stage_clock_start", start)
+        except Exception:  # noqa: BLE001 — 진단 실패는 본 기능에 전파하지 않는다
+            pass
 
     def reserve_provider_call(self, *, reserved_calls: int = 0) -> int:
         """요청 전체 AI 호출 상한을 실제 전송 경계에서 원자적으로 강제한다.
@@ -1470,6 +1577,39 @@ def _engine() -> Any:
     return _load_isolated_engine_module(root / "tools" / "run_pilot.py")
 
 
+def dart_api_key_configured(*, dotenv_path: Path | None = None) -> bool:
+    """``DART_API_KEY``가 환경변수나 ``analysis_engine/.env``에 있는지 싸게 본다.
+
+    ★ 왜 ``_engine()``을 안 쓰나 — ``서버켜기.ps1``의 진짜 조사 모드는 키를
+      자식 프로세스 환경에 주입하지 않고, 요청이 올 때마다 엔진이
+      ``core.env.load_env()``로 ``analysis_engine/.env``를 읽어 채운다
+      (독립 검토 2차, 2026-09-12). 그런데 ``_engine()``은 ``run_pilot.py``
+      전체(anthropic·presidio 등 무거운 의존성)를 불러오는데, 첫 호출은
+      냉시동 수 초가 걸린다(실측 18.09초) — 기동을 막지 않는다는 이
+      기능의 목표와 맞지 않는다. ``core.env``는 ``os``만 쓰는 가벼운
+      모듈이라(``load_env`` 자체가 «키 이름만 돌려주고 값은 절대
+      출력·반환하지 않는다» 계약을 지키는 기존 함수) 이 확인 하나만을
+      위해 무거운 엔진을 통째로 부르지 않는다.
+
+    Args:
+        dotenv_path: 시험 전용. 지정하면 ``analysis_engine/.env`` 대신 이
+            경로를 읽는다. ``core.env.load_env``의 기본 인자값은 함수
+            정의 시점에 한 번 고정되므로(late-binding 안 됨), 모듈 상수를
+            monkeypatch해도 소용없다 — 그래서 이 함수가 경로를 직접
+            받아 넘긴다. 운영 호출부(``runtime.py``)는 이 인자를 안 쓴다.
+    """
+    if os.environ.get("DART_API_KEY", "").strip():
+        return True
+    engine_src_dir = paths.PROJECT_ROOT / "analysis_engine" / "src"
+    if str(engine_src_dir) not in sys.path:
+        sys.path.insert(0, str(engine_src_dir))
+    from core.env import load_env as _load_dotenv  # noqa: PLC0415
+
+    # os.environ.setdefault로만 채운다 — 반환값(키 이름 목록)은 쓰지 않는다.
+    _load_dotenv() if dotenv_path is None else _load_dotenv(dotenv_path)
+    return bool(os.environ.get("DART_API_KEY", "").strip())
+
+
 def _exception_chain(error: BaseException) -> tuple[BaseException, ...]:
     """예외 문자열을 읽지 않고 cause/context 체인을 한 번만 순회한다."""
 
@@ -1524,34 +1664,136 @@ def _comparison_source_failure_is_transient(error: BaseException) -> bool:
     )
 
 
-@lru_cache(maxsize=1)
-def _company_catalog() -> tuple[tuple[str, str], ...]:
-    """전자공시 전체 법인의 기존 (고유번호, 표시명) 호환 목록.
+#: dart_client.CORPCODE_XML_FILENAME과 반드시 같은 이름이어야 한다. 이 값을
+#: 다시 정의하는 이유는, 이 파일이 analysis_engine을 기동 시점에 import하지
+#: 않는 격리 원칙(``_engine()`` 참고 — anthropic·presidio 같은 무거운 의존성
+#: 없이도 데모 화면이 떠야 한다) 때문이다. dart_client 모듈을 직접 import하지
+#: 않고, 요청마다 독립 namespace로 불러오는 ``_engine()``이 돌려주는 객체의
+#: ``CORPCODE_DIR``에 이 이름을 붙여서만 정본 경로를 계산한다.
+_CORPCODE_XML_FILENAME: Final[str] = "CORPCODE.xml"
 
-    실제 정본은 같은 XML에서 읽은 immutable 5-field record이며, 이 2-tuple은
-    기존 1판 exact-name index 계약에만 남긴다.
+#: mtime 나이 계산에서만 쓰는 환산 상수(매직 넘버 금지).
+_SECONDS_PER_DAY: Final[float] = 86_400.0
+
+
+@dataclass(frozen=True)
+class _CompanyCatalog:
+    """corpCode.xml 한 벌을 통째로 담는 불변 묶음.
+
+    7일 주기 갱신이 이 객체를 통째로 새로 만들고 통째로 스왑한다. 전역 dict를
+    제자리에서 clear/update하면 갱신 도중 다른 스레드가 «새 corp_code는
+    있는데 metadata는 아직 옛 값» 같은 절반만 바뀐 상태를 읽을 수 있어서다.
     """
+
+    records: tuple[DartCompanyRecord, ...]
+    compat_pairs: tuple[tuple[str, str], ...]
+    metadata: dict[str, tuple[str, str]]
+    english_names: dict[str, str]
+
+
+def _load_company_catalog(xml_path: Path) -> _CompanyCatalog:
+    """corpCode.xml 하나를 읽어 순수 데이터 객체로 돌려준다(전역 미접촉).
+
+    기동 때 처음 읽을 때도, 7일 주기 갱신이 새로 받은 임시 XML을 스왑 전에
+    미리 검증·파싱할 때도 이 함수 하나만 거친다 — 파싱 규칙이 두 곳으로
+    갈라지지 않게 한다.
+    """
+    records = parse_dart_company_records(xml_path)
+    return _CompanyCatalog(
+        records=records,
+        compat_pairs=tuple(
+            (record.corp_code, record.corp_name) for record in records
+        ),
+        metadata={
+            record.corp_code: (record.stock_code, record.modify_date)
+            for record in records
+        },
+        english_names={
+            record.corp_code: record.corp_eng_name for record in records
+        },
+    )
+
+
+def _build_company_candidate_index(
+    records: Iterable[DartCompanyRecord],
+):
+    """레코드 목록으로 후보 검색 색인을 새로 만든다(전역 미접촉, 순수 함수)."""
+
+    return build_dart_company_index(records)
+
+
+#: 주기 갱신이 락 밖에서 새 catalog를 이미 다 만들어 둔 경우에만 쓴다.
+#: ``_company_catalog()``가 이 값이 있으면 재다운로드·재파싱 없이 그대로
+#: 반환한다.
+_PRELOADED_CATALOG: _CompanyCatalog | None = None
+
+#: ``_company_catalog()``의 catalog 생성 자체를 직렬화하는 전용 락.
+#:
+#: ★ 왜 필요한가(독립 검토 실측, 2026-09-12) — ``functools.lru_cache``는
+#:   캐시가 비어 있을 때(cache miss) 원본 함수를 **잠금 없이** 실행하고,
+#:   동시에 두 스레드가 미스를 내면 **먼저 끝난 쪽 결과만 캐시에 남고
+#:   나중 쪽 호출자는 자기가 따로 계산한(캐시에 없는) 값을 돌려받는다.**
+#:   이 파일에는 ``_company_catalog()``를 락 없이 직접 부르는 곳이
+#:   ``_company_index()``·``_records_from_candidate_catalog(_company_catalog())``
+#:   (식별 AI 경로, 비교 배경 스레드) 여러 곳 있어, 주기 갱신이
+#:   ``_PRELOADED_CATALOG``를 채우고 ``cache_clear()``를 부르는 바로 그
+#:   틈에 그 소비자들이 끼어들면 preload를 가로채 락 밖에서 재파싱하거나
+#:   ``_COMPANY_CANDIDATE_INDEX_SOURCE``와 어긋난 객체를 캐시에 남겨
+#:   다음 검색이 16초 색인을 다시 만들게 만들 수 있었다(실측).
+#:   ``_company_catalog()``가 실제 계산(``_load_or_download_company_catalog``
+#:   호출)을 **오직 이 락을 쥔 채로만** 하게 만들면, 그 안쪽 lru_cache는
+#:   절대 동시에 미스를 내지 않는다 — 두 번째 호출자는 락을 기다렸다가
+#:   이미 채워진 캐시를 안전하게 재사용한다(double-checked locking).
+_COMPANY_CATALOG_LOCK = threading.Lock()
+
+
+@lru_cache(maxsize=1)
+def _load_or_download_company_catalog() -> _CompanyCatalog:
+    """실제 catalog 생성(다운로드+파싱 또는 preload 재사용).
+
+    ``_company_catalog()``가 ``_COMPANY_CATALOG_LOCK``을 쥔 채로만 이
+    함수를 부르므로, 이 lru_cache는 절대 동시 miss를 내지 않는다 — 두
+    번째 이후 호출은 항상 이미 채워진 캐시를 즉시 돌려받는다.
+    """
+    global _PRELOADED_CATALOG
+    if _PRELOADED_CATALOG is not None:
+        catalog = _PRELOADED_CATALOG
+        _PRELOADED_CATALOG = None
+        return catalog
     engine = _engine()
     # 기존 real 개발 실행은 analysis_engine/.env bootstrap에 의존할 수 있다.
     # 실시간 평가 launcher는 ANALYSIS_ENGINE_DISABLE_DOTENV=1이라 이 호출 자체가
     # no-op이고, 명시 전달된 환경변수만 사용한다.
     engine.load_env()
     xml = engine.download_corpcode(engine.CORPCODE_DIR, engine.UsageCounter())
-    records = parse_dart_company_records(xml)
-    global _COMPANY_CATALOG_RECORDS
-    _COMPANY_CATALOG_RECORDS = records
-    _COMPANY_CATALOG_METADATA.clear()
-    _COMPANY_CATALOG_METADATA.update(
-        {
-            record.corp_code: (record.stock_code, record.modify_date)
-            for record in records
-        }
-    )
-    _COMPANY_CATALOG_ENGLISH_NAMES.clear()
-    _COMPANY_CATALOG_ENGLISH_NAMES.update(
-        {record.corp_code: record.corp_eng_name for record in records}
-    )
-    return tuple((record.corp_code, record.corp_name) for record in records)
+    return _load_company_catalog(xml)
+
+
+def _company_catalog() -> tuple[tuple[str, str], ...]:
+    """전자공시 전체 법인의 기존 (고유번호, 표시명) 호환 목록.
+
+    실제 정본은 같은 XML에서 읽은 immutable 5-field record이며, 이 2-tuple은
+    기존 1판 exact-name index 계약에만 남긴다. ``@lru_cache``를 이 함수
+    자신이 아니라 안쪽 ``_load_or_download_company_catalog``에 붙인 이유는
+    위 ``_COMPANY_CATALOG_LOCK`` 설명을 참고 — 이 함수는 그 락으로 감싼
+    얇은 겉껍데기다.
+    """
+    global _COMPANY_CATALOG_RECORDS, _COMPANY_CATALOG_METADATA
+    global _COMPANY_CATALOG_ENGLISH_NAMES
+    with _COMPANY_CATALOG_LOCK:
+        catalog = _load_or_download_company_catalog()
+        _COMPANY_CATALOG_RECORDS = catalog.records
+        # 제자리 clear/update 대신 새 dict 객체로 재바인딩한다 — 갱신 스레드가
+        # 같은 dict를 손대는 동안 다른 스레드가 절반만 바뀐 값을 읽지 않게.
+        _COMPANY_CATALOG_METADATA = catalog.metadata
+        _COMPANY_CATALOG_ENGLISH_NAMES = catalog.english_names
+    return catalog.compat_pairs
+
+
+# 기존 호출부·시험이 ``real._company_catalog.cache_clear()``를 부른다(1판
+# lru_cache 계약과 호환). 실제 캐시는 안쪽 함수에 있으므로 그 메서드를
+# 그대로 이 이름에 얹는다 — 일반 함수도 임의 속성을 가질 수 있다.
+_company_catalog.cache_clear = _load_or_download_company_catalog.cache_clear
 
 
 def _records_from_candidate_catalog(
@@ -1591,16 +1833,239 @@ def _records_from_candidate_catalog(
 
 
 def _company_candidate_index():
-    """Cache normalized aliases against the cached catalog tuple identity."""
-    catalog = _company_catalog()
+    """Cache normalized aliases against the cached catalog tuple identity.
+
+    ★ catalog 조회(``_company_catalog()``)를 이 함수의 잠금 «안」에서 부른다.
+    ``_company_catalog()`` 자신은 ``_COMPANY_CATALOG_LOCK``으로 동시 미스를
+    이미 직렬화하지만(그 락 설명 참고), 이 함수가 필요한 건 «또 다른»
+    직렬화다 — catalog가 새로 바뀌었을 때(``_COMPANY_CANDIDATE_INDEX_SOURCE
+    is not catalog``) 색인을 다시 만드는 16초짜리 작업 자체가 두 번 일어나지
+    않게 막는 것이다. 두 요청이 같은 새 catalog를 동시에 보면, 이 락이
+    없으면 둘 다 각자 16초 색인을 만들어 CPU·메모리를 두 배로 쓴다. 이
+    잠금으로 감싸면 두 번째 호출자는 첫 호출자가 이미 채운 색인을 그대로
+    재사용한다.
+    """
     global _COMPANY_CANDIDATE_INDEX_SOURCE, _COMPANY_CANDIDATE_INDEX
     with _COMPANY_CANDIDATE_INDEX_LOCK:
+        catalog = _company_catalog()
         if _COMPANY_CANDIDATE_INDEX_SOURCE is not catalog:
-            _COMPANY_CANDIDATE_INDEX = build_dart_company_index(
+            _COMPANY_CANDIDATE_INDEX = _build_company_candidate_index(
                 _records_from_candidate_catalog(catalog)
             )
             _COMPANY_CANDIDATE_INDEX_SOURCE = catalog
         return _COMPANY_CANDIDATE_INDEX
+
+
+def prewarm_business_candidate_index() -> int:
+    """기동 예열 전용 진입점 — 첫 검색과 «같은» 색인을 미리 만든다.
+
+    ``search_business_candidates``가 첫 후보 검색에서 쓰는 함수를 그대로
+    호출해(아래 참고) ``_company_catalog``·``_company_candidate_index``의
+    lru_cache/전역 상태를 채운다. 다른 경로(예: 직접 XML을 내려받아 파싱)로
+    만들면 이 함수만의 결과가 따로 생기고 첫 검색 요청은 여전히 자기 캐시가
+    비어 새로 만들게 되어 예열이 헛수고가 된다.
+
+    참고: ``search_business_candidates``의 ``index = _company_candidate_index()``
+    호출부(이 파일의 ``RealPipeline.search_business_candidates``).
+
+    Returns:
+        색인에 들어간 법인 수(로그용). 실패하면 예외를 그대로 올린다 —
+        실패 처리(로그만 남기고 서비스는 계속 여는 것)는 호출자인
+        ``src.web.runtime``의 책임이다.
+    """
+    _company_candidate_index()
+    return len(_COMPANY_CATALOG_RECORDS)
+
+
+def _corpcode_age_days(xml_path: Path) -> Optional[float]:
+    """정본 파일의 mtime 기준 나이(일). 파일이 없으면 None(=무조건 갱신 대상)."""
+
+    try:
+        mtime = xml_path.stat().st_mtime
+    except OSError:
+        return None
+    return (time.time() - mtime) / _SECONDS_PER_DAY
+
+
+def _corpcode_xml_path() -> Path:
+    """정본 corpCode.xml 경로. ``_engine()``을 실제로 부른다 — 주석 참고."""
+
+    return Path(_engine().CORPCODE_DIR) / _CORPCODE_XML_FILENAME
+
+
+def business_candidate_catalog_needs_refresh() -> bool:
+    """법인목록 정본이 없거나 ``CORPCODE_REFRESH_INTERVAL_DAYS``보다 오래됐는가.
+
+    기동 색인 관리자가 «예열이냐 갱신이냐»를 고르는 데 쓴다(``runtime.py``의
+    ``_candidate_index_manager_loop``). 둘 다 하면 1세대 색인을 미처 못
+    버린 채 2세대를 또 만들어 메모리가 겹친다 — 아래
+    ``refresh_business_candidate_catalog_if_stale`` docstring의 실측 참고.
+
+    ★ 이 함수는 ``_engine()``을 무조건 먼저 부른다(냉시동 시 수 초, 이후는
+    ``sys.modules`` 재사용으로 사실상 0에 가깝다) — mtime 검사 자체는
+    파일 하나를 ``stat()``하는 것뿐이라 훨씬 싸지만, 경로를 구하려면
+    ``engine.CORPCODE_DIR``이 필요해 엔진 로드를 피할 수 없다.
+    """
+
+    age_days = _corpcode_age_days(_corpcode_xml_path())
+    return age_days is None or age_days >= CORPCODE_REFRESH_INTERVAL_DAYS
+
+
+def _discard_stale_refresh_temp_file(temp_path: Path) -> None:
+    """검증에 실패한 갱신용 임시 파일을 지운다 — 다음 검사 주기에 방해 안 되게."""
+
+    try:
+        temp_path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("법인목록 갱신용 임시 파일을 지우지 못했습니다")
+
+
+def refresh_business_candidate_catalog_if_stale() -> bool:
+    """법인목록이 ``CORPCODE_REFRESH_INTERVAL_DAYS``보다 오래됐으면 뒤에서 새로 받아 바꿔 끼운다.
+
+    ``download_corpcode``는 파일이 있으면 영원히 재사용한다(운영 영속
+    디스크에서는 최초 배포 이후 한 번도 안 바뀐다). 이 함수가 그 자리를
+    메운다 — 사용자 결정(2026-09-11)으로 주기는 7일이다.
+
+    ── 두 세대를 동시에 들고 있지 않는다(설계 확정, 독립 검토 뒤 2026-09-12) ──
+    실측(검토, Python 3.13.15/win32, 법인 118,747건): catalog 1벌 63.5MB,
+    색인 1벌 **549.0MB**(생성 16.24초) → 1세대 합계 612.5MB. 옛 색인을 쥔
+    채 새 색인을 만들면 두 세대가 겹쳐 **1,225.0MB(추적 최고 1,360.1MB)**
+    까지 치솟는다. 운영은 Render Standard 2GiB지만, 과거 512MB에서 이
+    색인 때문에 `/confirm` 처리 중 OOM으로 인스턴스가 재시작된 실측
+    이력이 있다(``deploy/README.md``). 그래서 이 함수는 **옛 색인·옛
+    catalog 전역을 먼저 놓아준 다음에만** 새 색인을 만든다 — 아래 순서
+    4번이 그 부분이다. 대가는 색인 재구축(약 16초)이 스왑 락 «안»에서
+    일어나 그동안 후보 검색이 락을 기다린다는 것이다. 갱신은 **주 1회
+    뿐**이고, 대기 상한은 다운로드 뒤 파싱 0.79초 + 색인 16.24초 ≈
+    **최대 약 17초**로 후보 검색 예산(``LOCAL_DART_PROVIDER_TIMEOUT_SEC``
+    60초) 안에 들어온다.
+
+    순서:
+      1) (락 밖) mtime만 본다(``business_candidate_catalog_needs_refresh``)
+         — 안 오래됐으면 바로 반환, DART를 부르지 않는다.
+      2) (락 밖) ``download_corpcode_fresh``로 새 XML을 임시 파일에 받는다
+         (정본 ``CORPCODE.xml``은 그대로 둔다).
+      3) (락 밖) 그 임시 파일을 파싱해 새 catalog를 미리 다 만든다(색인은
+         아직 안 만든다 — 색인 생성이 이 함수에서 가장 비싼 단계다).
+      4) (락 안) ``os.replace``로 정본을 바꾼다(이 한 줄만 실패를 따로
+         처리한다 — 아래 실패 격리 참고). **그 다음** ``_PRELOADED_CATALOG``에
+         새 catalog를 먼저 놓고, 옛 ``_COMPANY_CANDIDATE_INDEX``·
+         ``_COMPANY_CATALOG_RECORDS``와 두 lru_cache
+         (``_load_or_download_company_catalog``·``_company_index`` — 후자는
+         식별 AI 경로 전용 이름 색인, 안 비우면 그 경로가 프로세스 수명
+         내내 옛 법인목록을 쓴다)를 놓아준 뒤에야 새 색인을 만들고
+         전역·캐시를 다시 채운다. ``_PRELOADED_CATALOG``를 캐시 비우기
+         «전에» 두는 순서가 중요하다 — 반대로 하면 색인 생성 16초 동안
+         락 밖 소비자가 캐시 미스로 끼어들어 재파싱하고, 그 결과가
+         캐시를 선점해 이 함수의 preload가 끝내 소비되지 못한 채 catalog
+         한 벌을 다음 주기까지 누수시킨다(2차 검토 실측).
+
+    실패 격리: 다운로드 실패(DART 장애·키 오류·한도)·파싱 실패·레코드
+    0건·``os.replace`` 실패(Windows에서 정본을 다른 핸들이 열고 있으면
+    ``PermissionError``)는 모두 옛 파일·옛 색인을 그대로 두고(``os.replace``
+    실패 갈래는 임시 파일도 지운다) 경고 로그 1줄만 남긴 뒤 다음 검사
+    주기(``CORPCODE_REFRESH_CHECK_INTERVAL_SEC``)에 재시도한다. 이 함수는
+    예외를 밖으로 던지지 않는다 — 호출자(``src.web.runtime``의 색인 관리자
+    루프)가 죽지 않고 계속 돌게 하기 위해서다.
+
+    Returns:
+        실제로 정본을 바꿔 끼웠으면 True. 아직 안 오래됐거나, 이번 시도가
+        실패해 옛 것을 그대로 썼으면 False.
+    """
+    global _COMPANY_CATALOG_RECORDS, _COMPANY_CATALOG_METADATA
+    global _COMPANY_CATALOG_ENGLISH_NAMES, _PRELOADED_CATALOG
+    global _COMPANY_CANDIDATE_INDEX_SOURCE, _COMPANY_CANDIDATE_INDEX
+    engine = _engine()
+    xml_path = _corpcode_xml_path()
+    age_days = _corpcode_age_days(xml_path)
+    if age_days is not None and age_days < CORPCODE_REFRESH_INTERVAL_DAYS:
+        return False
+
+    started = time.monotonic()
+    try:
+        engine.load_env()
+        temp_path = engine.download_corpcode_fresh(
+            engine.CORPCODE_DIR, engine.UsageCounter()
+        )
+    except Exception:  # noqa: BLE001 — 키·URL·스택을 로그에 남기지 않는다
+        logger.warning("법인목록 갱신 다운로드가 실패했습니다 — 기존 목록을 계속 씁니다")
+        return False
+
+    try:
+        new_catalog = _load_company_catalog(temp_path)
+    except Exception:  # noqa: BLE001 — 손상된 XML도 서비스를 막지 않는다
+        logger.warning("법인목록 갱신 XML을 읽지 못했습니다 — 기존 목록을 계속 씁니다")
+        _discard_stale_refresh_temp_file(temp_path)
+        return False
+
+    if not new_catalog.records:
+        logger.warning("법인목록 갱신 응답에 레코드가 없어 기존 목록을 계속 씁니다")
+        _discard_stale_refresh_temp_file(temp_path)
+        return False
+
+    previous_count = len(_COMPANY_CATALOG_RECORDS)
+
+    with _COMPANY_CANDIDATE_INDEX_LOCK:
+        try:
+            os.replace(temp_path, xml_path)
+        except OSError:
+            # 대표 사례: Windows에서 정본을 다른 프로세스·핸들이 읽기로 열고
+            # 있으면 os.replace가 PermissionError(WinError 5)를 낸다(실측).
+            # 이 한 줄만 감싼다 — 아래 색인 생성 단계의 OSError(예: 디스크
+            # 꽉 참)까지 여기서 삼키면 "정본 교체 실패"라는 잘못된 원인을
+            # 로그에 남기고, 실제로는 정본이 이미 바뀌었는데 옛 색인이
+            # 남았다는(또는 그 반대) 거짓 상태 서술이 된다(2차 검토 실측).
+            # 아직 아무 전역도 손대지 않았으므로 옛 파일·옛 색인은 그대로다.
+            logger.warning("법인목록 정본 교체가 실패했습니다 — 기존 목록을 계속 씁니다")
+            _discard_stale_refresh_temp_file(temp_path)
+            return False
+
+        # 두 세대 동시 보유를 막는다 — 위 docstring의 실측(1,225MB→612MB)
+        # 참고. 옛 색인·옛 레코드 참조를 전부 놓아준 «다음»에만 아래에서
+        # 새 색인을 만든다. _COMPANY_CATALOG_METADATA·ENGLISH_NAMES는
+        # 여기서 비우지 않는다 — 두 dict는 법인마다 수십 바이트뿐이라
+        # 메모리에 미치는 영향이 무시할 만한 반면, 비워 두면 16초 동안
+        # 락 밖의 무보호 소비자(``_records_from_candidate_catalog`` at
+        # 4431·5252)가 종목코드·영문명을 전부 빈 값으로 보게 된다 —
+        # 그 대가가 더 크다고 판단했다(아래 이어지는 몇 줄 안에 새
+        # 값으로 다시 채워진다).
+        #
+        # ★ _PRELOADED_CATALOG는 반드시 cache_clear() «전에» 놓는다(2차
+        # 검토 실측, 2026-09-12) — cache_clear() 뒤 16초 색인 생성이
+        # 끝나야 preload를 놓는 순서였을 때는, 그 16초 동안
+        # _load_or_download_company_catalog의 캐시가 비어 있고
+        # preload도 아직 없어 락 밖 소비자(``_company_index()`` 등)가
+        # 끼어들면 캐시 미스로 30MB를 통째로 재파싱했다. 더 나쁜 건 그
+        # 소비자의 결과가 먼저 캐시에 들어가 버려 이 함수의 재사용
+        # 의도(preload)가 끝내 소비되지 못하고 catalog 한 벌(63.5MB)을
+        # 다음 주간 갱신까지 영구 점유했다(실측: 끼어든 소비자 대기
+        # 22.15초→0.10초, 재파싱 2회→1회, 상주 +63.2MB 누수→0).
+        _PRELOADED_CATALOG = new_catalog
+        _COMPANY_CANDIDATE_INDEX = None
+        _COMPANY_CANDIDATE_INDEX_SOURCE = None
+        _COMPANY_CATALOG_RECORDS = ()
+        _load_or_download_company_catalog.cache_clear()
+        _company_index.cache_clear()  # 식별 AI 경로(find_company_metered)도 함께 무효화
+
+        new_index = _build_company_candidate_index(new_catalog.records)
+
+        # _PRELOADED_CATALOG를 그대로 재사용하므로 여기서 재다운로드·
+        # 재파싱이 일어나지 않는다 — _load_or_download_company_catalog
+        # 본문의 분기를 참고.
+        refreshed_compat_pairs = _company_catalog()
+        _COMPANY_CANDIDATE_INDEX = new_index
+        _COMPANY_CANDIDATE_INDEX_SOURCE = refreshed_compat_pairs
+
+    elapsed_sec = time.monotonic() - started
+    logger.info(
+        "법인목록 갱신 완료 %.1f초, %d건(이전 %d건), 파일 나이 %s일",
+        elapsed_sec,
+        len(new_catalog.records),
+        previous_count,
+        "?" if age_days is None else f"{age_days:.0f}",
+    )
+    return True
 
 
 @lru_cache(maxsize=1)
@@ -3056,10 +3521,20 @@ class RealPipeline:
         on_step: Optional[StepReporter] = None,
     ) -> RunResult:
         """5 판정부터 13 출력까지 돌리고 예외 때도 이미 쓴 비용을 보존한다."""
+        # 「시동」구간의 시작 시각 — 반드시 `_engine()` 호출(1판 모듈을 처음
+        # 불러오는 자리) «앞»에서 잡는다. 냉시동은 이 import 하나가 수 초 걸린다
+        # (실측: bytecode 캐시 없는 완전 냉시동 53.7초, 있어도 4.1초). engine을
+        # 만든 «뒤»에 시계를 시작하면 이 구간이 어느 단계 진단에도 안 잡혀
+        # 「어느 단계가 느린지」가 시작 지연만큼 항상 틀린 답을 준다.
+        boot_started_at = time.monotonic()
         # lifespan을 거치지 않는 CLI·단위시험도 요청을 시작하는 이 자리에서
         # exact 모드를 한 번만 동결한다. 아래 캐시·분기에는 이 값만 운반한다.
         generation_mode = engine_mode.process_engine_mode()
         engine = _MeteredEngine(_engine())
+        # 첫 화면 단계(01 식별)로 넘어가는 순간 이 구간이 「시동」항목으로
+        # steps에 남는다 — 화면 단계 목록(PROGRESS_STEPS)에는 안 넣는다,
+        # 진단 전용이다.
+        engine.stage_elapsed_seed(STAGE_BOOT, start=boot_started_at)
         frozen_identity = generation_coordination.frozen_engine_build_identity()
         if frozen_identity is None:
             build_identity = engine_build_identity.process_engine_build_identity()
@@ -3180,6 +3655,11 @@ class RealPipeline:
                 message=_message(Outcome.FAILED),
             )
         finally:
+            # _run_metered의 tell()은 «다음 전환»이 있어야 직전 단계를 적는다.
+            # 마지막으로 머물던 단계는 정상 종료든 예외든 여기서 한 번 닫아야
+            # 「마지막 단계가 몇 초 걸렸는지」가 사라지지 않는다. 요약 로그보다
+            # 먼저 불러야 diagnostics.finish가 이 항목까지 함께 넘긴다.
+            engine.stage_elapsed_finish(steps=diagnostics.steps)
             # 성공·실패·요청 전역 중단을 가리지 않고 여기 한 곳에서만 남긴다.
             # 갈래마다 적으면 새 종료가 늘 때 한 곳은 반드시 빠진다.
             diagnostics.finish(corp_code=card.ref)
@@ -3210,17 +3690,26 @@ class RealPipeline:
         """
         generation_mode = engine_mode.assert_engine_mode_current(generation_mode)
 
+        # `run`이 열어 둔 자리에 그대로 쌓는다. 자리가 없는 옛 호출부는 예전처럼
+        # 자기만 쓰는 새 목록을 받는다 — 진단이 본 기능을 막지 않는다.
+        # ★ 아래 `tell()`이 이 이름을 클로저로 읽으므로 반드시 그 정의보다
+        #   앞에서 대입한다. 순서가 바뀌면(누가 `tell`을 이 대입보다 위로
+        #   옮기면) 첫 호출에서 `UnboundLocalError`가 나 본조사 전체가
+        #   죽는다 — 정의 시점의 순서 문제라 try/except로 못 막는다.
+        steps: list[dict[str, Any]] = run_diagnostics.current_steps()
+
         def tell(key: str) -> None:
             _set_meter_stage(engine, key)
             if on_step is not None:
                 on_step(key)
+            # 단계 전환마다 직전 단계 소요 시간(ms)을 steps에 남긴다 — 어느
+            # 단계가 느린지 다음 실행부터 실측으로 바로 보인다. 마지막 단계는
+            # 이 함수가 다시 안 불리므로 `run()`의 finally에서 따로 닫는다.
+            engine.stage_elapsed_mark(key, steps=steps)
 
         engine.load_env()
         client = _DeferredMeteredClient(lambda: _metered_client(engine, engine._client()))
         counter = engine.UsageCounter()
-        # `run`이 열어 둔 자리에 그대로 쌓는다. 자리가 없는 옛 호출부는 예전처럼
-        # 자기만 쓰는 새 목록을 받는다 — 진단이 본 기능을 막지 않는다.
-        steps: list[dict[str, Any]] = run_diagnostics.current_steps()
         model = getattr(engine, "MODEL", "")
 
         tell("identify")   # 이미 끝났다 — 화면에는 지나간 단계로 표시된다
@@ -3413,6 +3902,12 @@ class RealPipeline:
         # artifact로 합친다. 엔진 내부 디스크 캐시에 숨지 않고,
         # ``download_document`` 호출 자체가 접수번호당 1회만 발생한다.
         downloaded_document_artifacts: dict[str, Any] = {}
+        # 「있나 보고 없으면 받는다」는 두 동작 사이에 다른 스레드가 끼어들면
+        # 같은 접수번호를 두 번 받아 DART 호출 수가 두 배가 된다. 비교 갈래가
+        # 뉴스 검색과 동시에 도는 경로가 생겼으므로 확인과 저장을 한 자물쇠
+        # 안에 묶는다. 내려받는 동안 자물쇠를 놓지 않는 이유도 같다 — 놓으면
+        # 같은 접수번호의 두 번째 요청이 그 틈에 또 나간다.
+        downloaded_document_lock = threading.Lock()
 
         def download_document_once(
             receipt_number: str,
@@ -3422,18 +3917,19 @@ class RealPipeline:
             require_official_url_sidecar: bool = False,
         ) -> Any:
             receipt = str(receipt_number or "").strip()
-            if receipt not in downloaded_document_artifacts:
-                # FULL은 첫 요청이 비교/legacy의 약한 호출이어도
-                # 항상 sidecar 검증까지 한 강한 artifact를 만든다. 그렇지
-                # 않으면 non-strict path를 나중의 strict 수집에 재사용해
-                # 공식 URL 출처 검사를 통과한 척하게 된다.
-                downloaded_document_artifacts[receipt] = engine.download_document(
-                    receipt,
-                    directory,
-                    request_counter,
-                    require_official_url_sidecar=True,
-                )
-            return downloaded_document_artifacts[receipt]
+            with downloaded_document_lock:
+                if receipt not in downloaded_document_artifacts:
+                    # FULL은 첫 요청이 비교/legacy의 약한 호출이어도
+                    # 항상 sidecar 검증까지 한 강한 artifact를 만든다. 그렇지
+                    # 않으면 non-strict path를 나중의 strict 수집에 재사용해
+                    # 공식 URL 출처 검사를 통과한 척하게 된다.
+                    downloaded_document_artifacts[receipt] = engine.download_document(
+                        receipt,
+                        directory,
+                        request_counter,
+                        require_official_url_sidecar=True,
+                    )
+                return downloaded_document_artifacts[receipt]
 
         source_identity = ReportSourceIdentity.capture(
             filing=filing,
@@ -3697,6 +4193,12 @@ class RealPipeline:
                     "수집미완료": collection_incomplete,
                     "캐시재사용가능": False,
                 })
+        # ── 6·7 경쟁사 비교와 뉴스 검색 (서로의 결과를 읽지 않는다) ─────
+        # 두 갈래는 재분류(AI 소비)가 끝난 «뒤»에만 시작한다 — 그 호출 수가
+        # 뉴스 예산과 캐시 열쇠에 들어가기 때문이다. 비교는 DART(engine·counter)
+        # 만 쓰고 AI client를 받지 않으므로, 뉴스가 읽는 남은 호출 수를 바꾸지
+        # 않는다. 그래서 둘을 어느 순서로 돌려도 같은 값이 나온다.
+        comparison_branch: Callable[[], _BranchOutcome] | None = None
         if (
             generation_mode is engine_mode.EngineMode.V2
             and requested_release_mode is ReleaseMode.FULL
@@ -3706,25 +4208,49 @@ class RealPipeline:
             # 자사 cache key가 그대로 남는다. 실제 공식 비교를 여기서 먼저
             # 만들고 그 snapshot을 생성 신원에 포함한다.
             assert official_evidence is not None
-            try:
-                v2_comparison_result = _prepare_v2_comparison_result(
-                    engine=engine,
-                    counter=counter,
-                    profile=profile,
-                    official_evidence=official_evidence,
-                    corp_code=corp_code,
-                    company_name=company_name,
-                    corp_type=corp_type,
-                    financials=financials,
-                    filing=filing,
-                    business_date=business_date,
-                    dart_download_document=download_document_once,
-                )
-                generation_source_identity_digest = _comparison_generation_digest(
-                    generation_source_identity_digest,
-                    v2_comparison_result,
-                )
-            except Exception as error:  # 비교 한 장의 실패는 확인된 자사 근거를 지우지 않는다.
+            comparison_branch = partial(
+                _run_comparison_branch,
+                engine=engine,
+                counter=counter,
+                profile=profile,
+                official_evidence=official_evidence,
+                corp_code=corp_code,
+                company_name=company_name,
+                corp_type=corp_type,
+                financials=financials,
+                filing=filing,
+                business_date=business_date,
+                dart_download_document=download_document_once,
+                # 지문 접기까지 갈래 안에서 끝낸다 — 예전처럼 같은 `try`가
+                # 덮어야 직렬화 오류도 GATE_STOPPED로 끝난다.
+                source_identity_digest=generation_source_identity_digest,
+            )
+        # 뉴스는 공식 자료의 빈칸 여부와 무관한 현재성 입력이다. 검색은 AI 없이
+        # 먼저 고정하고, 본문 분석은 아래 owner 선정 뒤에만 실행한다. 이렇게 해야
+        # 공시가 같아도 새 보도가 나왔을 때 과거 PDF를 새 조사로 돌려주지 않는다.
+        news_branch: Callable[[], _BranchOutcome] | None = None
+        if (
+            generation_mode is engine_mode.EngineMode.V2
+            and news_intake_switch.news_intake_enabled()
+        ):
+            news_branch = partial(
+                _run_news_search_branch,
+                engine=engine,
+                profile=profile,
+                official_evidence=official_evidence,
+                company_name=company_name,
+                business_date=business_date,
+                pipeline_news_search=self._news_search,
+            )
+        comparison_outcome, news_outcome = _run_collection_branches(
+            comparison_branch, news_branch
+        )
+        news_session: news_research_adapter.NewsResearchSession | None = None
+        news_preparation_failed = False
+        if comparison_outcome is not None:
+            steps.extend(comparison_outcome.steps)
+            if comparison_outcome.error is not None:
+                error = comparison_outcome.error
                 raise_if_request_interrupted(error)
                 if isinstance(error, ComparisonBlockedError):
                     failure_reason = FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT
@@ -3737,7 +4263,13 @@ class RealPipeline:
                 v2_comparison_result = None
                 requested_release_mode = ReleaseMode.SHADOW
                 collection_incomplete = True
-                record_collection_failure(steps, source="회사 공식 비교", reason=failure_reason, error=error)
+                record_collection_failure(
+                    steps, source="회사 공식 비교", reason=failure_reason, error=error,
+                )
+            else:
+                assert isinstance(comparison_outcome.value, _ComparisonOutcome)
+                v2_comparison_result = comparison_outcome.value.result
+                generation_source_identity_digest = comparison_outcome.value.folded_digest
         if collection_incomplete:
             requested_release_mode = ReleaseMode.SHADOW
             generation_source_identity_digest = partial_generation_digest(
@@ -3745,60 +4277,21 @@ class RealPipeline:
                 official_snapshot=(official_evidence.source_snapshot_sha256 if official_evidence else ""),
                 source_identity=source_identity, failure_steps=steps,
             )
-        # 뉴스는 공식 자료의 빈칸 여부와 무관한 현재성 입력이다. 검색은 AI 없이
-        # 먼저 고정하고, 본문 분석은 아래 owner 선정 뒤에만 실행한다. 이렇게 해야
-        # 공시가 같아도 새 보도가 나왔을 때 과거 PDF를 새 조사로 돌려주지 않는다.
-        news_session: news_research_adapter.NewsResearchSession | None = None
-        news_preparation_failed = False
-        if (
-            generation_mode is engine_mode.EngineMode.V2
-            and news_intake_switch.news_intake_enabled()
-        ):
-            verified_domain, identity_context = official_news_context(
-                profile, official_evidence
-            )
-            try:
-                # FULL의 기본 작성·검수와 허용된 보충 검수 몫을 먼저 보호한다.
-                # 부분 모드도 같은 여유를 남기되 기존 선택적 다듬기 한도 저하는
-                # 유지한다. 재시도가 많은 모든 입력의 성공을 보장하는 값은 아니다.
-                news_analysis_call_budget = engine.available_provider_calls(
-                    reserved_calls=COMPOSER_RUNTIME_CALL_RESERVE
-                )
-                news_session = news_research_adapter.prepare_news_research(
-                    search_news=self._news_search or getattr(engine, "search_news", None),
-                    company_name=company_name,
-                    aliases=_official_company_aliases(profile),
-                    domain=verified_domain,
-                    executive_names=tuple(
-                        name.strip()
-                        for name in re.split(r"[,/·ㆍ]", str(profile.get("ceo_nm") or ""))
-                        if name.strip()
-                    ),
-                    identity_context=identity_context,
-                    as_of=business_date,
-                    max_analysis_calls=news_analysis_call_budget,
-                )
-                news_digest = news_session.snapshot.digest
-                steps.append(
-                    {
-                        "step": "5b_뉴스_검색스냅샷",
-                        "상태": news_session.snapshot.status,
-                        "사유코드": list(news_session.snapshot.reason_codes),
-                        "캐시재사용가능": news_session.snapshot.cache_eligible,
-                        "AI분석호출상한": news_session.policy.max_analysis_calls,
-                        "본문작성예약호출": COMPOSER_RUNTIME_CALL_RESERVE,
-                        **news_session.snapshot.transport_diagnostics,
-                    }
-                )
-            except Exception as error:  # 뉴스 장애가 확인된 공식 사실을 폐기하지 않는다
-                raise_if_request_interrupted(error)
+        if news_outcome is not None:
+            steps.extend(news_outcome.steps)
+            if news_outcome.error is not None:
+                raise_if_request_interrupted(news_outcome.error)
                 news_preparation_failed = True
                 news_digest = NEWS_INTAKE_INTERNAL_ERROR_CODE
-                logger.warning(
-                    "뉴스 검색 입력을 준비하지 못했습니다 code=%s kind=%s",
-                    NEWS_INTAKE_INTERNAL_ERROR_CODE,
-                    type(error).__name__,
+                record_collection_failure(
+                    steps, source="뉴스 검색", reason=news_digest,
+                    error=news_outcome.error,
                 )
+            else:
+                assert isinstance(news_outcome.value, _NewsSearchOutcome)
+                news_session = news_outcome.value.session
+                news_preparation_failed = news_outcome.value.preparation_failed
+                news_digest = news_outcome.value.digest
             generation_source_identity_digest = news_generation_digest(
                 generation_source_identity_digest,
                 news_snapshot_digest=news_digest,
@@ -5183,12 +5676,51 @@ def _company_cache_save(
 # ══════════════════════════════════════════════════════════
 
 
+def _initial_review_retry_max_tokens(metered: _MeteredEngine) -> int:
+    """1차 본문 검수 «재요청»에 쓸 출력 상한을 첫 답의 실제 출력에서 구한다.
+
+    ★ 인자 이름이 ``metered`` 인 이유 — ``usages`` 는 1판 엔진이 아니라 이 앱의
+      계량 껍데기가 가진 이름이다. 계약 검사(AST)가 ``engine.…`` 만 1판 이름으로
+      세므로, 껍데기 이름을 읽는 함수는 ``metered`` 로 받는다
+      (``_request_spent_krw`` 와 같은 규칙).
+
+    같은 요청에서 이미 성공한 ``v2_review`` 응답 중 «마지막» 것의 출력 token에
+    :data:`V2_INITIAL_REVIEW_RETRY_OUTPUT_HEADROOM` 배를 적용하고,
+    :data:`V2_INITIAL_REVIEW_RETRY_MIN_TOKENS` 와
+    :data:`V2_INITIAL_REVIEWER_MAX_TOKENS` 사이로 자른다.
+
+    쓸 만한 사용량이 하나도 없으면(첫 호출 자체가 usage 없이 끝난 경우 등)
+    예전 그대로 :data:`V2_INITIAL_REVIEWER_MAX_TOKENS` 를 돌려준다 — 모르는
+    값을 지어내 상한을 낮추지 않는다.
+    """
+    observed_output = 0
+    for usage in metered.usages:
+        if usage.get("stage") != "v2_review":
+            continue
+        # 실패 응답에 붙은 usage 는 «답이 이만큼 나왔다»가 아니다 — 중간에
+        # 끊긴 출력일 수 있어 그 값으로 상한을 낮추면 재요청 답이 잘린다.
+        # 실패분만 있으면 아래에서 예전 상한으로 되돌아간다.
+        if usage.get("failed") is True:
+            continue
+        out = usage.get("out")
+        # bool은 int의 하위형이라 type() 으로 못 박는다 (다른 계량 경계와 동일).
+        if type(out) is int and out > 0:
+            observed_output = out
+    if observed_output <= 0:
+        return V2_INITIAL_REVIEWER_MAX_TOKENS
+    scaled = math.ceil(observed_output * V2_INITIAL_REVIEW_RETRY_OUTPUT_HEADROOM)
+    return min(
+        V2_INITIAL_REVIEWER_MAX_TOKENS,
+        max(V2_INITIAL_REVIEW_RETRY_MIN_TOKENS, scaled),
+    )
+
+
 def _v2_ask_via_provider(
     engine: _MeteredEngine,
     client: Any,
     *,
     stage: str,
-    max_tokens: int,
+    max_tokens: int | Callable[[], int],
     reserved_calls: int = 0,
 ):
     """composer의 AskFn(프롬프트→응답 문자열)을 기존 provider 포트로 감싼다.
@@ -5196,6 +5728,12 @@ def _v2_ask_via_provider(
     writer 경로와 같은 계량 client 경계를 지난다 — 비용 계량·예산 가드·요청별
     모델 고정이 전부 그 경계에서 적용된다. 구조화 출력(output_config)은 쓰지
     않는다: composer가 응답 문자열에서 직접 JSON을 관용 파싱하기 때문이다.
+
+    ★ ``max_tokens`` 가 callable이면 «호출 시점에» 풀어 쓴다 — 1차 검수 재요청의
+      상한은 첫 답이 실제로 얼마나 길었는지에 달려 있어 클로저를 만드는 시점에는
+      아직 알 수 없다. 푼 값이 양의 int가 아니면 계량 경계
+      (``_MeteredMessages.create``)가 예전과 같이 ProviderBudgetUnavailable로
+      막는다 — 여기서 중복 검사를 새로 만들지 않는다.
 
     ★ 프롬프트가 «공유 앞부분» 길이를 실어 오면(composer의 CacheablePrompt)
       그 경계로 두 블록을 만들어 앞부분만 캐시한다 — 아래 ask 주석 참조.
@@ -5210,6 +5748,9 @@ def _v2_ask_via_provider(
     from src.features.composer.port import AskFatalError  # noqa: PLC0415
 
     def ask(prompt: str) -> str:
+        # 출력 상한은 «보내기 직전»에 확정한다 — 1차 검수 재요청의 상한은 첫
+        # 답의 실제 출력에 달려 있어 이 클로저를 만들 때는 아직 모른다.
+        cap = max_tokens() if callable(max_tokens) else max_tokens
         # composer가 «아홉 장이 공유하는 앞부분»(회사 머리말 + 조각 전체)의
         # 길이를 프롬프트에 실어 보내면(composer.logic.CacheablePrompt), 그
         # 경계에서 두 블록으로 나눠 앞부분에만 캐시 표식을 찍는다. 프롬프트
@@ -5244,7 +5785,7 @@ def _v2_ask_via_provider(
             ):
                 response = client.messages.create(
                     model=getattr(engine, "MODEL", "") or GENERATION_MODEL,
-                    max_tokens=max_tokens,
+                    max_tokens=cap,
                     temperature=0,  # 원문 인용 충실도 우선 (1판 _ask와 동일)
                     messages=[{"role": "user", "content": content}],
                 )
@@ -5306,7 +5847,7 @@ def _v2_ask_via_provider(
                     else V2_RESPONSE_UNKNOWN
                 ),
                 "출력상한": (
-                    max_tokens if type(max_tokens) is int and max_tokens > 0
+                    cap if type(cap) is int and cap > 0
                     else None
                 ),
                 "종료사유": (
@@ -5346,6 +5887,211 @@ def _packet_document_preflight_final_gate_reason(detail_code: str) -> str:
     if detail_code == FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID:
         return FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
     return FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT
+
+
+@dataclass(frozen=True)
+class _BranchOutcome:
+    """동시에 돌린 갈래 하나가 만든 값·예외·단계 기록.
+
+    ★ `Exception`을 던지지 않고 «담아» 돌려준다 — 스레드 안에서 그대로 던지면
+      원래 코드가 가진 사유 분류·화면 문구 경로를 못 타고, 합류한 쪽이 두 갈래의
+      기록 순서를 정할 기회도 사라진다. 반대로 취소·종료처럼 `Exception`이 아닌
+      중단은 담지 않는다 — 삼키면 예전에 멈추던 신호가 조용히 사라진다.
+    """
+
+    value: "_ComparisonOutcome | _NewsSearchOutcome | None"
+    error: Exception | None
+    steps: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class _ComparisonOutcome:
+    """비교 갈래가 만든 두 값 — 비교 생산물과 그것까지 접은 캐시 지문.
+
+    ★ 지문 접기를 왜 갈래 안에 두나 — 예전 코드는 비교 생산과 지문 접기가 같은
+      `try` 안이라, 직렬화 불가 값 때문에 접기가 터져도 「내부 근거 계약」
+      GATE_STOPPED로 끝났다. 합류 지점으로 빼면 그 덮개가 사라져 같은 입력이
+      처리되지 않은 실패가 된다. 그래서 값과 지문을 함께 만들어 함께 돌려준다.
+    """
+
+    #: `_prepare_v2_comparison_result`의 반환값. 생산기 자체가 `Any`다.
+    result: Any
+    folded_digest: str
+
+
+@dataclass(frozen=True)
+class _NewsSearchOutcome:
+    """뉴스 검색 갈래가 만든 세 값 — 세션·지문·준비 실패 여부."""
+
+    session: "news_research_adapter.NewsResearchSession | None"
+    digest: str
+    preparation_failed: bool
+
+
+def _run_comparison_branch(
+    *,
+    engine: Any,
+    counter: Any,
+    profile: dict[str, Any],
+    official_evidence: OfficialEvidenceCollectionResult,
+    corp_code: str,
+    company_name: str,
+    corp_type: str,
+    financials: Optional[dict[str, Any]],
+    filing: Optional[dict[str, Any]],
+    business_date: Any,
+    dart_download_document: Any,
+    source_identity_digest: str,
+) -> _BranchOutcome:
+    """공식 양사 비교 갈래. 실패는 합류 지점이 원래 분류로 처리한다."""
+
+    branch_steps: list[dict[str, Any]] = []
+    # 갈래가 부르는 하위 함수가 `current_steps()`로 기록을 남기더라도 공용
+    # 목록이 아니라 이 갈래 목록에 쌓이게 한다. 합류한 쪽이 정해진 차례로
+    # 옮겨 붙이므로 완료 순서가 기록 순서를 흔들지 않는다.
+    with run_diagnostics.use_steps(branch_steps):
+        try:
+            comparison = _prepare_v2_comparison_result(
+                engine=engine,
+                counter=counter,
+                profile=profile,
+                official_evidence=official_evidence,
+                corp_code=corp_code,
+                company_name=company_name,
+                corp_type=corp_type,
+                financials=financials,
+                filing=filing,
+                business_date=business_date,
+                dart_download_document=dart_download_document,
+            )
+            # 예전과 같은 `try` 안이다. 여기서 터지는 직렬화 오류도 합류 지점이
+            # 「내부 근거 계약」 GATE_STOPPED로 바꾼다.
+            value = _ComparisonOutcome(
+                result=comparison,
+                folded_digest=_comparison_generation_digest(
+                    source_identity_digest, comparison
+                ),
+            )
+        except Exception as error:  # noqa: BLE001 - 합류 지점이 원래대로 분류한다
+            return _BranchOutcome(value=None, error=error, steps=branch_steps)
+    return _BranchOutcome(value=value, error=None, steps=branch_steps)
+
+
+def _run_news_search_branch(
+    *,
+    engine: Any,
+    profile: dict[str, Any],
+    official_evidence: OfficialEvidenceCollectionResult | None,
+    company_name: str,
+    business_date: Any,
+    pipeline_news_search: Optional[Callable[..., Any]],
+) -> _BranchOutcome:
+    """뉴스 검색 스냅샷 갈래. 뉴스 장애는 예전처럼 보고서를 멈추지 않는다."""
+
+    branch_steps: list[dict[str, Any]] = []
+    news_session: news_research_adapter.NewsResearchSession | None = None
+    news_preparation_failed = False
+    # 두 갈래 모두 값을 채우지 못하는 경로가 생기면 «뉴스 없음»이 아니라
+    # «확인 못 함»으로 굳혀 캐시 열쇠가 정상 실행과 겹치지 않게 한다.
+    news_digest = NEWS_INTAKE_INTERNAL_ERROR_CODE
+    with run_diagnostics.use_steps(branch_steps):
+        try:
+            verified_domain, identity_context = official_news_context(
+                profile, official_evidence
+            )
+            try:
+                # FULL의 기본 작성·검수와 허용된 보충 검수 몫을 먼저 보호한다.
+                # 부분 모드도 같은 여유를 남기되 기존 선택적 다듬기 한도 저하는
+                # 유지한다. 재시도가 많은 모든 입력의 성공을 보장하는 값은 아니다.
+                news_analysis_call_budget = engine.available_provider_calls(
+                    reserved_calls=COMPOSER_RUNTIME_CALL_RESERVE
+                )
+                news_session = news_research_adapter.prepare_news_research(
+                    search_news=(
+                        pipeline_news_search
+                        or getattr(engine, "search_news", None)
+                    ),
+                    company_name=company_name,
+                    aliases=_official_company_aliases(profile),
+                    domain=verified_domain,
+                    executive_names=tuple(
+                        name.strip()
+                        for name in re.split(r"[,/·ㆍ]", str(profile.get("ceo_nm") or ""))
+                        if name.strip()
+                    ),
+                    identity_context=identity_context,
+                    as_of=business_date,
+                    max_analysis_calls=news_analysis_call_budget,
+                )
+                news_digest = news_session.snapshot.digest
+                branch_steps.append(
+                    {
+                        "step": "5b_뉴스_검색스냅샷",
+                        "상태": news_session.snapshot.status,
+                        "사유코드": list(news_session.snapshot.reason_codes),
+                        "캐시재사용가능": news_session.snapshot.cache_eligible,
+                        "AI분석호출상한": news_session.policy.max_analysis_calls,
+                        "본문작성예약호출": COMPOSER_RUNTIME_CALL_RESERVE,
+                        **news_session.snapshot.transport_diagnostics,
+                    }
+                )
+            except Exception as error:  # 뉴스 장애가 확인된 공식 사실을 폐기하지 않는다
+                raise_if_request_interrupted(error)
+                news_preparation_failed = True
+                news_digest = NEWS_INTAKE_INTERNAL_ERROR_CODE
+                logger.warning(
+                    "뉴스 검색 입력을 준비하지 못했습니다 code=%s kind=%s",
+                    NEWS_INTAKE_INTERNAL_ERROR_CODE,
+                    type(error).__name__,
+                )
+        except Exception as error:  # noqa: BLE001 - 원래처럼 합류 지점이 올린다
+            return _BranchOutcome(value=None, error=error, steps=branch_steps)
+    return _BranchOutcome(
+        value=_NewsSearchOutcome(
+            session=news_session,
+            digest=news_digest,
+            preparation_failed=news_preparation_failed,
+        ),
+        error=None,
+        steps=branch_steps,
+    )
+
+
+def _run_collection_branches(
+    comparison: Optional[Callable[[], _BranchOutcome]],
+    news: Optional[Callable[[], _BranchOutcome]],
+) -> tuple[Optional[_BranchOutcome], Optional[_BranchOutcome]]:
+    """비교·뉴스 검색 갈래를 스위치에 따라 동시에 또는 차례로 돌린다.
+
+    한쪽만 돌 때는 나눌 것이 없다. 스위치가 꺼져 있으면 예전과 똑같이 비교를
+    끝낸 뒤 뉴스를 시작한다. 비교 자료를 얻지 못해도 뉴스 수집은 계속하며,
+    요청 취소는 두 방식 모두 그대로 전파한다.
+    """
+
+    if comparison is None or news is None or not parallel_collect_switch.enabled():
+        comparison_outcome = None if comparison is None else comparison()
+        if comparison_outcome is not None and comparison_outcome.error is not None:
+            # 취소는 즉시 전파하되 비교 자료 부족은 뉴스 수집을 막지 않는다.
+            raise_if_request_interrupted(comparison_outcome.error)
+        return comparison_outcome, (None if news is None else news())
+    with ThreadPoolExecutor(max_workers=PARALLEL_COLLECT_BRANCH_WORKERS) as pool:
+        # ContextVar는 스레드마다 따로다. 문맥을 복사해 넘기지 않으면 safe_http
+        # 마감·provider 예산·attempt callback이 «설치 안 됨»으로 보여 갈래가
+        # 조용히 막힌다.
+        # ★ 공유 캐시 경쟁은 여기서 생기지 않는다(실측). 합류 시점에
+        #   ``safe_http._ACTIVE_CACHE``·``_ACTIVE_DEADLINE``이 둘 다 None이다 —
+        #   ``collection_cache_scope()``를 여는 자리는 legacy 수집과 뉴스 본문
+        #   수집뿐이고 셋 다 이 합류보다 «뒤»에 있다. 그래서 두 갈래가 같은
+        #   robots·DNS 딕셔너리를 나눠 쓰지 않고, 각자 자기 scope를 새로 연다.
+        comparison_future = pool.submit(contextvars.copy_context().run, comparison)
+        news_future = pool.submit(contextvars.copy_context().run, news)
+        # 기다리는 시간에 상한을 걸지 않는다. 각 갈래는 이미 자기 시간 계약을
+        # 갖고 있고(뉴스 검색 예산 등), 그보다 짧게 자르면 없던 실패를 만든다.
+        # 갈래가 담지 않는 중단(`Exception`이 아닌 것)은 `result()`가 여기서 그대로
+        # 다시 던진다 — 비교가 실패한 실행에서도 취소 신호가 묻히지 않게 뉴스
+        # 쪽부터 먼저 확인한다.
+        news_outcome = news_future.result()
+        return comparison_future.result(), news_outcome
 
 
 def _prepare_v2_comparison_result(
@@ -5835,6 +6581,15 @@ def _run_v2_composer(
         engine, client, stage="v2_review",
         max_tokens=V2_INITIAL_REVIEWER_MAX_TOKENS,
     )
+    # 최초 본문 검수의 «파싱 재요청» 전용 — 예약은 상한으로 잡히므로 첫 답이
+    # 실제로 쓴 출력에 맞춰 상한을 줄여 그 한 번의 예약액을 작게 만든다.
+    # (2026-09-13 실측: 24000 상한 그대로 실린 재요청이 남은 예약액을 넘겨
+    #  1차 검수가 통째로 실패했다. 자세한 근거는 위 상수 주석.)
+    # 필수 단계라 예약(reserved_calls)은 1차 검수와 같이 0이다.
+    initial_retry_reviewer_ask = _v2_ask_via_provider(
+        engine, client, stage="v2_review",
+        max_tokens=lambda: _initial_review_retry_max_tokens(engine),
+    )
     # 선택적 다듬기 전용 — «내 뒤에 반드시 와야 하는 호출»을 남기고 멈춘다.
     #   재작성: 재검수 1 + 필수 후속 2 를 남긴다 (재검수를 못 할 재작성은 안 한다).
     #   재검수: 필수 후속 2 를 남긴다.
@@ -5873,6 +6628,7 @@ def _run_v2_composer(
             writer_ask=writer_ask,
             reviewer_ask=reviewer_ask,
             initial_reviewer_ask=initial_reviewer_ask,
+            initial_retry_reviewer_ask=initial_retry_reviewer_ask,
             rewrite_ask=rewrite_ask,
             recheck_ask=recheck_ask,
             diagram_ask=diagram_ask,
@@ -5903,12 +6659,21 @@ def _run_v2_composer(
             ),
             review_diagnostics_sink=review_diagnostics_sink,
             composition_diagnostics_sink=composition_diagnostics_sink,
+            # SHADOW 자체가 수집 실패라는 뜻은 아니다. 정상 결과까지 축약 정책으로
+            # 표시하면 같은 회사의 재조사에서 캐시를 못 써 AI 비용이 다시 든다.
+            # 실제 수집 제약만 미리 전달하고 작성 중 품질 하한은 fallback이 처리한다.
             evidence_availability=(
                 report_evidence_availability(
                     official_evidence_context, has_fragments=bool(composer_fragments),
                     failure_steps=steps,
                 )
-                if release_mode is ReleaseMode.SHADOW else None
+                if release_mode is ReleaseMode.SHADOW and (
+                    any(item.get("step") == COLLECTION_RECOVERY_STEP for item in steps)
+                    or (
+                        official_evidence_context is not None
+                        and assess_official_evidence(official_evidence_context).dart_partial_fallback
+                    )
+                ) else None
             ),
             preserve_on_ask_failure=True,
         )

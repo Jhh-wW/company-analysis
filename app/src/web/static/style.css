@@ -768,6 +768,39 @@ td.center { text-align: center; }
   background: var(--ink-3);
   opacity: .7;
 }
+/* 제출 처리 중(_busy_submit_script.html 공용 스크립트가 붙이는 상태) —
+   커서와 작은 회전 원만 새로 더한다. 배경·투명도는 새로 정의하지 않고
+   위 .btn:disabled 규칙을 그대로 물려받는다.
+   ★ 「회색 톤」이 아닌 화면도 있다 — .home-page .btn 처럼 배경을 다시
+     정의하는 화면(첫 화면의 검은 버튼 등)에서는 CSS 우선순위가 동점일 때
+     나중에 나온 규칙이 이겨 그 화면 고유 배경(예: 검정)이 유지되고,
+     .btn:disabled 의 opacity(.7)만 함께 적용된다(실측 확인). 그래도 커서와
+     스피너로 «처리 중»이라는 것 자체는 모든 화면에서 똑같이 보인다.
+   ::before 원은 색을 새로 정의하지 않고 currentColor(버튼 글자색)를
+   그대로 따르고, 회전 애니메이션은 위 .phase-cards에서 쓰는
+   @keyframes spin 을 그대로 재사용한다. */
+/* :hover 를 함께 적는 이유 — 위 .btn:disabled:hover(cursor: not-allowed)가
+   선택자 우선순위에서 이기면, 정작 마우스를 올린 순간엔 «막힘» 커서가
+   보인다. 커서는 올렸을 때만 보이므로 hover 까지 덮어야 «처리 중»이 된다. */
+.btn[aria-busy="true"],
+.btn[aria-busy="true"]:hover {
+  cursor: progress;
+}
+.btn[aria-busy="true"]::before {
+  content: "";
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  margin-right: 8px;
+  vertical-align: -2px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .btn[aria-busy="true"]::before { animation: none; }
+}
 .auth-status .auth-action:hover {
   border-color: var(--ink-4);
   background: var(--paper-2);

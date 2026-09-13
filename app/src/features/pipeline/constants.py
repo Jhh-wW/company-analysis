@@ -10,6 +10,16 @@ DART_SUCCESS_STATUS: Final[str] = "000"
 #: 끄므로, 이 값은 단일 호출이 서버 worker를 무한정 점유하지 못하게 한다.
 ANTHROPIC_TIMEOUT_SEC: Final[float] = 180.0
 
+#: DART 법인목록(corpCode)을 몇 일마다 다시 받을지. ``download_corpcode``는
+#: 파일이 있으면 영원히 재사용하므로(운영 영속 디스크에서는 최초 배포 이후
+#: 한 번도 안 바뀜), 사용자 결정(2026-09-11)으로 7일 주기 자동 갱신을 둔다.
+#: 실측(로컬 사본, modify_date 기준): 하루 평균 17건, 7일 96건, 30일 542건.
+CORPCODE_REFRESH_INTERVAL_DAYS: Final[int] = 7
+
+#: 기동 색인 관리자 루프가 법인목록 나이를 얼마 만에 한 번씩 다시 검사할지.
+#: 검사 자체는 파일 mtime만 읽으므로 싸다 — 갱신 여부만 이 주기로 재확인한다.
+CORPCODE_REFRESH_CHECK_INTERVAL_SEC: Final[float] = 3600.0
+
 # 뉴스에서 동명이의어·계열사·제품을 구분할 공식 문맥의 상한이다.
 NEWS_IDENTITY_CONTEXT_CHARS: Final[int] = 4_000
 NEWS_IDENTITY_FRAGMENT_CHARS: Final[int] = 600
@@ -51,3 +61,18 @@ PARTIAL_GENERATION_IDENTITY_VERSION: Final[str] = "partial-collection-generation
 ELIGIBILITY_ACCEPTED_STATUS: Final[str] = "대상"
 ELIGIBILITY_PUBLIC_ORG_REJECT_STATUS: Final[str] = "거부A_공공기관"
 ELIGIBILITY_UNDETERMINED_STATUS: Final[str] = "미확인"
+# ── 실행 진단 — 단계별 소요 시간 ─────────────────────────
+#: 화면 단계(`core.constants.PROGRESS_STEPS`)가 바뀔 때마다 직전 단계의
+#: 소요 시간을 진단(`shared.stage_elapsed_constants.STAGE_ELAPSED_STEP`)으로
+#: 남긴다. 그 값은 파이프라인(생산자)·관리자 화면(소비자)이 함께 읽어야
+#: 해서 `shared`에 두지만(`runtime_failure_constants.py`와 같은 이유), 이
+#: 「시동」키는 이 feature 안에서만 쓰는 값이라 여기 그대로 둔다.
+#: 첫 화면 단계(01 식별) «앞»의 구간 — `_engine()`의 1판 모듈 import가 여기
+#: 안에 들어간다. 냉시동에서 수 초가 걸리는데 다른 단계 키로는 잡을 자리가
+#: 없어서 따로 둔다. 화면 단계 목록(`core.constants.PROGRESS_STEPS`)에는
+#: 넣지 않는다 — 진단 전용이지 사용자에게 보여줄 화면 문구가 아니다.
+STAGE_BOOT: Final[str] = "시동"
+
+#: 본조사에서 «경쟁사 비교»와 «뉴스 검색 스냅샷»을 동시에 돌릴 때 쓰는 worker 수.
+#: 서로 결과를 읽지 않는 갈래가 정확히 둘이라 둘이다 — 늘려도 돌릴 일이 없다.
+PARALLEL_COLLECT_BRANCH_WORKERS: Final[int] = 2

@@ -173,6 +173,23 @@ def _identity_supported(evidence: str, company: NewsCompanyContext) -> bool:
     )
 
 
+def _identity_failure(evidence: object, body: str, company: NewsCompanyContext) -> str | None:
+    """신원 근거의 첫 실패 원인만 반환하며 원문은 진단에 남기지 않는다."""
+    if not isinstance(evidence, str):
+        return "identity_evidence_invalid_type"
+    if not evidence.strip():
+        return "identity_evidence_empty"
+    if len(evidence) > c.GROUNDED_MAX_EXCERPT_CHARS:
+        return "identity_evidence_too_long"
+    if evidence not in body:
+        return "identity_evidence_not_exact"
+    if not mentions_target(evidence, company):
+        return "identity_name_missing"
+    if not _identity_supported(evidence, company):
+        return "identity_context_mismatch"
+    return None
+
+
 def _exact_date(value: str, evidence: str, text: str, temporal_status: str, as_of: dt.date) -> bool:
     if not value:
         return not evidence
@@ -282,8 +299,37 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
     )
 
 
+def _article_excerpts(item: dict[str, Any], candidate: NewsCandidate, body: str,
+                      company: NewsCompanyContext, as_of: dt.date,
+                      excluded: Counter[str]) -> list[GroundedNewsExcerpt]:
+    """신원 검증 경로와 무관하게 출처·응답 구조·모든 인용 조건을 적용한다."""
+    source_type = item["source_type"]
+    if not isinstance(source_type, str):
+        excluded["grounded_invalid_item"] += 1
+        return []
+    if source_type not in {"official_release", "news_report"} or (
+        source_type == "official_release" and candidate.source_category != "official_release"
+    ):
+        excluded["grounded_untrusted_content"] += 1
+        return []
+    raw_excerpts = item["excerpts"]
+    if not isinstance(raw_excerpts, list) or len(raw_excerpts) > c.GROUNDED_EXCERPTS_PER_ARTICLE:
+        excluded["grounded_invalid_excerpt"] += 1
+        return []
+    excerpts = []
+    for raw_excerpt in raw_excerpts:
+        excerpt = _excerpt(raw_excerpt, candidate, body, company, as_of, excluded)
+        if excerpt is not None:
+            excerpts.append(excerpt)
+    if not raw_excerpts:
+        excluded["grounded_no_substantive_excerpt"] += 1
+    return excerpts
+
+
 def validate_grounded_response(raw: object, *, articles: list[tuple[NewsCandidate, str]],
-                               company: NewsCompanyContext, as_of: dt.date) -> tuple[tuple[GroundedNewsExcerpt, ...], dict[str, int]]:
+                               company: NewsCompanyContext, as_of: dt.date,
+                               identity_diagnostics: Counter[str] | None = None,
+                               ) -> tuple[tuple[GroundedNewsExcerpt, ...], dict[str, int]]:
     excluded: Counter[str] = Counter()
     items = parse_grounded_payload(raw)
     if items is None:
@@ -312,28 +358,19 @@ def validate_grounded_response(raw: object, *, articles: list[tuple[NewsCandidat
         if item["material"] is not True:
             excluded["grounded_non_material"] += 1
             continue
-        identity = item["entity_evidence"]
-        if not isinstance(identity, str) or not identity or len(identity) > c.GROUNDED_MAX_EXCERPT_CHARS or identity not in body or not _identity_supported(identity, company):
-            excluded["grounded_identity_unverified"] += 1
-            continue
-        source_type = item["source_type"]
-        if not isinstance(source_type, str):
-            excluded["grounded_invalid_item"] += 1
-            continue
-        if source_type not in {"official_release", "news_report"} or (
-            source_type == "official_release" and candidate.source_category != "official_release"
-        ):
-            excluded["grounded_untrusted_content"] += 1
-            continue
-        raw_excerpts = item["excerpts"]
-        if not isinstance(raw_excerpts, list) or len(raw_excerpts) > c.GROUNDED_EXCERPTS_PER_ARTICLE:
-            excluded["grounded_invalid_excerpt"] += 1
-            continue
-        for raw_excerpt in raw_excerpts:
-            excerpt = _excerpt(raw_excerpt, candidate, body, company, as_of, excluded)
-            if excerpt is not None:
-                excerpts.append(excerpt)
-        if not raw_excerpts:
-            excluded["grounded_no_substantive_excerpt"] += 1
+        identity_failure = _identity_failure(item["entity_evidence"], body, company)
+        article_excluded: Counter[str] = Counter()
+        article_excerpts = _article_excerpts(item, candidate, body, company, as_of, article_excluded)
+        if identity_failure is not None:
+            # 같은 기사의 독립 검증된 인용만 신원 근거를 대신할 수 있다.
+            recovered = any(_identity_supported(excerpt.text, company) for excerpt in article_excerpts)
+            if identity_diagnostics is not None:
+                identity_diagnostics["identity_recovered_from_excerpt" if recovered else identity_failure] += 1
+            if not recovered:
+                # 복구 실패는 기존 신원 미확인 계약을 유지하고 임시 인용 진단은 합치지 않는다.
+                excluded["grounded_identity_unverified"] += 1
+                continue
+        excluded.update(article_excluded)
+        excerpts.extend(article_excerpts)
     excluded["grounded_missing_result"] += len(set(by_id) - seen)
     return tuple(excerpts), {key: count for key, count in excluded.items() if count}

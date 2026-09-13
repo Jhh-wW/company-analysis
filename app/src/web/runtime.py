@@ -6,7 +6,10 @@ import datetime as dt
 import logging
 import os
 import sqlite3
+import threading
+import time
 from contextlib import asynccontextmanager, closing
+from typing import Final
 
 from fastapi import FastAPI
 
@@ -15,6 +18,7 @@ from src.core import clock
 from src.features.budget import spend_store, state_machine as budget_state_machine
 from src.features.admin_dashboard import store as dashboard_store
 from src.features.observability import constants as obs
+from src.features.pipeline.constants import CORPCODE_REFRESH_CHECK_INTERVAL_SEC
 from src.features.pipeline.demo import DemoPipeline
 from src.features.pipeline import engine_mode
 from src.features.provenance import sources as provenance_sources
@@ -39,6 +43,15 @@ logger = logging.getLogger(__name__)
 #: ``run_stop_reason_labels``가 이 값을 사람이 읽을 라벨로 보여준다.
 _STALE_DELIVERY_LINK_STOP_STEP = "server_restart_recovery"
 _STALE_DELIVERY_LINK_STOP_REASON = "server_restart_delivery_incomplete"
+
+#: 기동 때 후보 검색 색인을 미리 만들지, 이후 법인목록을 7일 주기로 자동
+#: 갱신할지를 함께 끈다. 정확히 "0"일 때만 끈다(기본은 켜짐) — 이 모듈의
+#: 다른 on/off 환경변수와 같은 관례를 따른다. ``app/src/web/``에는 공용
+#: ``constants.py``가 없고, 환경변수 상수는 각자 쓰는 모듈이 스스로 들고
+#: 있는 게 이 저장소의 기존 관례다(``evaluation_mode.py``의
+#: ``GOOGLE_PLACES_KEY_ENV`` 등) — 이 상수도 그 관례를 따라 실제 쓰는 곳
+#: (``_lifespan``) 옆에 둔다.
+CANDIDATE_INDEX_PREWARM_ENV: Final[str] = "CANDIDATE_INDEX_PREWARM"
 
 
 def make_pipeline() -> object:
@@ -374,6 +387,150 @@ def _reconcile_report_retirements() -> None:
         )
 
 
+def _candidate_index_prewarm_enabled() -> bool:
+    """예열 스레드를 띄울지 결정한다. 기본은 켜짐, ``"0"``일 때만 끈다."""
+
+    return os.environ.get(CANDIDATE_INDEX_PREWARM_ENV, "") != "0"
+
+
+def _candidate_index_manager_should_run() -> bool:
+    """``PIPELINE=real``만으로는 못 거르는 두 경우를 추가로 막는다(독립 검토).
+
+    1) 실시간 성능시험 미리보기(``REALTIME_EVALUATION_MODE=1``이고 유료
+       provider는 안 켠 상태, ``실시간성능시험켜기.ps1``)는 화면에
+       «real pipeline은 불러왔지만 외부 호출은 잠겨 있습니다»라고 적어
+       두고도(``make_pipeline()`` 참고), 이 관리자 스레드는 그 상태와
+       무관하게 떠서 DART corpCode를 실제로 내려받아 그 약속을 깬다.
+       이 경우는 조용히 건너뛴다.
+    2) ``DART_API_KEY``가 아예 없으면 갱신 검사는 매 주기 반드시
+       실패한다. 실패 자체는 무해하지만(옛 목록 유지), 경고 로그가
+       시간마다 쌓인다. ``real.dart_api_key_configured()``는
+       ``os.environ``뿐 아니라 ``analysis_engine/.env``까지 본다 —
+       ``서버켜기.ps1``의 진짜 조사 모드는 키를 자식 환경에 주입하지
+       않고 요청 시점에 엔진이 그 파일을 읽어 채우므로(2차 검토
+       실측), ``os.environ``만 보면 이 모드에서 예열·갱신이 원인
+       로그 한 줄 없이 통째로 꺼진다. 정말 키가 없으면 INFO 로그를
+       남긴다 — 운영자가 원인을 알 수 있게.
+
+    ★ 이 함수 전체를 fail-open으로 감싼다(3차 검토, 2026-09-12) —
+      ``dart_api_key_configured()``는 ``analysis_engine/.env``를
+      읽는데, 그 파일이 UTF-8이 아닌 바이트를 담고 있거나 디렉터리로
+      바뀌어 있으면 ``UnicodeDecodeError``·``PermissionError``를
+      던진다(실측). 예열·갱신 자체의 실패는 전부 fail-open인데(경고
+      로그만 남기고 서비스는 연다), 그걸 켤지 «판정»하는 이 보조
+      검사 하나가 예외를 던져 ``_lifespan``을 통째로 죽이면 원칙이
+      깨진다. 실패하면 경로·바이트 값은 로그에 남기지 않는다 —
+      정확한 원인은 첫 실제 검색 요청이 같은 예외를 다시 만들 때 그
+      요청 로그에서 본다.
+    """
+
+    try:
+        if evaluation_mode.enabled() and not evaluation_mode.paid_providers_enabled():
+            return False
+        from src.features.pipeline.real import (  # noqa: PLC0415 — 순환 import 회피
+            dart_api_key_configured,
+        )
+
+        if not dart_api_key_configured():
+            logger.info("DART 키가 없어 후보 색인 예열·갱신을 건너뜁니다.")
+            return False
+        return True
+    except Exception:  # noqa: BLE001 — 판정 실패로 서버 기동 자체가 죽으면 안 된다
+        logger.warning("후보 색인 예열·갱신 여부 판정이 실패해 건너뜁니다.")
+        return False
+
+
+def _prewarm_candidate_index() -> None:
+    """기동 백그라운드 스레드에서 후보 색인을 미리 만든다(서비스 오픈을 막지 않음).
+
+    ``src.features.pipeline.real.prewarm_business_candidate_index``는 첫
+    후보 검색(``search_business_candidates``)이 쓰는 것과 같은 함수를 그대로
+    불러 lru_cache를 채운다. 실패(DART 키 없음·네트워크 오류·XML 손상 등)해도
+    서비스는 이미 ``yield``로 열려 있으므로 경고 로그만 남기고 조용히 끝낸다 —
+    첫 실제 검색 요청이 기존처럼 자기 요청 안에서 새로 만든다.
+    """
+    from src.features.pipeline.real import (  # noqa: PLC0415 — 순환 import 회피
+        prewarm_business_candidate_index,
+    )
+
+    started = time.monotonic()
+    try:
+        company_count = prewarm_business_candidate_index()
+    except Exception:  # noqa: BLE001 — 예열 실패로 서비스 기동을 막지 않는다
+        # 키·URL·스택은 로그에 남기지 않는다(브리핑 요구사항) — 원인은
+        # 첫 실제 검색 요청이 같은 예외를 다시 만들 때 그 요청 로그에서 본다.
+        logger.warning("후보 색인 예열이 실패했습니다 — 첫 검색 요청에서 새로 만듭니다.")
+        return
+    elapsed_sec = time.monotonic() - started
+    logger.info(
+        "후보 색인 예열 완료 %.1f초, %d건", elapsed_sec, company_count
+    )
+
+
+def _run_candidate_catalog_refresh_check() -> bool:
+    """법인목록 나이를 한 번 검사하고, 오래됐으면 갱신까지 시도한다.
+
+    ``real.refresh_business_candidate_catalog_if_stale()``가 이미 실패를
+    스스로 삼키고(다운로드·파싱 실패 등) 경고 로그만 남기지만, 그 함수가
+    예상 못 한 예외를 던지더라도(예: 디스크 꽉 참) 이 검사 한 번의 실패가
+    색인 관리자 루프 전체를 끝내면 안 되므로 한 겹 더 감싼다.
+
+    Returns:
+        실제로 갱신(스왑)했으면 True. 안 오래됐거나 이번 시도가 실패했으면
+        False — 기동 분기(``_candidate_index_manager_loop``)가 이 값으로
+        예열 대체 실행 여부를 판단한다.
+    """
+    from src.features.pipeline.real import (  # noqa: PLC0415 — 순환 import 회피
+        refresh_business_candidate_catalog_if_stale,
+    )
+
+    try:
+        return refresh_business_candidate_catalog_if_stale()
+    except Exception:  # noqa: BLE001 — 검사 실패로 관리자 루프가 죽으면 안 된다
+        logger.warning("법인목록 갱신 검사가 실패했습니다 — 다음 주기에 다시 시도합니다.")
+        return False
+
+
+def _candidate_index_manager_loop() -> None:
+    """기동 예열 뒤, 법인목록이 오래되면 주기적으로 뒤에서 새로 받아 바꿔 끼운다.
+
+    데몬 스레드 하나가 프로세스가 끝날 때까지 무한히 돈다.
+
+    ★ 기동 직후 파일이 이미 오래됐으면 예열을 건너뛰고 갱신 경로로 «한
+      번만» 만든다(독립 검토, 2026-09-12) — 운영 영속 디스크의
+      corpCode.xml은 최초 배포 뒤 한 번도 안 바뀌므로(``download_corpcode``의
+      «있으면 재사용» 계약), 이 기능이 처음 올라가는 부팅에서는 파일이
+      거의 확실히 7일보다 오래됐다. 그런데 예열이 1세대(색인 549MB·
+      catalog 63.5MB, 실측)를 만들자마자 곧바로 갱신 검사가 낡음을 보고
+      락 밖에서 2세대를 또 만들면, 옛 색인이 아직 살아 있는 채로 겹쳐
+      실측 최고 1,360MB까지 치솟는다 — 과거 512MB에서 이 색인 때문에
+      OOM 재시작 이력이 있는 서비스라 위험하다. 파일이 안 오래됐으면
+      (최근에 갱신됐거나 예열이 이미 받아 둔 경우) 평소처럼 예열 한 번만
+      한다 — 어느 쪽이든 기동 때는 1세대만 만든다.
+
+    ★ 갱신을 시도했는데 실패하면(DART 장애·한도 등) 예열로 넘어간다
+      (2차 검토, 2026-09-12) — «낡음»은 이 기능이 정상으로 상정하는
+      상태(7일마다 반드시 참이 된다)라서, 갱신 실패와 겹치면 아무도
+      색인을 안 만들어 프로세스 수명 내내 후보 검색이 0건이 될 뻔했다
+      (실측: 기동 뒤 법인 수 0). 예열은 옛(갱신을 못 받았으니) 파일로
+      1세대만 만들 뿐이라 P1-2(두 세대 금지)와 충돌하지 않는다 — 갱신이
+      성공했으면(``refreshed=True``) 이미 1세대가 있으므로 예열을 또
+      돌리지 않는다.
+    """
+    from src.features.pipeline.real import (  # noqa: PLC0415 — 순환 import 회피
+        business_candidate_catalog_needs_refresh,
+    )
+
+    refreshed = False
+    if business_candidate_catalog_needs_refresh():
+        refreshed = _run_candidate_catalog_refresh_check()
+    if not refreshed:
+        _prewarm_candidate_index()
+    while True:
+        _run_candidate_catalog_refresh_check()
+        time.sleep(CORPCODE_REFRESH_CHECK_INTERVAL_SEC)
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """시작 상태를 복구하고 종료 시 실행 중 조사를 안전하게 마감한다."""
@@ -411,6 +568,21 @@ async def _lifespan(_app: FastAPI):
     from src.web import job_runtime  # noqa: PLC0415
 
     job_runtime._start_job_runtime()
+    # 서비스가 열린 뒤(요청을 받을 수 있는 상태) 색인 관리자를 시작한다 —
+    # 예열 한 번 + 이후 7일 주기 법인목록 갱신 검사(CANDIDATE_INDEX_PREWARM으로
+    # 둘 다 함께 켜고 끈다). 데몬 스레드라 종료(``_begin_job_shutdown``)
+    # 중에도 프로세스 종료를 막지 않고, PIPELINE=real이 아니면(데모·시험)
+    # 외부 호출이 없으므로 돌리지 않는다.
+    if (
+        os.environ.get(PIPELINE_ENV, "").strip().lower() == PIPELINE_REAL
+        and _candidate_index_prewarm_enabled()
+        and _candidate_index_manager_should_run()
+    ):
+        threading.Thread(
+            target=_candidate_index_manager_loop,
+            name="candidate-index-prewarm",
+            daemon=True,
+        ).start()
     try:
         yield
     finally:

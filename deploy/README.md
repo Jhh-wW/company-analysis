@@ -77,6 +77,9 @@ Render에는 forwarded client IP를 신뢰하지 않는 좁은 계약이 세 개
   DART 118,747사 후보 색인이 Starter의 512MB를 넘어 `/confirm` 중 인스턴스가
   재시작된 운영 측정에 따른 최소 사양이다. 적용 직전 [Render 요금 페이지](https://render.com/pricing)와
   Dashboard의 예상 청구액을 다시 확인한다. 플랜·요금 숫자는 이 문서에 고정하지 않는다.
+- 법인목록(`/var/data/analysis_engine/corpcode/CORPCODE.xml`)은 기동 색인 관리자가
+  7일마다 자동으로 새로 받아 바꿔 끼운다(`CANDIDATE_INDEX_PREWARM`으로 예열과 함께
+  켜고 끈다). 즉시 최신화하려면 그 파일을 지우고 서비스를 재시작한다.
 - `PIPELINE=real`, `BETA_ADMIN_ONLY=1`, instance/worker 각각 1개를 유지한다. SQLite 단일
   writer 계약 때문에 scale-out하지 않는다.
 - `ADMIN_EMAILS`, Google OAuth 3개 값과 함께 `ANTHROPIC_API_KEY`, `DART_API_KEY`를
@@ -123,6 +126,7 @@ Render에는 forwarded client IP를 신뢰하지 않는 좁은 계약이 세 개
 | `EVIDENCE_RECLASSIFY` | 결정론 문지기가 채우지 못한 장의 근거를 AI가 한 번 재판정하고, 프로그램 검증을 통과한 정확 인용만 후보에 보탠다. | 키를 지우고 재배포 |
 | `NEWSROOM_DATE_AI` | 뉴스룸 목록의 글자 날짜가 프로그램 판정으로 확정되지 않을 때 AI 예비 1회와 원문 존재 대조를 허용한다. 프로그램 판정은 항상 켜져 있다. | 키를 지우고 재배포 |
 | `REVENUE_TABLE_V2` | 매출 구성표를 「제목 목록」이 아니라 「표 모양」으로 찾고, 3장 카드 작가 안내문을 새 문구로 바꾼다. 표가 나오는 회사가 늘어난다. **현재 출시 Blueprint에서 `"1"`로 켜져 있다**(검사판 재현·회귀 통과 뒤 결정). | 키를 지우고 재배포 |
+| `PARALLEL_COLLECT` | 본조사의 경쟁사 비교와 뉴스 검색 스냅샷을 동시에 돌린다. 보고서 결과·캐시 열쇠·실패 의미는 그대로고 순서만 바뀐다. 비교가 멈추는 실행에서는 이미 떠난 뉴스 검색 호출을 되돌릴 수 없다. **현재 출시 Blueprint에서 `"1"`로 켜져 있다.** | 키를 지우고 재배포 |
 
 `REVENUE_TABLE_V2`를 끄면(키 삭제) 파서는 표제 목록(`제품별 매출액`·`지역별 매출액` 등)으로만
 표를 찾는 옛 경로로 돌아간다. 코드를 되감을 필요가 없고, 이미 만들어진 보고서도

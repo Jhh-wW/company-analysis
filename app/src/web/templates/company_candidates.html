@@ -84,7 +84,8 @@
         </div>
 
         <div class="candidate-action">
-          <form method="post" action="/confirm">
+          <form method="post" action="/confirm"
+                data-busy-submit data-busy-label="확인 중…">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="hidden" name="company" value="{{ user_input.company }}">
             <input type="hidden" name="region" value="{{ user_input.region }}">
@@ -143,3 +144,4 @@
   </div>
 </div>
 {% endblock %}
+{% block scripts %}{% include "_busy_submit_script.html" %}{% endblock %}

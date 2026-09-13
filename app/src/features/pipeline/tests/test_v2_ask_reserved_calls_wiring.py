@@ -8,16 +8,22 @@
 지키는 것: 재작성 호출자는 재검수 1 + 필수 후속 3 = 4회를 남기고,
 재검수 호출자는 필수 후속 3회를 남긴다. 본문 검수·장 작성·도식·요약은
 필수 단계라 아무것도 남기지 않는다(예약 0).
+
+★ 2026-09-13 추가 — 1차 검수의 «파싱 재요청» 전용 호출자도 여기서 본다.
+  그 호출자만 출력 상한을 callable 로 들고 있어야 한다(첫 답의 실제 출력에
+  맞춰 «보낼 때» 상한을 푼다). 상한 규칙 자체는
+  ``test_initial_review_retry_cap.py`` 가 본다.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
 import src.features.composer.pipeline as composer_pipeline
 from src.core import deployment_identity
+from src.features.composer.constants import RETRY_REMINDER
 from src.core.provider_gateway import attempt_context
 from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.features.budget import provider_budget
@@ -31,6 +37,7 @@ from src.features.pipeline.tests.test_report_company_id_release_mode import (
     _frags,
     _frozen_v2_mode,
     _가짜_ask를_끼운다,
+    _가짜검수,
 )
 from src.shared.report_evidence.constants import ReleaseMode
 
@@ -71,16 +78,29 @@ def engine(monkeypatch: pytest.MonkeyPatch) -> FakeEngine:
 
 
 def _돌린다(
-    engine_fake: FakeEngine, monkeypatch: pytest.MonkeyPatch,
+    engine_fake: FakeEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reviewer: Any = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """SHADOW 경로로 v2 분기를 끝까지 돌리고 배선 기록을 돌려준다."""
+    """SHADOW 경로로 v2 분기를 끝까지 돌리고 배선 기록을 돌려준다.
+
+    ``reviewer``: 검수 가짜 응답을 바꾸고 싶을 때만 준다(예: 첫 답을 깨진 JSON
+    으로 돌려 파싱 재요청을 실제로 일으키는 경우). 주지 않으면 기본 가짜 검수.
+    """
     monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.SHADOW.value)
-    _가짜_ask를_끼운다(monkeypatch)
+    _가짜_ask를_끼운다(monkeypatch, reviewer=reviewer)
     가짜팩토리 = real._v2_ask_via_provider
     만든호출자: list[dict[str, Any]] = []
 
     def 기록하는_팩토리(
-        _engine, _client, *, stage: str, max_tokens: int, reserved_calls: int = 0,
+        _engine,
+        _client,
+        *,
+        stage: str,
+        # 1차 검수 재요청 호출자는 «보낼 때» 상한을 푸는 callable 을 받는다.
+        max_tokens: int | Callable[[], int],
+        reserved_calls: int = 0,
     ):
         속 = 가짜팩토리(
             _engine, _client, stage=stage, max_tokens=max_tokens,
@@ -91,12 +111,19 @@ def _돌린다(
         #   객체를 돌려주므로, 그대로 기록하면 v2_review 호출자 넷이 전부
         #   같은 것이 되어 아래 동일성 단정이 «항상 참»이 된다 —
         #   rewrite_ask 와 recheck_ask 를 뒤바꿔 넘겨도 초록이었다(실측).
-        def 감싼다(prompt: str, _속=속) -> str:
+        # ★ 프롬프트를 «호출자별로» 모은다. 가짜 검수는 어느 호출자가 자기를
+        #   불렀는지 모르므로(같은 객체를 돌려준다), «누가 몇 번 불렸는가»는
+        #   여기서만 잡힌다.
+        프롬프트들: list[str] = []
+
+        def 감싼다(prompt: str, _속=속, _프롬프트들=프롬프트들) -> str:
+            _프롬프트들.append(prompt)
             return _속(prompt)
 
         만든호출자.append(
             {"stage": stage, "max_tokens": max_tokens,
-             "reserved_calls": reserved_calls, "ask": 감싼다}
+             "reserved_calls": reserved_calls, "ask": 감싼다,
+             "프롬프트들": 프롬프트들}
         )
         return 감싼다
 
@@ -146,9 +173,11 @@ def test_real이_run_v2에_넘기는_rewrite_recheck_클로저의_예약값을_�
     만든호출자, 받은인자 = _돌린다(engine, monkeypatch)
 
     검수자들 = [항목 for 항목 in 만든호출자 if 항목["stage"] == "v2_review"]
-    assert [항목["reserved_calls"] for 항목 in 검수자들] == [0, 0, _재작성예약, _필수후속], (
-        "v2_review 호출자 네 개(검수·최초검수·재작성·재검수)의 예약값이 "
-        f"설계와 다릅니다: {[항목['reserved_calls'] for 항목 in 검수자들]}"
+    assert [항목["reserved_calls"] for 항목 in 검수자들] == [
+        0, 0, 0, _재작성예약, _필수후속,
+    ], (
+        "v2_review 호출자 다섯 개(검수·최초검수·최초검수재요청·재작성·재검수)의 "
+        f"예약값이 설계와 다릅니다: {[항목['reserved_calls'] for 항목 in 검수자들]}"
     )
     # 필수 단계는 아무것도 남기지 않는다 — 남기면 자기가 자기를 굶긴다.
     for 항목 in 만든호출자:
@@ -157,9 +186,9 @@ def test_real이_run_v2에_넘기는_rewrite_recheck_클로저의_예약값을_�
                 f"필수 단계 {항목['stage']} 가 예약을 걸었습니다"
             )
 
-    # ★ 아래 동일성 단정이 뜻을 가지려면 네 호출자가 «서로 다른 객체»여야
+    # ★ 아래 동일성 단정이 뜻을 가지려면 다섯 호출자가 «서로 다른 객체»여야
     #   한다. 하나라도 같아지면 인자를 뒤바꿔 넘겨도 초록이 되므로 먼저 못 박는다.
-    assert len({id(항목["ask"]) for 항목 in 검수자들}) == 4, (
+    assert len({id(항목["ask"]) for 항목 in 검수자들}) == 5, (
         "v2_review 호출자들이 같은 객체입니다 — 이 시험은 배선을 구분하지 못합니다"
     )
 
@@ -186,6 +215,114 @@ def test_real이_run_v2에_넘기는_rewrite_recheck_클로저의_예약값을_�
     assert 받은인자["reviewer_ask"] is 검수자들[0]["ask"]
     assert 받은인자["initial_reviewer_ask"] is 검수자들[1]["ask"]
     assert 받은인자["rewrite_ask"] is not 받은인자["reviewer_ask"]
+
+
+def test_최초검수_재요청_호출자만_보낼때_푸는_상한을_받는다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """1차 검수 재요청 자리에 «그 실행기가 만든» callable 상한 호출자가 들어간다.
+
+    예약액은 출력 «상한»으로 잡히므로, 재요청만 첫 답의 실제 출력에 맞춘 작은
+    상한으로 보내면 그 한 번의 예약액이 줄어든다 (2026-09-13 실측 사고).
+    상한을 «만들 때» 굳히면 첫 답을 아직 모르므로 callable 이어야 한다.
+    """
+    만든호출자, 받은인자 = _돌린다(engine, monkeypatch)
+
+    검수자들 = [항목 for 항목 in 만든호출자 if 항목["stage"] == "v2_review"]
+    푸는호출자 = [항목 for 항목 in 검수자들 if callable(항목["max_tokens"])]
+    assert len(푸는호출자) == 1, (
+        "v2_review 호출자 중 «보낼 때 상한을 푸는» 것이 정확히 하나여야 합니다: "
+        f"{[callable(항목['max_tokens']) for 항목 in 검수자들]}"
+    )
+    # ★ run_v2 가 «실제로 받은 객체»가 그 호출자와 같은 것인지 본다.
+    assert 받은인자["initial_retry_reviewer_ask"] is 푸는호출자[0]["ask"], (
+        "1차 검수 재요청 자리에 다른 호출자가 들어갔습니다"
+    )
+    assert (
+        받은인자["initial_retry_reviewer_ask"]
+        is not 받은인자["initial_reviewer_ask"]
+    ), "재요청이 1차 검수와 같은 호출자를 받았습니다 — 상한이 줄지 않습니다"
+    # 1차 검수 자신은 예전처럼 고정 상한(24,000)을 그대로 쓴다.
+    assert 받은인자["initial_reviewer_ask"] is 검수자들[1]["ask"]
+    assert 검수자들[1]["max_tokens"] == 24000
+    # 재요청은 필수 단계라 뒤에 남길 몫이 없다 — 1차 검수와 같은 예약 0.
+    assert 푸는호출자[0]["reserved_calls"] == 0
+    # 그 callable 이 실제로 재요청 상한 규칙을 돌려주는지 본다 (하한 12,000).
+    상한계산: Callable[[], int] = 푸는호출자[0]["max_tokens"]
+    assert 상한계산() == 24000, (
+        "검수 응답 사용량이 없을 때는 예전 상한을 그대로 써야 합니다"
+    )
+
+
+class _첫답이_깨진_검수:
+    """첫 본문 검수 답만 «JSON 문법이 깨진» 문자열로 돌려주는 가짜 검수.
+
+    2026-09-13 실측 사고와 같은 모양이다 — 정상 종료였는데 문법 오류로 한 행도
+    읽히지 않아 규칙대로 파싱 재요청이 걸렸다. 어느 호출인지는 «순번»으로만
+    가른다(가짜 응답 분기). «어느 호출자로 나갔는가»는 이 가짜가 아니라 팩토리가
+    호출자별로 모은 프롬프트로 단정한다 — 같은 객체를 모든 호출자에게 돌려주므로
+    가짜 자신은 누가 불렀는지 모른다.
+    """
+
+    #: 정상 종료인데 판정 배열이 닫히지 않은 응답.
+    깨진답 = '{"판정": ['
+
+    def __init__(self) -> None:
+        self._속 = _가짜검수()
+        self.호출수 = 0
+
+    def __call__(self, prompt: str) -> str:
+        self.호출수 += 1
+        if self.호출수 == 1:
+            return self.깨진답
+        return self._속(prompt)
+
+
+def test_첫_검수가_깨지면_재요청은_상한을_줄인_호출자로_나간다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """운영 배선을 통째로 지나 «재요청이 그 호출자로» 나가는지 본다.
+
+    ★ 이 시험이 없으면 `composer/pipeline.py` 가 `verify_report` 에 넘기는
+      `initial_retry_ask=` 두 줄을 통째로 지워도 전부 초록이었다 — SHADOW 배선
+      시험은 재요청을 일으키지 않고, composer 시험은 `verify_report` 를 직접
+      부르기 때문이다(독립 검토 지적).
+    """
+    검수 = _첫답이_깨진_검수()
+    만든호출자, 받은인자 = _돌린다(engine, monkeypatch, reviewer=검수)
+
+    검수자들 = [항목 for 항목 in 만든호출자 if 항목["stage"] == "v2_review"]
+    푸는호출자 = [항목 for 항목 in 검수자들 if callable(항목["max_tokens"])]
+    assert len(푸는호출자) == 1, (
+        "v2_review 호출자 중 «보낼 때 상한을 푸는» 것이 정확히 하나여야 합니다"
+    )
+    최초검수 = 검수자들[1]
+    재요청자 = 푸는호출자[0]
+    assert 최초검수 is not 재요청자, "1차 검수와 재요청이 같은 기록입니다"
+
+    # ① 재요청이 실제로 일어났다 — 안 일어나면 이 시험은 아무것도 못 본다.
+    assert 검수.호출수 == 2, (
+        f"검수 AI가 두 번 불리지 않았습니다(파싱 재요청 미발생): {검수.호출수}"
+    )
+    # ② 첫 검수는 큰 상한 호출자로 «한 번만» 나갔다.
+    assert len(최초검수["프롬프트들"]) == 1, 최초검수["프롬프트들"]
+    assert 최초검수["max_tokens"] == 24000
+    assert RETRY_REMINDER not in 최초검수["프롬프트들"][0]
+    # ③ 재요청은 상한을 줄이는 그 호출자로 «한 번» 나갔다 (객체 동일성으로 단정).
+    assert len(재요청자["프롬프트들"]) == 1, (
+        "재요청이 상한 축소 호출자로 나가지 않았습니다 — pipeline.py 가 "
+        f"initial_retry_ask 를 넘기지 않았을 수 있습니다: {재요청자['프롬프트들']}"
+    )
+    assert 받은인자["initial_retry_reviewer_ask"] is 재요청자["ask"]
+    # 재요청 프롬프트는 첫 프롬프트 + 형식 상기문이다 (내용 요구는 그대로).
+    재요청프롬프트 = 재요청자["프롬프트들"][0]
+    assert RETRY_REMINDER in 재요청프롬프트
+    assert 재요청프롬프트.startswith(최초검수["프롬프트들"][0])
+    # ④ 나머지 검수 호출자(검수·재작성·재검수)는 한 번도 쓰이지 않았다.
+    쓰인기록 = [항목 for 항목 in 검수자들 if 항목["프롬프트들"]]
+    assert [id(항목["ask"]) for 항목 in 쓰인기록] == [
+        id(최초검수["ask"]), id(재요청자["ask"]),
+    ], "1차 검수와 그 재요청 말고 다른 검수 호출자가 쓰였습니다"
 
 
 def test_재작성_예약이_재검수_예약보다_정확히_한_회_크다(

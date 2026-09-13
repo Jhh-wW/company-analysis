@@ -54,7 +54,8 @@ from core.logging_util import log_step  # noqa: E402
 from core.paths import PUBLIC_ORG_REGISTRY  # noqa: E402
 from core.runtime_paths import LOCAL_DATA_DIR, runtime_data_dir  # noqa: E402
 from core.dart_client import (  # noqa: E402
-    UsageCounter, download_corpcode, download_document, get_json)
+    UsageCounter, download_corpcode, download_corpcode_fresh, download_document,
+    get_json)
 from core.naver_client import search_news  # noqa: E402
 from features.name_match.logic import build_index, match_layer1, normalize_name  # noqa: E402
 from features.judgment.logic import TYPE_LISTED, decide  # noqa: E402

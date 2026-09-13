@@ -1905,6 +1905,7 @@ def _ask_verdicts(
     *,
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
+    initial_retry_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
 ) -> Optional[dict[int, str]]:
@@ -1914,8 +1915,17 @@ def _ask_verdicts(
     재요청에만 쓴다 — 재작성·재검수는 언제나 ``ask`` 를 그대로 쓴다.
     부르는 쪽이 «어느 검수인지»를 인자로 정한다. 프롬프트 글자·입력 크기·
     호출 순번으로 짐작하지 않는다.
+
+    ``initial_retry_ask``: 최초 본문 검수의 «파싱 재요청»만 쓰는 호출자.
+    ``initial_ask`` 가 있을 때만 뜻이 있다(후속 검수의 재요청은 예전처럼
+    ``ask``). 재요청은 같은 질문을 형식만 고쳐 다시 받는 것이라 답 길이가 첫
+    답과 비슷한데 부르는 쪽의 예약액은 «출력 상한»으로 잡히므로, 첫 답에 맞춘
+    작은 상한을 가진 호출자를 넣으면 그 한 번의 예약액만 줄어든다.
     """
     reviewer = initial_ask or ask
+    retry_reviewer = (
+        (initial_retry_ask or initial_ask) if initial_ask is not None else ask
+    )
     # ★ 후보별 보도 원문 문맥은 «한 번» 계산해 안내와 판정에 같은 값을 준다. 평문
     #   경로는 packet 허용 표가 없으므로 조각이 봉인해 온 의미 칸으로 장 소유권을 본다
     #   (보강 후보·보도표와 같은 기준). 요약 묶음은 소유 장이 없어 자격이 없다.
@@ -1931,6 +1941,9 @@ def _ask_verdicts(
         items, frag_by_id, table_evidence, table_source,
         verbatim_by_number=verbatim_by_number,
     )
+    # 초기 재검수 호출자 선택은 위에서 함께 설정한다.
+    # 재요청은 «최초 본문 검수»일 때만 전용 호출자를 쓴다. 후속 검수(재검수
+    # 등)는 initial_ask 가 없으므로 예전 그대로 ask 하나로 재요청한다.
     requested_numbers = [item.number for item in items]
 
     def _observe_attempt(attempt: int, sent: str, answer: Optional[str]):
@@ -1956,7 +1969,7 @@ def _ask_verdicts(
     while verdicts is None and retries < PARSE_RETRY_LIMIT:
         retries += 1
         retry_prompt = prompt + RETRY_REMINDER
-        raw = _safe_ask(reviewer, retry_prompt)
+        raw = _safe_ask(retry_reviewer, retry_prompt)
         observe = _observe_attempt(retries + 1, retry_prompt, raw)
         verdicts = _parse_verdicts(
             raw, observe=observe, requested_numbers=requested_numbers,
@@ -2158,6 +2171,7 @@ def _semantic_review(
     group_ids: Optional[Sequence[str]] = None,
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
+    initial_retry_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
     rewrite_ask: Optional[AskFn] = None,
@@ -2167,6 +2181,7 @@ def _semantic_review(
     """인용 있는 «확인»·«해석» 문장을 같은 1회 검수 호출로 대조한다.
 
     ``initial_ask``: 최초 본문 검수 전용 호출자. 재작성·재검수는 ``ask`` 그대로다.
+    ``initial_retry_ask``: 그 최초 검수의 «파싱 재요청» 전용 호출자(선택).
     ``absence_sections``: 부재 단언 가드가 문장을 뺀 장 id 수집기(선택).
 
     검수가 통째로 불능이면 대조 대상 문장을 공개 후보에서 뺀다. 라벨만
@@ -2228,6 +2243,7 @@ def _semantic_review(
         table_source,
         diagnostics=diagnostics,
         initial_ask=initial_ask,
+        initial_retry_ask=initial_retry_ask,
         protocol_diagnostics=protocol_diagnostics,
         baseline_date=baseline_date,
     )
@@ -2582,6 +2598,7 @@ def _verify_report_inner(
     ] = None,
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
+    initial_retry_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
     rewrite_ask: Optional[AskFn] = None,
@@ -2629,6 +2646,7 @@ def _verify_report_inner(
             ),
             diagnostics=diagnostics,
             initial_ask=initial_ask,
+            initial_retry_ask=initial_retry_ask,
             protocol_diagnostics=protocol_diagnostics,
             baseline_date=baseline_date,
             rewrite_ask=rewrite_ask,
@@ -2644,6 +2662,10 @@ def _verify_report_inner(
         )
         group_ids = [section.section_id for section in report.sections]
         group_ids.append(REVIEW_SUMMARY_GROUP)
+        # ★ packet 경로에는 ``initial_retry_ask`` 를 넘기지 않는다 — 이 경로의
+        #   검수는 «reviewer 1회 고정»이라 파싱 재요청 자체가 없다
+        #   (_ask_grouped_verdicts 는 형식 오류를 None 으로 닫는다). 쓰이지 않을
+        #   인자를 달아 두면 «재요청이 있다»는 거짓 신호가 된다.
         reviewed_groups, reviewed_flow_rows = _semantic_review_grouped(
             checked_groups,
             group_ids,
@@ -2708,6 +2730,7 @@ def verify_report(
     ] = None,
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
+    initial_retry_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
     rewrite_ask: Optional[AskFn] = None,
@@ -2722,6 +2745,16 @@ def verify_report(
         ask: 검수·재작성용 AI 호출 주입 함수 (작가와 «다른 호출» —
             Generator/Evaluator 분리는 부르는 쪽이 별도 클로저로 보장한다).
         diagnostics: 의미 근거 결속으로 최종 제외된 후보의 비식별 진단 수집기.
+        initial_ask: 최초 본문 검수 전용 호출자. 생략하면 ``ask``.
+        initial_retry_ask: 그 최초 검수의 «파싱 재요청» 전용 호출자. 생략하면
+            ``initial_ask``(그것도 없으면 ``ask``)로 재요청한다 — 예전 동작.
+            ★ 재요청은 같은 질문을 형식만 고쳐 다시 받는 것이라 답 길이가 첫
+              답과 비슷한데, 부르는 쪽의 예약액은 «출력 상한»으로 잡힌다.
+              첫 답에 맞춘 작은 상한을 가진 호출자를 넣으면 그 한 번의 예약액만
+              줄어든다(2026-09-13 실측: 24000 상한이 그대로 실린 재요청이 남은
+              예약액을 넘겨 1차 검수가 통째로 실패했다).
+            ⚠️ packet 엄격 경로(``allowed_fragment_ids_by_section`` 지정)는
+              검수 «1회 고정»이라 파싱 재요청이 없다 — 이 인자는 쓰이지 않는다.
         rewrite_ask: «거짓» 판정 문장 재작성 전용 호출자. 생략하면 ``ask``.
         recheck_ask: 재작성문 재검수 전용 호출자. 생략하면 ``ask``.
             ★ 이 둘은 «선택적 다듬기»라, 부르는 쪽이 도식 검수·요약 작성·
@@ -2737,7 +2770,8 @@ def verify_report(
     """
     try:
         if (allowed_fragment_ids_by_section is None and diagnostics is None
-                and initial_ask is None and protocol_diagnostics is None
+                and initial_ask is None and initial_retry_ask is None
+                and protocol_diagnostics is None
                 and baseline_date is None and rewrite_ask is None
                 and recheck_ask is None):
             # legacy 호출 모양과 monkeypatch 경계를 그대로 보존한다.
@@ -2752,6 +2786,7 @@ def verify_report(
             allowed_fragment_ids_by_section=allowed_fragment_ids_by_section,
             diagnostics=diagnostics,
             initial_ask=initial_ask,
+            initial_retry_ask=initial_retry_ask,
             protocol_diagnostics=protocol_diagnostics,
             baseline_date=baseline_date,
             rewrite_ask=rewrite_ask,

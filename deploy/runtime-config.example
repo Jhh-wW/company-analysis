@@ -1,11 +1,22 @@
 # 이 파일에는 실제 값을 넣지 않는다. runtime-config로 복사한 뒤 로컬에서만 채운다.
 PIPELINE=demo
+# PIPELINE=real일 때 기동 직후 후보 검색 색인을 백그라운드에서 미리 만들고,
+# 이후 법인목록(corpCode)을 7일마다 자동으로 새로 받아 바꿔 끼운다. 예열과
+# 갱신 둘 다 이 값으로 함께 켜고 끈다. 기본은 켜짐(값을 안 넣어도 됨) —
+# 끄려면 정확히 0으로 설정한다.
+CANDIDATE_INDEX_PREWARM=
 BETA_ADMIN_ONLY=1
 LOG_LEVEL=info
 DEPLOYMENT_EXPOSURE=local
 DEPLOYMENT_PLATFORM=local
 DEPLOYMENT_RUNTIME_CONTRACT=local-web-v1
 FORWARDED_ALLOW_IPS=127.0.0.1
+
+# [동시 수집 선택] PARALLEL_COLLECT가 정확히 1일 때만 경쟁사 비교와 뉴스 검색
+# 스냅샷을 동시에 돌립니다. 결과와 캐시 열쇠는 같고 순서만 바뀝니다.
+# 배포(render.yaml)와 같은 1로 둡니다 — 로컬에서 운영과 다른 갈래를 돌면
+# 동시 실행에서만 나는 문제를 로컬에서 영영 못 봅니다. 끄려면 0으로 바꿉니다.
+PARALLEL_COLLECT=1
 
 # 공개 배포 입력 예시다. Render Docker는 검증 가능한 ingress peer CIDR이 없어
 # 어떤 값을 채워도 BLOCKED이며, Kubernetes 역시 signed canary verifier가 설치되기

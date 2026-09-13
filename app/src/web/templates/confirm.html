@@ -57,7 +57,8 @@
 </div>
 
 <div class="btn-row">
-  <form method="post" action="/run" style="flex:1" id="runForm">
+  <form method="post" action="/run" style="flex:1" id="runForm"
+        data-busy-submit data-busy-label="보고서 준비 중…">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="company" value="{{ user_input.company }}">
     <input type="hidden" name="region" value="{{ user_input.region }}">
@@ -67,7 +68,8 @@
            value="{{ evaluation_consent_grant }}">
     <button type="submit" class="btn wide" id="runSubmitButton">맞습니다 — 조사 시작</button>
   </form>
-  <form method="post" action="/reject" style="flex:1">
+  <form method="post" action="/reject" style="flex:1"
+        data-busy-submit data-busy-label="잠시만요…">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <input type="hidden" name="company" value="{{ user_input.company }}">
     <input type="hidden" name="region" value="{{ user_input.region }}">
@@ -83,3 +85,4 @@
   주소가 달라도 <strong>막지 않습니다.</strong> 본사와 근무지가 다른 경우가 흔합니다.
 </p>
 {% endblock %}
+{% block scripts %}{% include "_busy_submit_script.html" %}{% endblock %}
