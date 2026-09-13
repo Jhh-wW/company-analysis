@@ -1394,11 +1394,11 @@ def test_호출전_예상비용_차단기준을_실제청구_최댓값으로_과
     #   옮겨갔다. 보는 문장과 숫자는 그대로다.
     text = admin.get("/admin/costs").text
 
-    # 링크 1개(3,000) + MEMBER 1명(3,000) + 관리자(50,000) = 56,000원.
+    # 링크 1개(6,000) + MEMBER 1명(6,000) + 관리자(100,000) = 112,000원.
     # MEMBER에는 이 금액 상한과 성공 3건 제한이 함께 적용된다.
     assert "호출 전 예상비용 차단 기준 합계" in text
-    assert "56,000원" in text
-    assert "친구 1명 × 3,000원" in text
+    assert "112,000원" in text
+    assert "친구 1명 × 6,000원" in text
     assert "성공 보고서 3건" in text
     assert "기준에 닿으면 새 호출을 차단" in text
     assert "실제 청구의 최댓값이 아닙니다" in text
@@ -1450,7 +1450,7 @@ def test_실제비용이_예상과_차단기준을_넘으면_금액과_overrun�
             phase=SPEND_PHASE_PIPELINE,
             day=today,
             bucket="user:admin@example.com",
-            cost_krw=51_000.0,
+            cost_krw=101_000.0,
             created_at="2026-08-18T10:01:00+09:00",
         )
 
@@ -1460,10 +1460,12 @@ def test_실제비용이_예상과_차단기준을_넘으면_금액과_overrun�
 
     assert response.status_code == 200
     assert 'role="status"' in response.text
-    assert "오늘 실제 지출은 <strong>51,000원</strong>" in compact
+    # 관리자 하루 한도가 100,000원으로 오르며 초과가 계속 재현되도록
+    # 실제 지출도 함께 50,000원 올렸다(101,000 - 100,000 = 1,000원 초과, 값 그대로 유지).
+    assert "오늘 실제 지출은 <strong>101,000원</strong>" in compact
     assert "차단 기준 합계보다 <strong>1,000원</strong>" in compact
     assert "정산은 <strong>1건</strong>" in compact
-    assert "관측 차액은 <strong>50,900원</strong>" in compact
+    assert "관측 차액은 <strong>100,900원</strong>" in compact
     assert "최악의 하루 지출" not in response.text
 
 
@@ -1473,7 +1475,7 @@ def test_관리자_첫화면은_승인된_운영대시보드로_연결된다(
     text = admin.get("/admin").text
 
     assert "운영 대시보드" in text
-    assert "하루 3,000원 입장 기준 + 성공 3건" in text
+    assert "하루 6,000원 입장 기준 + 성공 3건" in text
     assert "최악의 하루 지출" not in text
 
 

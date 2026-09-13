@@ -22,6 +22,7 @@ import importlib.util
 import itertools
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -635,6 +636,29 @@ V2_REVIEWER_MAX_TOKENS: Final[int] = 16000
 #: 작은 후속 검수는 기존 상한으로 예약한다. 이 상한도 기존 단계 예산을
 #: 통과해야 하며, 실제 비용은 응답 usage로 정산한다.
 V2_INITIAL_REVIEWER_MAX_TOKENS: Final[int] = 24000
+
+#: 1차 검수 «재요청»의 출력 상한 = 첫 답의 실제 출력 token × 이 배수.
+#:
+#: ★ 2026-09-13 실측(키움증권·claude-haiku-4-5) — 본조사 예약액 1000원 중
+#:   713원을 쓴 뒤 1차 검수 답이 정상 종료(end_turn)했는데 JSON 문법 오류로
+#:   68문장 중 0행만 읽혔다. 규칙대로 재요청(PARSE_RETRY_LIMIT=1)을 걸었지만
+#:   호출 «전» 예약액이 출력 상한 24000토큰(약 168원)으로 잡혀 남은 287원을
+#:   넘겼고(ProviderBudgetExceeded), 1차 검수는 강등 대상이 아니라 조사 전체가
+#:   「AI 예산 소진」으로 멈췄다. 첫 답의 실제 출력은 약 7000토큰이었다.
+#: · 예약은 «상한»으로 계산되므로(위 V2_REVIEWER_MAX_TOKENS 주석) 재요청
+#:   호출에만 상한을 낮추면 그 호출의 예약액이 같은 비율로 줄어든다.
+#: · 재요청은 «같은 질문을 형식만 고쳐 다시 써 달라»는 것이라 답 길이가 첫 답과
+#:   비슷하다. 1.5배는 형식을 고치며 조금 길어지는 몫의 여유다.
+#: · 답의 내용·형식 요구는 그대로다 — 검사 품질은 바뀌지 않는다.
+#: ⚠️ 첫 답이 상한(24000)에서 잘린 경우에는 1.5배가 상한에 걸려 예전과 같은
+#:   값이 되고, 재요청 답이 이 상한보다 길면 다시 잘려 못 읽는다. 재요청은
+#:   1회뿐이라 그때는 예전처럼 멈춘다(감수한 한계).
+V2_INITIAL_REVIEW_RETRY_OUTPUT_HEADROOM: Final[float] = 1.5
+
+#: 재요청 출력 상한의 하한. 첫 답이 극단적으로 짧아도(중간에 끊긴 응답 등)
+#: 정상 크기의 판정 배열을 받을 수 있어야 한다. 실측 68행 답이 약 7000토큰
+#: 이었으므로 24000의 절반(12000)이면 같은 크기의 답에 여유가 있다.
+V2_INITIAL_REVIEW_RETRY_MIN_TOKENS: Final[int] = V2_INITIAL_REVIEWER_MAX_TOKENS // 2
 
 #: 도식은 모든 장의 판정·짧은 대조 근거·수치 결속 배열을 함께 돌려준다.
 #: 실제 24행 검수에서 512토큰 출력 뒤 파싱 재요청이 관측돼 전용 상한을
@@ -5722,12 +5746,51 @@ def _company_cache_save(
 # ══════════════════════════════════════════════════════════
 
 
+def _initial_review_retry_max_tokens(metered: _MeteredEngine) -> int:
+    """1차 본문 검수 «재요청»에 쓸 출력 상한을 첫 답의 실제 출력에서 구한다.
+
+    ★ 인자 이름이 ``metered`` 인 이유 — ``usages`` 는 1판 엔진이 아니라 이 앱의
+      계량 껍데기가 가진 이름이다. 계약 검사(AST)가 ``engine.…`` 만 1판 이름으로
+      세므로, 껍데기 이름을 읽는 함수는 ``metered`` 로 받는다
+      (``_request_spent_krw`` 와 같은 규칙).
+
+    같은 요청에서 이미 성공한 ``v2_review`` 응답 중 «마지막» 것의 출력 token에
+    :data:`V2_INITIAL_REVIEW_RETRY_OUTPUT_HEADROOM` 배를 적용하고,
+    :data:`V2_INITIAL_REVIEW_RETRY_MIN_TOKENS` 와
+    :data:`V2_INITIAL_REVIEWER_MAX_TOKENS` 사이로 자른다.
+
+    쓸 만한 사용량이 하나도 없으면(첫 호출 자체가 usage 없이 끝난 경우 등)
+    예전 그대로 :data:`V2_INITIAL_REVIEWER_MAX_TOKENS` 를 돌려준다 — 모르는
+    값을 지어내 상한을 낮추지 않는다.
+    """
+    observed_output = 0
+    for usage in metered.usages:
+        if usage.get("stage") != "v2_review":
+            continue
+        # 실패 응답에 붙은 usage 는 «답이 이만큼 나왔다»가 아니다 — 중간에
+        # 끊긴 출력일 수 있어 그 값으로 상한을 낮추면 재요청 답이 잘린다.
+        # 실패분만 있으면 아래에서 예전 상한으로 되돌아간다.
+        if usage.get("failed") is True:
+            continue
+        out = usage.get("out")
+        # bool은 int의 하위형이라 type() 으로 못 박는다 (다른 계량 경계와 동일).
+        if type(out) is int and out > 0:
+            observed_output = out
+    if observed_output <= 0:
+        return V2_INITIAL_REVIEWER_MAX_TOKENS
+    scaled = math.ceil(observed_output * V2_INITIAL_REVIEW_RETRY_OUTPUT_HEADROOM)
+    return min(
+        V2_INITIAL_REVIEWER_MAX_TOKENS,
+        max(V2_INITIAL_REVIEW_RETRY_MIN_TOKENS, scaled),
+    )
+
+
 def _v2_ask_via_provider(
     engine: _MeteredEngine,
     client: Any,
     *,
     stage: str,
-    max_tokens: int,
+    max_tokens: int | Callable[[], int],
     reserved_calls: int = 0,
 ):
     """composer의 AskFn(프롬프트→응답 문자열)을 기존 provider 포트로 감싼다.
@@ -5735,6 +5798,12 @@ def _v2_ask_via_provider(
     writer 경로와 같은 계량 client 경계를 지난다 — 비용 계량·예산 가드·요청별
     모델 고정이 전부 그 경계에서 적용된다. 구조화 출력(output_config)은 쓰지
     않는다: composer가 응답 문자열에서 직접 JSON을 관용 파싱하기 때문이다.
+
+    ★ ``max_tokens`` 가 callable이면 «호출 시점에» 풀어 쓴다 — 1차 검수 재요청의
+      상한은 첫 답이 실제로 얼마나 길었는지에 달려 있어 클로저를 만드는 시점에는
+      아직 알 수 없다. 푼 값이 양의 int가 아니면 계량 경계
+      (``_MeteredMessages.create``)가 예전과 같이 ProviderBudgetUnavailable로
+      막는다 — 여기서 중복 검사를 새로 만들지 않는다.
 
     ★ 프롬프트가 «공유 앞부분» 길이를 실어 오면(composer의 CacheablePrompt)
       그 경계로 두 블록을 만들어 앞부분만 캐시한다 — 아래 ask 주석 참조.
@@ -5749,6 +5818,9 @@ def _v2_ask_via_provider(
     from src.features.composer.port import AskFatalError  # noqa: PLC0415
 
     def ask(prompt: str) -> str:
+        # 출력 상한은 «보내기 직전»에 확정한다 — 1차 검수 재요청의 상한은 첫
+        # 답의 실제 출력에 달려 있어 이 클로저를 만들 때는 아직 모른다.
+        cap = max_tokens() if callable(max_tokens) else max_tokens
         # composer가 «아홉 장이 공유하는 앞부분»(회사 머리말 + 조각 전체)의
         # 길이를 프롬프트에 실어 보내면(composer.logic.CacheablePrompt), 그
         # 경계에서 두 블록으로 나눠 앞부분에만 캐시 표식을 찍는다. 프롬프트
@@ -5783,7 +5855,7 @@ def _v2_ask_via_provider(
             ):
                 response = client.messages.create(
                     model=getattr(engine, "MODEL", "") or GENERATION_MODEL,
-                    max_tokens=max_tokens,
+                    max_tokens=cap,
                     temperature=0,  # 원문 인용 충실도 우선 (1판 _ask와 동일)
                     messages=[{"role": "user", "content": content}],
                 )
@@ -5842,7 +5914,7 @@ def _v2_ask_via_provider(
                     else V2_RESPONSE_UNKNOWN
                 ),
                 "출력상한": (
-                    max_tokens if type(max_tokens) is int and max_tokens > 0
+                    cap if type(cap) is int and cap > 0
                     else None
                 ),
                 "종료사유": (
@@ -6778,6 +6850,15 @@ def _run_v2_composer(
         engine, client, stage="v2_review",
         max_tokens=V2_INITIAL_REVIEWER_MAX_TOKENS,
     )
+    # 최초 본문 검수의 «파싱 재요청» 전용 — 예약은 상한으로 잡히므로 첫 답이
+    # 실제로 쓴 출력에 맞춰 상한을 줄여 그 한 번의 예약액을 작게 만든다.
+    # (2026-09-13 실측: 24000 상한 그대로 실린 재요청이 남은 예약액을 넘겨
+    #  1차 검수가 통째로 실패했다. 자세한 근거는 위 상수 주석.)
+    # 필수 단계라 예약(reserved_calls)은 1차 검수와 같이 0이다.
+    initial_retry_reviewer_ask = _v2_ask_via_provider(
+        engine, client, stage="v2_review",
+        max_tokens=lambda: _initial_review_retry_max_tokens(engine),
+    )
     # 선택적 다듬기 전용 — «내 뒤에 반드시 와야 하는 호출»을 남기고 멈춘다.
     #   재작성: 재검수 1 + 필수 후속 2 를 남긴다 (재검수를 못 할 재작성은 안 한다).
     #   재검수: 필수 후속 2 를 남긴다.
@@ -6816,6 +6897,7 @@ def _run_v2_composer(
             writer_ask=writer_ask,
             reviewer_ask=reviewer_ask,
             initial_reviewer_ask=initial_reviewer_ask,
+            initial_retry_reviewer_ask=initial_retry_reviewer_ask,
             rewrite_ask=rewrite_ask,
             recheck_ask=recheck_ask,
             diagram_ask=diagram_ask,
