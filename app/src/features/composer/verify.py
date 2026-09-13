@@ -86,6 +86,11 @@ from src.features.composer.body_review_constants import (
     BODY_REVIEW_COMPARISON_GUIDE,
     BODY_REVIEW_COMPARISON_KEY,
 )
+from src.features.composer.review_schema import (
+    FLAT_REVIEW_SCHEMA,
+    GROUPED_REVIEW_SCHEMA,
+    ReviewPrompt,
+)
 
 import hashlib
 import json
@@ -1108,7 +1113,7 @@ def _build_grouped_review_prompt(
             ))
         parts.append("===== 장별 검수 블록 끝 =====\n")
     parts.append(REVIEW_TRUSTED_TAIL)
-    return "".join(parts)
+    return ReviewPrompt("".join(parts), GROUPED_REVIEW_SCHEMA)
 
 
 def _grouped_row_reason(
@@ -1727,7 +1732,7 @@ def _build_review_prompt(
             item.sentence.text, item.sentence.citations, frag_by_id, table_source,
         )))
     parts.append(REVIEW_TRUSTED_TAIL)
-    return "".join(parts)
+    return ReviewPrompt("".join(parts), FLAT_REVIEW_SCHEMA)
 
 
 def _parse_verdicts(

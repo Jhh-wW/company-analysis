@@ -1227,6 +1227,8 @@ class _MeteredMessages:
             model=model,
             messages=call_kwargs.get("messages") or [],
             system=call_kwargs.get("system"),
+            # SDK가 description으로 옮긴 제약도 실제 전송과 같은 설정으로 센다.
+            output_config=call_kwargs.get("output_config"),
         )
         estimated_input = provider_budget.estimate_request_tokens_exact(
             {"args": args, "kwargs": call_kwargs},
@@ -5733,8 +5735,9 @@ def _v2_ask_via_provider(
     """composer의 AskFn(프롬프트→응답 문자열)을 기존 provider 포트로 감싼다.
 
     writer 경로와 같은 계량 client 경계를 지난다 — 비용 계량·예산 가드·요청별
-    모델 고정이 전부 그 경계에서 적용된다. 구조화 출력(output_config)은 쓰지
-    않는다: composer가 응답 문자열에서 직접 JSON을 관용 파싱하기 때문이다.
+    모델 고정이 전부 그 경계에서 적용된다. 프롬프트에 response_schema가 있으면
+    구조화 출력(output_config)으로 전달하고, 정규화·계측은 계량 경계에 맡긴다.
+    표시 없는 문자열은 기존 호출 형태를 유지한다.
 
     ★ 프롬프트가 «공유 앞부분» 길이를 실어 오면(composer의 CacheablePrompt)
       그 경계로 두 블록을 만들어 앞부분만 캐시한다 — 아래 ask 주석 참조.
@@ -5775,6 +5778,20 @@ def _v2_ask_via_provider(
             else text
         )
         try:
+            extra: dict[str, Any] = {}
+            response_schema = getattr(prompt, "response_schema", None)
+            if response_schema is not None:
+                if not isinstance(response_schema, Mapping):
+                    # 잘못된 표식을 일반 출력으로 바꿔 유료 호출하지 않는다.
+                    raise provider_budget.ProviderBudgetUnavailable(
+                        "composer 응답 schema 형식이 올바르지 않습니다"
+                    )
+                extra["output_config"] = {
+                    "format": {
+                        "type": "json_schema",
+                        "schema": dict(response_schema),
+                    }
+                }
             with _meter_stage(
                 engine,
                 stage,
@@ -5786,6 +5803,7 @@ def _v2_ask_via_provider(
                     max_tokens=max_tokens,
                     temperature=0,  # 원문 인용 충실도 우선 (1판 _ask와 동일)
                     messages=[{"role": "user", "content": content}],
+                    **extra,
                 )
         except (
             provider_budget.ProviderBudgetExceeded,
