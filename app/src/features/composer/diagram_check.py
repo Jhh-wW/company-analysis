@@ -703,7 +703,9 @@ def _review_prompt(
             + DIAGRAM_REASON_KEY + '": "원문과 칸 내용의 대조 근거", "'
             + _VERDICT_RESULT_KEY + '": "' + VERDICT_TRUE + '"}]}',
             "",
-            DIAGRAM_EVIDENCE_PREFIX + json.dumps(source_dictionary, ensure_ascii=False),
+            DIAGRAM_EVIDENCE_PREFIX + json.dumps(
+                source_dictionary, ensure_ascii=False, separators=(",", ":")
+            ),
             "",
         )
     )
@@ -711,11 +713,13 @@ def _review_prompt(
         # 경로·원문은 신뢰할 수 없는 데이터다. JSON 문자열로 봉인해
         # 안의 줄바꿈·가짜 번호·지시가 검수 프롬프트 구조를 바꾸지 못한다.
         path_json = json.dumps(
-            _labelled_cells(section_id, row), ensure_ascii=False
+            _labelled_cells(section_id, row), ensure_ascii=False, separators=(",", ":")
         )
         noun = flow_review_row_noun(section_id)
         lines.append(f"[{number}] {noun}(JSON 배열): {path_json}")
-        lines.append(DIAGRAM_CITATIONS_PREFIX + json.dumps(row.citations, ensure_ascii=False))
+        lines.append(DIAGRAM_CITATIONS_PREFIX + json.dumps(
+            row.citations, ensure_ascii=False, separators=(",", ":")
+        ))
         sources = {fid: texts[fid] for fid in row.citations if fid in texts}
         lines.append(grounding_hint(FLOW_CELL_JOIN.join(row.cells), sources, row.cells))
     lines.extend(

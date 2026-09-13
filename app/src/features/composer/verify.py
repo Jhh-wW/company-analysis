@@ -977,7 +977,10 @@ def _review_fragment_metadata(fragment: CollectedFragment) -> str:
         "문서기준일": fragment.document_date,
         "원문위치": fragment.location,
     }
-    return "출처 분류(JSON 자료): " + json.dumps(metadata, ensure_ascii=False) + "\n"
+    # JSON 구분자 공백만 줄인다. 빈 필드와 문자열 안의 공백도 출처 자료다.
+    return "출처 분류(JSON 자료): " + json.dumps(
+        metadata, ensure_ascii=False, separators=(",", ":")
+    ) + "\n"
 
 
 def _build_grouped_review_prompt(
@@ -1090,6 +1093,7 @@ def _build_grouped_review_prompt(
                     + json.dumps(
                         _review_labelled_flow_cells(section_id, item.flow_row),
                         ensure_ascii=False,
+                        separators=(",", ":"),
                     )
                     + "\n"
                 )
@@ -1626,7 +1630,9 @@ def _render_table_evidence(table: Optional[PerformanceTable]) -> str:
     if any(_raw_table_row(table, index) is not None for index in range(len(table.rows))):
         payload["raw_unit"] = str(table.raw_unit).strip()
         payload["raw_rows"] = [list(row) for row in table.raw_rows]
-    return REVIEW_TABLE_HEAD + json.dumps(payload, ensure_ascii=False) + "\n"
+    return REVIEW_TABLE_HEAD + json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":")
+    ) + "\n"
 
 
 def _review_item_section(item: _ReviewItem) -> str:

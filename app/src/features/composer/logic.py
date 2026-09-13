@@ -402,6 +402,8 @@ def _render_already_written(already_written: Sequence[str]) -> str:
     if not kept:
         return ""
     kept = kept[:ALREADY_WRITTEN_MAX_SENTENCES]
+    # 상한 뒤에 완전 일치 반복만 제거한다 — 범위 밖의 새 문장을 끌어오지 않는다.
+    kept = list(dict.fromkeys(kept))
     lines = "".join(f"- {text}\n" for text in kept)
     return f"{ALREADY_WRITTEN_HEAD}{lines}{ALREADY_WRITTEN_GUIDE}"
 
