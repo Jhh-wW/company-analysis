@@ -23,8 +23,19 @@ from typing import Final, Iterable, Sequence
 from src.features.composer.constants import PORTFOLIO_TABLE_SECTION_ID
 from src.features.composer.port import CollectedFragment, ComposedReport
 from src.shared.name_fragments.constants import (
+    NAME_KIND_LABELS,
+    NAME_KIND_SEGMENT,
     REPRESENTATIVE_NAME_LABELS,
     parse_name_location,
+)
+
+
+# 사업부문은 제품·서비스의 실제 운영 축을 나타내는 이름이다. shared의
+# 기본 대표 이름 집합은 기존 호출자와의 계약 때문에 그대로 두고, 3장 표에서만
+# 공시된 사업부문을 함께 소비한다. 종속회사·계약은 계속 이 집합에 넣지 않는다.
+PORTFOLIO_NAME_LABELS: tuple[str, ...] = (
+    *REPRESENTATIVE_NAME_LABELS,
+    NAME_KIND_LABELS[NAME_KIND_SEGMENT],
 )
 
 
@@ -124,9 +135,10 @@ def representative_name_sources(
         if parsed is None:
             continue
         label, name = parsed
-        # 사업부문·종속회사·주요 계약은 이 요구의 «충족 근거»가 아니다.
+        # 종속회사·주요 계약은 제품·서비스를 회사의 대표 이름으로 오인할 수
+        # 있으므로 계속 제외한다. 사업부문은 공시된 운영 축으로 보존한다.
         key = _normalized(name)
-        if label not in REPRESENTATIVE_NAME_LABELS or not key or key in seen:
+        if label not in PORTFOLIO_NAME_LABELS or not key or key in seen:
             continue
         seen.add(key)
         found.append(
@@ -189,6 +201,7 @@ def portfolio_name_usage(
 
 __all__ = [
     "MIN_REPRESENTATIVE_NAMES_FOR_CARD",
+    "PORTFOLIO_NAME_LABELS",
     "PortfolioNameUsage",
     "RepresentativeName",
     "UNUSED_REPRESENTATIVE_NAMES_STEP",

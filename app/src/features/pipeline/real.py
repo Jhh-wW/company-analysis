@@ -6616,6 +6616,16 @@ def _run_v2_composer(
     diagram_ask = _v2_ask_via_provider(
         engine, client, stage="v2_diagram", max_tokens=V2_DIAGRAM_MAX_TOKENS
     )
+    # 빈 장 두 곳의 짧은 새 문장을 묶어 작성·검수한다. 기존 선택적 문장
+    # 재작성 몫을 재배치하며, 재검수와 필수 도식·요약 호출을 먼저 남긴다.
+    empty_recovery_writer_ask = _v2_ask_via_provider(
+        engine, client, stage="v2_compose", max_tokens=V2_WRITER_MAX_TOKENS,
+        reserved_calls=MANDATORY_TAIL_AI_CALLS + REWRITE_RECHECK_CALLS,
+    )
+    empty_recovery_reviewer_ask = _v2_ask_via_provider(
+        engine, client, stage="v2_review", max_tokens=V2_DIAGRAM_MAX_TOKENS,
+        reserved_calls=MANDATORY_TAIL_AI_CALLS,
+    )
     review_diagnostics_sink: list[dict] = []
     composition_diagnostics_sink: list[dict] = []
     try:
@@ -6632,6 +6642,11 @@ def _run_v2_composer(
             rewrite_ask=rewrite_ask,
             recheck_ask=recheck_ask,
             diagram_ask=diagram_ask,
+            empty_recovery_writer_ask=empty_recovery_writer_ask,
+            empty_recovery_reviewer_ask=empty_recovery_reviewer_ask,
+            empty_recovery_can_start=lambda: engine.available_provider_calls(
+                reserved_calls=MANDATORY_TAIL_AI_CALLS + REWRITE_RECHECK_CALLS,
+            ) > 0,
             corp_type=corp_type,
             generated_at=business_date.isoformat(),
             as_of_date=business_date.isoformat(),

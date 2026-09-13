@@ -136,6 +136,33 @@ def test_continuation_page_after_mixed_page_inherits_last_heading() -> None:
     assert canvas._current_section_name == "회사가 밝힌 차별점"
 
 
+def test_heading_after_continuation_keeps_the_continued_section_as_page_header() -> None:
+    """앞 장의 본문이 먼저 이어진 뒤 새 장이 시작돼도 머리말은 이어진 장이다."""
+    canvas = _BrandedCanvas(io.BytesIO(), pagesize=(420, 800))
+
+    _draw_heading(canvas, "7", "사업 운영과 파트너 구조")
+    canvas.showPage()
+
+    # 실제 도식·표 Flowable처럼 먼저 페이지에 그려진 내용이 있는 상태를 만든다.
+    canvas.setFont(constants.FONT_REGULAR, 8)
+    canvas.drawString(20, 700, "앞 장에서 이어진 도식")
+    _draw_heading(canvas, "8", "인재상과 일하는 방식")
+
+    assert canvas._current_section_name == "사업 운영과 파트너 구조"
+    assert canvas._carry_section_name == "인재상과 일하는 방식"
+
+
+def test_new_page_heading_replaces_carried_name_when_no_content_precedes_it() -> None:
+    """새 쪽 첫 Flowable이 장 제목이면 새 장 머리말을 사용한다."""
+    canvas = _BrandedCanvas(io.BytesIO(), pagesize=(420, 800))
+
+    _draw_heading(canvas, "7", "사업 운영과 파트너 구조")
+    canvas.showPage()
+    _draw_heading(canvas, "8", "인재상과 일하는 방식")
+
+    assert canvas._current_section_name == "인재상과 일하는 방식"
+
+
 def test_single_heading_page_keeps_its_own_name() -> None:
     """장이 하나뿐인 보통의 쪽(대부분의 실제 쪽)은 예전과 같은 결과다 —
     이번 수정이 단일 장 쪽까지 건드리지 않았는지 확인하는 회귀 시험."""

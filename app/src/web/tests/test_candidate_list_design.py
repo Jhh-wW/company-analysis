@@ -16,6 +16,7 @@ from src.features.auth import constants as auth_constants
 from src.features.auth import logic as auth_logic
 from src.features.budget import logic as budget_logic
 from src.features.business_candidate import logic as candidate_logic
+from src.features.business_candidate.official_relations import OFFICIAL_ALIAS_MATCH_KIND
 from src.features.business_candidate.logic import RawBusinessCandidate
 from src.web import job_runtime, main, runtime
 from src.web.tests._visible_text import class_count, visible_text
@@ -99,6 +100,20 @@ _SPARSE_CANDIDATE = RawBusinessCandidate(
     name_similarity=1.0,
 )
 
+_SK_AX_CANDIDATE = RawBusinessCandidate(
+    candidate_name="SK",
+    address="서울특별시 종로구 종로 26",
+    source_label="전자공시(DART) 기업개황",
+    source_url="https://opendart.fss.or.kr/",
+    provider_name="DART",
+    candidate_ref="00181712",
+    stock_code="034730",
+    modify_date="20260914",
+    english_name="SK Inc.",
+    name_match_kind=OFFICIAL_ALIAS_MATCH_KIND,
+    name_similarity=1.0,
+)
+
 
 def _render_candidates() -> str:
     client, csrf = _admin_client()
@@ -162,6 +177,26 @@ def test_일치근거_칩은_계산된_근거만_요약하고_상세근거를_�
     # 문장형 상세 근거는 칩으로 바뀌어도 사라지지 않는다.
     assert "자세한 근거" in text
     assert "입력한 회사명과 DART 정식명칭이 일치합니다" in text
+
+
+def test_alias_candidate_displays_business_unit_and_disclosure_scope(monkeypatch):
+    monkeypatch.setattr(runtime, "_PIPELINE", RowRenderFakePipeline([_SK_AX_CANDIDATE]))
+    client, csrf = _admin_client()
+    try:
+        response = client.post("/confirm", data=_form(csrf, company="SK AX"))
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    text = visible_text(response.text)
+    assert "공식 사업부문 별칭" in text
+    assert "공시 범위 안내" in text
+    assert "SK AX는 SK㈜의 CIC(Company-in-Company) 사업부문입니다." in text
+    assert "보고서는 SK㈜ 공시 기준으로 작성됩니다." in text
+    assert "034730" in text
+    assert "00181712" not in text  # DART 고유번호는 hidden 선택값으로만 전송한다.
+    assert "이 기업 선택" in text
+    assert 'action="/confirm"' in response.text
 
 
 def test_후보데이터에_없는_법인_폐업_필터는_만들지_않는다(monkeypatch):

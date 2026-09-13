@@ -27,6 +27,10 @@ from src.shared.company_identity import (
     normalized_latin_acronym as _normalized_latin_acronym,
     official_uppercase_acronyms as _official_uppercase_acronyms,
 )
+from src.features.business_candidate.official_relations import (
+    OFFICIAL_ALIAS_MATCH_KIND,
+    official_alias_relation_for,
+)
 
 
 # 한글과 영문/숫자가 공백 없이 붙으면("삼성SDS") 옛 정규식
@@ -77,6 +81,7 @@ MATCH_KIND_PRIORITY: Mapping[str, int] = MappingProxyType(
     {
         "exact_id": 11,
         "exact_name": 10,
+        OFFICIAL_ALIAS_MATCH_KIND: 10,
         "spacing": 9,
         "legal_suffix": 8,
         "prefix": 7,
@@ -560,6 +565,19 @@ def generate_dart_company_matches(
         similarity=1.0,
         alias_predicate=lambda alias: alias.exact_key == exact_query,
     )
+
+    # 사업부문 별칭은 정확히 등록된 입력만 허용한다. 대상 법인을 색인에서
+    # 찾지 못하면 후보를 합성하지 않고 기존 결정적 검색 결과를 유지한다.
+    official_relation = official_alias_relation_for(raw_query)
+    if official_relation is not None:
+        _add_codes(
+            matches,
+            index,
+            (official_relation.corp_code,),
+            kind=OFFICIAL_ALIAS_MATCH_KIND,
+            similarity=1.0,
+            alias_predicate=lambda _alias: False,
+        )
 
     # 검색에서만 공백 차이를 흡수한다. 법인 확정용 공통 이름 비교는 넓히지 않는다.
     # 짧은 영문 조각을 합쳐 다른 약어를 만들지는 않는다.

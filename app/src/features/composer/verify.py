@@ -44,6 +44,8 @@ from src.features.composer.prose_own_source import (
     prose_own_source_problem,
 )
 from src.shared.report_quality.composition_diagnostic_constants import (
+    BODY_MACHINE_STEP,
+    BODY_DISPOSITION_STEP,
     PATH_FLAT,
     PATH_PACKET,
     READ_VERDICTS_KEY_MISSING,
@@ -2177,6 +2179,8 @@ def _semantic_review(
     rewrite_ask: Optional[AskFn] = None,
     recheck_ask: Optional[AskFn] = None,
     absence_sections: Optional[set[str]] = None,
+    allow_sentence_rewrite: bool = True,
+    sentence_rewrite_gate: Optional[Callable[[tuple[str, ...]], bool]] = None,
 ) -> list[list[ComposedSentence]]:
     """인용 있는 «확인»·«해석» 문장을 같은 1회 검수 호출로 대조한다.
 
@@ -2230,6 +2234,12 @@ def _semantic_review(
                 )
             )
     if not items:
+        if sentence_rewrite_gate is not None:
+            sentence_rewrite_gate(tuple(
+                group_id for group_index, (group_id, group) in enumerate(zip(group_ids or (), groups))
+                if not any((group_index, sentence_index) not in absence_rejected_positions
+                           for sentence_index, _sentence in enumerate(group))
+            ))
         return _groups_without_positions(groups, absence_rejected_positions)
 
     table_evidence = _render_table_evidence(table)
@@ -2316,7 +2326,28 @@ def _semantic_review(
             _센다["근거결속실패_제거"],
             _센다["번호없음_제거"],
         )
-        if rewrite_targets:
+        rewrite_allowed = allow_sentence_rewrite
+        empty_groups = []
+        if sentence_rewrite_gate is not None or protocol_diagnostics is not None:
+            for group_index, group in enumerate(groups):
+                has_survivor = any(
+                    (group_index, sentence_index) not in absence_rejected_positions
+                    and (position_numbers.get((group_index, sentence_index)) is None
+                         or final.get(position_numbers[(group_index, sentence_index)]) is not None)
+                    for sentence_index, _sentence in enumerate(group)
+                )
+                if not has_survivor and group_ids is not None:
+                    empty_groups.append(group_ids[group_index])
+        if sentence_rewrite_gate is not None:
+            rewrite_allowed = rewrite_allowed and sentence_rewrite_gate(tuple(empty_groups))
+        if protocol_diagnostics is not None and (sentence_rewrite_gate is not None or not allow_sentence_rewrite):
+            protocol_diagnostics.append({"step": BODY_DISPOSITION_STEP, "장별빈본문":
+                                         list(empty_groups),
+                                         "문장재작성허용": rewrite_allowed, "판정별": dict(_센다)})
+        if not rewrite_allowed:
+            for item in rewrite_targets:
+                final[item.number] = None
+        if rewrite_targets and rewrite_allowed:
             try:
                 _rewrite_and_recheck(
                     ask,
@@ -2603,6 +2634,8 @@ def _verify_report_inner(
     baseline_date: Optional[str] = None,
     rewrite_ask: Optional[AskFn] = None,
     recheck_ask: Optional[AskFn] = None,
+    allow_sentence_rewrite: bool = True,
+    sentence_rewrite_gate: Optional[Callable[[tuple[str, ...]], bool]] = None,
 ) -> ComposedReport:
     frag_by_id = {
         fragment.fragment_id: fragment
@@ -2625,6 +2658,11 @@ def _verify_report_inner(
         for section in report.sections
     ]
     checked_groups.append(_machine_check(report.summary, frag_by_id, table_texts))
+    if protocol_diagnostics is not None and (sentence_rewrite_gate is not None or not allow_sentence_rewrite):
+        protocol_diagnostics.append({"step": BODY_MACHINE_STEP, "장별": {
+            section.section_id: {"초안": len(section.sentences), "기계통과": len(checked)}
+            for section, checked in zip(report.sections, checked_groups)
+        }})
 
     # 2) 의미 검수 — legacy는 flat 응답 번호·재작성 계약을 유지한다.
     # packet 엄격 모드만 문장+도식을 장별 블록으로 한 번에 본다.
@@ -2652,6 +2690,8 @@ def _verify_report_inner(
             rewrite_ask=rewrite_ask,
             recheck_ask=recheck_ask,
             absence_sections=absence_sections,
+            allow_sentence_rewrite=allow_sentence_rewrite,
+            sentence_rewrite_gate=sentence_rewrite_gate,
         )
     else:
         allowed_for_review = dict(allowed_fragment_ids_by_section)
@@ -2735,6 +2775,8 @@ def verify_report(
     baseline_date: Optional[str] = None,
     rewrite_ask: Optional[AskFn] = None,
     recheck_ask: Optional[AskFn] = None,
+    allow_sentence_rewrite: bool = True,
+    sentence_rewrite_gate: Optional[Callable[[tuple[str, ...]], bool]] = None,
 ) -> ComposedReport:
     """진입 함수 — 규칙 ①~④를 보고서 전체에 문장 단위로 적용한다.
 
@@ -2760,6 +2802,10 @@ def verify_report(
             ★ 이 둘은 «선택적 다듬기»라, 부르는 쪽이 도식 검수·요약 작성·
               요약 검수 몫을 남긴 호출자를 넣어 두면 필수 후속 단계보다
               먼저 멈춘다. 멈추면 그 문장은 재작성 대신 제거된다.
+        allow_sentence_rewrite: 거짓 문장 재작성 허용 여부. 거짓이면 같은
+            검수에서 실패한 문장을 제거하며 재작성·재검수를 호출하지 않는다.
+        sentence_rewrite_gate: flat 첫 검수의 빈 장 ID를 받아 재작성 허용을
+            결정한다. 빈 장 복구와 문장 재작성이 같은 호출 몫을 쓰게 한다.
         baseline_date: 보고서 기준일 (ISO ``YYYY-MM-DD``). 근거 결속의
             executive_status_guard 에만 쓴다 — 넘기지 않으면 그 가드가 날짜
             문턱 없이 이탈 표지 존재만으로 판정한다. 기존 호출 계약은 그대로다.
@@ -2773,7 +2819,8 @@ def verify_report(
                 and initial_ask is None and initial_retry_ask is None
                 and protocol_diagnostics is None
                 and baseline_date is None and rewrite_ask is None
-                and recheck_ask is None):
+                and recheck_ask is None and allow_sentence_rewrite
+                and sentence_rewrite_gate is None):
             # legacy 호출 모양과 monkeypatch 경계를 그대로 보존한다.
             return _verify_report_inner(
                 report, fragments, performance_table, ask
@@ -2791,6 +2838,8 @@ def verify_report(
             baseline_date=baseline_date,
             rewrite_ask=rewrite_ask,
             recheck_ask=recheck_ask,
+            allow_sentence_rewrite=allow_sentence_rewrite,
+            sentence_rewrite_gate=sentence_rewrite_gate,
         )
     except AskFatalError:
         # 요청 전역 장애 — «검증기 내부 오류»로 위장하지 않고 그대로 재전파한다.
