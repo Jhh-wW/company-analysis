@@ -5,11 +5,10 @@
 
 - 스위치를 켜면 두 갈래가 **같은 약속 지점에서 서로를 만난다**(시계 없이 판정).
 - 켜든 끄든 보고서 입력·캐시 열쇠·단계 기록·DART 호출·비용이 **같다**.
-- 비교가 막히면 켜든 끄든 같은 사유로 멈추고 뉴스 단계는 남지 않는다.
-- 비교 지문을 못 만들어도 예전처럼 「내부 근거 계약」 관문으로 멈춘다.
+- 비교가 막혀도 켜든 끄든 자사 공식 자료를 유지하고 뉴스 보강을 계속한다.
+- 비교 지문 직렬화 오류도 SHADOW 보고서로 복구하고 캐시를 재사용하지 않는다.
 - 갈래 «안»에서 남긴 단계가 완료 순서가 아니라 정해진 차례로 놓인다.
-- 다만 비교가 막히는 실행에서 **켜면 뉴스 검색 호출이 이미 나간다** — 이
-  스위치가 만드는 유일한 외부 호출 증가 지점이라 여기서 함께 못 박는다.
+- 비교 자료가 부족해도 두 방식 모두 뉴스 검색을 이어 가며 요청 취소는 구분한다.
 - 갈래 스레드에 실행 문맥이 복사된다(`copy_context`를 빼면 실패해야 한다).
 
 진짜 AI·네트워크는 한 번도 열지 않는다.
@@ -17,6 +16,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -45,9 +45,10 @@ from src.features.pipeline.tests.test_official_evidence_runtime import (
     _wire_runtime,
 )
 from src.shared import engine_build_identity as build_identity_contract
-from src.shared.final_gate_diagnostics import (
-    FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
-    FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
+from src.shared.engine_build_identity import EngineBuildIdentityChangedError
+from src.shared.generation_coordination import (
+    GenerationCoordinationError,
+    GenerationWaitCancelled,
 )
 from src.shared.report_evidence.constants import ReleaseMode
 from src.shared.stage_elapsed_constants import STAGE_ELAPSED_MS_KEY, STAGE_ELAPSED_STEP
@@ -79,8 +80,6 @@ SAME_RECEIPT_REQUEST_COUNT = 2
 #: 그대로 적는다 — 생산 코드에서 이름이 바뀌면 이 시험이 먼저 깨져야 한다.
 NEWS_SEARCH_SNAPSHOT_STEP = "5b_뉴스_검색스냅샷"
 NEWS_STEP_PREFIX = "5b_뉴스"
-COMPARISON_BLOCKED_STEP = "v2_FULL_회사차별점사전검사_차단"
-COMPARISON_TRANSPORT_BLOCKED_STEP = "v2_FULL_공식비교transport_차단"
 
 #: 비교 갈래가 원문을 요청할 접수번호. FakeEngine의 최신 공시와 같은 값이다.
 PROBE_RECEIPT_NUMBER = "20260315000123"
@@ -92,9 +91,8 @@ COMPARISON_SENTINEL = "가짜-비교-생산물"
 class _UnserializableComparison:
     """캐시 지문을 만들 수 없는 비교 생산물.
 
-    `canonical_sha256`은 이런 값에 `TypeError`를 낸다. 예전 코드는 지문 접기가
-    비교 생산과 같은 `try` 안이라 그 오류도 「내부 근거 계약」 GATE_STOPPED로
-    끝났다 — 갈래로 나누면서 그 덮개가 사라지지 않았는지 이 값으로 확인한다.
+    `canonical_sha256`은 이런 값에 `TypeError`를 낸다. 비교 갈래가 이 오류를
+    수집 실패로 남기고 SHADOW 보고서를 계속 만드는지 이 값으로 확인한다.
     """
 
 
@@ -272,7 +270,9 @@ def _meet(meeting_point: threading.Barrier) -> bool:
     return True
 
 
-def _probe_search_news(probe: _BranchProbe):
+def _probe_search_news(
+    probe: _BranchProbe,
+):
     """첫 호출에서만 약속 지점·문맥·단계 기록을 남기는 가짜 뉴스 검색."""
 
     def search_news(_query: str, **_kwargs: object) -> Any:
@@ -296,6 +296,7 @@ def _run_research(
     *,
     parallel: bool,
     comparison_error: BaseException | None = None,
+    news_error: BaseException | None = None,
     comparison_result: Any = COMPARISON_SENTINEL,
     meet_at_barrier: bool = False,
     record_branch_steps: bool = False,
@@ -339,6 +340,15 @@ def _run_research(
             step_order_gate=threading.Event() if record_branch_steps else None,
         )
         _install_branch_probes(monkeypatch, probe)
+        if news_error is not None:
+            def fail_news_prepare(*_args: Any, **_kwargs: Any) -> Any:
+                raise news_error
+
+            monkeypatch.setattr(
+                real.news_research_adapter,
+                "prepare_news_research",
+                fail_news_prepare,
+            )
 
         user_input, card = _request()
         # 단계 기록은 시험이 따로 모으지 않는다. 운영 실행이 자기 자리에 쌓고
@@ -483,41 +493,43 @@ def test_갈래_스레드에_유료예산_문맥이_복사된다() -> None:
     assert NEWS_SEARCH_SNAPSHOT_STEP in _step_names(parallel.steps)
 
 
-def test_비교가_막히면_켜든_꺼든_같은_사유로_멈추고_뉴스단계가_없다() -> None:
-    """실패 의미는 스위치와 무관하다. 다만 켜면 뉴스 검색 호출이 이미 나간다."""
+def test_비교가_막혀도_켜든_꺼든_자사자료와_뉴스를_남기고_SHADOW로_복구한다() -> None:
+    """비교 근거가 부족해도 공식 자료를 유지하고 뉴스 보강을 계속한다."""
 
     blocked = ComparisonBlockedError("시험용 비교 차단")
     serial = _run_research(parallel=False, comparison_error=blocked)
     parallel = _run_research(parallel=True, comparison_error=blocked)
 
     for run, label in ((serial, "차례"), (parallel, "동시")):
-        assert run.result.outcome is Outcome.GATE_STOPPED, label
+        assert run.result.outcome is Outcome.REPORT, label
+        assert run.result.generation_cache_eligible is False, label
+        assert len(run.calls.composers) == 1, label
         assert (
-            run.result.final_gate_reason
-            == FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT
+            run.calls.composers[0]["release_mode_override"] is ReleaseMode.SHADOW
         ), label
-        assert run.calls.composers == [], label
+        projected = run.calls.legacy_collects[0]["formal_official_evidence"]
+        assert projected is not None, label
+        assert sum(len(candidate.fragments) for candidate in projected.candidates) > 0, label
 
     assert serial.result.message == parallel.result.message
 
     for run, label in ((serial, "차례"), (parallel, "동시")):
         recorded = _step_names(run.steps)
-        assert recorded.count(COMPARISON_BLOCKED_STEP) == 1, label
-        assert not [
+        assert recorded.count(real.COLLECTION_RECOVERY_STEP) == 1, label
+        assert [
             name for name in recorded if name.startswith(NEWS_STEP_PREFIX)
-        ], f"{label}: 비교가 막혔는데 뉴스 단계가 남았습니다"
+        ], f"{label}: 비교가 막혀도 뉴스 단계가 기록되어야 합니다"
 
     # 이 스위치가 만드는 유일한 외부 호출 증가 지점 — 켜면 되돌릴 수 없다.
-    assert serial.probe.search_calls == 0
+    assert serial.probe.search_calls >= 1
     assert parallel.probe.search_calls >= 1
 
 
-def test_비교지문을_못만들면_켜든_꺼든_내부계약_사유로_멈춘다() -> None:
-    """지문 접기가 터져도 예전처럼 fail-closed 관문으로 끝나야 한다.
+def test_비교지문_직렬화_오류도_켜든_꺼든_SHADOW로_복구한다() -> None:
+    """지문 접기 오류도 공식 자료를 남긴 SHADOW 보고서로 복구한다.
 
-    예전 코드는 비교 생산과 지문 접기가 같은 `try` 안이라 직렬화 오류도
-    「내부 근거 계약」 GATE_STOPPED가 됐다. 갈래로 나누면서 접기를 합류 지점으로
-    빼면 그 덮개가 사라져 처리되지 않은 실패로 바뀐다 — 그 회귀를 막는다.
+    비교 생산과 지문 접기를 갈래로 실행해도 오류를 수집 실패로 기록하고
+    캐시 재사용을 막은 채 보고서 생성을 계속해야 한다.
     """
 
     serial = _run_research(
@@ -528,17 +540,21 @@ def test_비교지문을_못만들면_켜든_꺼든_내부계약_사유로_멈�
     )
 
     for run, label in ((serial, "차례"), (parallel, "동시")):
-        assert run.result.outcome is Outcome.GATE_STOPPED, label
+        assert run.result.outcome is Outcome.REPORT, label
+        assert run.result.generation_cache_eligible is False, label
+        assert len(run.calls.composers) == 1, label
         assert (
-            run.result.final_gate_reason
-            == FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+            run.calls.composers[0]["release_mode_override"] is ReleaseMode.SHADOW
         ), label
-        assert run.calls.composers == [], label
+        projected = run.calls.legacy_collects[0]["formal_official_evidence"]
+        assert projected is not None, label
+        assert sum(len(candidate.fragments) for candidate in projected.candidates) > 0, label
         recorded = _step_names(run.steps)
-        assert recorded.count(COMPARISON_TRANSPORT_BLOCKED_STEP) == 1, label
+        assert recorded.count(real.COLLECTION_RECOVERY_STEP) == 1, label
+        assert NEWS_SEARCH_SNAPSHOT_STEP in recorded, label
 
     assert serial.result.message == parallel.result.message
-    # 비교 생산기는 정상적으로 끝났다 — 멈춘 것은 지문 접기다.
+    # 비교 생산기는 호출됐고, 멈춘 것은 지문 접기뿐이다.
     assert serial.probe.comparison_calls == parallel.probe.comparison_calls == 1
 
 
@@ -566,3 +582,42 @@ def test_갈래_안에서_남긴_단계가_완료순서가_아니라_정해진_�
     )
     # 뉴스 갈래 탐침은 검색 스냅샷 단계와 «같은 묶음»으로 옮겨져야 한다.
     assert recorded.index(NEWS_PROBE_STEP) < recorded.index(NEWS_SEARCH_SNAPSHOT_STEP)
+
+
+@pytest.mark.parametrize("parallel", (False, True), ids=("serial", "parallel"))
+@pytest.mark.parametrize("branch", ("comparison", "news"))
+@pytest.mark.parametrize(
+    "interrupted_type",
+    (
+        CancelledError,
+        GenerationCoordinationError,
+        EngineBuildIdentityChangedError,
+        GenerationWaitCancelled,
+    ),
+)
+def test_collection_branch_global_interrupts_are_propagated(
+    parallel: bool,
+    branch: str,
+    interrupted_type: type[BaseException],
+) -> None:
+    """중단 종류에 따른 파이프라인 종료 계약을 비교·뉴스 갈래별로 고정한다."""
+
+    interrupted = interrupted_type(f"시험용 {branch} 중단")
+    kwargs: dict[str, Any] = {"parallel": parallel}
+    if branch == "comparison":
+        kwargs["comparison_error"] = interrupted
+    else:
+        kwargs["news_error"] = interrupted
+
+    if interrupted_type is GenerationWaitCancelled:
+        with pytest.raises(interrupted_type) as caught:
+            _run_research(**kwargs)
+        assert caught.value is interrupted
+        return
+
+    run = _run_research(**kwargs)
+    assert run.result.outcome is Outcome.FAILED
+    assert run.calls.composers == []
+    assert not any(
+        step.get("step") == real.COLLECTION_RECOVERY_STEP for step in run.steps
+    )

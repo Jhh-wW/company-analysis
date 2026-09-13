@@ -13,6 +13,7 @@ import hmac
 import importlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -115,7 +116,6 @@ REQUIRED_TABLES: Final[frozenset[str]] = frozenset(
 )
 
 ACTIVE_QUERIES: Final[tuple[tuple[str, str], ...]] = (
-    ("미정산 비용 예약", "SELECT COUNT(*) FROM budget_spend_inflight"),
     (
         "진행 중 공유 링크 작업",
         "SELECT COUNT(*) FROM share_link_run_history "
@@ -138,6 +138,19 @@ ACTIVE_QUERIES: Final[tuple[tuple[str, str], ...]] = (
         "진행 중 Notion 내보내기",
         "SELECT COUNT(*) FROM notion_export_operations WHERE state = 'in_progress'",
     ),
+)
+
+BUDGET_CUTOVER_VERSION: Final[str] = "attempt-ledger-v1"
+BUDGET_ATTEMPT_TABLES: Final[frozenset[str]] = frozenset({
+    "budget_schema_migrations", "budget_phase_accounts",
+    "budget_provider_attempts", "budget_provider_attempt_events",
+})
+BUDGET_LEGACY_TABLES: Final[tuple[str, ...]] = (
+    "budget_spend_events", "budget_spend_inflight", "budget_spend_overruns",
+)
+BUDGET_LEGACY_WRITE_OPERATIONS: Final[tuple[str, ...]] = ("INSERT", "UPDATE", "DELETE")
+BUDGET_LIABILITY_STATES: Final[tuple[str, ...]] = (
+    "UNKNOWN_LEGACY", "CONSERVATIVE_LIABILITY", "LIABILITY_CONFIRMED",
 )
 
 
@@ -1988,6 +2001,154 @@ def _database_under_root(database_path: Path, data_root: Path) -> tuple[Path, Pa
     return database, root
 
 
+def _assert_budget_legacy_barriers(connection: sqlite3.Connection) -> None:
+    """이관된 구표가 보존용이라는 판단에는 실제 쓰기 방지 계약이 필요하다."""
+    for table in BUDGET_LEGACY_TABLES:
+        for operation in BUDGET_LEGACY_WRITE_OPERATIONS:
+            name = f"{table}_{operation.lower()}_after_cutover"
+            row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,),
+            ).fetchone()
+            expected = f"""
+                CREATE TRIGGER {name} BEFORE {operation} ON {table}
+                WHEN EXISTS (SELECT 1 FROM budget_schema_migrations
+                    WHERE version = '{BUDGET_CUTOVER_VERSION}')
+                BEGIN SELECT RAISE(ABORT, 'legacy budget ledger is disabled after cutover'); END
+            """
+            if row is None or _normalized_schema_sql(row[0]) != _normalized_schema_sql(expected):
+                raise ReadinessError("이관된 구 비용 원장의 쓰기 방지 계약이 불완전합니다.")
+
+
+def _assert_budget_legacy_binding(connection: sqlite3.Connection, migration: sqlite3.Row) -> int:
+    """구표 각 행을 불변 초기 attempt와 대조한다. 현재 대사 결과는 덮어쓰지 않는다."""
+    legacy_count = 0
+    for kind, table, amount_column, time_column, operation in (
+        ("known", "budget_spend_events", "cost_krw", "created_at", "known-spend"),
+        ("unknown", "budget_spend_inflight", "reserved_krw", "started_at", "unknown-inflight"),
+    ):
+        for old in connection.execute(
+            f"SELECT run_id, phase, day, bucket_id, {amount_column}, {time_column} FROM {table}"
+        ):
+            digest = hashlib.sha256(f"{kind}\0{old[0]}\0{old[1]}".encode("utf-8")).hexdigest()
+            bound = connection.execute(
+                """
+                SELECT p.day, p.bucket_id, p.state, p.reservation_krw,
+                       p.lease_owner_id, p.lease_expires_at, a.estimated_krw, a.created_at,
+                       e.transport_state, e.billing_state, e.reservation_krw,
+                       e.known_cost_krw, e.liability_krw, e.reason_code
+                  FROM budget_provider_attempts a
+                  JOIN budget_phase_accounts p ON p.run_id=a.run_id AND p.phase=a.phase
+                  JOIN budget_provider_attempt_events e ON e.attempt_id=a.attempt_id AND e.event_seq=0
+                 WHERE a.attempt_id=? AND a.run_id=? AND a.phase=?
+                   AND a.provider='legacy' AND a.operation=?
+                """,
+                (f"legacy:{kind}:{digest}", old[0], old[1], operation),
+            ).fetchone()
+            amount = float(old[4])
+            if not math.isfinite(amount) or amount < 0 or bound is None:
+                raise ReadinessError("구 비용 원장의 행이 새 attempt 원장에 결속되지 않았습니다.")
+            if (tuple(bound[:2]) != tuple(old[2:4]) or bound[7] != old[5]
+                    or bound[3] != 0 or bound[4] is not None or bound[5] is not None
+                    or bound[10] != 0):
+                raise ReadinessError("구 비용 원장과 이관된 날짜·통장·예약·시각이 다릅니다.")
+            if kind == "unknown":
+                legacy_count += 1
+                migrated_amount = float(bound[12])
+                valid = (
+                    bound[2] == "UNKNOWN_LEGACY" and bound[8] == "UNKNOWN_LEGACY"
+                    and bound[9] == "UNKNOWN_LEGACY" and bound[11] == 0
+                    and math.isfinite(migrated_amount) and migrated_amount > 0
+                    and bound[6] == migrated_amount
+                    and ((amount > 0 and migrated_amount == amount and bound[13] == "legacy-inflight-reservation")
+                         or (amount == 0 and bound[13] == "legacy-zero-reservation-fallback"))
+                )
+            else:
+                valid = (
+                    bound[2] in ("SUCCEEDED", "UNKNOWN_LEGACY")
+                    and bound[8] == "RESPONSE_RECEIVED" and bound[9] == "KNOWN_COST"
+                    and bound[6] == amount and bound[11] == amount and bound[12] == 0
+                    and bound[13] == "legacy-known-spend"
+                )
+            if not valid:
+                raise ReadinessError("구 비용 원장과 이관된 확정액·보수부채가 다릅니다.")
+            if kind == "unknown":
+                latest = connection.execute(
+                    "SELECT transport_state, billing_state, known_cost_krw, liability_krw, reservation_krw "
+                    "FROM budget_provider_attempt_events WHERE attempt_id=? ORDER BY event_seq DESC LIMIT 1",
+                    (f"legacy:{kind}:{digest}",),
+                ).fetchone()
+                if (latest[0] != "UNKNOWN_LEGACY" or latest[4] != 0
+                        or latest[1] not in ("UNKNOWN_LEGACY", "LIABILITY_CONFIRMED", "KNOWN_COST", "KNOWN_ZERO")
+                        or (latest[1] in ("UNKNOWN_LEGACY", "LIABILITY_CONFIRMED")
+                            and (latest[2] != 0 or latest[3] != migrated_amount))
+                        or (latest[1] in ("KNOWN_COST", "KNOWN_ZERO") and latest[3] != 0)
+                        or (latest[1] == "KNOWN_ZERO" and latest[2] != 0)):
+                    raise ReadinessError("이관된 보수부채의 현재 기록과 감사 이력이 다릅니다.")
+    phases = _single_count(connection, """
+        SELECT COUNT(*) FROM (
+            SELECT run_id, phase FROM budget_spend_events
+            UNION SELECT run_id, phase FROM budget_spend_inflight
+        )
+    """)
+    known = _single_count(connection, """
+        SELECT COUNT(*) FROM budget_provider_attempts
+        WHERE provider='legacy' AND operation IN ('known-spend', 'observation-adjustment')
+    """)
+    unknown = _single_count(connection, """
+        SELECT COUNT(*) FROM budget_provider_attempts
+        WHERE provider='legacy' AND operation='unknown-inflight'
+    """)
+    if (tuple(migration) != (phases, known, unknown) or unknown != legacy_count
+            or _single_count(connection, "SELECT COUNT(*) FROM budget_spend_events")
+            != _single_count(connection, "SELECT COUNT(*) FROM budget_provider_attempts WHERE provider='legacy' AND operation='known-spend'")
+            or _single_count(connection, """
+                SELECT COUNT(*) FROM budget_provider_attempts a
+                LEFT JOIN budget_provider_attempt_events e
+                  ON e.attempt_id=a.attempt_id AND e.event_seq=0
+                WHERE e.attempt_id IS NULL
+            """)):
+        raise ReadinessError("비용 원장의 이관 집계 또는 초기 attempt 기록이 불완전합니다.")
+    return legacy_count
+
+
+def _budget_preflight(connection: sqlite3.Connection, tables: set[str]) -> dict[str, object]:
+    """진행 lease와 보존 부채를 구분한다. 이관 증거가 불완전하면 실패한다."""
+    legacy_count = _single_count(connection, "SELECT COUNT(*) FROM budget_spend_inflight")
+    present = BUDGET_ATTEMPT_TABLES & tables
+    if not present:
+        return {"mode": "legacy", "active_phases": legacy_count, "preserved_legacy_inflight": 0}
+    if present != BUDGET_ATTEMPT_TABLES:
+        raise ReadinessError("새 비용 원장의 이관 테이블이 불완전합니다.")
+    migration = connection.execute(
+        "SELECT legacy_phases, legacy_known_attempts, legacy_unknown_attempts "
+        "FROM budget_schema_migrations WHERE version=?", (BUDGET_CUTOVER_VERSION,),
+    ).fetchone()
+    if migration is None:
+        # schema bootstrap은 이관 완료가 아니다. 비어 있는 새 표는 구판 정책으로 검사한다.
+        if any(_single_count(connection, f"SELECT COUNT(*) FROM {table}") for table in BUDGET_ATTEMPT_TABLES):
+            raise ReadinessError("이관 완료 표식 없이 새 비용 원장 기록이 존재합니다.")
+        return {"mode": "legacy", "active_phases": legacy_count, "preserved_legacy_inflight": 0}
+    _assert_budget_legacy_barriers(connection)
+    preserved = _assert_budget_legacy_binding(connection, migration)
+    active = _single_count(connection, "SELECT COUNT(*) FROM budget_phase_accounts WHERE state='ACTIVE'")
+    liabilities: dict[str, dict[str, float | int]] = {}
+    for row in connection.execute("""
+        SELECT e.billing_state, COUNT(*), SUM(e.liability_krw)
+          FROM budget_provider_attempt_events e
+          JOIN (SELECT attempt_id, MAX(event_seq) AS event_seq
+                  FROM budget_provider_attempt_events GROUP BY attempt_id) latest
+            ON latest.attempt_id=e.attempt_id AND latest.event_seq=e.event_seq
+         WHERE e.billing_state IN (?, ?, ?)
+         GROUP BY e.billing_state
+    """, BUDGET_LIABILITY_STATES):
+        amount = float(row[2])
+        if not math.isfinite(amount) or amount <= 0:
+            raise ReadinessError("현재 보수부채 금액이 유효하지 않습니다.")
+        liabilities[str(row[0])] = {"attempts": int(row[1]), "liability_krw": amount}
+    return {"mode": BUDGET_CUTOVER_VERSION, "active_phases": active,
+            "preserved_legacy_inflight": preserved, "liabilities": liabilities}
+
+
 def preflight(
     database_path: Path,
     data_root: Path,
@@ -2004,9 +2165,25 @@ def preflight(
     blockers: list[str] = []
     warnings: list[str] = []
     counts: dict[str, int] = {}
+    budget: dict[str, object] = {"mode": "검증 실패"}
     try:
         with closing(_live_readonly_connection(database)) as connection:
-            _assert_database(connection)
+            tables = _assert_database(connection)
+            try:
+                budget = _budget_preflight(connection, tables)
+            except (ReadinessError, sqlite3.Error, ValueError, TypeError) as exc:
+                # 구표를 무시하거나 불완전한 새 원장을 진행 0으로 보고하지 않는다.
+                message = str(exc) if isinstance(exc, ReadinessError) else "비용 원장 이관 계약을 읽지 못했습니다."
+                blockers.append(message)
+            else:
+                label = "미정산 비용 예약" if budget["mode"] == "legacy" else "진행 중 비용 단계"
+                counts[label] = int(budget["active_phases"])
+                if counts[label]:
+                    blockers.append(f"{label} {counts[label]}건이 남아 있습니다.")
+                if budget["preserved_legacy_inflight"]:
+                    warnings.append(f"이관된 구 비용 예약 {budget['preserved_legacy_inflight']}건을 감사 원장에 보존하고 있습니다.")
+                for state, summary in budget.get("liabilities", {}).items():
+                    warnings.append(f"비용 부채 {state} {summary['attempts']}건, {summary['liability_krw']:g}원을 보존합니다. 진행 중 작업 수와 별도입니다.")
             for label, sql in ACTIVE_QUERIES:
                 counts[label] = _single_count(connection, sql)
                 if counts[label] > 0:
@@ -2051,6 +2228,7 @@ def preflight(
         "status": "차단" if blockers else "통과",
         "service_state": service_state,
         "counts": counts,
+        "budget_ledger": budget,
         "disk": {
             "total_bytes": disk.total,
             "free_bytes": disk.free,

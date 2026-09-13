@@ -81,15 +81,19 @@ def test_character_budget_includes_heading_and_intervening_whitespace(monkeypatc
     monkeypatch.setattr(c, "MAX_LONG_FRAGMENT_CHARS_PER_DOCUMENT", len(BODY))
     result = segment_document_with_status(text)
     assert result.candidates == ()
-    assert result.truncation_reason == c.REASON_DOCUMENT_FRAGMENT_CHARS_EXCEEDED
+    assert result.scan_complete and result.selection_compressed
+    assert not result.truncation_reason
+    assert result.compression_reason == c.REASON_DOCUMENT_FRAGMENT_CHARS_EXCEEDED
 
 
-def test_candidate_limit_preserves_truncation(monkeypatch):
+def test_후보_보관상한은_선택압축으로_기록한다(monkeypatch):
     monkeypatch.setattr(c, "MAX_LONG_FRAGMENT_CANDIDATES_PER_DOCUMENT", 1)
     text = f"1) 첫 법인\n\n{BODY}\n\n2) 둘째 법인\n\n새로운 고객을 확보하면서 독립적인 업무와 사업을 운영하고 있습니다."
     result = segment_document_with_status(text)
     assert len(result.candidates) == 1
-    assert result.truncation_reason == c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
+    assert result.scan_complete and result.selection_compressed
+    assert not result.truncation_reason
+    assert result.compression_reason == c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
 
 
 def test_parenthesized_subheadings_preserve_segment_and_candidate_limits(monkeypatch):
@@ -98,7 +102,9 @@ def test_parenthesized_subheadings_preserve_segment_and_candidate_limits(monkeyp
     text = "\n\n".join(f"{i}) 법인\n\n본문 {i}의 독립적인 내용과 운영 현황을 충분한 길이로 기록합니다." for i in range(1, 5))
     result = segment_document_with_status(text)
     assert len(result.candidates) <= 2
-    assert result.truncation_reason == c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
+    assert result.scan_complete and result.selection_compressed
+    assert not result.truncation_reason
+    assert result.compression_reason == c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
 
 
 def test_already_contiguous_heading_preserves_whitespace_offsets():
@@ -155,11 +161,12 @@ def test_classified_body_preserves_short_observation_in_separate_lane():
     assert [f["text"] for f in mapping["unclassified_fragments"]] == [heading]
 
 
-def test_short_range_deduplication_preserves_observed_truncation(monkeypatch):
+def test_짧은범위_중복제거_후에도_선택압축_관측을_보존한다(monkeypatch):
     monkeypatch.setattr(c, "MAX_SHORT_OBSERVATION_CANDIDATES_PER_DOCUMENT", 1)
     text = "8) 예시항목\n\n오늘 날씨가 맑고 하늘이 파랗다는 이야기를 적어 둔 문단이다.\n\n별도 관측"
     harvest = _collect_text(text, short_observation_filter=lambda value: True)
     assert any(
-        a.state == c.ATTEMPT_STATE_TRUNCATED and a.reason_code == c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
+        a.state == c.ATTEMPT_STATE_OK and a.document_scan is not None
+        and a.document_scan.state == c.SCAN_STATE_COMPLETE and a.document_scan.selection_compressed
         for a in harvest.attempts
     )

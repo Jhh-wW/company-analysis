@@ -34,6 +34,7 @@ from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
 from src.shared.report_generation.table_citations import validated_row_cites
 from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
 from src.shared.report_quality.output_constants import SUMMARY_MIN_SENTENCES, SUMMARY_MAX_SENTENCES
+from src.shared.report_quality.models import PublicationPolicy
 
 #: 조립·렌더 결함이 남기는 영문 내부 키 모양 — 값 «전체» 일치만 본다.
 INTERNAL_KEY_SHAPE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -251,8 +252,30 @@ def _citation_mapping_problems(report: object, source_numbers, citation_number) 
 # ══════════════════════════════════════════════════════════
 
 
+def summary_floor_relaxed(report: object) -> bool:
+    """확보 근거 보고서(evidence-available 정책)만 요약 하한을 두지 않는다.
+
+    ★ 정책 값은 생성 시점에 Report에 저장되고 웹·PDF·Notion 재검사도 같은
+      값을 읽으므로 채널마다 판정이 갈리지 않는다. FULL 봉인 보고서는 공개
+      정책이 structured-safety로 고정돼(canonical 검사) 이 완화를 받을 수 없다.
+    """
+
+    return (
+        str(getattr(report, "publication_policy", "") or "")
+        == PublicationPolicy.EVIDENCE_AVAILABLE.value
+    )
+
+
 def _summary_problems(report: object) -> list[str]:
     count = len(report.summary_items)
+    if summary_floor_relaxed(report):
+        # 확보 근거 보고서는 검증된 문장이 3개 장에 못 미치면 0~2문장도 낸다.
+        # 상한은 그대로 둔다 — 요약이 본문보다 길어지는 결함은 여전히 막는다.
+        if count <= SUMMARY_MAX_SENTENCES:
+            return []
+        return [
+            f"핵심 요약은 최대 {SUMMARY_MAX_SENTENCES}문장이어야 하는데 {count}문장입니다"
+        ]
     if SUMMARY_MIN_SENTENCES <= count <= SUMMARY_MAX_SENTENCES:
         return []
     return [

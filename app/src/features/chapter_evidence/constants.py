@@ -21,6 +21,8 @@ from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 
 
 CHAPTER_EVIDENCE_PRODUCER_VERSION: Final[str] = "chapter-evidence-producer-v1"
+SELECTION_CHANGE_CONTEXT: Final[str] = "selection_change_context"
+SELECTION_RECENT_CONTEXT: Final[str] = "selection_recent_context"
 
 # 근거 원문 문자 수 → 예상 토큰 추정 비율.
 # 한국어 위주 원문은 토크나이저별로 평균 1토큰≈2~2.6자 범위를 보인다. 예산을

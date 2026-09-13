@@ -53,6 +53,14 @@ PROVIDER_ERROR_PREFIX_BOUNDARIES: Final[tuple[str, ...]] = (".", ":", " ")
 PROVIDER_ENFORCED_SPEND_LIMIT_CODE: Final[str] = "enforced_spend_limit_reached"
 PROVIDER_MONTHLY_SPEND_CATEGORY: Final[str] = "organization_monthly_spend_cap"
 
+# 수집 실패 자체에는 본문이 없으므로 비어 있는 장 후보의 최소 선언 예산이다.
+EMPTY_COLLECTION_CANDIDATE_BUDGET: Final[int] = 1
+EVIDENCE_AVAILABLE_PUBLICATION_POLICY: Final[str] = "evidence-available-v1"
+COLLECTION_RECOVERY_STEP: Final[str] = "6_수집_확보자료계속"
+PARTIAL_GENERATION_IDENTITY_VERSION: Final[str] = "partial-collection-generation-v1"
+ELIGIBILITY_ACCEPTED_STATUS: Final[str] = "대상"
+ELIGIBILITY_PUBLIC_ORG_REJECT_STATUS: Final[str] = "거부A_공공기관"
+ELIGIBILITY_UNDETERMINED_STATUS: Final[str] = "미확인"
 # ── 실행 진단 — 단계별 소요 시간 ─────────────────────────
 #: 화면 단계(`core.constants.PROGRESS_STEPS`)가 바뀔 때마다 직전 단계의
 #: 소요 시간을 진단(`shared.stage_elapsed_constants.STAGE_ELAPSED_STEP`)으로

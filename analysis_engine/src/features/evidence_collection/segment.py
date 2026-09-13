@@ -1,24 +1,22 @@
-"""전문(全文) 의미 분할.
+"""원문 순회와 후보 보관을 분리한 문서 분할기.
 
-기존 방식(공시 종류당 첫 1,200자만 봄, 실측 커버리지 2.4%)을 버리고 문서
-전체를 제목·문단 구조로 나눈다. 목차 구간과 문서 전체에서 반복되는 상투
-문구(면책 등)는 후보에서 뺀다.
+색인·후보 보관 상한은 EOF 순회를 중단하지 않는다. 시간 제한만 실제
+미완료로 기록하며, 후보 원문은 항상 입력의 연속 구간이다.
 """
-
 from __future__ import annotations
 
-import io
+import hashlib
 import re
-from collections.abc import Callable
-from dataclasses import dataclass
+import time
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
 
 from features.evidence_collection import constants as c
 from features.evidence_collection.models import DocumentTextRange
 
+
 @dataclass(frozen=True)
 class TextSegment:
-    """제목 줄 하나가 여는 구간. 목차 구간은 애초에 만들지 않는다."""
-
     heading: str
     start: int
     end: int
@@ -27,356 +25,244 @@ class TextSegment:
 
 @dataclass(frozen=True)
 class FragmentCandidate:
-    """문단 하나 — EvidenceFragment로 올라가기 전의 중간 산출물."""
-
     start: int
     end: int
     text: str
     section_heading: str
+    is_short: bool = False
+
+
+@dataclass
+class ScanProgress:
+    scanned_chars: int = 0
+    complete: bool = False
+    truncation_reason: str = ""
+    line_index_saturated: bool = False
+    windowed_paragraphs: bool = False
+    candidates_seen: int = 0
+    classification_keywords: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
 class DocumentSegmentationResult:
-    """bounded 전문 분할 결과와 잘린 이유.
-
-    ``truncation_reason``이 있으면 후보는 안전한 상한까지의 실제 원문이지만
-    문서 전문을 끝까지 검사했다는 뜻은 아니다. 호출자는 이를 OK로 기록하면
-    안 된다.
-    """
-
     candidates: tuple[FragmentCandidate, ...]
     truncation_reason: str = ""
+    scan_complete: bool = False
+    scanned_chars: int = 0
+    selection_compressed: bool = False
+    compression_reason: str = ""
+    line_index_saturated: bool = False
+
+
+_TOC_ENTRY_LEADER_PATTERN = re.compile(r"[.·]{2,}\s*\d{1,4}\s*$")
 
 
 def _is_heading(line: str) -> bool:
-    return bool(c.DOCUMENT_HEADING_PATTERN.match(line.strip()))
+    return len(line.strip()) <= c.MAX_HEADING_CONTEXT_CHARS and bool(
+        c.DOCUMENT_HEADING_PATTERN.match(line.strip())
+    )
 
 
 def _is_context_heading(text: str) -> bool:
-    return _is_heading(text) or bool(c.PARAGRAPH_SUBHEADING_PATTERN.match(text.strip()))
-
-
-#: 목차 «항목» 줄(예: 「I. 회사의 개요 ...... 3」) — 점·가운뎃점 leader가 2개
-#: 이상 이어지다 쪽 번호로 끝나는 형태를 목차 항목으로 본다(P2 v1 휴리스틱 —
-#: 모든 DART 공시의 목차 표기를 전수 조사하지 않았다. 확인 못 함). 이 줄은
-#: DOCUMENT_HEADING_PATTERN에도 걸려 진짜 표제로 오인되던 결함이 있었다 — 표제
-#: 패턴과 겹치는 번호 매김(로마숫자 등)을 그대로 쓰기 때문이다.
-_TOC_ENTRY_LEADER_PATTERN = re.compile(r"[.·]{2,}\s*\d{1,4}\s*$")
+    return _is_heading(text) or (
+        len(text.strip()) <= c.MAX_HEADING_CONTEXT_CHARS
+        and bool(c.PARAGRAPH_SUBHEADING_PATTERN.match(text.strip()))
+    )
 
 
 def _is_toc_heading(line: str) -> bool:
     stripped = line.strip()
-    # 「목 차」처럼 마커 안에 공백이 섞여도 잡도록 공백을 모두 지우고 비교한다.
     collapsed = re.sub(r"\s+", "", stripped)
-    if any(marker in collapsed for marker in c.TOC_HEADING_MARKERS):
-        return True
-    return bool(_TOC_ENTRY_LEADER_PATTERN.search(stripped))
-
-
-def _segment_sections_with_status(text: str) -> tuple[list[TextSegment], str]:
-    """제목 구간과 잘린 이유를 함께 돌려준다."""
-    # ``splitlines``로 줄·offset list를 두 벌 만들면 8MiB의
-    # ``a\n`` 입력이 수백만 Python 객체로 증폭된다. 한 줄씩
-    # 스캔하고 현재 제목의 start만 유지한다.
-    segments: list[TextSegment] = []
-    found_heading = False
-    current_heading = ""
-    current_start = 0
-    current_is_toc = False
-    running = 0
-    for line in io.StringIO(text):
-        if _is_heading(line) or (
-            current_is_toc and _is_context_heading(line) and not _is_toc_heading(line)
-        ):
-            if found_heading and not current_is_toc:
-                segments.append(
-                    TextSegment(
-                        heading=current_heading,
-                        start=current_start,
-                        end=running,
-                        text=text[current_start:running],
-                    )
-                )
-                if len(segments) >= c.MAX_TEXT_SEGMENTS_PER_DOCUMENT:
-                    return segments, c.REASON_DOCUMENT_SECTION_COUNT_EXCEEDED
-            found_heading = True
-            current_heading = line.strip()
-            current_start = running
-            current_is_toc = _is_toc_heading(line)
-        running += len(line)
-
-    if not found_heading:
-        stripped = text.strip()
-        if not stripped:
-            return [], ""
-        return [TextSegment(heading="", start=0, end=len(text), text=text)], ""
-    if not current_is_toc and len(segments) < c.MAX_TEXT_SEGMENTS_PER_DOCUMENT:
-        segments.append(
-            TextSegment(
-                heading=current_heading,
-                start=current_start,
-                end=len(text),
-                text=text[current_start:],
-            )
-        )
-    return segments, ""
-
-
-def segment_sections(text: str) -> list[TextSegment]:
-    """제목 줄 기준 구간을 bounded list로 돌려준다(상태는 전문 API가 보존)."""
-
-    segments, _truncation_reason = _segment_sections_with_status(text)
-    return segments
-
-
-def _find_repeated_lines(text: str) -> tuple[frozenset[str], str]:
-    """반복 상투문구와 distinct-line 색인이 잘린 이유를 돌려준다."""
-    counts: dict[str, int] = {}
-    for line in io.StringIO(text):
-        stripped = line.strip()
-        if len(stripped) < c.BOILERPLATE_MIN_CHARS:
-            continue
-        if (
-            stripped not in counts
-            and len(counts) >= c.MAX_BOILERPLATE_DISTINCT_LINES_PER_DOCUMENT
-        ):
-            return (
-                frozenset(
-                    value
-                    for value, count in counts.items()
-                    if count >= c.BOILERPLATE_MIN_REPEAT_COUNT
-                ),
-                c.REASON_DOCUMENT_LINE_INDEX_EXCEEDED,
-            )
-        counts[stripped] = counts.get(stripped, 0) + 1
-    return (
-        frozenset(
-            line
-            for line, count in counts.items()
-            if count >= c.BOILERPLATE_MIN_REPEAT_COUNT
-        ),
-        "",
+    return any(marker in collapsed for marker in c.TOC_HEADING_MARKERS) or bool(
+        _TOC_ENTRY_LEADER_PATTERN.search(stripped)
     )
 
 
-def _split_paragraphs(
-    segment: TextSegment,
-    boilerplate: frozenset[str],
-    *,
-    min_chars: int = c.MIN_FRAGMENT_CHARS,
-    max_chars_exclusive: int | None = None,
-    max_candidates: int | None = None,
-    max_total_chars: int | None = None,
-    candidate_filter: Callable[[str], bool] | None = None,
-    preserve_heading_context: bool = False,
-) -> tuple[list[tuple[int, int, str]], str]:
-    """문단 후보와 count/문자 상한으로 잘린 이유를 함께 돌려준다."""
-    paragraphs: list[tuple[int, int, str]] = []
-    accepted_chars = 0
-    truncation_reason = ""
-    current_start: int | None = None
-    current_end: int | None = None
-    running = segment.start
-    pending_heading_start: int | None = None
+def _lines(text: str) -> Iterator[tuple[int, int, str]]:
+    """개행 없는 장문도 유한한 작업 단위로 나누어 마감을 확인할 수 있다."""
+    start = 0
+    while start < len(text):
+        limit = min(len(text), start + c.MAX_CANDIDATE_WINDOW_CHARS)
+        newline = text.find("\n", start, limit)
+        end = newline + 1 if newline >= 0 else limit
+        if newline < 0 and limit < len(text):
+            # 원문 좌표와 최대 창 크기를 유지한다. 가까운 문장 끝이 없으면
+            # 고정 경계로 진행하므로 모든 장문 의미를 복원했다고 주장하지 않는다.
+            boundary_start = max(start, limit - c.CANDIDATE_WINDOW_SENTENCE_LOOKBACK_CHARS)
+            for boundary in c.CANDIDATE_WINDOW_SENTENCE_END_PATTERN.finditer(text, boundary_start, limit):
+                end = boundary.end()
+        yield start, end, text[start:end]
+        start = end
 
-    def emit() -> None:
-        nonlocal accepted_chars, truncation_reason
-        nonlocal pending_heading_start
-        if truncation_reason:
-            return
-        if current_start is None or current_end is None:
-            return
-        raw = segment.text[
-            current_start - segment.start : current_end - segment.start
-        ]
-        stripped = raw.strip()
-        source_start = current_start
-        heading_start = pending_heading_start
-        # 비어 있지 않은 바로 다음 문단에서만 소비한다. 짧은 표 셀이나
-        # 다른 소제목을 건너뛰어 뒤쪽 문단에 제목을 빌려주지 않는다.
-        pending_heading_start = None
-        if (
-            preserve_heading_context
-            and "\n" not in stripped
-            and "\r" not in stripped
-            and _is_context_heading(stripped)
-            and len(stripped) < c.MIN_FRAGMENT_CHARS
-            and stripped not in boilerplate
-            and not _is_toc_heading(stripped)
-        ):
-            pending_heading_start = current_start + len(raw) - len(raw.lstrip())
-            return
-        eligible = (
-            stripped
-            and stripped not in boilerplate
-            and len(stripped) >= min_chars
-            and (
-                max_chars_exclusive is None
-                or len(stripped) < max_chars_exclusive
-            )
-            and (candidate_filter is None or candidate_filter(stripped))
-        )
-        if not eligible:
-            return
-        if heading_start is not None:
-            # 본문 자체가 기존 적격 기준을 통과한 뒤에만 원문 범위를 넓힌다.
-            # 제목·사이 공백도 문자 예산에 포함하며 합성 문장은 만들지 않는다.
-            source_start = heading_start
-            raw = segment.text[
-                source_start - segment.start : current_end - segment.start
-            ]
-            stripped = raw.strip()
-        if max_candidates is not None and len(paragraphs) >= max_candidates:
-            truncation_reason = c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
-            return
-        if (
-            max_total_chars is not None
-            and accepted_chars + len(stripped) > max_total_chars
-        ):
-            truncation_reason = c.REASON_DOCUMENT_FRAGMENT_CHARS_EXCEEDED
-            return
-        # 적격 판정은 ``stripped``로 하면서 내보내는 원문만 개행을 뗀 값
-        # (``raw.rstrip("\r\n")``)이면 XML 들여쓰기에서 온 앞 공백·줄 끝 공백이
-        # 조각 원문에 그대로 실린다. 그 원문은 app transport 경계
-        # (``value != value.strip()``이면 거절)를 통과하지 못해, 조각이 typed
-        # 신원을 잃거나 packet 전체가 거절된다. 판정과 산출을 같은 값으로
-        # 맞추고 좌표도 뗀 만큼 함께 옮긴다 — ``text_sha256``·usable range가
-        # 이 좌표·원문에서 파생되므로 하류에서 원문만 다시 strip하면 결속이
-        # 깨진다. ``str.strip()``은 U+3000·U+00A0 같은 유니코드 공백도 떼며,
-        # app 검사도 같은 ``str.strip()``을 쓰므로 두 판정이 대칭이다.
-        lead_whitespace_chars = len(raw) - len(raw.lstrip())
-        start = source_start + lead_whitespace_chars
-        paragraphs.append((start, start + len(stripped), stripped))
-        accepted_chars += len(stripped)
 
-    # ``splitlines``는 짧은 줄 수백만 개를 한꺼번에 list로 만들어 메모리를
-    # 증폭시킨다. StringIO iterator로 한 줄씩 읽어 같은 위치 계산을 유지한다.
-    for line in io.StringIO(segment.text):
-        if line.strip():
-            if current_start is None:
-                current_start = running
-            current_end = running + len(line)
+def iter_document_candidates(
+    text: str, *, progress: ScanProgress,
+    deadline_at: float | None = None,
+    short_filter: Callable[[str], bool] | None = None,
+) -> Iterator[FragmentCandidate]:
+    """일반·짧은 후보를 같은 순회에서 즉시 내보낸다.
+
+    반복 줄 사전 색인은 해시만 유한하게 보관한다. 포화 뒤에는 새 줄을
+    색인하지 않을 뿐 끝까지 읽는다. 이 색인 스캔은 후보 검사 완료 증명이
+    아니므로 scanned_chars는 실제 후보 순회에서만 늘어난다.
+    """
+    def expired() -> bool:
+        if deadline_at is not None and time.monotonic() > deadline_at:
+            progress.truncation_reason = c.REASON_DEADLINE_EXCEEDED
+            return True
+        return False
+
+    counts: dict[bytes, int] = {}
+    classification_tail = ""
+    classification_keywords = (c.REVENUE_LINE_ITEM_KEYWORD, *c.FINANCIAL_COMPANY_REVENUE_KEYWORDS)
+    overlap = max(map(len, classification_keywords))
+    for _start, _end, line in _lines(text):
+        if expired():
+            return
+        stripped = line.strip()
+        probe = classification_tail + line
+        progress.classification_keywords.update(keyword for keyword in classification_keywords if keyword in probe)
+        classification_tail = probe[-overlap:]
+        if len(stripped) < c.BOILERPLATE_MIN_CHARS:
+            continue
+        digest = hashlib.sha256(stripped.encode("utf-8")).digest()
+        if digest in counts:
+            counts[digest] = min(c.BOILERPLATE_MIN_REPEAT_COUNT, counts[digest] + 1)
+        elif len(counts) < c.MAX_BOILERPLATE_DISTINCT_LINES_PER_DOCUMENT:
+            counts[digest] = 1
         else:
-            emit()
-            if truncation_reason:
-                break
-            current_start, current_end = None, None
-        running += len(line)
-    emit()
-    return paragraphs, truncation_reason
+            progress.line_index_saturated = True
+
+    heading = ""
+    in_toc = False
+    para_start: int | None = None
+    para_end = 0
+    pending_heading: int | None = None
+    short_observations: set[str] = set()
+
+    def emit() -> FragmentCandidate | None:
+        nonlocal para_start, pending_heading
+        if para_start is None:
+            return None
+        start = para_start
+        para_start = None
+        raw = text[start:para_end]
+        body = raw.strip()
+        previous_heading = pending_heading
+        pending_heading = None
+        if not body or in_toc:
+            return None
+        if counts.get(hashlib.sha256(body.encode("utf-8")).digest(), 0) >= c.BOILERPLATE_MIN_REPEAT_COUNT:
+            return None
+        start += len(raw) - len(raw.lstrip())
+        end = start + len(body)
+        is_short = len(body) < c.MIN_FRAGMENT_CHARS
+        if is_short:
+            if _is_context_heading(body) and not _is_toc_heading(body):
+                pending_heading = start
+            if short_filter is not None and not short_filter(body):
+                return None
+            # 짧은 셀·잔여물도 첫 관측은 남긴다. 제목 문맥은 위에서 이미
+            # 갱신했으므로 같은 제목의 재등장이 다음 문단에서 사라지지 않는다.
+            if len(body) < c.BOILERPLATE_MIN_CHARS:
+                if body in short_observations:
+                    return None
+                if len(short_observations) < c.MAX_SHORT_DUPLICATE_TEXTS_PER_DOCUMENT:
+                    short_observations.add(body)
+        elif previous_heading is not None and end - previous_heading <= c.MAX_CANDIDATE_WINDOW_CHARS:
+            start = previous_heading
+            body = text[start:end]
+        first = body.partition("\n")[0].strip()
+        candidate = FragmentCandidate(start, end, body, first if _is_context_heading(first) else heading, is_short)
+        progress.candidates_seen += 1
+        return candidate
+
+    for start, end, line in _lines(text):
+        if expired():
+            return
+        is_heading = _is_heading(line) or (in_toc and _is_context_heading(line) and not _is_toc_heading(line))
+        if is_heading:
+            candidate = emit()
+            if candidate is not None:
+                yield candidate
+            heading = line.strip()
+            in_toc = _is_toc_heading(line)
+            pending_heading = None
+        if line.strip():
+            if para_start is not None and end - para_start > c.MAX_CANDIDATE_WINDOW_CHARS:
+                progress.windowed_paragraphs = True
+                candidate = emit()
+                if candidate is not None:
+                    yield candidate
+            if para_start is None:
+                para_start = start
+            para_end = end
+        else:
+            candidate = emit()
+            if candidate is not None:
+                yield candidate
+        progress.scanned_chars = end
+    candidate = emit()
+    if candidate is not None:
+        yield candidate
+    if not expired():
+        progress.scanned_chars = len(text)
+        progress.complete = True
+
+
+def _bounded_candidates(text: str, *, short: bool, candidate_filter=None) -> DocumentSegmentationResult:
+    progress = ScanProgress()
+    candidates: list[FragmentCandidate] = []
+    chars = 0
+    reason = ""
+    count_limit = c.MAX_SHORT_OBSERVATION_CANDIDATES_PER_DOCUMENT if short else c.MAX_LONG_FRAGMENT_CANDIDATES_PER_DOCUMENT
+    char_limit = c.MAX_SHORT_OBSERVATION_CHARS_PER_DOCUMENT if short else c.MAX_LONG_FRAGMENT_CHARS_PER_DOCUMENT
+    for candidate in iter_document_candidates(text, progress=progress, short_filter=candidate_filter):
+        if candidate.is_short != short:
+            continue
+        if len(candidates) >= count_limit:
+            reason = reason or c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
+        elif chars + len(candidate.text) > char_limit:
+            reason = reason or c.REASON_DOCUMENT_FRAGMENT_CHARS_EXCEEDED
+        else:
+            candidates.append(candidate)
+            chars += len(candidate.text)
+    return DocumentSegmentationResult(tuple(candidates), progress.truncation_reason,
+        progress.complete, progress.scanned_chars, bool(reason), reason, progress.line_index_saturated)
 
 
 def segment_document_with_status(text: str) -> DocumentSegmentationResult:
-    """문서 전문을 bounded 분할하고 완전성 상태를 함께 돌려준다."""
-
-    boilerplate, line_index_truncation = _find_repeated_lines(text)
-    candidates: list[FragmentCandidate] = []
-    total_chars = 0
-    sections, section_truncation = _segment_sections_with_status(text)
-    for section in sections:
-        remaining_count = c.MAX_LONG_FRAGMENT_CANDIDATES_PER_DOCUMENT - len(
-            candidates
-        )
-        remaining_chars = c.MAX_LONG_FRAGMENT_CHARS_PER_DOCUMENT - total_chars
-        paragraphs, paragraph_truncation = _split_paragraphs(
-            section,
-            boilerplate,
-            max_candidates=max(0, remaining_count),
-            max_total_chars=max(0, remaining_chars),
-            preserve_heading_context=True,
-        )
-        for start, end, para_text in paragraphs:
-            first_line = para_text.partition("\n")[0].strip()
-            heading = first_line if _is_context_heading(first_line) else section.heading
-            candidates.append(FragmentCandidate(
-                start=start, end=end, text=para_text, section_heading=heading,
-            ))
-            total_chars += len(para_text.strip())
-        if paragraph_truncation:
-            return DocumentSegmentationResult(
-                candidates=tuple(candidates),
-                truncation_reason=paragraph_truncation,
-            )
-    return DocumentSegmentationResult(
-        candidates=tuple(candidates),
-        truncation_reason=line_index_truncation or section_truncation,
-    )
+    """호환 보관 API. 정식 수집기는 반복자를 직접 채점하며 소비한다."""
+    return _bounded_candidates(text, short=False)
 
 
 def segment_document(text: str) -> list[FragmentCandidate]:
-    """호환 API — 후보는 항상 bounded이며 collect는 별도 상태 API를 쓴다."""
-
     return list(segment_document_with_status(text).candidates)
 
 
-def segment_short_observation_candidates_with_status(
-    text: str,
-    *,
-    candidate_filter: Callable[[str], bool] | None = None,
-) -> DocumentSegmentationResult:
-    """writer 하한보다 짧은 문단을 전문에서 찾고 완전성 상태도 돌려준다.
-
-    ``segment_document``의 품질 하한을 낮추지 않는다. 다른 생산기가 필요로
-    할 수 있는 원문을 같은 제목·문단 경계에서 관측한다. 호출자가 중립적인
-    ``candidate_filter``를 주입하면 필터에 맞지 않는 앞쪽 표 셀·상품코드는
-    예산을 소비하지 않으므로 문서 뒤쪽 후보까지 streaming 탐색할 수 있다.
-    필터 문법은 이 engine feature에 하드코딩하지 않는다.
-
-    문서당 개수·총문자를 동시에 제한하며, 맞는 후보가 상한을 넘어 하나라도
-    버려졌다면 ``truncation_reason``을 남긴다. 따라서 호출자는 bounded 결과를
-    「전문에서 더는 후보가 없었다」고 확대해석할 수 없다.
-    """
-
-    boilerplate, line_index_truncation = _find_repeated_lines(text)
-    candidates: list[FragmentCandidate] = []
-    total_chars = 0
-    sections, section_truncation = _segment_sections_with_status(text)
-    for section in sections:
-        remaining_count = c.MAX_SHORT_OBSERVATION_CANDIDATES_PER_DOCUMENT - len(
-            candidates
-        )
-        remaining_chars = c.MAX_SHORT_OBSERVATION_CHARS_PER_DOCUMENT - total_chars
-        paragraphs, paragraph_truncation = _split_paragraphs(
-            section,
-            boilerplate,
-            min_chars=1,
-            max_chars_exclusive=c.MIN_FRAGMENT_CHARS,
-            max_candidates=max(0, remaining_count),
-            max_total_chars=max(0, remaining_chars),
-            candidate_filter=candidate_filter,
-        )
-        for start, end, para_text in paragraphs:
-            candidates.append(
-                FragmentCandidate(
-                    start=start,
-                    end=end,
-                    text=para_text,
-                    section_heading=section.heading,
-                )
-            )
-            total_chars += len(para_text.strip())
-        if paragraph_truncation:
-            return DocumentSegmentationResult(
-                candidates=tuple(candidates),
-                truncation_reason=paragraph_truncation,
-            )
-    return DocumentSegmentationResult(
-        candidates=tuple(candidates),
-        truncation_reason=line_index_truncation or section_truncation,
-    )
+def segment_short_observation_candidates_with_status(text: str, *, candidate_filter=None) -> DocumentSegmentationResult:
+    return _bounded_candidates(text, short=True, candidate_filter=candidate_filter)
 
 
 def segment_short_observation_candidates(text: str) -> list[FragmentCandidate]:
-    """호환 API — 짧은 후보는 bounded이며 정식 수집은 상태 API를 쓴다."""
-
     return list(segment_short_observation_candidates_with_status(text).candidates)
 
 
-def usable_ranges_from_candidates(
-    candidates: list[FragmentCandidate],
-) -> tuple[DocumentTextRange, ...]:
-    """조각 후보들의 구간을 CollectedDocument.usable_ranges 모양으로 정렬해 돌려준다."""
-    return tuple(sorted(
-        (DocumentTextRange(start=candidate.start, end=candidate.end) for candidate in candidates),
-        key=lambda text_range: (text_range.start, text_range.end),
-    ))
+def segment_sections(text: str) -> list[TextSegment]:
+    """호환 제목 목록의 보관량만 제한한다. 후보 반복자는 이 목록을 쓰지 않는다."""
+    result: list[TextSegment] = []
+    start, heading, in_toc = 0, "", False
+    def keep(end: int) -> None:
+        if not in_toc and end > start and len(result) < c.MAX_TEXT_SEGMENTS_PER_DOCUMENT:
+            result.append(TextSegment(heading, start, end, text[start:end]))
+    for offset, _end, line in _lines(text):
+        if _is_heading(line):
+            keep(offset)
+            start, heading, in_toc = offset, line.strip(), _is_toc_heading(line)
+    keep(len(text))
+    return result
+
+
+def usable_ranges_from_candidates(candidates: list[FragmentCandidate]) -> tuple[DocumentTextRange, ...]:
+    return tuple(sorted((DocumentTextRange(candidate.start, candidate.end) for candidate in candidates),
+                        key=lambda value: (value.start, value.end)))

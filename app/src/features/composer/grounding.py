@@ -20,9 +20,12 @@ import unicodedata
 
 from src.features.composer.executive_status_guard import executive_status_problem
 from src.features.composer.modality_guard import modality_problem
-from src.features.composer.role_binding import claims_role_or_fee, role_binding_problem
+from src.features.composer.role_binding import (
+    role_binding_hint_lines, role_binding_problem, role_binding_requirements,
+)
 from src.features.composer.numeric_quote_refs import resolve_numeric_quote_refs
 from src.features.composer.scope_guard import scope_problem
+from src.features.composer.verbatim_news import VerbatimNewsSource
 
 from src.features.composer.grounding_constants import (
     COMPARATIVE_RE, CONTINUOUS_RE, COUNTED_CONTINUOUS_RE,
@@ -814,19 +817,28 @@ def grounding_problem(text: str, sources: Mapping[str, str], entry: Mapping) -> 
 
 def grounding_hint(
     text: str, sources: Mapping[str, str], cells: Sequence[str] | None = None,
+    *, verbatim_source: VerbatimNewsSource | None = None,
 ) -> str:
-    """그 후보에 어떤 추가 근거가 필요한지 검수 프롬프트에 한 줄로 적는다.
+    """그 후보에 어떤 추가 근거가 필요한지 검수 프롬프트에 적는다.
 
     ★ 인과와 역할·과금은 같은 «관계» 배열을 쓴다. 요구 항목 이름을 나누지 않아야
       파서·프롬프트·가드가 한 이름으로 맞물린다.
     ★ cells 는 도식 후보일 때만 준다 — 칸은 낱말만으로도 주장이지만, 산문은 그
       낱말이 서술어로 쓰였을 때만 주장이다.
+    ★ 역할·과금 요구는 판정과 «같은 함수»(`role_binding_requirements`)로 계산해
+      어느 낱말 때문에 어떤 유형이 필요한지, 어느 자리의 요구를 제외했는지를 후보
+      밑에 그대로 적는다. ``verbatim_source`` 는 검수 단계가 수집 객체로 증명한
+      «원문 그대로인 보도» 문맥이며, 판정 쪽에도 같은 값이 간다.
     """
 
     required = grounding_requirements(text, tuple(sources.values()))
-    if claims_cause(text) or claims_role_or_fee(text, cells):
+    binding = role_binding_requirements(text, sources, cells, verbatim_source)
+    if claims_cause(text) or binding.required:
         required += (RELATION_KEY,)
-    return "  추가 검증 필요: " + (", ".join(required) or "없음") + "\n"
+    return (
+        "  추가 검증 필요: " + (", ".join(required) or "없음") + "\n"
+        + role_binding_hint_lines(binding, cells is not None)
+    )
 
 
 def constrain_verdicts(
@@ -836,6 +848,7 @@ def constrain_verdicts(
     *,
     cells_by_number: Mapping[int, Sequence[str]] | None = None,
     baseline_date: str | None = None,
+    verbatim_by_number: Mapping[int, VerbatimNewsSource] | None = None,
 ) -> tuple[dict[int, str], dict[int, str]]:
     """같은 검수 응답의 근거를 실제 입력에 결속한다. 추가 AI 호출은 없다.
 
@@ -845,6 +858,8 @@ def constrain_verdicts(
     ``baseline_date``(ISO ``YYYY-MM-DD``, 보고서 기준일)는 executive_status_guard
     에만 쓰인다 — 생략하면 그 가드는 날짜 문턱 없이 이탈 표지 존재만으로
     판정한다(§executive_status_constants 참고). 기존 호출자는 그대로 동작한다.
+    ``verbatim_by_number`` 는 검수 단계가 수집 객체로 증명한 «원문 그대로인 보도»
+    문맥이다. 역할·과금 결속에만 쓰이며, 안내 생성과 같은 값을 받아야 한다.
     """
     from src.features.composer.logic import extract_json_payload
     # verify.py의 검수 파서와 같은 번호 보정 규칙을 쓴다 — 이 함수는 raw를
@@ -883,6 +898,7 @@ def constrain_verdicts(
             )
             or role_binding_problem(
                 text, sources, relation_evidence.get(number), cells,
+                (verbatim_by_number or {}).get(number),
             )
             or executive_status_problem(
                 text, sources, cells, baseline_date=baseline_date,

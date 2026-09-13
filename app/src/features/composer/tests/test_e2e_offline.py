@@ -110,11 +110,18 @@ _INTERNAL_KEY_RE = re.compile(r"[a-z][a-z0-9_]*")
 
 def _fixture_fragments() -> dict[int, dict[str, str]]:
     """fixture JSON을 real.py 원시 조각 dict[int, dict] 모양으로 바꾼다."""
-    return {
+    fragments = {
         int(number): dict(fields)
         for number, fields in _FRAGMENTS_FIXTURE.items()
         if number.isdigit()
     }
+    # fixture의 공식 IR 표기가 등록된 legacy kind와 달라 typed transport에서
+    # 신원 검증 실패 조각으로 격리됐다. URL·문서명·문서일을 가진 실제 공식 IR
+    # 근거의 등록명만 보정해, 부적격 조각 차단과 정상 수치 보존을 함께 검증한다.
+    for fragment in fragments.values():
+        if fragment.get("종류") == "공식IR":
+            fragment["종류"] = "공식 IR"
+    return fragments
 
 
 #: 요약 «고르기»가 돌려주는 문장 수. 가짜 AI(`_summary_selection_json`)가 서로

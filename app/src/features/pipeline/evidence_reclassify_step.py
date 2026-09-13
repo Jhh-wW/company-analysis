@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import sqlite3
+
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -22,6 +23,7 @@ from src.features.evidence_reclassify.logic import (
     to_typed_fragments,
 )
 from src.features.evidence_reclassify.models import ReclassifyAssignment, ReclassifyResult
+from src.features.pipeline.collection_recovery import raise_if_request_interrupted
 from src.features.pipeline.official_evidence_preflight import empty_collector_sections
 from src.features.storage import evidence_reclassify_cache
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
@@ -503,6 +505,7 @@ def reclassify_official_evidence(
                     )
                     parsed = parse_and_verify(_response_json(response), included)
                 except Exception as error:  # noqa: BLE001 - 차선 실패는 보고서를 막지 않는다
+                    raise_if_request_interrupted(error)
                     steps.append(
                         _step(
                             empty_sections=empty_sections,
@@ -541,6 +544,7 @@ def reclassify_official_evidence(
                     additions=additions,
                 )
             except Exception as error:  # noqa: BLE001 - 차선 병합 실패는 원결과로 격리한다
+                raise_if_request_interrupted(error)
                 steps.append(
                     _step(
                         empty_sections=empty_sections,
@@ -579,12 +583,14 @@ def reclassify_official_evidence(
                     # 여기서 확정한다.
                     conn.commit()
                 except Exception as error:  # noqa: BLE001 - cache 장애는 채택 결과를 버리지 않는다
+                    raise_if_request_interrupted(error)
                     save_failure = type(error).__name__
                     try:
                         conn.rollback()
                     except Exception:  # noqa: BLE001 - rollback 실패도 채택 결과를 막지 않는다
                         pass
     except Exception as error:  # noqa: BLE001 - DB 차선 실패는 보고서를 막지 않는다
+        raise_if_request_interrupted(error)
         steps.append(
             _step(
                 empty_sections=empty_sections,

@@ -22,6 +22,7 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION,
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT,
+    FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INCOMPLETE,
     FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
     FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
 )
@@ -34,6 +35,7 @@ class StoppedGuidanceState(str, Enum):
     EVIDENCE_CLASSIFICATION_UNDETERMINED = "evidence_classification_undetermined"
     OFFICIAL_SOURCE_CONFIGURATION = "official_source_configuration"
     TRANSIENT_COLLECTION_ISSUE = "transient_collection_issue"
+    COLLECTION_INCOMPLETE = "collection_incomplete"
     EVIDENCE_INSUFFICIENT = "evidence_insufficient"
     COMPARISON_EVIDENCE_INSUFFICIENT = "comparison_evidence_insufficient"
     GENERATION_QUALITY_SHORTFALL = "generation_quality_shortfall"
@@ -56,6 +58,17 @@ class StoppedGuidance:
 _GUIDANCE_BY_STATE: Final[Mapping[StoppedGuidanceState, StoppedGuidance]] = (
     MappingProxyType(
         {
+            StoppedGuidanceState.COLLECTION_INCOMPLETE: StoppedGuidance(
+                state=StoppedGuidanceState.COLLECTION_INCOMPLETE,
+                title="공식 자료의 일부를 끝까지 확인하지 못했습니다",
+                summary="수집 또는 처리 한도 때문에 확인하지 못한 범위가 남아 있습니다.",
+                meaning=(
+                    "회사에 자료가 없거나 분석 대상이 아니라는 뜻이 아닙니다. "
+                    "보고서는 확보하고 검증한 근거를 사용하며 나머지는 미확인으로 표시합니다."
+                ),
+                actions=("보고서에 표시된 미확인 범위와 수집 상태를 확인해 주세요.",),
+                primary_button_label="입력 화면으로 돌아가기",
+            ),
             StoppedGuidanceState.INTERNAL_EVIDENCE_ERROR: StoppedGuidance(
                 state=StoppedGuidanceState.INTERNAL_EVIDENCE_ERROR,
                 title="회사 자료가 아니라 시스템 내부 연결 문제입니다",
@@ -253,6 +266,8 @@ def guidance_for_final_gate_reason(reason_code: str) -> StoppedGuidance:
         state = StoppedGuidanceState.OFFICIAL_SOURCE_CONFIGURATION
     elif normalized == FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT:
         state = StoppedGuidanceState.TRANSIENT_COLLECTION_ISSUE
+    elif normalized == FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INCOMPLETE:
+        state = StoppedGuidanceState.COLLECTION_INCOMPLETE
     elif normalized == FINAL_GATE_REASON_COMPARISON_BLOCKED:
         state = StoppedGuidanceState.COMPARISON_EVIDENCE_INSUFFICIENT
     elif normalized == FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED:

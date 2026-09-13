@@ -97,7 +97,9 @@ SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
     "current_challenges:next_check": ("점검", "모니터링", "확인 예정"),
 
     "future_strategy:stated_plan": ("계획이며", "추진할 계획", "예정이다"),
-    "future_strategy:plan_status": ("진행", "검토 중", "착수"),
+    # 취소·철회도 계획의 상태다. 일반적인 취소 한 단어를 전략으로 승격하지
+    # 않고 계획·투자·일정과 직접 연결된 표현만 수집한다.
+    "future_strategy:plan_status": ("진행", "검토 중", "착수", *c.PLAN_CHANGE_STATUS_MARKERS),
     "future_strategy:plan_timing": ("2025년", "2026년", "분기까지"),
     "future_strategy:plan_condition": ("조건부", "전제로"),
     "future_strategy:execution_signal": ("투자", "착공", "체결"),

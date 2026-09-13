@@ -38,6 +38,7 @@ ALLOWED_OFFICIAL_COLLECTION_REASON_CODES: Final[frozenset[str]] = frozenset(
         "list_row_identity_mismatch",
         "list_rows_all_filtered",
         "document_fetch_ok",
+        "document_selection_compressed",
         "document_fetch_failed",
         "document_fetch_missing",
         "document_too_large",

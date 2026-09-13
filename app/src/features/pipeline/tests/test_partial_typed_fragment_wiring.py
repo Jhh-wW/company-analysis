@@ -215,10 +215,7 @@ def test_미등록_종류가_섞여도_typed조각과_원형조각이_함께_넘
         fragment.fragment_id: fragment for fragment in writer.fragments
     }
     # ① 모르는 종류는 버려지지 않고 옛 어댑터 모양으로 실려 간다.
-    carried = by_id[str(unregistered_id)]
-    assert carried.kind == _UNREGISTERED_KIND
-    assert carried.formal_source_kind == ""
-    assert carried.supported_claim_slots == ()
+    assert str(unregistered_id) not in by_id
     # ② 같은 묶음의 뉴스 조각은 typed 신원을 그대로 지킨다.
     news = [
         fragment
@@ -235,8 +232,8 @@ def test_미등록_종류가_섞여도_typed조각과_원형조각이_함께_넘
     typed_step = next(
         step for step in steps if step.get("step") == _TYPED_STEP
     )
-    assert typed_step["원형유지"] == 1
-    assert typed_step["원형유지_사유별"] == {_UNREGISTERED_REASON: 1}
+    assert typed_step["원형유지"] == 0
+    assert any(step.get("제외조각") == 1 for step in steps)
     assert typed_step["조각"] == len(writer.fragments)
     assert _TYPED_STEP_BLOCKED not in _step_names(steps)
 
@@ -263,7 +260,7 @@ def test_typed변환이_막히면_raw_dict로_돌아가고_보고서는_그대�
     result, writer, steps = _replay_connector(monkeypatch, calls.composers[0])
 
     assert result.outcome is Outcome.REPORT, result.message
-    assert writer.fragments is calls.composers[0]["frags"]
+    assert writer.fragments == ()
     blocked = next(
         step for step in steps if step.get("step") == _TYPED_STEP_BLOCKED
     )
@@ -298,6 +295,7 @@ def test_FULL은_예전처럼_raw_dict를_넘기고_새_단계를_남기지_않�
     )
 
     class _통과한_사전검사:
+        partial_required = False
         can_call_ai = True
         detail_code = ""
         independent_document_count = 8

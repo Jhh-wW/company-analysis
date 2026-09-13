@@ -57,18 +57,55 @@ REPEAT_CELL_MARKER_RE: Final[re.Pattern[str]] = re.compile(
 #: 산문은 «되풀이된다는 뜻이 분명한» 낱말과 «대가를 주고받는 서술»만 본다.
 #: ★ 「반복·지속·후속」을 산문 발동에 넣으면 「지속적인 채용」 같은 일반 문장이
 #:   전부 걸린다. 도식 칸과 달리 산문은 그 낱말이 주장이 아닐 때가 많다.
+#: ★ 낱말 목록을 «튜플»로 먼저 두고 정규식을 그 튜플에서 만든다. 검수 안내문도
+#:   같은 튜플에서 만들어야 «코드가 찾는 낱말»과 «AI에게 알려 준 낱말»이 다시
+#:   어긋나지 않는다(실측: 안내문에 「재가입」이 없는 채로 코드는 그 낱말에 결속을
+#:   요구했다).
+PROSE_REPEAT_WORDS: Final[tuple[str, ...]] = (
+    "재구매", "재예치", "재가입", "재계약", "재유치", "재이용", "갱신", "연장",
+)
 PROSE_REPEAT_MARKER_RE: Final[re.Pattern[str]] = re.compile(
-    r"(재구매|재예치|재가입|재계약|재유치|재이용|갱신|연장)")
+    r"(" + "|".join(PROSE_REPEAT_WORDS) + r")")
+#: 산문에서 «대가를 주고받는 서술»로 보는 낱말. 아래 정규식과 안내문이 함께 쓴다.
+PROSE_FEE_WORDS: Final[tuple[str, ...]] = ("수수료", "로열티", "보수", "대가", "우대금리")
 #: ⚠️ 뒤따르는 동사는 «활용형까지» 적는다. 「부과」·「청구」를 명사 두 글자로 두면
 #:    공백을 지운 표면형에서 「정**부과**제」처럼 낱말 경계를 걸쳐 우연히 맞는다
 #:    (실측: 「개발 대가와 정부 과제 수입은 …」이 대가 결속을 요구했다).
 #: ★ 「…수수료가 주요 수익원이다」도 대가 단언이다(우리은행 2장 실측). 수취 동사가
 #:   붙지 않아 위 꼴로는 잡히지 않으므로 그 틀을 따로 더한다.
 PROSE_FEE_MARKER_RE: Final[re.Pattern[str]] = re.compile(
-    _NOT_FEE_PREFIX + r"(수수료|로열티|보수|대가|우대금리)(?=[^.]{0,12}?"
+    _NOT_FEE_PREFIX + r"(" + "|".join(PROSE_FEE_WORDS) + r")(?=[^.]{0,12}?"
     r"(?:수취하|수취한|수취|수령하|수령한|수령|받|지급하|지급받|발생하|발생한|"
     r"부과하|부과되|부과한|부과된|청구하|청구되|청구한|청구된|면제)"
     r"|(?:은|는|이|가)?.{0,4}?주(?:요|된)?수익(?:원|기반))")
+
+# ══════════════════════════════════════════════════════════
+# ②-b 반복 낱말이 «혜택 수령인의 참여 조건»인 자리 — 닫힌 문법 꼴 하나
+# ══════════════════════════════════════════════════════════
+#
+# ★ 실측 반례: 보도 원문 「…만기 재가입 고객에 현금 …을 지급하고…」의 「재가입」은
+#   «누가 혜택을 받는가»의 조건이지 «고객이 반복해서 가입해 수익이 난다»는 주장이
+#   아니다. 그런데 산문 반복 표지는 낱말만 보고 발동해, 원문 그대로인 정상 보도
+#   문장에도 반복 결속 항목을 요구했고 검수 응답의 유형이 어긋나자 문장과 뉴스
+#   목록이 함께 사라졌다.
+# ★ 같은 꼴은 반대 방향의 구멍도 막는다 — 원문의 참여 조건 구절을 근거로 후보가
+#   「고객은 재가입한다」고 실제 행동을 단언하면, 그 구절로는 증명하지 못한다.
+# ⚠️ 이 꼴은 «반복 낱말 바로 뒤»만 본다: 「<반복낱말> <수령인 명사><여격 조사> …
+#    <혜택 서술어>」. 수령인과 혜택 서술어 사이에 쉼표·다른 주체·닫힌 연결어미가
+#    끼면 참여 조건으로 «확인하지 못한다»(통과가 아니라 미확인 — 기존 검사 유지).
+#: 혜택을 받는 쪽을 가리키는 명사. 닫힌 목록이며 늘리면 면제 범위가 넓어진다.
+PARTICIPATION_RECIPIENT_WORDS: Final[tuple[str, ...]] = (
+    "고객", "회원", "신청자", "대상자", "가입자", "이용자",
+)
+#: 반복 낱말 «바로 뒤»(원문 좌표, 띄어쓰기 필수)에 오는 수령인 명사 + 여격 조사.
+#: 「재가입 고객이 주요 수익원이다」의 「고객이」는 주격이라 여기 맞지 않는다 —
+#: 그 문장은 수익 주장이므로 결속 검사 대상으로 남는다(총괄 반례 ④).
+PARTICIPATION_RECIPIENT_RE: Final[re.Pattern[str]] = re.compile(
+    r"\s+(?:" + "|".join(PARTICIPATION_RECIPIENT_WORDS) + r")(?:에게|에|한테|께)(?=\s)")
+#: 수령인 뒤 같은 절 안에서 «혜택을 준다»는 서술어(활용형까지). 명사 두 글자만 두면
+#: 「지급보증」처럼 다른 낱말의 일부와 우연히 맞으므로 어미까지 적는다.
+BENEFIT_PREDICATE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:지급|증정|제공|적립)(?:하|해|했|한|할|합|함|되|돼|됐|된)")
 
 # ══════════════════════════════════════════════════════════
 # ③ 후보가 스스로 부정한 자리 — 발동에서 뺀다
@@ -195,6 +232,55 @@ ROLE_BINDING_NEGATED_IN_SOURCE: Final[str] = "role_binding_negated_in_source"
 ROLE_BINDING_CONDITION_DROPPED: Final[str] = "role_binding_condition_dropped_from_source"
 ROLE_BINDING_DIRECTION_REVERSED: Final[str] = "role_binding_direction_reversed"
 ROLE_BINDING_CLAIM_UNCOVERED: Final[str] = "role_binding_claim_not_covered"
+#: 원문의 그 자리는 «혜택 수령인의 참여 조건»인데 후보는 «실제 반복 행동·수익»으로
+#: 적었다 — 그 조건 구절로는 증명하지 못한다(§②-b). 같은 인용의 다른 절이 같은
+#: 주체의 실제 행동을 명시하면 그 절로는 증명할 수 있다.
+ROLE_BINDING_CONDITION_NOT_ACTION: Final[str] = (
+    "role_binding_participation_condition_not_action")
+#: 결속 요구를 «제외»한 후보가 낸 관계 항목의 유형이 비었거나 계약 밖이다. 평소에는
+#: 유형이 어긋난 항목을 이 가드가 읽지 않고 넘기지만(다른 유형은 다른 가드 몫), 요구가
+#: 남지 않은 자리에서는 그렇게 넘긴 항목을 아무 가드도 보지 않게 되므로 여기서 막는다.
+ROLE_BINDING_ENTRY_TYPE_UNKNOWN: Final[str] = "role_binding_entry_type_unknown"
+
+#: 규칙 버전 — 진단이 «어느 규칙으로 판정했는지»를 남긴다. 발동·면제·대조 규칙이
+#: 바뀔 때마다 올린다. 회사·날짜·사례가 아니라 규칙의 판만 가리킨다.
+ROLE_BINDING_RULE_VERSION: Final[str] = "role-binding-rules/2"
+#: 결속 요구를 «제외»한 사유표 — 진단·안내문이 같은 이름을 쓴다.
+ROLE_BINDING_WAIVER_VERBATIM_CONDITION: Final[str] = "verbatim_news_participation_condition"
+ROLE_BINDING_WAIVER_TEXTS: Final[dict[str, str]] = {
+    ROLE_BINDING_WAIVER_VERBATIM_CONDITION:
+        "검증된 보도 조각 하나를 원문 그대로 옮긴 후보이고, 그 반복 낱말은 혜택 수령인의 "
+        "참여 조건이라 반복 결속 항목을 요구하지 않습니다",
+}
+#: 사유 코드 → 실패한 검사 «단계». 유형 오류(kind)는 뒤쪽 원문 대조(source)보다
+#: 먼저 나므로, 이 표만 보고 «단순 형식 오류»라고 확정하면 안 된다 — 뒤 단계의
+#: 오류가 아직 드러나지 않았을 뿐이다.
+ROLE_BINDING_STAGE_FORMAT: Final[str] = "format"
+ROLE_BINDING_STAGE_KIND: Final[str] = "kind"
+ROLE_BINDING_STAGE_CITATION: Final[str] = "citation"
+ROLE_BINDING_STAGE_CANDIDATE: Final[str] = "candidate"
+ROLE_BINDING_STAGE_SOURCE: Final[str] = "source"
+ROLE_BINDING_STAGE_COVERAGE: Final[str] = "coverage"
+ROLE_BINDING_STAGE_BY_REASON: Final[dict[str, str]] = {
+    ROLE_BINDING_MISSING: ROLE_BINDING_STAGE_FORMAT,
+    ROLE_BINDING_FIELD_TYPE_INVALID: ROLE_BINDING_STAGE_FORMAT,
+    ROLE_BINDING_PAIR_MISSING: ROLE_BINDING_STAGE_FORMAT,
+    ROLE_BINDING_PAIR_DEGENERATE: ROLE_BINDING_STAGE_FORMAT,
+    ROLE_BINDING_KIND_MISMATCH: ROLE_BINDING_STAGE_KIND,
+    ROLE_BINDING_NOT_OWN_CITE: ROLE_BINDING_STAGE_CITATION,
+    ROLE_BINDING_QUOTE_NOT_IN_SOURCE: ROLE_BINDING_STAGE_CITATION,
+    ROLE_BINDING_TARGET_NOT_IN_CANDIDATE: ROLE_BINDING_STAGE_CANDIDATE,
+    ROLE_BINDING_ROLE_NOT_IN_CANDIDATE: ROLE_BINDING_STAGE_CANDIDATE,
+    ROLE_BINDING_ACTOR_BOUNDARY: ROLE_BINDING_STAGE_CANDIDATE,
+    ROLE_BINDING_ROLE_OUTSIDE_QUOTE: ROLE_BINDING_STAGE_SOURCE,
+    ROLE_BINDING_UNBOUND_IN_SOURCE: ROLE_BINDING_STAGE_SOURCE,
+    ROLE_BINDING_NEGATED_IN_SOURCE: ROLE_BINDING_STAGE_SOURCE,
+    ROLE_BINDING_CONDITION_DROPPED: ROLE_BINDING_STAGE_SOURCE,
+    ROLE_BINDING_DIRECTION_REVERSED: ROLE_BINDING_STAGE_SOURCE,
+    ROLE_BINDING_CONDITION_NOT_ACTION: ROLE_BINDING_STAGE_SOURCE,
+    ROLE_BINDING_CLAIM_UNCOVERED: ROLE_BINDING_STAGE_COVERAGE,
+    ROLE_BINDING_ENTRY_TYPE_UNKNOWN: ROLE_BINDING_STAGE_FORMAT,
+}
 
 #: 사유 코드 → 한국어 설명. 공개 문구·문서·진단 표시는 이 표를 쓴다.
 #: ⚠️ 문구는 모두 «확인하지 못함»이다. 「원문에 없다」고 단정하지 않는다.
@@ -231,6 +317,11 @@ ROLE_BINDING_REASON_TEXTS: Final[dict[str, str]] = {
         "원문은 그 대가가 어디서 발생하는지를 말하는데 후보는 그 대상의 주요 수익원이라고 방향을 뒤집었습니다",
     ROLE_BINDING_CLAIM_UNCOVERED:
         "후보가 역할·대가·반복이라고 적은 자리 가운데 결속 항목이 뒷받침하지 않은 자리가 있습니다",
+    ROLE_BINDING_CONDITION_NOT_ACTION:
+        "원문의 그 자리는 혜택 수령인의 참여 조건인데 후보는 실제 반복 행동·수익으로 적어 "
+        "그 조건 구절로는 확인하지 못했습니다",
+    ROLE_BINDING_ENTRY_TYPE_UNKNOWN:
+        "관계 항목의 유형이 비었거나 계약에 없는 값이라 어느 검사도 그 항목을 확인하지 못했습니다",
 }
 
 # ══════════════════════════════════════════════════════════
@@ -246,17 +337,41 @@ WHITESPACE_RE: Final[re.Pattern[str]] = re.compile(r"\s")
 #
 # ★ 파서가 요구하는 칸을 모델에게 요구하지 않으면 역할·대가를 말한 정상 후보가
 #   전부 형식 미달로 떨어진다. 아래 문구와 위 사유 코드는 반드시 함께 바뀐다.
+# ★ 낱말 목록은 위 튜플(ROLE_WORDS·FEE_WORDS·REPEAT_WORDS·PROSE_*_WORDS)에서
+#   «만든다». 손으로 다시 적으면 코드가 찾는 낱말과 안내가 어긋난다(실측: 안내에
+#   「재가입」이 빠진 채 코드는 그 낱말에 결속을 요구했다). 산문과 도식의 발동
+#   낱말이 다르므로 두 줄로 나눠 적고, 반복 낱말은 «과금» 유형이라고 못 박는다.
+_JOIN: Final[str] = "·"
 ROLE_BINDING_REVIEW_GUIDE: Final[str] = (
     "\n■ 역할·대가·반복을 적은 후보의 결속 근거\n"
-    "후보가 «무엇을 기획·제작·개발·제조·생산한다»를 서술어로 적었거나, "
-    "«수수료·로열티·보수·대가·우대금리·면제·배분» 또는 «재구매·재예치·재계약·갱신·"
-    "반복·지속» 같은 대가·반복을 적었으면, 검증근거의 "
-    f"'{RELATION_KEY}' 배열에 항목을 더한다. 다섯 칸을 모두 «문자열»로 채운다: "
+    "어느 낱말 때문에 어떤 유형의 항목이 필요한지는 아래 대응표와 각 후보의 "
+    "「관계 결속 요구」 줄이 정한다. 그 줄에 적힌 자리마다 뒷받침이 있어야 한다 — "
+    "같은 대상·같은 역할값의 여러 자리는 항목 하나로 증명할 수 있고, 서로 다른 주장은 "
+    "자리마다 항목이 필요하다. 이 안내는 «역할·과금» 유형의 항목에만 해당한다. 인과·양보 "
+    "항목은 인과 안내가 따로 정하며 이 줄의 유무와 무관하다.\n"
+    f"· 역할 낱말 «{_JOIN.join(ROLE_WORDS)}» → 유형 \"{RELATION_ROLE}\". "
+    "산문은 그 낱말이 서술어로 쓰였을 때만(「제작한다」·「기획·제작되며」), "
+    "도식 칸은 낱말만 있어도 항목이 필요하다.\n"
+    f"· 대가 낱말 «{_JOIN.join(FEE_WORDS)}» → 유형 \"{RELATION_FEE}\". "
+    f"산문은 «{_JOIN.join(PROSE_FEE_WORDS)}»가 수취·수령·지급·부과·청구·면제 서술이나 "
+    "«주요 수익원» 꼴과 이어질 때만, 도식 칸은 낱말만 있어도 항목이 필요하다.\n"
+    f"· 반복 낱말 «{_JOIN.join(REPEAT_WORDS)}» → 유형 \"{RELATION_FEE}\"(반복 거래도 "
+    f"과금 유형이다 — \"{RELATION_ROLE}\"이 아니다). 산문은 «{_JOIN.join(PROSE_REPEAT_WORDS)}»에서, "
+    "도식 칸은 위 목록 전체에서 발동한다.\n"
+    f"항목은 검증근거의 '{RELATION_KEY}' 배열에 넣고 다섯 칸을 모두 «문자열»로 채운다: "
     f'{{"{RELATION_SOURCE_KEY}": "<그 후보가 인용한 근거 id>", '
     f'"{RELATION_TARGET_KEY}": "<그 역할·대가가 걸린 대상, 후보의 표현 그대로>", '
-    f'"{RELATION_ROLE_KEY}": "<후보가 적은 역할·대가·반복 표현 그대로>", '
+    f'"{RELATION_ROLE_KEY}": "<후보가 적은 역할·대가·반복 표현 그대로 — 위 발동 낱말을 그 안에 포함한다>", '
     f'"{RELATION_QUOTE_KEY}": "<그 근거 원문에서 그대로 옮긴 구절>", '
     f'"{RELATION_TYPE_KEY}": "{RELATION_ROLE}" 또는 "{RELATION_FEE}"}}\n'
+    "역할값에 「지급」·「이벤트」처럼 발동 낱말이 없는 표현만 적으면 유형이 맞아도 "
+    "그 주장에 답하지 않은 항목이다. 역할·과금 유형의 항목은 「관계 결속 요구」 줄에 "
+    "적힌 자리에만 낸다 — 그 줄에 없는 자리에 역할·과금 항목을 만들지 마라. 유형 칸을 "
+    "비우거나 위 두 값·인과·양보 밖의 값을 적지 마라. 잘못된 항목 하나가 그 후보 "
+    "전체를 탈락시킨다.\n"
+    "「결속 요구 제외」로 적힌 자리는 원문 그대로인 보도 문장의 참여 조건이라 역할·과금 "
+    "항목이 필요 없다. 그 참여 조건을 «고객이 실제로 반복해 가입·구매한다»는 뜻으로 "
+    "해석해 넣지 마라 — 원문이 그렇게 적지 않았다.\n"
     "대상과 역할값은 서로 달라야 하고, 한쪽이 다른 쪽의 일부여서는 안 된다.\n"
     "같은 대상·같은 역할값의 반복은 각 자리의 주체·부정·조건을 모두 뒷받침하는 "
     "근거가 있을 때 항목 하나로 증명할 수 있다. 서로 «다른» 주장은 자리마다 항목이 "
@@ -278,3 +393,21 @@ ROLE_BINDING_REVIEW_GUIDE: Final[str] = (
     "«부정»한 문장도 단언이 아니므로 필요 없다. 기존 수치·추세·시점·인과 배열과 판정 "
     "규칙은 그대로다.\n"
 )
+
+# ══════════════════════════════════════════════════════════
+# ⑪ 후보별 안내 — 코드가 계산한 «같은» 요구를 그 후보 밑에 적는다
+# ══════════════════════════════════════════════════════════
+#
+# ★ 「추가 검증 필요: 관계」만으로는 어느 낱말 때문에 어떤 유형이 필요한지 알 수
+#   없다. 발동기(`role_binding_requirements`)가 낸 자리 그대로를 안내에 싣는다 —
+#   안내와 판정이 «한 계산»을 쓰게 하는 자리다. 도식 칸은 칸 번호로 자리를 가리킨다.
+ROLE_BINDING_HINT_REQUIRED_HEAD: Final[str] = "  관계 결속 요구: "
+ROLE_BINDING_HINT_WAIVED_HEAD: Final[str] = "  결속 요구 제외: "
+#: 요구 자리 하나 — 「「재가입」→유형 "과금"」. 역할값에 그 낱말을 포함해야 한다.
+ROLE_BINDING_HINT_ITEM_TEMPLATE: Final[str] = (
+    "「{marker}」→유형 \"{kind}\"(역할값에 이 낱말 포함)")
+#: 도식 칸에서는 어느 칸인지도 적는다.
+ROLE_BINDING_HINT_CELL_ITEM_TEMPLATE: Final[str] = (
+    "{cell}번째 칸 「{marker}」→유형 \"{kind}\"(역할값에 이 낱말 포함)")
+ROLE_BINDING_HINT_WAIVED_TEMPLATE: Final[str] = "「{marker}」({reason})"
+ROLE_BINDING_HINT_WAIVED_TAIL: Final[str] = " — 이 자리에는 역할·과금 항목을 넣지 않는다"

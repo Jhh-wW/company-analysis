@@ -18,6 +18,7 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_DETAIL_PREFLIGHT_CLASSIFIER_COVERAGE_GAP,
     FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT,
     FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT,
+    FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE,
     FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID,
 )
 from src.shared.report_evidence.constants import (
@@ -180,7 +181,7 @@ def test_bound_dart_and_ready_two_sections_block_release_but_continue_news_resea
     preflight = assess_official_evidence(_result(ready_count=2))
 
     assert preflight.decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
-    assert preflight.can_call_ai is False
+    assert preflight.can_call_ai is True
     assert (
         preflight.detail_code
         == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
@@ -194,7 +195,7 @@ def test_actual_dart_fragment_classifier_gap_is_not_falsely_ready_and_continues_
     preflight = assess_official_evidence(_result(ready_count=2, unclassified=True))
 
     assert preflight.decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
-    assert preflight.can_call_ai is False
+    assert preflight.can_call_ai is True
     assert preflight.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_CLASSIFIER_COVERAGE_GAP
     # 무분류 관측은 fragment/READY가 아니다. 다만 이미 결속된 별도 DART
     # fragment가 있으므로 최신 보조 뉴스 조사의 대상 법인 문맥은 남아 있다.
@@ -204,7 +205,7 @@ def test_actual_dart_fragment_classifier_gap_is_not_falsely_ready_and_continues_
 def test_classifier_gap_without_original_fragment_does_not_bypass_as_research_continuation() -> None:
     preflight = assess_official_evidence(_result(ready_count=0, unclassified=True))
 
-    assert preflight.can_call_ai is False
+    assert preflight.can_call_ai is True
     assert preflight.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_CLASSIFIER_COVERAGE_GAP
     assert preflight.supplementary_research_allowed is False
 
@@ -215,8 +216,8 @@ def test_required_dart_failure_does_not_continue_research_even_with_bound_origin
     )
 
     assert preflight.decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE
-    assert preflight.can_call_ai is False
-    assert preflight.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT
+    assert preflight.can_call_ai is True
+    assert preflight.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE
     assert preflight.supplementary_research_allowed is False
 
 
@@ -235,4 +236,4 @@ def test_ready_three_sections_are_shadow_release_path_not_research_only_status()
 
     assert preflight.can_call_ai is True
     assert preflight.dart_partial_fallback is True
-    assert preflight.supplementary_research_allowed is False
+    assert preflight.supplementary_research_allowed is True

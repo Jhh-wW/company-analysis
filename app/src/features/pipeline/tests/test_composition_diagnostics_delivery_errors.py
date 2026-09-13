@@ -10,7 +10,7 @@ from src.features.budget import provider_budget
 from src.features.composer.port import AskFatalError
 from src.features.pipeline import real
 from src.features.pipeline.port import Outcome
-from src.features.pipeline.tests.test_real_cache import FakeEngine
+from src.features.pipeline.tests.test_real_cache import CORP_ID, FakeEngine
 from src.features.pipeline.tests.test_real_v2_switch import (
     _branch_ingredients,
     _build_identity,
@@ -72,6 +72,7 @@ def _run(*, steps: list[dict], mutate_sink, raise_exc: BaseException):
             corp_type="상장사", frags=frags, financials=financials,
             filing=filing, revenue_tables=[], sources=[],
             business_date=real.today_kst(), model="가짜모델", steps=steps,
+            corp_id=CORP_ID,
             build_identity=_build_identity(), generation_mode=_frozen_v2_mode(),
             release_mode_override=ReleaseMode.SHADOW,
         ), engine

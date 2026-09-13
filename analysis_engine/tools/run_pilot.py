@@ -441,6 +441,17 @@ def _latest_of_kind(
 FINANCIALS_OK_STATUSES: Final[frozenset[str]] = frozenset({"000", "013"})
 
 
+class PartialFinancialCollectionError(RuntimeError):
+    """연도별 실패와 성공한 재무 응답을 함께 전달하는 명시적 경계."""
+
+    def __init__(self, payload: Optional[dict], years: list[int], failed_years: list[int], *, errors: tuple[Exception, ...] = ()):
+        super().__init__("일부 사업연도 재무 자료를 확인하지 못했습니다")
+        self.payload = payload
+        self.years = tuple(years)
+        self.failed_years = tuple(failed_years)
+        self.errors = errors
+
+
 def fetch_financials(
     corp_code: str,
     counter: UsageCounter,
@@ -461,17 +472,42 @@ def fetch_financials(
       **「빈 결과」와 「못 물어봄」은 다르다.**
     """
     got, years = None, []
+    failed_years: list[int] = []
+    errors: list[Exception] = []
     this_year = (business_date or today_kst()).year
     for year in range(this_year - 1, this_year - 4, -1):
-        payload = get_json("fnlttSinglAcnt.json", {
-            "corp_code": corp_code, "bsns_year": str(year), "reprt_code": "11011"}, counter)
-        status = payload.get("status")
-        if status not in FINANCIALS_OK_STATUSES:
-            raise RuntimeError("DART 재무 조회 응답이 정상 상태가 아닙니다")
-        if status == "000":
+        try:
+            payload = get_json("fnlttSinglAcnt.json", {
+                "corp_code": corp_code, "bsns_year": str(year), "reprt_code": "11011"}, counter)
+            if not isinstance(payload, dict):
+                raise ValueError("DART 재무 조회 응답 모양이 올바르지 않습니다")
+            status = payload.get("status")
+            rows = payload.get("list")
+            if (
+                status not in FINANCIALS_OK_STATUSES
+                or (status == "013" and rows not in (None, []))
+                or (status == "000" and (
+                    not isinstance(rows, list)
+                    or not all(isinstance(row, dict) for row in rows)
+                    or any(
+                        row.get("corp_code", corp_code) != corp_code
+                        or str(row.get("bsns_year", year)) != str(year)
+                        or row.get("reprt_code", "11011") != "11011"
+                        for row in rows
+                    )
+                ))
+            ):
+                raise ValueError("DART 재무 조회 응답의 상태 또는 목록이 올바르지 않습니다")
+        except Exception as error:  # 실패 연도를 자료 없음으로 바꾸지 않고 다른 연도는 계속 확인한다.
+            failed_years.append(year)
+            errors.append(error)
+            continue
+        if status == "000" and rows:
             years.append(year)
             if got is None:
                 got = payload
+    if failed_years:
+        raise PartialFinancialCollectionError(got, years, failed_years, errors=tuple(errors))
     return got, years
 
 

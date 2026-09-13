@@ -81,7 +81,12 @@ from src.features.composer.future_plan_guard import (
 from src.features.composer.direct_support_constants import (
     FLOW_CELL_JOIN, RELATION_REVIEW_GUIDE,
 )
-from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
+from src.features.composer.direct_support import support_entries_by_number
+from src.features.composer.role_binding import role_binding_report, role_binding_requirements
+from src.features.composer.role_binding_constants import (
+    ROLE_BINDING_REASON_TEXTS, ROLE_BINDING_REVIEW_GUIDE,
+)
+from src.features.composer.verbatim_news import VerbatimNewsSource, verbatim_news_source
 from src.features.composer.body_review_constants import (
     BODY_REVIEW_COMPARISON_GUIDE,
     BODY_REVIEW_COMPARISON_KEY,
@@ -177,29 +182,36 @@ def _append_grounding_diagnostic(
     candidate_text: str,
     sources: Mapping[str, str],
     verification_text: Optional[str] = None,
+    detail: Optional[Mapping[str, object]] = None,
 ) -> None:
-    """원문 없이 의미 근거 결속의 최종 제외 사건만 구조화해 남긴다."""
+    """원문 없이 의미 근거 결속의 최종 제외 사건만 구조화해 남긴다.
+
+    ``detail``: 사유별 닫힌 부가 정보(예: 역할·과금 결속의 요구·제외 표지·규칙 버전).
+    원문·응답 본문을 담지 않는 값만 넣는다. 공유 전송 계약(`observed_review_outcomes`)은
+    기본 다섯 필드만 옮기므로, 부가 정보는 이 요청 로컬 목록과 로그에서만 확인한다.
+    """
 
     if diagnostics is None:
         return
-    diagnostics.append(
-        {
-            "section_id": section_id,
-            "kind": kind,
-            "reason_code": reason_code,
-            "candidate_sha256": hashlib.sha256(
-                candidate_text.encode("utf-8")
-            ).hexdigest(),
-            "verification_items": (
-                (REVIEW_SCOPE_ITEMS[reason_code],)
-                if reason_code in REVIEW_SCOPE_ITEMS
-                else grounding_requirements(
-                    verification_text if verification_text is not None else candidate_text,
-                    tuple(sources.values()),
-                )
-            ),
-        }
-    )
+    entry: dict[str, object] = {
+        "section_id": section_id,
+        "kind": kind,
+        "reason_code": reason_code,
+        "candidate_sha256": hashlib.sha256(
+            candidate_text.encode("utf-8")
+        ).hexdigest(),
+        "verification_items": (
+            (REVIEW_SCOPE_ITEMS[reason_code],)
+            if reason_code in REVIEW_SCOPE_ITEMS
+            else grounding_requirements(
+                verification_text if verification_text is not None else candidate_text,
+                tuple(sources.values()),
+            )
+        ),
+    }
+    if detail:
+        entry.update(detail)
+    diagnostics.append(entry)
 
 
 def _absence_claim_rejected(
@@ -980,10 +992,41 @@ def _review_fragment_metadata(fragment: CollectedFragment) -> str:
     return "출처 분류(JSON 자료): " + json.dumps(metadata, ensure_ascii=False) + "\n"
 
 
+def _verbatim_news_by_number(
+    entries: Sequence[tuple[int, str, str, Sequence[str]]],
+    frag_by_id: Mapping[str, CollectedFragment],
+    allowed_by_section: Optional[Mapping[str, frozenset[str]]],
+) -> dict[int, VerbatimNewsSource]:
+    """후보별 «원문 그대로인 보도» 문맥 — 안내 생성과 결속 판정이 같은 값을 받는다.
+
+    ``entries`` 는 (번호, 소유 장, 공개 문장 전체, 실제 인용) 이다. 자격은 실제 문장·
+    수집 조각·장 소유권으로만 계산하며(`verbatim_news_source`), 자격이 없는 번호는
+    빠진다 — 그 후보는 기존 검사를 그대로 받는다. packet 경로는 장별 허용 조각까지
+    대조하고, 허용 표에 없는 장은 자격을 주지 않는다.
+    """
+
+    out: dict[int, VerbatimNewsSource] = {}
+    for number, section_id, text, citations in entries:
+        allowed: Optional[frozenset[str]] = None
+        if allowed_by_section is not None:
+            allowed = allowed_by_section.get(section_id)
+            if allowed is None:
+                continue
+        context = verbatim_news_source(
+            text, citations, frag_by_id,
+            section_id=section_id, allowed_fragment_ids=allowed,
+        )
+        if context is not None:
+            out[number] = context
+    return out
+
+
 def _build_grouped_review_prompt(
     items: Sequence[_GroupedReviewItem],
     frag_by_id: Mapping[str, CollectedFragment],
     table: Optional[PerformanceTable],
+    *,
+    verbatim_by_number: Optional[Mapping[int, VerbatimNewsSource]] = None,
 ) -> str:
     """장별 후보와 그 장이 실제 인용한 원문만 한 블록에 묶는다.
 
@@ -1101,6 +1144,7 @@ def _build_grouped_review_prompt(
             parts.append(grounding_hint(
                 *candidate,
                 cells=item.flow_row.cells if item.flow_row is not None else None,
+                verbatim_source=(verbatim_by_number or {}).get(item.number),
             ))
         parts.append("===== 장별 검수 블록 끝 =====\n")
     parts.append(REVIEW_TRUSTED_TAIL)
@@ -1220,14 +1264,29 @@ def _ask_grouped_verdicts(
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
     absence_sections: Optional[set[str]] = None,
+    allowed_fragment_ids_by_section: Optional[Mapping[str, frozenset[str]]] = None,
 ) -> Optional[dict[int, str]]:
     """packet 본문·도식을 정확히 한 번에 검수한다.
 
     엄격 packet의 호출 계약은 reviewer 1회 고정이다. 형식 오류·누락을 두 번째
     호출로 복구하지 않고 ``None``으로 돌려 공개 후보를 fail-closed 처리한다.
+
+    ``allowed_fragment_ids_by_section``: 장별 허용 조각. «원문 그대로인 보도» 문맥의
+    장 소유권 대조에만 쓴다(항목 자체의 허용 검사는 부르는 쪽이 이미 했다).
     """
 
-    prompt = _build_grouped_review_prompt(items, frag_by_id, table)
+    # ★ 후보별 보도 원문 문맥은 «한 번» 계산해 안내와 판정에 같은 값을 준다.
+    verbatim_by_number = _verbatim_news_by_number(
+        tuple(
+            (item.number, item.section_id, item.sentence.text, item.citations)
+            for item in items if item.sentence is not None
+        ),
+        frag_by_id,
+        allowed_fragment_ids_by_section,
+    )
+    prompt = _build_grouped_review_prompt(
+        items, frag_by_id, table, verbatim_by_number=verbatim_by_number,
+    )
     owners = {item.number: item.section_id for item in items}
     evidence_ids_by_number = {
         item.number: frozenset(item.citations) for item in items
@@ -1306,6 +1365,7 @@ def _ask_grouped_verdicts(
         ),
         baseline_date=baseline_date,
         absence_sections=absence_sections,
+        verbatim_by_number=verbatim_by_number,
     )
 
 
@@ -1379,6 +1439,7 @@ def _apply_grounding(
     confirmed_prose_numbers: frozenset[int] = frozenset(),
     baseline_date: Optional[str] = None,
     absence_sections: Optional[set[str]] = None,
+    verbatim_by_number: Optional[Mapping[int, VerbatimNewsSource]] = None,
 ) -> dict[int, str]:
     # ``absence_sections``: 부재 단언 가드가 «도식 행»을 뺀 장 id 수집기.
     # ★ 왜 여기가 필요한가 (독립 검토 P1-6) — 문장 경로는 _semantic_review*가
@@ -1388,10 +1449,28 @@ def _apply_grounding(
     # ★ 보고서 기준일을 그대로 넘긴다. 안 넘기면 executive_status_guard 가 날짜
     #   문턱 없이 이탈 «표지» 존재만으로 판정해, 「기준일 이후에 물러날 예정」인
     #   임원 문장까지 근거 없음으로 뺀다(가드 머리말 참고).
+    # ``verbatim_by_number``: 검수 단계가 수집 객체로 증명한 «원문 그대로인 보도»
+    #   문맥. 안내 생성이 받은 것과 같은 값이어야 한다 — 역할·과금 결속에만 쓴다.
     constrained, problems = constrain_verdicts(
         raw, verdicts, candidates, cells_by_number=flow_cells_by_number,
-        baseline_date=baseline_date,
+        baseline_date=baseline_date, verbatim_by_number=verbatim_by_number,
     )
+    # ★ 결속 요구를 «제외»한 자리는 진단 목록에 남지 않는다(제외는 탈락이 아니다).
+    #   그래서 개수·규칙 버전·후보지문만 로그로 남겨 «어느 표지의 요구가 빠졌는지»를
+    #   되짚을 수 있게 한다. 원문·응답 본문은 넣지 않는다.
+    for number, context in (verbatim_by_number or {}).items():
+        if number not in candidates:
+            continue
+        text, sources = candidates[number]
+        binding = role_binding_requirements(text, sources, None, context)
+        if binding.waived:
+            logger.info(
+                "역할·과금 결속 요구 제외: 후보 %d, 제외 표지 %d개, 남은 요구 %d개, "
+                "규칙 %s, 후보지문 %s",
+                number, len(binding.waived), len(binding.required),
+                binding.rule_version, context.candidate_sha256,
+            )
+    relation_evidence = support_entries_by_number(raw)
     # 같은 파서로 미래 근거를 읽고, 중복 번호는 근거 없음으로 처리한다.
     # 같은 값이 «이 후보가 어느 인용을 근거로 들었는가»도 담고 있어 함께 쓴다.
     review_evidence = future_plan_entries_by_number(raw)
@@ -1521,6 +1600,26 @@ def _apply_grounding(
             problems[number] = problem
     for number, problem in problems.items():
         logger.warning("의미 근거 검증: %s, 후보 %d 공개 제외", problem, number)
+        detail: Optional[dict[str, object]] = None
+        if problem in ROLE_BINDING_REASON_TEXTS and number in candidates:
+            # ★ 역할·과금 결속 탈락은 «어느 단계에서, 어떤 요구와 어떤 제출 유형으로»
+            #   났는지를 함께 남긴다. 유형 오류 코드만 보고 형식 오류로 확정하지
+            #   못하게 단계·규칙 버전·결속 문맥을 붙인다. 원 응답과 지문은 손대지 않는다.
+            verification_text, sources = candidates[number]
+            report = role_binding_report(
+                verification_text, sources, relation_evidence.get(number),
+                (flow_cells_by_number or {}).get(number),
+                (verbatim_by_number or {}).get(number),
+            )
+            detail = {"role_binding": report.as_diagnostic()}
+            logger.warning(
+                "역할·과금 결속 탈락 상세: 후보 %d, 단계 %s, 요구 %s, 제외 %s, "
+                "제출 유형 %s, 규칙 %s",
+                number, detail["role_binding"]["stage"],
+                [f"{item.marker}→{item.kind}" for item in report.requirements.required],
+                [item.marker for item in report.requirements.waived],
+                list(report.submitted_kinds), report.requirements.rule_version,
+            )
         if diagnostic_contexts is not None and number in diagnostic_contexts:
             section_id, kind, exact_candidate_text = diagnostic_contexts[number]
             verification_text, sources = candidates[number]
@@ -1532,6 +1631,7 @@ def _apply_grounding(
                 candidate_text=exact_candidate_text,
                 sources=sources,
                 verification_text=verification_text,
+                detail=detail,
             )
     return constrained
 
@@ -1648,6 +1748,8 @@ def _build_review_prompt(
     frag_by_id: Mapping[str, CollectedFragment],
     table_evidence: str,
     table_source: str = "",
+    *,
+    verbatim_by_number: Optional[Mapping[int, VerbatimNewsSource]] = None,
 ) -> str:
     """문장과 근거를 «나란히» 놓는 대조 지시문 (writer/verify.py의 핵심 철학).
 
@@ -1717,9 +1819,12 @@ def _build_review_prompt(
             "  주장 범주(JSON 문자열): "
             f"{json.dumps(item.sentence.planned_claim_slot, ensure_ascii=False)}\n"
         )
-        parts.append(grounding_hint(*_grounding_candidate(
-            item.sentence.text, item.sentence.citations, frag_by_id, table_source,
-        )))
+        parts.append(grounding_hint(
+            *_grounding_candidate(
+                item.sentence.text, item.sentence.citations, frag_by_id, table_source,
+            ),
+            verbatim_source=(verbatim_by_number or {}).get(item.number),
+        ))
     parts.append(REVIEW_TRUSTED_TAIL)
     return "".join(parts)
 
@@ -1818,12 +1923,27 @@ def _ask_verdicts(
     작은 상한을 가진 호출자를 넣으면 그 한 번의 예약액만 줄어든다.
     """
     reviewer = initial_ask or ask
-    # 재요청은 «최초 본문 검수»일 때만 전용 호출자를 쓴다. 후속 검수(재검수
-    # 등)는 initial_ask 가 없으므로 예전 그대로 ask 하나로 재요청한다.
     retry_reviewer = (
         (initial_retry_ask or initial_ask) if initial_ask is not None else ask
     )
-    prompt = _build_review_prompt(items, frag_by_id, table_evidence, table_source)
+    # ★ 후보별 보도 원문 문맥은 «한 번» 계산해 안내와 판정에 같은 값을 준다. 평문
+    #   경로는 packet 허용 표가 없으므로 조각이 봉인해 온 의미 칸으로 장 소유권을 본다
+    #   (보강 후보·보도표와 같은 기준). 요약 묶음은 소유 장이 없어 자격이 없다.
+    verbatim_by_number = _verbatim_news_by_number(
+        tuple(
+            (item.number, item.section_id, item.sentence.text, item.sentence.citations)
+            for item in items if item.kind == DIAGNOSTIC_KIND_BODY
+        ),
+        frag_by_id,
+        None,
+    )
+    prompt = _build_review_prompt(
+        items, frag_by_id, table_evidence, table_source,
+        verbatim_by_number=verbatim_by_number,
+    )
+    # 초기 재검수 호출자 선택은 위에서 함께 설정한다.
+    # 재요청은 «최초 본문 검수»일 때만 전용 호출자를 쓴다. 후속 검수(재검수
+    # 등)는 initial_ask 가 없으므로 예전 그대로 ask 하나로 재요청한다.
     requested_numbers = [item.number for item in items]
 
     def _observe_attempt(attempt: int, sent: str, answer: Optional[str]):
@@ -1881,6 +2001,7 @@ def _ask_verdicts(
             and item.sentence.citations
         ),
         baseline_date=baseline_date,
+        verbatim_by_number=verbatim_by_number,
     )
 
 
@@ -2358,6 +2479,7 @@ def _semantic_review_grouped(
         protocol_diagnostics=protocol_diagnostics,
         baseline_date=baseline_date,
         absence_sections=absence_sections,
+        allowed_fragment_ids_by_section=allowed_fragment_ids_by_section,
     )
     sentence_by_number: dict[int, Optional[ComposedSentence]] = {}
     flow_kept_numbers: set[int] = set()

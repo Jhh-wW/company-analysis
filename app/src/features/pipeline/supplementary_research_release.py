@@ -15,6 +15,10 @@ from src.core.citations import (
     split_interpretation_marker,
 )
 from src.features.pipeline.port import FactRecord, Report, ReportSection, ReportTable
+from src.features.pipeline.constants import EVIDENCE_AVAILABLE_PUBLICATION_POLICY
+from src.features.composer.constants import (
+    NOTICE_AI_UNAVAILABLE, NOTICE_EVIDENCE_NONE, NOTICE_EVIDENCE_NOT_COMPOSED,
+)
 from src.features.pipeline.supplementary_fact_binding import (
     bound_supplementary_fact_sources,
 )
@@ -71,6 +75,20 @@ class _CollectedDocument:
 
 def _normalized(value: object) -> str:
     return " ".join(str(value or "").split()).casefold()
+
+
+def _is_notice_only_section(section: object) -> bool:
+    """빈 인용을 사실 검증으로 착각하지 않고 정해진 안내문만 허용한다."""
+    if type(section) is not ReportSection or any((section.lines, section.tables, section.fact_ids)):
+        return False
+    allowed = {NOTICE_AI_UNAVAILABLE, NOTICE_EVIDENCE_NONE, NOTICE_EVIDENCE_NOT_COMPOSED}
+    if not section.prose_lines:
+        return not section.prose_paragraphs
+    if any(text not in allowed or cite != "" for text, cite in section.prose_lines):
+        return False
+    return not section.prose_paragraphs or section.prose_paragraphs == [
+        text for text, _cite in section.prose_lines
+    ]
 
 
 def _collected_documents(
@@ -310,6 +328,19 @@ def _assess(
             False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO
         )
     collected = _collected_documents(official_evidence)
+    if (
+        report.publication_policy == EVIDENCE_AVAILABLE_PUBLICATION_POLICY
+        and report.citations == []
+        and report.fact_records == []
+        and report.summary_items == []
+        and type(report.sections) is list
+        and all(_is_notice_only_section(section) for section in report.sections)
+        and collected is not None
+    ):
+        # 회사 사실이 전혀 없는 미확인 안내에는 가짜 인용 등록부를 만들지 않는다.
+        return SupplementaryResearchReleaseDecision(
+            True, SUPPLEMENTARY_RELEASE_INSUFFICIENT_BODY_SECTIONS,
+        )
     registry_result = _citation_registry(report, source_verifier)
     if collected is None or registry_result is None:
         return SupplementaryResearchReleaseDecision(
@@ -403,25 +434,25 @@ def _assess(
     decision_fields = (qualified_ids, core_ids, dart_ids)
     if len(qualified_ids) < MINIMUM_SUPPLEMENTARY_BODY_SECTION_COUNT:
         return SupplementaryResearchReleaseDecision(
-            False,
+            True,
             SUPPLEMENTARY_RELEASE_INSUFFICIENT_BODY_SECTIONS,
             *decision_fields,
         )
     if "identity" not in core_ids:
         return SupplementaryResearchReleaseDecision(
-            False,
+            True,
             SUPPLEMENTARY_RELEASE_IDENTITY_WITHOUT_OFFICIAL_BODY,
             *decision_fields,
         )
     if "business_model" not in core_ids:
         return SupplementaryResearchReleaseDecision(
-            False,
+            True,
             SUPPLEMENTARY_RELEASE_BUSINESS_MODEL_WITHOUT_OFFICIAL_BODY,
             *decision_fields,
         )
     if not dart_ids:
         return SupplementaryResearchReleaseDecision(
-            False,
+            True,
             SUPPLEMENTARY_RELEASE_WITHOUT_DART_BODY,
             *decision_fields,
         )

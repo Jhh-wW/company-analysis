@@ -1,6 +1,7 @@
 """출처 문서부터 장별 근거까지 잃지 않고 나르는 불변 자료형."""
 
 from __future__ import annotations
+from src.shared.report_evidence.document_scan import DocumentScan, DOCUMENT_SCAN_INCOMPLETE
 
 import hashlib
 import re
@@ -209,6 +210,7 @@ class CollectionAttempt:
     #: 등록된 수라 둘은 다르다. 한 칸에 적으면 「0건 시도 · 수십만 바이트
     #: 수신」 같은 모순 표시가 된다.
     documents_attempted: int = 0
+    document_scan: DocumentScan | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.company_id, label="회사 식별자")
@@ -230,6 +232,13 @@ class CollectionAttempt:
             < 0
         ):
             raise ValueError("수집 시간·바이트·문서 수는 음수일 수 없습니다")
+        if self.document_scan is not None:
+            if not isinstance(self.document_scan, DocumentScan):
+                raise ValueError("문서 순회 기록의 자료형이 올바르지 않습니다")
+            if self.attempt_id != f"document:{self.document_scan.document_id}":
+                raise ValueError("문서 순회 기록과 수집 시도의 문서가 다릅니다")
+            if self.document_scan.state == DOCUMENT_SCAN_INCOMPLETE and self.state is not CollectionState.TRUNCATED:
+                raise ValueError("미완료 순회는 TRUNCATED로 기록해야 합니다")
 
 
 @dataclass(frozen=True)

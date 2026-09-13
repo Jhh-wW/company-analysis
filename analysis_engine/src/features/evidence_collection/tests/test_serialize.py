@@ -226,7 +226,7 @@ def test_attempts_필드_이름과_값이_원본과_일치하고_slot_ids는_lis
 
     assert set(serialized.keys()) == {
         "company_id", "attempt_id", "source_kind", "requirement", "state", "slot_ids",
-        "reason_code", "elapsed_ms", "bytes_downloaded", "documents_seen",
+        "reason_code", "elapsed_ms", "bytes_downloaded", "documents_seen", "document_scan",
     }
     assert serialized["attempt_id"] == original.attempt_id
     assert serialized["slot_ids"] == list(original.slot_ids)

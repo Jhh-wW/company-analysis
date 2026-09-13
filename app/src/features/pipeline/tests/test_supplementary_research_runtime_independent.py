@@ -215,11 +215,11 @@ def test_news_off_preserves_ready_two_section_prejudgment_and_stop(
 
     assert preflight.decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
     assert preflight.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
-    assert preflight.can_call_ai is False
+    assert preflight.can_call_ai is True
     assert preflight.supplementary_research_allowed is True
-    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.outcome is Outcome.REPORT
     assert called == 0
-    assert calls.composers == []
+    assert len(calls.composers) == 1
 
 
 def test_news_on_and_bound_dart_ready_two_sections_connect_news_and_shadow_composer_after_owner(
@@ -284,9 +284,14 @@ def test_required_dart_failure_and_internal_contract_error_do_not_open_news_or_c
         monkeypatch, official, news_on=True, search_news=unexpected, fetch_text=unexpected
     )
 
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert calls_to_news == 0
-    assert calls.composers == []
+    if contract_error:
+        assert result.outcome is Outcome.GATE_STOPPED
+        assert calls_to_news == 0
+        assert calls.composers == []
+    else:
+        assert result.outcome is Outcome.REPORT
+        assert len(calls.composers) == 1
+        assert calls.composers[0]["release_mode_override"] is ReleaseMode.SHADOW
 
 
 @pytest.mark.parametrize("ready_count", [3, 9])

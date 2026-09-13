@@ -56,6 +56,11 @@ class PublicationPolicy(str, Enum):
 
     STRUCTURED_SAFETY = "structured-safety-v1"
     LEGACY_SHADOW_EXCEPTION = "legacy-shadow-exception-v1"
+    #: 확보 근거 보고서(2026-09-14 사용자 계약) — 분석 대상 회사의 확인된
+    #: 자료만으로 만든 부분 보고서. 수량 하한(요약 3문장·장 수·문서 수)만으로
+    #: 전체를 막지 않되, 문장 단위 원문 검증·인용 결속은 그대로 통과한 결과다.
+    #: 안전 통과를 뜻하지 않으며 화면·PDF는 부분 완성 등급을 그대로 보인다.
+    EVIDENCE_AVAILABLE = "evidence-available-v1"
 
 
 class VerificationState(str, Enum):
