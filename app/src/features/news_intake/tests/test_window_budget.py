@@ -1,4 +1,4 @@
-"""접근 실패와 빈 기간이 남은 기사 시도 예산을 버리지 않는지 검증한다."""
+"""후보가 적은 기간의 남는 기사 시도 예산을 최근부터 재사용하는지 검증한다."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.features.news_intake import constants as c
+from src.features.news_intake import collection as collection_service
 from src.features.news_intake.collection import collect_from_snapshot
 from src.features.news_intake.models import NewsBodyFetchResult
 from src.features.news_intake.search_snapshot import collect_search_snapshot, diverse_candidates
@@ -69,12 +70,49 @@ def test_existing_archive_candidates_keep_both_window_allocations():
     assert result.diagnostics["본문시도기사"] == 24
 
 
-def test_one_archive_candidate_keeps_its_base_allocation():
-    snapshot = paged_snapshot([item(number) for number in range(30)] + [item(30, date="2025-01-01")])
+@pytest.mark.parametrize("recent_count", [30, 55])
+def test_one_archive_candidate_reserves_one_attempt_and_releases_the_rest(recent_count):
+    snapshot = paged_snapshot([item(number) for number in range(recent_count)]
+                              + [item(recent_count, date="2025-01-01")])
     result = collect_from_snapshot(snapshot, company=COMPANY, as_of=AS_OF, fetch_text=unique_body,
                                    analyze_grounded=analyzer(), policy=POLICY)
-    assert result.diagnostics["기간별"]["12"]["시도상한"] == 20
+    assert result.diagnostics["기간별"]["12"]["시도상한"] == 23
+    assert result.diagnostics["기간별"]["12"]["시도"] == 23
+    assert result.diagnostics["기간별"]["12"]["미시도"] == recent_count - 23
     assert result.diagnostics["기간별"]["24"]["시도"] == 1
+    assert result.diagnostics["본문시도기사"] == 24
+
+
+@pytest.mark.parametrize("counts,expected", [
+    ((30, 1, 1), (22, 1, 1)),
+    ((2, 30, 1), (2, 21, 1)),
+    ((1, 2, 30), (1, 2, 21)),
+    ((3, 2, 1), (3, 2, 1)),
+    ((1, 30, 30), (1, 19, 4)),
+    ((30, 1, 30), (19, 1, 4)),
+    ((30, 30, 1), (19, 4, 1)),
+])
+def test_sparse_windows_release_only_attempts_they_cannot_use(counts, expected):
+    dates = ("2026-09-01", "2025-01-01", "2024-01-01")
+    items = [item(window * 100 + number, date=dates[window])
+             for window, count in enumerate(counts) for number in range(count)]
+    snapshot = paged_snapshot(items)
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        return unique_body(url)
+
+    result = collect_from_snapshot(snapshot, company=COMPANY, as_of=AS_OF, fetch_text=fetch,
+                                   analyze_grounded=analyzer(), policy=POLICY)
+    assert tuple(result.diagnostics["기간별"][str(month)]["시도"] for month in c.WINDOW_MONTHS) == expected
+    assert len(calls) == len(set(calls)) == sum(expected)
+    window_by_url = {candidate.source_url: candidate.published_on for candidate in snapshot.candidates}
+    assert [window_by_url[url] for url in calls] == sorted(
+        (window_by_url[url] for url in calls), reverse=True,
+    )
+    assert result.diagnostics["본문호출"] <= POLICY.max_body_calls
+    assert result.diagnostics["분석AI호출"] <= POLICY.max_analysis_calls
 
 
 def test_corrected_dates_defer_bodies_without_refetch_within_five_analysis_calls():
@@ -100,6 +138,67 @@ def test_corrected_dates_defer_bodies_without_refetch_within_five_analysis_calls
     assert result.diagnostics["기간별"]["12"]["이월"] == 2
     assert result.diagnostics["분석AI호출"] == 5
     assert result.diagnostics["기간별"]["36"]["본문"] == 2
+
+
+@pytest.mark.parametrize("corrected_date,target_months", [("2025-01-01", 24), ("2024-01-01", 36)])
+def test_deferred_bodies_preserve_sparse_archive_attempts_without_refetch(corrected_date, target_months):
+    snapshot = paged_snapshot([item(number) for number in range(30)] + [item(30, date="2025-01-01")])
+    recent = [candidate for candidate in snapshot.candidates if candidate.published_on == "2026-09-01"]
+    carried_urls = {candidate.source_url for candidate in diverse_candidates(recent, 2)}
+    calls, analysis = [], []
+
+    def fetch(url):
+        calls.append(url)
+        return NewsBodyFetchResult(text=unique_body(url), stage=c.BODY_STAGE_ARTICLE_TAG,
+                                   published_on=corrected_date if url in carried_urls else "")
+
+    result = collect_from_snapshot(snapshot, company=COMPANY, as_of=AS_OF, fetch_text=fetch,
+                                   analyze_grounded=analyzer(calls=analysis), policy=POLICY)
+    analyzed_urls = [article["url"] for batch in analysis for article in batch["articles"]]
+    assert len(calls) == len(set(calls)) == len(analyzed_urls) == 24
+    assert all(analyzed_urls.count(url) == 1 for url in carried_urls)
+    assert tuple(result.diagnostics["기간별"][str(month)]["시도"] for month in c.WINDOW_MONTHS) == (23, 1, 0)
+    assert result.diagnostics["기간별"]["12"]["이월"] == 2
+    assert result.diagnostics["기간별"][str(target_months)]["본문"] >= 2
+    assert result.diagnostics["분석AI호출"] <= POLICY.max_analysis_calls
+
+
+def test_redistribution_preserves_article_and_fallback_call_limits():
+    items = [item(number) for number in range(55)] + [item(55, date="2025-01-01")]
+    for number, article in enumerate(items):
+        article.link = f"https://n.news.naver.com/mnews/article/001/{number}"
+    snapshot = paged_snapshot(items)
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        return NewsBodyFetchResult(reason_code="fetch_http_403")
+
+    result = collect_from_snapshot(snapshot, company=COMPANY, as_of=AS_OF, fetch_text=fetch,
+                                   analyze_grounded=analyzer(), policy=POLICY)
+    assert len(calls) == len(set(calls)) == result.diagnostics["본문호출"] == 48
+    assert result.diagnostics["본문시도기사"] == 24
+    assert tuple(result.diagnostics["기간별"][str(month)]["시도"] for month in c.WINDOW_MONTHS) == (23, 1, 0)
+    assert result.diagnostics["분석AI호출"] == 0
+
+
+def test_redistribution_stops_requests_when_collection_deadline_expires(monkeypatch):
+    snapshot = paged_snapshot([item(number) for number in range(30)] + [item(30, date="2025-01-01")])
+    elapsed = 0
+    calls, analysis = [], []
+    monkeypatch.setattr(collection_service, "time", SimpleNamespace(monotonic=lambda: elapsed))
+
+    def fetch(url):
+        nonlocal elapsed
+        calls.append(url)
+        elapsed = POLICY.max_collection_seconds
+        return unique_body(url)
+
+    result = collect_from_snapshot(snapshot, company=COMPANY, as_of=AS_OF, fetch_text=fetch,
+                                   analyze_grounded=analyzer(calls=analysis), policy=POLICY)
+    assert len(calls) == result.diagnostics["본문시도기사"] == result.diagnostics["본문호출"] == 1
+    assert not analysis and result.diagnostics["분석AI호출"] == 0
+    assert "body_budget_exhausted" in result.diagnostics["상한사유"]
 
 
 @pytest.mark.parametrize("article_limit,call_limit", [(1, 48), (24, 3), (7, 5)])
