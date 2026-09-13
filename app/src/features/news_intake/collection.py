@@ -48,6 +48,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     excluded = Counter(snapshot.exclusion_counts)
     failures = [code for code in snapshot.reason_codes if code not in c.SEARCH_BUDGET_REASON_CODES]
     warnings: Counter[str] = Counter()
+    identity_diagnostics: Counter[str] = Counter()
     budget_codes: list[str] = [code for code in snapshot.reason_codes if code in c.SEARCH_BUDGET_REASON_CODES]
     stages: Counter[str] = Counter()
     body_calls = 0
@@ -68,11 +69,12 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         months: [item for item in snapshot.candidates if candidate_window(item, as_of) == months]
         for months in c.WINDOW_MONTHS
     }
-    # 빈 창만 기본 몫을 반납한다. 과거 후보가 하나라도 있으면 그 창의 몫을 남긴다.
-    reusable_window_budget = sum(
-        budget for months, budget in zip(c.WINDOW_MONTHS, c.WINDOW_ARTICLE_BUDGETS)
-        if not candidates_by_window[months]
-    )
+    # 각 기간의 실제 후보에 필요한 기본 몫만 예약하고, 남는 몫은 최근부터 재사용한다.
+    reserved_window_budgets = {
+        months: min(budget, len(candidates_by_window[months]))
+        for months, budget in zip(c.WINDOW_MONTHS, c.WINDOW_ARTICLE_BUDGETS)
+    }
+    reusable_window_budget = sum(c.WINDOW_ARTICLE_BUDGETS) - sum(reserved_window_budgets.values())
     deadline = time.monotonic() + policy.max_collection_seconds
     stopped = False
 
@@ -118,7 +120,9 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                     response = None
             except (TypeError, ValueError):
                 response = None
-        excerpts, rejected = validate_grounded_response(response, articles=batch, company=company, as_of=as_of)
+        excerpts, rejected = validate_grounded_response(
+            response, articles=batch, company=company, as_of=as_of, identity_diagnostics=identity_diagnostics,
+        )
         excluded.update(rejected)
         if any(code in rejected for code in ("grounded_invalid_response", "grounded_invalid_item", "grounded_missing_result")):
             failures.append("grounded_response_incomplete")
@@ -148,7 +152,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             analyze_batch(batch)
             batch.clear()
 
-    for months, base_window_budget in zip(c.WINDOW_MONTHS, c.WINDOW_ARTICLE_BUDGETS):
+    for months, reserved_window_budget in reserved_window_budgets.items():
         if stopped or evidence_is_sufficient(all_excerpts, policy):
             break
         windows.append(months)
@@ -159,7 +163,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         ranked_candidates = diverse_candidates(
             candidates + [candidate for candidate, _ in carried], len(candidates) + len(carried),
         )
-        window_budget = min(base_window_budget + reusable_window_budget,
+        window_budget = min(reserved_window_budget + reusable_window_budget,
                             policy.max_body_articles - body_articles) if candidates else 0
         window_counts[str(months)] = {
             "후보": len(candidates) + len(carried), "본문": len(carried), "검증기사": 0, "이월": 0,
@@ -272,7 +276,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             if stopped:
                 break
         analyze_batch(batch)
-        reusable_window_budget -= max(0, examined - base_window_budget)
+        reusable_window_budget -= max(0, examined - reserved_window_budget)
         window_counts[str(months)]["시도"] = examined
         window_counts[str(months)]["미시도"] = len(candidates) - examined
         window_counts[str(months)]["검증기사"] = len(relevant_articles) - relevant_before
@@ -325,6 +329,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             "미확인검색반환행수": sum(snapshot.unverified_publishers.values()),
         },
         "검증된이름변형": derived_company_names(company),
+        "법인검증상세": dict(identity_diagnostics),
         "메타이름일치후보": sum(item.metadata_name_match for item in snapshot.candidates),
         "메타이름비일치후보": sum(not item.metadata_name_match for item in snapshot.candidates),
         "이름미확인후보": excluded.get("grounded_identity_unverified", 0),
