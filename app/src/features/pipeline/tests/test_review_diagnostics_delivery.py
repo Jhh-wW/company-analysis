@@ -17,7 +17,7 @@ from src.features.composer.tests.test_section_public_manifest import (
 from src.features.composer.validate import V2ValidationError
 from src.features.pipeline import real
 from src.features.pipeline.port import Grade, Outcome, Report
-from src.features.pipeline.tests.test_real_cache import FakeEngine
+from src.features.pipeline.tests.test_real_cache import CORP_ID, FakeEngine
 from src.features.pipeline.tests.test_real_v2_switch import (
     _branch_ingredients,
     _build_identity,
@@ -125,6 +125,7 @@ def test_real_성공실패_진단은_한국어_닫힌필드만_저장한다(
         filing=filing,
         revenue_tables=[],
         sources=[],
+        corp_id=CORP_ID,
         business_date=real.today_kst(),
         model="가짜모델",
         steps=steps,

@@ -6675,7 +6675,7 @@ def _run_v2_composer(
                     )
                 ) else None
             ),
-            preserve_on_ask_failure=True,
+            preserve_on_ask_failure=(release_mode is not ReleaseMode.ENFORCE_NO_PARTIAL),
         )
         degraded_reason = str(getattr(output, "degraded_reason", "") or "")
         if degraded_reason:
@@ -6931,6 +6931,7 @@ def _run_v2_composer(
         )
         if result.outcome is not Outcome.REPORT:
             return result
+        report = result.report
     # ★ 출고 검증(validate_v2)을 이미 통과한 보고서만 여기 온다. 그것을
     #   «지금 코드 지문»과 함께 저장해 두면, 코드가 그대로일 때 같은 회사를
     #   다시 조사해도 900원이 안 나간다. 코드가 바뀌면 지문이 달라져 저절로
