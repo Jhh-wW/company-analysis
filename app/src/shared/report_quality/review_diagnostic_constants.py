@@ -57,6 +57,8 @@ REVIEW_SCOPE_ITEMS = {
     "role_binding_condition_dropped_from_source": "역할·과금 결속",
     "role_binding_direction_reversed": "역할·과금 결속",
     "role_binding_claim_not_covered": "역할·과금 결속",
+    "role_binding_participation_condition_not_action": "역할·과금 결속",
+    "role_binding_entry_type_unknown": "역할·과금 결속",
     # ★ 6장 「회사가 밝힌 성장 계획」 표의 미래 근거 결속 사유.
     #   composer 의 future_plan_constants.FUTURE_REASON_CODES 와 같은 목록이며,
     #   어긋나면 test_future_plan_guard 의 동기화 시험이 깨진다. 공유 계층이

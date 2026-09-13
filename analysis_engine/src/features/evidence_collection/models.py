@@ -14,6 +14,7 @@ from datetime import date
 
 from core.dart_client import normalize_document_web_url
 from features.evidence_collection import constants as c
+from features.evidence_collection.scan_contract import DocumentScan
 
 _SHA256_HEX_LENGTH = 64
 _SHA256_HEX_CHARS = frozenset("0123456789abcdef")
@@ -240,6 +241,7 @@ class CollectionAttempt:
     elapsed_ms: int
     bytes_downloaded: int
     documents_seen: int
+    document_scan: DocumentScan | None = None
 
     def __post_init__(self) -> None:
         _require_nonempty(self.company_id, "company_id")
@@ -257,6 +259,13 @@ class CollectionAttempt:
         _require_nonnegative_int(self.elapsed_ms, "elapsed_ms")
         _require_nonnegative_int(self.bytes_downloaded, "bytes_downloaded")
         _require_nonnegative_int(self.documents_seen, "documents_seen")
+        if self.document_scan is not None:
+            if not isinstance(self.document_scan, DocumentScan):
+                raise EvidenceCollectionError("문서 순회 기록의 자료형이 올바르지 않습니다")
+            if self.attempt_id != f"document:{self.document_scan.document_id}":
+                raise EvidenceCollectionError("문서 순회 기록과 수집 시도의 문서가 다릅니다")
+            if self.document_scan.state == c.SCAN_STATE_INCOMPLETE and self.state != c.ATTEMPT_STATE_TRUNCATED:
+                raise EvidenceCollectionError("미완료 순회는 TRUNCATED로 기록해야 합니다")
 
 
 @dataclass(frozen=True)
@@ -397,6 +406,10 @@ class DartEvidenceHarvest:
                 raise EvidenceCollectionError(
                     f"시도 {attempt.attempt_id}의 company_id가 harvest와 다릅니다"
                 )
+            if attempt.document_scan is not None:
+                for document in (*self.documents, *self.unclassified_documents):
+                    if document.document_id == attempt.document_scan.document_id and document.content_sha256 != attempt.document_scan.content_sha256:
+                        raise EvidenceCollectionError("문서와 순회 기록의 원문 해시가 다릅니다")
         seen_candidates: set[tuple[str, str, str]] = set()
         for candidate in self.official_url_candidates:
             if candidate.company_id != self.company_id:

@@ -341,39 +341,24 @@ def test_문서_조회_실패는_FAILED로_기록되고_문서를_만들지_않�
     assert fail_attempts[0].reason_code == c.REASON_DOCUMENT_FETCH_FAILED
 
 
-def test_문단후보_상한에_닿은_문서는_부분근거가_있어도_OK로_위장하지_않는다(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(c, "MAX_LONG_FRAGMENT_CANDIDATES_PER_DOCUMENT", 1)
+def test_보관_압축은_필수성이나_원문_순회_완료를_바꾸지_않는다(monkeypatch) -> None:
+    monkeypatch.setattr(c, "RETAINED_TOP_PER_SLOT", 1)
+    monkeypatch.setattr(c, "RETAINED_RECENT_PER_SLOT", 1)
+    monkeypatch.setattr(c, "RETAINED_CHANGE_PER_SLOT", 1)
     row = RawFilingRow("20250315000021", "사업보고서", "20250315")
-    company_id = "00126380"
-    text = (
-        "I. 회사의 개요\n"
-        "당사는 정밀부품을 생산하는 주식회사이며 법인이다.\n\n"
-        "II. 사업의 내용\n"
-        "주요 매출은 제품 판매에서 발생하며 고객에게 서비스를 제공한다.\n"
-    )
-
-    harvest = collect_dart_evidence(
-        _fetcher("A", row, text), company_id, now=_NOW
-    )
-    document_attempt = next(
-        attempt
-        for attempt in harvest.attempts
-        if attempt.attempt_id.startswith("document:")
-    )
-
-    assert harvest.company_id == company_id
-    assert harvest.fragments  # 상한 전까지의 실제 부분 근거는 버리지 않는다.
-    assert document_attempt.state == c.ATTEMPT_STATE_TRUNCATED
-    assert (
-        document_attempt.reason_code
-        == c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
-    )
-    assert not any(
-        attempt.attempt_id.startswith("fragments:")
-        for attempt in harvest.attempts
-    )
+    text = "\n\n".join(
+        f"당사는 정밀부품을 생산하는 주식회사이며 법인이다. 항목 {index}"
+        for index in range(20)
+    ) + "\n\n주요 매출은 제품 판매에서 발생하며 고객에게 서비스를 제공한다."
+    harvest = collect_dart_evidence(_fetcher("A", row, text), "00126380", now=_NOW)
+    attempt = next(value for value in harvest.attempts if value.attempt_id.startswith("document:"))
+    assert {fragment.section_id for fragment in harvest.fragments} >= {"identity", "business_model"}
+    assert attempt.state == c.ATTEMPT_STATE_OK
+    assert attempt.requirement == c.REQUIREMENT_REQUIRED
+    assert attempt.reason_code == c.REASON_SELECTION_COMPRESSED
+    assert attempt.document_scan.state == c.SCAN_STATE_COMPLETE
+    assert attempt.document_scan.scanned_chars == len(text)
+    assert attempt.document_scan.selection_compressed
 
 
 @pytest.mark.parametrize(
@@ -739,7 +724,7 @@ def test_P0_3_scored_근거가_없는_문서는_documents에서_제외되고_att
     assert no_evidence_attempts[0].documents_seen == 2  # 관측된 무신호 문단 개수
 
 
-def test_정식_짧은관측_filter가_cap에_닿으면_문서attempt는_TRUNCATED다(
+def test_정식_짧은관측_보관이_압축돼도_끝부분까지_관측한다(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(c, "MAX_SHORT_OBSERVATION_CANDIDATES_PER_DOCUMENT", 1)
@@ -763,9 +748,11 @@ def test_정식_짧은관측_filter가_cap에_닿으면_문서attempt는_TRUNCAT
         for attempt in harvest.attempts
         if attempt.attempt_id.startswith("document:")
     )
-    assert document_attempt.state == c.ATTEMPT_STATE_TRUNCATED
-    assert document_attempt.reason_code == c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
-    assert any("나다라와 경쟁" in fragment.text for fragment in harvest.unclassified_fragments)
+    assert document_attempt.state == c.ATTEMPT_STATE_OK
+    assert document_attempt.reason_code == c.REASON_SELECTION_COMPRESSED
+    assert any("사아자와 경쟁" in fragment.text for fragment in harvest.unclassified_fragments)
+    assert document_attempt.document_scan.state == c.SCAN_STATE_COMPLETE
+    assert document_attempt.document_scan.unclassified_seen == 2
 
 
 # ══════════════════════════════════════════════════════════

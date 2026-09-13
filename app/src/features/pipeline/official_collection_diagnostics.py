@@ -30,11 +30,24 @@ def official_collection_attempt_step(
 
     seen_attempt_ids: set[str] = set()
     histogram: Counter[tuple[str, str, str, str]] = Counter()
+    scan_counts: Counter[str] = Counter()
     for candidate in result.candidates:
         for attempt in candidate.attempts:
             if attempt.attempt_id in seen_attempt_ids:
                 continue
             seen_attempt_ids.add(attempt.attempt_id)
+            scan = attempt.document_scan
+            if scan is not None:
+                scan_counts[scan.state] += 1
+                scan_counts["selection_compressed"] += int(scan.selection_compressed)
+                scan_counts["line_index_saturated"] += int(scan.line_index_saturated)
+                scan_counts["windowed_paragraphs"] += int(scan.windowed_paragraphs)
+                scan_counts["total_chars"] += scan.total_chars
+                scan_counts["scanned_chars"] += scan.scanned_chars
+                scan_counts["candidates_seen"] += scan.candidates_seen
+                scan_counts["candidates_retained"] += scan.candidates_retained
+                scan_counts["unclassified_seen"] += scan.unclassified_seen
+                scan_counts["unclassified_retained"] += scan.unclassified_retained
             source_kind = _allowed(
                 attempt.source_kind,
                 ALLOWED_OFFICIAL_COLLECTION_SOURCE_KINDS,
@@ -56,6 +69,7 @@ def official_collection_attempt_step(
     return {
         "step": OFFICIAL_COLLECTION_DIAGNOSTICS_STEP,
         "attempt_count": len(seen_attempt_ids),
+        **({"document_scan": dict(sorted(scan_counts.items()))} if scan_counts else {}),
         "histogram": [
             {
                 "source_kind": source_kind,

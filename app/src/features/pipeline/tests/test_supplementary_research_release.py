@@ -14,6 +14,8 @@ from src.features.pipeline.port import (
     ReportTable,
     SummaryItem,
 )
+from src.features.pipeline.constants import EVIDENCE_AVAILABLE_PUBLICATION_POLICY
+from src.features.composer.constants import NOTICE_EVIDENCE_NONE
 from src.features.pipeline.supplementary_research_release import (
     assess_supplementary_research_release,
 )
@@ -372,6 +374,22 @@ def _assess(report: Report, evidence: OfficialEvidenceCollectionResult):
         official_evidence=evidence,
         source_verifier=_Verifier(),
     )
+
+
+def test_빈_근거_안내에는_인용을_발명하지_않는다():
+    report, evidence = _report(())
+    report = replace(
+        report, publication_policy=EVIDENCE_AVAILABLE_PUBLICATION_POLICY,
+        summary_items=[], sections=[ReportSection(
+            cell="identity", title="기업 정체성", empty_reason="확보한 근거에서 미확인",
+        )],
+    )
+    assert _assess(report, evidence).allowed
+    rendered_notice = replace(report.sections[0], prose_lines=[(NOTICE_EVIDENCE_NONE, "")], prose_paragraphs=[NOTICE_EVIDENCE_NONE])
+    assert _assess(replace(report, sections=[rendered_notice]), evidence).allowed
+    # 안내 정책에 근거 없는 문장을 섞어도 통과하는 우회로가 생기면 안 된다.
+    report = replace(report, sections=[replace(report.sections[0], prose_lines=[("미검증 주장", "")])])
+    assert not _assess(report, evidence).allowed
 
 
 def test_shadow_observation_does_not_override_grounded_partial_release():

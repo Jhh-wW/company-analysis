@@ -279,6 +279,7 @@ def test_분기_함수는_v1_자산을_재사용해_run_v2에_넘긴다(
     steps: list[dict[str, Any]] = []
 
     result = real._run_v2_composer(
+        corp_id=CORP_ID,
         engine=engine,
         client=client,
         company_name="가나다전자",
@@ -297,7 +298,7 @@ def test_분기_함수는_v1_자산을_재사용해_run_v2에_넘긴다(
 
     # run_v2 입력 — 조각 원본 그대로 + 프로그램 실적표 + 기간 라벨 재사용
     assert captured["company_name"] == "가나다전자"
-    assert captured["fragments"] is frags
+    assert {fragment.fragment_id for fragment in captured["fragments"]} == {str(number) for number in frags}
     assert captured["performance_table"] is not None
     assert captured["performance_table"].rows  # build_three_year_table 재사용
     assert captured["analysis_period"] == "2023~2025 완료 회계연도"
@@ -536,6 +537,7 @@ def test_v2_분기는_AskFatalError_원인을_그대로_다시_던진다(
 
     with pytest.raises(provider_budget.ProviderBudgetUnavailable):
         real._run_v2_composer(
+        corp_id=CORP_ID,
             engine=engine,
             client=client,
             company_name="가나다전자",
@@ -610,6 +612,7 @@ def test_v2_출고검증과_회복실패는_닫힌사유의_GATE_STOPPED로_끝�
     steps: list[dict[str, Any]] = []
 
     result = real._run_v2_composer(
+        corp_id=CORP_ID,
         engine=engine,
         client=client,
         company_name="가나다전자",
@@ -730,6 +733,7 @@ def test_v2_품질하한_각_코드는_새_최종게이트사유로_구분된다
     steps: list[dict[str, Any]] = []
 
     result = real._run_v2_composer(
+        corp_id=CORP_ID,
         engine=engine,
         client=client,
         company_name="가나다전자",
@@ -782,6 +786,7 @@ def test_v2_다른_품질코드나_안전오류는_기존_publish_blocked를_유
     steps: list[dict[str, Any]] = []
 
     result = real._run_v2_composer(
+        corp_id=CORP_ID,
         engine=engine,
         client=client,
         company_name="가나다전자",
@@ -833,6 +838,7 @@ def test_v2_혼합코드는_품질하한코드가_하나라도_있으면_품질�
     steps: list[dict[str, Any]] = []
 
     result = real._run_v2_composer(
+        corp_id=CORP_ID,
         engine=engine,
         client=client,
         company_name="가나다전자",
@@ -867,6 +873,7 @@ def test_v2_기존_예외_호환_problem_codes없이_던져도_그대로_동작�
     steps: list[dict[str, Any]] = []
 
     result = real._run_v2_composer(
+        corp_id=CORP_ID,
         engine=engine,
         client=client,
         company_name="가나다전자",
@@ -914,6 +921,7 @@ def test_v2_real자체_transport_무결성_실패도_품질게이트_사유를_�
     steps: list[dict[str, Any]] = []
 
     result = real._run_v2_composer(
+        corp_id=CORP_ID,
         engine=engine,
         client=client,
         company_name="가나다전자",

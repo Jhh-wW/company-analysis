@@ -36,7 +36,11 @@ def classify_company_type(
 ) -> str:
     """관측된 공시 구성과 조각 원문만으로 listed/audit_only/financial/undecided를 정한다."""
     docs = list(documents)
-    joined_text = "\n".join(fragment_texts)
+    observed_keywords = set()
+    for text in fragment_texts:
+        for keyword in (c.REVENUE_LINE_ITEM_KEYWORD, *c.FINANCIAL_COMPANY_REVENUE_KEYWORDS):
+            if keyword in text:
+                observed_keywords.add(keyword)
     attempts_list = list(attempts)
 
     if not docs or _required_list_query_failed(attempts_list):
@@ -47,9 +51,9 @@ def classify_company_type(
     has_business_report = any(doc.source_kind == c.SOURCE_KIND_BUSINESS_REPORT for doc in docs)
     has_audit_report = any(doc.source_kind == c.SOURCE_KIND_AUDIT_REPORT for doc in docs)
 
-    has_revenue_line_item = c.REVENUE_LINE_ITEM_KEYWORD in joined_text
+    has_revenue_line_item = c.REVENUE_LINE_ITEM_KEYWORD in observed_keywords
     has_financial_company_signal = any(
-        keyword in joined_text for keyword in c.FINANCIAL_COMPANY_REVENUE_KEYWORDS
+        keyword in observed_keywords for keyword in c.FINANCIAL_COMPANY_REVENUE_KEYWORDS
     )
 
     # 「매출액」이 아예 없는데 금융업 특유의 수익 항목이 있으면 금융형으로 본다.

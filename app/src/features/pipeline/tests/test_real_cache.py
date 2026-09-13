@@ -1215,11 +1215,11 @@ def test_로컬통합_삼성전자_저장원문은_가짜AI로_생성이후까�
         progress.append,
     )
 
-    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.publication_policy == real.EVIDENCE_AVAILABLE_PUBLICATION_POLICY
     assert result.outcome is not Outcome.FAILED
-    assert result.report is None
     assert result.billing_uncertain is False
-    assert "핵심 기본 보고서" in result.message
     assert calls == {"writer": 0, "comparison": 0, "finalize": 0}
     assert progress[:5] == ["identify", "judge", "collect", "gate", "generate"]
     assert fake.client.messages.calls == real.VOTE_ROUNDS
@@ -1232,7 +1232,7 @@ def test_로컬통합_삼성전자_저장원문은_가짜AI로_생성이후까�
 # ══════════════════════════════════════════════════════════
 
 
-def test_본조사_DART_회사정보오류는_거부가_아니라_AI전_기술실패다(
+def test_본조사_DART_회사정보오류는_확보자료로_계속하고_실패를_표시한다(
     engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     original = engine.get_json
@@ -1246,10 +1246,10 @@ def test_본조사_DART_회사정보오류는_거부가_아니라_AI전_기술�
 
     result = _run()
 
-    assert result.outcome is Outcome.FAILED
+    assert result.outcome is Outcome.REPORT
     assert result.outcome is not Outcome.REJECT_NO_DISCLOSURE
-    assert engine.client.messages.calls == 0
-    assert result.cost_krw == 0
+    assert any(source.state == "failed" for source in result.sources)
+    assert result.generation_cache_eligible is False
 
 
 def test_본조사_DART_공시목록오류는_감사보고서없음으로_거부하지_않는다(
@@ -1266,26 +1266,16 @@ def test_본조사_DART_공시목록오류는_감사보고서없음으로_거부
 
     result = _run()
 
-    assert result.outcome is Outcome.FAILED
+    assert result.outcome is Outcome.REPORT
     assert result.outcome is not Outcome.REJECT_NO_DISCLOSURE
-    assert engine.client.messages.calls == 0
-    assert result.cost_krw == 0
+    assert any(source.state == "failed" for source in result.sources)
+    assert result.generation_cache_eligible is False
 
 
-def test_본조사_DART_013이고_재무제표도_없으면_공시없음으로_명확히거부한다(
+def test_본조사_DART_013이고_재무제표도_없어도_대상외를_입증하지_않는다(
     engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """★ 계약 변경 — 옛 이름은 「013은 …추가호출하지않는다」였다.
-
-    013(감사보고서 목록 비어 있음)은 「이름이 감사보고서인 공시가 없다」일 뿐
-    「분석할 자료가 없다」가 아니다. 사업보고서를 내는 회사는 감사보고서를 그
-    안에 첨부하므로 별도 공시가 안 생긴다(외부감사법 23조① 단서). 그래서 이제
-    **재무제표를 한 번 더 확인한 뒤에** 거부한다 — 그 확인도 없이 거부하던 것이
-    현대카드·우리은행을 삼킨 결함이었다.
-
-    이 시험은 「둘 다 없을 때」의 거부 화면을 지킨다. 「감사보고서는 없지만
-    재무제표는 있을 때」는 바로 아래 시험이 지킨다.
-    """
+    """공시·재무 미확인은 대상 외 입증이 아니므로 확보자료 보고서로 잇는다."""
     original = engine.get_json
     endpoints: list[str] = []
 
@@ -1311,18 +1301,13 @@ def test_본조사_DART_013이고_재무제표도_없으면_공시없음으로_�
 
     result = _run()
 
-    assert result.outcome is Outcome.REJECT_NO_DISCLOSURE
-    # ★ 화면은 «우리가 찾은 방법»이 아니라 «사용자가 알아야 할 사실»을 말한다.
-    #   옛 문구 「감사보고서를 낸 기록이 없습니다」는 방법이었고, 틀리기도 했다.
-    assert "재무 자료" in result.message
-    assert "감사보고서" not in result.message
-    assert result.sources[0].state == "none"
-    # ★ 가짜 엔진의 fetch_financials 는 get_json 을 안 거치므로 여기 안 잡힌다.
-    #   진짜 엔진에서는 fnlttSinglAcnt.json 이 «3번» 더 나간다 (최근 3개 사업연도).
-    #   ⚠️ 돈은 0원이지만 DART 일일 호출 한도는 그만큼 쓴다. 게다가 판정 «전»으로
-    #      옮겼으므로 거부될 회사도 3번을 쓴다 — 예전엔 통과분만 썼다.
-    #      개수를 못 박는 시험은 test_engine_financials_contract.py 에 있다.
-    assert endpoints == ["company.json", "list.json"]
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.grade is Grade.PARTIAL
+    assert result.report.company_id == CORP_ID
+    assert result.report.corp_type == ""
+    assert result.report.shortfall_reasons
+    assert endpoints[:2] == ["company.json", "list.json"]
     assert engine.client.messages.calls == 0
     assert result.cost_krw == 0
 
@@ -1407,7 +1392,7 @@ def test_본조사_재무제표도_없으면_판정에_없다고_넘긴다(
         {"status": 0, "list": []},
     ],
 )
-def test_본조사_DART_공시목록_모순응답은_공시없음이아니라_기술실패다(
+def test_본조사_DART_공시목록_모순응답은_자료없음으로_위장하지_않고_계속한다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
     payload: dict[str, Any],
@@ -1424,10 +1409,10 @@ def test_본조사_DART_공시목록_모순응답은_공시없음이아니라_�
 
     result = _run()
 
-    assert result.outcome is Outcome.FAILED
+    assert result.outcome is Outcome.REPORT
     assert result.outcome is not Outcome.REJECT_NO_DISCLOSURE
-    assert engine.client.messages.calls == 0
-    assert result.cost_krw == 0
+    assert any(source.state == "failed" for source in result.sources)
+    assert result.generation_cache_eligible is False
 
 
 def test_본조사_DART_013이어도_상장사는_공시없음으로_오거부하지않는다(
@@ -1767,7 +1752,7 @@ def test_Writer가_최소핵심을_한번빠뜨리면_검증된_span만_한번�
     assert engine.client.messages.calls == 5
 
 
-def test_Writer가_수익구조를_보충에도_빠뜨리면_닫힌사유로_멈춘다(
+def test_Writer가_수익구조를_빠뜨리면_확보원문으로_축약한다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1793,9 +1778,10 @@ def test_Writer가_수익구조를_보충에도_빠뜨리면_닫힌사유로_멈
 
     result = _run()
 
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.report is None
-    assert result.final_gate_reason == "publish_missing_revenue"
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.publication_policy == real.EVIDENCE_AVAILABLE_PUBLICATION_POLICY
+    assert result.span_selection_result_reason == "publish_missing_revenue"
     assert writer_calls == 2
     assert len(result.span_selection_diagnostics) == 1
 
@@ -1832,13 +1818,14 @@ def test_뒤_선택에서_최소사실_SID가_충돌하면_앞_부분집합을_�
     result = _run()
 
     assert calls == real.VOTE_ROUNDS
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.report is None
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.publication_policy == real.EVIDENCE_AVAILABLE_PUBLICATION_POLICY
     # 선택 두 번 뒤 충돌을 코드로 중단하므로 Writer·Reviewer는 부르지 않는다.
     assert engine.client.messages.calls == 2
 
 
-def test_삼개년표가_없으면_선택AI를_부르기전에_멈춘다(
+def test_삼개년표가_없으면_선택AI_없이_확보자료로_축약한다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1854,7 +1841,9 @@ def test_삼개년표가_없으면_선택AI를_부르기전에_멈춘다(
 
     result = _run()
 
-    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.publication_policy == real.EVIDENCE_AVAILABLE_PUBLICATION_POLICY
     assert selection_calls == 0
     assert engine.client.messages.calls == 0
     assert result.span_selection_diagnostics == ()
@@ -1864,7 +1853,7 @@ def test_삼개년표가_없으면_선택AI를_부르기전에_멈춘다(
     )
 
 
-def test_원문조각이_없으면_기타게이트_코드로_멈춘다(
+def test_원문조각이_없으면_미확인_안내_보고서를_만든다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1872,8 +1861,10 @@ def test_원문조각이_없으면_기타게이트_코드로_멈춘다(
 
     result = _run()
 
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == "other_gate"
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.publication_policy == real.EVIDENCE_AVAILABLE_PUBLICATION_POLICY
+    assert result.final_gate_reason == ""
 
 
 def test_공식IR_ok_수집은_조각과_단계기록을_그대로_보존한다(
@@ -2089,8 +2080,10 @@ def test_공식IR_실패나_잘림은_후보없음으로_거짓확정하지않�
     result = _run()
 
     assert span_calls == real.VOTE_ROUNDS
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == "other_gate"
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.publication_policy == real.EVIDENCE_AVAILABLE_PUBLICATION_POLICY
+    assert result.final_gate_reason == ""
     assert result.final_gate_reason != "comparison_blocked"
     ir_status = next(source for source in result.sources if source.name == "회사 공식 IR")
     assert ir_status.state == ("failed" if ir_result.state == "failed" else "ok")
@@ -2160,8 +2153,10 @@ def test_공식IR까지_비교후보가_없어도_기본분석은_계속한다(
     result = _run()
 
     assert span_called is True
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == "other_gate"
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.publication_policy == real.EVIDENCE_AVAILABLE_PUBLICATION_POLICY
+    assert result.final_gate_reason == ""
     assert engine.generate_ai_calls == 0
     ir_status = next(source for source in result.sources if source.name == "회사 공식 IR")
     assert ir_status.state == "none"
@@ -2235,7 +2230,9 @@ def test_실제_run은_메타검증_IR을_DART법인에_먼저_결속한_뒤_Wri
 
     result = _run()
 
-    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.publication_policy == real.EVIDENCE_AVAILABLE_PUBLICATION_POLICY
     assert captured
     generated_ir = [
         fragment
@@ -2333,9 +2330,10 @@ def test_오래된_newsroom_경쟁문장은_비교에서_빼고_기본분석은_
     result = _run()
 
     assert span_calls == real.VOTE_ROUNDS
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == "other_gate"
-    assert result.sentences_made == 0
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.publication_policy == real.EVIDENCE_AVAILABLE_PUBLICATION_POLICY
+    assert result.final_gate_reason == ""
     assert engine.generate_ai_calls == 0
 
 
@@ -2472,15 +2470,14 @@ def test_전체공시원문에_비교후보가_없어도_기본사실_span은_�
 
     result = _run()
 
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == "other_gate"
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.publication_policy == real.EVIDENCE_AVAILABLE_PUBLICATION_POLICY
+    assert result.final_gate_reason == ""
     assert span_calls == real.VOTE_ROUNDS
-    assert result.sentences_made == 0
-    assert result.sentences_passed == 0
     assert len(result.span_selection_diagnostics) == real.VOTE_ROUNDS
     assert result.span_selection_result_reason == "all_provider_rounds_empty"
     assert engine.generate_ai_calls == 0
-    assert "회사 사실" in result.message
 
 
 def test_경쟁사비교_실패는_원문사유를_숨기고_기본보고서를_반환한다(
@@ -2504,7 +2501,7 @@ def test_경쟁사비교_실패는_원문사유를_숨기고_기본보고서를_
     assert "자기 선언" in result.message
 
 
-def test_정본출고_차단은_원문사유대신_닫힌코드만_반환한다(
+def test_정본출고_실패초안은_버리고_확보원문으로_다시_검증한다(
     engine: FakeEngine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2519,8 +2516,10 @@ def test_정본출고_차단은_원문사유대신_닫힌코드만_반환한다(
 
     result = _run()
 
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == "publish_blocked"
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.publication_policy == real.EVIDENCE_AVAILABLE_PUBLICATION_POLICY
+    assert result.span_selection_result_reason == "publish_blocked"
     assert internal_reason not in result.message
 
 
@@ -2780,10 +2779,9 @@ def test_3개년표만_있고_필수_정체성제품근거가_없으면_출고�
 
     result = _run()
 
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.report is None
-    assert result.charged is False
-    assert "확인되지 않은 내용을 보고서처럼 보여주지 않" in result.message
+    assert result.outcome is Outcome.REPORT
+    assert result.report is not None
+    assert result.report.publication_policy == real.EVIDENCE_AVAILABLE_PUBLICATION_POLICY
 
 
 def test_공시_사업연도는_접수일이_아니라_결산연도를_읽는다() -> None:

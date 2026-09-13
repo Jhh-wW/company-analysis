@@ -32,6 +32,8 @@ from src.features.chapter_evidence.constants import (
     CHARS_PER_ESTIMATED_TOKEN,
     DEFAULT_MAX_CHARS_PER_SECTION,
     DEFAULT_MAX_ESTIMATED_TOKENS_PER_SECTION,
+    SELECTION_CHANGE_CONTEXT,
+    SELECTION_RECENT_CONTEXT,
 )
 from src.shared.report_evidence.models import CollectedEvidenceDocument, EvidenceFragment
 from src.shared.report_evidence.constants import (
@@ -55,6 +57,16 @@ class SectionFragmentSelection:
 
 def _estimated_tokens(char_count: int) -> int:
     return math.ceil(char_count / CHARS_PER_ESTIMATED_TOKEN)
+
+
+def _selection_priority(fragment: EvidenceFragment) -> tuple[bool, int, bool, int, str]:
+    """뒤쪽 취소·변경을 대표/추가 후보 단계 모두에서 보존한다."""
+    is_change = SELECTION_CHANGE_CONTEXT in fragment.reason_codes
+    start = fragment.location.partition("-")[0]
+    source_order = int(start) if is_change and start.isdecimal() else 0
+    return (not is_change, -source_order,
+            SELECTION_RECENT_CONTEXT not in fragment.reason_codes,
+            -fragment.score_millis, fragment.fragment_id)
 
 
 def _dedupe_by_evidence_range(
@@ -188,7 +200,10 @@ def select_section_fragments(
             if slot_id in collector_slot_set:
                 by_slot[slot_id].append(fragment)
     for items in by_slot.values():
-        items.sort(key=lambda fragment: (-fragment.score_millis, fragment.fragment_id))
+        # 최근 문맥은 추가 몫에서 보존하며, 슬롯 대표는 변경 근거만 우선한다.
+        items.sort(key=lambda fragment: (
+            *_selection_priority(fragment)[:2], -fragment.score_millis, fragment.fragment_id,
+        ))
 
     included: list[EvidenceFragment] = []
     included_ids: set[str] = set()
@@ -237,7 +252,7 @@ def select_section_fragments(
             if fragment.fragment_id not in included_ids
             and fragment.fragment_id not in excluded_ids
         ),
-        key=lambda fragment: (-fragment.score_millis, fragment.fragment_id),
+        key=_selection_priority,
     )
     for fragment in remaining:
         cost_chars = len(fragment.text)

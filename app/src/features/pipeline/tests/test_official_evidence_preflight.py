@@ -30,7 +30,7 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_DETAIL_PREFLIGHT_CLASSIFIER_COVERAGE_GAP,
     FINAL_GATE_DETAIL_PREFLIGHT_DOCUMENT_SOURCES_INSUFFICIENT,
     FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT,
-    FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT,
+    FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE,
     FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID,
 )
 from src.shared.report_evidence.constants import (
@@ -398,7 +398,7 @@ def test_formal_의미칸검사는_뒤에_합쳐질_구조화문서를_미리_�
 
     assert preflight.can_call_ai is True
     assert preflight.independent_document_count == 1
-    assert preflight.detail_code == ""
+    assert preflight.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_DOCUMENT_SOURCES_INSUFFICIENT
 
 
 def test_정상확인후_자료부족과_조회실패를_다르게_분류한다() -> None:
@@ -415,7 +415,7 @@ def test_정상확인후_자료부족과_조회실패를_다르게_분류한다(
     )
     assert (
         transient.detail_code
-        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT
+        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE
     )
 
 
@@ -457,7 +457,7 @@ def test_DART핵심장이_있으면_홈페이지장애는_부분보고서로_전
     assert preflight.dart_partial_fallback is True
     assert preflight.dart_partial_reason == "transient_web_failure"
     assert preflight.can_call_ai is True
-    assert preflight.detail_code == ""
+    assert preflight.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE
 
 
 def test_DART근거가_있으면_사업모델_웹장애도_부분보고서로_진행한다() -> None:
@@ -497,10 +497,10 @@ def test_DART근거가_있으면_사업모델_웹장애도_부분보고서로_�
     assert preflight.decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE
     assert preflight.dart_partial_fallback is True
     assert preflight.can_call_ai is True
-    assert preflight.detail_code == ""
+    assert preflight.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE
 
 
-def test_robots실패와_웹신원불일치가_함께있으면_DART부분우회를_막는다() -> None:
+def test_robots실패와_웹신원불일치는_격리하고_검증된_DART자료로_진행한다() -> None:
     observed = _with_dart_evidence(_result())
     candidates = list(observed.candidates)
     target_index = next(
@@ -548,11 +548,11 @@ def test_robots실패와_웹신원불일치가_함께있으면_DART부분우회�
     )
 
     assert preflight.decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE
-    assert preflight.dart_partial_fallback is False
-    assert preflight.can_call_ai is False
+    assert preflight.dart_partial_fallback is True
+    assert preflight.can_call_ai is True
     assert (
         preflight.detail_code
-        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT
+        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE
     )
 
 
@@ -574,10 +574,10 @@ def test_INSUFFICIENT라도_DART근거와_READY_3장이상이면_부분보고서
     assert preflight.dart_partial_fallback is True
     assert preflight.dart_partial_reason == "insufficient_with_ready_sections"
     assert preflight.can_call_ai is True
-    assert preflight.detail_code == ""
+    assert preflight.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
 
 
-def test_READY가_최소_공개_장수_미만이면_INSUFFICIENT는_그대로_막힌다() -> None:
+def test_READY_최소장수_미만도_상태를_보존하고_부분작성한다() -> None:
     # 공개 가능한 부분 보고서의 최소 장 수는 3장이다. 경계 양쪽을 같이 본다 —
     # 3장이면 열리고 2장이면 닫혀야, 하한이 실제로 판정에 쓰이는 것이 된다.
     blocked_ids = (
@@ -608,9 +608,9 @@ def test_READY가_최소_공개_장수_미만이면_INSUFFICIENT는_그대로_�
     assert exactly_minimum.can_call_ai is True
 
     assert len(below_minimum.decision.ready_section_ids) == 2
-    assert below_minimum.dart_partial_fallback is False
-    assert below_minimum.dart_partial_reason == ""
-    assert below_minimum.can_call_ai is False
+    assert below_minimum.dart_partial_fallback is True
+    assert below_minimum.dart_partial_reason == "insufficient_with_ready_sections"
+    assert below_minimum.can_call_ai is True
     assert (
         below_minimum.detail_code
         == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
@@ -636,7 +636,7 @@ def test_READY가_최소_공개_장수_미만이면_INSUFFICIENT는_그대로_�
         )
     )
 
-    assert below_minimum_unclassified.dart_partial_fallback is False
+    assert below_minimum_unclassified.dart_partial_fallback is True
     assert (
         below_minimum_unclassified.detail_code
         == FINAL_GATE_DETAIL_PREFLIGHT_CLASSIFIER_COVERAGE_GAP
@@ -659,7 +659,7 @@ def test_READY여도_독립문서가_정식_하한에_못미치면_부분보고�
     # 자료가 부족한 게 아니라 «완성 등급»만 못 미치는 상태다. AI 호출은 그대로
     # 열려 있어야 부분 보고서가 실제로 만들어진다.
     assert preflight.can_call_ai is True
-    assert preflight.detail_code == ""
+    assert preflight.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_DOCUMENT_SOURCES_INSUFFICIENT
 
 
 def test_늦게_더해질_문서를_합쳐_하한에_닿을_수_있으면_정식을_유지한다() -> None:
@@ -692,7 +692,7 @@ def test_늦게_더해질_문서를_합쳐_하한에_닿을_수_있으면_정식
     assert plenty.dart_partial_reason == ""
 
 
-def test_문서하한_강등도_READY_3장_미만이면_열리지_않는다() -> None:
+def test_문서하한과_READY_3장_미만도_부분작성을_허용한다() -> None:
     # 문서가 모자란다는 이유만으로 부분 보고서를 열지 않는다. 오늘의 게이트에서
     # READY_FOR_GENERATION은 아홉 장 전부 READY와 같은 뜻이라, 확인하지 못한 장이
     # 많은 이 모양은 세 번째 갈래가 아니라 INSUFFICIENT 갈래의 공개 최소 장 수
@@ -717,9 +717,9 @@ def test_문서하한_강등도_READY_3장_미만이면_열리지_않는다() ->
 
     assert preflight.independent_document_count == 2
     assert len(preflight.decision.ready_section_ids) == 2
-    assert preflight.dart_partial_fallback is False
-    assert preflight.dart_partial_reason == ""
-    assert preflight.can_call_ai is False
+    assert preflight.dart_partial_fallback is True
+    assert preflight.dart_partial_reason == "insufficient_with_ready_sections"
+    assert preflight.can_call_ai is True
     assert (
         preflight.detail_code
         == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
@@ -787,7 +787,7 @@ def test_갈래_우선순위는_transient_insufficient_document_floor_순이다(
     } == {True}
 
 
-def test_DART근거가_결속되지_않으면_INSUFFICIENT_구제는_없다() -> None:
+def test_DART근거가_없어도_검증된_다른공식자료로_작성한다() -> None:
     # 남은 장이 아무리 많아도 부분 보고서의 본문은 DART 원문이 받쳐야 한다.
     observed = _without_section_evidence(
         _result(),
@@ -798,16 +798,16 @@ def test_DART근거가_결속되지_않으면_INSUFFICIENT_구제는_없다() ->
     preflight = assess_official_evidence(observed)
 
     assert len(preflight.decision.ready_section_ids) == 7
-    assert preflight.dart_partial_fallback is False
-    assert preflight.dart_partial_reason == ""
-    assert preflight.can_call_ai is False
+    assert preflight.dart_partial_fallback is True
+    assert preflight.dart_partial_reason == "insufficient_with_ready_sections"
+    assert preflight.can_call_ai is True
     assert (
         preflight.detail_code
         == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
     )
 
 
-def test_REQUIRED_DART_실패는_INSUFFICIENT_구제를_막는다() -> None:
+def test_REQUIRED_DART_실패를_기록하고_확보자료로_작성한다() -> None:
     # DART 필수 경로를 끝까지 확인하지 못한 상태를 «확인 완료»로 바꾸지 않는다.
     observed = _without_section_evidence(
         _with_dart_evidence(_result()),
@@ -844,11 +844,11 @@ def test_REQUIRED_DART_실패는_INSUFFICIENT_구제를_막는다() -> None:
 
     assert preflight.decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
     assert len(preflight.decision.ready_section_ids) == 7
-    assert preflight.dart_partial_fallback is False
-    assert preflight.can_call_ai is False
+    assert preflight.dart_partial_fallback is True
+    assert preflight.can_call_ai is True
     assert (
         preflight.detail_code
-        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT
+        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE
     )
 
 
@@ -882,7 +882,7 @@ def test_신원대조_실패시도는_같은장에_검증된웹문서가_있어�
     assert passed.dart_partial_fallback is True
     assert passed.dart_partial_reason == "insufficient_with_ready_sections"
     assert passed.can_call_ai is True
-    assert passed.detail_code == ""
+    assert passed.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
 
     # (나) 같은 fixture에서 웹 문서가 살아 있는 장에 같은 불일치 사유를 붙인다.
     candidates = list(unbound.candidates)
@@ -921,7 +921,7 @@ def test_신원대조_실패시도는_같은장에_검증된웹문서가_있어�
         == "insufficient_with_ready_sections"
     )
     assert passed_with_verified_web.can_call_ai is True
-    assert passed_with_verified_web.detail_code == ""
+    assert passed_with_verified_web.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
 
 
 def test_READY_4문서에_실패한웹후보가_섞여도_DART부분보고서로_내린다() -> None:
@@ -957,7 +957,7 @@ def test_READY_4문서에_실패한웹후보가_섞여도_DART부분보고서로
     assert preflight.dart_partial_fallback is True
     assert preflight.dart_partial_reason == "too_few_documents_for_full"
     assert preflight.can_call_ai is True
-    assert preflight.detail_code == ""
+    assert preflight.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_DOCUMENT_SOURCES_INSUFFICIENT
 
 
 def test_읽은원문을_분류못했으면_회사의_자료부족이_아니라_내부범위결함이다() -> None:
@@ -979,7 +979,7 @@ def test_읽은원문을_분류못했으면_회사의_자료부족이_아니라_
 
     preflight = assess_official_evidence(observed)
 
-    assert preflight.can_call_ai is False
+    assert preflight.can_call_ai is True
     assert (
         preflight.detail_code
         == FINAL_GATE_DETAIL_PREFLIGHT_CLASSIFIER_COVERAGE_GAP
@@ -1011,7 +1011,7 @@ def test_무분류관측이_있어도_DART부분보고서_조건을_채우면_�
 
     assert preflight.dart_partial_fallback is True
     assert preflight.dart_partial_reason == "insufficient_with_ready_sections"
-    assert preflight.detail_code == ""
+    assert preflight.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_CLASSIFIER_COVERAGE_GAP
     assert preflight.can_call_ai is True
 
 
@@ -1032,7 +1032,7 @@ def test_무분류관측이_있어도_조회실패가_섞이면_일시장애를_
 
     assert (
         preflight.detail_code
-        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT
+        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE
     )
 
 
@@ -1063,13 +1063,45 @@ def test_REQUIRED_DART_실패를_웹조각이_채운슬롯으로_덮지_않는�
     )
 
     # 모든 의미 칸은 웹 조각으로 채워져 일반 bundle 판정만 보면 READY다.
-    # 그래도 필수 DART 확인이 끝나지 않았으므로 AI 호출은 막아야 한다.
+    # 필수 DART 확인 미완료를 남기고 확보한 웹 근거로 부분 작성한다.
     assert preflight.decision.status is GenerationGateStatus.READY_FOR_GENERATION
-    assert preflight.can_call_ai is False
+    assert preflight.can_call_ai is True
     assert (
         preflight.detail_code
-        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT
+        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE
     )
+
+
+def test_원문_미검사_꼬리는_작성허용_이후에도_INCOMPLETE로_보존한다():
+    from src.shared.report_evidence.document_scan import DocumentScan
+
+    observed = _with_dart_evidence(_result())
+    first = observed.candidates[0]
+    document = first.documents[0]
+    checked_chars = len(first.fragments[0].text)
+    scan = DocumentScan(
+        version="document_scan/1", document_id=document.document_id,
+        content_sha256=document.content_sha256, state="INCOMPLETE",
+        total_chars=checked_chars + 10, scanned_chars=checked_chars,
+        candidates_seen=1, candidates_retained=1,
+        unclassified_seen=0, unclassified_retained=0,
+        selection_compressed=False, line_index_saturated=False, windowed_paragraphs=False,
+    )
+    attempt = CollectionAttempt(
+        company_id=observed.company_id, attempt_id=f"document:{document.document_id}",
+        source_kind=SOURCE_KIND_DART_BUSINESS_REPORT, requirement=SourceRequirement.REQUIRED,
+        state=CollectionState.TRUNCATED, slot_ids=collector_slots_for(first.section_id),
+        reason_code="collection_deadline_exceeded", document_scan=scan,
+    )
+    partial = replace(observed, candidates=(replace(first, attempts=(attempt,)), *observed.candidates[1:]))
+    preflight = assess_official_evidence(partial)
+    assert preflight.can_call_ai
+    assert preflight.collection_incomplete
+    assert preflight.dart_partial_fallback
+    assert len(preflight.decision.ready_section_ids) == len(REQUIRED_EVIDENCE_SECTION_IDS)
+    assert partial.candidates[0].attempts[0].state is CollectionState.TRUNCATED
+    assert partial.candidates[0].attempts[0].document_scan is scan
+    assert partial.source_snapshot_sha256 != observed.source_snapshot_sha256
 
 
 def test_문서결속_배선오류를_외부자료부족으로_분류하지_않는다() -> None:
@@ -1191,7 +1223,7 @@ def test_매출표_문서ID가_formal_DART문서와_맞으면_기존_인용번�
     assert merged[revenue_cite_number]["문서ID"] == formal_document_id
 
 
-def test_모든_실제_packet을_합친_뒤에도_한문서면_AI전에_차단한다() -> None:
+def test_모든_packet이_한문서여도_부분작성을_허용한다() -> None:
     result = _result(document_count=1)
     merged, _added = merge_official_evidence_fragments({}, result)
     packets = build_section_evidence_packet_set(
@@ -1203,7 +1235,7 @@ def test_모든_실제_packet을_합친_뒤에도_한문서면_AI전에_차단�
 
     preflight = assess_packet_document_sources(packets)
 
-    assert preflight.can_call_ai is False
+    assert preflight.can_call_ai is True
     assert preflight.independent_document_count == 1
     assert (
         preflight.detail_code
@@ -1221,14 +1253,14 @@ def test_같은원문을_서로다른_URL로_복제해도_한문서로_센다() 
     preflight = assess_packet_document_sources(packets)
 
     assert preflight.independent_document_count == 1
-    assert preflight.can_call_ai is False
+    assert preflight.can_call_ai is True
 
 
 def test_뉴스보조조각은_문서원문hash가_있어도_독립문서수에_세지않는다() -> None:
     preflight = assess_packet_document_sources(_supplementary_packet_set())
 
     assert preflight.independent_document_count == 0
-    assert preflight.can_call_ai is False
+    assert preflight.can_call_ai is True
 
 
 def test_정식문서조각은_표식기본값_true로_지금처럼_독립문서에_센다() -> None:

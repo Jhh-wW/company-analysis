@@ -752,7 +752,7 @@ def test_같은_DART와_재무라도_공식_snapshot이_바뀌면_coordinate와_
         ),
     ),
 )
-def test_공식근거_부족과_일시장애는_서로_다른_사유로_AI전에_멈춘다(
+def test_공식근거_부족과_일시장애는_진단을_남기고_확보자료로_진행한다(
     monkeypatch: pytest.MonkeyPatch,
     official: Any,
     expected_reason: str,
@@ -768,19 +768,21 @@ def test_공식근거_부족과_일시장애는_서로_다른_사유로_AI전에
 
     result = _run(collector)
 
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == expected_reason
+    assert result.outcome is Outcome.REPORT
+    assert calls.composers[0]["frags"]
+    assert real.assess_official_evidence(collector.requests and calls.legacy_collects[0]["formal_official_evidence"]).collection_incomplete
     assert len(collector.requests) == 1
-    assert calls.coordinates == []
+    assert len(calls.coordinates) == 1
     assert calls.cache_lookups == []
-    assert calls.legacy_collects == []
-    assert calls.composers == []
+    assert len(calls.legacy_collects) == 1
+    assert len(calls.composers) == 1
+    assert calls.composers[0]["release_mode_override"] is ReleaseMode.SHADOW
     assert calls.paid_phase_count == 0
     assert engine.posting_ai_calls == 0
     assert engine.generate_ai_calls == 0
 
 
-def test_무분류_원문이_남은_부족은_실제자료부족으로_단정하지_않고_AI전에_멈춘다(
+def test_무분류_원문이_남은_부족은_실제자료부족으로_단정하지_않고_확보자료로_진행한다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _freeze_runtime(
@@ -803,18 +805,15 @@ def test_무분류_원문이_남은_부족은_실제자료부족으로_단정하
 
     result = _run(collector)
 
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert (
-        result.final_gate_reason
-        == FINAL_GATE_REASON_EVIDENCE_CLASSIFICATION_UNDETERMINED
-    )
-    assert "공식 자료는 읽었지만" in result.message
-    assert result.sources[0].state == "failed"
-    assert "자동으로 확인하지 못했습니다" in result.sources[0].detail
-    assert calls.coordinates == []
-    assert calls.cache_lookups == []
-    assert calls.legacy_collects == []
-    assert calls.composers == []
+    assert result.outcome is Outcome.REPORT
+    projected = calls.legacy_collects[0]["formal_official_evidence"]
+    assert projected.unclassified_evidence == official.unclassified_evidence
+    assert real.assess_official_evidence(projected).detail_code == "preflight_classifier_coverage_gap"
+    assert len(calls.coordinates) == 1
+    assert len(calls.cache_lookups) == 1
+    assert len(calls.legacy_collects) == 1
+    assert len(calls.composers) == 1
+    assert calls.composers[0]["release_mode_override"] is ReleaseMode.SHADOW
     assert calls.paid_phase_count == 0
     assert engine.posting_ai_calls == 0
     assert engine.generate_ai_calls == 0
@@ -857,7 +856,7 @@ def test_formal_문서수만으로는_뒤에_합쳐질_구조화근거를_과소
         ),
     ),
 )
-def test_collector_결과가_깨졌거나_예외면_자료탓이_아닌_내부계약오류로_멈춘다(
+def test_collector_결과가_깨졌거나_예외면_자료탓이_아닌_내부오류를_기록하고_다른_확보자료를_보존한다(
     monkeypatch: pytest.MonkeyPatch,
     malformed: object,
 ) -> None:
@@ -872,13 +871,14 @@ def test_collector_결과가_깨졌거나_예외면_자료탓이_아닌_내부�
 
     result = _run(collector)
 
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+    assert result.outcome is Outcome.REPORT
+    assert next(step["사유코드"] for step in calls.composers[0]["steps"] if step.get("step") == "6_수집_확보자료계속") == FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
     assert len(collector.requests) == 1
-    assert calls.coordinates == []
+    assert len(calls.coordinates) == 1
     assert calls.cache_lookups == []
-    assert calls.legacy_collects == []
-    assert calls.composers == []
+    assert len(calls.legacy_collects) == 1
+    assert len(calls.composers) == 1
+    assert calls.composers[0]["release_mode_override"] is ReleaseMode.SHADOW
     assert calls.paid_phase_count == 0
     assert engine.posting_ai_calls == 0
     assert engine.generate_ai_calls == 0
@@ -897,12 +897,13 @@ def test_FULL에_formal_collector_주입이_빠지면_legacy로_강등하지_않
 
     result = _run(None)
 
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
-    assert calls.coordinates == []
+    assert result.outcome is Outcome.REPORT
+    assert next(step["사유코드"] for step in calls.composers[0]["steps"] if step.get("step") == "6_수집_확보자료계속") == FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+    assert len(calls.coordinates) == 1
     assert calls.cache_lookups == []
-    assert calls.legacy_collects == []
-    assert calls.composers == []
+    assert len(calls.legacy_collects) == 1
+    assert len(calls.composers) == 1
+    assert calls.composers[0]["release_mode_override"] is ReleaseMode.SHADOW
     assert calls.paid_phase_count == 0
     assert engine.posting_ai_calls == 0
     assert engine.generate_ai_calls == 0
@@ -935,7 +936,7 @@ def test_SHADOW와_v1은_collector가_주입돼도_formal_수집을_열지_않�
     assert len(calls.coordinates) == 1
     assert len(calls.legacy_collects) == 1
     assert calls.legacy_collects[0]["formal_official_evidence"] is None
-    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.outcome is Outcome.REPORT
     assert engine.posting_ai_calls == 0
     assert engine.generate_ai_calls == 0
 
@@ -952,7 +953,7 @@ def test_SHADOW와_v1은_collector가_주입돼도_formal_수집을_열지_않�
         ("DartResponseError", FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT),
     ),
 )
-def test_정식공식수집_DART장애도_닫힌사유만_남기고_AI전에_멈춘다(
+def test_정식공식수집_DART장애도_닫힌사유를_남기고_확보자료로_진행한다(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     dart_error_name: str,
@@ -972,14 +973,15 @@ def test_정식공식수집_DART장애도_닫힌사유만_남기고_AI전에_멈
 
     result = _run(collector)
 
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == expected_reason
+    assert result.outcome is Outcome.REPORT
+    assert next(step["사유코드"] for step in calls.composers[0]["steps"] if step.get("step") == "6_수집_확보자료계속") == expected_reason
     assert secret not in result.message
     assert all(secret not in source.detail for source in result.sources)
     assert secret not in caplog.text
     assert len(collector.requests) == 1
-    assert calls.coordinates == []
-    assert calls.composers == []
+    assert len(calls.coordinates) == 1
+    assert len(calls.composers) == 1
+    assert calls.composers[0]["release_mode_override"] is ReleaseMode.SHADOW
     assert calls.paid_phase_count == 0
     assert engine.posting_ai_calls == 0
     assert engine.generate_ai_calls == 0
@@ -1024,14 +1026,15 @@ def test_공식양사비교_DART운영예외는_자료부족이나_내부오류�
 
     result = _run(collector)
 
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == expected_reason
+    assert result.outcome is Outcome.REPORT
+    assert next(step["사유코드"] for step in calls.composers[0]["steps"] if step.get("step") == "6_수집_확보자료계속") == expected_reason
     assert secret not in result.message
     assert all(secret not in source.detail for source in result.sources)
     assert secret not in caplog.text
-    assert calls.coordinates == []
+    assert len(calls.coordinates) == 1
     assert calls.cache_lookups == []
-    assert calls.composers == []
+    assert len(calls.composers) == 1
+    assert calls.composers[0]["release_mode_override"] is ReleaseMode.SHADOW
     assert calls.paid_phase_count == 0
     assert engine.posting_ai_calls == 0
     assert engine.generate_ai_calls == 0
@@ -1056,11 +1059,12 @@ def test_공식양사비교_내부계약오류는_DART일시장애로_위장하�
 
     result = _run(collector)
 
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
-    assert calls.coordinates == []
+    assert result.outcome is Outcome.REPORT
+    assert next(step["사유코드"] for step in calls.composers[0]["steps"] if step.get("step") == "6_수집_확보자료계속") == FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
+    assert len(calls.coordinates) == 1
     assert calls.cache_lookups == []
-    assert calls.composers == []
+    assert len(calls.composers) == 1
+    assert calls.composers[0]["release_mode_override"] is ReleaseMode.SHADOW
     assert calls.paid_phase_count == 0
     assert engine.posting_ai_calls == 0
     assert engine.generate_ai_calls == 0
@@ -1563,7 +1567,7 @@ def test_우리은행_운영모양은_FULL패킷전에_문서하한_부분보고
     assert preflight.decision.status.value == "READY_FOR_GENERATION"
     assert preflight.independent_document_count == 4
     assert preflight.dart_partial_fallback is True
-    assert preflight.dart_partial_reason == "too_few_documents_for_full"
+    assert preflight.dart_partial_reason == "transient_web_failure"
 
     _freeze_runtime(
         monkeypatch,
@@ -1593,18 +1597,20 @@ def test_우리은행_운영모양은_FULL패킷전에_문서하한_부분보고
         "준비장": len(REQUIRED_EVIDENCE_SECTION_IDS),
         "독립문서수": 4,
         "판정": "READY_FOR_GENERATION",
-        "사유코드": "",
+        "사유코드": "preflight_official_evidence_incomplete",
+        "작성허용": True,
+        "수집미완료": True,
         "DART부분보고서전환": True,
         "불명장수": 0,
         "불명장목록": [],
         "미달장수": 0,
-        "전환갈래": "too_few_documents_for_full",
+        "전환갈래": "transient_web_failure",
         "차단사유코드": [],
         "차단사유코드총수": 0,
     }
     assert {
         "step": "6_수집_DART부분보고서전환",
-        "사유코드": "too_few_documents_for_full",
+        "사유코드": "transient_web_failure",
     } in steps
 
 
@@ -1667,7 +1673,7 @@ def test_일시장애_부분보고서_전환도_불명_장과_사유코드를_�
     assert preflight.dart_partial_fallback is True
     assert preflight.dart_partial_reason == "transient_web_failure"
     # 전환이 열리면 판단 값은 «정상적으로» 빈다. 그래서 진단이 따로 필요하다.
-    assert preflight.detail_code == ""
+    assert preflight.detail_code == "preflight_official_evidence_incomplete"
     assert preflight.decision.unknown_section_ids == (blocked_section_id,)
 
     _freeze_runtime(
@@ -1686,7 +1692,7 @@ def test_일시장애_부분보고서_전환도_불명_장과_사유코드를_�
         step for step in steps if step.get("step") == "6_수집_공식근거사전검사"
     )
 
-    assert formal_step["사유코드"] == ""
+    assert formal_step["사유코드"] == "preflight_official_evidence_incomplete"
     assert formal_step["DART부분보고서전환"] is True
     assert formal_step["불명장수"] == 1
     assert formal_step["불명장목록"] == [blocked_section_id]
@@ -1734,7 +1740,7 @@ def test_막힌_사유_코드가_상한을_넘으면_잘렸다는_표시를_남�
     with run_diagnostics.capture() as captured:
         result = _run(_Collector([official]))
 
-    assert result.outcome is Outcome.GATE_STOPPED
+    assert result.outcome is Outcome.REPORT
     formal_step = next(
         step
         for step in captured.steps

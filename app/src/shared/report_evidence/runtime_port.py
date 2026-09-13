@@ -6,6 +6,7 @@
 """
 
 from __future__ import annotations
+from dataclasses import asdict
 
 import datetime as dt
 import hashlib
@@ -35,7 +36,7 @@ from src.shared.report_evidence.source_kind_policy import (
 )
 
 
-SOURCE_SNAPSHOT_VERSION: Final[str] = "official-evidence-source-snapshot-v4"
+SOURCE_SNAPSHOT_VERSION: Final[str] = "official-evidence-source-snapshot-v5"
 PROVENANCE_AUDIT_SNAPSHOT_VERSION: Final[str] = (
     "official-evidence-provenance-audit-v1"
 )
@@ -289,6 +290,10 @@ def _source_snapshot(
             if previous_fragment != fragment_row:
                 raise ValueError("같은 근거 조각 식별자가 서로 다른 내용을 가리킵니다")
         for attempt in candidate.attempts:
+            if attempt.document_scan is not None:
+                for document in candidate.documents:
+                    if document.document_id == attempt.document_scan.document_id and document.content_sha256 != attempt.document_scan.content_sha256:
+                        raise ValueError("문서와 순회 기록의 원문 해시가 다릅니다")
             attempt_row: dict[str, object] = {
                 "attempt_id": attempt.attempt_id,
                 "source_kind": attempt.source_kind,
@@ -296,6 +301,7 @@ def _source_snapshot(
                 "state": attempt.state.value,
                 "slot_ids": sorted(attempt.slot_ids),
                 "reason_code": attempt.reason_code,
+                "document_scan": asdict(attempt.document_scan) if attempt.document_scan is not None else None,
             }
             previous_attempt = attempt_rows_by_id.setdefault(
                 attempt.attempt_id,
