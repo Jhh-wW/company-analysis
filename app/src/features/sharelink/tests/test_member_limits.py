@@ -228,8 +228,8 @@ def test_성공_건수_한도의_경계값은_받아들인다(건수: int):
         assert 저장된 is not None and 저장된.daily_success_limit == 건수
 
 
-@pytest.mark.parametrize("금액", [-1.0, 20_000.5, 100_000.0])
-def test_하루_비용_한도가_0에서_20000원_밖이면_거절한다(금액: float):
+@pytest.mark.parametrize("금액", [-1.0, 40_000.5, 100_000.0])
+def test_하루_비용_한도가_0에서_40000원_밖이면_거절한다(금액: float):
     with _새표() as conn:
         assert share_allow.invite(conn, email=_친구, note="", now_iso=_초대일)
         with pytest.raises(ValueError):
@@ -239,7 +239,7 @@ def test_하루_비용_한도가_0에서_20000원_밖이면_거절한다(금액:
             )
 
 
-@pytest.mark.parametrize("금액", [0.0, 20_000.0])
+@pytest.mark.parametrize("금액", [0.0, 40_000.0])
 def test_하루_비용_한도의_경계값은_받아들인다(금액: float):
     with _새표() as conn:
         assert share_allow.invite(conn, email=_친구, note="", now_iso=_초대일)
@@ -271,14 +271,14 @@ def test_회원_비용_상한은_회원값이_있으면_그_값을_쓴다():
     assert budget_of(Track.MEMBER, member_daily_budget_krw=900.0) == 900.0
 
 
-def test_회원_비용_상한이_비어_있으면_기존_3000원을_쓴다():
-    assert budget_of(Track.MEMBER) == 3000.0
-    assert budget_of(Track.MEMBER, member_daily_budget_krw=None) == 3000.0
+def test_회원_비용_상한이_비어_있으면_기존_6000원을_쓴다():
+    assert budget_of(Track.MEMBER) == 6000.0
+    assert budget_of(Track.MEMBER, member_daily_budget_krw=None) == 6000.0
 
 
 @pytest.mark.parametrize(
     ("갈래", "기존값"),
-    [(Track.ADMIN, 50000.0), (Track.LINK, 3000.0), (Track.PUBLIC, 0.0)],
+    [(Track.ADMIN, 100000.0), (Track.LINK, 6000.0), (Track.PUBLIC, 0.0)],
 )
 def test_회원값은_다른_갈래의_상한을_건드리지_않는다(갈래: Track, 기존값: float):
     """★ 반대 경우 시험 — 회원 한도 인자를 줘도 LINK·ADMIN·PUBLIC은 그대로다."""

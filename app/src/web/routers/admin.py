@@ -613,6 +613,12 @@ def _access_context(request: Request, *, today: dt.date, **kwargs) -> dict:
         member_budget_total_krw=member_budget_total_krw,
         member_budget_customized=member_budget_customized,
         member_default_budget_label=f"{member_default_budget_krw:,.0f}원",
+        link_daily_budget_label=(
+            f"{(share_tracks.budget_of(share_tracks.Track.LINK) or 0.0):,.0f}원"
+        ),
+        admin_daily_budget_label=(
+            f"{(share_tracks.budget_of(share_tracks.Track.ADMIN) or 0.0):,.0f}원"
+        ),
         member_default_success_limit=dashboard_store.MEMBER_DAILY_SUCCESS_LIMIT,
         spent_today=spent_today,
         liability_today=liability_today,

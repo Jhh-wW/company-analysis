@@ -56,9 +56,10 @@ def test_launcher_has_fail_closed_real_evaluation_contract() -> None:
     )
     for fragment in required_fragments:
         assert fragment in SCRIPT
-    # 본조사 예약액 1,800원(2026-09-05 상향)보다 큰 기본값이어야 유료 단계가 입장한다.
-    assert "[double]$PerRunExpectedCostCapKrw = 2000" in SCRIPT
-    assert "[double]$DailyExpectedCostCapKrw = 5000" in SCRIPT
+    # 본조사 예약액 2,000원(2026-09-13 2배 인상)보다 큰 기본값이어야 유료 단계가 입장한다.
+    # 하루 기본값은 본조사 두 건(2 × 4,000원)이 들어가는 값이다.
+    assert "[double]$PerRunExpectedCostCapKrw = 4000" in SCRIPT
+    assert "[double]$DailyExpectedCostCapKrw = 10000" in SCRIPT
     for name in PROVIDER_STATUS_NAMES:
         assert f'"{name}"' in SCRIPT
     assert "Get-Content" not in SCRIPT
