@@ -8,11 +8,16 @@
 지키는 것: 재작성 호출자는 재검수 1 + 필수 후속 3 = 4회를 남기고,
 재검수 호출자는 필수 후속 3회를 남긴다. 본문 검수·장 작성·도식·요약은
 필수 단계라 아무것도 남기지 않는다(예약 0).
+
+★ 2026-09-13 추가 — 1차 검수의 «파싱 재요청» 전용 호출자도 여기서 본다.
+  그 호출자만 출력 상한을 callable 로 들고 있어야 한다(첫 답의 실제 출력에
+  맞춰 «보낼 때» 상한을 푼다). 상한 규칙 자체는
+  ``test_initial_review_retry_cap.py`` 가 본다.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -80,7 +85,13 @@ def _돌린다(
     만든호출자: list[dict[str, Any]] = []
 
     def 기록하는_팩토리(
-        _engine, _client, *, stage: str, max_tokens: int, reserved_calls: int = 0,
+        _engine,
+        _client,
+        *,
+        stage: str,
+        # 1차 검수 재요청 호출자는 «보낼 때» 상한을 푸는 callable 을 받는다.
+        max_tokens: int | Callable[[], int],
+        reserved_calls: int = 0,
     ):
         속 = 가짜팩토리(
             _engine, _client, stage=stage, max_tokens=max_tokens,
@@ -146,9 +157,11 @@ def test_real이_run_v2에_넘기는_rewrite_recheck_클로저의_예약값을_�
     만든호출자, 받은인자 = _돌린다(engine, monkeypatch)
 
     검수자들 = [항목 for 항목 in 만든호출자 if 항목["stage"] == "v2_review"]
-    assert [항목["reserved_calls"] for 항목 in 검수자들] == [0, 0, _재작성예약, _필수후속], (
-        "v2_review 호출자 네 개(검수·최초검수·재작성·재검수)의 예약값이 "
-        f"설계와 다릅니다: {[항목['reserved_calls'] for 항목 in 검수자들]}"
+    assert [항목["reserved_calls"] for 항목 in 검수자들] == [
+        0, 0, 0, _재작성예약, _필수후속,
+    ], (
+        "v2_review 호출자 다섯 개(검수·최초검수·최초검수재요청·재작성·재검수)의 "
+        f"예약값이 설계와 다릅니다: {[항목['reserved_calls'] for 항목 in 검수자들]}"
     )
     # 필수 단계는 아무것도 남기지 않는다 — 남기면 자기가 자기를 굶긴다.
     for 항목 in 만든호출자:
@@ -157,9 +170,9 @@ def test_real이_run_v2에_넘기는_rewrite_recheck_클로저의_예약값을_�
                 f"필수 단계 {항목['stage']} 가 예약을 걸었습니다"
             )
 
-    # ★ 아래 동일성 단정이 뜻을 가지려면 네 호출자가 «서로 다른 객체»여야
+    # ★ 아래 동일성 단정이 뜻을 가지려면 다섯 호출자가 «서로 다른 객체»여야
     #   한다. 하나라도 같아지면 인자를 뒤바꿔 넘겨도 초록이 되므로 먼저 못 박는다.
-    assert len({id(항목["ask"]) for 항목 in 검수자들}) == 4, (
+    assert len({id(항목["ask"]) for 항목 in 검수자들}) == 5, (
         "v2_review 호출자들이 같은 객체입니다 — 이 시험은 배선을 구분하지 못합니다"
     )
 
@@ -186,6 +199,43 @@ def test_real이_run_v2에_넘기는_rewrite_recheck_클로저의_예약값을_�
     assert 받은인자["reviewer_ask"] is 검수자들[0]["ask"]
     assert 받은인자["initial_reviewer_ask"] is 검수자들[1]["ask"]
     assert 받은인자["rewrite_ask"] is not 받은인자["reviewer_ask"]
+
+
+def test_최초검수_재요청_호출자만_보낼때_푸는_상한을_받는다(
+    engine: FakeEngine, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """1차 검수 재요청 자리에 «그 실행기가 만든» callable 상한 호출자가 들어간다.
+
+    예약액은 출력 «상한»으로 잡히므로, 재요청만 첫 답의 실제 출력에 맞춘 작은
+    상한으로 보내면 그 한 번의 예약액이 줄어든다 (2026-09-13 실측 사고).
+    상한을 «만들 때» 굳히면 첫 답을 아직 모르므로 callable 이어야 한다.
+    """
+    만든호출자, 받은인자 = _돌린다(engine, monkeypatch)
+
+    검수자들 = [항목 for 항목 in 만든호출자 if 항목["stage"] == "v2_review"]
+    푸는호출자 = [항목 for 항목 in 검수자들 if callable(항목["max_tokens"])]
+    assert len(푸는호출자) == 1, (
+        "v2_review 호출자 중 «보낼 때 상한을 푸는» 것이 정확히 하나여야 합니다: "
+        f"{[callable(항목['max_tokens']) for 항목 in 검수자들]}"
+    )
+    # ★ run_v2 가 «실제로 받은 객체»가 그 호출자와 같은 것인지 본다.
+    assert 받은인자["initial_retry_reviewer_ask"] is 푸는호출자[0]["ask"], (
+        "1차 검수 재요청 자리에 다른 호출자가 들어갔습니다"
+    )
+    assert (
+        받은인자["initial_retry_reviewer_ask"]
+        is not 받은인자["initial_reviewer_ask"]
+    ), "재요청이 1차 검수와 같은 호출자를 받았습니다 — 상한이 줄지 않습니다"
+    # 1차 검수 자신은 예전처럼 고정 상한(24,000)을 그대로 쓴다.
+    assert 받은인자["initial_reviewer_ask"] is 검수자들[1]["ask"]
+    assert 검수자들[1]["max_tokens"] == 24000
+    # 재요청은 필수 단계라 뒤에 남길 몫이 없다 — 1차 검수와 같은 예약 0.
+    assert 푸는호출자[0]["reserved_calls"] == 0
+    # 그 callable 이 실제로 재요청 상한 규칙을 돌려주는지 본다 (하한 12,000).
+    상한계산: Callable[[], int] = 푸는호출자[0]["max_tokens"]
+    assert 상한계산() == 24000, (
+        "검수 응답 사용량이 없을 때는 예전 상한을 그대로 써야 합니다"
+    )
 
 
 def test_재작성_예약이_재검수_예약보다_정확히_한_회_크다(
