@@ -43,8 +43,9 @@ _시각 = "2026-09-02T09:00:00+09:00"
 
 #: 누적 상한값과 그 경계. ★ 생산 상수를 import해 비교하면 값이 몰래 낮아져도
 #:  시험이 통과한다. 여기서는 리터럴로 못 박고, 상수 자체는 sharelink 시험이 본다.
-_누적상한 = 3000.0
-_상한직전 = 2999.0
+#: 2026-09-13 본조사 예약액·하루 한도 2배 인상에 맞춰 3,000.0 → 6,000.0.
+_누적상한 = 6000.0
+_상한직전 = 5999.0
 
 #: 누적 소진 화면이 반드시 말하는 두 가지. 화면은 앞 문장을 제목으로, 뒤 문장을
 #: 본문으로 «나눠» 그린다 — 이어 붙인 한 문장으로 찾으면 화면이 맞아도 못 찾는다.
@@ -233,7 +234,7 @@ def _요청() -> Request:
     )
 
 
-def _하루를_다_쓴다(통장: str = _열쇠, 금액: float = 3000.0) -> None:
+def _하루를_다_쓴다(통장: str = _열쇠, 금액: float = 6000.0) -> None:
     오늘 = clock.today_kst()
     paid_runtime._LINK_SPEND = share_logic.add_spend(
         share_logic.DailySpend(day=오늘), 통장, 오늘, 금액
@@ -302,12 +303,12 @@ def test_누적_소진은_고장이_아니라고_말한다(client: TestClient, m
 
 
 # ══════════════════════════════════════════════════════════
-# ② 경계 — 2,999 / 3,000
+# ② 경계 — 5,999 / 6,000
 # ══════════════════════════════════════════════════════════
 
 
 def _링크갈래() -> tuple:
-    return (share_tracks.Track.LINK, _열쇠, 3000.0)
+    return (share_tracks.Track.LINK, _열쇠, 6000.0)
 
 
 def test_누적이_상한_직전이면_새조사가_열린다(monkeypatch):
@@ -343,8 +344,8 @@ def test_누적이_정확히_상한이면_막는다(monkeypatch):
 def test_진행중_예약을_더해_상한에_닿으면_새조사를_막는다(monkeypatch):
     """★ 이게 없으면 조사가 도는 «동안» 새 조사가 계속 통과해 천장을 넘는다."""
     _링크발급()
-    _끝난조사를_넣는다(run_id="run-1", 원가=2100.0)
-    _진행중조사를_넣는다(run_id="run-2", 예약액=900.0)
+    _끝난조사를_넣는다(run_id="run-1", 원가=4200.0)
+    _진행중조사를_넣는다(run_id="run-2", 예약액=1800.0)
     monkeypatch.setattr(runtime, "_PIPELINE", _돈이드는가짜파이프라인())
 
     막힘 = request_helpers._guard_run(
@@ -441,14 +442,14 @@ def test_MEMBER_ADMIN_PUBLIC_갈래는_누적_상한을_보지_않는다(monkeyp
         _요청(),
         count_start=False,
         resolved_track=(
-            share_tracks.Track.MEMBER, "user:friend@example.com", 3000.0
+            share_tracks.Track.MEMBER, "user:friend@example.com", 6000.0
         ),
     )
     관리자 = request_helpers._guard_run(
         _요청(),
         count_start=False,
         resolved_track=(
-            share_tracks.Track.ADMIN, "user:admin@example.com", 50000.0
+            share_tracks.Track.ADMIN, "user:admin@example.com", 100000.0
         ),
     )
     손님 = request_helpers._guard_run(

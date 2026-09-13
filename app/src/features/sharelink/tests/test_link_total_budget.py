@@ -1,8 +1,8 @@
 """초대 링크의 «수명 전체 누적 상한»을 못 박는다.
 
 ★ 이 시험이 지키는 것 — **링크 하나가 평생 쓸 수 있는 돈에 천장이 있다.**
-  기존 「하루 3,000원」은 하루가 지나면 되살아나므로, 60일짜리 링크 하나의
-  최악 노출은 3,000 × 60 = 18만 원이었다. 누적 상한은 그 곱셈을 끊는다.
+  기존 「하루 6,000원」은 하루가 지나면 되살아나므로, 60일짜리 링크 하나의
+  최악 노출은 6,000 × 60 = 36만 원이었다. 누적 상한은 그 곱셈을 끊는다.
 
 ⚠️ 여기 적힌 금액은 **리터럴**이다. 생산 상수를 import해 같은 상수와 비교하면
   값이 몰래 낮아져도 시험이 그대로 통과한다 — 그건 검증이 아니라 순환이다.
@@ -125,9 +125,9 @@ def _예약중인_조사를_넣는다(
 # ══════════════════════════════════════════════════════════
 
 
-def test_LINK_누적_예산은_리터럴_3000원이다() -> None:
+def test_LINK_누적_예산은_리터럴_6000원이다() -> None:
     """★ 상수끼리 비교하면 값이 바뀌어도 안 깨진다. 그래서 리터럴로 못 박는다."""
-    assert constants.LINK_TOTAL_BUDGET_KRW == 3000.0
+    assert constants.LINK_TOTAL_BUDGET_KRW == 6000.0
 
 
 def test_소진_문구는_정확히_이_문장이다() -> None:
@@ -152,9 +152,9 @@ def test_소진_문구는_내부_용어를_노출하지_않는다() -> None:
         assert 금지어 not in 문구
 
 
-def test_하루_상한은_그대로_리터럴_3000원이다() -> None:
+def test_하루_상한은_그대로_리터럴_6000원이다() -> None:
     """★ 누적 상한을 넣느라 하루 상한을 건드리지 않았다는 반대 경우 시험."""
-    assert constants.PER_LINK_DAILY_BUDGET_KRW == 3000.0
+    assert constants.PER_LINK_DAILY_BUDGET_KRW == 6000.0
 
 
 # ══════════════════════════════════════════════════════════
@@ -162,7 +162,7 @@ def test_하루_상한은_그대로_리터럴_3000원이다() -> None:
 # ══════════════════════════════════════════════════════════
 
 
-def test_기존행은_NULL이면_기본_3000을_쓴다(conn: sqlite3.Connection) -> None:
+def test_기존행은_NULL이면_기본_6000을_쓴다(conn: sqlite3.Connection) -> None:
     """★ 이미 뿌린 링크에 값을 채워 넣지 않는다. 비어 있으면 기본값이다."""
     _링크를_만든다(conn)
 
@@ -170,7 +170,7 @@ def test_기존행은_NULL이면_기본_3000을_쓴다(conn: sqlite3.Connection)
 
     assert 링크 is not None
     assert 링크.total_budget_krw is None
-    assert 링크.effective_total_budget_krw == 3000.0
+    assert 링크.effective_total_budget_krw == 6000.0
 
 
 def test_누적상한_열은_기존_스키마에도_멱등으로_붙는다() -> None:
@@ -210,7 +210,7 @@ def test_누적상한_열은_기존_스키마에도_멱등으로_붙는다() -> 
         assert 링크 is not None
         assert 링크.report_id == "r1"
         assert 링크.total_budget_krw is None
-        assert 링크.effective_total_budget_krw == 3000.0
+        assert 링크.effective_total_budget_krw == 6000.0
     finally:
         옛DB.close()
 
