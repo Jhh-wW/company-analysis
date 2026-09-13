@@ -88,7 +88,6 @@ from src.features.composer.body_review_constants import (
 )
 from src.features.composer.review_schema import (
     FLAT_REVIEW_SCHEMA,
-    GROUPED_REVIEW_SCHEMA,
     ReviewPrompt,
 )
 
@@ -1113,7 +1112,7 @@ def _build_grouped_review_prompt(
             ))
         parts.append("===== 장별 검수 블록 끝 =====\n")
     parts.append(REVIEW_TRUSTED_TAIL)
-    return ReviewPrompt("".join(parts), GROUPED_REVIEW_SCHEMA)
+    return "".join(parts)
 
 
 def _grouped_row_reason(
@@ -1732,7 +1731,7 @@ def _build_review_prompt(
             item.sentence.text, item.sentence.citations, frag_by_id, table_source,
         )))
     parts.append(REVIEW_TRUSTED_TAIL)
-    return ReviewPrompt("".join(parts), FLAT_REVIEW_SCHEMA)
+    return "".join(parts)
 
 
 def _parse_verdicts(
@@ -1859,7 +1858,7 @@ def _ask_verdicts(
     retries = 0
     while verdicts is None and retries < PARSE_RETRY_LIMIT:
         retries += 1
-        retry_prompt = prompt + RETRY_REMINDER
+        retry_prompt = ReviewPrompt(prompt + RETRY_REMINDER, FLAT_REVIEW_SCHEMA)
         raw = _safe_ask(retry_reviewer, retry_prompt)
         observe = _observe_attempt(retries + 1, retry_prompt, raw)
         verdicts = _parse_verdicts(

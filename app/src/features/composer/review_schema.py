@@ -1,5 +1,7 @@
-"""검수 문자열에만 붙이는 네이티브 JSON 출력 계약.
+"""검수 JSON 파싱 실패의 기존 재요청에만 붙이는 네이티브 출력 계약.
 
+최초 검수에는 스키마 입력 비용을 더하지 않는다. 재요청이 없는 묶음 검수도
+적용 대상이 아니며, 이 모듈 때문에 호출이나 재시도가 생기지 않는다.
 스키마는 응답의 모양만 제한한다. 근거 필요 여부·원문 결속·번호 소유권은
 기존 검증기가 판정하며, 거짓·애매에 없는 증거를 만들어 넣도록 강제하지 않는다.
 선택 필드를 null로 채우지 않아 원문참조와 기존 생략 규칙도 그대로 유지한다.
@@ -36,7 +38,7 @@ from src.features.composer.role_binding_constants import RELATION_KEY
 
 
 class ReviewPrompt(str):
-    """기존 문자열 사용법과 재요청 덧붙이기를 보존하는 검수 프롬프트."""
+    """기존 문자열과 메타데이터를 함께 전달하는 재요청 프롬프트."""
 
     response_schema: Mapping[str, Any]
 
@@ -119,7 +121,7 @@ def _grounding_schema() -> dict[str, Any]:
     }, required=())
 
 
-def _review_schema(*, grouped: bool = False, diagram: bool = False) -> dict[str, Any]:
+def _review_schema(*, diagram: bool = False) -> dict[str, Any]:
     reason_key = DIAGRAM_REASON_KEY if diagram else BODY_REVIEW_COMPARISON_KEY
     verdicts = sorted({REVIEW_REJECTED, *REVIEW_SUPPORT_CANDIDATE_VERDICTS})
     # 생성은 기존 지시대로 번호=정수, 인용=문자열로 고정한다. 구형 응답의
@@ -129,8 +131,6 @@ def _review_schema(*, grouped: bool = False, diagram: bool = False) -> dict[str,
         "장": {"type": "string"},
         "근거": _array({"type": "string"}),
     }
-    if grouped:
-        identity.update(ownership)
     # 대조 설명 유무를 두 행으로 나누면 공통 근거까지 문법에서 확장되어 실제
     # API가 grammar too large로 거절한다. 기존 지시가 요구한 설명을 생성의
     # 필수 필드로 두어 «번호 → 대조 설명 → 결과» 순서와 단일 행을 유지한다.
@@ -138,8 +138,7 @@ def _review_schema(*, grouped: bool = False, diagram: bool = False) -> dict[str,
     properties = {**identity, reason_key: {"type": "string"},
                   REVIEW_RESULT_KEY: {"type": "string", "enum": verdicts}}
     required = tuple(properties)
-    if not grouped:
-        properties.update(ownership)
+    properties.update(ownership)
     properties[GROUNDING_KEY] = {"$ref": "#/$defs/grounding"}
     return {
         **_object({REVIEW_ENTRIES_KEY: _array(_object(properties, required=required))}),
@@ -149,5 +148,4 @@ def _review_schema(*, grouped: bool = False, diagram: bool = False) -> dict[str,
 
 
 FLAT_REVIEW_SCHEMA = _review_schema()
-GROUPED_REVIEW_SCHEMA = _review_schema(grouped=True)
 DIAGRAM_REVIEW_SCHEMA = _review_schema(diagram=True)

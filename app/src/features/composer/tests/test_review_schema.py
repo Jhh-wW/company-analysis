@@ -1,4 +1,4 @@
-"""네이티브 검수의 문자열·재요청·근거 계약을 무과금으로 확인한다.
+"""파싱 재요청에만 적용하는 네이티브 검수 계약을 무과금으로 확인한다.
 
 시험 의존성 jsonschema로 구조를 검사하고 기존 의미 검증을 함께 실행한다.
 SDK 변환이 같다는 사실과 실제 제공자의 문법 컴파일 성공은 별개다.
@@ -20,7 +20,7 @@ from src.features.composer.constants import RETRY_REMINDER
 from src.features.composer.grounding import constrain_verdicts, grounding_problem
 from src.features.composer.port import AskFatalError, CollectedFragment, ComposedSentence, FlowRow
 from src.features.composer.review_schema import (
-    DIAGRAM_REVIEW_SCHEMA, FLAT_REVIEW_SCHEMA, GROUPED_REVIEW_SCHEMA, ReviewPrompt,
+    DIAGRAM_REVIEW_SCHEMA, FLAT_REVIEW_SCHEMA, ReviewPrompt,
 )
 from src.features.composer.tests import test_numeric_quote_refs as numeric_fixture
 from src.features.composer.tests.test_review_prompt_serialization import (
@@ -28,8 +28,9 @@ from src.features.composer.tests.test_review_prompt_serialization import (
 )
 
 
-SCHEMAS = (FLAT_REVIEW_SCHEMA, GROUPED_REVIEW_SCHEMA, DIAGRAM_REVIEW_SCHEMA)
-SCHEMA_NAMES = ("flat", "grouped", "diagram")
+SCHEMAS = (FLAT_REVIEW_SCHEMA, DIAGRAM_REVIEW_SCHEMA)
+SCHEMA_NAMES = ("flat", "diagram")
+REVIEW_KINDS = ("flat", "grouped", "diagram")
 TEXT = "회사는 제품을 판매한다."
 SENTENCE = ComposedSentence(TEXT, ("1",), "확인")
 FRAGMENTS = {"1": CollectedFragment("1", "공시", TEXT)}
@@ -87,20 +88,26 @@ def test_prompt_is_string_and_concatenation_preserves_schema_and_exact_bytes():
         prompt + 1
 
 
-@pytest.mark.parametrize("kind", SCHEMA_NAMES)
+@pytest.mark.parametrize("schema,expected", (
+    (FLAT_REVIEW_SCHEMA, "dadbdfa61b5a88bdbf286f639ed3a20bc029149421a9bd905edce246306c3a52"),
+    (DIAGRAM_REVIEW_SCHEMA, "52de628b50a1c2d19f6c56bb4939d6dd8b4bf474d4e75e5c8af73cde7abe5909"),
+))
+def test_retry_schema_hash_matches_provider_accepted_schema(schema, expected):
+    encoded = json.dumps(schema, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    assert hashlib.sha256(encoded).hexdigest() == expected
+
+
+@pytest.mark.parametrize("kind", REVIEW_KINDS)
 @pytest.mark.parametrize("empty", (False, True))
-def test_builders_mark_only_review_text(kind, empty):
+def test_initial_builders_return_plain_strings_without_schema(kind, empty):
     if kind == "flat":
         prompt = verify._build_review_prompt(() if empty else FLAT_ITEMS, FRAGMENTS, "")
-        schema = FLAT_REVIEW_SCHEMA
     elif kind == "grouped":
         prompt = verify._build_grouped_review_prompt(() if empty else GROUPED_ITEMS, FRAGMENTS, None)
-        schema = GROUPED_REVIEW_SCHEMA
     else:
         prompt = diagram_check._review_prompt(() if empty else FLOW_ITEMS, {"1": TEXT})
-        schema = DIAGRAM_REVIEW_SCHEMA
-    assert isinstance(prompt, ReviewPrompt)
-    assert prompt.response_schema is schema
+    assert type(prompt) is str
+    assert getattr(prompt, "response_schema", None) is None
     assert prompt
 
 
@@ -125,6 +132,29 @@ def test_diagram_prompt_bytes_match_pre_schema_baseline(items, expected):
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
 
 
+def _run_review(kind, ask):
+    if kind == "flat":
+        return verify._ask_verdicts(ask, FLAT_ITEMS, FRAGMENTS, "")
+    if kind == "grouped":
+        return verify._ask_grouped_verdicts(ask, GROUPED_ITEMS, FRAGMENTS, None)
+    section, row = FLOW_ITEMS[0][1:]
+    return diagram_check._review_rows(((section, (row,)),), {"1": TEXT}, ask)
+
+
+@pytest.mark.parametrize("kind", REVIEW_KINDS)
+def test_first_valid_response_never_requests_native_schema(kind):
+    calls = []
+
+    def ask(prompt):
+        calls.append(prompt)
+        return '{"판정":[{"번호":1,"장":"identity","근거":["1"],"결과":"참"}]}'
+
+    _run_review(kind, ask)
+    assert len(calls) == 1
+    assert type(calls[0]) is str
+    assert getattr(calls[0], "response_schema", None) is None
+
+
 def test_flat_retry_keeps_metadata_and_original_retry_text():
     calls = []
 
@@ -134,8 +164,9 @@ def test_flat_retry_keeps_metadata_and_original_retry_text():
 
     assert verify._ask_verdicts(ask, FLAT_ITEMS, FRAGMENTS, "") == {1: "참"}
     assert len(calls) == 2
-    assert calls[1] == str(calls[0]) + RETRY_REMINDER
-    assert all(p.response_schema is FLAT_REVIEW_SCHEMA for p in calls)
+    assert type(calls[0]) is str
+    assert calls[1] == calls[0] + RETRY_REMINDER
+    assert calls[1].response_schema is FLAT_REVIEW_SCHEMA
 
 
 def test_diagram_retry_keeps_metadata_and_call_count():
@@ -149,8 +180,93 @@ def test_diagram_retry_keeps_metadata_and_call_count():
     kept, dropped = diagram_check._review_rows(((section, (row,)),), {"1": TEXT}, ask)
     assert kept == {section: ()} and dropped
     assert len(calls) == 2
-    assert calls[1] == str(calls[0]) + RETRY_REMINDER
-    assert all(p.response_schema is DIAGRAM_REVIEW_SCHEMA for p in calls)
+    assert type(calls[0]) is str
+    assert calls[1] == calls[0] + RETRY_REMINDER
+    assert calls[1].response_schema is DIAGRAM_REVIEW_SCHEMA
+
+
+@pytest.mark.parametrize("separate_retry", (False, True))
+def test_flat_native_retry_preserves_initial_retry_callable(separate_retry):
+    calls = []
+
+    def initial(prompt):
+        calls.append(("initial", prompt))
+        return "형식 오류" if len(calls) == 1 else '{"판정":[{"번호":1,"결과":"참"}]}'
+
+    def retry(prompt):
+        calls.append(("retry", prompt))
+        return '{"판정":[{"번호":1,"결과":"참"}]}'
+
+    def followup(prompt):
+        pytest.fail("최초 검수가 후속 호출자를 사용했습니다")
+
+    assert verify._ask_verdicts(
+        followup, FLAT_ITEMS, FRAGMENTS, "", initial_ask=initial,
+        initial_retry_ask=retry if separate_retry else None,
+    ) == {1: "참"}
+    assert [name for name, _prompt in calls] == ["initial", "retry" if separate_retry else "initial"]
+    assert type(calls[0][1]) is str
+    assert calls[1][1] == calls[0][1] + RETRY_REMINDER
+    assert calls[1][1].response_schema is FLAT_REVIEW_SCHEMA
+
+
+def test_followup_retry_does_not_borrow_initial_retry_callable():
+    calls = []
+
+    def ask(prompt):
+        calls.append(prompt)
+        return "형식 오류" if len(calls) == 1 else '{"판정":[{"번호":1,"결과":"참"}]}'
+
+    def initial_retry(prompt):
+        pytest.fail("후속 검수가 최초 재요청 호출자를 사용했습니다")
+
+    assert verify._ask_verdicts(
+        ask, FLAT_ITEMS, FRAGMENTS, "", initial_retry_ask=initial_retry,
+    ) == {1: "참"}
+    assert len(calls) == 2 and type(calls[0]) is str
+    assert calls[1].response_schema is FLAT_REVIEW_SCHEMA
+
+
+@pytest.mark.parametrize("kind,schema", tuple(zip(SCHEMA_NAMES, SCHEMAS)))
+@pytest.mark.parametrize("failure", ("invalid", "error", "fatal"))
+def test_native_retry_failure_does_not_add_hidden_fallback(kind, schema, failure):
+    calls = []
+
+    def ask(prompt):
+        calls.append(prompt)
+        if len(calls) == 1 or failure == "invalid":
+            return "형식 오류"
+        if failure == "fatal":
+            raise AskFatalError("제공자 장애")
+        raise RuntimeError("스키마 요청 오류")
+
+    if failure == "fatal":
+        with pytest.raises(AskFatalError):
+            _run_review(kind, ask)
+    else:
+        result = _run_review(kind, ask)
+        if kind == "flat":
+            assert result is None
+        else:
+            assert result[0] == {"business_model": ()}
+    assert len(calls) == 2
+    assert type(calls[0]) is str
+    assert calls[1].response_schema is schema
+
+
+def test_semantic_proof_failure_does_not_enable_native_retry():
+    text = "매출액은 5억원이다."
+    item = verify._ReviewItem(1, ComposedSentence(text, ("1",), "확인"), "past_changes")
+    fragments = {"1": CollectedFragment("1", "공시", "매출액은 500000000원이다.")}
+    calls = []
+
+    def ask(prompt):
+        calls.append(prompt)
+        return '{"판정":[{"번호":1,"결과":"참"}]}'
+
+    verdicts = verify._ask_verdicts(ask, (item,), fragments, "")
+    assert verdicts[1] != "참"
+    assert len(calls) == 1 and type(calls[0]) is str
 
 
 @pytest.mark.parametrize("raw", ("invalid", '{"판정":[]}'))
@@ -163,7 +279,31 @@ def test_grouped_does_not_add_retry_or_fallback(raw):
 
     assert verify._ask_grouped_verdicts(ask, GROUPED_ITEMS, FRAGMENTS, None) is None
     assert len(calls) == 1
-    assert calls[0].response_schema is GROUPED_REVIEW_SCHEMA
+    assert type(calls[0]) is str
+    assert getattr(calls[0], "response_schema", None) is None
+
+
+@pytest.mark.parametrize("rewrite", (False, True))
+def test_summary_and_rewritten_sentence_start_with_plain_review(rewrite):
+    corrected = "회사는 플랫폼을 보유한다."
+    bad = "회사는 플랫폼을 자체 개발했다."
+    calls = []
+
+    def ask(prompt):
+        calls.append(prompt)
+        if verify.REWRITE_PROMPT_HEADER in prompt:
+            return corrected
+        verdict = "거짓" if rewrite and len(calls) == 1 else "참"
+        return json.dumps({"판정": [{"번호": 1, "결과": verdict}]}, ensure_ascii=False)
+
+    kept = verify.verify_sentences(
+        (ComposedSentence(bad if rewrite else corrected, ("1",), "확인"),),
+        (CollectedFragment("1", "공시", corrected),), None, ask,
+    )
+    assert [sentence.text for sentence in kept] == [corrected]
+    assert len(calls) == (3 if rewrite else 1)
+    assert all(type(prompt) is str for prompt in calls)
+    assert all(getattr(prompt, "response_schema", None) is None for prompt in calls)
 
 
 def test_rewrite_is_still_unmarked_plain_text():
@@ -186,7 +326,7 @@ def test_legacy_parsers_keep_reasonless_and_numeric_string_compatibility():
     assert all(not Draft202012Validator(schema).is_valid(json.loads(raw)) for schema in SCHEMAS)
 
 
-@pytest.mark.parametrize("kind", SCHEMA_NAMES)
+@pytest.mark.parametrize("kind", REVIEW_KINDS)
 def test_fatal_provider_error_is_not_schema_fallback(kind):
     calls = []
     error = AskFatalError("제공자 장애")
@@ -204,6 +344,7 @@ def test_fatal_provider_error_is_not_schema_fallback(kind):
             section, row = FLOW_ITEMS[0][1:]
             diagram_check._review_rows(((section, (row,)),), {"1": TEXT}, ask)
     assert raised.value is error and len(calls) == 1
+    assert type(calls[0]) is str
 
 
 @pytest.fixture
@@ -297,14 +438,13 @@ def test_existing_trend_and_time_fixtures_fit_all_schemas(schema_validator, monk
     assert calls
 
 
-@pytest.mark.parametrize("grouped", (False, True))
 @pytest.mark.parametrize("section,text", (
     ("operations_partners", "회사는 여행 예약 플랫폼을 자체 개발했다."),
     ("past_changes", "회사는 공급 차질이 납기 지연의 주된 원인이라고 밝혔다."),
     ("future_strategy", ""),
 ))
-def test_existing_role_cause_and_future_fixtures_fit_actual_prompt_schema(
-    schema_validator, monkeypatch, section, text, grouped,
+def test_existing_role_cause_and_future_fixtures_fit_actual_retry_schema(
+    schema_validator, monkeypatch, section, text,
 ):
     from src.features.composer.tests import test_body_review_comparison as fixtures
 
@@ -312,39 +452,45 @@ def test_existing_role_cause_and_future_fixtures_fit_actual_prompt_schema(
     calls = []
 
     def checked(report, fragments, table, ask, **kwargs):
+        sent = []
+
         def checked_ask(prompt):
+            sent.append(prompt)
+            if len(sent) == 1:
+                assert type(prompt) is str
+                return "형식 오류"
             raw = ask(prompt)
-            schema = getattr(prompt, "response_schema", None)
-            if schema is not None:
-                payload = json.loads(raw)
-                schema_validator(schema).validate(payload)
-                schema_validator(transform_schema(schema)).validate(payload)
-                calls.append(payload)
+            assert prompt.response_schema is FLAT_REVIEW_SCHEMA
+            payload = json.loads(raw)
+            schema_validator(prompt.response_schema).validate(payload)
+            schema_validator(transform_schema(prompt.response_schema)).validate(payload)
+            calls.append(payload)
             return raw
-        return original(report, fragments, table, checked_ask, **kwargs)
+        result = original(report, fragments, table, checked_ask, **kwargs)
+        assert len(sent) == 2
+        return result
 
     monkeypatch.setattr(fixtures, "verify_report", checked)
     if section == "future_strategy":
         case = next(case for case in fixtures.CONTRASTS if case[0] == "plan")
-        fixtures.test_controlled_false_removes_addition_and_true_keeps_supported_peer(case, grouped, "해석")
+        fixtures.test_controlled_false_removes_addition_and_true_keeps_supported_peer(case, False, "해석")
     else:
-        fixtures.test_controlled_true_preserves_explicit_hr_cause_condition_and_development(section, text, grouped)
+        fixtures.test_controlled_true_preserves_explicit_hr_cause_condition_and_development(section, text, False)
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("grouped", (False, True))
-def test_existing_golden_responses_fit_actual_prompt_schema(schema_validator, grouped):
+def test_existing_golden_responses_fit_flat_retry_schema(schema_validator):
     import re
     from src.features.composer.tests.review_evidence_fixture import grounded_review_response
 
-    prompt = _render_case(verify, _golden_case(), grouped)
+    prompt = _render_case(verify, _golden_case(), False)
     # 기존 fixture 독자의 별도 등급 줄 처리만 보정해 응답을 읽는다.
     readable = re.sub(r"(?m)^  등급: [^\n]+\n", "", prompt)
     payload = json.loads(grounded_review_response(readable))
     assert len(payload["판정"]) > 10
-    native = _native_response(payload["판정"], prompt.response_schema)
-    schema_validator(prompt.response_schema).validate(native)
-    schema_validator(transform_schema(prompt.response_schema)).validate(native)
+    native = _native_response(payload["판정"], FLAT_REVIEW_SCHEMA)
+    schema_validator(FLAT_REVIEW_SCHEMA).validate(native)
+    schema_validator(transform_schema(FLAT_REVIEW_SCHEMA)).validate(native)
 
 
 @pytest.mark.parametrize("schema", SCHEMAS, ids=SCHEMA_NAMES)
