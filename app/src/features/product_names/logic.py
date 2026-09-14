@@ -50,7 +50,9 @@ from .constants import (
     REJECTED_NAME_PREFIXES,
     RELATION_HEADERS,
     SECTION_HEADING_RE,
+    SEGMENT_ADJUSTMENT_KEYWORD,
     SEGMENT_HEADERS,
+    SEGMENT_SUBTOTAL_KEY_SUFFIXES,
     SUBJECT_CONTRACT,
     SUBJECT_IP,
     SUBJECT_PRODUCT,
@@ -91,6 +93,31 @@ def _is_valid_name(value: str) -> bool:
     if NUMERIC_OR_UNIT_ONLY_RE.fullmatch(value) is not None:
         return False
     return any(character.isalpha() for character in value)
+
+
+def _is_segment_subtotal_name(value: str) -> bool:
+    """사업부문 칸의 소계·조정 행을 닫힌 어휘로 가른다.
+
+    「가. 주요 제품 등의 현황」류 표는 부문 이름 아래에 합계·조정 행을 같은
+    칸에 둔다(실측: 「(연결 조정)」·「연결 합계」·「조정 전 매출 합계」·
+    「조정후 매출 합계」). 그 행이 부문 이름 후보로 나가면 3장 「회사가
+    공시한 대표 이름」 표가 소계·조정 행으로 오염된다. 이 규칙은 사업부문
+    칸에만 쓴다 — 제품명 등 다른 칸까지 적용하면 「조정」이 든 진짜 상품명을
+    잘못 막을 수 있다. 「기타」는 정상 부문일 수 있어 여기서 거르지 않는다.
+
+    Args:
+        value: 사업부문 칸의 원문 값(정규화 전).
+
+    Returns:
+        소계·조정 행이면 True. 정상 부문 이름이면 False.
+    """
+
+    key = _header_key(value)
+    if not key:
+        return False
+    if key.endswith(SEGMENT_SUBTOTAL_KEY_SUFFIXES):
+        return True
+    return SEGMENT_ADJUSTMENT_KEYWORD in key
 
 
 def _split_names(value: str) -> tuple[str, ...]:
@@ -256,14 +283,16 @@ def parse_product_service_table(text: str) -> tuple[NameCandidate, ...]:
                 continue
             segment_index = _header_index(headers, SEGMENT_HEADERS)
             if segment_index is not None:
-                _append_candidate(
-                    output,
-                    name=cells[segment_index],
-                    subject_kind=SUBJECT_SEGMENT,
-                    description="",
-                    location=location,
-                    excerpt=excerpt,
-                )
+                segment_name = cells[segment_index]
+                if not _is_segment_subtotal_name(segment_name):
+                    _append_candidate(
+                        output,
+                        name=segment_name,
+                        subject_kind=SUBJECT_SEGMENT,
+                        description="",
+                        location=location,
+                        excerpt=excerpt,
+                    )
             for name in _split_names(cells[name_index]):
                 _append_candidate(
                     output,
@@ -601,14 +630,16 @@ def parse_product_service_tables(
             excerpt = _row_excerpt(cells, headers)
             location = _row_location(table, row_index)
             if segment_index is not None and segment_index != name_index:
-                _append_candidate(
-                    output,
-                    name=cells[segment_index],
-                    subject_kind=SUBJECT_SEGMENT,
-                    description="",
-                    location=location,
-                    excerpt=excerpt,
-                )
+                segment_name = cells[segment_index]
+                if not _is_segment_subtotal_name(segment_name):
+                    _append_candidate(
+                        output,
+                        name=segment_name,
+                        subject_kind=SUBJECT_SEGMENT,
+                        description="",
+                        location=location,
+                        excerpt=excerpt,
+                    )
             for name in _split_names(cells[name_index]):
                 _append_candidate(
                     output,

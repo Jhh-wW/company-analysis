@@ -341,6 +341,8 @@ WHITESPACE_RE: Final[re.Pattern[str]] = re.compile(r"\s")
 #   «만든다». 손으로 다시 적으면 코드가 찾는 낱말과 안내가 어긋난다(실측: 안내에
 #   「재가입」이 빠진 채 코드는 그 낱말에 결속을 요구했다). 산문과 도식의 발동
 #   낱말이 다르므로 두 줄로 나눠 적고, 반복 낱말은 «과금» 유형이라고 못 박는다.
+# ⚠️ 산문 안내에는 큰따옴표를 쓰지 않는다(JSON 예시 줄 제외). 모델이 안내 문구를 답의
+#    문자열 값 안에 그대로 옮기면 따옴표가 JSON을 깨뜨린다 — 유형 이름은 「」로 감싼다.
 _JOIN: Final[str] = "·"
 ROLE_BINDING_REVIEW_GUIDE: Final[str] = (
     "\n■ 역할·대가·반복을 적은 후보의 결속 근거\n"
@@ -349,14 +351,14 @@ ROLE_BINDING_REVIEW_GUIDE: Final[str] = (
     "같은 대상·같은 역할값의 여러 자리는 항목 하나로 증명할 수 있고, 서로 다른 주장은 "
     "자리마다 항목이 필요하다. 이 안내는 «역할·과금» 유형의 항목에만 해당한다. 인과·양보 "
     "항목은 인과 안내가 따로 정하며 이 줄의 유무와 무관하다.\n"
-    f"· 역할 낱말 «{_JOIN.join(ROLE_WORDS)}» → 유형 \"{RELATION_ROLE}\". "
+    f"· 역할 낱말 «{_JOIN.join(ROLE_WORDS)}» → 유형 「{RELATION_ROLE}」. "
     "산문은 그 낱말이 서술어로 쓰였을 때만(「제작한다」·「기획·제작되며」), "
     "도식 칸은 낱말만 있어도 항목이 필요하다.\n"
-    f"· 대가 낱말 «{_JOIN.join(FEE_WORDS)}» → 유형 \"{RELATION_FEE}\". "
+    f"· 대가 낱말 «{_JOIN.join(FEE_WORDS)}» → 유형 「{RELATION_FEE}」. "
     f"산문은 «{_JOIN.join(PROSE_FEE_WORDS)}»가 수취·수령·지급·부과·청구·면제 서술이나 "
     "«주요 수익원» 꼴과 이어질 때만, 도식 칸은 낱말만 있어도 항목이 필요하다.\n"
-    f"· 반복 낱말 «{_JOIN.join(REPEAT_WORDS)}» → 유형 \"{RELATION_FEE}\"(반복 거래도 "
-    f"과금 유형이다 — \"{RELATION_ROLE}\"이 아니다). 산문은 «{_JOIN.join(PROSE_REPEAT_WORDS)}»에서, "
+    f"· 반복 낱말 «{_JOIN.join(REPEAT_WORDS)}» → 유형 「{RELATION_FEE}」(반복 거래도 "
+    f"과금 유형이다 — 「{RELATION_ROLE}」이 아니다). 산문은 «{_JOIN.join(PROSE_REPEAT_WORDS)}»에서, "
     "도식 칸은 위 목록 전체에서 발동한다.\n"
     f"항목은 검증근거의 '{RELATION_KEY}' 배열에 넣고 다섯 칸을 모두 «문자열»로 채운다: "
     f'{{"{RELATION_SOURCE_KEY}": "<그 후보가 인용한 근거 id>", '
@@ -405,9 +407,9 @@ ROLE_BINDING_HINT_REQUIRED_HEAD: Final[str] = "  관계 결속 요구: "
 ROLE_BINDING_HINT_WAIVED_HEAD: Final[str] = "  결속 요구 제외: "
 #: 요구 자리 하나 — 「「재가입」→유형 "과금"」. 역할값에 그 낱말을 포함해야 한다.
 ROLE_BINDING_HINT_ITEM_TEMPLATE: Final[str] = (
-    "「{marker}」→유형 \"{kind}\"(역할값에 이 낱말 포함)")
+    "「{marker}」→유형 「{kind}」(역할값에 이 낱말 포함)")
 #: 도식 칸에서는 어느 칸인지도 적는다.
 ROLE_BINDING_HINT_CELL_ITEM_TEMPLATE: Final[str] = (
-    "{cell}번째 칸 「{marker}」→유형 \"{kind}\"(역할값에 이 낱말 포함)")
+    "{cell}번째 칸 「{marker}」→유형 「{kind}」(역할값에 이 낱말 포함)")
 ROLE_BINDING_HINT_WAIVED_TEMPLATE: Final[str] = "「{marker}」({reason})"
 ROLE_BINDING_HINT_WAIVED_TAIL: Final[str] = " — 이 자리에는 역할·과금 항목을 넣지 않는다"

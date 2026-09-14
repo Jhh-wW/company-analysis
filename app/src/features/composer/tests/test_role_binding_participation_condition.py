@@ -402,7 +402,7 @@ def test_hint_lists_the_marker_kind_and_waiver_the_guard_uses():
     assert ROLE_BINDING_HINT_WAIVED_HEAD + "「재가입」" in with_context
     without = grounding_hint(KIWOOM, {FID: KIWOOM}, None)
     assert without.startswith("  추가 검증 필요: 관계\n")
-    assert ROLE_BINDING_HINT_REQUIRED_HEAD + f'「재가입」→유형 "{RELATION_FEE}"' in without
+    assert ROLE_BINDING_HINT_REQUIRED_HEAD + f'「재가입」→유형 「{RELATION_FEE}」' in without
     assert ROLE_BINDING_HINT_WAIVED_HEAD not in without
     flow = grounding_hint("고객 ; 재가입", {FID: KIWOOM}, ["고객", "재가입"], verbatim_source=context())
     assert "2번째 칸 「재가입」" in flow and ROLE_BINDING_HINT_WAIVED_HEAD not in flow
@@ -428,8 +428,11 @@ def test_review_guide_is_derived_from_the_same_word_lists():
 
 
 def test_review_guide_maps_repeat_words_to_the_fee_kind_explicitly():
-    assert re.search(r"반복 낱말 «[^»]+» → 유형 \"" + RELATION_FEE + r"\"", ROLE_BINDING_REVIEW_GUIDE)
-    assert f'"{RELATION_ROLE}"이 아니다' in ROLE_BINDING_REVIEW_GUIDE
+    assert re.search(r"반복 낱말 «[^»]+» → 유형 「" + RELATION_FEE + r"」", ROLE_BINDING_REVIEW_GUIDE)
+    assert f'「{RELATION_ROLE}」이 아니다' in ROLE_BINDING_REVIEW_GUIDE
+    # 산문 안내에 큰따옴표가 없어야 한다 — 모델이 옮겨 적으면 JSON이 깨진다(2026-09-14 운영 실측).
+    prose = ROLE_BINDING_REVIEW_GUIDE.split("항목은 검증근거의")[0]
+    assert '"' not in prose
     assert "결속 요구 제외" in ROLE_BINDING_REVIEW_GUIDE and "관계 결속 요구" in ROLE_BINDING_REVIEW_GUIDE
 
 

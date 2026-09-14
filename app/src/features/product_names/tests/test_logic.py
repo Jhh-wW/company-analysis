@@ -116,6 +116,50 @@ def test_삼성전자_부문과_품목을_구분해_읽는다() -> None:
     assert by_name["NAND Flash"].subject_kind == "product"
 
 
+def test_사업부문_칸의_소계_조정_행은_부문_이름이_되지_않는다_평문() -> None:
+    # 실측(사업보고서 「가. 주요 제품 등의 현황」): 사업부문 칸에 부문 이름과
+    # 함께 연결 조정·합계 행이 섞여 있고, 예전에는 그 행까지 부문 이름
+    # 후보로 나가 3장 표를 오염시켰다.
+    text = """가. 주요 제품 등의 현황
+사업부문 | 제품
+IT서비스 | 클라우드 관리
+배터리사업 | 전기차 배터리
+석유사업 | 휘발유
+기유 및 윤활유사업 | 윤활기유
+기초유화사업 | 에틸렌
+화학소재사업 | 합성수지
+(연결 조정) | -
+연결 합계 | -
+조정 전 매출 합계 | -
+조정후 매출 합계 | -
+"""
+
+    candidates = parse_product_service_table(text)
+    segment_names = {
+        candidate.name
+        for candidate in candidates
+        if candidate.subject_kind == "segment"
+    }
+    all_names = {candidate.name for candidate in candidates}
+
+    assert segment_names == {
+        "IT서비스",
+        "배터리사업",
+        "석유사업",
+        "기유 및 윤활유사업",
+        "기초유화사업",
+        "화학소재사업",
+    }
+    assert all_names.isdisjoint(
+        {
+            "(연결 조정)",
+            "연결 합계",
+            "조정 전 매출 합계",
+            "조정후 매출 합계",
+        }
+    )
+
+
 @pytest.mark.parametrize(
     "parser",
     (
@@ -317,6 +361,53 @@ def test_표의_합계행과_괄호속_슬래시는_이름이_되지_않는다()
     assert "합계" not in names
     assert "기타(A/S) 등" not in names
     assert not any(name.startswith("S)") for name in names)
+
+
+def test_사업부문_칸의_소계_조정_행은_부문_이름이_되지_않는다_표구조() -> None:
+    # 실측(사업보고서 「가. 주요 제품 등의 현황」 표): 사업부문 칸에 부문
+    # 이름과 연결 조정·합계 행이 함께 있다. 표 구조 경로(HTML TABLE)는
+    # 평문 경로와 별도 함수라 따로 확인한다 — 운영 파이프라인은 원문 표가
+    # 있으면 이 경로를 먼저 쓴다.
+    markup = """
+    <P>가. 주요 제품 등의 현황</P>
+    <TABLE>
+      <TR><TH>사업부문</TH><TH>주요 제품</TH><TH>매출액</TH></TR>
+      <TR><TD>IT서비스</TD><TD>클라우드 관리</TD><TD>1,000</TD></TR>
+      <TR><TD>배터리사업</TD><TD>전기차 배터리</TD><TD>2,000</TD></TR>
+      <TR><TD>석유사업</TD><TD>휘발유</TD><TD>3,000</TD></TR>
+      <TR><TD>기유 및 윤활유사업</TD><TD>윤활기유</TD><TD>500</TD></TR>
+      <TR><TD>기초유화사업</TD><TD>에틸렌</TD><TD>700</TD></TR>
+      <TR><TD>화학소재사업</TD><TD>합성수지</TD><TD>600</TD></TR>
+      <TR><TD>(연결 조정)</TD><TD>-</TD><TD>-500</TD></TR>
+      <TR><TD>연결 합계</TD><TD>-</TD><TD>7,400</TD></TR>
+      <TR><TD>조정 전 매출 합계</TD><TD>-</TD><TD>7,900</TD></TR>
+      <TR><TD>조정후 매출 합계</TD><TD>-</TD><TD>7,400</TD></TR>
+    </TABLE>
+    """
+    candidates = parse_product_service_tables(parse_filing_tables(markup))
+    segment_names = {
+        candidate.name
+        for candidate in candidates
+        if candidate.subject_kind == "segment"
+    }
+    all_names = {candidate.name for candidate in candidates}
+
+    assert segment_names == {
+        "IT서비스",
+        "배터리사업",
+        "석유사업",
+        "기유 및 윤활유사업",
+        "기초유화사업",
+        "화학소재사업",
+    }
+    assert all_names.isdisjoint(
+        {
+            "(연결 조정)",
+            "연결 합계",
+            "조정 전 매출 합계",
+            "조정후 매출 합계",
+        }
+    )
 
 
 def test_재고자산_원재료_명세는_제품_이름표가_아니다() -> None:

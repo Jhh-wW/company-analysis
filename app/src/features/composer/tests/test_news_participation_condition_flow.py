@@ -208,7 +208,7 @@ def test_condition_generalised_to_an_action_is_blocked_even_if_the_reviewer_says
     assert diagnostic["reason_code"] == ROLE_BINDING_CONDITION_NOT_ACTION
     assert diagnostic["role_binding"]["verbatim_bound"] is False
     assert diagnostic["role_binding"]["verbatim_source"] is None
-    assert ROLE_BINDING_HINT_REQUIRED_HEAD + f'「재가입」→유형 "{RELATION_FEE}"' in result["calls"][0]
+    assert ROLE_BINDING_HINT_REQUIRED_HEAD + f'「재가입」→유형 「{RELATION_FEE}」' in result["calls"][0]
 
 
 @pytest.mark.parametrize("grouped", (False, True))
@@ -263,7 +263,7 @@ def test_a_false_clause_appended_to_the_exact_clause_gets_no_waiver(grouped):
     assert without["body"] == [] and without["rows"] == 0
     assert without["diagnostics"][0]["reason_code"] == ROLE_BINDING_MISSING
     assert ROLE_BINDING_HINT_WAIVED_HEAD not in without["calls"][0]
-    assert ROLE_BINDING_HINT_REQUIRED_HEAD + f'「재가입」→유형 "{RELATION_FEE}"' in without["calls"][0]
+    assert ROLE_BINDING_HINT_REQUIRED_HEAD + f'「재가입」→유형 「{RELATION_FEE}」' in without["calls"][0]
     with_entry = _run(report, (fragment,), _response({"관계": [relation(target="키움증권", quote=NUMBER_FREE)]}),
                       grouped=grouped)
     assert len(with_entry["body"]) == 1, "기존 한계: 덧붙인 절은 이 가드의 범위 밖(검수 AI 몫)"

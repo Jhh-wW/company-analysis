@@ -356,6 +356,18 @@ REJECTED_NAME_PREFIXES: Final[tuple[str, ...]] = (
     "연결기준합계",
     "해당사항",
 )
+# 「사업부문」 칸에만 쓰는 닫힌 규칙 — 표의 소계·조정 행을 부문 이름으로 읽지
+# 않는다(실측: 「(연결 조정)」·「연결 합계」·「조정 전 매출 합계」·「조정후
+# 매출 합계」). 위 REJECTED_NAME_PREFIXES/KEYS와 달리 이 규칙은 부문 칸에만
+# 적용한다 — 「조정」이 들어간 진짜 상품명(예: 금리조정형 예금)까지 막으면
+# 안 되기 때문이다. 「기타」는 정상 부문일 수 있으므로 이 규칙에 넣지 않는다.
+SEGMENT_SUBTOTAL_KEY_SUFFIXES: Final[tuple[str, ...]] = (
+    "합계",
+    "소계",
+    "총계",
+    "계",
+)
+SEGMENT_ADJUSTMENT_KEYWORD: Final[str] = "조정"
 # 표 제목이 이 말을 담으면 대표 IP 표로 본다(머리행 어휘와 함께 쓴다).
 IP_TABLE_TITLE_KEYWORDS: Final[tuple[str, ...]] = (
     "주요 아티스트",

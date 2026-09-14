@@ -98,6 +98,7 @@ def count_input_tokens(
     model: str,
     messages: list,
     system: str | None = None,
+    output_config: dict[str, Any] | None = None,
 ) -> int | None:
     """provider tokenizer에게 이 요청의 입력 token 수를 직접 물어본다.
 
@@ -117,12 +118,17 @@ def count_input_tokens(
         messages: provider에 그대로 보낼 message 목록.
         system: system 프롬프트. 값이 없으면 kwarg 자체를 넘기지 않는다 —
             SDK가 ``None`` 을 «빈 system» 으로 받아 거절할 수 있기 때문이다.
+        output_config: 실제 전송할 정규화된 구조화 출력 설정. SDK가 schema 제약을
+            설명으로 옮긴 추가 지시도 입력에 포함하므로 같은 설정으로 센다.
+            없으면 기존 계수 요청처럼 kwarg 자체를 생략한다.
 
     Returns:
         음이 아닌 정수 token 수. 계수를 신뢰할 수 없으면 ``None``.
     """
     try:
         extra: dict[str, Any] = {"system": system} if system else {}
+        if output_config is not None:
+            extra["output_config"] = output_config
         response = messages_resource.count_tokens(
             model=model, messages=messages, **extra
         )
