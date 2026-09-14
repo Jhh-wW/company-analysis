@@ -256,7 +256,7 @@ def test_주입된_짧은후보_filter는_앞쪽_잡음예산과_무관하게_�
     assert text[result.candidates[0].start : result.candidates[0].end] == target
 
 
-def test_주입된_짧은후보가_cap을_넘으면_전문완료로_위장하지_않는다(
+def test_짧은후보_보관압축과_전문순회_완료를_별도로_기록한다(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(c, "MAX_SHORT_OBSERVATION_CANDIDATES_PER_DOCUMENT", 2)
@@ -274,7 +274,9 @@ def test_주입된_짧은후보가_cap을_넘으면_전문완료로_위장하지
     )
 
     assert len(result.candidates) == 2
-    assert result.truncation_reason == c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
+    assert result.scan_complete and result.selection_compressed
+    assert not result.truncation_reason
+    assert result.compression_reason == c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
 
 
 def test_목차_leader는_짧은_관측_차선에도_들어가지_않는다() -> None:
@@ -290,7 +292,7 @@ def test_목차_leader는_짧은_관측_차선에도_들어가지_않는다() ->
     assert not any("............" in item.text for item in candidates)
 
 
-def test_장문_문단폭탄은_후보수_상한과_잘림사유를_함께_남긴다(monkeypatch) -> None:
+def test_장문_문단폭탄은_보관상한과_선택압축_사유를_남긴다(monkeypatch) -> None:
     monkeypatch.setattr(c, "MAX_LONG_FRAGMENT_CANDIDATES_PER_DOCUMENT", 3)
     text = "\n\n".join(
         f"서로 다른 장문 문단 {index} " + "가" * 30 for index in range(10)
@@ -299,10 +301,12 @@ def test_장문_문단폭탄은_후보수_상한과_잘림사유를_함께_남�
     result = segment_document_with_status(text)
 
     assert len(result.candidates) == 3
-    assert result.truncation_reason == c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
+    assert result.scan_complete and result.selection_compressed
+    assert not result.truncation_reason
+    assert result.compression_reason == c.REASON_DOCUMENT_FRAGMENT_COUNT_EXCEEDED
 
 
-def test_장문_후보의_총문자_상한도_잘림사유를_남긴다(monkeypatch) -> None:
+def test_장문_후보의_총문자_상한은_읽기완료와_별개다(monkeypatch) -> None:
     monkeypatch.setattr(c, "MAX_LONG_FRAGMENT_CANDIDATES_PER_DOCUMENT", 100)
     monkeypatch.setattr(c, "MAX_LONG_FRAGMENT_CHARS_PER_DOCUMENT", 70)
     text = "\n\n".join(("가" * 40, "나" * 40, "다" * 40))
@@ -310,7 +314,9 @@ def test_장문_후보의_총문자_상한도_잘림사유를_남긴다(monkeypa
     result = segment_document_with_status(text)
 
     assert len(result.candidates) == 1
-    assert result.truncation_reason == c.REASON_DOCUMENT_FRAGMENT_CHARS_EXCEEDED
+    assert result.scan_complete and result.selection_compressed
+    assert not result.truncation_reason
+    assert result.compression_reason == c.REASON_DOCUMENT_FRAGMENT_CHARS_EXCEEDED
 
 
 def test_서로다른_줄폭탄은_상투문구색인을_무한히_키우지_않는다(monkeypatch) -> None:
@@ -325,10 +331,11 @@ def test_서로다른_줄폭탄은_상투문구색인을_무한히_키우지_않
 
     result = segment_document_with_status(text)
 
-    assert result.truncation_reason == c.REASON_DOCUMENT_LINE_INDEX_EXCEEDED
+    assert result.scan_complete and result.line_index_saturated
+    assert not result.truncation_reason
 
 
-def test_제목구간_상한도_OK가_아닌_잘림으로_관측한다(monkeypatch) -> None:
+def test_제목구간_보관상한은_실제_후보순회를_막지_않는다(monkeypatch) -> None:
     monkeypatch.setattr(c, "MAX_TEXT_SEGMENTS_PER_DOCUMENT", 2)
     text = "\n".join(
         (
@@ -343,5 +350,6 @@ def test_제목구간_상한도_OK가_아닌_잘림으로_관측한다(monkeypat
 
     result = segment_document_with_status(text)
 
-    assert len(result.candidates) <= 2
-    assert result.truncation_reason == c.REASON_DOCUMENT_SECTION_COUNT_EXCEEDED
+    assert len(result.candidates) == 3
+    assert result.scan_complete and result.scanned_chars == len(text)
+    assert not result.truncation_reason

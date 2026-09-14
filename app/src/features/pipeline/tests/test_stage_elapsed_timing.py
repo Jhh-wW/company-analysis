@@ -128,7 +128,7 @@ class _JudgeRejectEngine:
 
     def decide(self, _corp_cls, _has_audit, _bizr_no, _match_fn, *, has_financial_statements):
         del has_financial_statements
-        return SimpleNamespace(status="거부A", corp_type="비상장 외감")
+        return SimpleNamespace(status="거부A_공공기관", corp_type="비상장 외감")
 
 
 def test_실제_본조사가_시동부터_두_단계를_지나면_단계소요를_순서대로_남긴다(
@@ -195,9 +195,13 @@ def test_예외로_끝나도_마지막_단계_소요시간이_기록된다(monke
 
     assert result.outcome is Outcome.FAILED
     elapsed = _elapsed_entries(captured.steps)
-    # 예외는 tell("identify") 다음(tell("judge") 전)에서 나므로, 시동→식별
-    # 두 구간만 닫히고 마지막(식별)은 run()의 finally가 닫는다.
-    assert [item["단계"] for item in elapsed] == [pipeline_constants.STAGE_BOOT, "identify"]
+    # 기업개황 실패를 복구한 뒤 judge에 진입한다. 가짜 엔진에 판정 기능이
+    # 없어 끝나는 마지막 구간도 run()의 finally가 닫는다.
+    assert [item["단계"] for item in elapsed] == [
+        pipeline_constants.STAGE_BOOT,
+        "identify",
+        "judge",
+    ]
     for item in elapsed:
         ms = item[STAGE_ELAPSED_MS_KEY]
         assert type(ms) is int and ms >= 0

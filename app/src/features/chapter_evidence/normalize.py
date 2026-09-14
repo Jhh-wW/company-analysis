@@ -6,6 +6,7 @@
 """
 
 from __future__ import annotations
+from src.shared.report_evidence.document_scan import DocumentScan
 
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
@@ -220,6 +221,20 @@ def to_fragment(
         raise ValueError(f"근거 조각에 필수 항목이 빠졌습니다: {error}") from error
 
 
+def _to_document_scan(value: object) -> DocumentScan | None:
+    """누락된 구형 기록은 완료 증명으로 기본화하지 않는다."""
+    if value is None:
+        return None
+    if isinstance(value, DocumentScan):
+        return value
+    if not isinstance(value, Mapping):
+        raise ValueError("문서 순회 기록은 매핑이어야 합니다")
+    try:
+        return DocumentScan(**value)
+    except TypeError as error:
+        raise ValueError("문서 순회 기록의 필드가 계약과 다릅니다") from error
+
+
 def to_attempt(
     value: CollectionAttempt | Mapping[str, object],
 ) -> CollectionAttempt:
@@ -250,6 +265,7 @@ def to_attempt(
             documents_attempted=_coerce_int(
                 value.get("documents_attempted", 0), label="시도한 문서 수"
             ),
+            document_scan=_to_document_scan(value.get("document_scan")),
         )
     except KeyError as error:
         raise ValueError(f"수집 시도 기록에 필수 항목이 빠졌습니다: {error}") from error

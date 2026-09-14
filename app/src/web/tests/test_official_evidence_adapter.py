@@ -919,7 +919,8 @@ def test_재할당된_hm_url의_타사자료는_adapter와_preflight를_속이�
         for document in chapter.documents
     )
     assert product not in transport_calls
-    assert preflight.can_call_ai is False
+    assert preflight.can_call_ai is True
+    assert preflight.dart_partial_fallback is True
 
 
 def test_collect부터_preflight까지_무분류원문은_근거가아닌_내부분류결함으로_간다(
@@ -1007,7 +1008,8 @@ def test_collect부터_preflight까지_무분류원문은_근거가아닌_내부
     assert result.unclassified_evidence.document_count == 1
     assert result.unclassified_evidence.fragment_count == 2
     assert len(result.unclassified_evidence.observation_sha256) == 64
-    assert preflight.can_call_ai is False
+    assert preflight.can_call_ai is True
+    assert preflight.dart_partial_fallback is True
     assert (
         preflight.detail_code
         == FINAL_GATE_DETAIL_PREFLIGHT_CLASSIFIER_COVERAGE_GAP

@@ -76,10 +76,31 @@ from src.features.composer.logic import (
     summary_candidates,
 )
 from src.features.composer.constants import (
+    AI_STAGE_COMPOSE_VERIFY,
+    AI_STAGE_DIAGRAM,
+    AI_STAGE_FULL_SUPPLEMENT,
+    AI_STAGE_REWRITE,
+    AI_STAGE_SUMMARY,
     DEFAULT_CITATION_STYLE,
+    DEGRADED_REASON_CALL_LIMIT,
+    DEGRADED_REASON_EVIDENCE_UNREACHABLE,
+    DEGRADED_REASON_PROVIDER_UNAVAILABLE,
+    DEGRADED_REASON_QUALITY_FLOOR,
+    DEGRADED_REASON_REQUEST_BUDGET_EXHAUSTED,
+    NOTICE_AI_UNAVAILABLE,
+    NOTICE_EVIDENCE_NONE,
+    NOTICE_EVIDENCE_NOT_COMPOSED,
     PORTFOLIO_TABLE_SECTION_ID,
     SECTION_IDS,
     SECTION_TITLES,
+    SHORTFALL_AI_DEGRADED,
+    SHORTFALL_TABLE_EVIDENCE_UNBOUND,
+    SUMMARY_NOTICE_EMPTY,
+    SUMMARY_NOTICE_THIN,
+)
+from src.features.composer.evidence_availability import (
+    COLLECTION_STATE_PARTIAL,
+    EvidenceAvailability,
 )
 from src.features.composer.dedupe import (
     drop_cross_section_duplicates,
@@ -105,6 +126,7 @@ from src.features.composer.portfolio_names import portfolio_name_usage
 from src.features.composer.port import (
     AskFatalError,
     ComposedReport,
+    ComposedSection,
     ComposedSentence,
     FilingMeta,
     PerformanceTable,
@@ -124,11 +146,16 @@ from src.shared.generation_validation_receipt import (
     ValidationRound,
 )
 from src.shared.report_recovery import (
+    QUALITY_DERIVED_STOP_REASON_CODES,
     RecoveryAction,
+    RecoveryDecision,
     SupplementAuthorization,
     decide_post_validation,
     supplement_unchanged_sections,
 )
+from src.core.citations import citation_number
+from src.shared.engine_build_identity import EngineBuildIdentityChangedError
+from src.shared.generation_coordination import GenerationCoordinationError
 from src.shared.report_generation.public_projection import build_report_digest
 from src.shared.report_generation.canonical import (
     assert_report_matches_generation_evidence,
@@ -257,6 +284,20 @@ class V2RunOutput:
     news_usage_diagnostics: dict[str, object] = field(default_factory=dict)
     #: 원문을 저장하지 않는 검수 제외 진단. 본문·요약·도식에서 같은 계약을 쓴다.
     review_diagnostics: tuple[dict[str, object], ...] = ()
+    # ── 확보 근거 보고서 전환 기록(2026-09-14 사용자 계약) ──
+    #: 왜 결정론 경로로 마무리했는가. 빈 값이면 전환이 없었다.
+    #: 값: request_budget_exhausted · call_limit · provider_unavailable ·
+    #:     quality_floor · required_evidence_unreachable
+    degraded_reason: str = ""
+    #: AI 전역 장애의 원인 예외 클래스 이름(원문·메시지는 싣지 않는다).
+    degraded_cause_kind: str = ""
+    #: 건너뛴 AI 단계(compose_verify·diagram_review·summary_selection·full_supplement).
+    ai_stages_skipped: tuple[str, ...] = ()
+    #: 실제로 적용된 운영 모드. FULL 요청이 확보 근거 보고서로 내려가면 SHADOW다.
+    #: 파이프라인은 요청 모드가 아니라 «이 값»으로 결과를 다뤄야 한다.
+    effective_release_mode: str = ""
+    #: 확보 근거 보고서로 내려온 경우 원래 요청 모드(예: FULL). 아니면 빈 값.
+    downgraded_from_release_mode: str = ""
 
 
 class _CallLedgerRecorder:
@@ -943,6 +984,412 @@ def _raise_recovery_stop(
     )
 
 
+def _notice_only_report(notice: str) -> ComposedReport:
+    """아홉 장 전부를 «문장 없음 + 안내»로 둔 본문. 장을 지우지 않는다."""
+
+    return ComposedReport(
+        sections=tuple(
+            ComposedSection(section_id=section_id, sentences=(), notice=notice)
+            for section_id in SECTION_IDS
+        ),
+        summary=(),
+    )
+
+
+def _fallback_blocked(error: AskFatalError) -> bool:
+    """전역 취소·소유권 상실·대기 시간 초과·배포 epoch 변경은 우회하지 않는다.
+
+    이 원인들은 자료원·제공자 장애가 아니라 «이 실행이 더는 결과를 내면 안
+    된다»는 신호다. 확보 근거 보고서로 내려가면 중복 과금·소유권 충돌을 만든다.
+    """
+
+    return isinstance(
+        error.cause, (GenerationCoordinationError, EngineBuildIdentityChangedError)
+    )
+
+
+def _degradable_on_fallback(ask: Optional[AskFn], sink: list[AskFatalError]) -> Optional[AskFn]:
+    """재작성·재검수 호출의 전역 장애를 «강등 가능»으로 바꿔 검증 본문을 지킨다.
+
+    재작성은 «거짓» 판정 문장을 살려 보려는 선택적 다듬기라, 못 하면 그 문장만
+    제거되고 나머지 검증 문장은 남는다(verify_report의 degradable 갈래). 돈·제공자
+    장애도 확보 근거 전환에서는 같은 처분이 정직하다 — 원래 예외는 ``sink``에
+    남겨 전환 사유로 쓴다. 전역 취소·epoch 변경은 그대로 올린다.
+    """
+
+    if ask is None:
+        return None
+
+    def call(prompt: str) -> str:
+        try:
+            return ask(prompt)
+        except AskFatalError as error:
+            if _fallback_blocked(error) or error.degradable:
+                raise
+            sink.append(error)
+            raise AskFatalError(
+                error.cause, call_limit=True, request_budget=error.request_budget,
+            ) from error
+
+    return call
+
+
+def _degraded_reason_of(error: AskFatalError) -> str:
+    """AI 전역 장애를 닫힌 전환 사유로 바꾼다. 예산 feature를 import하지 않는다."""
+
+    cause_kind = type(error.cause).__name__
+    if error.request_budget or cause_kind == "ProviderBudgetExceeded":
+        return DEGRADED_REASON_REQUEST_BUDGET_EXHAUSTED
+    if error.call_limit:
+        return DEGRADED_REASON_CALL_LIMIT
+    return DEGRADED_REASON_PROVIDER_UNAVAILABLE
+
+
+def _is_quality_stop(decision: RecoveryDecision) -> bool:
+    """회복 정책의 중단이 «품질 하한» 때문인가(구조·증거 결함이면 False)."""
+
+    return bool(decision.quality_problem_codes) or (
+        decision.reason_code in QUALITY_DERIVED_STOP_REASON_CODES
+    )
+
+
+def _rule_summary_stage(
+    verified: ComposedReport,
+    body_numeric_filtering: NumericSafetyFiltering,
+) -> tuple[ComposedReport, NumericSafetyFiltering]:
+    """AI 없이 검증 본문 문장으로만 요약을 채운다(0~5문장).
+
+    ``_legacy_summary_stage``의 «고르기 AI» 단계만 뺀 같은 규칙이다 — 같은
+    요약 잣대·같은 «장당 최대 1개»·같은 수치 안전 재검사를 쓴다. 후보가
+    3개 장에 못 미치면 짧게 나가고, 출고 검증은 확보 근거 정책이 그 길이를
+    허용한다(shared/report_quality/output_validation.summary_floor_relaxed).
+    """
+
+    safe_owner_by_fact_id = safe_numeric_owners_by_fact_id(verified.sections)
+
+    def _summary_ready(sentence: ComposedSentence) -> bool:
+        return is_release_ready_summary_sentence(
+            sentence, safe_owner_by_fact_id=safe_owner_by_fact_id
+        )
+
+    candidates = summary_candidates(verified, accept=_summary_ready)
+    section_by_key = {
+        _normalized_text(candidate.sentence.text): candidate.section_id
+        for candidate in candidates
+    }
+    summary = _supplement_safe_summary(
+        (), verified, accept=_summary_ready, section_by_key=section_by_key,
+    )
+    final = ComposedReport(
+        sections=verified.sections,
+        summary=tuple(summary)[:SUMMARY_MAX_SENTENCES],
+    )
+    final, summary_numeric_filtering = enforce_public_numeric_safety(final)
+    return final, body_numeric_filtering.merged(summary_numeric_filtering)
+
+
+def _table_cite_is_bound(
+    table: Optional[PerformanceTable], fragments: FragmentsInput,
+) -> bool:
+    """표의 cite 번호가 이번 입력 조각에 실제로 있는가. 없으면 표를 싣지 않는다."""
+
+    if table is None:
+        return False
+    raw_number = citation_number(str(table.cite or ""))
+    if not raw_number:
+        return False
+    numbers = set(citation_numbers_for_fragments(fragments).values())
+    return int(raw_number) in numbers
+
+
+def _notice_only_sections(final: ComposedReport) -> dict[str, str]:
+    """문장이 하나도 없고 안내만 남은 장 → 안내문. 파이프라인 빈 등록부 guard용."""
+
+    return {
+        section.section_id: section.notice
+        for section in final.sections
+        if not section.sentences and section.notice
+    }
+
+
+def _apply_evidence_available_policy(
+    rendered: Report,
+    *,
+    availability: EvidenceAvailability,
+    degraded_reason: str,
+    extra_reasons: Sequence[str] = (),
+    notice_only: Mapping[str, str] | None = None,
+) -> Report:
+    """확보 근거 보고서의 등급·공개 정책·확인 범위 안내를 한 번에 붙인다.
+
+    ★ 여기서 바꾸는 것은 등급(항상 부분 완성)·정책 값·«미제공 사유» 문장뿐이다.
+      본문·표·인용·요약의 글자는 하나도 바뀌지 않는다.
+    """
+
+    reasons = list(rendered.shortfall_reasons)
+    reasons.extend(availability.coverage_lines)
+    summary_count = len(rendered.summary_items)
+    if summary_count < SUMMARY_MIN_SENTENCES:
+        reasons.append(
+            SUMMARY_NOTICE_EMPTY
+            if summary_count == 0
+            else SUMMARY_NOTICE_THIN.format(count=summary_count)
+        )
+    if degraded_reason in {
+        DEGRADED_REASON_REQUEST_BUDGET_EXHAUSTED,
+        DEGRADED_REASON_CALL_LIMIT,
+        DEGRADED_REASON_PROVIDER_UNAVAILABLE,
+    }:
+        reasons.append(SHORTFALL_AI_DEGRADED)
+    reasons.extend(extra_reasons)
+    unique_reasons = list(dict.fromkeys(reason for reason in reasons if reason))
+    # 문장이 하나도 없는 장은 안내를 ``empty_reason``에도 병기한다 — 파이프라인
+    # 빈 등록부 guard가 «안내뿐인 장»을 기계적으로 알아보게 하려는 것이다.
+    # 화면·PDF는 무봉인 v2 보고서의 prose만 그리므로 prose 쪽 안내는 그대로 둔다
+    # (render는 lines에도 같은 줄을 복사하므로 lines 유무로는 가릴 수 없다).
+    notices = dict(notice_only or {})
+    sections = [
+        replace(section, empty_reason=notices[section.cell])
+        if section.cell in notices and not section.tables and not section.fact_ids
+        else section
+        for section in rendered.sections
+    ]
+    return replace(
+        rendered,
+        grade=Grade.PARTIAL,
+        sections=sections,
+        shortfall_reasons=unique_reasons,
+        publication_policy=PublicationPolicy.EVIDENCE_AVAILABLE.value,
+    )
+
+
+def _finish_evidence_available(
+    company_name: str,
+    verified: ComposedReport,
+    fragments: FragmentsInput,
+    performance_table: Optional[PerformanceTable],
+    *,
+    availability: EvidenceAvailability,
+    degraded_reason: str,
+    degraded_cause_kind: str,
+    ai_stages_skipped: tuple[str, ...],
+    downgraded_from: str,
+    tail_already_applied: bool,
+    corp_type: str,
+    generated_at: str,
+    as_of_date: str,
+    analysis_period: str,
+    latest_performance_period: str,
+    table_presentation: str,
+    filing_meta: Optional[FilingMeta],
+    composition_tables: tuple[PerformanceTable, ...],
+    citation_style: str,
+    company_id: str,
+    research_diagnostics: dict[str, object] | None,
+    review_diagnostics: list[dict],
+    composition_diagnostics: list[dict],
+    draft_body_count: int,
+    news_review_candidates: frozenset[str] | set[str],
+    news_review_rejections: list,
+    name_table: object | None = None,
+) -> V2RunOutput:
+    """검증된 본문(또는 안내뿐인 본문)에서 AI 0회로 확보 근거 보고서를 마무리한다.
+
+    ``tail_already_applied``가 참이면(FULL 후처리에서 내려온 본문) 수치 claim·
+    보도표·조사 안내를 다시 붙이지 않는다 — 두 번 붙이면 같은 문장이 겹친다.
+    """
+
+    extra_reasons: list[str] = []
+    body = verified
+    numeric_filtering: NumericSafetyFiltering
+    if tail_already_applied:
+        body, numeric_filtering = enforce_public_numeric_safety(body)
+    else:
+        if performance_table is not None and not _table_cite_is_bound(
+            performance_table, fragments
+        ):
+            # 근거 조각이 없는 표는 인용-부록 1:1을 깨므로 표를 싣지 않고 알린다.
+            performance_table = None
+            extra_reasons.append(SHORTFALL_TABLE_EVIDENCE_UNBOUND)
+        composition_tables = tuple(
+            table for table in composition_tables
+            if _table_cite_is_bound(table, fragments)
+        )
+        body = append_past_changes_numeric_claims(
+            body, performance_table, fragments, filing_meta,
+        )
+        body, numeric_filtering = enforce_public_numeric_safety(body)
+        if name_table is None:
+            name_table = _build_name_table(fragments, None, enabled=True).table
+        news_block = _augment_news_blocks(
+            body, fragments, None, enabled=True,
+            review_candidates=frozenset(news_review_candidates),
+        )
+        body = append_research_notice(
+            news_block.report, research_diagnostics,
+            fragments=_normalize_fragments(fragments),
+            review_rejections=news_review_rejections,
+        )
+    final, numeric_filtering = _rule_summary_stage(body, numeric_filtering)
+    rendered = render_report(
+        company_name,
+        final,
+        fragments,
+        performance_table,
+        corp_type=corp_type,
+        grade=Grade.PARTIAL,
+        generated_at=generated_at,
+        as_of_date=as_of_date,
+        analysis_period=analysis_period,
+        latest_performance_period=latest_performance_period,
+        table_presentation=table_presentation,
+        filing_meta=filing_meta,
+        composition_tables=composition_tables,
+        citation_style=citation_style,
+        company_id=str(company_id).strip(),
+        release_mode="",
+        name_table=name_table,
+    )
+    quality_candidate = build_generation_quality_candidate(rendered, final)
+    generation_assessment, quality_observation = assess_and_observe_generation(
+        quality_candidate, contract_version="",
+    )
+    log_generation_quality_observation(
+        quality_observation, ReleaseMode.SHADOW, logger=logger,
+    )
+    final_review_diagnostics = final_review_outcomes(final, review_diagnostics)
+    rendered = _apply_generation_quality_label(
+        rendered, quality_observation, numeric_filtering, final_review_diagnostics,
+    )
+    rendered = _apply_evidence_available_policy(
+        rendered,
+        availability=availability,
+        degraded_reason=degraded_reason,
+        extra_reasons=extra_reasons,
+        notice_only=_notice_only_sections(final),
+    )
+    composed_item_count = max(draft_body_count, _total_sentences(final))
+    fragments_collected, fragments_cited = _generation_fragment_counts(
+        fragments, rendered,
+    )
+    generation_metrics = GenerationRunMetrics(
+        fragments_collected=fragments_collected,
+        fragments_cited=fragments_cited,
+        sentences_made=composed_item_count,
+        sentences_passed=_total_sentences(final),
+    )
+    assert_observation_matches_assessment(quality_observation, generation_assessment)
+    rendered = replace(
+        rendered,
+        generation_metrics=generation_metrics,
+        quality_observation=quality_observation,
+    )
+    _log_duplicate_findings(rendered)
+    # 남는 출고 검증은 내부 키 노출·인용↔부록·문단 투영뿐이다 — 수량 하한이 아니다.
+    validate_v2(rendered)
+    return V2RunOutput(
+        report=rendered,
+        composed_sentences=composed_item_count,
+        verified_sentences=_total_sentences(final),
+        quality_observation=quality_observation,
+        generation_evidence=None,
+        generation_metrics=generation_metrics,
+        review_diagnostics=final_review_diagnostics,
+        degraded_reason=degraded_reason,
+        degraded_cause_kind=degraded_cause_kind,
+        ai_stages_skipped=tuple(ai_stages_skipped),
+        effective_release_mode=ReleaseMode.SHADOW.value,
+        downgraded_from_release_mode=downgraded_from,
+    )
+
+
+def compose_evidence_available_report(
+    company_name: str,
+    fragments: FragmentsInput,
+    performance_table: Optional[PerformanceTable],
+    *,
+    evidence_availability: EvidenceAvailability,
+    corp_type: str = "",
+    generated_at: str = "",
+    as_of_date: str = "",
+    analysis_period: str = "",
+    latest_performance_period: str = "",
+    table_presentation: str = "table",
+    filing_meta: Optional[FilingMeta] = None,
+    composition_tables: tuple[PerformanceTable, ...] = (),
+    citation_style: str = DEFAULT_CITATION_STYLE,
+    company_id: str = "",
+    research_diagnostics: dict[str, object] | None = None,
+    review_diagnostics_sink: list[dict] | None = None,
+    composition_diagnostics_sink: list[dict] | None = None,
+    degraded_reason: str = "",
+    degraded_cause_kind: str = "",
+) -> V2RunOutput:
+    """AI를 한 번도 부르지 않고 확보한 자료만으로 부분 보고서를 만든다.
+
+    사용자 계약(2026-09-14): 분석 대상 회사면 자료가 적어도 보고서가 나온다.
+    본문 문장은 «검증을 마친 문장»만 실을 수 있는데 AI를 부르지 않으므로
+    산문은 없고, 프로그램이 만든 표·수치 claim·이름 표·보도표·회사 신원과
+    장별 안내만 싣는다. 원문 조각을 검수 없이 본문 문장으로 올리지 않는다.
+
+    Args:
+        fragments: 빈 값 허용. 있으면 부록·표·보도표의 재료가 된다.
+        evidence_availability: 파이프라인이 확인한 자료 확보 상태.
+        degraded_reason / degraded_cause_kind: 호출자가 AI 장애를 먼저 알았을 때
+            그 사유를 그대로 실어 나른다(파이프라인 단계 기록용).
+
+    Returns:
+        V2RunOutput — grade 부분 완성, publication_policy evidence-available-v1.
+
+    Raises:
+        V2ValidationError: 내부 키 노출·인용↔부록 불일치 같은 배선 결함뿐이다.
+    """
+
+    if not isinstance(evidence_availability, EvidenceAvailability):
+        raise TypeError("evidence_availability는 EvidenceAvailability 값이어야 합니다")
+    has_fragments = bool(_normalize_fragments(fragments))
+    if degraded_reason:
+        notice = NOTICE_AI_UNAVAILABLE
+    elif has_fragments:
+        notice = NOTICE_EVIDENCE_NOT_COMPOSED
+    else:
+        notice = NOTICE_EVIDENCE_NONE
+    return _finish_evidence_available(
+        company_name,
+        _notice_only_report(notice),
+        fragments,
+        performance_table,
+        availability=evidence_availability,
+        degraded_reason=degraded_reason,
+        degraded_cause_kind=degraded_cause_kind,
+        ai_stages_skipped=(AI_STAGE_COMPOSE_VERIFY,) if degraded_reason else (),
+        downgraded_from="",
+        tail_already_applied=False,
+        corp_type=corp_type,
+        generated_at=generated_at,
+        as_of_date=as_of_date,
+        analysis_period=analysis_period,
+        latest_performance_period=latest_performance_period,
+        table_presentation=table_presentation,
+        filing_meta=filing_meta,
+        composition_tables=composition_tables,
+        citation_style=citation_style,
+        company_id=company_id,
+        research_diagnostics=research_diagnostics,
+        review_diagnostics=(
+            review_diagnostics_sink if review_diagnostics_sink is not None else []
+        ),
+        composition_diagnostics=(
+            composition_diagnostics_sink
+            if composition_diagnostics_sink is not None
+            else []
+        ),
+        draft_body_count=0,
+        news_review_candidates=frozenset(),
+        news_review_rejections=[],
+    )
+
+
 def run_v2(
     company_name: str,
     fragments: FragmentsInput,
@@ -972,8 +1419,26 @@ def run_v2(
     research_diagnostics: dict[str, object] | None = None,
     review_diagnostics_sink: list[dict] | None = None,
     composition_diagnostics_sink: list[dict] | None = None,
+    evidence_availability: EvidenceAvailability | None = None,
+    evidence_available_fallback: bool = False,
+    preserve_on_ask_failure: bool = False,
+    _downgraded_from: str = "",
 ) -> V2RunOutput:
     """엔진 v2 전체 흐름을 한 번 돌려 최종 보고서를 만든다 (04장 3-4절).
+
+    ★ 확보 근거 보고서(2026-09-14 사용자 계약) — 아래 두 인자가 기본값이면
+      이 함수의 동작은 종전과 완전히 같다.
+        evidence_availability: 파이프라인이 확인한 자료 확보 상태. 주면 결과는
+            항상 부분 완성 + publication_policy evidence-available-v1 이고, 요약
+            3문장 하한을 두지 않으며, 조각이 하나도 없으면 AI를 부르지 않는다.
+        evidence_available_fallback (별칭 preserve_on_ask_failure): 참이면
+            «수량 하한·AI 전역 장애» 때문에 예외로 끝나던 자리에서 확보 근거
+            보고서로 내려간다 — 작성·검수 중 AI 장애는 미검증 초안을 버리고
+            결정론 꼬리로, 도식·요약 단계 장애는 검증 본문을 보존하고, FULL의
+            품질 하한 중단은 검증 본문으로 부분 보고서를 만든다. 내부 계약
+            결함(구조 결속·생산 증거·manifest)은 여전히 예외로 끝난다.
+      결과의 ``effective_release_mode``가 실제 적용 모드다 — FULL 요청이
+      내려가면 SHADOW이며 파이프라인은 그 값으로 저장·차감을 다뤄야 한다.
 
     흐름:
         ① compose_sections — 작가 AI가 9개 장을 산문으로 쓴다 (장 삭제 없음).
@@ -1045,6 +1510,39 @@ def run_v2(
     """
     if not isinstance(release_mode, ReleaseMode):
         raise TypeError("release_mode는 ReleaseMode 값이어야 합니다")
+    fallback_allowed = bool(evidence_available_fallback or preserve_on_ask_failure)
+    if evidence_availability is not None and not isinstance(
+        evidence_availability, EvidenceAvailability
+    ):
+        raise TypeError("evidence_availability는 EvidenceAvailability 값이어야 합니다")
+    if (
+        evidence_availability is not None or fallback_allowed
+    ) and release_mode is ReleaseMode.ENFORCE_NO_PARTIAL:
+        raise TypeError("ENFORCE_NO_PARTIAL은 확보 근거 보고서 전환을 지원하지 않습니다")
+    if evidence_availability is not None and release_mode is ReleaseMode.SHADOW:
+        if not _normalize_fragments(fragments):
+            # 조각이 하나도 없으면 작가·검수를 부를 재료가 없다 — AI 0회.
+            return compose_evidence_available_report(
+                company_name,
+                fragments,
+                performance_table,
+                evidence_availability=evidence_availability,
+                corp_type=corp_type,
+                generated_at=generated_at,
+                as_of_date=as_of_date,
+                analysis_period=analysis_period,
+                latest_performance_period=latest_performance_period,
+                table_presentation=table_presentation,
+                filing_meta=filing_meta,
+                composition_tables=composition_tables,
+                citation_style=citation_style,
+                company_id=company_id,
+                research_diagnostics=research_diagnostics,
+                review_diagnostics_sink=review_diagnostics_sink,
+                composition_diagnostics_sink=composition_diagnostics_sink,
+            )
+    ai_failure: AskFatalError | None = None
+    ai_stages_skipped: list[str] = []
 
     review_diagnostics = (
         review_diagnostics_sink if review_diagnostics_sink is not None else []
@@ -1133,6 +1631,11 @@ def run_v2(
                 validation_round=ValidationRound.PRIMARY,
                 section_ids=("bundled",),
             )
+
+    rewrite_failures: list[AskFatalError] = []
+    if fallback_allowed and release_mode is ReleaseMode.SHADOW:
+        rewrite_for_run = _degradable_on_fallback(rewrite_for_run, rewrite_failures)
+        recheck_for_run = _degradable_on_fallback(recheck_for_run, rewrite_failures)
 
     # packet 계약은 첫 유료 호출 전에 닫는다. 작성에는 장별 packet만,
     # 검증·부록에는 충돌 검사를 마친 결정론적 union만 전달한다.
@@ -1241,6 +1744,43 @@ def run_v2(
                     "FULL 사전 필수 의미칸 미달: %s",
                     unreachable_slots_by_section,
                 )
+                if fallback_allowed:
+                    # 유료 호출 «전»이다 — 같은 입력을 SHADOW 흐름으로 한 번만
+                    # 돌려 확보 근거 보고서를 만든다(AI 비용은 한 번뿐).
+                    return run_v2(
+                        company_name,
+                        fragments,
+                        performance_table,
+                        writer_ask=writer_ask,
+                        reviewer_ask=reviewer_ask,
+                        initial_reviewer_ask=initial_reviewer_ask,
+                        initial_retry_reviewer_ask=initial_retry_reviewer_ask,
+                        rewrite_ask=rewrite_ask,
+                        recheck_ask=recheck_ask,
+                        diagram_ask=diagram_ask,
+                        corp_type=corp_type,
+                        grade=Grade.PARTIAL,
+                        generated_at=generated_at,
+                        as_of_date=as_of_date,
+                        analysis_period=analysis_period,
+                        latest_performance_period=latest_performance_period,
+                        table_presentation=table_presentation,
+                        filing_meta=filing_meta,
+                        composition_tables=composition_tables,
+                        citation_style=citation_style,
+                        release_mode=ReleaseMode.SHADOW,
+                        section_evidence_packets=None,
+                        company_id=company_id,
+                        research_diagnostics=research_diagnostics,
+                        review_diagnostics_sink=review_diagnostics,
+                        composition_diagnostics_sink=composition_diagnostics,
+                        evidence_availability=(
+                            evidence_availability
+                            or EvidenceAvailability(COLLECTION_STATE_PARTIAL)
+                        ),
+                        evidence_available_fallback=True,
+                        _downgraded_from=release_mode.value,
+                    )
                 raise V2ValidationError(
                     (
                         "report_recovery:"
@@ -1248,109 +1788,135 @@ def run_v2(
                     )
                 )
 
-    # ① 본문 9장 작성 (작가)
-    draft = compose_sections(
-        company_name,
-        fragments,
-        performance_table,
-        writer_for_run,
-        # 준비 결과의 plain Mapping으로 낮추면 원본 typed PacketSet이라는 사실과
-        # claim-slot 소유권 강제 플래그가 사라진다. 검증한 정본 입력을 그대로
-        # 넘겨 작성 경계도 같은 계약을 보게 한다.
-        section_evidence_packets=section_evidence_packets,
-        # 장별 도식 «행 수»를 작성 직후·장 근거 정리 직후에 남긴다. 이 기록이
-        # 없으면 어떤 장의 도식 0줄이 «작가가 안 냈다»인지 «우리가 걸렀다»인지
-        # 되짚을 방법이 없다.
-        composition_diagnostics=composition_diagnostics,
-    )
-    draft, news_supplemented = supplement_news_candidates(
-        draft, _normalize_fragments(verification_fragments),
-        prepared_evidence.allowed_fragment_ids_by_section if prepared_evidence else None,
-    )
-    news_review_candidates = news_citation_ids(draft, _normalize_fragments(verification_fragments))
-    news_review_rejections = []
-    if release_mode is not ReleaseMode.SHADOW:
-        if prepared_evidence is not None:
-            draft = _sanitize_report_to_section_evidence(
-                draft,
-                prepared_evidence.allowed_fragment_ids_by_section,
-                supported_claim_slots_by_fragment_id=(
-                    prepared_evidence.supported_claim_slots_by_fragment_id
-                ),
-                enforce_claim_slot_support=(
-                    prepared_evidence.enforce_claim_slot_support
-                ),
-            )
-            # 이 자리는 «두 번째» 정리다(작성 단계에서 이미 한 번 돈다). 뉴스
-            # 보충이 끼어든 뒤의 줄 수라 앞 기록과 값이 다를 수 있으므로 따로
-            # 남긴다 — 기록은 관측이며 중복 제거하지 않는다.
-            record_flow_row_counts(
-                composition_diagnostics, draft,
-                stage=DIAGRAM_STAGE_SECTION_EVIDENCE,
-            )
-            _assert_composed_report_evidence_invariant(
-                draft,
-                prepared_evidence.allowed_fragment_ids_by_section,
-                packet_union_ids,
-                stage="draft-pre-review",
-            )
-        # flow 숫자는 기존 canonical 검사로 먼저 재검산한다. 관계 의미는
-        # 바로 다음 bundled reviewer 한 번에 본문과 함께 판정한다.
-        draft, diagram_problems = check_diagram_numbers(
-            draft, _normalize_fragments(verification_fragments),
-            derived_ratio_diagnostics=composition_diagnostics,
-        )
-        if prepared_evidence is not None:
-            _assert_composed_report_evidence_invariant(
-                draft,
-                prepared_evidence.allowed_fragment_ids_by_section,
-                packet_union_ids,
-                stage="diagram-numeric-pre-review",
-            )
-    else:
-        diagram_problems = ()
-    draft_body_count = _total_sentences(draft)  # 이 시점 summary는 빈 튜플이다
-
-    # ② 본문 검증 (검수 — 문장 단위 제거/강등만, 장 삭제 없음)
-    # ★ 보고서 기준일을 검증기에 함께 넘긴다. 이 값이 없으면 임원 재직 가드가
-    #   날짜 문턱 없이 이탈 «표지»만 보고 판정해, 「기준일 이후에 물러날 예정」인
-    #   임원 문장까지 근거 없음으로 뺀다. render 메타로만 쓰이던 값을 판정에도
-    #   쓰는 것이라 형식은 그대로 ISO(YYYY-MM-DD)다.
     baseline_date = as_of_date or None
-    if prepared_evidence is None:
-        verified = verify_report(
-            draft, verification_fragments, performance_table, reviewer_for_run,
-            diagnostics=review_diagnostics,
-            initial_ask=initial_reviewer_for_run,
-            initial_retry_ask=initial_retry_reviewer_for_run,
-            rewrite_ask=rewrite_for_run,
-            recheck_ask=recheck_for_run,
-            protocol_diagnostics=composition_diagnostics,
-            baseline_date=baseline_date,
-        )
-    else:
-        verified = verify_report(
-            draft,
-            verification_fragments,
+    try:
+        # ① 본문 9장 작성 (작가)
+        draft = compose_sections(
+            company_name,
+            fragments,
             performance_table,
-            reviewer_for_run,
-            allowed_fragment_ids_by_section=(
-                prepared_evidence.allowed_fragment_ids_by_section
-            ),
-            diagnostics=review_diagnostics,
-            initial_ask=initial_reviewer_for_run,
-            initial_retry_ask=initial_retry_reviewer_for_run,
-            rewrite_ask=rewrite_for_run,
-            recheck_ask=recheck_for_run,
-            protocol_diagnostics=composition_diagnostics,
-            baseline_date=baseline_date,
+            writer_for_run,
+            # 준비 결과의 plain Mapping으로 낮추면 원본 typed PacketSet이라는 사실과
+            # claim-slot 소유권 강제 플래그가 사라진다. 검증한 정본 입력을 그대로
+            # 넘겨 작성 경계도 같은 계약을 보게 한다.
+            section_evidence_packets=section_evidence_packets,
+            # 장별 도식 «행 수»를 작성 직후·장 근거 정리 직후에 남긴다. 이 기록이
+            # 없으면 어떤 장의 도식 0줄이 «작가가 안 냈다»인지 «우리가 걸렀다»인지
+            # 되짚을 방법이 없다.
+            composition_diagnostics=composition_diagnostics,
         )
-        _assert_composed_report_evidence_invariant(
-            verified,
-            prepared_evidence.allowed_fragment_ids_by_section,
-            packet_union_ids,
-            stage="post-verify",
+        draft, news_supplemented = supplement_news_candidates(
+            draft, _normalize_fragments(verification_fragments),
+            prepared_evidence.allowed_fragment_ids_by_section if prepared_evidence else None,
         )
+        news_review_candidates = news_citation_ids(draft, _normalize_fragments(verification_fragments))
+        news_review_rejections = []
+        if release_mode is not ReleaseMode.SHADOW:
+            if prepared_evidence is not None:
+                draft = _sanitize_report_to_section_evidence(
+                    draft,
+                    prepared_evidence.allowed_fragment_ids_by_section,
+                    supported_claim_slots_by_fragment_id=(
+                        prepared_evidence.supported_claim_slots_by_fragment_id
+                    ),
+                    enforce_claim_slot_support=(
+                        prepared_evidence.enforce_claim_slot_support
+                    ),
+                )
+                # 이 자리는 «두 번째» 정리다(작성 단계에서 이미 한 번 돈다). 뉴스
+                # 보충이 끼어든 뒤의 줄 수라 앞 기록과 값이 다를 수 있으므로 따로
+                # 남긴다 — 기록은 관측이며 중복 제거하지 않는다.
+                record_flow_row_counts(
+                    composition_diagnostics, draft,
+                    stage=DIAGRAM_STAGE_SECTION_EVIDENCE,
+                )
+                _assert_composed_report_evidence_invariant(
+                    draft,
+                    prepared_evidence.allowed_fragment_ids_by_section,
+                    packet_union_ids,
+                    stage="draft-pre-review",
+                )
+            # flow 숫자는 기존 canonical 검사로 먼저 재검산한다. 관계 의미는
+            # 바로 다음 bundled reviewer 한 번에 본문과 함께 판정한다.
+            draft, diagram_problems = check_diagram_numbers(
+                draft, _normalize_fragments(verification_fragments),
+                derived_ratio_diagnostics=composition_diagnostics,
+            )
+            if prepared_evidence is not None:
+                _assert_composed_report_evidence_invariant(
+                    draft,
+                    prepared_evidence.allowed_fragment_ids_by_section,
+                    packet_union_ids,
+                    stage="diagram-numeric-pre-review",
+                )
+        else:
+            diagram_problems = ()
+        draft_body_count = _total_sentences(draft)  # 이 시점 summary는 빈 튜플이다
+
+        # ② 본문 검증 (검수 — 문장 단위 제거/강등만, 장 삭제 없음)
+        # ★ 보고서 기준일을 검증기에 함께 넘긴다. 이 값이 없으면 임원 재직 가드가
+        #   날짜 문턱 없이 이탈 «표지»만 보고 판정해, 「기준일 이후에 물러날 예정」인
+        #   임원 문장까지 근거 없음으로 뺀다. render 메타로만 쓰이던 값을 판정에도
+        #   쓰는 것이라 형식은 그대로 ISO(YYYY-MM-DD)다.
+        baseline_date = as_of_date or None
+        if prepared_evidence is None:
+            verified = verify_report(
+                draft, verification_fragments, performance_table, reviewer_for_run,
+                diagnostics=review_diagnostics,
+                initial_ask=initial_reviewer_for_run,
+                initial_retry_ask=initial_retry_reviewer_for_run,
+                rewrite_ask=rewrite_for_run,
+                recheck_ask=recheck_for_run,
+                protocol_diagnostics=composition_diagnostics,
+                baseline_date=baseline_date,
+            )
+        else:
+            verified = verify_report(
+                draft,
+                verification_fragments,
+                performance_table,
+                reviewer_for_run,
+                allowed_fragment_ids_by_section=(
+                    prepared_evidence.allowed_fragment_ids_by_section
+                ),
+                diagnostics=review_diagnostics,
+                initial_ask=initial_reviewer_for_run,
+                initial_retry_ask=initial_retry_reviewer_for_run,
+                rewrite_ask=rewrite_for_run,
+                recheck_ask=recheck_for_run,
+                protocol_diagnostics=composition_diagnostics,
+                baseline_date=baseline_date,
+            )
+            _assert_composed_report_evidence_invariant(
+                verified,
+                prepared_evidence.allowed_fragment_ids_by_section,
+                packet_union_ids,
+                stage="post-verify",
+            )
+
+    except AskFatalError as error:
+        if not fallback_allowed or _fallback_blocked(error):
+            raise
+        # 작성·검수 도중 AI 전역 장애 — 검수를 못 마친 초안은 «절대» 싣지
+        # 않는다. 안내뿐인 본문으로 바꾸고 확보한 표·조각으로 마무리한다.
+        ai_failure = error
+        ai_stages_skipped.append(AI_STAGE_COMPOSE_VERIFY)
+        logger.warning(
+            "AI 작성·검수 중단(kind=%s) — 미검증 초안을 버리고 확보 자료로 마무리한다",
+            type(error.cause).__name__,
+        )
+        draft = _notice_only_report(NOTICE_AI_UNAVAILABLE)
+        verified = draft
+        draft_body_count = 0
+        news_supplemented = ()
+        news_review_candidates = set()
+        news_review_rejections = []
+        diagram_problems = ()
+    if rewrite_failures and ai_failure is None:
+        # 재작성 단계의 전역 장애 — verify_report가 미다듬 문장만 제거했고
+        # 검증을 마친 나머지 문장은 그대로 남았다. 전환 사유만 기록한다.
+        ai_failure = rewrite_failures[0]
+        ai_stages_skipped.append(AI_STAGE_REWRITE)
 
     # ②-b 사실 단일 소유 강제 — 여러 장에 반복된 같은 사실을 소유 장 하나만
     #     남기고 뺀다. 요약 «앞»에 둔다 — 곧 사라질 문장을 요약 재료로 고르면
@@ -1390,14 +1956,32 @@ def run_v2(
     #       비싼 회사에서 보고서 «전체»가 예산 초과로 실패한다(실측).
     #     근거 없는 줄만 빼며, 줄이 다 빠지면 도식을 안 그릴 뿐 장은 남는다.
     if release_mode is ReleaseMode.SHADOW:
-        verified, diagram_problems = check_diagrams(
-            verified,
-            _normalize_fragments(verification_fragments),
-            diagram_ask or reviewer_ask,
-            diagnostics=review_diagnostics,
-            derived_ratio_diagnostics=composition_diagnostics,
-            baseline_date=baseline_date,
-        )
+        try:
+            verified, diagram_problems = check_diagrams(
+                verified,
+                _normalize_fragments(verification_fragments),
+                diagram_ask or reviewer_ask,
+                diagnostics=review_diagnostics,
+                derived_ratio_diagnostics=composition_diagnostics,
+                baseline_date=baseline_date,
+            )
+        except AskFatalError as error:
+            if not fallback_allowed or _fallback_blocked(error):
+                raise
+            # 도식 의미 검수를 못 하면 «미확인 화살표만» 빼고 본문은 그대로 둔다.
+            ai_failure = ai_failure or error
+            ai_stages_skipped.append(AI_STAGE_DIAGRAM)
+            hidden = sum(len(section.flow_rows) for section in verified.sections)
+            verified = replace(
+                verified,
+                sections=tuple(
+                    replace(section, flow_rows=()) for section in verified.sections
+                ),
+            )
+            diagram_problems = (
+                *diagram_problems,
+                f"AI 장애로 의미 검수를 못 한 관계 flow {hidden}행 공개 제외",
+            )
     elif prepared_evidence is None:
         # ENFORCE_NO_PARTIAL은 이식기 호환 모드라 typed packet/장별 bundled
         # 의미 판정이 없다. 관계를 확인하지 못한 flow를 공개하거나 별도 diagram
@@ -1441,6 +2025,46 @@ def run_v2(
         ),
     )
     name_table = name_table_result.table
+
+    def _downgrade_after_write(
+        reason: str,
+        *,
+        stages: tuple[str, ...] = (),
+    ) -> V2RunOutput:
+        """FULL이 작성 뒤 품질 하한에 걸렸을 때 검증 본문으로 부분 보고서를 낸다."""
+
+        return _finish_evidence_available(
+            company_name,
+            verified,
+            verification_fragments,
+            performance_table,
+            availability=(
+                evidence_availability
+                or EvidenceAvailability(COLLECTION_STATE_PARTIAL)
+            ),
+            degraded_reason=reason,
+            degraded_cause_kind="",
+            ai_stages_skipped=(*ai_stages_skipped, *stages),
+            downgraded_from=release_mode.value,
+            tail_already_applied=True,
+            corp_type=corp_type,
+            generated_at=generated_at,
+            as_of_date=as_of_date,
+            analysis_period=analysis_period,
+            latest_performance_period=latest_performance_period,
+            table_presentation=table_presentation,
+            filing_meta=filing_meta,
+            composition_tables=composition_tables,
+            citation_style=citation_style,
+            company_id=company_id,
+            research_diagnostics=research_diagnostics,
+            review_diagnostics=review_diagnostics,
+            composition_diagnostics=composition_diagnostics,
+            draft_body_count=draft_body_count,
+            news_review_candidates=news_review_candidates,
+            news_review_rejections=news_review_rejections,
+            name_table=name_table,
+        )
 
     # ②-d 첫 구조화 claim 슬라이스 — 검증된 DART 3개년 표의 원값에서
     # 누적 증감률을 코드로 재계산한다. AI 산문에서 숫자를 역추출하지 않으며,
@@ -1504,12 +2128,23 @@ def run_v2(
     # (본문이 결속을 못 만든 실행에서는 요약도 결속되지 않는다 — 요약이
     #  본문보다 느슨해지지 않을 뿐, 없는 결속을 만들어 주지는 않는다.)
     if release_mode is ReleaseMode.SHADOW:
-        final, summary_draft_count, numeric_filtering = _legacy_summary_stage(
-            verified,
-            writer_ask=writer_ask,
-            body_numeric_filtering=body_numeric_filtering,
-            summary_diagnostics=composition_diagnostics,
-        )
+        try:
+            final, summary_draft_count, numeric_filtering = _legacy_summary_stage(
+                verified,
+                writer_ask=writer_ask,
+                body_numeric_filtering=body_numeric_filtering,
+                summary_diagnostics=composition_diagnostics,
+            )
+        except AskFatalError as error:
+            if not fallback_allowed or _fallback_blocked(error):
+                raise
+            # 고르기 AI를 못 부르면 검증 본문 문장으로만 규칙 요약을 채운다.
+            ai_failure = ai_failure or error
+            ai_stages_skipped.append(AI_STAGE_SUMMARY)
+            final, numeric_filtering = _rule_summary_stage(
+                verified, body_numeric_filtering,
+            )
+            summary_draft_count = 0
     else:
         body_rendered = render_report(
             company_name,
@@ -1549,6 +2184,8 @@ def run_v2(
             not extractive.release_ready
             and release_mode is not ReleaseMode.FULL
         ):
+            if fallback_allowed:
+                return _downgrade_after_write(DEGRADED_REASON_QUALITY_FLOOR)
             raise V2ValidationError(
                 (
                     "엄격 출고용 핵심 요약에 서로 다른 장의 검증 사실이 "
@@ -1980,6 +2617,11 @@ def run_v2(
                     ("report_recovery:supplement_receipt_invalid",)
                 ) from error
             if recovery_decision.action is not RecoveryAction.RELEASE_COMPLETE:
+                if fallback_allowed and _is_quality_stop(recovery_decision):
+                    return _downgrade_after_write(
+                        DEGRADED_REASON_QUALITY_FLOOR,
+                        stages=(AI_STAGE_FULL_SUPPLEMENT,),
+                    )
                 _raise_recovery_stop(
                     recovery_decision.reason_code,
                     recovery_decision.quality_problem_codes,
@@ -1988,11 +2630,18 @@ def run_v2(
                 # 두 번째 후보의 manifest·render·품질 평가·receipt·정책 결정을
                 # 모두 다시 만든 뒤에야 닫는다. 조기 예외로 파생물 재계산을
                 # 건너뛰거나 세 번째 보충으로 흐르지 않는다.
+                if fallback_allowed:
+                    return _downgrade_after_write(
+                        DEGRADED_REASON_QUALITY_FLOOR,
+                        stages=(AI_STAGE_FULL_SUPPLEMENT,),
+                    )
                 _raise_recovery_stop("supplement_summary_insufficient")
             validation_receipts = (primary_receipt, supplement_receipt)
         elif recovery_decision.action is RecoveryAction.RELEASE_COMPLETE:
             validation_receipts = (primary_receipt,)
         elif recovery_decision.action is RecoveryAction.STOP_NO_CHARGE:
+            if fallback_allowed and _is_quality_stop(recovery_decision):
+                return _downgrade_after_write(DEGRADED_REASON_QUALITY_FLOOR)
             _raise_recovery_stop(
                 recovery_decision.reason_code,
                 recovery_decision.quality_problem_codes,
@@ -2025,6 +2674,19 @@ def run_v2(
             problem_codes=quality_observation.quality_problem_codes,
         )
     final_review_diagnostics = final_review_outcomes(final, review_diagnostics)
+    degraded_reason = ""
+    if ai_failure is not None:
+        degraded_reason = _degraded_reason_of(ai_failure)
+    elif _downgraded_from:
+        degraded_reason = DEGRADED_REASON_EVIDENCE_UNREACHABLE
+    evidence_available_applied = (
+        release_mode is ReleaseMode.SHADOW
+        and (
+            evidence_availability is not None
+            or ai_failure is not None
+            or bool(_downgraded_from)
+        )
+    )
     if release_mode is ReleaseMode.SHADOW:
         rendered = _apply_generation_quality_label(
             rendered,
@@ -2032,6 +2694,16 @@ def run_v2(
             numeric_filtering,
             final_review_diagnostics,
         )
+        if evidence_available_applied:
+            rendered = _apply_evidence_available_policy(
+                rendered,
+                availability=(
+                    evidence_availability
+                    or EvidenceAvailability(COLLECTION_STATE_PARTIAL)
+                ),
+                degraded_reason=degraded_reason,
+                notice_only=_notice_only_sections(final),
+            )
     else:
         # 엄격 계약을 실제로 통과한 결과만 여기 온다. 입력 grade의 옛 기본값
         # PARTIAL을 그대로 두면 내용은 완성인데 화면·결제층은 부분 보고서로
@@ -2220,7 +2892,20 @@ def run_v2(
             review_rejections=news_review_rejections,
         ),
         review_diagnostics=final_review_diagnostics,
+        degraded_reason=degraded_reason if evidence_available_applied else "",
+        degraded_cause_kind=(
+            type(ai_failure.cause).__name__
+            if ai_failure is not None and evidence_available_applied
+            else ""
+        ),
+        ai_stages_skipped=tuple(ai_stages_skipped),
+        effective_release_mode=release_mode.value,
+        downgraded_from_release_mode=_downgraded_from,
     )
 
 
-__all__ = ["V2RunOutput", "run_v2"]
+__all__ = [
+    "V2RunOutput",
+    "compose_evidence_available_report",
+    "run_v2",
+]

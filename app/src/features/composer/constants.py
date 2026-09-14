@@ -404,6 +404,51 @@ NOTICE_NUMERIC_BODY_WITHHELD: Final[str] = (
     "자료가 없다는 뜻은 아닙니다."
 )
 
+# ── 확보 근거 보고서(2026-09-14 사용자 계약) 안내 ──
+#: 이번 조사에서 이 장에 쓸 공식 자료를 하나도 확보하지 못한 경우.
+NOTICE_EVIDENCE_NONE: Final[str] = (
+    "이번 조사에서 이 장에 쓸 공식 자료를 확보하지 못했습니다. "
+    "자료가 없다는 뜻이 아니라 이번에 확인하지 못했다는 뜻입니다."
+)
+#: 자료는 확보했지만 검증을 마친 문장이 없어 설명을 싣지 못한 경우.
+NOTICE_EVIDENCE_NOT_COMPOSED: Final[str] = (
+    "확보한 공식 자료로 이 장의 설명을 작성하지 못했습니다. "
+    "확인을 마친 문장만 싣기 때문이며, 자료가 없다는 뜻은 아닙니다."
+)
+#: AI 작성·검수가 중간에 멈춰(예산·한도·제공자 장애) 검증되지 않은 초안을 버린 경우.
+NOTICE_AI_UNAVAILABLE: Final[str] = (
+    "AI 작성·검수를 끝내지 못해 이 장의 설명을 싣지 않았습니다. "
+    "확보한 자료는 보존되어 있으며 다시 실행하면 채워질 수 있습니다."
+)
+#: 확보 근거 보고서에서 핵심 요약이 3문장에 못 미칠 때 «미제공 사유»에 남기는 안내.
+SUMMARY_NOTICE_THIN: Final[str] = (
+    "검증된 문장이 적어 핵심 요약을 {count}문장만 실었습니다."
+)
+SUMMARY_NOTICE_EMPTY: Final[str] = (
+    "핵심 요약을 만들 만큼 검증된 문장이 없어 요약을 싣지 않았습니다."
+)
+#: AI 단계가 중간에 멈춰 결정론 경로로 마무리했을 때의 «미제공 사유» 안내.
+SHORTFALL_AI_DEGRADED: Final[str] = (
+    "AI 작성·검수 일부를 끝내지 못해 검증을 마친 내용만 실었습니다. "
+    "다시 실행하면 더 채워질 수 있습니다."
+)
+#: 실적표의 원문 근거 조각이 이번 입력에 없어 표를 싣지 않았을 때의 안내.
+SHORTFALL_TABLE_EVIDENCE_UNBOUND: Final[str] = (
+    "실적표의 원문 근거 조각이 이번 입력에 없어 표를 싣지 않았습니다."
+)
+#: 확보 근거 보고서 전환 사유 — V2RunOutput.degraded_reason의 닫힌 값.
+DEGRADED_REASON_REQUEST_BUDGET_EXHAUSTED: Final[str] = "request_budget_exhausted"
+DEGRADED_REASON_CALL_LIMIT: Final[str] = "call_limit"
+DEGRADED_REASON_PROVIDER_UNAVAILABLE: Final[str] = "provider_unavailable"
+DEGRADED_REASON_QUALITY_FLOOR: Final[str] = "quality_floor"
+DEGRADED_REASON_EVIDENCE_UNREACHABLE: Final[str] = "required_evidence_unreachable"
+#: 확보 근거 전환 때 건너뛴 AI 단계의 닫힌 이름.
+AI_STAGE_COMPOSE_VERIFY: Final[str] = "compose_verify"
+AI_STAGE_DIAGRAM: Final[str] = "diagram_review"
+AI_STAGE_SUMMARY: Final[str] = "summary_selection"
+AI_STAGE_FULL_SUPPLEMENT: Final[str] = "full_supplement"
+AI_STAGE_REWRITE: Final[str] = "sentence_rewrite"
+
 # ══════════════════════════════════════════════════════════
 # 공시 원문 주소 — 부록 출처를 «사용자가 직접 열 수 있게» 만든다
 # ══════════════════════════════════════════════════════════

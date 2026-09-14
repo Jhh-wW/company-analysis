@@ -20,12 +20,11 @@ from core.dart_client import (
     ZIP_MEMBER_MAX_COMPRESSION_RATIO,
 )
 
-# 8MiB 원문이 수백만 개의 짧은 줄·제목으로 조각나도 메모리
-# 객체를 무제한 만들지 않는 문서 단위 상한. 실제 사업보고서의
-# 제목 수보다 크게 잡되, 현재 엔진의 최대 입력에서도 유한하다.
+# 호환 제목 목록의 보관 상한이다. 정식 수집의 후보 반복자는 제목 목록을
+# 만들지 않으므로 이 값이 끝부분 원문 순회를 중단하지 않는다.
 MAX_TEXT_SEGMENTS_PER_DOCUMENT: Final[int] = 4_096
 # 반복 상투문구 탐지 dict도 서로 다른 짧은 줄 수만큼 객체가 늘어난다.
-# 입력 바이트 상한만 믿지 않고 distinct line 색인을 별도로 닫는다.
+# 입력 바이트 상한과 별도로 해시 색인을 제한하며, 포화 뒤에도 순회한다.
 MAX_BOILERPLATE_DISTINCT_LINES_PER_DOCUMENT: Final[int] = 32_768
 
 # ══════════════════════════════════════════════════════════
@@ -313,17 +312,46 @@ ALLOWED_HOST_ALLOWLIST: Final[frozenset[str]] = frozenset({
 
 MIN_FRAGMENT_CHARS: Final[int] = 20
 
-# 번호 매긴 명시적 제목. 본문 안 번호 목록도 제목으로 볼 수 있는 휴리스틱이다.
+# 소수와 숫자만 있는 표 셀을 제외한 명시적 제목. 번호 목록의 문맥은
+# 짧은 제목 보존 규칙으로 처리하며, 의미 분류의 완전성을 주장하지 않는다.
 DOCUMENT_HEADING_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^(?:[IVXLCDM]{1,6}\.|[0-9]{1,3}\.|제\s?[0-9]{1,3}\s?장|[가나다라마바사아자차카타파하]\.)\s*\S"
+    r"^(?:(?:[IVXLCDM]{1,6}\.|제\s?[0-9]{1,3}\s?장|[가나다라마바사아자차카타파하]\.)\s*\S|"
+    r"[0-9]{1,6}\.(?![0-9])\s*[^\d\s])"
 )
-# 하위 번호 제목은 직후 문단의 문맥으로만 추적한다. 별도 section 객체를
-# 늘리면 기존 대형 공시가 제목 개수 상한에 닿아 뒷부분을 잃을 수 있다.
+# 하위 번호 제목은 직후 문단의 문맥으로만 추적한다.
 PARAGRAPH_SUBHEADING_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[0-9]{1,3}\)\s*\S")
-# 일반 장문 차선도 입력 바이트 상한만으로는 안전하지 않다. 8MiB 안에
-# ``20자 문단+빈 줄``을 반복하면 수십만 Python 객체와 슬롯 채점 호출이
-# 생길 수 있으므로 문서별 객체 수·실제 보존 문자 합을 함께 제한한다.
-# 정상 사업보고서 전체를 자르지 않도록 short 관측 차선보다 충분히 크게 둔다.
+MAX_CANDIDATE_WINDOW_CHARS: Final[int] = 4_096
+# 고정 창 경계 가까이에 문장 끝이 있으면 그곳에서 나누어 단어·부정문 절단을 줄인다.
+CANDIDATE_WINDOW_SENTENCE_LOOKBACK_CHARS: Final[int] = 512
+CANDIDATE_WINDOW_SENTENCE_END_PATTERN: Final[re.Pattern[str]] = re.compile(r"[.!?](?=\s)")
+MAX_HEADING_CONTEXT_CHARS: Final[int] = 256
+RETAINED_TOP_PER_SLOT: Final[int] = 6
+RETAINED_RECENT_PER_SLOT: Final[int] = 3
+RETAINED_CHANGE_PER_SLOT: Final[int] = 3
+MAX_UNCLASSIFIED_CANDIDATES_PER_DOCUMENT: Final[int] = 128
+MAX_UNCLASSIFIED_CHARS_PER_DOCUMENT: Final[int] = 64 * 1024
+# 후속 비교 생산기의 원천을 보관할 신호이며 사실 인정·장 배정 신호가 아니다.
+UNCLASSIFIED_PRIORITY_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"경쟁|동종|비교|대비|점유율|\bcompet(?:itor|itors|e|es|ed|ing|ition)\b",
+    re.IGNORECASE,
+)
+# 아주 짧은 반복 줄도 첫 관측은 남기되 수백만 개 후보 생성을 피한다.
+MAX_SHORT_DUPLICATE_TEXTS_PER_DOCUMENT: Final[int] = 2_048
+CHANGE_CONTEXT_MARKERS: Final[tuple[str, ...]] = (
+    "취소", "철회", "중단", "위험", "변경", "정정", "연기", "지연", "종료",
+)
+PLAN_CHANGE_STATUS_MARKERS: Final[tuple[str, ...]] = (
+    "계획을 취소", "계획을 철회", "계획을 변경", "투자를 취소", "투자를 중단",
+    "일정을 연기", "일정을 변경", "시기를 변경", "추진을 중단",
+)
+SCAN_VERSION: Final[str] = "document_scan/1"
+SCAN_STATE_COMPLETE: Final[str] = "COMPLETE"
+SCAN_STATE_INCOMPLETE: Final[str] = "INCOMPLETE"
+REASON_SELECTION_COMPRESSED: Final[str] = "document_selection_compressed"
+REASON_CHANGE_CONTEXT: Final[str] = "selection_change_context"
+REASON_RECENT_CONTEXT: Final[str] = "selection_recent_context"
+# 일반 장문 보관량은 개수·문자 한도와 슬롯별 더 작은 몫을 함께 적용한다.
+# 발견 후보는 이 한도와 무관하게 즉시 채점하며 마감까지 순회를 계속한다.
 MAX_LONG_FRAGMENT_CANDIDATES_PER_DOCUMENT: Final[int] = 8_192
 MAX_LONG_FRAGMENT_CHARS_PER_DOCUMENT: Final[int] = 4 * 1024 * 1024
 # 일반 writer 조각 하한보다 짧은 독립 문장은 9장 같은 별도 생산기가 필요할
@@ -360,10 +388,10 @@ FINANCIAL_COMPANY_REVENUE_KEYWORDS: Final[tuple[str, ...]] = (
 # 버전·출처 표기
 # ══════════════════════════════════════════════════════════
 
-COLLECTOR_VERSION: Final[str] = "evidence_collection/1.0"
-#: 1.1 (2026-09-07): 문단 가장자리 공백을 떼고 좌표를 함께 옮긴다 — 같은
-#: 문서라도 1.0과는 조각 원문·좌표·text_sha256이 다를 수 있다.
-PARSER_VERSION: Final[str] = "evidence_collection_segment/1.1"
+COLLECTOR_VERSION: Final[str] = "evidence_collection/2.0"
+#: 2.0: EOF 후보 반복자·유한 문단 구간·제목 오인 방지. 1.x의 저장 한도
+#: 잘림 기록을 새 완료 증명으로 재사용하지 않는다.
+PARSER_VERSION: Final[str] = "evidence_collection_segment/2.0"
 DART_PUBLISHER_NAME: Final[str] = "금융감독원 전자공시시스템(DART)"
 #: composer/constants.py DART_DOCUMENT_URL_TEMPLATE와 같은 값(rcept_no만 다른 키 이름).
 DART_DOCUMENT_URL_TEMPLATE: Final[str] = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"

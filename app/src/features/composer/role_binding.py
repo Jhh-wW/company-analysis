@@ -28,6 +28,7 @@ from dataclasses import dataclass
 
 from src.features.composer.role_binding_constants import (
     ADJACENCY_BREAK_RE,
+    BENEFIT_PREDICATE_RE,
     CELL_SPLIT_RE,
     CLAIM_ROLE_NEGATED_RE,
     CLAUSE_SPLIT_RE,
@@ -35,6 +36,7 @@ from src.features.composer.role_binding_constants import (
     FEE_CELL_MARKER_RE,
     FEE_CONCENTRATION_SOURCE_TEMPLATE,
     FEE_MAIN_REVENUE_CLAIM_TEMPLATES,
+    PARTICIPATION_RECIPIENT_RE,
     PREDICATE_BREAK_RE,
     PROSE_FEE_MARKER_RE,
     PROSE_REPEAT_MARKER_RE,
@@ -52,9 +54,17 @@ from src.features.composer.role_binding_constants import (
     ROLE_BINDING_ACTOR_BOUNDARY,
     ROLE_BINDING_CLAIM_UNCOVERED,
     ROLE_BINDING_CONDITION_DROPPED,
+    ROLE_BINDING_CONDITION_NOT_ACTION,
     ROLE_BINDING_DIRECTION_REVERSED,
+    ROLE_BINDING_ENTRY_TYPE_UNKNOWN,
     ROLE_BINDING_FIELD_TYPE_INVALID,
     ROLE_BINDING_FIELDS,
+    ROLE_BINDING_HINT_CELL_ITEM_TEMPLATE,
+    ROLE_BINDING_HINT_ITEM_TEMPLATE,
+    ROLE_BINDING_HINT_REQUIRED_HEAD,
+    ROLE_BINDING_HINT_WAIVED_HEAD,
+    ROLE_BINDING_HINT_WAIVED_TAIL,
+    ROLE_BINDING_HINT_WAIVED_TEMPLATE,
     ROLE_BINDING_KIND_MISMATCH,
     ROLE_BINDING_MISSING,
     ROLE_BINDING_NEGATED_IN_SOURCE,
@@ -64,9 +74,13 @@ from src.features.composer.role_binding_constants import (
     ROLE_BINDING_QUOTE_NOT_IN_SOURCE,
     ROLE_BINDING_ROLE_NOT_IN_CANDIDATE,
     ROLE_BINDING_ROLE_OUTSIDE_QUOTE,
+    ROLE_BINDING_RULE_VERSION,
+    ROLE_BINDING_STAGE_BY_REASON,
     ROLE_BINDING_TARGET_NOT_IN_CANDIDATE,
     ROLE_BINDING_TYPES,
     ROLE_BINDING_UNBOUND_IN_SOURCE,
+    ROLE_BINDING_WAIVER_TEXTS,
+    ROLE_BINDING_WAIVER_VERBATIM_CONDITION,
     ROLE_AS_PREDICATE_RE,
     ROLE_CELL_MARKER_RE,
     ROLE_CONDITION_MARKERS,
@@ -74,6 +88,8 @@ from src.features.composer.role_binding_constants import (
     SUBJECT_TOKEN_RE,
     WHITESPACE_RE,
 )
+from src.features.composer.direct_support_constants import RELATION_TYPES
+from src.features.composer.verbatim_news import VerbatimNewsSource
 
 
 #: 괄호 짝. 여는 쪽과 닫는 쪽 순서가 같아야 한다.
@@ -279,6 +295,37 @@ def _source_clauses(source: str) -> tuple[_Unit, ...]:
     return tuple(_surface_unit(clause) for clause in clauses)
 
 
+def _participation_condition(unit: _Unit, marker_end: int) -> bool:
+    """그 자리의 반복 낱말이 «혜택 수령인의 참여 조건»인가(§②-b의 닫힌 꼴).
+
+    표면형 좌표 ``marker_end``(반복 낱말이 끝난 자리)를 원문 좌표로 되돌려, 원문에서
+    바로 뒤가 「 <수령인 명사><여격 조사> 」이고 같은 절 안에서 혜택 서술어가 이어지며
+    그 사이에 쉼표·다른 주체·닫힌 연결어미가 없을 때만 참이다.
+
+    ★ 후보 쪽과 원문 쪽에 «같은» 기준을 쓴다 — 면제(원문 그대로인 후보의 요구 제외)와
+      역방향 차단(조건 구절로 실제 행동을 증명하지 못함)이 한 판단을 공유해야 한쪽만
+      느슨해지지 않는다.
+    ⚠️ 이 꼴 밖은 «확인하지 못함»이다. 「재가입 고객에게 포인트가 적립된다」처럼 수령인
+       뒤에 주격 조사를 단 다른 이름이 오면 주체를 확정하지 못해 참여 조건으로 보지
+       않는다 — 그 후보는 기존 결속 검사를 그대로 받는다.
+    """
+
+    if marker_end <= 0 or marker_end > len(unit.index):
+        return False
+    tail = unit.raw[unit.index[marker_end - 1] + 1:]
+    recipient = PARTICIPATION_RECIPIENT_RE.match(tail)
+    if recipient is None:
+        return False
+    after = tail[recipient.end():]
+    predicate = BENEFIT_PREDICATE_RE.search(after)
+    if predicate is None:
+        return False
+    between = _outer_only(after[: predicate.start()])
+    if ADJACENCY_BREAK_RE.search(between) or PREDICATE_BREAK_RE.search(between):
+        return False
+    return SUBJECT_TOKEN_RE.search(between) is None
+
+
 # ══════════════════════════════════════════════════════════
 # 후보가 단언한 자리 찾기 (발동)
 # ══════════════════════════════════════════════════════════
@@ -319,6 +366,127 @@ def claims_role_or_fee(text: str, cells: Sequence[str] | None = None) -> bool:
     """후보가 역할·대가·반복을 «단언»했는가. 발동 여부만 본다."""
 
     return bool(_claim_markers(_units(text, cells), cells is not None))
+
+
+# ══════════════════════════════════════════════════════════
+# 요구사항 계산 — 안내와 판정이 «같은» 결과를 쓴다
+# ══════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True)
+class RoleBindingRequirement:
+    """후보의 단언 자리 하나와 그 자리의 결속 요구.
+
+    ``waiver`` 가 비어 있으면 결속 항목이 필요한 자리이고, 값이 있으면 그 이름의 사유로
+    요구를 «제외»한 자리다. 제외는 판정 없음이지 승인이 아니다 — 제출된 항목은 여전히
+    대조한다.
+    """
+
+    unit: int
+    start: int
+    end: int
+    kind: str
+    marker: str
+    waiver: str = ""
+
+    @property
+    def waived(self) -> bool:
+        return bool(self.waiver)
+
+    def as_diagnostic(self) -> dict[str, object]:
+        detail: dict[str, object] = {"unit": self.unit, "marker": self.marker, "kind": self.kind}
+        if self.waiver:
+            detail["waiver"] = self.waiver
+        return detail
+
+
+@dataclass(frozen=True)
+class RoleBindingRequirements:
+    """한 후보의 단언 자리 전체와 규칙 버전. ``verbatim_bound`` 는 검증된 보도 원문
+    문맥이 실제 후보·인용에 결속됐는지(문맥이 없거나 어긋나면 False)다."""
+
+    rule_version: str
+    items: tuple[RoleBindingRequirement, ...]
+    verbatim_bound: bool
+
+    @property
+    def required(self) -> tuple[RoleBindingRequirement, ...]:
+        return tuple(item for item in self.items if not item.waiver)
+
+    @property
+    def waived(self) -> tuple[RoleBindingRequirement, ...]:
+        return tuple(item for item in self.items if item.waiver)
+
+
+def role_binding_requirements(
+    text: str,
+    own_sources: Mapping[str, str],
+    cells: Sequence[str] | None = None,
+    verbatim_source: VerbatimNewsSource | None = None,
+) -> RoleBindingRequirements:
+    """후보가 결속 항목을 내야 하는 자리와 «제외»한 자리를 한 번에 계산한다.
+
+    ★ 검수 안내(`grounding.grounding_hint`)와 판정(`role_binding_problem`)이 이 함수
+      «하나»를 쓴다. 안내에 없는 낱말을 코드가 요구하거나 그 반대가 되는 어긋남을
+      계산을 나누지 않는 것으로 막는다.
+    ★ 제외 범위는 좁다 — 도식이 아닌 산문, 검증된 보도 조각 «하나»를 원문 그대로 옮긴
+      후보(`verbatim_source.matches`), 단언 자리가 «하나», 그 자리가 과금 유형의 반복
+      낱말이며 혜택 수령인의 참여 조건 꼴(`_participation_condition`)일 때만이다.
+      의역·부분 인용·다중 인용·다른 역할·수익 주장이 섞이면 어느 자리도 제외하지
+      않는다. 문맥이 없거나 실제 입력과 어긋나면 «없는 것»으로 본다.
+    """
+
+    is_flow = cells is not None
+    units = _units(text, cells)
+    markers = _claim_markers(units, is_flow)
+    bound = (
+        not is_flow
+        and verbatim_source is not None
+        and verbatim_source.matches(text, own_sources)
+    )
+    single_condition = bound and len(markers) == 1
+    items: list[RoleBindingRequirement] = []
+    for position, start, end, kind in markers:
+        word = units[position].surface[start:end]
+        waiver = ""
+        if (single_condition
+                and kind == RELATION_FEE
+                and REPEAT_CELL_MARKER_RE.fullmatch(word) is not None
+                and _participation_condition(units[position], end)):
+            waiver = ROLE_BINDING_WAIVER_VERBATIM_CONDITION
+        items.append(RoleBindingRequirement(position, start, end, kind, word, waiver))
+    return RoleBindingRequirements(ROLE_BINDING_RULE_VERSION, tuple(items), bound)
+
+
+def role_binding_hint_lines(requirements: RoleBindingRequirements, is_flow: bool) -> str:
+    """검수 프롬프트의 후보 밑에 붙일 «어느 낱말 때문에 어떤 유형이 필요한지» 줄.
+
+    요구가 없고 제외도 없으면 빈 문자열이다(기존 프롬프트 바이트 불변). 같은 낱말·
+    유형의 반복은 한 번만 적는다 — 공통 안내가 「같은 대상·같은 역할값의 반복은 항목
+    하나로 증명할 수 있다」고 정한 것과 맞춘다.
+    """
+
+    lines: list[str] = []
+    if requirements.required:
+        template = (ROLE_BINDING_HINT_CELL_ITEM_TEMPLATE if is_flow
+                    else ROLE_BINDING_HINT_ITEM_TEMPLATE)
+        entries = dict.fromkeys(
+            template.format(cell=item.unit + 1, marker=item.marker, kind=item.kind)
+            for item in requirements.required
+        )
+        lines.append(ROLE_BINDING_HINT_REQUIRED_HEAD + ", ".join(entries) + "\n")
+    if requirements.waived:
+        entries = dict.fromkeys(
+            ROLE_BINDING_HINT_WAIVED_TEMPLATE.format(
+                marker=item.marker, reason=ROLE_BINDING_WAIVER_TEXTS[item.waiver],
+            )
+            for item in requirements.waived
+        )
+        lines.append(
+            ROLE_BINDING_HINT_WAIVED_HEAD + ", ".join(entries)
+            + ROLE_BINDING_HINT_WAIVED_TAIL + "\n"
+        )
+    return "".join(lines)
 
 
 # ══════════════════════════════════════════════════════════
@@ -551,11 +719,18 @@ def _span_problem(
     role_key: str,
     kind: str,
 ) -> str:
-    """후보의 자리 하나를 원문에 대조한다. 빈 문자열이면 그 자리는 증명됐다."""
+    """후보의 자리 하나를 원문에 대조한다. 빈 문자열이면 그 자리는 증명됐다.
+
+    ★ 원문 자리가 «혜택 수령인의 참여 조건»인데 후보 자리는 그렇지 않으면(「재가입
+      고객에 …을 지급」→「고객은 재가입한다」) 그 절로는 증명하지 못하고 다음 절을
+      본다. 같은 인용의 다른 절이 같은 주체의 실제 행동을 명시하면 그 절로 증명된다.
+      끝까지 조건 절뿐이면 그 사유를 돌려준다 — 조건을 행동의 증거로 쓰지 못한다.
+    """
 
     candidate_tail = _candidate_tail(units, claim_span)
     outside_quote = False
     unbound = False
+    condition_only = False
     for clause in _source_clauses(source):
         window = _quote_window(clause, quote_key)
         target_spots = _occurrences(clause.surface, target_key)
@@ -589,7 +764,14 @@ def _span_problem(
                 units[claim_span[0]].surface, clause.surface, target_key, role_key
             ):
                 return ROLE_BINDING_DIRECTION_REVERSED
+            if kind == RELATION_FEE and _condition_used_as_action(
+                clause, role_span, units[claim_span[0]], claim_span, role_key
+            ):
+                condition_only = True
+                continue
             return ""
+    if condition_only:
+        return ROLE_BINDING_CONDITION_NOT_ACTION
     if outside_quote:
         return ROLE_BINDING_ROLE_OUTSIDE_QUOTE
     if unbound:
@@ -597,12 +779,96 @@ def _span_problem(
     return ROLE_BINDING_UNBOUND_IN_SOURCE
 
 
-def role_binding_problem(
+def _condition_used_as_action(
+    clause: _Unit,
+    role_span: tuple[int, int],
+    unit: _Unit,
+    claim_span: tuple[int, int, int],
+    role_key: str,
+) -> bool:
+    """원문 자리는 참여 조건인데 후보 자리는 실제 반복 행동·수익인가.
+
+    역할값 안의 «첫 반복 낱말»이 끝난 자리를 원문·후보 양쪽에서 같은 오프셋으로
+    찾아 §②-b 의 꼴을 «같은 기준»으로 대조한다. 반복 낱말이 없는 대가 항목(수수료 등)은
+    이 검사의 대상이 아니다.
+    """
+
+    repeat = REPEAT_CELL_MARKER_RE.search(role_key)
+    if repeat is None:
+        return False
+    source_end = role_span[0] + repeat.end()
+    candidate_end = claim_span[1] + repeat.end()
+    return (_participation_condition(clause, source_end)
+            and not _participation_condition(unit, candidate_end))
+
+
+@dataclass(frozen=True)
+class RoleBindingReport:
+    """판정 결과와 «어떤 요구로 판정했는지». 진단이 원문 없이 이 값을 남긴다."""
+
+    problem: str
+    requirements: RoleBindingRequirements
+    submitted_kinds: tuple[str, ...]
+    other_relation_entries: int
+    verbatim_source: VerbatimNewsSource | None
+
+    def as_diagnostic(self) -> dict[str, object]:
+        """원 응답·원문·후보 본문을 담지 않는다 — 닫힌 낱말·유형·지문·규칙 버전만."""
+
+        return {
+            "rule_version": self.requirements.rule_version,
+            "stage": ROLE_BINDING_STAGE_BY_REASON.get(self.problem, ""),
+            "required": [item.as_diagnostic() for item in self.requirements.required],
+            "waived": [item.as_diagnostic() for item in self.requirements.waived],
+            "submitted_kinds": list(self.submitted_kinds),
+            "other_relation_entries": self.other_relation_entries,
+            "verbatim_bound": self.requirements.verbatim_bound,
+            "verbatim_source": (
+                self.verbatim_source.as_diagnostic()
+                if self.verbatim_source is not None and self.requirements.verbatim_bound
+                else None
+            ),
+        }
+
+
+def _relation_mappings(entries: object) -> tuple[Mapping, ...]:
+    """검증근거의 관계 배열에서 Mapping 항목 전부(유형을 가리지 않고)."""
+
+    if not isinstance(entries, Mapping):
+        return ()
+    values = entries.get(RELATION_KEY)
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        return ()
+    return tuple(item for item in values if isinstance(item, Mapping))
+
+
+def _relation_entry_count(entries: object) -> int:
+    """검증근거의 관계 배열 전체 길이(역할·과금이 아닌 항목까지)."""
+
+    return len(_relation_mappings(entries))
+
+
+def _unknown_type_entry_count(entries: object) -> int:
+    """유형 칸이 비었거나 닫힌 관계 유형 목록 밖인 항목 수.
+
+    ★ 평소 이 가드는 역할·과금이 아닌 항목을 «읽지 않고» 넘긴다 — 인과·양보는 인과
+      가드의 몫이다. 그러나 유형이 비었거나 계약 밖이면 어느 가드도 그 항목을 보지
+      않으므로, 요구를 제외한 자리에서는 그런 항목을 승인의 틈으로 두지 않는다.
+    """
+
+    return sum(
+        1 for item in _relation_mappings(entries)
+        if str(item.get(RELATION_TYPE_KEY) or "").strip() not in RELATION_TYPES
+    )
+
+
+def role_binding_report(
     text: str,
     own_sources: Mapping[str, str],
     entries: object = None,
     cells: Sequence[str] | None = None,
-) -> str:
+    verbatim_source: VerbatimNewsSource | None = None,
+) -> RoleBindingReport:
     """역할·대가·반복을 단언한 후보만, 그 결속을 «자기 인용의 한 절»과 대조한다.
 
     ★ 후보가 그런 단언을 하지 않으면 아무 판정도 하지 않는다. 단언했다면 검수 응답이
@@ -615,37 +881,69 @@ def role_binding_problem(
     ★ cells 는 «도식 후보일 때만» 준다. 행은 칸이 실제 구조라 칸을 넘는 결속을
       허용하지만, 그 칸이 자기 주체를 데리고 있으면 허용하지 않는다. 산문은 한
       절 안에서만 결속한다.
+    ★ ``verbatim_source`` 는 검수 단계가 수집 객체로 증명한 «원문 그대로인 보도» 문맥이다.
+      `role_binding_requirements` 가 그 문맥으로 참여 조건 자리의 요구만 제외한다.
+      요구가 남지 않아도 «제출된» 항목은 전부 대조한다 — 잘못된 유형·대상·인용·원문은
+      그대로 탈락이다. 요구가 0개라는 이유로 항목 검사를 건너뛰지 않는다.
     """
 
+    is_flow = cells is not None
     units = _units(text, cells)
-    markers = _claim_markers(units, cells is not None)
-    if not markers:
-        return ""
+    requirements = role_binding_requirements(text, own_sources, cells, verbatim_source)
     bindings = _binding_entries(entries)
+    submitted = tuple(
+        str(item.get(RELATION_TYPE_KEY) or "").strip() for item in bindings
+    )
+    other = _relation_entry_count(entries) - len(bindings)
+
+    def report(problem: str) -> RoleBindingReport:
+        return RoleBindingReport(problem, requirements, submitted, other, verbatim_source)
+
+    if not requirements.items:
+        return report("")
+    if not requirements.required and _unknown_type_entry_count(entries):
+        # 요구를 모두 제외한 자리에서 유형이 비었거나 계약 밖인 항목은 «무시»가 아니라
+        # 탈락이다. 인과·양보처럼 계약 안의 다른 유형은 그대로 두고 그 가드가 본다.
+        return report(ROLE_BINDING_ENTRY_TYPE_UNKNOWN)
     if not bindings:
-        return ROLE_BINDING_MISSING
+        # 요구 자리가 하나도 없으면(모두 제외) 항목이 없어도 문제 없음. 요구가 남았는데
+        # 항목이 없으면 근거 누락이다.
+        return report(ROLE_BINDING_MISSING if requirements.required else "")
     proven: list[tuple[int, int, int, str]] = []
     span_reasons: dict[tuple[int, int, int], str] = {}
     for item in bindings:
         problem, spans, kind, reasons = _binding_problem(
-            item, units, own_sources, cells is not None,
+            item, units, own_sources, is_flow,
         )
         if problem:
-            return problem
+            return report(problem)
         span_reasons.update(reasons)
         for span in spans:
             proven.append((span[0], span[1], span[2], kind))
-    # ★ 후보의 «각 단언 자리»가 그 자리를 덮는 결속을 가져야 한다. 역할 낱말·칸
-    #   전체·첫 대가 근거로 다른 자리를 덮지 못한다.
-    for position, start, end, kind in markers:
+    # ★ 후보의 «각 요구 자리»가 그 자리를 덮는 결속을 가져야 한다. 역할 낱말·칸
+    #   전체·첫 대가 근거로 다른 자리를 덮지 못한다. 제외한 자리는 덮임을 묻지 않는다.
+    for item in requirements.required:
+        position, start, end, kind = item.unit, item.start, item.end, item.kind
         if not any(unit == position and low <= start and end <= high
                    and proven_kind == kind
                    for unit, low, high, proven_kind in proven):
             # 그 자리를 증명하려다 어긋난 사유가 있으면 그대로 쓴다. 「조건을 뺐다」가
             # 「덮이지 않았다」로 뭉뚱그려지면 어디를 고쳐야 할지 알 수 없다.
-            return next(
+            return report(next(
                 (reason for span, reason in span_reasons.items()
                  if span[0] == position and span[1] <= start and end <= span[2]),
                 ROLE_BINDING_CLAIM_UNCOVERED,
-            )
-    return ""
+            ))
+    return report("")
+
+
+def role_binding_problem(
+    text: str,
+    own_sources: Mapping[str, str],
+    entries: object = None,
+    cells: Sequence[str] | None = None,
+    verbatim_source: VerbatimNewsSource | None = None,
+) -> str:
+    """`role_binding_report` 의 사유 코드만. 빈 문자열은 «문제 없음»이지 승인이 아니다."""
+
+    return role_binding_report(text, own_sources, entries, cells, verbatim_source).problem

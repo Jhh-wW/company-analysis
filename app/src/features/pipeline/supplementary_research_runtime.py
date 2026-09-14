@@ -7,6 +7,7 @@ from src.features.pipeline.port import Outcome, RunResult
 from src.features.pipeline.supplementary_research_runtime_constants import (
     SUPPLEMENTARY_RESEARCH_INVALID_RESULT_CODES,
     SUPPLEMENTARY_RESEARCH_RELEASE_STEP,
+    SUPPLEMENTARY_RESEARCH_FILTER_STEP,
 )
 from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
@@ -41,6 +42,25 @@ def enforce_supplementary_research_release(
         "검증본문장": list(decision.qualified_section_ids),
     })
     if decision.allowed:
+        if result.report is not None and result.report.citations:
+            from src.features.pipeline.supplementary_research_filter import (
+                filter_supplementary_research_report,
+            )
+
+            filtered = filter_supplementary_research_report(
+                result.report, official_evidence=official_evidence,
+                source_verifier=supplementary_research_source_verifier(),
+            )
+            if filtered is not result.report:
+                steps.append({
+                    "step": SUPPLEMENTARY_RESEARCH_FILTER_STEP,
+                    "제외사실수": len(result.report.fact_records) - len(filtered.fact_records),
+                })
+                return replace(
+                    result, report=filtered, generation_cache_eligible=False,
+                    generation_evidence=None, quality_observation=None, cache_hit="",
+                    reused_content_snapshot_id="", reused_artifact_id="",
+                )
         return result
     gate_reason = (
         FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT

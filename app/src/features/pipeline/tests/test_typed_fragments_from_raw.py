@@ -315,21 +315,19 @@ def test_미등록_종류_하나가_같은_묶음의_typed조각을_망치지_�
     by_id = _by_id(conversion.fragments)
 
     # 세 조각 모두 결과에 있다 — 하나도 버려지지 않았다.
-    assert sorted(by_id) == ["1", "2", "3"]
+    assert sorted(by_id) == ["1", "3"]
     news = by_id["3"]
     assert news.formal_source_kind == SOURCE_KIND_NEWS
     assert news.source_publisher == "media.example"
     assert news.document_date == "2026-09-01"
     assert news.supported_claim_slots == ("portfolio:product_role",)
     # 모르는 종류는 옛 어댑터 모양 그대로 실린다 — 이름은 지키고 신원은 비운다.
-    carried = by_id["2"]
-    assert carried.kind == _UNREGISTERED_KIND
-    assert carried.formal_source_kind == ""
-    assert carried.supported_claim_slots == ()
+    assert "2" not in by_id
 
     assert conversion.typed_count == 1
     assert conversion.legacy_count == 1
-    assert conversion.carried_raw_count == 1
+    assert conversion.rejected_count == 1
+    assert conversion.carried_raw_count == 0
     assert conversion.skipped_empty_count == 0
     assert conversion.carried_raw_reasons == ((_UNREGISTERED_REASON, 1),)
 
@@ -343,12 +341,12 @@ def test_실패조각이_있어도_성공조각의_결과는_그대로다() -> N
     baseline = _by_id(_flat(clean).fragments)
     tolerant = _by_id(_flat(mixed).fragments)
 
-    assert set(baseline) < set(tolerant)
+    assert baseline == tolerant
     for fragment_id, fragment in baseline.items():
         assert tolerant[fragment_id] == fragment, fragment_id
 
 
-def test_같은_origin을_두_공개번호가_주장하면_둘째만_원형으로_남는다() -> None:
+def test_같은_origin을_두_공개번호가_주장하면_둘째만_제외한다() -> None:
     """묶음 단위 중복 검사는 살아 있되, 첫째 조각까지 잃지는 않는다."""
 
     frags = {1: _typed_raw(), 2: _typed_raw()}
@@ -358,9 +356,10 @@ def test_같은_origin을_두_공개번호가_주장하면_둘째만_원형으�
 
     assert by_id["1"].formal_source_kind == _typed_raw()["종류"]
     assert by_id["1"].supported_claim_slots == ("portfolio:product_role",)
-    assert by_id["2"].formal_source_kind == ""
+    assert "2" not in by_id
     assert conversion.typed_count == 1
-    assert conversion.carried_raw_count == 1
+    assert conversion.rejected_count == 1
+    assert conversion.carried_raw_count == 0
     assert conversion.carried_raw_reasons == ((_DUPLICATE_ORIGIN_REASON, 1),)
 
     # packet 빌더는 여전히 엄격하다 — FULL 출고 계약은 하나도 안 봐준다.
@@ -391,12 +390,13 @@ def test_실패한_조각의_origin은_뒤_조각의_typed신원을_뺏지_않�
     by_id = _by_id(conversion.fragments)
 
     # 두 조각 모두 남고, 뒤 조각은 typed 신원을 그대로 지킨다.
-    assert sorted(by_id) == ["1", "2"]
-    assert by_id["1"].formal_source_kind == ""
+    assert sorted(by_id) == ["2"]
+    assert "1" not in by_id
     assert by_id["2"].formal_source_kind == _TYPED_KIND
     assert by_id["2"].supported_claim_slots == ("portfolio:product_role",)
     assert conversion.typed_count == 1
-    assert conversion.carried_raw_count == 1
+    assert conversion.rejected_count == 1
+    assert conversion.carried_raw_count == 0
     # 사유는 「중복 origin」이 아니라 «진짜 원인»인 문서명 형식이어야 한다.
     assert conversion.carried_raw_reasons == (
         (f"{_TYPED_KIND}: 근거 조각의 문서명 형식이 올바르지 않습니다", 1),
@@ -415,7 +415,8 @@ def test_두_조각이_실패하면_사유별로_따로_센다() -> None:
 
     conversion = _flat(frags)
 
-    assert conversion.carried_raw_count == 3
+    assert conversion.rejected_count == 3
+    assert conversion.carried_raw_count == 0
     # ★ 사유 메시지는 두 조각이 같지만 종류가 달라 «따로» 센다. 이게 열쇠에
     #   종류를 넣은 이유다 — 합쳐 세면 어느 생산자가 걸렸는지 사라진다.
     assert conversion.carried_raw_reasons == (
@@ -429,7 +430,7 @@ def test_두_조각이_실패하면_사유별로_따로_센다() -> None:
     )
 
 
-def test_잘못된_typed조각은_묶음을_막지_않고_원형으로_실린다() -> None:
+def test_잘못된_typed조각은_묶음을_막지_않고_제외한다() -> None:
     """typed 메타가 깨진 조각도 버리지 않는다 — 원문은 여전히 근거다."""
 
     broken = _typed_raw()
@@ -437,27 +438,29 @@ def test_잘못된_typed조각은_묶음을_막지_않고_원형으로_실린다
 
     conversion = _flat({1: broken, 2: _legacy_raw("사업내용")})
 
-    assert conversion.carried_raw_count == 1
+    assert conversion.rejected_count == 1
+    assert conversion.carried_raw_count == 0
     assert conversion.legacy_count == 1
-    assert _by_id(conversion.fragments)["1"].formal_source_kind == ""
+    assert "1" not in _by_id(conversion.fragments)
     assert conversion.carried_raw_reasons == (
         (f"{_TYPED_KIND}: typed 근거에 알 수 없는 장 식별자가 있습니다", 1),
     )
 
 
-def test_장과_의미칸_소유권이_어긋나면_원형으로_실린다() -> None:
+def test_장과_의미칸_소유권이_어긋나면_제외한다() -> None:
     broken = _typed_raw()
     broken[RAW_EVIDENCE_SLOT_IDS_KEY] = ("identity:corporate_identity",)
 
     conversion = _flat({1: broken})
 
-    assert conversion.carried_raw_count == 1
+    assert conversion.rejected_count == 1
+    assert conversion.carried_raw_count == 0
     assert conversion.carried_raw_reasons == (
         (f"{_TYPED_KIND}: typed 근거의 장과 의미 칸 소유권이 일치하지 않습니다", 1),
     )
 
 
-def test_다른_회사의_typed조각도_원형으로만_실린다() -> None:
+def test_다른_회사의_typed조각도_제외한다() -> None:
     """★ 여기서 지키는 것은 「typed 신원을 안 준다」이지 「버린다」가 아니다.
 
     회사가 다른 조각의 typed 신원을 인정하면 남의 회사 근거가 우리 장을
@@ -466,12 +469,11 @@ def test_다른_회사의_typed조각도_원형으로만_실린다() -> None:
     """
 
     conversion = _flat({1: _typed_raw(company_id="00000001")})
-    fragment = _by_id(conversion.fragments)["1"]
+    assert conversion.fragments == ()
 
-    assert conversion.carried_raw_count == 1
+    assert conversion.rejected_count == 1
+    assert conversion.carried_raw_count == 0
     assert conversion.typed_count == 0
-    assert fragment.formal_source_kind == ""
-    assert fragment.supported_claim_slots == ()
     assert conversion.carried_raw_reasons == (
         (f"{_TYPED_KIND}: 다른 회사의 typed 근거를 섞을 수 없습니다", 1),
     )
@@ -485,7 +487,8 @@ def test_원형유지_사유는_여든자를_넘지_않는다() -> None:
 
     conversion = _flat({1: broken})
 
-    assert conversion.carried_raw_count == 1
+    assert conversion.rejected_count == 1
+    assert conversion.carried_raw_count == 0
     assert conversion.carried_raw_reasons == (
         ("관측된적없는문서종류: 등록되지 않은 수집 조각 종류입니다", 1),
     )
@@ -501,7 +504,8 @@ def test_종류가_아주_길면_사유에_안_싣고_자리표시자로_바꾼�
 
     conversion = _flat({1: _typed_raw(source_kind="가" * 100)})
 
-    assert conversion.carried_raw_count == 1
+    assert conversion.rejected_count == 1
+    assert conversion.carried_raw_count == 0
     assert conversion.carried_raw_reasons == ((_OUT_OF_FORM_REASON, 1),)
 
 
@@ -513,14 +517,13 @@ def test_종류가_비면_자리표시자_접두가_붙는다() -> None:
     )
 
     assert CARRIED_RAW_UNKNOWN_KIND == "(종류 없음)"
-    assert conversion.carried_raw_count == 1
+    assert conversion.rejected_count == 1
+    assert conversion.carried_raw_count == 0
     assert conversion.carried_raw_reasons == (
         ("(종류 없음): 근거 조각의 종류 형식이 올바르지 않습니다", 1),
     )
-    # 종류를 못 읽어도 원문은 근거다 — 버리지 않는다.
-    assert _by_id(conversion.fragments)["1"].text == (
-        "가나다전자의 종류 없는 근거다."
-    )
+    # 출처 종류 검증을 통과하지 못한 조각을 사실로 승격하지 않는다.
+    assert conversion.fragments == ()
 
 
 # ══════════════════════════════════════════════════════════
@@ -600,11 +603,12 @@ def test_종류에_URL이_오면_사유열쇠에_주소가_실리지_않는다()
 
     conversion = _flat({1: {"종류": url_kind, "원문": _NEWS_TEXT}})
 
-    assert conversion.carried_raw_count == 1
+    assert conversion.rejected_count == 1
+    assert conversion.carried_raw_count == 0
     assert conversion.carried_raw_reasons == ((_OUT_OF_FORM_REASON, 1),)
     # ★ 여기서 좁히는 것은 «실행 기록의 열쇠»뿐이다. 조각 자체는 이 관용 이전과
     #   똑같이 옛 어댑터 규칙으로 실린다 — 원문은 여전히 근거이기 때문이다.
-    assert _by_id(conversion.fragments)["1"].kind == url_kind
+    assert conversion.fragments == ()
 
 
 def test_종류에_줄바꿈이나_콜론이_섞이면_자리표시자로_바꾼다() -> None:
@@ -614,7 +618,8 @@ def test_종류에_줄바꿈이나_콜론이_섞이면_자리표시자로_바꾼
         {1: {"종류": "사업내용\n담당: 아무개", "원문": "가나다전자의 근거 문장이다."}}
     )
 
-    assert conversion.carried_raw_count == 1
+    assert conversion.rejected_count == 1
+    assert conversion.carried_raw_count == 0
     assert conversion.carried_raw_reasons == ((_OUT_OF_FORM_REASON, 1),)
 
 

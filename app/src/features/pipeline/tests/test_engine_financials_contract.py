@@ -115,6 +115,24 @@ def test_한_해가_비어도_다른_해가_있으면_찾아낸다(monkeypatch: 
     assert years == [_올해() - 2]
 
 
+def test_중간연도_실패에도_앞뒤_성공자료와_실패연도를_함께_보존한다(monkeypatch):
+    engine = _엔진_with_status(monkeypatch, ["000", "800", "000"])
+    with pytest.raises(engine.PartialFinancialCollectionError) as caught:
+        engine.fetch_financials("00222374", _계수기(), business_date=dt.date(2030, 9, 14))
+    assert caught.value.payload["status"] == "000"
+    assert caught.value.years == (2029, 2027)
+    assert caught.value.failed_years == (2028,)
+
+
+def test_첫연도_실패도_뒤의_정상자료를_버리지_않는다(monkeypatch):
+    engine = _엔진_with_status(monkeypatch, ["800", "000", "013"])
+    with pytest.raises(engine.PartialFinancialCollectionError) as caught:
+        engine.fetch_financials("00222374", _계수기(), business_date=dt.date(2030, 9, 14))
+    assert caught.value.payload["status"] == "000"
+    assert caught.value.years == (2028,)
+    assert caught.value.failed_years == (2029,)
+
+
 def test_세_해를_다_물어본다(monkeypatch: pytest.MonkeyPatch) -> None:
     """★ 실측 정정 — 「한 번 더 나간다」가 아니라 «3번» 나간다.
 

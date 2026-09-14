@@ -617,6 +617,8 @@ def test_스위치OFF면_3장_부족과_뉴스미조사_안내를_포함한_바�
     #        2개를 뺐습니다」 한 줄이 사라지고 뒤 항목이 한 칸씩 당겨졌다.
     #        요약이 후보 단계에서 이미 걸러지므로 «뺄 문장»이 없다.
     #   회사 사실·조각 수·본문 문장 수·안내문은 그대로다.
+    # 2026-09-14: 일부 공식 자료의 미확인 범위 안내 한 줄만 추가했다.
+    # 회사 사실·본문·표·요약·지표는 이전 골든과 필드별로 모두 동일하다.
     actual = _stable_result_bytes(result)
     golden = json.loads(_GOLDEN_FIXTURE.read_text(encoding="utf-8"))
     assert golden["byte_count"] == len(actual)

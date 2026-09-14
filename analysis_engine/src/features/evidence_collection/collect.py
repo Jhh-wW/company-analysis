@@ -19,6 +19,8 @@ from features.evidence_collection.fetch_failure import (
     is_recoverable_external_fetch_error,
 )
 from features.evidence_collection.filing_select import DartFetcher, DocumentFetchResult, SelectedFiling
+from features.evidence_collection.retention import CandidateRetention
+from features.evidence_collection.scan_contract import DocumentScan
 from features.evidence_collection.models import (
     CollectedDocument,
     CollectionAttempt,
@@ -78,6 +80,7 @@ def _document_attempt(
     documents_seen: int = 1,
     slot_ids: tuple[str, ...] | None = None,
     requirement: str | None = None,
+    document_scan: DocumentScan | None = None,
 ) -> CollectionAttempt:
     """문서 단계 attempt 1건을 만든다.
 
@@ -100,6 +103,7 @@ def _document_attempt(
         elapsed_ms=max(0, fetch_result.elapsed_ms),
         bytes_downloaded=max(0, fetch_result.bytes_downloaded),
         documents_seen=documents_seen,
+        document_scan=document_scan,
     )
 
 
@@ -188,11 +192,9 @@ def collect_dart_evidence(
     fragments: list[EvidenceFragment] = []
     unclassified_documents: list[CollectedDocument] = []
     unclassified_fragments: list[EvidenceFragment] = []
-    # classify는 채점 여부와 무관하게 문서 전체 원문을 훑어야 한다(예:
-    # 「매출액」 단독은 v1 키워드 어휘에서 일부러 뺐다 — relevance.py 주석
-    # 참고 — 그래서 채점되지 않는 문단에도 있을 수 있다). fragments(=채점된
-    # 것만)와는 별도로 모든 후보 문단 원문을 따로 모은다.
-    classify_probe_texts: list[str] = []
+    # 회사 유형 탐침은 후보 보관과 독립적으로 관측한 유한한 키워드 집합이다.
+    # 원문 목록을 모아 다시 join하지 않으며, 필터가 제외한 매출액 줄도 본다.
+    classify_probe_keywords: set[str] = set()
     official_url_candidates: list[OfficialUrlCandidate] = []
     seen_official_candidate_urls: set[str] = set()
     seen_content_hashes: set[str] = set()
@@ -305,7 +307,6 @@ def collect_dart_evidence(
             ))
             continue
         total_bytes += text_bytes
-        seen_content_hashes.add(content_sha256)
 
         if time.monotonic() > deadline_at:
             # 조회 자체가 느려 deadline을 넘겼는데도 분할·채점이 검사 없이
@@ -315,81 +316,47 @@ def collect_dart_evidence(
             ))
             continue
 
-        segmentation = segment.segment_document_with_status(fetch_result.text)
-        candidates = list(segmentation.candidates)
-        segmentation_truncation_reason = segmentation.truncation_reason
-        short_segmentation = segment.segment_short_observation_candidates_with_status(
-            fetch_result.text,
-            candidate_filter=short_observation_filter,
-        )
-        short_candidates = list(short_segmentation.candidates)
-        # 정식 호출자가 짧은 후보 의미를 filter로 선언했을 때만 그 scope의
-        # 완전성을 main attempt에 합친다. filter 없는 옛 v1/SHADOW 호출은
-        # 이 보조 관측 차선을 출고 근거로 의존하지 않으므로 소급 차단하지 않는다.
-        if short_observation_filter is not None and short_segmentation.truncation_reason:
-            segmentation_truncation_reason = (
-                segmentation_truncation_reason
-                or short_segmentation.truncation_reason
-            )
-        classify_probe_texts.extend(
-            candidate.text for candidate in (*candidates, *short_candidates)
-        )
-        short_observations = [
-            (candidate_index, candidate)
-            for candidate_index, candidate in enumerate(short_candidates)
-        ]
-
-        scored: list[
-            tuple[int, segment.FragmentCandidate, tuple[relevance.SlotScore, ...]]
-        ] = []
-        unscored: list[tuple[int, segment.FragmentCandidate]] = []
-        allowed_slot_ids = frozenset(
-            c.SOURCE_KIND_SLOT_SCOPE[filing.source_kind]
-        )
-        for candidate_index, candidate in enumerate(candidates):
-            slot_scores, has_any_direct_signal = (
-                relevance.score_fragment_slots_with_signal(
-                    candidate.text,
-                    candidate.section_heading,
-                    allowed_slot_ids=allowed_slot_ids,
-                )
-            )
-            if not slot_scores:
-                # 분류기가 뜻을 전혀 못 알아본 원문만 무분류 차선에 둔다.
-                # 반기·분기 자료가 회사 개요처럼 자기 소유 밖 슬롯의 신호를
-                # 가진 경우는 이미 분류된 문단이다. 이를 무분류로 바꾸면
-                # 후단이 classifier coverage gap으로 오판한다.
-                if not has_any_direct_signal:
-                    unscored.append((candidate_index, candidate))
-            else:
-                scored.append((candidate_index, candidate, slot_scores))
-
-        # 같은 무분류 차선의 장문에 포함된 짧은 제목만 중복 범위에서 뺀다.
-        # 분류된 장문과 별도 차선의 짧은 관측은 유지한다. 정렬된 후보를
-        # 한 번씩만 훑어 기존 후보·메모리 상한과 short 관측 상태를 보존한다.
-        unscored_index = 0
-        independent_short_observations = []
-        for short_index, short_candidate in short_observations:
-            while (
-                unscored_index < len(unscored)
-                and unscored[unscored_index][1].end <= short_candidate.start
-            ):
-                unscored_index += 1
-            if (
-                unscored_index < len(unscored)
-                and unscored[unscored_index][1].start <= short_candidate.start
-                and short_candidate.end <= unscored[unscored_index][1].end
-            ):
+        progress = segment.ScanProgress()
+        allowed_slot_ids = frozenset(c.SOURCE_KIND_SLOT_SCOPE[filing.source_kind])
+        retention = CandidateRetention(allowed_slot_ids)
+        for candidate_index, candidate in enumerate(segment.iter_document_candidates(
+            fetch_result.text, progress=progress, deadline_at=deadline_at,
+            short_filter=short_observation_filter,
+        )):
+            if candidate.is_short:
+                retention.offer_unclassified(candidate_index, candidate)
                 continue
-            independent_short_observations.append((short_index, short_candidate))
+            slot_scores, has_any_direct_signal = relevance.score_fragment_slots_with_signal(
+                candidate.text, candidate.section_heading, allowed_slot_ids=allowed_slot_ids,
+            )
+            if slot_scores:
+                retention.offer_scored(candidate_index, candidate, slot_scores)
+            elif not has_any_direct_signal:
+                retention.offer_unclassified(candidate_index, candidate)
 
-        unclassified_candidates = [
-            (f"unclassified{candidate_index}", candidate)
-            for candidate_index, candidate in unscored
-        ] + [
-            (f"short{candidate_index}", candidate)
-            for candidate_index, candidate in independent_short_observations
-        ]
+        scored = retention.selected_scored()
+        classify_probe_keywords.update(progress.classification_keywords)
+        unclassified_candidates = retention.selected_unclassified()
+        segmentation_truncation_reason = progress.truncation_reason
+        selection_compressed = (
+            retention.scored_seen > len(scored)
+            or retention.unclassified_seen > len(retention.unclassified)
+            or retention.short_seen > len(retention.short)
+        )
+        document_scan = DocumentScan(
+            version=c.SCAN_VERSION, document_id=document_id, content_sha256=content_sha256,
+            state=c.SCAN_STATE_COMPLETE if progress.complete else c.SCAN_STATE_INCOMPLETE,
+            total_chars=len(fetch_result.text), scanned_chars=progress.scanned_chars,
+            candidates_seen=progress.candidates_seen,
+            candidates_retained=len(scored) + len(unclassified_candidates),
+            unclassified_seen=retention.unclassified_seen + retention.short_seen,
+            unclassified_retained=len(unclassified_candidates),
+            selection_compressed=selection_compressed,
+            line_index_saturated=progress.line_index_saturated,
+            windowed_paragraphs=progress.windowed_paragraphs,
+        )
+        if progress.complete:
+            seen_content_hashes.add(content_sha256)
 
         identity_binding = _identity_binding(company_id, filing, fetch_result)
         try:
@@ -456,15 +423,9 @@ def collect_dart_evidence(
             unclassified_fragments.extend(new_unclassified_fragments)
 
         if not scored:
-            # 채점 가능한 근거가 하나도 없다 — 보고서 근거 documents에서는
-            # 빼되 무분류 차선에는 원문을 이미 보존했다.
-            # 후보 상한에 닿지 않은 경우에만 fetch·분할·채점을 실제로 다
-            # 거쳐 문서 전문을 훑었다. 그때만 광역 slot_ids + REQUIRED + OK가
-            # 정직하다. 상한에 닿은 경우는 아래에서 TRUNCATED로 갈린다.
-            # 후보/문자/제목 상한에 닿았으면 문서 뒷부분을 안 본 것이다.
-            # 일부에서 점수가 없었다는 사실을 «전문에 근거가 없다»는 OK로
-            # 확대하지 않고 TRUNCATED로 남겨 AI 전 진단이 내부 완전성 문제로
-            # 멈추게 한다.
+            # 보관한 분류 근거가 없어도 관측·보관 계수와 순회 완료를 남긴다.
+            # 무분류 보관까지 0인 압축도 문서 자료 부재와 구분할 수 있다.
+            # 시간 초과는 실제 미완료이며 최종 출력 정책은 앱이 판단한다.
             attempts.append(_document_attempt(
                 company_id,
                 filing,
@@ -474,9 +435,10 @@ def collect_dart_evidence(
                     else c.ATTEMPT_STATE_OK
                 ),
                 segmentation_truncation_reason
-                or c.REASON_DOCUMENT_NO_SCORED_EVIDENCE,
+                or (c.REASON_SELECTION_COMPRESSED if selection_compressed else c.REASON_DOCUMENT_NO_SCORED_EVIDENCE),
                 fetch_result,
-                documents_seen=len(candidates) + len(short_candidates),
+                documents_seen=progress.candidates_seen,
+                document_scan=document_scan,
             ))
             continue
 
@@ -529,7 +491,7 @@ def collect_dart_evidence(
                         section_id=primary_score.section_id,
                         slot_id=primary_score.slot_id,
                         score_millis=primary_score.score_millis,
-                        reason_codes=reason_codes,
+                        reason_codes=(*reason_codes, *retention.context_reasons(candidate_index)),
                         covered_slot_ids=tuple(
                             slot_score.slot_id for slot_score in slot_scores
                         ),
@@ -545,9 +507,8 @@ def collect_dart_evidence(
 
         documents.append(document)
         fragments.extend(new_fragments)
-        # 「REQUIRED+OK+광역 slot_ids」는 전문을 끝까지 훑은 경우에만
-        # 정직하다. 후보 상한에 닿았으면 부분 근거는 보존하되 이 attempt는
-        # TRUNCATED로 남겨 미검사 뒷부분을 없다고 주장하지 않는다.
+        # 보관 압축은 읽기 완료를 바꾸지 않는다. 실제 마감은 TRUNCATED와
+        # 검사 위치로 남기고, 확보된 근거와 필수성을 그대로 전달한다.
         attempts.append(_document_attempt(
             company_id,
             filing,
@@ -556,8 +517,9 @@ def collect_dart_evidence(
                 if segmentation_truncation_reason
                 else c.ATTEMPT_STATE_OK
             ),
-            segmentation_truncation_reason or c.REASON_DOCUMENT_FETCH_OK,
+            segmentation_truncation_reason or (c.REASON_SELECTION_COMPRESSED if selection_compressed else c.REASON_DOCUMENT_FETCH_OK),
             fetch_result,
+            document_scan=document_scan,
         ))
         if unclassified_candidates and not segmentation_truncation_reason:
             # 이 attempt도 같은 fetch·분할·채점 파이프라인을 거쳤으므로
@@ -578,7 +540,7 @@ def collect_dart_evidence(
         for document in (*documents, *unclassified_documents)
     }
     company_type = classify.classify_company_type(
-        classification_documents.values(), classify_probe_texts, attempts=attempts
+        classification_documents.values(), classify_probe_keywords, attempts=attempts
     )
 
     return DartEvidenceHarvest(

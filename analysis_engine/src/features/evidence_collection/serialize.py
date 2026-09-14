@@ -21,6 +21,7 @@ company_id와 다르면 그보다 앞서 ``DartEvidenceHarvest.__post_init__``�
 """
 
 from __future__ import annotations
+from dataclasses import asdict
 
 from features.evidence_collection.models import (
     CollectedDocument,
@@ -97,6 +98,7 @@ def _attempt_to_mapping(attempt: CollectionAttempt) -> dict[str, object]:
         "elapsed_ms": attempt.elapsed_ms,
         "bytes_downloaded": attempt.bytes_downloaded,
         "documents_seen": attempt.documents_seen,
+        "document_scan": asdict(attempt.document_scan) if attempt.document_scan is not None else None,
     }
 
 

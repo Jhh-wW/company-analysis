@@ -13,6 +13,7 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION,
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT,
+    FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INCOMPLETE,
     FINAL_GATE_REASON_OTHER_GATE,
     FINAL_GATE_REASON_PUBLISH_BLOCKED,
     FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
@@ -38,6 +39,7 @@ def test_최종게이트_사유는_원문없는_안전코드로_닫혀있다() -
         FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
         FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
         FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT,
+    FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INCOMPLETE,
         FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION,
         FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT,
         FINAL_GATE_REASON_EVIDENCE_CLASSIFICATION_UNDETERMINED,
@@ -54,6 +56,7 @@ def test_최종게이트_사유는_원문없는_안전코드로_닫혀있다() -
         "publish_blocked_quality_floor",
         "official_evidence_insufficient",
         "official_evidence_transient",
+        "official_evidence_incomplete",
         "official_evidence_configuration",
         "internal_evidence_contract",
         "evidence_classification_undetermined",
@@ -309,3 +312,7 @@ def test_report_recovery_접두사를_두번붙인_문자열은_승인코드가_
         )
         == FINAL_GATE_REASON_PUBLISH_BLOCKED
     )
+
+
+def test_처리한도_미완료를_네트워크_장애로_단정하지_않는다():
+    assert classify_v2_validation_final_gate_reason(("preflight_official_evidence_incomplete",)) == FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INCOMPLETE

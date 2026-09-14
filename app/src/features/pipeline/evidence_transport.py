@@ -831,26 +831,22 @@ def _carried_raw_reason(error: EvidenceTransportError, *, kind: str) -> str:
 
 @dataclass(frozen=True)
 class FlatFragmentConversion:
-    """부분 보고서 평면 변환의 결과와 «무엇이 어떻게 실렸는지»를 함께 담는다.
+    """검증을 통과한 조각과 제외한 조각의 수·안전 사유를 함께 담는다."""
 
-    수만 세는 것이 아니라 사유별 수까지 돌려주는 이유는, 운영에서 보도표가
-    비었을 때 「조각이 없었나」와 「조각이 원형으로 실렸나」를 실행 기록만 보고
-    가를 수 있어야 하기 때문이다. 처음 판은 성공/실패 두 갈래뿐이라 원인을
-    가르지 못했다.
-    """
-
-    #: 공개 번호 오름차순 조각. typed·legacy·원형 유지가 섞여 있다.
+    #: 공개 번호 오름차순으로 정렬한 검증 통과 typed·legacy 조각.
     fragments: tuple[CollectedFragment, ...] = ()
     #: typed transport 메타를 다 채워 봉인된 신원 그대로 실린 조각 수.
     typed_count: int = 0
     #: typed 키 없이 정본에 등록된 legacy 종류로 변환된 조각 수.
     legacy_count: int = 0
-    #: 계약을 못 채워 옛 어댑터 모양으로 실린 조각 수(버리지 않는다).
+    #: 구형 소비자 호환 필드. 검증 실패 원형 전달은 허용하지 않아 항상 0이다.
     carried_raw_count: int = 0
     #: 원문이 비어 옛 어댑터와 같은 규칙으로 건너뛴 조각 수.
     skipped_empty_count: int = 0
     #: (「종류: 사유 메시지」, 개수) 쌍을 사유 문자열 오름차순으로 담는다.
     carried_raw_reasons: tuple[tuple[str, int], ...] = ()
+    #: 회사·원문·출처 결속 검증을 통과하지 못해 작성 입력에서 제외한 수.
+    rejected_count: int = 0
 
     @property
     def supplementary_count(self) -> int:
@@ -885,20 +881,9 @@ def typed_fragments_from_raw(
     ★ 조각의 typed 신원은 릴리스 모드와 무관한 사실이다. 그래서 조각 하나의
       검증은 packet 빌더와 «같은» ``_collected_fragment_from_raw``를 지난다.
 
-    ★ 왜 FULL packet은 엄격한데 여기는 조각별로 관용하는가 (2026-09-07 실측) —
-      비상장 외감 회사의 묶음에는 「감사보고서 재무」처럼 정본 등록표에 아직
-      없던 종류가 섞인다. 처음 판에서는 그 조각 하나가 ``EvidenceTransportError``
-      를 내면 «묶음 전체»가 raw dict로 되돌아갔고, 같은 묶음에 있던 정상 뉴스
-      조각의 typed 신원까지 함께 잃어 보도표가 0건이 됐다. FULL은 아홉 장 계약
-      자체가 걸린 출고 관문이라 하나라도 어긋나면 거절하는 것이 맞지만, 부분
-      보고서는 애초에 그 하한을 못 채워서 열린 길이다. 여기서 묶음을 통째로
-      포기하면 «고칠 수 있었던 조각»까지 같이 버린다.
-
-    그래서 조각 하나가 계약을 어기면 그 조각만 옛 어댑터(``fragments_from_raw``)
-    모양으로 싣고(버리지 않는다) 사유를 세어 돌려준다. 옛 어댑터와 마찬가지로
-    원문이 빈 조각만 건너뛴다. 묶음 자체가 잘못된 입력(회사 식별자·공개 번호·
-    묶음/조각 자료형)일 때만 예외로 남긴다 — 그건 한 조각의 품질 문제가 아니라
-    호출자의 계약 위반이라 조용히 넘기면 원인을 못 찾는다.
+    조각별 검증 실패는 해당 조각만 제외하고 닫힌 사유를 기록한다. 잘못된
+    회사·문서·출처 결속을 legacy 원형으로 되살리지 않는다. 같은 묶음에서
+    검증을 통과한 다른 조각은 원문과 typed 신원을 그대로 보존한다.
 
     Args:
         corp_id: 여덟 자리 회사 고유번호. typed 조각의 회사 결속을 검산한다.
@@ -934,6 +919,7 @@ def typed_fragments_from_raw(
     carried_raw_count = 0
     skipped_empty_count = 0
     carried_raw_reasons: Counter[str] = Counter()
+    rejected_count = 0
     for public_id in sorted(public_ids):
         raw = frags[public_id]
         if not isinstance(raw, Mapping):
@@ -958,14 +944,9 @@ def typed_fragments_from_raw(
                 seen_origin_ids=attempted_origin_ids,
             )
         except EvidenceTransportError as error:
-            carried = fragments_from_raw({public_id: raw})
-            if not carried:
-                # 위 빈 원문 검사와 옛 어댑터의 규칙이 어긋난 경우에만 온다.
-                # 만들 수 없는 조각을 지어내지 않고 건너뛴 것으로 센다.
-                skipped_empty_count += 1
-                continue
-            fragments.extend(carried)
-            carried_raw_count += 1
+            # 검증에 실패한 조각을 legacy 원형으로 다시 넣으면 회사·인용
+            # 결속을 우회한다. 다른 정상 조각은 보존하고 이 조각만 격리한다.
+            rejected_count += 1
             carried_raw_reasons[
                 _carried_raw_reason(
                     error, kind=str(raw.get("종류") or "").strip()
@@ -986,4 +967,5 @@ def typed_fragments_from_raw(
         carried_raw_count=carried_raw_count,
         skipped_empty_count=skipped_empty_count,
         carried_raw_reasons=tuple(sorted(carried_raw_reasons.items())),
+        rejected_count=rejected_count,
     )

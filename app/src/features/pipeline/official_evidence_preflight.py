@@ -1,8 +1,7 @@
-"""FULL 생성 전에 공식 근거의 의미 칸과 독립 문서 수를 판정한다.
+"""공식 근거의 준비 상태와 확보 자료를 사용하는 작성 허용을 분리한다.
 
-수집기는 후보를 만들고, 이 모듈은 그 후보가 유료 작성에 들어가도 되는지만
-판정한다. 작가가 채울 수 없는 구조화 칸(3개년 실적·독립 비교)은 각 전용
-검증기가 맡으므로 여기서는 수집기가 책임지는 칸만 본다.
+자료 수·의미 칸·수집 완료 여부는 축약 필요성과 미확인 안내에 사용한다.
+회사·문서 결속이 깨진 입력은 작성 근거로 승격하지 않는다.
 """
 
 from __future__ import annotations
@@ -16,26 +15,21 @@ from src.features.composer.constants import (
     DART_FINANCIAL_API_HOST,
     DART_FINANCIAL_API_URL,
 )
-from src.features.report_standard.constants import (
-    MINIMUM_PUBLISHABLE_SECTION_COUNT,
-)
 from src.shared.final_gate_diagnostics import (
     FINAL_GATE_DETAIL_PREFLIGHT_CLASSIFIER_COVERAGE_GAP,
     FINAL_GATE_DETAIL_PREFLIGHT_DOCUMENT_SOURCES_INSUFFICIENT,
     FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT,
-    FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT,
+    FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE,
     FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID,
 )
 from src.shared.report_evidence.constants import (
     CollectionState,
     GenerationGateStatus,
-    OFFICIAL_WEB_SOURCE_KINDS,
     SOURCE_KIND_DART_AUDIT_REPORT,
     SOURCE_KIND_DART_BUSINESS_REPORT,
     SOURCE_KIND_DART_QUARTERLY_REPORT,
     SOURCE_KIND_DART_SEMIANNUAL_REPORT,
     SourceRequirement,
-    SOURCE_KIND_ROBOTS_TXT,
 )
 from src.shared.report_evidence.logic import assess_generation_gate, build_section_bundle
 from src.shared.report_evidence.models import GenerationGateDecision
@@ -79,16 +73,8 @@ _DART_DOCUMENT_SOURCE_KINDS = frozenset(
 _INCOMPLETE_COLLECTION_STATES = frozenset(
     {CollectionState.FAILED, CollectionState.TRUNCATED}
 )
-# 부분 보고서는 실제 DART 원문 조각이 하나라도 결속된 경우에만 허용한다.
-# 빠진 장의 최종 사용 가능 여부는 뒤쪽 composer 품질 검사가 다시 판정한다.
-_WEB_FAILURE_SOURCE_KINDS = frozenset(
-    {*OFFICIAL_WEB_SOURCE_KINDS, SOURCE_KIND_ROBOTS_TXT}
-)
-_WEB_IDENTITY_REJECTION_REASON_CODES = frozenset(
-    {"root_identity_mismatch", "cross_domain_identity_mismatch"}
-)
-# 부분 보고서로 전환한 갈래를 진단에 남기는 닫힌 세 값이다. 회사·URL·원문을
-# 담지 않으므로 steps 로그에 그대로 실어도 된다.
+# 작성 경로의 전환 사유다. 수집 완료나 해당 원문의 사실 검증을 뜻하지 않는다.
+DART_PARTIAL_REASON_REQUIRED_COLLECTION_INCOMPLETE = "required_collection_incomplete"
 DART_PARTIAL_REASON_TRANSIENT_WEB_FAILURE = "transient_web_failure"
 DART_PARTIAL_REASON_INSUFFICIENT_WITH_READY_SECTIONS = (
     "insufficient_with_ready_sections"
@@ -152,15 +138,19 @@ class OfficialEvidencePreflight:
     detail_code: str = ""
     dart_partial_fallback: bool = False
     # 어느 갈래로 부분 보고서 전환을 허용했는지 남긴다. 값은
-    # ``DART_PARTIAL_REASON_*`` 세 개뿐이고, 전환이 없으면 빈 문자열이다.
+    # ``DART_PARTIAL_REASON_*`` 값이며, 전환이 없으면 빈 문자열이다.
     dart_partial_reason: str = ""
     # 공식 근거의 장 분류가 적어도 확인된 DART 원문은 있을 수 있다. 이것은
     # 보완 조사만 허용하는 관측이며, can_call_ai나 최종 출고 허가가 아니다.
     supplementary_research_allowed: bool = False
+    collection_incomplete: bool = False
+
     @property
     def can_call_ai(self) -> bool:
-        return self.dart_partial_fallback or (
-            not self.detail_code and self.decision.can_call_ai
+        return self.detail_code != FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID and (
+            self.dart_partial_fallback or (
+                not self.detail_code and self.decision.can_call_ai
+            )
         )
 
 
@@ -173,7 +163,11 @@ class PacketDocumentSourcePreflight:
 
     @property
     def can_call_ai(self) -> bool:
-        return not self.detail_code
+        return self.detail_code != FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID
+
+    @property
+    def partial_required(self) -> bool:
+        return self.detail_code == FINAL_GATE_DETAIL_PREFLIGHT_DOCUMENT_SOURCES_INSUFFICIENT
 
 
 def empty_collector_sections(
@@ -203,19 +197,11 @@ def empty_collector_sections(
 def assess_official_evidence(
     result: OfficialEvidenceCollectionResult,
 ) -> OfficialEvidencePreflight:
-    """formal 수집기의 아홉 장 의미 칸 준비 상태를 검사한다.
+    """수집 관측과 작성 허용을 분리하고 확보 근거로 부분 작성을 잇는다.
 
-    일시 장애가 하나라도 있으면 ``transient``로 남긴다. 독립 문서 하한은
-    재무 API·매출표까지 실제 packet에 합친 뒤 ``assess_packet_document_sources``
-    가 검사한다. 여기서 formal 문서만 세어 미리 막으면 정상 후보도 과소평가한다.
-
-    DART 근거가 결속돼 있으면 세 갈래로 부분 보고서(SHADOW)를 허용한다 —
-    웹 경로가 막힌 경우(갈래 1), 확인은 끝냈지만 일부 장의 자료가 없는
-    경우(갈래 2), 아홉 장을 다 확인했지만 완성 보고서의 독립 문서 하한에
-    도달할 길이 없는 경우(갈래 3)다. 어느 갈래로 열렸는지는
-    ``dart_partial_reason``에 남는다.
+    실패·잘림·의미 칸 부족은 원래 decision과 진단에 남긴다. 부분 작성은
+    완료 증명이 아니며 각 문장의 회사·원문·인용 검증은 그대로 적용한다.
     """
-
     candidates_by_id = {
         candidate.section_id: candidate for candidate in result.candidates
     }
@@ -231,28 +217,10 @@ def assess_official_evidence(
         bundles=bundles,
         required_section_ids=REQUIRED_EVIDENCE_SECTION_IDS,
     )
-
     integrity_is_broken = any(
         reason_code.startswith(_INTERNAL_INTEGRITY_REASON_PREFIXES)
         for candidate in result.candidates
         for reason_code in candidate.reason_codes
-    )
-    # build_section_bundle은 이미 다른 공식 문서가 채운 슬롯에 대해서는
-    # attempt를 보지 않는다. 그 규칙만 쓰면 DART 필수 경로가 TypeError나
-    # 일시 장애로 실패해도 홈페이지 조각이 같은 슬롯을 채웠다는 이유로
-    # READY가 된다. DART 원문을 실제로 확인하지 못한 상태를 "확인 완료"로
-    # 바꾸지 않도록, formal 수집 전체에서 REQUIRED DART 실패를 별도로 본다.
-    required_dart_collection_incomplete = any(
-        attempt.source_kind in _DART_DOCUMENT_SOURCE_KINDS
-        and attempt.requirement is SourceRequirement.REQUIRED
-        and attempt.state in _INCOMPLETE_COLLECTION_STATES
-        for candidate in result.candidates
-        for attempt in candidate.attempts
-    )
-    web_identity_was_rejected = any(
-        attempt.reason_code in _WEB_IDENTITY_REJECTION_REASON_CODES
-        for candidate in result.candidates
-        for attempt in candidate.attempts
     )
     incomplete_attempts = tuple(
         attempt
@@ -260,143 +228,54 @@ def assess_official_evidence(
         for attempt in candidate.attempts
         if attempt.state in _INCOMPLETE_COLLECTION_STATES
     )
-    # 세 갈래 모두 «내부 배선은 멀쩡하고, 필수 DART 확인이 끝났고, 실제 DART
-    # 원문 조각이 결속돼 있다»를 전제로 한다. 이 셋 중 하나라도 깨지면 어떤
-    # 부분 보고서도 만들지 않는다.
-    dart_partial_prerequisites_hold = (
-        not integrity_is_broken
-        and not required_dart_collection_incomplete
-        and _has_usable_dart_evidence(result)
+    required_dart_collection_incomplete = any(
+        attempt.source_kind in _DART_DOCUMENT_SOURCE_KINDS
+        and attempt.requirement is SourceRequirement.REQUIRED
+        for attempt in incomplete_attempts
     )
-    dart_partial_eligible = (
-        dart_partial_prerequisites_hold
-        and len(decision.ready_section_ids) >= MINIMUM_PUBLISHABLE_SECTION_COUNT
-    )
-    # 신원 대조에 실패한 웹 후보는 wide_collect에서 MISSING attempt만 남기고
-    # 문서·조각을 만들지 않는다. 반대로 여기에 도달한 웹 조각은 별도 Writer
-    # 자격과 회사 결속 검사를 이미 통과했다. 둘이 같은 장에 기록됐다는 이유로
-    # 성공 문서까지 연좌시키면, 후보 URL 하나가 빗나간 모든 회사의 안전한 DART
-    # 부분 출구가 닫힌다. 그러므로 확인이 끝난 아래 갈래 2·3에서는 실패 attempt
-    # 자체가 이 자격을 뒤집지 않는다.
-    # (갈래 1) 회사 웹 경로가 «막혀서» 확인을 끝내지 못한 경우. 상장 엔터사 실측이
-    # 이 모양이었다 — robots.txt 거부로 FAILED가 나 STOP_TRANSIENT_FAILURE로
-    # 닫혔고, DART 근거로 SHADOW 부분 보고서가 정상 생성됐다.
-    transient_partial_fallback = (
-        dart_partial_eligible
-        # DART 기업개황이 가리킨 대표 홈페이지 자체가 다른 회사로 확인됐는데
-        # 조회까지 덜 끝난 상태라면, 오래된 회사 신원을 부분 보고서로 우회하지
-        # 않는다. 반면 아래 자료 부족·문서 하한 갈래는 이미 확인된 근거만 쓴다.
-        and not web_identity_was_rejected
-        and decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE
-        and bool(incomplete_attempts)
-        and all(
-            attempt.source_kind in _WEB_FAILURE_SOURCE_KINDS
-            for attempt in incomplete_attempts
-        )
-    )
-    # (갈래 2) 확인은 끝냈는데 일부 장의 자료가 없는 경우. 은행 실측이
-    # 이 모양이었다 — DART ir_url이 비어 공식 웹 후보가 없었고 남은 웹 경로는
-    # 전부 신원 대조에 실패해 MISSING으로 닫혔다. 아홉 장 중 일곱 장이 READY
-    # 인데도 갈래 1의 조건(FAILED/TRUNCATED)에 걸리지 않아 보고서가 0건
-    # 나왔다. 공개 가능한 최소 장 수를 넘겼다면 그 일곱 장은 실제로 확인된
-    # 자료이므로, FULL이 아니라 부분 보고서로 내보낸다. 하한은 부분 보고서
-    # 출고 계약과 같은 정본(MINIMUM_PUBLISHABLE_SECTION_COUNT)을 쓴다.
-    insufficient_partial_fallback = (
-        dart_partial_eligible
-        and decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
-    )
-    # (갈래 3) 아홉 장을 다 확인했는데도 완성 보고서의 독립 문서 하한에 닿을
-    # 길이 없는 경우. 은행 실측이 이 모양이다 — 사전검사는 9장 READY지만
-    # 수집한 독립 문서가 DART 공시 3건뿐이라, 뒤에 합쳐질 문서를 다 더해도
-    # ``MIN_DOCUMENT_SOURCES``를 채울 수 없다. 그 8건은 부족한 보고서를
-    # 지우는 값이 아니라 완성/부분을 가르는 하한이므로, 도달 불가가 이미
-    # 확정된 회사는 유료 AI 호출 전에 무료로 부분 보고서 경로로 내리는 것이
-    # 정직하다. 지금 막지 않으면 FULL로 들어가 packet 문서 검사에서 멈추고
-    # 보고서가 0건 나온다.
     full_document_floor_unreachable = (
-        decision.status is GenerationGateStatus.READY_FOR_GENERATION
-        and result.independent_document_count + LATE_PACKET_DOCUMENT_SOURCES
+        result.independent_document_count + LATE_PACKET_DOCUMENT_SOURCES
         < MIN_DOCUMENT_SOURCES
     )
-    document_floor_partial_fallback = (
-        dart_partial_eligible and full_document_floor_unreachable
+    partial_required = (
+        bool(incomplete_attempts)
+        or not decision.can_call_ai
+        or full_document_floor_unreachable
     )
-    # 게이트 판정은 한 상태만 갖는다 — 세 갈래는 서로 다른 상태를 요구하므로
-    # 동시에 참이 될 수 없다. 그래도 사유는 transient > insufficient >
-    # document_floor 순서로 하나만 고른다.
-    dart_partial_fallback = (
-        transient_partial_fallback
-        or insufficient_partial_fallback
-        or document_floor_partial_fallback
-    )
-    supplementary_research_allowed = (
-        dart_partial_prerequisites_hold
-        and not dart_partial_fallback
-        and decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
-    )
-    dart_partial_reason = next(
-        (
-            reason
-            for opened, reason in (
-                (
-                    transient_partial_fallback,
-                    DART_PARTIAL_REASON_TRANSIENT_WEB_FAILURE,
-                ),
-                (
-                    insufficient_partial_fallback,
-                    DART_PARTIAL_REASON_INSUFFICIENT_WITH_READY_SECTIONS,
-                ),
-                (
-                    document_floor_partial_fallback,
-                    DART_PARTIAL_REASON_TOO_FEW_DOCUMENTS_FOR_FULL,
-                ),
-            )
-            if opened
-        ),
-        "",
-    )
+    partial_reason = ""
+    detail_code = ""
     if integrity_is_broken:
         detail_code = FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID
     elif required_dart_collection_incomplete:
-        detail_code = FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT
-    elif dart_partial_fallback:
-        # ★ 여기서 비우는 것이 «정상»이다 — detail_code는 진단이 아니라
-        #   ``can_call_ai``를 가르는 판단 값이라, 전환을 열어 놓고 사유를 채우면
-        #   그 순간 AI 호출이 다시 막힌다.
-        # ★ 다만 이 빈 칸 때문에 「무엇이 왜 막혔나」가 실행 기록에서 사라졌다
-        #   (2026-09-11 실측: robots.txt 2건 실패 → 필수 장 UNKNOWN → 전환).
-        #   그래서 ``decision.unknown_section_ids``·``decision.reason_codes``·
-        #   ``dart_partial_reason``을 진단 단계(`real.py`의
-        #   ``6_수집_공식근거사전검사``)가 «옆 필드»로 따로 남긴다. 판단용 값과
-        #   진단용 값을 같은 칸에 두지 않는다.
-        detail_code = ""
-    elif decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE:
-        detail_code = FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_TRANSIENT
-    elif decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE:
-        # 현재 결정론 분류기의 단어 목록은 일부 예시에 불과하고 «해당 뜻이
-        # 원문에 없다»를 증명하는 완전한 분류기가 아니다. 실제 원문 조각을
-        # 읽었지만 의미 칸을 붙이지 못한 관측이 하나라도 있으면 회사를
-        # 자료 부족으로 탓할 수 없다. 무분류 조각은 근거로 승격하지 않은 채
-        # 내부 분류 범위 결함으로 닫아 선결제·AI 호출 전에 운영자에게 보낸다.
-        #
-        # 여기까지 왔다는 것은 갈래 2가 거짓이라는 뜻이다 — 즉 DART 근거가
-        # 결속되지 않았거나 READY 장이 공개 최소치보다 적다. 그때만 이 두
-        # 사유로 닫는다.
+        partial_reason = DART_PARTIAL_REASON_REQUIRED_COLLECTION_INCOMPLETE
+        detail_code = FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE
+    elif incomplete_attempts:
+        partial_reason = DART_PARTIAL_REASON_TRANSIENT_WEB_FAILURE
+        detail_code = FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE
+    elif not decision.can_call_ai:
+        partial_reason = DART_PARTIAL_REASON_INSUFFICIENT_WITH_READY_SECTIONS
         detail_code = (
             FINAL_GATE_DETAIL_PREFLIGHT_CLASSIFIER_COVERAGE_GAP
             if result.unclassified_evidence is not None
             else FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
         )
-    else:
-        detail_code = ""
-
+    elif full_document_floor_unreachable:
+        partial_reason = DART_PARTIAL_REASON_TOO_FEW_DOCUMENTS_FOR_FULL
+        detail_code = FINAL_GATE_DETAIL_PREFLIGHT_DOCUMENT_SOURCES_INSUFFICIENT
     return OfficialEvidencePreflight(
         decision=decision,
         independent_document_count=result.independent_document_count,
         detail_code=detail_code,
-        dart_partial_fallback=dart_partial_fallback,
-        dart_partial_reason=dart_partial_reason,
-        supplementary_research_allowed=supplementary_research_allowed,
+        dart_partial_fallback=partial_required and not integrity_is_broken,
+        dart_partial_reason=partial_reason,
+        # 공식 원문이 있으면 보완조사를 이어갈 수 있다. 보완조사 실패도
+        # 확보한 사실을 지우거나 미확인 범위를 완료로 바꾸지 않는다.
+        supplementary_research_allowed=(
+            not integrity_is_broken
+            and decision.status is GenerationGateStatus.STOP_INSUFFICIENT_EVIDENCE
+            and _has_usable_dart_evidence(result)
+        ),
+        collection_incomplete=bool(incomplete_attempts),
     )
 
 
@@ -407,8 +286,8 @@ def assess_packet_document_sources(
 
     formal collector 직후에는 재무 API와 매출표 전용 조각이 아직 합쳐지지
     않는다. 그때 8건을 검사하면 최종 후보가 충족할 수 있는 회사도 일찍
-    거절한다. 반대로 packet까지 합친 뒤에도 8건보다 적으면 작성기가 어떤
-    문장을 골라도 최종 품질 하한을 채울 수 없으므로 AI 전에 안전하게 멈춘다.
+    거절한다. 최종 packet도 8건보다 적으면 확보 근거를 사용하는 부분
+    보고서로 전환한다. 문서 수가 회사·인용 검증을 대신하지 않는다.
     """
 
     hashes_by_identity: dict[str, set[str]] = {}

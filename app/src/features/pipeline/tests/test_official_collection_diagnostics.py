@@ -106,8 +106,8 @@ def test_실제_게이트중단에도_수집직후_histogram이_run_steps에_남
     with run_diagnostics.capture() as captured:
         result = _run(collector)
 
-    assert result.outcome is Outcome.GATE_STOPPED
-    assert result.final_gate_reason == FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT
+    assert result.outcome is Outcome.REPORT
+    assert result.final_gate_reason == ""
     assert [step for step in captured.steps if step["step"] == OFFICIAL_COLLECTION_DIAGNOSTICS_STEP] == [
         {
             "step": OFFICIAL_COLLECTION_DIAGNOSTICS_STEP,

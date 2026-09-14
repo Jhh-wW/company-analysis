@@ -13,6 +13,7 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_CONFIGURATION,
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INSUFFICIENT,
     FINAL_GATE_REASON_OFFICIAL_EVIDENCE_TRANSIENT,
+    FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INCOMPLETE,
     FINAL_GATE_REASON_PUBLISH_BLOCKED,
     FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
     FINAL_GATE_REASON_REQUEST_BUDGET_EXHAUSTED,
@@ -26,6 +27,7 @@ def test_아홉_사용자_상태를_서로_다르게_번역한다() -> None:
     사용자가 멀쩡한 회사를 탓하게 되므로 별도 상태로 센다.
     """
     cases = {
+        FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INCOMPLETE: StoppedGuidanceState.COLLECTION_INCOMPLETE,
         FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT: (
             StoppedGuidanceState.INTERNAL_EVIDENCE_ERROR
         ),
@@ -113,3 +115,11 @@ def test_요청예산_소진은_기타_안내로_뭉뚱그리지_않는다() -> 
     rendered = " ".join((guidance.title, guidance.summary, guidance.meaning, *guidance.actions))
     assert "예산" in rendered
     assert "관리자" in rendered
+
+
+def test_수집미완료는_처리한도와_미확인범위를_안내한다():
+    guidance = guidance_for_final_gate_reason(FINAL_GATE_REASON_OFFICIAL_EVIDENCE_INCOMPLETE)
+    text = " ".join((guidance.title, guidance.summary, guidance.meaning))
+    assert "처리 한도" in text
+    assert "미확인" in text
+    assert "잠시" not in text
