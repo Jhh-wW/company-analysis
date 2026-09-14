@@ -36,6 +36,7 @@ from src.features.composer.portfolio_names import (
 )
 from src.shared.name_fragments.constants import (
     NAME_KIND_LABELS,
+    NAME_KIND_SEGMENT,
     NAME_LABEL_SEPARATOR,
     REPRESENTATIVE_NAME_KINDS,
     parse_name_location,
@@ -63,11 +64,12 @@ NAME_TABLE_HEADERS: Final[tuple[str, str]] = (
 #:
 #: ★ 이 순서는 이름 표 파서의 조각 배분 순서(`features/product_names`의
 #:   ``NAME_FRAGMENT_KIND_ORDER``)에서 «대표 이름 종류만» 남긴 것과 같다.
-#:   feature 간 직접 import는 이 저장소의 경계 규칙이 막으므로 공용 정본
-#:   (`shared/name_fragments`)의 순서를 쓰고, 두 순서가 어긋나지 않는지는
-#:   시험(`test_portfolio_name_table.py`)이 두 상수를 함께 읽어 지킨다.
-NAME_TABLE_ROW_LABELS: Final[tuple[str, ...]] = tuple(
-    NAME_KIND_LABELS[kind] for kind in REPRESENTATIVE_NAME_KINDS
+#:   feature 간 직접 import는 이 저장소의 경계 규칙이 막으므로 공용 정본의
+#:   순서를 따르되, 사업부문은 3장 표의 운영 축으로 먼저 둔다. 종류 순서가
+#:   바뀌면 시험(`test_portfolio_name_table.py`)이 생산자·소비자를 함께 확인한다.
+NAME_TABLE_ROW_LABELS: Final[tuple[str, ...]] = (
+    NAME_KIND_LABELS[NAME_KIND_SEGMENT],
+    *(NAME_KIND_LABELS[kind] for kind in REPRESENTATIVE_NAME_KINDS),
 )
 
 #: 한 종류(=한 행)에 나열할 이름의 최대 개수.

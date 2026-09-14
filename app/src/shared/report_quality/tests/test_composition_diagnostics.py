@@ -7,6 +7,46 @@ import pytest
 from src.shared.report_quality.composition_diagnostics import observed_composition_steps
 
 
+def test_empty_recovery_records_closed_counts_and_machine_semantic_stages():
+    records = [
+        {"step": "8_본문검수_기계통과", "장별": {
+            "past_changes": {"초안": 3, "기계통과": 0, "원문": "비공개"},
+            "culture": {"초안": 2, "기계통과": 2}}},
+        {"step": "8_본문검수_처분", "장별빈본문": ["past_changes", "culture"],
+         "문장재작성허용": False, "판정별": {"근거결속실패_제거": 2}},
+        {"step": "8_빈장_복구", "상태": "작성완료", "대상장": ["past_changes"],
+         "작성문장수": 2, "원문": "비공개", "응답": "비공개", "tokens": 100},
+        {"step": "8_빈장_복구", "상태": "검수완료", "대상장": ["past_changes"],
+         "복구장": ["past_changes"], "error": "비공개"},
+        {"step": "8_빈장_복구", "상태": "호출중단", "대상장": ["culture"],
+         "오류종류": "제공자오류", "원문": "비공개"},
+    ]
+    result = observed_composition_steps(records)
+    assert len(result) == 5
+    assert result[0]["장별"]["past_changes"] == {"초안": 3, "기계통과": 0}
+    assert result[0]["장별"]["culture"]["기계통과"] == 2
+    assert result[1]["장별빈본문"] == ["past_changes", "culture"]
+    assert result[3]["복구장"] == ["past_changes"]
+    serialized = json.dumps(result, ensure_ascii=False)
+    assert "비공개" not in serialized and "tokens" not in serialized
+
+
+@pytest.mark.parametrize("record", [
+    {"step": "8_빈장_복구", "상태": [], "대상장": ["culture"]},
+    {"step": "8_빈장_복구", "상태": "본문", "대상장": ["culture"]},
+    {"step": "8_빈장_복구", "상태": "작성완료", "대상장": ["culture"], "작성문장수": True},
+    {"step": "8_빈장_복구", "상태": "작성완료", "대상장": ["culture"], "작성문장수": -1},
+    {"step": "8_빈장_복구", "상태": "검수완료", "대상장": ["culture"], "복구장": ["identity"]},
+    {"step": "8_빈장_복구", "상태": "검수완료", "대상장": ["본문"], "복구장": []},
+    {"step": "8_빈장_복구", "상태": "호출중단", "대상장": ["culture"], "오류종류": "비공개 오류문"},
+    {"step": "8_본문검수_기계통과", "장별": {"본문": {"초안": 1, "기계통과": 1}}},
+    {"step": "8_본문검수_기계통과", "장별": {"culture": {"초안": 1, "기계통과": 2}}},
+    {"step": "8_본문검수_처분", "장별빈본문": ["culture"], "문장재작성허용": True, "판정별": {"본문": 1}},
+])
+def test_rejects_open_or_invalid_recovery_diagnostic_fields(record):
+    assert observed_composition_steps([record]) == ()
+
+
 def _parse_event(**changes: object) -> dict:
     return {
         "step": "8_본문검수_응답판독", "경로": "flat", "시도": 1,

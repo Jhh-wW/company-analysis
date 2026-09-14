@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import calendar
+import re
 from collections import Counter
 from dataclasses import replace
 from datetime import date
@@ -22,6 +23,7 @@ from src.features.composer.news_constants import (
     NEWS_RESEARCH_ABSENCE_NOTICE,
     NEWS_RESEARCH_UNKNOWN_NOTICE,
     NEWS_BODY_REJECTION_NOTICE,
+    NEWS_KOREAN_SYLLABLE_PATTERN,
 )
 from src.features.composer.news_block import _is_news_fragment, news_ownership_from_claim_slots
 from src.features.composer.port import ComposedSentence
@@ -109,6 +111,9 @@ def supplement_news_candidates(report, fragments, ownership=None):
                 or not fragment.news_grounded or not fragment.document_date
                 or not fragment.source_publisher or not fragment.text.strip()):
                 continue
+            # 외국어 원문은 검수를 통과한 작가의 한국어 설명으로만 공개한다.
+            if not re.search(NEWS_KOREAN_SYLLABLE_PATTERN, fragment.text):
+                continue
             event = fragment.news_event_key or " ".join(fragment.text.split())
             canonical_candidate = (attribution_prefix(fragment) + fragment.text.strip(),
                                    frozenset({fragment.fragment_id}))
@@ -186,6 +191,9 @@ def retain_verified_news(report, fragments, *, review_input=None, diagnostics=No
             if not source.document_date or not source.source_publisher or not sentence.text.startswith(prefix):
                 record(sentence, section.section_id, "게시조건", "attribution_invalid")
                 return False
+            if not re.search(NEWS_KOREAN_SYLLABLE_PATTERN, sentence.text[len(prefix):]):
+                record(sentence, section.section_id, "게시조건", "korean_body_unverified")
+                return False
             supported = news_number_tokens(sentence.text[len(prefix):]).issubset(
                 news_number_tokens(" ".join(news[fid].text for fid in sentence.citations)))
             if not supported:
@@ -241,6 +249,8 @@ def news_usage_diagnostics(report, fragments, supplemented=(), *, review_candida
             reason, explanation = decisions[fid]
         elif not fragment.news_grounded:
             reason, explanation = "본문검증미확인", "법인·사업사실·원문·시점 검증 통과 표시가 없어 자동 본문 보강하지 않았습니다."
+        elif not re.search(NEWS_KOREAN_SYLLABLE_PATTERN, fragment.text):
+            reason, explanation = "한국어본문미확인", NEWS_REJECTION_REASONS["korean_body_unverified"]
         else:
             reason, explanation = "본문활용미해결", "본문 활용 또는 구체적 제외 사유를 확인하지 못했습니다."
         details.append({"조각": fid, "기사": article_key(fragment), "사유": reason, "설명": explanation,

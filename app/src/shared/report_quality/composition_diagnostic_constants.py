@@ -25,6 +25,18 @@ ROW_NUMBER_CONFLICT = "number_conflicting_duplicate"
 
 PROTOCOL_STEP = "8_본문검수_응답판독"
 SUMMARY_STEP = "8_핵심요약_단계"
+BODY_MACHINE_STEP = "8_본문검수_기계통과"
+BODY_DISPOSITION_STEP = "8_본문검수_처분"
+EMPTY_RECOVERY_STEP = "8_빈장_복구"
+BODY_SECTION_IDS = frozenset((*STRICT_REQUIRED_QUALITY_SECTION_IDS, "summary"))
+BODY_DISPOSITIONS = frozenset((
+    "참", "거짓_재작성", "거짓_제거", "애매_강등", "근거결속실패_제거", "번호없음_제거",
+))
+EMPTY_RECOVERY_STATES = frozenset((
+    "문장재작성대신예약", "작성형식실패", "확인후보없음", "작성완료", "검수완료",
+    "호출중단", "복구형식실패",
+))
+EMPTY_RECOVERY_ERRORS = frozenset(("호출한도", "요청예산", "제공자오류"))
 
 PROTOCOL_READ_CODES = frozenset((
     READ_OK, READ_EMPTY, READ_JSON_SYNTAX, READ_NOT_OBJECT,

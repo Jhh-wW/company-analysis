@@ -18,6 +18,7 @@ def test_transport_contract_matches_the_actual_producer():
     )
     from src.features.composer.modality_constants import MODALITY_PLAN_ASSERTED
     from src.features.composer.scope_constants import SCOPE_CONDITION_UNBOUND
+    from src.features.composer.quantified_relation_constants import QUANTIFIED_DIVIDEND_UNBOUND
     from src.features.composer.prose_own_source_constants import (
         PROSE_OWN_SOURCE_REASON_CODES,
     )
@@ -41,6 +42,7 @@ def test_transport_contract_matches_the_actual_producer():
 
     assert set(REVIEW_SCOPE_ITEMS) == {
         MODALITY_PLAN_ASSERTED, SCOPE_CONDITION_UNBOUND, CULTURE_EVIDENCE_SCOPE_MISMATCH,
+        QUANTIFIED_DIVIDEND_UNBOUND,
         CULTURE_ACCOUNTING_POLICY_MISPLACED, *DIRECT_SUPPORT_REASON_TEXTS,
         *ROLE_BINDING_REASON_TEXTS,
         *FUTURE_REASON_CODES,
