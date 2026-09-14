@@ -39,6 +39,9 @@ def test_transport_contract_matches_the_actual_producer():
     from src.features.composer.executive_status_constants import (
         EXECUTIVE_STATUS_REASON_TEXTS,
     )
+    from src.features.composer.stray_citation_marker_constants import (
+        STRAY_CITATION_MARKER_REASON_CODES,
+    )
 
     assert set(REVIEW_SCOPE_ITEMS) == {
         MODALITY_PLAN_ASSERTED, SCOPE_CONDITION_UNBOUND, CULTURE_EVIDENCE_SCOPE_MISMATCH,
@@ -56,6 +59,8 @@ def test_transport_contract_matches_the_actual_producer():
         ABSENCE_CLAIM_UNSUPPORTED,
         *PROSE_OWN_SOURCE_REASON_CODES,
         *EXECUTIVE_STATUS_REASON_TEXTS,
+        # 인용 아닌 대괄호 숫자를 정리하며 «뺀» 축자 문장의 사유 코드.
+        *STRAY_CITATION_MARKER_REASON_CODES,
     }
     assert set(REVIEW_ITEMS) == {NUMERIC_KEY, TIME_KEY, TREND_KEY, *REVIEW_SCOPE_ITEMS.values()}
     assert set(REVIEW_REASONS) == {GROUNDING_INVALID, GROUNDING_MISSING, *REVIEW_SCOPE_ITEMS}

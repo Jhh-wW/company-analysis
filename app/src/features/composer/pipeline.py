@@ -108,6 +108,7 @@ from src.features.composer.dedupe import (
 )
 from src.features.composer.news_usage import supplement_news_candidates, retain_verified_news, news_usage_diagnostics, append_research_notice, news_citation_ids
 from src.features.composer.review_outcomes import final_review_outcomes
+from src.features.composer.stray_citation_marker import sanitize_stray_citation_markers
 from src.features.composer.empty_section_recovery import (
     recovery_evidence, recover_empty_sections, rejected_sentence_fingerprint,
 )
@@ -1234,6 +1235,11 @@ def _finish_evidence_available(
             fragments=_normalize_fragments(fragments),
             review_rejections=news_review_rejections,
         )
+    # 확보 근거 보고서도 «같은» 정리를 거친다. FULL에서 내려온 본문
+    # (tail_already_applied)은 이미 정리돼 있어 이 호출이 무동작이다(멱등).
+    body = sanitize_stray_citation_markers(
+        body, fragments, diagnostics=review_diagnostics,
+    )
     final, numeric_filtering = _rule_summary_stage(body, numeric_filtering)
     rendered = render_report(
         company_name,
@@ -2168,6 +2174,13 @@ def run_v2(
         fragments=_normalize_fragments(verification_fragments),
         review_rejections=news_review_rejections,
     )
+    # ★ 본 경로의 본문이 확정된 직후 인용 아닌 대괄호 숫자를 글자로 굳힌다.
+    #   여기서 한 번 정리하면 아래의 요약 고르기·렌더·봉인·출고 검증이 모두
+    #   «같은 글자»를 본다. 보충 경로는 이 뒤에 문장을 더하므로 그쪽 병합본에도
+    #   같은 호출이 한 번 더 있다(멱등이라 겹쳐도 값이 바뀌지 않는다).
+    verified = sanitize_stray_citation_markers(
+        verified, verification_fragments, diagnostics=review_diagnostics,
+    )
     if prepared_evidence is not None:
         _assert_composed_report_evidence_invariant(
             verified,
@@ -2512,6 +2525,12 @@ def run_v2(
                 news_block.report, research_diagnostics,
                 fragments=_normalize_fragments(verification_fragments),
                 review_rejections=news_review_rejections,
+            )
+            # 본 경로와 «같은» 정리를 병합본에도 건다. 비대상 장은 이미 정리된
+            # 글자라 이 호출이 아무것도 바꾸지 않는다(멱등) — 아래 비대상 장
+            # 불변 검사가 그대로 통과한다.
+            merged_body = sanitize_stray_citation_markers(
+                merged_body, verification_fragments, diagnostics=review_diagnostics,
             )
             base_by_id = {
                 section.section_id: section for section in base_body.sections
