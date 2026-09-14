@@ -39,6 +39,9 @@ def test_transport_contract_matches_the_actual_producer():
     from src.features.composer.executive_status_constants import (
         EXECUTIVE_STATUS_REASON_TEXTS,
     )
+    from src.features.composer.combined_relation_constants import (
+        COMBINED_RELATION_REASON_TEXTS,
+    )
 
     assert set(REVIEW_SCOPE_ITEMS) == {
         MODALITY_PLAN_ASSERTED, SCOPE_CONDITION_UNBOUND, CULTURE_EVIDENCE_SCOPE_MISMATCH,
@@ -56,6 +59,10 @@ def test_transport_contract_matches_the_actual_producer():
         ABSENCE_CLAIM_UNSUPPORTED,
         *PROSE_OWN_SOURCE_REASON_CODES,
         *EXECUTIVE_STATUS_REASON_TEXTS,
+        # 수량 범위 결속(«결합» 유형) — 진단 우선 모드라도 전송 계약에는 항상 있어야
+        # 한다. 나중에 quantified_dividend_recipient_unbound를 흡수해도 이 스프레드는
+        # 그대로 둔다(§6 흡수 계획).
+        *COMBINED_RELATION_REASON_TEXTS,
     }
     assert set(REVIEW_ITEMS) == {NUMERIC_KEY, TIME_KEY, TREND_KEY, *REVIEW_SCOPE_ITEMS.values()}
     assert set(REVIEW_REASONS) == {GROUNDING_INVALID, GROUNDING_MISSING, *REVIEW_SCOPE_ITEMS}
