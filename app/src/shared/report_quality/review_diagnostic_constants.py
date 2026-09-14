@@ -109,6 +109,11 @@ REVIEW_SCOPE_ITEMS = {
     "combined_scope_split_across_clauses": "수량 범위 결속",
     "combined_scope_negated_in_source": "수량 범위 결속",
     "combined_scope_claim_not_covered": "수량 범위 결속",
+    # ★ 인용 아닌 대괄호 숫자 정리(composer.stray_citation_marker_constants).
+    #   코드 문자열은 그 모듈의 상수와 «반드시 같은 값»이어야 한다 —
+    #   원문을 글자 그대로 옮긴 문장은 고칠 수 없어 «뺀» 기록만 남기기 때문에,
+    #   이 목록에 없으면 그 제외가 진단에서 통째로 사라진다.
+    "citation_marker_not_in_citations": "인용 표기",
 }
 REVIEW_REASONS = (
     "semantic_grounding_missing", "semantic_grounding_invalid", *REVIEW_SCOPE_ITEMS,
