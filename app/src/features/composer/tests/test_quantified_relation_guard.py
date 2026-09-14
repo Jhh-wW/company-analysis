@@ -61,3 +61,41 @@ def test_later_plan_does_not_hide_earlier_unsupported_actual_receipt():
     text = "577개 종속회사로부터 배당수익을 수취했고, 향후 배당 계획을 수립했다."
     source = "연결대상 회사는 577개사다. 투자부문은 배당수익을 수취한다."
     assert quantified_dividend_problem(text, {"1": source}) == QUANTIFIED_DIVIDEND_UNBOUND
+
+
+# ── 후보 쪽 어순·지급형·「연결대상 회사」 표현 (2026-09-14 독립 검토 실측 반례) ──
+SPLIT_SOURCE = "연결대상 회사는 577개사이다. 투자부문은 종속회사와 기타 투자사로부터 배당수익을 수취한다."
+
+
+@pytest.mark.parametrize("claim", [
+    "투자부문은 종속회사 577개사로부터 배당금을 수취했다.",      # 어순 반대
+    "577개 종속회사가 당사에 배당금을 지급했다.",                # 지급형
+    "회사는 연결대상 회사 577개로부터 배당수익을 수취한다.",      # 공시의 실제 집단 이름
+    "연결대상 회사 577개가 회사에 배당금을 지급한다.",
+    "회사는 연결대상 종속회사 577개사로부터 배당수익을 수취한다.",
+])
+def test_reordered_payment_and_consolidated_wording_are_checked_too(claim):
+    """후보가 어순만 바꾸거나 지급형·공시 표현을 써도 원문 한 곳이 그 관계를 말해야 한다."""
+
+    assert quantified_dividend_problem(claim, {"1": SPLIT_SOURCE}) == QUANTIFIED_DIVIDEND_UNBOUND
+
+
+@pytest.mark.parametrize("claim,source", [
+    ("회사는 연결대상 회사 577개로부터 배당수익을 수취한다.",
+     "당사는 연결대상 회사 577개사로부터 배당수익을 수취합니다."),
+    ("투자부문은 종속회사 577개사로부터 배당금을 수취했다.",
+     "당사는 577개 종속회사로부터 배당금을 수취했습니다."),
+    ("577개 종속회사가 회사에 배당금을 지급했다.",
+     "종속회사 577개사가 당사에 배당금을 지급했습니다."),
+])
+def test_same_relation_stated_in_one_source_clause_passes_in_any_order(claim, source):
+    assert quantified_dividend_problem(claim, {"1": source}) == ""
+
+
+def test_group_kind_must_match_not_just_the_count():
+    """「연결대상 회사 N개」를 「N개 종속회사」로 바꿔 적는 것도 새 관계다."""
+
+    source = "당사는 연결대상 회사 577개사로부터 배당수익을 수취합니다."
+    assert quantified_dividend_problem(
+        "회사는 577개 종속회사로부터 배당수익을 수취한다.", {"1": source},
+    ) == QUANTIFIED_DIVIDEND_UNBOUND
