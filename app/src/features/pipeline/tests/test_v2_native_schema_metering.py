@@ -244,6 +244,10 @@ def test_native_stop_reasons_preserve_text_diagnostics_and_actual_charge(
 
 @pytest.mark.parametrize("with_usage", [False, True])
 def test_native_provider_error_never_retries_as_plain_output(with_usage, attempts):
+    """스키마 거절도 다른 제공자 장애와 같은 요청 전역 실패로 다룬다(main c20a2101의 계약).
+
+    그 회차만 넘기는 대안은 채택하지 않았다.
+    """
     error = anthropic.BadRequestError(
         "시험용 schema 거절",
         response=httpx.Response(400, request=httpx.Request("POST", "https://offline.invalid")),
@@ -254,9 +258,10 @@ def test_native_provider_error_never_retries_as_plain_output(with_usage, attempt
     messages = RecordingMessages(error=error)
     engine, ask = make_ask(messages)
     with provider_budget.activate(1000) as budget:
-        with pytest.raises(gateway.ProviderCallFailed) as caught:
+        with pytest.raises(AskFatalError) as caught:
             ask(SchemaPrompt("검수 입력", schema()))
-        assert caught.value.__cause__ is error
+        assert isinstance(caught.value.cause, gateway.ProviderCallFailed)
+        assert caught.value.cause.__cause__ is error
         if with_usage:
             assert budget.accounted_krw == usage_cost_krw(MODEL, COUNTED_INPUT, 50)
             assert engine.usages[0]["failed"] is True

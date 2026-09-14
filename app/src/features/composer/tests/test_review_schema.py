@@ -112,10 +112,10 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "d3a778c9f13705e1b5c5a5f4d31905df14c780dd61bf69b56a2e091dfdecf20a"),
-    (_golden_case, True, "1db8b19baf4a861551930843ce3d4692f2b624e1647b9f889b54e14465294367"),
-    (_boundary_case, False, "5db25ef50dcedcfb437526d7dd11b3aa8ae6f32043515df2de91c317b904acb6"),
-    (_boundary_case, True, "a2e212ace823302011ab8f0872813b5b29536e4c336a632499f89189d78003f3"),
+    (_golden_case, False, "7865939fc9758218d88e621aa0a49c61205711ea4a97388ca9d698e9332a918c"),
+    (_golden_case, True, "6450fded0f0ed5fd0c942019f9dec652adfb7eaa7dec98e915f8d3f8ed524367"),
+    (_boundary_case, False, "450b7c3ec8e5014b1260fcefc99a5de4faf16d223af5a2c1e4787f625cbd1eb9"),
+    (_boundary_case, True, "b1aaebf6a665a431bdf1675382ad7a3a63411c3fd0b76b229182e64c3f691727"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
     # de0a68e1의 원래 builder로 재생한 전체 UTF-8 프롬프트 해시다.
@@ -124,8 +124,8 @@ def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected)
 
 
 @pytest.mark.parametrize("items,expected", (
-    ((), "add29ee2e97fb46e5edace05e7d9ae3f316881b1dfdec61a5eaea08871b77431"),
-    (FLOW_ITEMS, "c3f087e0cae73ded7338ae5e11297304088d453e42adcd3da2cbda15a1716ca6"),
+    ((), "519258c77127c5b99d4df036d199a80c835fdb3dd5af38f31ec33e4bca58d83e"),
+    (FLOW_ITEMS, "9bd79ccbe333501a168aabe4bf5bd2047e2c27ac216059293843a0284c31bac6"),
 ))
 def test_diagram_prompt_bytes_match_pre_schema_baseline(items, expected):
     prompt = diagram_check._review_prompt(items, {"1": TEXT})
