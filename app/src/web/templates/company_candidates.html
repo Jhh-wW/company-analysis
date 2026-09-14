@@ -73,13 +73,6 @@
               <li class="candidate-chip tone-{{ chip.tone }}">{{ chip.label }}</li>
             {% endfor %}
           </ul>
-          {% if candidate.name_match_kind == 'official_alias' and candidate.evidence|length >= 2 %}
-            <aside class="candidate-scope-notice" role="note">
-              <p class="evidence-heading">공시 범위 안내</p>
-              <p>{{ candidate.evidence[0] }}</p>
-              <p>{{ candidate.evidence[1] }}</p>
-            </aside>
-          {% endif %}
           {% if candidate.evidence %}
             <details class="candidate-evidence-more">
               <summary>자세한 근거 {{ candidate.evidence|length }}건</summary>

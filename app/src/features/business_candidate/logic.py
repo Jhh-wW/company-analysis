@@ -56,11 +56,6 @@ from src.features.business_candidate.dart_identity import (
     MATCH_KIND_PRIORITY,
     normalize_company_name,
 )
-from src.features.business_candidate.official_relations import (
-    OFFICIAL_ALIAS_MATCH_KIND,
-    OFFICIAL_ALIAS_SCORE_BONUS,
-    official_alias_relation_for,
-)
 from src.shared.company_identity import (
     latin_acronym_korean,
     normalized_latin_acronym,
@@ -404,21 +399,6 @@ def _score(
     if match_kind == "exact_id":
         score += 0.64
         evidence.append("입력한 DART 고유번호 또는 종목코드가 정확히 일치합니다")
-    elif match_kind == OFFICIAL_ALIAS_MATCH_KIND:
-        score += OFFICIAL_ALIAS_SCORE_BONUS
-        relation = official_alias_relation_for(query)
-        if relation is not None:
-            evidence.extend(
-                (
-                    relation.relation,
-                    relation.report_scope,
-                    "관계 확인 근거: " + " · ".join(relation.source_urls),
-                )
-            )
-        else:
-            # matcher가 만든 공식 별칭 종류라도 등록 데이터가 없으면
-            # 확신 근거를 만들지 않는다.
-            evidence.append("공식 사업부문 별칭 후보이므로 DART 법인을 확인해야 합니다")
     elif match_kind == "exact_name" or (query_key and query_key == candidate_key):
         score += 0.62
         evidence.append(
@@ -634,8 +614,6 @@ def _name_chip(candidate: BusinessCandidate, query: str) -> CandidateDisplayChip
         #   가장 강한 확신 신호로 보게 되고, 「AI는 회사를 확정하지 않는다」는
         #   설계가 화면에서 무너진다. 종류가 무엇이든 확신 칩을 주지 않는다.
         return CandidateDisplayChip(CHIP_TONE_PART, _CHIP_NAME_AI_ALIAS)
-    if match_kind == OFFICIAL_ALIAS_MATCH_KIND:
-        return CandidateDisplayChip(CHIP_TONE_PART, "공식 사업부문 별칭")
     if match_kind == "exact_id":
         return CandidateDisplayChip(CHIP_TONE_OK, _CHIP_ID_EXACT)
     if match_kind in {"exact_name", "legal_suffix"} or (
