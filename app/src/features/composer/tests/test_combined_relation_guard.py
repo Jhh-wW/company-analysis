@@ -217,6 +217,45 @@ def test_a_totality_word_with_a_closed_group_noun_still_triggers(text, scope):
     assert [trigger.scope for trigger in triggers] == [scope]
 
 
+@pytest.mark.parametrize("text", [
+    # ⑥ 「한」은 수관형사 목록에 없다 — 수량이 아닌 뜻으로 쓰이는 일이 너무 많다
+    "SaaS를 한곳에 통합해 운영한다.",
+    "흩어진 자료를 한 곳에 모아 제공한다.",
+    "여러 채널을 한 곳에서 담당한다.",
+])
+def test_the_numeral_one_is_not_in_the_closed_quantifier_list(text):
+    """「한곳·한편·한번·한계」처럼 「한」은 «하나»가 아닌 뜻이 너무 많아, 장소 서술이
+    집단 수 단언으로 읽혔다(2026-09-14 총괄 결정으로 목록에서 뺐다)."""
+
+    assert combined_relation_triggers(text) == ()
+
+
+@pytest.mark.parametrize("replacement,scope", [("두 곳", "두 곳"), ("2곳", "2곳")])
+def test_the_same_shape_still_triggers_with_a_real_number(replacement, scope):
+    """뺀 것은 «「한」 한 낱말»뿐이다 — 같은 문장 꼴이라도 숫자·다른 수관형사로 바꾸면
+    그대로 발동한다. 최소 대립쌍으로 목록 변경의 사정거리를 못 박는다."""
+
+    assert combined_relation_triggers("SaaS를 한곳에 통합해 운영한다.") == ()
+    triggers = combined_relation_triggers(f"SaaS를 {replacement}에 통합해 운영한다.")
+    assert [(t.scope, t.relation) for t in triggers] == [(scope, "운영")]
+
+
+@pytest.mark.parametrize("claim,source,scope", [
+    ("당사는 협력사 두 곳으로부터 부품을 납품받는다.",
+     "당사는 협력사 두 곳으로부터 부품을 납품받고 있습니다.", "두 곳"),
+    ("당사는 협력사 2곳으로부터 부품을 납품받는다.",
+     "당사는 협력사 2곳으로부터 부품을 납품받고 있습니다.", "2곳"),
+])
+def test_one_place_counterparty_still_needs_combined_evidence(claim, source, scope):
+    """§7.2 방식 그대로 — 「한」을 뺀 뒤에도 «둘 이상»을 센 상대편 자리는 근거를
+    요구하고, 원문 한 절이 그 관계를 말하면 통과한다."""
+
+    assert combined_relation_report(claim, {"1": "아무 관련 없는 원문"}, None).problem == (
+        COMBINED_SCOPE_EVIDENCE_MISSING)
+    entries = {"관계": [_combined_item(범위=scope, 관계="납품", 원문=source)]}
+    assert combined_relation_report(claim, {"1": source}, entries).problem == ""
+
+
 def test_relation_verb_lists_are_split_without_losing_or_adding_a_word():
     """안내문이 쓰는 전체 목록과 정규식이 쓰는 두 갈래가 «같은 낱말 집합»이어야 한다."""
 
