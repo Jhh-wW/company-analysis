@@ -93,6 +93,10 @@ from src.features.composer.body_review_constants import (
     BODY_REVIEW_COMPARISON_GUIDE,
     BODY_REVIEW_COMPARISON_KEY,
 )
+from src.features.composer.review_schema import (
+    FLAT_REVIEW_SCHEMA,
+    ReviewPrompt,
+)
 
 import hashlib
 import json
@@ -991,7 +995,10 @@ def _review_fragment_metadata(fragment: CollectedFragment) -> str:
         "문서기준일": fragment.document_date,
         "원문위치": fragment.location,
     }
-    return "출처 분류(JSON 자료): " + json.dumps(metadata, ensure_ascii=False) + "\n"
+    # JSON 구분자 공백만 줄인다. 빈 필드와 문자열 안의 공백도 출처 자료다.
+    return "출처 분류(JSON 자료): " + json.dumps(
+        metadata, ensure_ascii=False, separators=(",", ":")
+    ) + "\n"
 
 
 def _verbatim_news_by_number(
@@ -1135,6 +1142,7 @@ def _build_grouped_review_prompt(
                     + json.dumps(
                         _review_labelled_flow_cells(section_id, item.flow_row),
                         ensure_ascii=False,
+                        separators=(",", ":"),
                     )
                     + "\n"
                 )
@@ -1728,7 +1736,9 @@ def _render_table_evidence(table: Optional[PerformanceTable]) -> str:
     if any(_raw_table_row(table, index) is not None for index in range(len(table.rows))):
         payload["raw_unit"] = str(table.raw_unit).strip()
         payload["raw_rows"] = [list(row) for row in table.raw_rows]
-    return REVIEW_TABLE_HEAD + json.dumps(payload, ensure_ascii=False) + "\n"
+    return REVIEW_TABLE_HEAD + json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":")
+    ) + "\n"
 
 
 def _review_item_section(item: _ReviewItem) -> str:
@@ -1970,7 +1980,7 @@ def _ask_verdicts(
     retries = 0
     while verdicts is None and retries < PARSE_RETRY_LIMIT:
         retries += 1
-        retry_prompt = prompt + RETRY_REMINDER
+        retry_prompt = ReviewPrompt(prompt + RETRY_REMINDER, FLAT_REVIEW_SCHEMA)
         raw = _safe_ask(retry_reviewer, retry_prompt)
         observe = _observe_attempt(retries + 1, retry_prompt, raw)
         verdicts = _parse_verdicts(

@@ -1,0 +1,75 @@
+{
+  "측정일": "2026-09-13",
+  "기준커밋": "eaa20aedd51b7b7c0b5fcc66d79e8842aaaab5ff",
+  "모델": "claude-haiku-4-5-20251001",
+  "방식": "Anthropic messages.count_tokens 10회, 생성 호출 0회",
+  "자료": "JYP 오프라인 fixture 및 완전 일치 반복 합성 자료. 현대글로비스 실사용 자료 아님.",
+  "한계": "공급자의 입력 토큰 추정치이며 실제 출력·캐시 비용이나 보고서 총원가 절감률을 측정하지 않음.",
+  "결과": [
+    {
+      "after": {
+        "chars": 25957,
+        "sha256": "d3a778c9f13705e1b5c5a5f4d31905df14c780dd61bf69b56a2e091dfdecf20a",
+        "tokens": 21955
+      },
+      "before": {
+        "chars": 26070,
+        "sha256": "02e03cd1c888b5b8a5f9f00792aa39f7e98fe347b9e6500b976ecfad2b259371",
+        "tokens": 22033
+      },
+      "case": "body_jyp_flat"
+    },
+    {
+      "after": {
+        "chars": 28139,
+        "sha256": "1db8b19baf4a861551930843ce3d4692f2b624e1647b9f889b54e14465294367",
+        "tokens": 24062
+      },
+      "before": {
+        "chars": 28270,
+        "sha256": "0708aa3b8a7ae36adf4969eeb6bc666f7c20947e67307f2518372811016e38eb",
+        "tokens": 24153
+      },
+      "case": "body_jyp_grouped"
+    },
+    {
+      "after": {
+        "chars": 8538,
+        "sha256": "fc3ad953c8629e158909ad7b6fddd4fcaa195d83fee5193afd6281582eb051ff",
+        "tokens": 8552
+      },
+      "before": {
+        "chars": 8547,
+        "sha256": "00e856f617732f73f12d3b967ab2c8a023f42517bf05f4c14d64aa8a47dd9732",
+        "tokens": 8561
+      },
+      "case": "diagram_jyp_4_rows"
+    },
+    {
+      "after": {
+        "chars": 2817,
+        "sha256": "f6cdb5b4b3b81c0022bd1ff8d743b78163a2379dc4443aa8c8ae5df7f76658eb",
+        "tokens": 2756
+      },
+      "before": {
+        "chars": 2817,
+        "sha256": "f6cdb5b4b3b81c0022bd1ff8d743b78163a2379dc4443aa8c8ae5df7f76658eb",
+        "tokens": 2756
+      },
+      "case": "writer_synthetic_1"
+    },
+    {
+      "after": {
+        "chars": 2817,
+        "sha256": "f6cdb5b4b3b81c0022bd1ff8d743b78163a2379dc4443aa8c8ae5df7f76658eb",
+        "tokens": 2756
+      },
+      "before": {
+        "chars": 4318,
+        "sha256": "0ce4fa7d897fe02c7e2c53b39d91f3286cb7c4616604ddb93e923906a5e763d5",
+        "tokens": 4257
+      },
+      "case": "writer_synthetic_80"
+    }
+  ]
+}
