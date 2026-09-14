@@ -89,8 +89,8 @@ def test_prompt_is_string_and_concatenation_preserves_schema_and_exact_bytes():
 
 
 @pytest.mark.parametrize("schema,expected", (
-    (FLAT_REVIEW_SCHEMA, "dadbdfa61b5a88bdbf286f639ed3a20bc029149421a9bd905edce246306c3a52"),
-    (DIAGRAM_REVIEW_SCHEMA, "52de628b50a1c2d19f6c56bb4939d6dd8b4bf474d4e75e5c8af73cde7abe5909"),
+    (FLAT_REVIEW_SCHEMA, "ec40152ca2ad8aa43192180dd0583bff4a6c3f5e52042ac1f2b915bc7fd0b94d"),
+    (DIAGRAM_REVIEW_SCHEMA, "ba1d778829286673bd6cde6ebb5d559274c78f0202b92d6e4128891736dfc1c8"),
 ))
 def test_retry_schema_hash_matches_provider_accepted_schema(schema, expected):
     encoded = json.dumps(schema, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -112,10 +112,10 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "9235869c919e626a5451293e145beae7f26c653e2658c0baa31d7a6ca47964fa"),
-    (_golden_case, True, "f7e87fe57acde668bd24a3d131ef313cc374d5377d0a24d1aea68f4156ab2e57"),
-    (_boundary_case, False, "2e6ae4afd661b996b44a32589a6fe8b434ecae90eb506778a763e9261035e5fe"),
-    (_boundary_case, True, "90b880b7fcf6bcf2c066630ee9bc2115a050f82436fb98fc3ce1365be02d491b"),
+    (_golden_case, False, "42780485a8c79ba3c887d3460dcc2f6bb16d26ffb4a302290f254a43939ba958"),
+    (_golden_case, True, "452c8fc61344d3926546733b6adccd2f85d45683deabbba70bfe3ee2f4b0671f"),
+    (_boundary_case, False, "9db1c4f8a61fd7550a71fef5f68dd14f276223da796be5f890498170e6d128a2"),
+    (_boundary_case, True, "58abb2b5f0f31380dcdeeadff19e69ba9781ca584a67d1b0361aadc2a8257ab7"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
     # de0a68e1의 원래 builder로 재생한 전체 UTF-8 프롬프트 해시다.

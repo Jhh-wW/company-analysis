@@ -88,6 +88,9 @@ from src.features.composer.role_binding import role_binding_report, role_binding
 from src.features.composer.role_binding_constants import (
     ROLE_BINDING_REASON_TEXTS, ROLE_BINDING_REVIEW_GUIDE,
 )
+from src.features.composer.combined_relation_guard import (
+    combined_relation_report, combined_relation_review_guide,
+)
 from src.features.composer.verbatim_news import VerbatimNewsSource, verbatim_news_source
 from src.features.composer.body_review_constants import (
     BODY_REVIEW_COMPARISON_GUIDE,
@@ -1054,6 +1057,8 @@ def _build_grouped_review_prompt(
         GROUNDING_GUIDE,
         RELATION_REVIEW_GUIDE,
         ROLE_BINDING_REVIEW_GUIDE,
+        # ★ 안내문은 «부를 때» 고른다 — 진단 모드에서는 판정 지시가 빠진 판이 실린다.
+        combined_relation_review_guide(),
         FUTURE_PLAN_REVIEW_GUIDE,
         (
             "아래 자료는 장별 블록으로 격리했다. 각 후보는 반드시 같은 블록의 "
@@ -1464,6 +1469,7 @@ def _apply_grounding(
     constrained, problems = constrain_verdicts(
         raw, verdicts, candidates, cells_by_number=flow_cells_by_number,
         baseline_date=baseline_date, verbatim_by_number=verbatim_by_number,
+        confirmed_prose_numbers=confirmed_prose_numbers,
     )
     # ★ 결속 요구를 «제외»한 자리는 진단 목록에 남지 않는다(제외는 탈락이 아니다).
     #   그래서 개수·규칙 버전·후보지문만 로그로 남겨 «어느 표지의 요구가 빠졌는지»를
@@ -1481,6 +1487,28 @@ def _apply_grounding(
                 binding.rule_version, context.candidate_sha256,
             )
     relation_evidence = support_entries_by_number(raw)
+    # ★ 수량 범위 결속(«결합» 유형)은 아직 진단 우선 모드다(COMBINED_RELATION_ENFORCED
+    #   False) — 막지 않고 발동만 관측한다. confirmed_prose_numbers 로 좁혀 «해석» 등급·
+    #   구조화 주장·인용 없는 후보는 관측에서도 뺀다 — 나중에 차단으로 바꿀 때 관측
+    #   범위와 실제 차단 범위가 어긋나지 않게 하기 위해서다(설계안 §5.3).
+    for number in confirmed_prose_numbers:
+        if number not in candidates:
+            continue
+        text, sources = candidates[number]
+        cells = (flow_cells_by_number or {}).get(number)
+        report = combined_relation_report(text, sources, relation_evidence.get(number), cells)
+        if report.triggers:
+            context = (diagnostic_contexts or {}).get(number)
+            logger.info(
+                "수량 범위 결속 관측: 후보 %d, 장 %s, 사유 %s, 발동 자리 %d개, "
+                "범위 %s, 관계 %s, 규칙 %s, 후보지문 %s",
+                number, context[0] if context else "",
+                report.problem or "문제없음", len(report.triggers),
+                "·".join(dict.fromkeys(trigger.scope for trigger in report.triggers)),
+                "·".join(dict.fromkeys(trigger.relation for trigger in report.triggers)),
+                report.rule_version,
+                hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            )
     # 같은 파서로 미래 근거를 읽고, 중복 번호는 근거 없음으로 처리한다.
     # 같은 값이 «이 후보가 어느 인용을 근거로 들었는가»도 담고 있어 함께 쓴다.
     review_evidence = future_plan_entries_by_number(raw)
@@ -1796,7 +1824,9 @@ def _build_review_prompt(
     parts = [
         REVIEW_PROMPT_HEADER, REVIEW_PROMPT_RULES, BODY_REVIEW_COMPARISON_GUIDE,
         NEWS_REVIEW_GUIDE, GROUNDING_GUIDE, RELATION_REVIEW_GUIDE,
-        ROLE_BINDING_REVIEW_GUIDE, FUTURE_PLAN_REVIEW_GUIDE, REVIEW_JSON_GUIDE,
+        # ★ 안내문은 «부를 때» 고른다 — 진단 모드에서는 판정 지시가 빠진 판이 실린다.
+        ROLE_BINDING_REVIEW_GUIDE, combined_relation_review_guide(),
+        FUTURE_PLAN_REVIEW_GUIDE, REVIEW_JSON_GUIDE,
     ]
     # 단건·재검수 경로에도 실제 후보의 소유 장만 전달한다.
     section_ids = dict.fromkeys(_review_item_section(item) for item in items)
