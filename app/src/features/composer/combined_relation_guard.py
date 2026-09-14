@@ -28,6 +28,8 @@ from src.features.composer.combined_relation_constants import (
     COMBINED_RELATION_ENFORCED,
     COMBINED_RELATION_HINT_HEAD,
     COMBINED_RELATION_HINT_ITEM_TEMPLATE,
+    COMBINED_RELATION_REVIEW_GUIDE_ENFORCED,
+    COMBINED_RELATION_REVIEW_GUIDE_OBSERVED,
     COMBINED_RELATION_RULE_VERSION,
     COMBINED_RELATION_TRIGGER_RE,
     COMBINED_RELATION_WORD_KEY,
@@ -54,7 +56,21 @@ from src.features.composer.direct_support_constants import (
     SOURCE_SENTENCE_SPLIT_RE,
     WHITESPACE_RE,
 )
+from src.features.composer.grounding_constants import TABLE_SOURCE_ID
 from src.features.composer.role_binding_constants import CLAUSE_SPLIT_RE
+
+
+def combined_relation_review_guide() -> str:
+    """검수 프롬프트에 실을 결합 안내문 — 스위치를 «부를 때» 읽는다.
+
+    ★ 진단 모드에서는 판정 지시를 빼고 «항목을 내 달라»까지만 싣는다. 코드가 막지
+      않는데 프롬프트만 판정을 바꾸면 A단계가 관측이 아니라 조용한 차단이 된다
+      (설계안 §4, 독립 검토 §3-A). 모듈 전역을 그때그때 읽으므로 시험이 스위치를
+      갈아 끼우면 두 모드의 프롬프트를 각각 고정할 수 있다.
+    """
+
+    return (COMBINED_RELATION_REVIEW_GUIDE_ENFORCED if COMBINED_RELATION_ENFORCED
+            else COMBINED_RELATION_REVIEW_GUIDE_OBSERVED)
 
 
 def _surface(value: object) -> str:
@@ -229,6 +245,10 @@ def combined_relation_report(
       2단계 확장은 이 설계안의 범위 밖이다.
     ★ 발동 자리가 여럿이면 «자리마다» 뒷받침이 있어야 한다. 항목을 더 넣거나 같은
       쌍을 되풀이해도 «같은 자리»만 다시 덮을 뿐 다른 자리는 덮이지 않는다.
+    ★ 실적표 결속 원문(`TABLE_SOURCE_ID`)은 결합 근거의 «원문 후보»에서 뺀다
+      (설계안 §4). 그 원문은 후보가 인용해서 들어온 값이 아니라 보고서에 표가 있으면
+      모든 후보에 함께 실리는 값이라(`verify._grounding_candidate`), 그대로 두면
+      검수 응답이 근거 id 를 실적표로 적는 것만으로 1단계를 통과한다.
     """
 
     if cells is not None:
@@ -236,6 +256,13 @@ def combined_relation_report(
     triggers = combined_relation_triggers(text)
     if not triggers:
         return CombinedRelationReport("", (), COMBINED_RELATION_RULE_VERSION)
+    sources_mapping = {
+        source_id: source_text
+        for source_id, source_text in (
+            sources_mapping.items() if isinstance(sources_mapping, Mapping) else ()
+        )
+        if source_id != TABLE_SOURCE_ID
+    }
     claim_key = _surface(text)
     relations = [
         item for item in _combined_entries(entries)

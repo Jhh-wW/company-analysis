@@ -88,10 +88,9 @@ from src.features.composer.role_binding import role_binding_report, role_binding
 from src.features.composer.role_binding_constants import (
     ROLE_BINDING_REASON_TEXTS, ROLE_BINDING_REVIEW_GUIDE,
 )
-from src.features.composer.combined_relation_constants import (
-    COMBINED_RELATION_REVIEW_GUIDE,
+from src.features.composer.combined_relation_guard import (
+    combined_relation_report, combined_relation_review_guide,
 )
-from src.features.composer.combined_relation_guard import combined_relation_report
 from src.features.composer.verbatim_news import VerbatimNewsSource, verbatim_news_source
 from src.features.composer.body_review_constants import (
     BODY_REVIEW_COMPARISON_GUIDE,
@@ -1051,7 +1050,8 @@ def _build_grouped_review_prompt(
         GROUNDING_GUIDE,
         RELATION_REVIEW_GUIDE,
         ROLE_BINDING_REVIEW_GUIDE,
-        COMBINED_RELATION_REVIEW_GUIDE,
+        # ★ 안내문은 «부를 때» 고른다 — 진단 모드에서는 판정 지시가 빠진 판이 실린다.
+        combined_relation_review_guide(),
         FUTURE_PLAN_REVIEW_GUIDE,
         (
             "아래 자료는 장별 블록으로 격리했다. 각 후보는 반드시 같은 블록의 "
@@ -1814,7 +1814,8 @@ def _build_review_prompt(
     parts = [
         REVIEW_PROMPT_HEADER, REVIEW_PROMPT_RULES, BODY_REVIEW_COMPARISON_GUIDE,
         NEWS_REVIEW_GUIDE, GROUNDING_GUIDE, RELATION_REVIEW_GUIDE,
-        ROLE_BINDING_REVIEW_GUIDE, COMBINED_RELATION_REVIEW_GUIDE,
+        # ★ 안내문은 «부를 때» 고른다 — 진단 모드에서는 판정 지시가 빠진 판이 실린다.
+        ROLE_BINDING_REVIEW_GUIDE, combined_relation_review_guide(),
         FUTURE_PLAN_REVIEW_GUIDE, REVIEW_JSON_GUIDE,
     ]
     # 단건·재검수 경로에도 실제 후보의 소유 장만 전달한다.
