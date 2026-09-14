@@ -194,7 +194,8 @@ from src.features.composer.validate import V2ValidationError, validate_v2
 # ★ verify_sentences를 «일부러» 들여오지 않는다 — 요약 재검증 단계가 없어졌고,
 #   import가 남아 있으면 다음 사람이 무심코 다시 부를 자리가 된다.
 from src.features.composer.verify import verify_report
-from src.features.pipeline.port import Grade, Report
+from src.features.pipeline.port import FactRecord, Grade, Report
+from src.features.provenance.sources import Source
 # ★ 경계 메모 — ``composer/render.py``·``port.py`` 머리말은 「composer는
 #   report_standard를 import 하지 않는다」고 적어 두었고, 그래서 그 두 파일은
 #   장 id·태그를 «복사»해 쓴다. 여기(pipeline.py)는 그 규칙의 예외다:
@@ -1196,11 +1197,21 @@ def _finish_evidence_available(
     news_review_candidates: frozenset[str] | set[str],
     news_review_rejections: list,
     name_table: object | None = None,
+    verified_program_facts: Sequence[FactRecord] = (),
+    program_registry_sources: Sequence[Source] = (),
 ) -> V2RunOutput:
     """검증된 본문(또는 안내뿐인 본문)에서 AI 0회로 확보 근거 보고서를 마무리한다.
 
     ``tail_already_applied``가 참이면(FULL 후처리에서 내려온 본문) 수치 claim·
     보도표·조사 안내를 다시 붙이지 않는다 — 두 번 붙이면 같은 문장이 겹친다.
+
+    ★ ``verified_program_facts`` / ``program_registry_sources``를 «반드시» 그대로
+      받아 renderer에 넘긴다. FULL 후처리에서 내려온 본문에는 프로그램 등록부에
+      결속된 문장(``verified_fact_id``가 있는 비교·수치 문장)이 남아 있는데,
+      등록부를 빼고 렌더하면 renderer가 그 문장의 짝을 못 찾아
+      「프로그램 공개 문장과 비교 FactRecord가 다릅니다」로 멈춘다. 그러면
+      품질 하한 «무차감 중단»이 «생성 실패»로 뒤집혀 사용자 화면과 과금
+      판정이 함께 틀어진다. 등록부가 없는 AI 0회 경로는 기본값 ``()``로 둔다.
     """
 
     extra_reasons: list[str] = []
@@ -1252,6 +1263,8 @@ def _finish_evidence_available(
         citation_style=citation_style,
         company_id=str(company_id).strip(),
         release_mode="",
+        verified_program_facts=verified_program_facts,
+        program_registry_sources=program_registry_sources,
         name_table=name_table,
     )
     quality_candidate = build_generation_quality_candidate(rendered, final)
@@ -2130,6 +2143,19 @@ def run_v2(
             news_review_candidates=news_review_candidates,
             news_review_rejections=news_review_rejections,
             name_table=name_table,
+            # 본문은 FULL 작성본 그대로라 프로그램 등록부에 결속된 문장이 살아
+            # 있다. 같은 등록부를 넘겨야 renderer가 그 문장의 짝을 찾는다 —
+            # 빼면 무차감 중단이 생성 실패로 뒤집힌다.
+            verified_program_facts=(
+                prepared_evidence.program_facts
+                if prepared_evidence is not None
+                else ()
+            ),
+            program_registry_sources=(
+                prepared_evidence.program_sources
+                if prepared_evidence is not None
+                else ()
+            ),
         )
 
     # ②-d 첫 구조화 claim 슬라이스 — 검증된 DART 3개년 표의 원값에서

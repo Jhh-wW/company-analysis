@@ -34,6 +34,7 @@ from src.features.homepage.ir_pdf import FetchedIrHtml, FetchedIrPdf
 from src.features.homepage.wide_fetch import WideRawResponse
 from src.features.observability import lifecycle
 from src.features.pipeline import real
+from src.features.pipeline.constants import EVIDENCE_AVAILABLE_PUBLICATION_POLICY
 from src.features.pipeline.port import CompanyCard, Grade, Outcome, UserInput
 from src.features.provenance.sources import (
     exact_evidence_text_hash,
@@ -45,9 +46,6 @@ from src.features.sharelink import tracks as share_tracks
 from src.features.storage import db as storage_db
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_evidence.constants import ReleaseMode
-from src.shared.final_gate_diagnostics import (
-    FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR,
-)
 from src.shared.report_evidence.identity_verified_web import (
     parse_verified_dart_filing_official_web_binding,
     parse_verified_dart_filing_subdomain_binding,
@@ -57,6 +55,7 @@ from src.shared.report_generation.canonical import (
     report_verification_payload,
 )
 from src.shared.report_generation.models import exact_text_sha256
+from src.shared.report_quality.models import QualityProblemCode
 from src.web import (
     job_runtime,
     official_evidence_adapter,
@@ -1094,12 +1093,23 @@ def test_공개worker에서_매출원문_TYPED비교_FULL봉인_delivery재조�
 
 
 @pytest.mark.local_integration
-def test_실제FULL은_필수칸과_장당3이_보충뒤에도비면_무차감중단한다(
+def test_실제FULL은_필수칸과_장당3이_보충뒤에도비면_검증본문으로_부분보고서를_내고_차감한다(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     _isolated_company_catalog_state: None,
 ) -> None:
-    """외부 AI 응답만 얇게 하고 생산 assessor·receipt·회복은 그대로 탄다."""
+    """외부 AI 응답만 얇게 하고 생산 assessor·receipt·회복은 그대로 탄다.
+
+    ★ 계약 변경(PR #82, 2026-09-14 「확보한 근거를 보존해 대형 공시와 부분
+      보고서 생성」) — FULL이 보충 뒤에도 품질 하한(필수 칸 다양성·장당 최소
+      의미범주)을 못 넘기면, 예전처럼 «무과금 중단(GATE_STOPPED)» 하지 않고
+      검증된 본문 그대로 확보 근거 부분 보고서를 만들어 출고·과금한다
+      (``real.py`` D5 — 부분 보고서도 1 차감). 이 시험은 실제 FULL
+      파이프라인으로 그 새 계약을 관통시키되, 품질 하한이 «실제로 걸렸다»는
+      증거(``quality_observation``의 닫힌 코드와 해당 장 이름)까지 함께
+      단정해 계약 전환이 검사를 느슨하게 만든 것이 아니라 «걸렸을 때의
+      처리 방법만 바뀐 것»임을 지킨다.
+    """
 
     monkeypatch.setenv(PIPELINE_ENV, PIPELINE_REAL)
     monkeypatch.setenv(real.ENGINE_V2_ENV_NAME, real.ENGINE_V2_ENV_ON)
@@ -1150,19 +1160,47 @@ def test_실제FULL은_필수칸과_장당3이_보충뒤에도비면_무차감�
     asyncio.run(job_runtime._run_job(job))
 
     assert job.result is not None
-    assert job.result.outcome is Outcome.GATE_STOPPED
-    assert job.result.charged is False
-    assert job.result.report is None
-    assert job.result.final_gate_reason == (
-        FINAL_GATE_REASON_PUBLISH_BLOCKED_QUALITY_FLOOR
+    assert job.result.outcome is Outcome.REPORT, (
+        job.result.final_gate_reason,
+        job.result.message,
+        tuple(
+            (source.name, source.state, source.detail)
+            for source in job.result.sources
+        ),
     )
+    assert job.result.charged is True
+    assert job.result.final_gate_reason == ""
+    report = job.result.report
+    assert report is not None
+    assert report.grade is Grade.PARTIAL
+    assert report.publication_policy == EVIDENCE_AVAILABLE_PUBLICATION_POLICY
+    assert report.release_mode == ""
+    # ★ 품질 하한이 «실제로» 걸렸다는 증거 — 사람이 읽는 문구(언제든 화면
+    #   개선으로 바뀔 수 있다) 대신 닫힌 기계 코드로 확인한다. 실측:
+    #   business_model이 보충 뒤에도 서로 다른 의미 claim 범주(필수 칸)를
+    #   장당 최소치만큼 갖추지 못해 low_semantic_coverage가 남는다.
+    quality_observation = report.quality_observation
+    assert quality_observation is not None
+    assert (
+        QualityProblemCode.LOW_SEMANTIC_COVERAGE.value
+        in quality_observation.quality_problem_codes
+    ), quality_observation.quality_problem_codes
+    assert "business_model" in quality_observation.semantic_underfilled_sections
+    assert quality_observation.release_allowed is False
+    # 검증 본문이 실제로 보존됐는지 — 보충 뒤 남은 문장이 안내문으로
+    # 뭉개지지 않고 그대로 실렸다(실측: business_model 2문장).
+    business_model_section = next(
+        section for section in report.sections if section.cell == "business_model"
+    )
+    assert business_model_section.prose_lines
+    assert not business_model_section.empty_reason
     # primary 9+1 뒤 business_model 한 장만 1회 보충하고 검수 1회.
     # 세 번째 생성은 없으며, 실제 provider 사용량은 숨기지 않는다.
     assert len(external_services.client.messages.writer_prompts) == 10
     assert len(external_services.client.messages.reviewer_prompts) == 2
     assert job.result.cost_krw > 0
-    assert job.report_persisted is not True
-    assert job.delivery_persisted is not True
+    assert job.report_persisted is True
+    assert job.delivery_persisted is True
     assert job.slot_released is True
 
 
