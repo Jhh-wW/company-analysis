@@ -96,6 +96,7 @@ REVIEW_SCOPE_ITEMS = {
     #   모듈의 EXECUTIVE_STATUS_* 상수와 «반드시 같은 값»이어야 진단이 표에서
     #   새지 않는다.
     "executive_status_outdated": "임원 재직 확인",
+    "quantified_dividend_recipient_unbound": "집단 수와 배당 관계",
 }
 REVIEW_REASONS = (
     "semantic_grounding_missing", "semantic_grounding_invalid", *REVIEW_SCOPE_ITEMS,

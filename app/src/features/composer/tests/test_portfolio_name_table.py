@@ -26,10 +26,12 @@ from src.features.composer.portfolio_name_table import (
 )
 from src.shared.name_fragments.constants import (
     NAME_KIND_BRAND,
+    NAME_KIND_CONTRACT,
     NAME_KIND_IP,
     NAME_KIND_LABELS,
     NAME_KIND_PRODUCT,
     NAME_KIND_SEGMENT,
+    NAME_KIND_SUBSIDIARY,
     compose_name_location,
 )
 
@@ -88,10 +90,10 @@ def test_종류가_섞이면_대표IP_제품_브랜드_순으로_행이_선다()
 
     assert result.table is not None
     assert [row[0] for row in result.table.rows] == ["대표 IP", "제품", "브랜드"]
-    assert list(NAME_TABLE_ROW_LABELS) == ["대표 IP", "제품", "브랜드"]
+    assert list(NAME_TABLE_ROW_LABELS) == ["사업부문", "대표 IP", "제품", "브랜드"]
 
 
-def test_사업부문은_대표_이름이_아니라_표에_안_들어간다() -> None:
+def test_사업부문은_대표_이름으로_표에_들어간다() -> None:
     result = build_portfolio_name_table(
         (
             _fragment("3", NAME_KIND_SEGMENT, "가전부문"),
@@ -99,10 +101,23 @@ def test_사업부문은_대표_이름이_아니라_표에_안_들어간다() ->
         )
     )
 
+    assert result.table is not None
+    assert result.table.rows == (("사업부문", "가전부문·반도체부문"),)
+    assert result.table.row_fragment_ids == (("3", "4"),)
+
+
+def test_사업부문은_보존하되_종속회사와_계약은_대표_이름으로_승격하지_않는다() -> None:
+    result = build_portfolio_name_table(
+        (
+            _fragment("3", NAME_KIND_SEGMENT, "IT서비스"),
+            _fragment("4", NAME_KIND_SUBSIDIARY, "SK바이오팜"),
+            _fragment("5", NAME_KIND_CONTRACT, "주요 라이선스 계약"),
+        )
+    )
+
     assert result.table is None
-    # 대표 이름이 한 건도 아니므로 «사유도 없다» — 흔한 정상 상태다.
-    assert result.blocked_reason == ""
-    assert result.candidate_count == 0
+    assert result.candidate_count == 1
+    assert result.blocked_reason == BLOCKED_TOO_FEW_NAMES
 
 
 def test_캡션에_실린_이름_수가_붙는다() -> None:
@@ -378,10 +393,13 @@ def test_행_순서는_이름_표_파서의_종류_순서와_같다() -> None:
     from src.features.product_names.constants import NAME_FRAGMENT_KIND_ORDER
     from src.shared.name_fragments.constants import REPRESENTATIVE_NAME_KINDS
 
-    expected = tuple(
+    expected = (
+        NAME_KIND_LABELS[NAME_KIND_SEGMENT],
+        *tuple(
         NAME_KIND_LABELS[kind]
         for kind in NAME_FRAGMENT_KIND_ORDER
         if kind in REPRESENTATIVE_NAME_KINDS
+        ),
     )
 
     assert NAME_TABLE_ROW_LABELS == expected

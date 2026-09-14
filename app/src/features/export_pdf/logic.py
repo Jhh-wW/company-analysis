@@ -274,6 +274,28 @@ class PDFGenerationError(RuntimeError):
     """PDF를 만들지 못했을 때 웹 경계가 안전한 503으로 바꿀 공개 오류."""
 
 
+def _page_has_drawn_content(canvas: Canvas) -> bool:
+    """현재 페이지에 본문 그리기가 이미 있었는지 확인한다."""
+
+    operations = getattr(canvas, "_code", ())
+    # onPage 콜백이 그린 바닥글·표지 장식은 본문 이어짐의 증거가 아니다.
+    # _page_furniture()가 콜백 마지막에 본문 검사의 시작 위치를 남긴다.
+    start = int(getattr(canvas, "_page_content_code_start", 0))
+    for operation in operations[start:]:
+        if operation in {"q", "Q"}:
+            continue
+        parts = str(operation).split()
+        if len(parts) == 7 and parts[-1] == "cm":
+            try:
+                [float(value) for value in parts[:-1]]
+            except ValueError:
+                pass
+            else:
+                continue
+        return True
+    return False
+
+
 class _BrandedCanvas(Canvas):
     """기본 Helvetica 리소스조차 만들지 않는 Freesentation 전용 canvas."""
 
@@ -304,9 +326,10 @@ class _BrandedCanvas(Canvas):
           · ``_carry_section_name`` = «다음 쪽에 물려줄» 값. 이 쪽에서
             «마지막»으로 그려진 장 제목으로 매번 갱신한다.
           다음 쪽이 시작될 때(바로 아래) ``_current_section_name``을
-          ``_carry_section_name``으로 미리 채운다 — 그 쪽에 새 장 제목이
-          있으면 그 제목이 다시 덮어쓰고(그 쪽 자체 규칙 그대로), 없으면
-          (순수 이어짐 쪽) 이 값이 그대로 남는다. 실측: 8장 「인재상과
+          ``_carry_section_name``으로 미리 채운다 — 그 쪽에 본문보다 먼저
+          새 장 제목이 오면 그 제목이 다시 덮어쓰고(그 쪽 자체 규칙 그대로),
+          본문이 먼저 이어지면(혼합 쪽) 이 값이 그대로 남는다. 실측: 8장
+          「인재상과
           일하는 방식」·9장 「회사가 밝힌 차별점」이 한 쪽에 같이 실리면, 그
           쪽 자체는 여전히 8장을 보여주되(기존과 동일) 9장 본문만 이어지는
           다음 쪽은 이제 9장을 정확히 물려받는다(예전엔 8장에 멈춰 있었다).
@@ -406,7 +429,20 @@ class _SectionHeading(Flowable):
         # 쪽에 물려줄 값(_carry_section_name)은 매번(마지막 장까지) 갱신한다.
         setattr(canvas, "_carry_section_name", self.section_name)
         if not bool(getattr(canvas, "_page_section_seen", False)):
-            setattr(canvas, "_current_section_name", self.section_name)
+            # 앞 쪽에서 시작한 블록이 이 쪽에서 먼저 이어지면, 뒤늦게
+            # 배치된 다음 장 제목이 이 쪽의 첫 머리말을 덮어쓰지 않게 한다.
+            # 새 쪽에서 제목이 곧바로 그려지는 경우에는 ReportLab canvas의
+            # 현재 페이지 코드가 비어 있으므로 제목을 그대로 첫 머리말로 쓴다.
+            page_has_content = _page_has_drawn_content(canvas)
+            carried_name = str(getattr(canvas, "_current_section_name", ""))
+            continuation_fix_enabled = bool(
+                getattr(canvas, "_masthead_continuation_fix_enabled", True)
+            )
+            if (
+                not continuation_fix_enabled
+                or not (carried_name and page_has_content)
+            ):
+                setattr(canvas, "_current_section_name", self.section_name)
             setattr(canvas, "_page_section_seen", True)
         # 배지 글자(위첨자)가 네모 가운데에 오도록: 가로는 문단을 글자 폭만큼 오른쪽으로,
         # 세로는 네모를 실측 편차만큼 위로. 글자 순서·내용은 그대로라 추출 글자가 같다.
@@ -3172,6 +3208,11 @@ def _page_furniture(canvas: Canvas, doc: SimpleDocTemplate) -> None:
     report_date = cast(str, getattr(doc, "report_date", ""))
     author = cast(str, getattr(doc, "report_author", constants.PDF_AUTHOR))
     subject = cast(str, getattr(doc, "report_subject", title))
+    setattr(
+        canvas,
+        "_masthead_continuation_fix_enabled",
+        bool(getattr(doc, "masthead_continuation_fix_enabled", False)),
+    )
     canvas.saveState()
     canvas.setTitle(title)
     canvas.setAuthor(author)
@@ -3225,6 +3266,8 @@ def _page_furniture(canvas: Canvas, doc: SimpleDocTemplate) -> None:
             alignment="right",
         )
     canvas.restoreState()
+    # 이후 Flowable이 그리는 명령만 페이지 내용 이어짐으로 판정한다.
+    setattr(canvas, "_page_content_code_start", len(getattr(canvas, "_code", ())))
 
 
 def _content_manifest_metadata(
@@ -3343,7 +3386,10 @@ def _add_accessibility_metadata(
 def _build_pdf(report: Report) -> bytes:
     """``build_pdf``의 실제 생성 경로. 공개 경계에서 오류 문구를 정규화한다."""
 
-    if report.schema_version == ENGINE_V2_SCHEMA_VERSION:
+    masthead_continuation_fix_enabled = (
+        report.schema_version == ENGINE_V2_SCHEMA_VERSION
+    )
+    if masthead_continuation_fix_enabled:
         # v2(엔진 v2 composer): v1 canonical 투영(build_published_report)은
         # v2 구조(빈 fact_records·다른 검증 방식)와 맞지 않아 태우지 않는다.
         # composer 자체 3검사(validate_v2)만 다시 확인하고 검증된 Report를
@@ -3378,6 +3424,9 @@ def _build_pdf(report: Report) -> bytes:
     setattr(document, "report_date", _display_report_date(report))
     setattr(document, "report_author", author)
     setattr(document, "report_subject", subject)
+    # v1 canonical PDF는 기존 바이트 계약을 유지하고, v2 공개 투영만
+    # 본문 이어짐 페이지의 새 머리말 규칙을 사용한다.
+    setattr(document, "masthead_continuation_fix_enabled", masthead_continuation_fix_enabled)
     styles = _styles()
     story: list[Flowable] = _document_header(
         report, styles, document.width, projection=projection

@@ -174,21 +174,25 @@ def test_real이_run_v2에_넘기는_rewrite_recheck_클로저의_예약값을_�
 
     검수자들 = [항목 for 항목 in 만든호출자 if 항목["stage"] == "v2_review"]
     assert [항목["reserved_calls"] for 항목 in 검수자들] == [
-        0, 0, 0, _재작성예약, _필수후속,
+        0, 0, 0, _재작성예약, _필수후속, _필수후속,
     ], (
-        "v2_review 호출자 다섯 개(검수·최초검수·최초검수재요청·재작성·재검수)의 "
+        "v2_review 호출자 여섯 개(검수·최초검수·최초검수재요청·재작성·재검수·빈장검수)의 "
         f"예약값이 설계와 다릅니다: {[항목['reserved_calls'] for 항목 in 검수자들]}"
     )
     # 필수 단계는 아무것도 남기지 않는다 — 남기면 자기가 자기를 굶긴다.
     for 항목 in 만든호출자:
+        if 항목["ask"] is 받은인자["empty_recovery_writer_ask"]:
+            assert 항목["stage"] == "v2_compose"
+            assert 항목["reserved_calls"] == _재작성예약
+            continue
         if 항목["stage"] in ("v2_compose", "v2_diagram", "news_grounding"):
             assert 항목["reserved_calls"] == 0, (
                 f"필수 단계 {항목['stage']} 가 예약을 걸었습니다"
             )
 
-    # ★ 아래 동일성 단정이 뜻을 가지려면 다섯 호출자가 «서로 다른 객체»여야
+    # ★ 아래 동일성 단정이 뜻을 가지려면 여섯 호출자가 «서로 다른 객체»여야
     #   한다. 하나라도 같아지면 인자를 뒤바꿔 넘겨도 초록이 되므로 먼저 못 박는다.
-    assert len({id(항목["ask"]) for 항목 in 검수자들}) == 5, (
+    assert len({id(항목["ask"]) for 항목 in 검수자들}) == 6, (
         "v2_review 호출자들이 같은 객체입니다 — 이 시험은 배선을 구분하지 못합니다"
     )
 
@@ -215,6 +219,7 @@ def test_real이_run_v2에_넘기는_rewrite_recheck_클로저의_예약값을_�
     assert 받은인자["reviewer_ask"] is 검수자들[0]["ask"]
     assert 받은인자["initial_reviewer_ask"] is 검수자들[1]["ask"]
     assert 받은인자["rewrite_ask"] is not 받은인자["reviewer_ask"]
+    assert 받은인자["empty_recovery_reviewer_ask"] is 검수자들[-1]["ask"]
 
 
 def test_최초검수_재요청_호출자만_보낼때_푸는_상한을_받는다(

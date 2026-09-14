@@ -4,6 +4,8 @@ import re
 from collections.abc import Mapping
 
 from src.shared.report_quality.composition_diagnostic_constants import (
+    BODY_MACHINE_STEP, BODY_DISPOSITION_STEP, BODY_SECTION_IDS, BODY_DISPOSITIONS,
+    EMPTY_RECOVERY_STEP, EMPTY_RECOVERY_STATES, EMPTY_RECOVERY_ERRORS,
     DERIVED_RATIO_DECIMAL_FIELDS,
     DERIVED_RATIO_FINGERPRINT_FIELD,
     DERIVED_RATIO_KINDS,
@@ -161,8 +163,73 @@ def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], 
             _protocol(record) if step == PROTOCOL_STEP else
             _summary(record) if step == SUMMARY_STEP else
             _diagram_rows(record) if step == DIAGRAM_ROW_COUNT_STEP else
-            _derived_ratio(record) if step == DERIVED_RATIO_STEP else None
+            _derived_ratio(record) if step == DERIVED_RATIO_STEP else
+            _body_machine(record) if step == BODY_MACHINE_STEP else
+            _body_disposition(record) if step == BODY_DISPOSITION_STEP else
+            _empty_recovery(record) if step == EMPTY_RECOVERY_STEP else None
         )
         if normalized is not None:
             result.append(normalized)
     return tuple(result)
+
+
+def _section_ids(value: object, *, summary: bool = False) -> list[str] | None:
+    if not isinstance(value, (tuple, list)):
+        return None
+    if any(not isinstance(item, str) or item not in BODY_SECTION_IDS
+           or (item == "summary" and not summary) for item in value):
+        return None
+    return list(dict.fromkeys(value))
+
+
+def _body_machine(record: Mapping) -> dict[str, object] | None:
+    counts = record.get("장별")
+    if not isinstance(counts, Mapping):
+        return None
+    clean = {}
+    for section_id, values in counts.items():
+        if (not isinstance(section_id, str) or section_id not in BODY_SECTION_IDS
+                or not isinstance(values, Mapping)):
+            return None
+        draft, passed = values.get("초안"), values.get("기계통과")
+        if not _count(draft) or not _count(passed) or passed > draft:
+            return None
+        clean[section_id] = {"초안": draft, "기계통과": passed}
+    return {"step": BODY_MACHINE_STEP, "장별": clean}
+
+
+def _body_disposition(record: Mapping) -> dict[str, object] | None:
+    empty = _section_ids(record.get("장별빈본문"), summary=True)
+    rewrite = record.get("문장재작성허용")
+    counts = record.get("판정별")
+    if empty is None or type(rewrite) is not bool or not isinstance(counts, Mapping):
+        return None
+    if any(not isinstance(key, str) or key not in BODY_DISPOSITIONS or not _count(value)
+           for key, value in counts.items()):
+        return None
+    return {"step": BODY_DISPOSITION_STEP, "장별빈본문": empty,
+            "문장재작성허용": rewrite, "판정별": dict(counts)}
+
+
+def _empty_recovery(record: Mapping) -> dict[str, object] | None:
+    state = record.get("상태")
+    targets = _section_ids(record.get("대상장"))
+    if not isinstance(state, str) or state not in EMPTY_RECOVERY_STATES or targets is None:
+        return None
+    result = {"step": EMPTY_RECOVERY_STEP, "상태": state, "대상장": targets}
+    if state == "작성완료":
+        count = record.get("작성문장수")
+        if not _count(count):
+            return None
+        result["작성문장수"] = count
+    if state == "검수완료":
+        recovered = _section_ids(record.get("복구장"))
+        if recovered is None or not set(recovered) <= set(targets):
+            return None
+        result["복구장"] = recovered
+    if state == "호출중단":
+        error = record.get("오류종류")
+        if not isinstance(error, str) or error not in EMPTY_RECOVERY_ERRORS:
+            return None
+        result["오류종류"] = error
+    return result

@@ -14,6 +14,7 @@ from src.features.composer.constants import (
 from src.features.composer.logic import build_section_prompt, compose_sections
 from src.features.composer.port import filing_meta_from_raw
 from src.features.composer.portfolio_names import (
+    PORTFOLIO_NAME_LABELS,
     MIN_REPRESENTATIVE_NAMES_FOR_CARD,
     UNUSED_REPRESENTATIVE_NAMES_STEP,
     representative_names,
@@ -418,7 +419,7 @@ def test_실측_원문의_대표IP가_3장_packet과_작가_프롬프트까지_�
     assert len(name_fragments) <= added
     labelled = representative_names(portfolio_packet.fragments)
     assert len(labelled) >= MIN_REPRESENTATIVE_NAMES_FOR_CARD
-    assert {label for label, _name in labelled} <= set(REPRESENTATIVE_NAME_LABELS)
+    assert {label for label, _name in labelled} <= set(PORTFOLIO_NAME_LABELS)
 
     # (c) 그 조각과 안내문 문장이 실제 작가 프롬프트에 실리는가.
     prompt = build_section_prompt(
@@ -589,8 +590,8 @@ def test_대표이름_라벨이_실제_생산자와_같다() -> None:
     assert produced == set(REPRESENTATIVE_NAME_LABELS)
 
 
-def test_사업부문_라벨은_대표이름으로_세지_않는다() -> None:
-    """부문명만 있는 카드는 이 규칙을 충족하지 못한다 — 그 경계를 못 박는다."""
+def test_segment_label_is_available_only_to_portfolio_names() -> None:
+    """사업부문은 제품 종류를 바꾸지 않고 3장 대표 표에서 함께 소비한다."""
 
     made = name_candidate_fragments(
         (
@@ -610,9 +611,10 @@ def test_사업부문_라벨은_대표이름으로_세지_않는다() -> None:
     )
     location = str(made[0]["원문위치"])
 
-    # 생산자는 라벨을 읽지만 소비자(3장 판정)는 대표 이름으로 세지 않는다.
+    # 공유 제품 이름의 종류를 넓히지 않고 3장 소비 범위에만 더한다.
     assert parse_name_location(location) == (NAME_KIND_LABELS["segment"], "가나다부문")
     assert NAME_KIND_LABELS["segment"] not in REPRESENTATIVE_NAME_LABELS
+    assert NAME_KIND_LABELS["segment"] in PORTFOLIO_NAME_LABELS
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -664,7 +666,7 @@ def test_다른_업종_원문도_3장_packet에_대표이름을_싣는다(스위
     labelled = representative_names(portfolio_packet.fragments)
 
     assert len(labelled) >= MIN_REPRESENTATIVE_NAMES_FOR_CARD, step
-    assert {label for label, _name in labelled} <= set(REPRESENTATIVE_NAME_LABELS)
+    assert {label for label, _name in labelled} <= set(PORTFOLIO_NAME_LABELS)
 
     prompt = build_section_prompt(
         "가나다회사",

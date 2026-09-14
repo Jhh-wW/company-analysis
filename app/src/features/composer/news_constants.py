@@ -17,6 +17,7 @@ NEWS_RESEARCH_UNKNOWN_NOTICE = "확인 범위: 뉴스 조사 완료 상태를 �
 NEWS_BODY_REJECTION_NOTICE = "확인 범위: 이 장에서 본문 검수·공개 기준을 통과하지 못한 뉴스 후보는 본문과 뉴스 목록에서 제외했습니다. 관련 보도가 없다는 뜻은 아닙니다."
 NEWS_VALID_EXCLUSION_REASONS = frozenset({"중복", "장무관", "시간불일치", "공시충돌", "실질정보없음"})
 NEWS_ATTRIBUTION_TEMPLATE = "{date} {publisher} 보도에 따르면, "
+NEWS_KOREAN_SYLLABLE_PATTERN = r"[가-힣]"
 NEWS_PERIOD_MONTHS = (12, 24, 36)
 NEWS_BODY_DUPLICATE_PREVIEW_CHARS = 160
 NEWS_BODY_REFERENCE_SUFFIX = "… (전체 보도 근거는 이 장 본문 참조)"
@@ -27,6 +28,7 @@ NEWS_REJECTION_REASONS = {
     "mixed_sources": "한 문장에 공시와 뉴스 인용이 섞여 보도 범위를 확정하지 못했습니다.",
     "attribution_invalid": "확인된 보도 날짜·발행처와 문장의 출처 표기가 일치하지 않습니다.",
     "unsupported_number": "보도 문장에 인용 원문의 수치 범위를 벗어난 숫자가 있습니다.",
+    "korean_body_unverified": "원문을 설명하는 한국어 본문이 확인되지 않아 외국어 원문을 그대로 싣지 않았습니다.",
     "duplicate_source": "같은 기사의 같은 원문 사실을 인용한 검수 통과 문장이 이미 있어 대체 후보를 중복 공개하지 않았습니다.",
 }
 NEWS_RESEARCH_NOTICES = {
@@ -40,6 +42,8 @@ NEWS_RESEARCH_NOTICES = {
 NEWS_WRITER_GUIDE = """
 뉴스는 공시를 보강하는 보조 근거다. 기사 날짜·발행처·보도종류·사건시점을 읽고,
 유용한 서로 다른 사업 사실을 해당 장의 설명에 통합하라. 기사 수나 인용 수 할당량은 없다.
+외국어 기사도 본문은 한국어로 작성하라. 주체·수치·단위·시점을 보존하고,
+생략된 주어나 수치의 항목을 확인할 수 없는 문장은 추측해서 옮기지 마라.
 뉴스로 법인 정체, 공식 수치표, 9장 공식 비교를 대체하지 마라. 공시와 다른 수치는
 덮어쓰지 말고 기준시점·보도 출처를 구분하라. 발표한 계획을 실현된 사실로 쓰지 마라.
 뉴스 수치는 정확 원문이 뒷받침할 때만 허용한다. 뉴스 문장은

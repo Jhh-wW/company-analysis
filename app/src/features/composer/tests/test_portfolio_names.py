@@ -49,6 +49,7 @@ from src.features.composer.portfolio_name_table import (
 )
 from src.features.composer.portfolio_names import (
     MIN_REPRESENTATIVE_NAMES_FOR_CARD,
+    PORTFOLIO_NAME_LABELS,
     portfolio_name_usage,
     representative_names,
 )
@@ -276,15 +277,16 @@ def test_원문위치_표기에서_종류와_이름을_읽는다() -> None:
     assert parse_name_location(location) == (PRODUCT_LABEL, "가람메모리 D9")
 
 
-def test_대표_이름이_아닌_표기는_읽지_않는다() -> None:
-    """사업부문·종속회사·주요 계약은 이 규칙의 충족 근거가 아니다."""
+def test_사업부문은_대표_이름으로_읽되_공시_라벨을_보존한다() -> None:
+    """사업부문은 운영 축을 보여 주므로 대표 이름 후보로 읽는다."""
 
     segment_location = _location(
         "가. 주요 제품 및 서비스의 현황", 3, SEGMENT_LABEL, "메모리"
     )
-    # 표기 자체는 읽히지만 «대표 이름» 라벨이 아니라 충족 근거로 세지 않는다.
+    # shared의 공통 집합은 유지하되, 3장 대표 이름 feature는 사업부문을 소비한다.
     assert parse_name_location(segment_location) == (SEGMENT_LABEL, "메모리")
     assert SEGMENT_LABEL not in REPRESENTATIVE_NAME_LABELS
+    assert SEGMENT_LABEL in PORTFOLIO_NAME_LABELS
     assert representative_names(
         (
             CollectedFragment(
@@ -294,7 +296,7 @@ def test_대표_이름이_아닌_표기는_읽지_않는다() -> None:
                 location=segment_location,
             ),
         )
-    ) == ()
+    ) == ((SEGMENT_LABEL, "메모리"),)
     assert parse_name_location("사업의 내용") is None
     assert parse_name_location("") is None
 

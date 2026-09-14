@@ -6,7 +6,9 @@
 
 from dataclasses import replace
 
-from src.core.citations import citation_number, split_citation_markers, split_interpretation_marker
+from src.core.citations import (
+    INTERPRETATION_SUFFIX, citation_number, split_citation_markers, split_interpretation_marker,
+)
 from src.features.pipeline.constants import EVIDENCE_AVAILABLE_PUBLICATION_POLICY
 from src.features.pipeline.port import Grade, Report, ReportSection, ReportTable
 from src.features.pipeline.supplementary_fact_binding import bound_supplementary_fact_sources
@@ -19,6 +21,78 @@ from src.features.pipeline.supplementary_research_runtime_constants import (
 )
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
 from src.shared.report_evidence.source_verification import SourceVerifier
+from src.shared.report_quality.output_validation import _cited_numbers_in_body
+
+
+def _displayed_numbers(report: Report) -> set[str]:
+    """출고 검증과 같은 본문·요약·표의 공개 인용 위치만 읽는다."""
+    return {str(number) for number in _cited_numbers_in_body(report, citation_number)}
+
+
+def prune_unused_supplementary_citations(
+    report: Report, *, numbers_by_source_id: dict[str, str] | None = None,
+) -> Report:
+    """공개 사용과 잔여 사실 참조가 모두 없는 부록만 제거한다. 새 인용은 만들지 않는다."""
+    displayed = _displayed_numbers(report)
+    referenced_ids = {source_id for fact in report.fact_records
+                      for source_id in (fact.source_id, *fact.supporting_source_ids)}
+    numbers = numbers_by_source_id or {
+        source.source_id: str(getattr(source, "number", 0)) for source in report.citations
+    }
+    citations = [source for source in report.citations
+                 if getattr(source, "provenance_role", "citation") != "citation"
+                 or source.source_id in referenced_ids or numbers.get(source.source_id) in displayed]
+    kept_numbers = {numbers.get(source.source_id) for source in citations}
+    source_grades = {number: grades for number, grades in report.source_grades.items()
+                     if number in kept_numbers}
+    if citations == report.citations and source_grades == report.source_grades:
+        return report
+    return replace(report, citations=citations, source_grades=source_grades)
+
+
+def reconcile_supplementary_citations(report: Report, *, source_verifier: SourceVerifier) -> Report:
+    """이미 걸러진 본문에 맞춰 인용 표시와 부록만 정리한다. 출처를 재서명하지 않는다."""
+    if not report.citations:
+        return replace(report, source_grades={}) if report.source_grades else report
+    registry_result = _citation_registry(report, source_verifier)
+    if registry_result is None:
+        raise ValueError("공개 인용 정리 전에 출처 등록부 검사가 필요합니다")
+    registry, by_id, _by_number = registry_result
+    facts = {fact.fact_id: fact for fact in report.fact_records}
+    displayed = _displayed_numbers(report)
+    sections = []
+    for section in report.sections:
+        prose = []
+        for text, cite in section.prose_lines:
+            body, interpreted = split_interpretation_marker(text)
+            parts = split_citation_markers(body)
+            numbers = {str(part.number) for part in parts if part.number > 0}
+            claim = _normalized("".join(part.text for part in parts))
+            ids = {fact_id for fact_id in section.fact_ids
+                   if fact_id in facts and facts[fact_id].section_owner == section.cell
+                   and _normalized(facts[fact_id].claim) == claim}
+            if not numbers and not citation_number(cite) and len(ids) == 1:
+                bindings = bound_supplementary_fact_sources(
+                    facts[next(iter(ids))], registry=registry, source_verifier=source_verifier,
+                    reference_date=report.as_of_date,
+                )
+                bound_numbers = {str(source.number) for source in bindings}
+                # 앞 문장의 제거로 생략 인용만 남은 경우, 잠긴 사실과 기존
+                # 봉인 출처에 다시 결속되는 번호만 표시한다. 새 근거는 붙이지 않는다.
+                if bound_numbers - displayed:
+                    markers = " ".join(f"[{number}]" for number in sorted(bound_numbers, key=int))
+                    text = body.rstrip() + " " + markers + (INTERPRETATION_SUFFIX if interpreted else "")
+                    displayed.update(bound_numbers)
+            prose.append((text, cite))
+        sections.append(
+            replace(section, prose_lines=prose, prose_paragraphs=[text for text, _cite in prose])
+            if prose != section.prose_lines else section
+        )
+    # 출처 DTO와 번호·봉인은 그대로 둔다. 숨은 회사 신원 증명도 보존한다.
+    numbers = {source.source_id: str(by_id[source.source_id][1].number if source.source_id in by_id
+                                   else getattr(source, "number", 0)) for source in report.citations}
+    restored = replace(report, sections=sections) if sections != report.sections else report
+    return prune_unused_supplementary_citations(restored, numbers_by_source_id=numbers)
 
 
 def filter_supplementary_research_report(
@@ -181,17 +255,22 @@ def filter_supplementary_research_report(
                    and citation_number(cite) not in invalid_numbers],
             empty_reason=(section.empty_reason if prose or tables else SUPPLEMENTARY_RESEARCH_FILTER_NOTICE),
         ))
-    if not invalid_ids and not rejected_lines and sections == report.sections:
+    content_changed = bool(invalid_ids or rejected_lines or sections != report.sections)
+    summaries = ([item for item in report.summary_items
+                  if item.fact_ids and not invalid_ids.intersection(item.fact_ids)]
+                 if content_changed else report.summary_items)
+    candidate = (replace(report, sections=sections, summary_items=summaries,
+                         fact_records=[fact for fact in report.fact_records if fact.fact_id not in invalid_ids],
+                         citations=[source for source in report.citations
+                                    if getattr(source, "source_id", "") not in invalid_sources])
+                 if content_changed else report)
+    reconciled = reconcile_supplementary_citations(candidate, source_verifier=source_verifier)
+    if not content_changed and reconciled is report:
         return report
     # 원래 FULL 봉인은 내용 변경 뒤 재사용할 수 없다. 부분 보고서라는 사실과
     # 원 실행의 비용·생성 지표는 보존하고, 공개 승인·캐시 권한만 거둔다.
     return replace(
-        report, sections=sections,
-        fact_records=[fact for fact in report.fact_records if fact.fact_id not in invalid_ids],
-        summary_items=[item for item in report.summary_items
-                       if item.fact_ids and not invalid_ids.intersection(item.fact_ids)],
-        citations=[source for source in report.citations
-                   if getattr(source, "source_id", "") not in invalid_sources],
+        reconciled,
         grade=Grade.PARTIAL, publication_policy=EVIDENCE_AVAILABLE_PUBLICATION_POLICY,
         release_mode="", quality_contract_version="", safety_decision="",
         public_structure_manifest="", public_projection=None, generation_evidence=None,

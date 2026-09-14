@@ -294,13 +294,24 @@ def test_실시간성능시험_외부호출잠김_미리보기면_예열도_갱�
         ), "외부 호출 잠김 미리보기인데 카탈로그 함수가 불렸다(DART 다운로드가 나갔다)"
 
 
-def test_DART_API_KEY가_없으면_예열도_갱신도_건너뛴다(monkeypatch) -> None:
+def test_DART_API_KEY가_없으면_예열도_갱신도_건너뛴다(tmp_path, monkeypatch) -> None:
     """P2-3: 키가 아예 없는 로컬 실행(예: 배포 리허설 초기 설정)에서 매시간 실패 경고가 쌓이지 않게 한다."""
 
     called = threading.Event()
     monkeypatch.setattr(real, "_company_catalog", lambda: (called.set(), ())[1])
     monkeypatch.setenv(PIPELINE_ENV, PIPELINE_REAL)
     monkeypatch.delenv("DART_API_KEY", raising=False)
+    # 운영 경로는 ``analysis_engine/.env``를 읽지만, 이 시험이 개발 PC의
+    # 실제 .env를 읽으면 키가 없어야 한다는 조건이 깨진다. 빈 임시 dotenv를
+    # 명시해 외부 비밀값과 무관하게 실제 dotenv 연결만 검증한다.
+    empty_env = tmp_path / "empty.env"
+    empty_env.write_text("", encoding="utf-8")
+    original_key_check = real.dart_api_key_configured
+
+    def key_missing() -> bool:
+        return original_key_check(dotenv_path=empty_env)
+
+    monkeypatch.setattr(real, "dart_api_key_configured", key_missing)
 
     with TestClient(app):
         assert not called.wait(timeout=0.3), "DART_API_KEY가 없는데 카탈로그 함수가 불렸다"

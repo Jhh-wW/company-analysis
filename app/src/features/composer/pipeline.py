@@ -23,7 +23,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Optional
@@ -108,6 +108,10 @@ from src.features.composer.dedupe import (
 )
 from src.features.composer.news_usage import supplement_news_candidates, retain_verified_news, news_usage_diagnostics, append_research_notice, news_citation_ids
 from src.features.composer.review_outcomes import final_review_outcomes
+from src.features.composer.empty_section_recovery import (
+    recovery_evidence, recover_empty_sections, rejected_sentence_fingerprint,
+)
+from src.features.composer.empty_section_recovery_constants import EMPTY_RECOVERY_STEP, MAX_EMPTY_RECOVERY_SECTIONS
 from src.features.composer.diagram_check import check_diagram_numbers, check_diagrams
 from src.features.composer.dup_detect import CONFIDENCE_CONFIRMED, find_numeric_duplicates
 from src.features.composer.extractive_summary import select_extractive_summary
@@ -1402,6 +1406,9 @@ def run_v2(
     rewrite_ask: Optional[AskFn] = None,
     recheck_ask: Optional[AskFn] = None,
     diagram_ask: Optional[AskFn] = None,
+    empty_recovery_writer_ask: Optional[AskFn] = None,
+    empty_recovery_reviewer_ask: Optional[AskFn] = None,
+    empty_recovery_can_start: Optional[Callable[[], bool]] = None,
     corp_type: str = "",
     grade: Grade = Grade.PARTIAL,
     generated_at: str = "",
@@ -1758,6 +1765,9 @@ def run_v2(
                         rewrite_ask=rewrite_ask,
                         recheck_ask=recheck_ask,
                         diagram_ask=diagram_ask,
+                        empty_recovery_writer_ask=empty_recovery_writer_ask,
+                        empty_recovery_reviewer_ask=empty_recovery_reviewer_ask,
+                        empty_recovery_can_start=empty_recovery_can_start,
                         corp_type=corp_type,
                         grade=Grade.PARTIAL,
                         generated_at=generated_at,
@@ -1789,6 +1799,13 @@ def run_v2(
                 )
 
     baseline_date = as_of_date or None
+    recovery_targets: tuple[str, ...] = ()
+    recovery_sources = {}
+    recovery_enabled = (
+        release_mode is ReleaseMode.SHADOW and (fallback_allowed or evidence_availability is not None)
+        and empty_recovery_writer_ask is not None and empty_recovery_reviewer_ask is not None
+        and empty_recovery_can_start is not None
+    )
     try:
         # ① 본문 9장 작성 (작가)
         draft = compose_sections(
@@ -1852,6 +1869,22 @@ def run_v2(
         else:
             diagram_problems = ()
         draft_body_count = _total_sentences(draft)  # 이 시점 summary는 빈 튜플이다
+        rewrite_gate = None
+        if recovery_enabled:
+            recovery_sources = recovery_evidence(_normalize_fragments(verification_fragments))
+            attempted = {section.section_id for section in draft.sections if section.sentences}
+
+            def rewrite_gate(empty_ids: tuple[str, ...]) -> bool:
+                nonlocal recovery_targets
+                eligible = tuple(section_id for section_id in SECTION_IDS
+                                 if section_id in empty_ids and section_id in attempted
+                                 and section_id in recovery_sources)[:MAX_EMPTY_RECOVERY_SECTIONS]
+                if eligible and empty_recovery_can_start():
+                    recovery_targets = eligible
+                    composition_diagnostics.append({"step": EMPTY_RECOVERY_STEP, "상태": "문장재작성대신예약",
+                                                    "대상장": list(eligible)})
+                    return False
+                return True
 
         # ② 본문 검증 (검수 — 문장 단위 제거/강등만, 장 삭제 없음)
         # ★ 보고서 기준일을 검증기에 함께 넘긴다. 이 값이 없으면 임원 재직 가드가
@@ -1867,6 +1900,7 @@ def run_v2(
                 initial_retry_ask=initial_retry_reviewer_for_run,
                 rewrite_ask=rewrite_for_run,
                 recheck_ask=recheck_for_run,
+                sentence_rewrite_gate=rewrite_gate,
                 protocol_diagnostics=composition_diagnostics,
                 baseline_date=baseline_date,
             )
@@ -1938,6 +1972,38 @@ def run_v2(
     )
     if moved_sentences:
         logger.info("장 간 중복 %d문장을 소유 장으로 모았습니다", moved_sentences)
+    if recovery_targets and ai_failure is None and not rewrite_failures:
+        still_empty = {section.section_id for section in verified.sections if not section.sentences}
+        targets = tuple(section_id for section_id in recovery_targets if section_id in still_empty)
+        if targets and empty_recovery_can_start():
+            try:
+                verified = recover_empty_sections(
+                    company_name, verified, targets=targets, evidence=recovery_sources,
+                    writer=empty_recovery_writer_ask, reviewer=empty_recovery_reviewer_ask,
+                    performance_table=performance_table, baseline_date=baseline_date,
+                    diagnostics=review_diagnostics, protocol_diagnostics=composition_diagnostics,
+                    comparison_fragments=_normalize_fragments(verification_fragments),
+                    rejected_fingerprints={
+                        section.section_id: frozenset(rejected_sentence_fingerprint(sentence.text)
+                                                     for sentence in section.sentences)
+                        for section in draft.sections if section.section_id in targets
+                    },
+                )
+            except AskFatalError as error:
+                if _fallback_blocked(error):
+                    raise
+                # 선택적 복구 실패가 이미 검증된 본문을 없애지 않게 한다.
+                composition_diagnostics.append({"step": EMPTY_RECOVERY_STEP, "상태": "호출중단",
+                                                "대상장": list(targets), "오류종류": (
+                                                    "호출한도" if error.call_limit else
+                                                    "요청예산" if error.request_budget else "제공자오류")})
+            except (TypeError, ValueError):
+                composition_diagnostics.append({"step": EMPTY_RECOVERY_STEP, "상태": "복구형식실패",
+                                                "대상장": list(targets)})
+            draft_body_count += sum(
+                item.get("작성문장수", 0) for item in composition_diagnostics
+                if item.get("step") == EMPTY_RECOVERY_STEP and item.get("상태") == "작성완료"
+            )
     if prepared_evidence is not None:
         _assert_composed_report_evidence_invariant(
             verified,
