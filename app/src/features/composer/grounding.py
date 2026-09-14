@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from src.features.composer.direct_support import claims_cause, direct_support_problem, support_entries_by_number
 from src.features.composer.direct_support_constants import RELATION_KEY
+from src.features.composer.combined_relation_guard import (
+    combined_relation_hint, combined_relation_problem, combined_relation_triggers,
+)
 from src.features.composer.future_plan_constants import FUTURE_KEY
 from src.features.composer.grounding_constants import REVIEW_SUPPORT_CANDIDATE_VERDICTS
 
@@ -833,15 +836,20 @@ def grounding_hint(
       어느 낱말 때문에 어떤 유형이 필요한지, 어느 자리의 요구를 제외했는지를 후보
       밑에 그대로 적는다. ``verbatim_source`` 는 검수 단계가 수집 객체로 증명한
       «원문 그대로인 보도» 문맥이며, 판정 쪽에도 같은 값이 간다.
+    ★ 수량 범위 결속(«결합» 유형)도 같은 «관계» 배열을 쓴다. 발동 자리는 판정과
+      «같은 함수»(`combined_relation_triggers`)로 계산한다 — 도식 후보(cells 있음)는
+      1단계에서 발동하지 않는다(combined_relation_report와 같은 계약).
     """
 
     required = grounding_requirements(text, tuple(sources.values()))
     binding = role_binding_requirements(text, sources, cells, verbatim_source)
-    if claims_cause(text) or binding.required:
+    triggers = combined_relation_triggers(text) if cells is None else ()
+    if claims_cause(text) or binding.required or triggers:
         required += (RELATION_KEY,)
     return (
         "  추가 검증 필요: " + (", ".join(required) or "없음") + "\n"
         + role_binding_hint_lines(binding, cells is not None)
+        + combined_relation_hint(triggers)
     )
 
 
@@ -853,6 +861,7 @@ def constrain_verdicts(
     cells_by_number: Mapping[int, Sequence[str]] | None = None,
     baseline_date: str | None = None,
     verbatim_by_number: Mapping[int, VerbatimNewsSource] | None = None,
+    confirmed_prose_numbers: frozenset[int] = frozenset(),
 ) -> tuple[dict[int, str], dict[int, str]]:
     """같은 검수 응답의 근거를 실제 입력에 결속한다. 추가 AI 호출은 없다.
 
@@ -864,6 +873,10 @@ def constrain_verdicts(
     판정한다(§executive_status_constants 참고). 기존 호출자는 그대로 동작한다.
     ``verbatim_by_number`` 는 검수 단계가 수집 객체로 증명한 «원문 그대로인 보도»
     문맥이다. 역할·과금 결속에만 쓰이며, 안내 생성과 같은 값을 받아야 한다.
+    ``confirmed_prose_numbers``는 수량 범위 결속(«결합» 유형)만 거른다 — 「해석」
+    등급·구조화 주장·인용 없는 후보에는 이 검사를 걸지 않는다(설계안 §4). 인과·역할·
+    과금 검사는 이 목록과 무관하게 그대로 전체 후보에 돈다 — 그쪽은 이 설계안이
+    손대는 범위가 아니다.
     """
     from src.features.composer.logic import extract_json_payload
     # verify.py의 검수 파서와 같은 번호 보정 규칙을 쓴다 — 이 함수는 raw를
@@ -906,6 +919,10 @@ def constrain_verdicts(
             )
             or executive_status_problem(
                 text, sources, cells, baseline_date=baseline_date,
+            )
+            or (
+                combined_relation_problem(text, sources, relation_evidence.get(number), cells)
+                if number in confirmed_prose_numbers else ""
             )
         )
         if problem:

@@ -71,8 +71,11 @@ RELATION_TYPE_KEY: Final[str] = "유형"
 #: 관계 유형의 닫힌 목록. 이 밖의 값은 받지 않는다.
 RELATION_CAUSAL: Final[str] = "인과"
 RELATION_CONCESSIVE: Final[str] = "양보"
+#: ⚠️ 「결합」을 빼면 role_binding._unknown_type_entry_count 가 그 항목을 계약 밖으로
+#:   세어, 역할·과금 요구가 없는 후보에서 결합 항목을 냈다는 이유만으로 역할 가드가
+#:   그 문장을 탈락시킨다(combined_relation_constants.py §3.4 참고).
 RELATION_TYPES: Final[tuple[str, ...]] = (
-    RELATION_CAUSAL, RELATION_CONCESSIVE, "역할", "과금",
+    RELATION_CAUSAL, RELATION_CONCESSIVE, "역할", "과금", "결합",
 )
 #: 관계 항목이 «무엇이 원인이고 무엇이 결과인지»를 스스로 밝히게 하는 칸.
 #:
