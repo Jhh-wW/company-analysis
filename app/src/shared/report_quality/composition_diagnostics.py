@@ -25,6 +25,7 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     SUMMARY_COUNT_FIELDS,
     SUMMARY_STAGES,
     SUMMARY_STEP,
+    EMPTY_RECOVERY_RESPONSE_SHAPES, EMPTY_RECOVERY_STAGE_COUNT_KEYS,
 )
 
 
@@ -259,16 +260,36 @@ def _empty_recovery(record: Mapping) -> dict[str, object] | None:
         if not _count(extra):
             return None
         result["요청밖장수"] = extra
+    if state == "작성완료" and "응답꼴" in record:
+        shape = record.get("응답꼴")
+        if not isinstance(shape, str) or shape not in EMPTY_RECOVERY_RESPONSE_SHAPES:
+            return None
+        result["응답꼴"] = shape
     if state == "작성형식실패":
         attempts = record.get("시도")
         if not _count(attempts, minimum=1):
             return None
         result["시도"] = attempts
+        # 시도마다 어떤 꼴이었는지 — 열린 문자열이 아니라 닫힌 코드만 남긴다.
+        if "응답꼴" in record:
+            shapes = record.get("응답꼴")
+            if (not isinstance(shapes, list) or not shapes
+                    or any(not isinstance(item, str) or item not in EMPTY_RECOVERY_RESPONSE_SHAPES
+                           for item in shapes)):
+                return None
+            result["응답꼴"] = list(shapes)
     if state == "검수완료":
         recovered = _section_ids(record.get("복구장"))
         if recovered is None or not set(recovered) <= set(targets):
             return None
         result["복구장"] = recovered
+        # 관문별 문장 수. 옛 기록에는 없으므로 있을 때만 검사한다.
+        for key in EMPTY_RECOVERY_STAGE_COUNT_KEYS:
+            if key not in record:
+                continue
+            if not _count(record.get(key)):
+                return None
+            result[key] = record[key]
     if state == "호출중단":
         error = record.get("오류종류")
         if not isinstance(error, str) or error not in EMPTY_RECOVERY_ERRORS:

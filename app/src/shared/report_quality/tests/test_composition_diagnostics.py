@@ -237,3 +237,49 @@ def test_계약에_없는_칸은_기록에_남지_않는다() -> None:
     직렬 = json.dumps(관측, ensure_ascii=False)
     for 비공개 in ("24514287835", "27351053389", "회사 본문"):
         assert 비공개 not in 직렬
+
+
+def test_recovery_response_shape_and_stage_counts_survive_sanitizing():
+    """2026-09-17 실측: 새로 넣은 응답꼴·관문별 수가 화이트리스트에 걸러져 운영 진단에서 사라졌다."""
+    records = [
+        {"step": "8_빈장_복구", "상태": "작성형식실패", "대상장": ["past_changes"], "시도": 2,
+         "응답꼴": ["요청장없음", "읽기실패"], "원문": "비공개"},
+        {"step": "8_빈장_복구", "상태": "작성완료", "대상장": ["past_changes"],
+         "작성문장수": 2, "요청밖장수": 0, "응답꼴": "포장없음"},
+        {"step": "8_빈장_복구", "상태": "검수완료", "대상장": ["past_changes"], "복구장": [],
+         "검수통과": 1, "안전검사후": 1, "최종반영": 0, "응답": "비공개"},
+    ]
+    result = observed_composition_steps(records)
+    assert result == (
+        {"step": "8_빈장_복구", "상태": "작성형식실패", "대상장": ["past_changes"], "시도": 2,
+         "응답꼴": ["요청장없음", "읽기실패"]},
+        {"step": "8_빈장_복구", "상태": "작성완료", "대상장": ["past_changes"],
+         "작성문장수": 2, "요청밖장수": 0, "응답꼴": "포장없음"},
+        {"step": "8_빈장_복구", "상태": "검수완료", "대상장": ["past_changes"], "복구장": [],
+         "검수통과": 1, "안전검사후": 1, "최종반영": 0},
+    )
+
+
+def test_recovery_records_without_new_fields_still_pass():
+    """옛 기록(응답꼴·관문별 수 없음)은 그대로 통과한다 — 저장된 실행의 진단을 깨지 않는다."""
+    records = [
+        {"step": "8_빈장_복구", "상태": "작성형식실패", "대상장": ["culture"], "시도": 2},
+        {"step": "8_빈장_복구", "상태": "검수완료", "대상장": ["culture"], "복구장": ["culture"]},
+    ]
+    assert observed_composition_steps(records) == (
+        {"step": "8_빈장_복구", "상태": "작성형식실패", "대상장": ["culture"], "시도": 2},
+        {"step": "8_빈장_복구", "상태": "검수완료", "대상장": ["culture"], "복구장": ["culture"]},
+    )
+
+
+@pytest.mark.parametrize("record", [
+    {"step": "8_빈장_복구", "상태": "작성형식실패", "대상장": ["culture"], "시도": 2, "응답꼴": "요청장없음"},
+    {"step": "8_빈장_복구", "상태": "작성형식실패", "대상장": ["culture"], "시도": 2, "응답꼴": []},
+    {"step": "8_빈장_복구", "상태": "작성형식실패", "대상장": ["culture"], "시도": 2, "응답꼴": ["원문 그대로"]},
+    {"step": "8_빈장_복구", "상태": "작성완료", "대상장": ["culture"], "작성문장수": 1, "요청밖장수": 0,
+     "응답꼴": ["계약"]},
+    {"step": "8_빈장_복구", "상태": "검수완료", "대상장": ["culture"], "복구장": [], "검수통과": -1},
+    {"step": "8_빈장_복구", "상태": "검수완료", "대상장": ["culture"], "복구장": [], "최종반영": "둘"},
+])
+def test_rejects_open_response_shapes_and_invalid_stage_counts(record):
+    assert observed_composition_steps([record]) == ()
