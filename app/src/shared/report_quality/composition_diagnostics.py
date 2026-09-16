@@ -5,6 +5,7 @@ from collections.abc import Mapping
 
 from src.shared.report_quality.composition_diagnostic_constants import (
     BODY_MACHINE_STEP, BODY_DISPOSITION_STEP, BODY_SECTION_IDS, BODY_DISPOSITIONS,
+    BODY_SECTION_MOVE_STEP, SECTION_MOVE_BLOCKERS, SECTION_MOVE_REASONS,
     EMPTY_RECOVERY_STEP, EMPTY_RECOVERY_STATES, EMPTY_RECOVERY_ERRORS,
     DERIVED_RATIO_DECIMAL_FIELDS,
     DERIVED_RATIO_FINGERPRINT_FIELD,
@@ -166,6 +167,7 @@ def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], 
             _derived_ratio(record) if step == DERIVED_RATIO_STEP else
             _body_machine(record) if step == BODY_MACHINE_STEP else
             _body_disposition(record) if step == BODY_DISPOSITION_STEP else
+            _body_section_move(record) if step == BODY_SECTION_MOVE_STEP else
             _empty_recovery(record) if step == EMPTY_RECOVERY_STEP else None
         )
         if normalized is not None:
@@ -211,6 +213,34 @@ def _body_disposition(record: Mapping) -> dict[str, object] | None:
             "문장재작성허용": rewrite, "판정별": dict(counts)}
 
 
+def _body_section_move(record: Mapping) -> dict[str, object] | None:
+    """장 배치 위반 문장을 «버리지 않고 옮긴» 결과를 닫힌 칸으로만 통과시킨다.
+
+    출발 장과 도착 장은 서로 달라야 하고 둘 다 본문 장이어야 한다(요약은 장이
+    아니므로 받지 않는다). 못 옮긴 사유는 닫힌 목록이며, 「옮긴 수 + 못 옮긴
+    수」가 0이면 아무 일도 없었던 기록이라 버린다.
+    """
+
+    source, target = record.get("출발장"), record.get("도착장")
+    reason = record.get("사유코드")
+    moved = record.get("이동")
+    blocked = record.get("이동불가")
+    if (not isinstance(source, str) or source not in BODY_SECTION_IDS
+            or source == "summary"
+            or not isinstance(target, str) or target not in BODY_SECTION_IDS
+            or target == "summary" or source == target
+            or not isinstance(reason, str) or reason not in SECTION_MOVE_REASONS
+            or not _count(moved) or not isinstance(blocked, Mapping)):
+        return None
+    if any(not isinstance(key, str) or key not in SECTION_MOVE_BLOCKERS
+           or not _count(value, minimum=1) for key, value in blocked.items()):
+        return None
+    if not moved and not blocked:
+        return None
+    return {"step": BODY_SECTION_MOVE_STEP, "출발장": source, "도착장": target,
+            "사유코드": reason, "이동": moved, "이동불가": dict(blocked)}
+
+
 def _empty_recovery(record: Mapping) -> dict[str, object] | None:
     state = record.get("상태")
     targets = _section_ids(record.get("대상장"))
@@ -222,6 +252,18 @@ def _empty_recovery(record: Mapping) -> dict[str, object] | None:
         if not _count(count):
             return None
         result["작성문장수"] = count
+        # 요청하지 않은 장을 답에 끼워 넣은 «형식 어긋남»의 크기. 부분 수용으로
+        # 바꾸면서 통째 포기가 사라졌으므로, 이 값이 계속 크면 지시문을 손봐야
+        # 한다는 신호로 남긴다. 장 이름은 남기지 않고 개수만 센다.
+        extra = record.get("요청밖장수")
+        if not _count(extra):
+            return None
+        result["요청밖장수"] = extra
+    if state == "작성형식실패":
+        attempts = record.get("시도")
+        if not _count(attempts, minimum=1):
+            return None
+        result["시도"] = attempts
     if state == "검수완료":
         recovered = _section_ids(record.get("복구장"))
         if recovered is None or not set(recovered) <= set(targets):

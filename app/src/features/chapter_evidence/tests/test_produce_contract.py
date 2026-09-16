@@ -16,6 +16,7 @@ from src.shared.report_evidence.policy import (
     REQUIRED_EVIDENCE_SECTION_IDS,
     collector_slots_for,
 )
+from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
 
 
 _REASON_CODE = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
@@ -274,3 +275,105 @@ def test_잘못된_형식의_문서_입력은_한국어_예외로_남는다() ->
             fragments=fixture["fragments"],
             attempts=fixture["attempts"],
         )
+
+
+def _previous_year_filing_fixture(
+    *, company_id: str = "corp-listed", requirement: str
+) -> dict[str, list]:
+    """당기 공시 fixture에 직전 사업연도 공시 문서·조각을 한 벌 더 붙인다."""
+
+    fixture = build_listed_fixture(company_id=company_id)
+    previous_document_id = "dart-business-report-previous"
+    previous_fragments = [
+        make_fragment(
+            company_id=company_id,
+            fragment_id=f"frag-previous-{slot_id.split(':')[-1]}",
+            document_id=previous_document_id,
+            section_id="business_model",
+            slot_id=slot_id,
+            text=f"직전 사업연도 {slot_id} 관련 공식 원문 서술.",
+        )
+        for slot_id in collector_slots_for("business_model")
+    ]
+    previous_document = make_document(
+        company_id=company_id,
+        document_id=previous_document_id,
+        source_kind="dart_business_report",
+        title="사업보고서(직전 사업연도)",
+        requirement=requirement,
+        exact_evidence_hashes=tuple(
+            str(fragment["text_sha256"]) for fragment in previous_fragments
+        ),
+    )
+    return {
+        "documents": [*fixture["documents"], previous_document],
+        "fragments": [*fixture["fragments"], *previous_fragments],
+        "attempts": fixture["attempts"],
+    }
+
+
+def test_직전사업연도_공시조각은_Writer입력에_남고_생산자계약도_통과한다() -> None:
+    """2026-09-16 운영 실측 재현 — 한 문서의 조각 95개가 통째로 사라졌다.
+
+    수집 엔진은 직전 사업연도 연차 공시를 필수 여부만 OPTIONAL로 낮춰 내보낸다.
+    장 선택이 이 문서를 «낮은 신뢰 외부 페이지»로 세어 버리면 6장·8장이 빈 장이
+    된다. 동시에 ``OfficialEvidenceCollectionResult``의 생산자 계약도 같은 조합을
+    받아들여야 한다 — 한쪽만 고치면 회사 전체 생산이 예외로 죽는다.
+    """
+
+    fixture = _previous_year_filing_fixture(requirement="OPTIONAL")
+
+    candidates = produce_chapter_evidence_candidates(
+        company_id="corp-listed",
+        company_type="listed",
+        **fixture,
+    )
+
+    business_model = next(
+        candidate for candidate in candidates if candidate.section_id == "business_model"
+    )
+    fragment_ids = {fragment.fragment_id for fragment in business_model.fragments}
+    assert {
+        f"frag-previous-{slot_id.split(':')[-1]}"
+        for slot_id in collector_slots_for("business_model")
+    } <= fragment_ids
+    assert "dart-business-report-previous" in {
+        document.document_id for document in business_model.documents
+    }
+    assert not [
+        code
+        for candidate in candidates
+        for code in candidate.reason_codes
+        if code.startswith("low_trust_external_page_fragment_ignored:")
+    ]
+
+    # 생산자 계약(_validate_document_trust)까지 실제로 통과하는지 확인한다.
+    OfficialEvidenceCollectionResult(company_id="corp-listed", candidates=candidates)
+
+
+def test_필수여부를_올려말한_보조공시_문서는_사유이름과_함께_계속_버려진다() -> None:
+    """음성 대조 — 완화는 낮춰 말한 연차 공시 한 방향뿐이다."""
+
+    fixture = _previous_year_filing_fixture(requirement="REQUIRED")
+    fixture["documents"][-1] = {
+        **fixture["documents"][-1],
+        "source_kind": "dart_semiannual_report",
+    }
+
+    candidates = produce_chapter_evidence_candidates(
+        company_id="corp-listed",
+        company_type="listed",
+        **fixture,
+    )
+
+    business_model = next(
+        candidate for candidate in candidates if candidate.section_id == "business_model"
+    )
+    assert not any(
+        fragment.fragment_id.startswith("frag-previous-")
+        for fragment in business_model.fragments
+    )
+    assert (
+        "low_trust_external_page_fragment_ignored:3:formal_writer_trust_not_eligible"
+        in business_model.reason_codes
+    )

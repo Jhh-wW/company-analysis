@@ -26,6 +26,7 @@ from src.features.composer.constants import (
 )
 from src.features.composer.dedupe import (
     drop_cross_section_duplicates,
+    duplicates_kept_sentence,
     sections_with_program_tables,
 )
 from src.features.composer.port import (
@@ -848,3 +849,72 @@ def test_모든_호출부가_표가_있는_장을_넘긴다():
         assert ast.unparse(keywords["sections_with_tables"]) == (
             "sections_with_program_tables(performance_table, composition_tables)"
         ), f"{call.lineno}행이 다른 값을 넘깁니다"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 한 장 «안»의 반복 — 다른 장에서 옮겨 온 문장이 남긴 구멍
+#
+# 위 `test_같은_장_안의_반복은_이_단계가_다루지_않는다` 가 그 구멍을 못 박는다.
+# 다른 장에서 옮겨 온 문장은 그 구멍으로 그대로 들어가므로, 옮기는 쪽이
+# `duplicates_kept_sentence` 로 따로 본다 — 문턱은 여기와 같은 한 벌이다.
+# ══════════════════════════════════════════════════════════════════════
+
+def test_같은_근거의_닮은_문장은_그_장에_이미_있는_사실로_본다():
+    기존 = (ComposedSentence(_파트너_문장, ("1",), "확인"),)
+    옮길_문장 = ComposedSentence(_파트너_문장_변형, ("1",), "확인")
+    assert duplicates_kept_sentence(옮길_문장, 기존) is True
+
+
+def test_근거_조각이_다르면_옮겨_온_문장을_중복으로_보지_않는다():
+    기존 = (ComposedSentence(_파트너_문장, ("1",), "확인"),)
+    옮길_문장 = ComposedSentence(_파트너_문장_변형, ("2",), "확인")
+    assert duplicates_kept_sentence(옮길_문장, 기존) is False
+
+
+#: 같은 문서 문턱을 넘는 꼴 — 꼬리만 「확대하고」→「넓히고」로 바뀐 문장.
+#: 실측 겹침: _파트너_문장 과 0.9385 (아래 변형은 0.8387로 그 문턱 아래다).
+_파트너_문장_거의같음 = (
+    "회사는 Sony Music, TME, Republic Records 등 글로벌 유수의 음반·음원 "
+    "유통 전문사와 파트너십을 체결하여 글로벌 유통 범위를 넓히고 있다."
+)
+
+
+def test_같은_문서에서_온_다른_조각이면_더_높은_문턱으로_본다():
+    """조각이 다르면 «같은 문서»일 때만, 그리고 더 높은 문턱으로만 비교한다."""
+
+    조각들 = (
+        CollectedFragment("1", "사업내용", "", document_identity="문서A"),
+        CollectedFragment("2", "사업내용", "", document_identity="문서A"),
+    )
+    기존 = (ComposedSentence(_파트너_문장, ("1",), "확인"),)
+    거의같음 = ComposedSentence(_파트너_문장_거의같음, ("2",), "확인")
+    # 조각 열쇠만으로는 아예 비교하지 않는다 — 문서를 모르면 «다른 자료»다.
+    assert duplicates_kept_sentence(거의같음, 기존) is False
+    assert duplicates_kept_sentence(거의같음, 기존, fragments=조각들) is True
+
+
+def test_같은_문서라도_문턱_아래면_옮겨_온_문장을_지우지_않는다():
+    """실측 겹침 0.8387 — 조각을 공유했다면 지웠을 짝이지만 여기서는 남긴다."""
+
+    조각들 = (
+        CollectedFragment("1", "사업내용", "", document_identity="문서A"),
+        CollectedFragment("2", "사업내용", "", document_identity="문서A"),
+    )
+    기존 = (ComposedSentence(_파트너_문장, ("1",), "확인"),)
+    변형 = ComposedSentence(_파트너_문장_변형, ("2",), "확인")
+    assert duplicates_kept_sentence(변형, 기존, fragments=조각들) is False
+    # 같은 조각을 인용하면 낮은 문턱이라 같은 짝이 «중복»이 된다.
+    assert duplicates_kept_sentence(
+        ComposedSentence(_파트너_문장_변형, ("1",), "확인"), 기존,
+    ) is True
+
+
+def test_아무것도_없는_장으로_옮기면_중복이_아니다():
+    옮길_문장 = ComposedSentence(_파트너_문장, ("1",), "확인")
+    assert duplicates_kept_sentence(옮길_문장, ()) is False
+
+
+def test_인용이_없는_문장은_비교하지_않는다():
+    기존 = (ComposedSentence(_파트너_문장, ("1",), "확인"),)
+    옮길_문장 = ComposedSentence(_파트너_문장_변형, (), "해석")
+    assert duplicates_kept_sentence(옮길_문장, 기존) is False

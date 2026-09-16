@@ -32,9 +32,17 @@ BODY_SECTION_IDS = frozenset((*STRICT_REQUIRED_QUALITY_SECTION_IDS, "summary"))
 BODY_DISPOSITIONS = frozenset((
     "참", "거짓_재작성", "거짓_제거", "애매_강등", "근거결속실패_제거", "번호없음_제거",
 ))
+#: 복구가 «시작조차» 못 한 두 경우. 예전에는 아무 기록 없이 넘어가서,
+#: 실행 진단에 `8_빈장_복구` 단계 자체가 없는 실행이 「복구가 꺼져 있었다」인지
+#: 「예산이 없었다」인지 「근거가 없었다」인지 되짚을 방법이 없었다
+#: (2026-09-16 실측: 6·8장이 빈 채로 나간 실행의 단계 목록 53개에 이 step 없음).
+#: 이름은 기존 `확인후보없음`(작가가 쓴 문장이 하나도 확인 등급을 못 받음)과
+#: 다르다 — 이쪽은 «AI를 부르기 전»의 사유다.
+EMPTY_RECOVERY_NO_BUDGET = "예산부족"
+EMPTY_RECOVERY_NO_EVIDENCE = "근거후보없음"
 EMPTY_RECOVERY_STATES = frozenset((
     "문장재작성대신예약", "작성형식실패", "확인후보없음", "작성완료", "검수완료",
-    "호출중단", "복구형식실패",
+    "호출중단", "복구형식실패", EMPTY_RECOVERY_NO_BUDGET, EMPTY_RECOVERY_NO_EVIDENCE,
 ))
 EMPTY_RECOVERY_ERRORS = frozenset(("호출한도", "요청예산", "제공자오류"))
 
@@ -108,3 +116,35 @@ DERIVED_RATIO_DECIMAL_FIELDS = ("백분율",)
 #: 빈 문자열은 «근거 쌍 없음»(상한 초과 기록)이다.
 DERIVED_RATIO_FINGERPRINT_FIELD = "근거지문"
 DERIVED_RATIO_SECTION_IDS = frozenset(STRICT_REQUIRED_QUALITY_SECTION_IDS)
+
+# ── 6장 → 5장 «장 이동» 기록 ──────────────────────────────────────────────
+#
+# ★ 왜 «제외» 장부가 아닌 여기인가 — 옮긴 문장은 빠진 문장이 아니다. 검수
+#   제외 장부(8_근거검수_제외)에 넣으면 화면 안내문을 만드는 쪽이 그 장부의
+#   모든 항목을 「…개를 뺐습니다」로 세기 때문에, 보고서에 그대로 실린 문장을
+#   뺐다고 말하게 된다.
+# ★ 원문 글자는 담지 않는다 — 장 이름·닫힌 사유 코드·수만 통과시킨다.
+BODY_SECTION_MOVE_STEP = "8_본문검수_장이동"
+#: 옮기기를 시도하게 만든 사유 코드. composer 의
+#: `future_plan_constants.FUTURE_SECTION_NO_FORWARD_STATEMENT` 와 «반드시 같은
+#: 값»이어야 한다 — 공유 계층이 feature 를 import 하지 않도록 인과·미래 근거
+#: 코드와 같은 방식으로 글자를 적고, composer 쪽 시험이 두 값을 맞댄다.
+SECTION_MOVE_REASONS = frozenset(("future_section_no_forward_statement",))
+#: 못 옮긴 이유 — 닫힌 목록.
+#:   · 허용근거밖   : 그 문장의 인용이 도착 장에 허용된 조각 밖이다.
+#:   · 근거결속미해결 : 출발 장의 근거 결속 검사에도 걸렸다(이동이 아니라 제외).
+#:   · 도착장규칙탈락 : 도착 장의 규칙으로 다시 보니 걸렸다.
+#:   · 도착장중복   : 도착 장에 이미 같은 사실이 있다.
+#:   · 도착장없음   : 이번 검수 묶음에 도착 장 자체가 없다.
+SECTION_MOVE_BLOCKED_OUT_OF_EVIDENCE = "허용근거밖"
+SECTION_MOVE_BLOCKED_SOURCE_BINDING = "근거결속미해결"
+SECTION_MOVE_BLOCKED_TARGET_RULE = "도착장규칙탈락"
+SECTION_MOVE_BLOCKED_DUPLICATE = "도착장중복"
+SECTION_MOVE_BLOCKED_NO_TARGET = "도착장없음"
+SECTION_MOVE_BLOCKERS = frozenset((
+    SECTION_MOVE_BLOCKED_OUT_OF_EVIDENCE,
+    SECTION_MOVE_BLOCKED_SOURCE_BINDING,
+    SECTION_MOVE_BLOCKED_TARGET_RULE,
+    SECTION_MOVE_BLOCKED_DUPLICATE,
+    SECTION_MOVE_BLOCKED_NO_TARGET,
+))
