@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import pytest
 from dataclasses import dataclass, replace
 
 from src.features.pipeline.port import (
@@ -15,7 +16,10 @@ from src.features.pipeline.port import (
     SummaryItem,
 )
 from src.features.pipeline.constants import EVIDENCE_AVAILABLE_PUBLICATION_POLICY
-from src.features.composer.constants import NOTICE_EVIDENCE_NONE
+from src.features.composer.constants import (
+    LEGACY_EVIDENCE_AVAILABLE_NOTICES,
+    NOTICE_EVIDENCE_NONE,
+)
 from src.features.pipeline.supplementary_research_release import (
     assess_supplementary_research_release,
 )
@@ -390,6 +394,24 @@ def test_빈_근거_안내에는_인용을_발명하지_않는다():
     # 안내 정책에 근거 없는 문장을 섞어도 통과하는 우회로가 생기면 안 된다.
     report = replace(report, sections=[replace(report.sections[0], prose_lines=[("미검증 주장", "")])])
     assert not _assess(report, evidence).allowed
+
+
+@pytest.mark.parametrize("legacy_notice", sorted(LEGACY_EVIDENCE_AVAILABLE_NOTICES))
+def test_옛_안내문으로_저장된_보고서도_안내문_전용_장으로_본다(legacy_notice):
+    """2026-09-16 안내문 통일 이전에 저장된 확보 근거 보고서를 보호한다.
+
+    저장값은 소급 수정하지 않으므로, 옛 글자로 남은 안내문도 «안내문 전용 장»으로
+    인정해야 보충 조사 출고 판정이 갑자기 거절로 뒤집히지 않는다.
+    """
+    report, evidence = _report(())
+    report = replace(
+        report, publication_policy=EVIDENCE_AVAILABLE_PUBLICATION_POLICY,
+        summary_items=[], sections=[ReportSection(
+            cell="identity", title="기업 정체성", empty_reason=legacy_notice,
+            prose_lines=[(legacy_notice, "")], prose_paragraphs=[legacy_notice],
+        )],
+    )
+    assert _assess(report, evidence).allowed
 
 
 def test_shadow_observation_does_not_override_grounded_partial_release():
