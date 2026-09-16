@@ -2512,8 +2512,6 @@ def _add_section_content_block(
     caption = " ".join(
         value for value in (block.title, markers) if str(value).strip()
     )
-    if block.tone == "limitation":
-        caption = f"확인 범위 · {caption}"
     data: list[list[Paragraph]] = [
         [
             Paragraph(_escape(caption), styles["card_title_on_ink"]),

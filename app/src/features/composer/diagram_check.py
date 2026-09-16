@@ -106,11 +106,7 @@ from src.features.composer.portfolio_name_constants import (
 )
 from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
 from src.features.composer.scope_guard import flow_scope_problem
-from src.features.composer.absence_claim_guard import (
-    absence_claim_problem,
-    with_absence_scope_guidance,
-)
-from src.features.composer.absence_claim_constants import ABSENCE_CLAIM_UNSUPPORTED
+from src.features.composer.absence_claim_guard import absence_claim_problem
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_financial_risk_goal_problem,
     culture_flow_cells_evidence_problem,
@@ -791,12 +787,8 @@ def _review_rows(
     *,
     diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
-    absence_sections: Optional[set[str]] = None,
 ) -> tuple[dict[str, tuple[FlowRow, ...]], list[str]]:
     """모든 장의 경로를 «한 묶음»으로 검수한다 (AI 1회).
-
-    ``absence_sections``: 부재 단언 가드가 «행»을 뺀 장 id 수집기(선택).
-    문장 경로(verify.py)와 같은 이유로 그 장에 확인 범위 안내문을 남긴다.
     """
     items: list[tuple[int, str, FlowRow]] = []
     owner: dict[int, str] = {}
@@ -914,9 +906,6 @@ def _review_rows(
                 )
             if flow_problem:
                 grounding_problems[number] = flow_problem
-        if (absence_sections is not None
-                and grounding_problems.get(number) == ABSENCE_CLAIM_UNSUPPORTED):
-            absence_sections.add(section_id)
         if number in grounding_problems:
             candidate_text, sources = candidates[number]
             _append_grounding_diagnostic(
@@ -1045,12 +1034,10 @@ def check_diagrams(
     ]
 
     # ② 의미 검수 — 관계는 글자로 알 수 없다
-    absence_sections: set[str] = set()
     if ask is not None and any(rows for _sid, rows in after_numbers):
         reviewed, dropped = _review_rows(
             after_numbers, texts, ask, diagnostics=diagnostics,
             baseline_date=baseline_date,
-            absence_sections=absence_sections,
         )
         problems.extend(dropped)
     else:
@@ -1068,13 +1055,6 @@ def check_diagrams(
         replace(
             section,
             flow_rows=reviewed.get(section.section_id, section.flow_rows),
-            # 부재 단언을 뺀 장에는 확인 범위를 남긴다 — 문장 경로와 같은
-            # 안내문·같은 중복 금지 규칙이다.
-            **(
-                {"notice": with_absence_scope_guidance(section.notice)}
-                if section.section_id in absence_sections
-                else {}
-            ),
         )
         for section in number_checked.sections
     )

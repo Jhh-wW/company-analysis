@@ -222,8 +222,6 @@ def _section_blocks(report: Report, section: ReportSection) -> list[NotionBlock]
         for detail in detail_blocks:
             markers = " ".join(f"[{number}]" for number in detail.source_numbers)
             title = " ".join(value for value in (detail.title, markers) if value)
-            if detail.tone == "limitation":
-                title = f"확인 범위 · {title}"
             blocks.append(_heading_3(title))
             blocks.append(
                 _table_block(

@@ -106,7 +106,7 @@ from src.features.composer.dedupe import (
     drop_cross_section_duplicates,
     sections_with_program_tables,
 )
-from src.features.composer.news_usage import supplement_news_candidates, retain_verified_news, news_usage_diagnostics, append_research_notice, news_citation_ids
+from src.features.composer.news_usage import supplement_news_candidates, retain_verified_news, news_usage_diagnostics, news_citation_ids
 from src.features.composer.review_outcomes import final_review_outcomes
 from src.features.composer.stray_citation_marker import sanitize_stray_citation_markers
 from src.features.composer.empty_section_recovery import (
@@ -1191,7 +1191,6 @@ def _finish_evidence_available(
     composition_tables: tuple[PerformanceTable, ...],
     citation_style: str,
     company_id: str,
-    research_diagnostics: dict[str, object] | None,
     review_diagnostics: list[dict],
     composition_diagnostics: list[dict],
     draft_body_count: int,
@@ -1240,7 +1239,7 @@ def _finish_evidence_available(
             body, fragments, None, enabled=True,
             review_candidates=frozenset(news_review_candidates),
         )
-        body = append_research_notice(news_block.report, research_diagnostics)
+        body = news_block.report
     # 확보 근거 보고서도 «같은» 정리를 거친다. FULL에서 내려온 본문
     # (tail_already_applied)은 이미 정리돼 있어 이 호출이 무동작이다(멱등).
     body = sanitize_stray_citation_markers(
@@ -1337,7 +1336,6 @@ def compose_evidence_available_report(
     composition_tables: tuple[PerformanceTable, ...] = (),
     citation_style: str = DEFAULT_CITATION_STYLE,
     company_id: str = "",
-    research_diagnostics: dict[str, object] | None = None,
     review_diagnostics_sink: list[dict] | None = None,
     composition_diagnostics_sink: list[dict] | None = None,
     degraded_reason: str = "",
@@ -1393,7 +1391,6 @@ def compose_evidence_available_report(
         composition_tables=composition_tables,
         citation_style=citation_style,
         company_id=company_id,
-        research_diagnostics=research_diagnostics,
         review_diagnostics=(
             review_diagnostics_sink if review_diagnostics_sink is not None else []
         ),
@@ -1436,7 +1433,6 @@ def run_v2(
     section_evidence_packets: Optional[SectionEvidencePackets] = None,
     company_id: str = "",
     build_identity_sha256: str = "",
-    research_diagnostics: dict[str, object] | None = None,
     review_diagnostics_sink: list[dict] | None = None,
     composition_diagnostics_sink: list[dict] | None = None,
     evidence_availability: EvidenceAvailability | None = None,
@@ -1557,7 +1553,6 @@ def run_v2(
                 composition_tables=composition_tables,
                 citation_style=citation_style,
                 company_id=company_id,
-                research_diagnostics=research_diagnostics,
                 review_diagnostics_sink=review_diagnostics_sink,
                 composition_diagnostics_sink=composition_diagnostics_sink,
             )
@@ -1794,7 +1789,6 @@ def run_v2(
                         release_mode=ReleaseMode.SHADOW,
                         section_evidence_packets=None,
                         company_id=company_id,
-                        research_diagnostics=research_diagnostics,
                         review_diagnostics_sink=review_diagnostics,
                         composition_diagnostics_sink=composition_diagnostics,
                         evidence_availability=(
@@ -2136,7 +2130,6 @@ def run_v2(
             composition_tables=composition_tables,
             citation_style=citation_style,
             company_id=company_id,
-            research_diagnostics=research_diagnostics,
             review_diagnostics=review_diagnostics,
             composition_diagnostics=composition_diagnostics,
             draft_body_count=draft_body_count,
@@ -2188,7 +2181,7 @@ def run_v2(
         verified, verification_fragments, prepared_evidence,
         enabled=True, review_candidates=news_review_candidates,
     )
-    verified = append_research_notice(news_block.report, research_diagnostics)
+    verified = news_block.report
     # ★ 본 경로의 본문이 확정된 직후 인용 아닌 대괄호 숫자를 글자로 굳힌다.
     #   여기서 한 번 정리하면 아래의 요약 고르기·렌더·봉인·출고 검증이 모두
     #   «같은 글자»를 본다. 보충 경로는 이 뒤에 문장을 더하므로 그쪽 병합본에도
@@ -2536,7 +2529,7 @@ def run_v2(
                 merged_body, verification_fragments, prepared_evidence,
                 enabled=True, review_candidates=news_review_candidates,
             )
-            merged_body = append_research_notice(news_block.report, research_diagnostics)
+            merged_body = news_block.report
             # 본 경로와 «같은» 정리를 병합본에도 건다. 비대상 장은 이미 정리된
             # 글자라 이 호출이 아무것도 바꾸지 않는다(멱등) — 아래 비대상 장
             # 불변 검사가 그대로 통과한다.

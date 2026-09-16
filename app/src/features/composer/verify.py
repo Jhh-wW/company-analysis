@@ -29,10 +29,7 @@ from __future__ import annotations
 from src.features.composer.news_constants import NEWS_REVIEW_GUIDE
 from src.features.composer.news_usage import attribution_prefix, news_metadata
 from src.features.composer.news_block import _is_news_fragment
-from src.features.composer.absence_claim_guard import (
-    absence_claim_problem,
-    with_absence_scope_guidance,
-)
+from src.features.composer.absence_claim_guard import absence_claim_problem
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_accounting_policy_problem,
     culture_financial_risk_goal_problem,
@@ -229,7 +226,6 @@ def _absence_claim_rejected(
     section_id: str,
     kind: str,
     diagnostics: Optional[list[dict]],
-    absence_sections: Optional[set[str]] = None,
 ) -> bool:
     """자료 부재를 단언한 문장인가 — 맞으면 진단을 남기고 참을 돌려준다.
 
@@ -237,17 +233,11 @@ def _absence_claim_rejected(
       문장을 대조할 자료가 없다는 이유로 통째로 건너뛰는데, 부재 단언은
       바로 그 자리에서 가장 잘 통과한다(실측: 인용 0개·등급 «해석»인
       「공식 자료에서 … 찾을 수 없다」 두 문장이 그대로 공개됐다).
-
-    ``absence_sections``: 이 가드가 문장을 «뺀» 장 id 수집기. 재조립 단계가
-    그 장에만 확인 범위 안내문을 남긴다 — 참인 부재 문장까지 지워 놓고 아무
-    말도 안 하면 독자는 그 장이 왜 그렇게 생겼는지 알 수 없다(4차 실행 실측).
     """
 
     problem = absence_claim_problem(sentence.text)
     if not problem:
         return False
-    if absence_sections is not None:
-        absence_sections.add(section_id)
     logger.warning("의미 근거 검증: %s, 장 %s 문장 공개 제외", problem, section_id)
     _append_grounding_diagnostic(
         diagnostics,
@@ -1280,7 +1270,6 @@ def _ask_grouped_verdicts(
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
-    absence_sections: Optional[set[str]] = None,
     allowed_fragment_ids_by_section: Optional[Mapping[str, frozenset[str]]] = None,
 ) -> Optional[dict[int, str]]:
     """packet 본문·도식을 정확히 한 번에 검수한다.
@@ -1381,7 +1370,6 @@ def _ask_grouped_verdicts(
             and item.citations
         ),
         baseline_date=baseline_date,
-        absence_sections=absence_sections,
         verbatim_by_number=verbatim_by_number,
     )
 
@@ -1455,14 +1443,8 @@ def _apply_grounding(
     flow_cells_by_number: Optional[Mapping[int, Sequence[str]]] = None,
     confirmed_prose_numbers: frozenset[int] = frozenset(),
     baseline_date: Optional[str] = None,
-    absence_sections: Optional[set[str]] = None,
     verbatim_by_number: Optional[Mapping[int, VerbatimNewsSource]] = None,
 ) -> dict[int, str]:
-    # ``absence_sections``: 부재 단언 가드가 «도식 행»을 뺀 장 id 수집기.
-    # ★ 왜 여기가 필요한가 (독립 검토 P1-6) — 문장 경로는 _semantic_review*가
-    #   수집기를 넘기지만, 도식 행을 실제로 지우는 자리는 여기다. FULL(packet
-    #   엄격)은 check_diagrams를 부르지 않으므로(pipeline.py) 여기 없으면 그
-    #   모드에서만 안내문이 사라진다.
     # ★ 보고서 기준일을 그대로 넘긴다. 안 넘기면 executive_status_guard 가 날짜
     #   문턱 없이 이탈 «표지» 존재만으로 판정해, 「기준일 이후에 물러날 예정」인
     #   임원 문장까지 근거 없음으로 뺀다(가드 머리말 참고).
@@ -1586,9 +1568,6 @@ def _apply_grounding(
             # ⚠️ 칸마다 «따로» 건다. 이어 붙인 문자열로 걸면 서로 다른 칸의
             #   표지가 결합해 정상 행이 지워진다(cellwise_problem 머리말).
             problem = cellwise_problem(cells, absence_claim_problem)
-            if problem and absence_sections is not None and context:
-                # 행을 지운 장에도 문장 경로와 «같은» 확인 범위 안내문을 남긴다.
-                absence_sections.add(context[0])
             problem = problem or flow_scope_problem(cells, sources)
             if not problem and context and context[0] == CHALLENGE_FLOW_SECTION_ID:
                 # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 묶음 검수 경로와
@@ -2220,7 +2199,6 @@ def _semantic_review(
     baseline_date: Optional[str] = None,
     rewrite_ask: Optional[AskFn] = None,
     recheck_ask: Optional[AskFn] = None,
-    absence_sections: Optional[set[str]] = None,
     allow_sentence_rewrite: bool = True,
     sentence_rewrite_gate: Optional[Callable[[tuple[str, ...]], bool]] = None,
 ) -> list[list[ComposedSentence]]:
@@ -2228,7 +2206,6 @@ def _semantic_review(
 
     ``initial_ask``: 최초 본문 검수 전용 호출자. 재작성·재검수는 ``ask`` 그대로다.
     ``initial_retry_ask``: 그 최초 검수의 «파싱 재요청» 전용 호출자(선택).
-    ``absence_sections``: 부재 단언 가드가 문장을 뺀 장 id 수집기(선택).
 
     검수가 통째로 불능이면 대조 대상 문장을 공개 후보에서 뺀다. 라벨만
     «해석»으로 바꾸어 의미 검사를 통과한 것처럼 보이게 하지 않는다.
@@ -2257,7 +2234,6 @@ def _semantic_review(
             if _absence_claim_rejected(
                 sentence, section_id=section_id, kind=kind,
                 diagnostics=diagnostics,
-                absence_sections=absence_sections,
             ):
                 absence_rejected_positions.add((group_index, sentence_index))
                 continue
@@ -2460,7 +2436,6 @@ def _semantic_review_grouped(
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
-    absence_sections: Optional[set[str]] = None,
 ) -> tuple[list[list[ComposedSentence]], dict[str, tuple[FlowRow, ...]]]:
     """packet 문장과 도식을 장별 근거 블록으로 묶어 AI 1회 검수한다.
 
@@ -2488,7 +2463,6 @@ def _semantic_review_grouped(
             if _absence_claim_rejected(
                 sentence, section_id=section_id, kind=DIAGNOSTIC_KIND_BODY,
                 diagnostics=diagnostics,
-                absence_sections=absence_sections,
             ):
                 rejected_sentence_positions.add((group_index, sentence_index))
                 continue
@@ -2551,7 +2525,6 @@ def _semantic_review_grouped(
         initial_ask=initial_ask,
         protocol_diagnostics=protocol_diagnostics,
         baseline_date=baseline_date,
-        absence_sections=absence_sections,
         allowed_fragment_ids_by_section=allowed_fragment_ids_by_section,
     )
     sentence_by_number: dict[int, Optional[ComposedSentence]] = {}
@@ -2709,10 +2682,6 @@ def _verify_report_inner(
     # 2) 의미 검수 — legacy는 flat 응답 번호·재작성 계약을 유지한다.
     # packet 엄격 모드만 문장+도식을 장별 블록으로 한 번에 본다.
     reviewed_flow_rows: Optional[dict[str, tuple[FlowRow, ...]]] = None
-    # 부재 단언 가드가 문장을 «뺀» 장 — 아래 재조립에서 그 장에만 확인 범위
-    # 안내문을 남긴다. 두 검수 경로가 «같은» 수집기를 쓴다(한쪽만 걸면 그
-    # 경로의 장에서만 안내문이 사라진다).
-    absence_sections: set[str] = set()
     if allowed_fragment_ids_by_section is None:
         reviewed_groups = _semantic_review(
             checked_groups,
@@ -2731,7 +2700,6 @@ def _verify_report_inner(
             baseline_date=baseline_date,
             rewrite_ask=rewrite_ask,
             recheck_ask=recheck_ask,
-            absence_sections=absence_sections,
             allow_sentence_rewrite=allow_sentence_rewrite,
             sentence_rewrite_gate=sentence_rewrite_gate,
         )
@@ -2764,7 +2732,6 @@ def _verify_report_inner(
             initial_ask=initial_ask,
             protocol_diagnostics=protocol_diagnostics,
             baseline_date=baseline_date,
-            absence_sections=absence_sections,
         )
     reviewed_summary = reviewed_groups.pop()
 
@@ -2775,11 +2742,6 @@ def _verify_report_inner(
         if section.sentences and not kept and not notice:
             # 초안엔 문장이 있었는데 검증이 전부 걷어낸 장 — 자료 부재로 위장하지 않는다
             notice = NOTICE_ALL_SENTENCES_REJECTED
-        if section.section_id in absence_sections:
-            # 부재 단언을 뺀 장 — 그 자리에 확인 범위를 남긴다. 문장이 남아
-            # 있어도 붙인다(뺀 사실은 남은 문장 수와 무관하다). 여러 문장이
-            # 걸려도 한 줄이다.
-            notice = with_absence_scope_guidance(notice)
         _warn_if_interpretation_heavy(section.section_id, kept)
         out_sections.append(
             ComposedSection(

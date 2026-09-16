@@ -10,9 +10,9 @@
   그 자리에서 가장 잘 통과한다. 그래서 호출자는 인용 유무와 «무관하게» 이
   검사를 먼저 돌려야 한다.
 
-★ 저장소에 이미 옳은 방식이 있다 — 부재는 확인 범위 «안내문»이 말하고
-  (「자료가 없다는 뜻은 아닙니다」) 문장은 말하지 않는다. 이 가드는 그 경계를
-  코드로 굳힌다.
+★ 부재는 문장으로 말하지 않는다. 2026-09-16부터는 「확인 범위」 안내문도 싣지
+  않는다 — 자료가 적으면 독자는 못 찾았다고 알아서 읽는다. 뺀 사실은 진단에만
+  남긴다.
 """
 
 from typing import Final
@@ -22,13 +22,11 @@ from src.features.composer.absence_claim_constants import (
     ABSENCE_CLAIM_UNSUPPORTED,
     ABSENCE_CLAUSE_SPLIT_RE,
     ABSENCE_PREDICATE_RE,
-    ABSENCE_SCOPE_GUIDANCE_NOTICE,
     SOURCE_REFERENT_RE,
 )
 
 __all__: Final[tuple[str, ...]] = (
     "absence_claim_problem",
-    "with_absence_scope_guidance",
 )
 
 
@@ -60,24 +58,3 @@ def absence_claim_problem(text: str) -> str:
     return ""
 
 
-def with_absence_scope_guidance(notice: str) -> str:
-    """이 가드가 문장을 뺀 장의 안내문에 확인 범위 한 줄을 «한 번만» 붙인다.
-
-    ★ 왜 문장 대신 안내문인가 — 작성부는 «공식 자료 전체»를 본 적이 없어서
-      「없다」를 말할 자격이 없다. 그렇다고 아무 말도 안 하면 독자는 그 장이
-      왜 그렇게 생겼는지 알 수 없다. 그래서 «범위»만 말한다.
-
-    ★ 이미 붙어 있으면 다시 붙이지 않는다 — 한 장에서 여러 문장이 걸려도
-      안내문은 한 줄이다. 기존 안내문(예: 「검증을 통과하지 못해 싣지
-      않았습니다」)이 있으면 그 뒤에 이어 붙인다. 기존 문구는 지우지 않는다.
-
-    ⚠️ 지운 문장의 주제어를 넣지 않는다 — 그 주제가 실제로 없는지는 작성부가
-      모르기 때문이다(지어냄 방지).
-    """
-
-    if ABSENCE_SCOPE_GUIDANCE_NOTICE in notice:
-        return notice
-    stripped = notice.strip()
-    if not stripped:
-        return ABSENCE_SCOPE_GUIDANCE_NOTICE
-    return f"{stripped} {ABSENCE_SCOPE_GUIDANCE_NOTICE}"

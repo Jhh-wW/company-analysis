@@ -571,7 +571,7 @@ def test_스위치ON이면_재판정뒤_3장이_READY이고_SHADOW로_끝까지_
     assert _REVENUE_SENTENCES[0] in portfolio_text
 
 
-def test_스위치OFF면_3장_부족과_뉴스미조사_안내를_포함한_바이트골든을_유지한다(
+def test_스위치OFF면_3장_부족_바이트골든을_유지한다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _engine, observations = _wire_pipeline(
@@ -619,6 +619,9 @@ def test_스위치OFF면_3장_부족과_뉴스미조사_안내를_포함한_바�
     #   회사 사실·조각 수·본문 문장 수·안내문은 그대로다.
     # 2026-09-14: 일부 공식 자료의 미확인 범위 안내 한 줄만 추가했다.
     # 회사 사실·본문·표·요약·지표는 이전 골든과 필드별로 모두 동일하다.
+    # 2026-09-16: 1장 첫 줄의 뉴스 미조사 안내(「확인 범위: …」)가 골든에서 빠졌다.
+    #   독자용 「확인 범위」 안내문을 전부 싣지 않기로 한 사용자 결정. 필드별 대조로
+    #   확인한 변화는 그 한 줄(칸 2개, 208→206)뿐이고 회사 사실·본문·표·요약은 그대로다.
     actual = _stable_result_bytes(result)
     golden = json.loads(_GOLDEN_FIXTURE.read_text(encoding="utf-8"))
     assert golden["byte_count"] == len(actual)

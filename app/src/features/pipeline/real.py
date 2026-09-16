@@ -283,7 +283,6 @@ from src.features.pipeline.supplementary_research_runtime_constants import (
 from src.features.pipeline.news_research_context import (
     news_generation_digest,
     official_news_context,
-    public_news_research_status,
 )
 from src.features.pipeline import engine_mode
 from src.features.pipeline.collection_recovery import (
@@ -6687,9 +6686,6 @@ def _run_v2_composer(
             # 이 값을 읽는다). corp_id를 확인하지 못했으면 예전처럼 빈 값이다.
             company_id=corp_id,
             build_identity_sha256=build_identity_sha256,
-            research_diagnostics=public_news_research_status(
-                steps, enabled=news_intake_switch.news_intake_enabled()
-            ),
             review_diagnostics_sink=review_diagnostics_sink,
             composition_diagnostics_sink=composition_diagnostics_sink,
             # SHADOW 자체가 수집 실패라는 뜻은 아니다. 정상 결과까지 축약 정책으로
@@ -7045,9 +7041,6 @@ def _run_available_evidence_report(
         analysis_period=analysis_period, latest_performance_period=latest_period,
         filing_meta=filing_meta, composition_tables=tuple(composition_tables),
         table_presentation=str(getattr(performance_table, "presentation", "") or "table"),
-        research_diagnostics=public_news_research_status(
-            steps, enabled=news_intake_switch.news_intake_enabled(),
-        ),
     )
     report = replace(output.report, sources=list(sources))
     steps.append({

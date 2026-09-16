@@ -614,13 +614,6 @@ def _competitive_blocks(
                             "발표일·출처",
                             _joined((fact.source_date, fact.source_title)),
                         ),
-                        _field(
-                            "확인 범위",
-                            _clean(
-                                fact.limitations or fact.limitation,
-                                "회사 공식 발표 표현 자체로 한정",
-                            ),
-                        ),
                     ),
                     fact_ids=(fact.fact_id,),
                     source_numbers=_numbers((fact,), source_numbers),
@@ -633,7 +626,7 @@ def _competitive_blocks(
         ):
             out.append(
                 SectionContentBlock(
-                    title="확인 범위",
+                    title="발표 해석의 한계",
                     fields=(_field("발표 해석의 한계", fact.claim),),
                     fact_ids=(fact.fact_id,),
                     source_numbers=_numbers((fact,), source_numbers),
