@@ -252,6 +252,18 @@ def _empty_recovery(record: Mapping) -> dict[str, object] | None:
         if not _count(count):
             return None
         result["작성문장수"] = count
+        # 요청하지 않은 장을 답에 끼워 넣은 «형식 어긋남»의 크기. 부분 수용으로
+        # 바꾸면서 통째 포기가 사라졌으므로, 이 값이 계속 크면 지시문을 손봐야
+        # 한다는 신호로 남긴다. 장 이름은 남기지 않고 개수만 센다.
+        extra = record.get("요청밖장수")
+        if not _count(extra):
+            return None
+        result["요청밖장수"] = extra
+    if state == "작성형식실패":
+        attempts = record.get("시도")
+        if not _count(attempts, minimum=1):
+            return None
+        result["시도"] = attempts
     if state == "검수완료":
         recovered = _section_ids(record.get("복구장"))
         if recovered is None or not set(recovered) <= set(targets):

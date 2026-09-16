@@ -191,6 +191,7 @@ from src.features.spanselect.constants import (
 from src.shared.official_ir import verified_official_ir_fragment_is_usable
 from src.shared import engine_build_identity, generation_coordination
 from src.shared.report_recovery import (
+    EMPTY_RECOVERY_AI_CALLS,
     MANDATORY_REPORT_AI_CALLS as COMPOSER_RUNTIME_CALL_RESERVE,
     MANDATORY_TAIL_AI_CALLS,
     REWRITE_RECHECK_CALLS,
@@ -6020,8 +6021,17 @@ def _run_news_search_branch(
                 # FULL의 기본 작성·검수와 허용된 보충 검수 몫을 먼저 보호한다.
                 # 부분 모드도 같은 여유를 남기되 기존 선택적 다듬기 한도 저하는
                 # 유지한다. 재시도가 많은 모든 입력의 성공을 보장하는 값은 아니다.
+                #
+                # ★ 빈 장 복구 2회를 함께 남긴다 (2026-09-16 실측) — 뉴스 5 +
+                #   장 작성 9 + 본문 검수 1 + 필수 후속 2 = 17회로 상한 18을
+                #   거의 채운 실행에서, 본문이 빈 장 두 곳을 채울 여유가 1회밖에
+                #   남지 않아 복구가 시작조차 못 했다. 복구는 빈 장이 있을 때만
+                #   도는 조건부 단계지만, 빈 장이 생길지는 본문 검수가 끝나야
+                #   알 수 있고 그때는 이미 뉴스가 몫을 다 쓴 뒤다. 그래서 «미리»
+                #   남긴다 — 값이 남으면 뒤 단계가 그대로 쓰므로 버려지지 않고,
+                #   빡빡한 실행에서만 뉴스 분석이 2회 줄어든다.
                 news_analysis_call_budget = engine.available_provider_calls(
-                    reserved_calls=COMPOSER_RUNTIME_CALL_RESERVE
+                    reserved_calls=COMPOSER_RUNTIME_CALL_RESERVE + EMPTY_RECOVERY_AI_CALLS
                 )
                 news_session = news_research_adapter.prepare_news_research(
                     search_news=(
@@ -6049,6 +6059,7 @@ def _run_news_search_branch(
                         "캐시재사용가능": news_session.snapshot.cache_eligible,
                         "AI분석호출상한": news_session.policy.max_analysis_calls,
                         "본문작성예약호출": COMPOSER_RUNTIME_CALL_RESERVE,
+                        "빈장복구예약호출": EMPTY_RECOVERY_AI_CALLS,
                         **news_session.snapshot.transport_diagnostics,
                     }
                 )
@@ -6635,6 +6646,13 @@ def _run_v2_composer(
     )
     # 빈 장 두 곳의 짧은 새 문장을 묶어 작성·검수한다. 기존 선택적 문장
     # 재작성 몫을 재배치하며, 재검수와 필수 도식·요약 호출을 먼저 남긴다.
+    #
+    # ⚠️ 바로 위 「SHADOW 계약으로 도는 실행에만 효과가 있다」는 재작성·재검수
+    #    이야기이고, 아래 두 호출자에는 해당하지 않는다 — 빈 장 복구는
+    #    2026-09-16부터 FULL의 packet 경로에서도 돈다
+    #    (`composer/pipeline.py`의 `recovery_enabled`). 뉴스 단계가 이 2회를
+    #    미리 남기므로(위 `EMPTY_RECOVERY_AI_CALLS`) 여기 예약은 «앞»이 아니라
+    #    «뒤»(도식·요약)를 지키는 몫이다.
     empty_recovery_writer_ask = _v2_ask_via_provider(
         engine, client, stage="v2_compose", max_tokens=V2_WRITER_MAX_TOKENS,
         reserved_calls=MANDATORY_TAIL_AI_CALLS + REWRITE_RECHECK_CALLS,

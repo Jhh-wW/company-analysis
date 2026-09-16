@@ -32,9 +32,17 @@ BODY_SECTION_IDS = frozenset((*STRICT_REQUIRED_QUALITY_SECTION_IDS, "summary"))
 BODY_DISPOSITIONS = frozenset((
     "참", "거짓_재작성", "거짓_제거", "애매_강등", "근거결속실패_제거", "번호없음_제거",
 ))
+#: 복구가 «시작조차» 못 한 두 경우. 예전에는 아무 기록 없이 넘어가서,
+#: 실행 진단에 `8_빈장_복구` 단계 자체가 없는 실행이 「복구가 꺼져 있었다」인지
+#: 「예산이 없었다」인지 「근거가 없었다」인지 되짚을 방법이 없었다
+#: (2026-09-16 실측: 6·8장이 빈 채로 나간 실행의 단계 목록 53개에 이 step 없음).
+#: 이름은 기존 `확인후보없음`(작가가 쓴 문장이 하나도 확인 등급을 못 받음)과
+#: 다르다 — 이쪽은 «AI를 부르기 전»의 사유다.
+EMPTY_RECOVERY_NO_BUDGET = "예산부족"
+EMPTY_RECOVERY_NO_EVIDENCE = "근거후보없음"
 EMPTY_RECOVERY_STATES = frozenset((
     "문장재작성대신예약", "작성형식실패", "확인후보없음", "작성완료", "검수완료",
-    "호출중단", "복구형식실패",
+    "호출중단", "복구형식실패", EMPTY_RECOVERY_NO_BUDGET, EMPTY_RECOVERY_NO_EVIDENCE,
 ))
 EMPTY_RECOVERY_ERRORS = frozenset(("호출한도", "요청예산", "제공자오류"))
 

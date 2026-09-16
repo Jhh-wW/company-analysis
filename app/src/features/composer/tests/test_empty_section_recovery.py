@@ -7,12 +7,19 @@ from dataclasses import replace
 
 import pytest
 
-from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
+from src.features.composer.constants import (
+    GRADE_CONFIRMED, GRADE_INTERPRETED, SECTION_IDS as _ALL_SECTION_IDS,
+)
 from src.features.composer.empty_section_recovery import recover_empty_sections, recovery_evidence, rejected_sentence_fingerprint
-from src.features.composer.port import AskFatalError, CollectedFragment, ComposedReport, ComposedSection, ComposedSentence
+from src.features.composer.port import (
+    AskFatalError, CollectedFragment, ComposedReport, ComposedSection, ComposedSentence,
+    SectionEvidencePacket, SectionEvidencePacketSet,
+)
 from src.features.composer.tests.test_pipeline import _FakeReviewer
 from src.features.composer.tests.test_verify import _FakeVerifier, _all_true, _verdict_json
 from src.features.composer.verify import verify_report
+from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+from src.shared.report_evidence.constants import ReleaseMode
 from src.shared.report_quality.source_identity import document_identity_from_parts
 
 
@@ -40,10 +47,12 @@ def _report(*section_ids):
                                 for section_id in section_ids))
 
 
-def _response(sections):
+def _response(sections, *, claim_slot=None):
     return json.dumps({"장들": {
-        section_id: {"문장들": [{"글": text, "인용": [fragment_id], "등급": grade}
-                              for text, fragment_id, grade in sentences]}
+        section_id: {"문장들": [
+            {"글": text, "인용": [fragment_id], "등급": grade,
+             **({"주장슬롯": claim_slot} if claim_slot else {})}
+            for text, fragment_id, grade in sentences]}
         for section_id, sentences in sections.items()
     }}, ensure_ascii=False)
 
@@ -221,3 +230,286 @@ def test_rejected_sentence_cannot_be_reapproved_with_cosmetic_changes(changed):
         writer=lambda _: _response({"past_changes": [(changed, "1", GRADE_CONFIRMED)]}))
     assert result == report
     assert not reviewer.prompts
+
+
+# ══════════════════════════════════════════════════════════
+# 작성 형식 어긋남 — 통째 포기 대신 «요청한 장만» 골라 쓴다
+#
+# 실측(2026-09-14): 답에 요청 밖 장이 하나 섞였다는 이유로 정상적으로 쓰인 장까지
+# 함께 버려져 8장이 빈 채로 나갔다. 아래 세 시험이 「골라 쓰기 · 1회 재요청 ·
+# 그래도 못 읽으면 포기」를 나눠 지킨다.
+# ══════════════════════════════════════════════════════════
+
+
+def test_extra_sections_in_response_are_dropped_not_fatal():
+    """요청 밖 장이 섞여도 요청한 장은 그대로 쓰고 개수만 진단에 남긴다."""
+    fragments = (_fragment(), _fragment("culture", CULTURE_TEXT, "2"))
+    diagnostics = []
+    raw = json.loads(_response({"past_changes": [(PAST_TEXT, "1", GRADE_CONFIRMED)],
+                                "culture": [(CULTURE_TEXT, "2", GRADE_CONFIRMED)],
+                                "identity": [(PAST_TEXT, "1", GRADE_CONFIRMED)]}))
+    calls = []
+    def writer(prompt):
+        calls.append(prompt)
+        return json.dumps(raw, ensure_ascii=False)
+    result = recover_empty_sections("가나다전자", _report("past_changes", "culture"),
+        targets=("past_changes", "culture"), evidence=recovery_evidence(fragments),
+        writer=writer, reviewer=_FakeReviewer(), protocol_diagnostics=diagnostics)
+    assert len(calls) == 1, "요청한 장을 읽었으면 재요청하지 않는다"
+    assert [section.sentences[0].text for section in result.sections] == [PAST_TEXT, CULTURE_TEXT]
+    written = next(item for item in diagnostics if item.get("상태") == "작성완료")
+    assert written["요청밖장수"] == 1
+
+
+def test_missing_section_in_response_recovers_the_other_one():
+    """요청 두 장 중 한 장만 답해도 그 한 장은 살린다(예전에는 둘 다 버렸다)."""
+    fragments = (_fragment(), _fragment("culture", CULTURE_TEXT, "2"))
+    diagnostics = []
+    calls = []
+    def writer(prompt):
+        calls.append(prompt)
+        return _response({"culture": [(CULTURE_TEXT, "2", GRADE_CONFIRMED)]})
+    result = recover_empty_sections("가나다전자", _report("past_changes", "culture"),
+        targets=("past_changes", "culture"), evidence=recovery_evidence(fragments),
+        writer=writer, reviewer=_FakeReviewer(), protocol_diagnostics=diagnostics)
+    assert len(calls) == 1
+    assert not result.sections[0].sentences
+    assert result.sections[1].sentences[0].text == CULTURE_TEXT
+    assert next(item for item in diagnostics if item.get("상태") == "검수완료")["복구장"] == ["culture"]
+
+
+def test_unreadable_response_retries_once_then_reports_format_failure():
+    """JSON 자체가 깨졌을 때만 재요청하고, 재요청 프롬프트에 형식 요구를 덧붙인다."""
+    from src.features.composer.empty_section_recovery_constants import EMPTY_RECOVERY_RETRY_GUIDE
+
+    diagnostics = []
+    calls = []
+    def writer(prompt):
+        calls.append(prompt)
+        return "형식을 따르지 못했습니다"
+    reviewer = _FakeReviewer()
+    result = recover_empty_sections("가나다전자", _report("past_changes"), targets=("past_changes",),
+        evidence=recovery_evidence((_fragment(),)), writer=writer, reviewer=reviewer,
+        protocol_diagnostics=diagnostics)
+    assert result == _report("past_changes")
+    assert len(calls) == 2, "파싱 재요청 상한은 1회다"
+    assert EMPTY_RECOVERY_RETRY_GUIDE not in calls[0] and EMPTY_RECOVERY_RETRY_GUIDE in calls[1]
+    assert not reviewer.prompts
+    assert diagnostics == [{"step": "8_빈장_복구", "상태": "작성형식실패",
+                            "대상장": ["past_changes"], "시도": 2}]
+
+
+def test_retry_response_is_accepted_when_the_first_one_was_unreadable():
+    """재요청이 읽히면 그대로 복구한다 — 재요청이 형식뿐인 것을 확인한다."""
+    answers = ["설명만 적었습니다", _response({"past_changes": [(PAST_TEXT, "1", GRADE_CONFIRMED)]})]
+    diagnostics = []
+    result = recover_empty_sections("가나다전자", _report("past_changes"), targets=("past_changes",),
+        evidence=recovery_evidence((_fragment(),)), writer=lambda _: answers.pop(0),
+        reviewer=_FakeReviewer(), protocol_diagnostics=diagnostics)
+    assert not answers
+    assert result.sections[0].sentences[0].text == PAST_TEXT
+    assert next(item for item in diagnostics if item.get("상태") == "작성완료")["요청밖장수"] == 0
+
+
+# ══════════════════════════════════════════════════════════
+# 운영(FULL) 모드 — 복구는 모드와 무관하게 돈다
+#
+# 실측(2026-09-16): 운영 실행 진단의 단계 53개에 `8_빈장_복구`가 «아예 없었고»
+# 6·8장이 빈 채로 나갔다. 원인 두 가지 — 복구 스위치가 SHADOW에서만 켜졌고,
+# 대상 선정이 flat 검수 경로에만 달린 재작성 게이트 안에 있었다(FULL은 packet
+# 경로라 그 게이트가 한 번도 불리지 않는다).
+# ══════════════════════════════════════════════════════════
+
+_ALL_CLAIM_SLOTS = tuple(
+    slot_id for section_id in _ALL_SECTION_IDS
+    for slot_id in CLAIM_SLOTS_BY_SECTION[section_id]
+)
+#: 8장 복구 후보로 쓸 «공식 결속» 조각. 얇은 FULL 후보(공식 홈페이지)는
+#: formal_source_kind가 없어 복구 근거가 되지 못하므로 한 개만 따로 넣는다.
+_RECOVERY_FRAGMENT_ID = "9"
+
+
+def _culture_recovery_fragment():
+    return replace(_fragment("culture", CULTURE_TEXT, _RECOVERY_FRAGMENT_ID),
+                   supported_claim_slots=_ALL_CLAIM_SLOTS,
+                   counts_toward_document_floor=True)
+
+
+def _full_packets(*, culture_owns_recovery_fragment: bool):
+    """얇은 FULL packet에 복구용 공식 조각을 더한다.
+
+    ``culture_owns_recovery_fragment`` 가 거짓이면 그 조각을 8장 packet에서만
+    뺀다 — union에는 남으므로 «장이 들고 있지 않은 근거»를 재현한다.
+    """
+    from src.features.composer.tests.test_pipeline import _strict_packet_set
+
+    base = _strict_packet_set()
+    extra = _culture_recovery_fragment()
+    return SectionEvidencePacketSet(
+        company_id=base.company_id,
+        evidence_generation_sha256=base.evidence_generation_sha256,
+        packets=tuple(
+            SectionEvidencePacket(
+                company_id=packet.company_id,
+                evidence_generation_sha256=packet.evidence_generation_sha256,
+                section_id=packet.section_id,
+                fragments=(
+                    packet.fragments
+                    if packet.section_id == "culture" and not culture_owns_recovery_fragment
+                    else packet.fragments + (extra,)
+                ),
+            )
+            for packet in base.packets
+        ),
+    )
+
+
+def _full_writer_leaving_culture_empty():
+    """8장만 빈 배열로 내는 얇은 FULL 작가.
+
+    문장 목록은 기존 얇은 작가를 그대로 물려받는다 — 복제하면 한쪽만 고쳐져
+    다른 쪽이 «비지 않는» 입력으로 조용히 바뀐다.
+    """
+    from src.features.composer.tests.test_evidence_available_report import _StrictThinWriter
+
+    class _Writer(_StrictThinWriter):
+        def __call__(self, prompt: str) -> str:
+            if self.section_calls < len(_ALL_SECTION_IDS) and (
+                _ALL_SECTION_IDS[self.section_calls] == "culture"
+            ):
+                self.prompts.append(prompt)
+                self.section_calls += 1
+                return json.dumps({"문장들": []}, ensure_ascii=False)
+            return super().__call__(prompt)
+
+    return _Writer()
+
+
+def _run_full(packets, *, can_start=True, recovery_writer, diagnostics):
+    from src.features.composer import pipeline
+
+    return pipeline.run_v2(
+        "가나다전자", {}, None,
+        writer_ask=_full_writer_leaving_culture_empty(), reviewer_ask=_FakeReviewer(),
+        empty_recovery_writer_ask=recovery_writer,
+        empty_recovery_reviewer_ask=_FakeReviewer(),
+        empty_recovery_can_start=lambda: can_start,
+        release_mode=ReleaseMode.FULL,
+        section_evidence_packets=packets,
+        company_id="00123456",
+        build_identity_sha256="b" * 64,
+        evidence_available_fallback=True,
+        composition_diagnostics_sink=diagnostics,
+    )
+
+
+def _recovery_steps(diagnostics):
+    return [item for item in diagnostics if item.get("step") == "8_빈장_복구"]
+
+
+def test_full_release_mode_recovers_the_empty_section():
+    """운영 모드에서도 복구 작가가 «실제로» 불리고 8장이 채워진다."""
+    recovery_calls = []
+    def recovery_writer(prompt):
+        recovery_calls.append(prompt)
+        return _response({"culture": [(CULTURE_TEXT, _RECOVERY_FRAGMENT_ID, GRADE_CONFIRMED)]},
+                         claim_slot=CLAIM_SLOTS_BY_SECTION["culture"][0])
+    diagnostics = []
+    output = _run_full(_full_packets(culture_owns_recovery_fragment=True),
+                       recovery_writer=recovery_writer, diagnostics=diagnostics)
+    assert len(recovery_calls) == 1, "FULL에서 복구 작가가 한 번도 불리지 않았습니다"
+    recovered = next(item for item in _recovery_steps(diagnostics)
+                     if item.get("상태") == "검수완료")
+    assert recovered["복구장"] == ["culture"]
+    culture_section = next(section for section in output.report.sections
+                           if section.cell == "culture")
+    assert any(CULTURE_TEXT in str(line) for line in culture_section.prose_lines)
+
+
+def test_full_release_mode_records_no_budget_without_calling_the_writer():
+    """예산이 없으면 조용히 넘어가지 않고 «예산부족»을 남긴다."""
+    recovery_calls = []
+    diagnostics = []
+    _run_full(_full_packets(culture_owns_recovery_fragment=True), can_start=False,
+              diagnostics=diagnostics,
+              recovery_writer=lambda prompt: recovery_calls.append(prompt) or "")
+    assert not recovery_calls
+    assert _recovery_steps(diagnostics) == [
+        {"step": "8_빈장_복구", "상태": "예산부족", "대상장": ["culture"]}]
+
+
+def test_packet_path_ignores_evidence_the_section_does_not_own():
+    """장이 들고 있지 않은 조각은 복구 근거가 아니다 — 근거후보없음으로 남는다.
+
+    ★ 이 교집합을 빼면 복구 문장이 장별 근거 소유권 불변식을 깨뜨려 검증을 마친
+      보고서 «전체»가 ValueError로 죽는다. 그래서 「기록이 남는가」와 「실행이
+      살아 있는가」를 함께 본다.
+    """
+    recovery_calls = []
+    diagnostics = []
+    _run_full(_full_packets(culture_owns_recovery_fragment=False), diagnostics=diagnostics,
+              recovery_writer=lambda prompt: recovery_calls.append(prompt) or "")
+    assert not recovery_calls
+    assert _recovery_steps(diagnostics) == [
+        {"step": "8_빈장_복구", "상태": "근거후보없음", "대상장": ["culture"]}]
+
+
+def test_full_release_mode_drops_recovered_sentence_without_a_claim_slot():
+    """의미 칸 없는 복구 문장은 싣지 않는다 — 실으면 보고서 전체가 막힌다.
+
+    ★ 음성 대조 — `require_claim_slot` 을 빼면 이 실행이
+      `report_recovery:post_validation_safety_blocked` 로 «예외»가 된다
+      (culture장에 fact_id와 결속되지 않은 공개 내용). 즉 빈 장 하나를 채우려다
+      보고서를 통째로 막는다. 그래서 「빈 채로 끝나되 살아서 끝난다」를 본다.
+    """
+    recovery_calls = []
+    def recovery_writer(prompt):
+        recovery_calls.append(prompt)
+        # 주장슬롯을 적지 않은 답. 형식은 멀쩡하므로 재요청 대상도 아니다.
+        return _response({"culture": [(CULTURE_TEXT, _RECOVERY_FRAGMENT_ID, GRADE_CONFIRMED)]})
+    diagnostics = []
+    output = _run_full(_full_packets(culture_owns_recovery_fragment=True),
+                       recovery_writer=recovery_writer, diagnostics=diagnostics)
+    assert len(recovery_calls) == 1
+    # packet 경로에는 재작성 게이트가 없어 «문장재작성대신예약» 기록도 없다.
+    assert [item["상태"] for item in _recovery_steps(diagnostics)] == ["확인후보없음"]
+    culture_section = next(section for section in output.report.sections
+                           if section.cell == "culture")
+    assert not any(CULTURE_TEXT in str(line) for line in culture_section.prose_lines)
+
+
+def test_section_the_writer_never_attempted_is_still_a_recovery_target():
+    """작가가 한 글자도 못 쓴 장이 오히려 복구가 가장 필요한 장이다.
+
+    ★ 예전에는 자격이 「작가가 한 문장이라도 쓴 장」이어서, 초안이 통째로 빈 장은
+      후보에서 아예 빠졌다. 그 조건을 빼면 이 시험이 초록이 되고, 되살리면
+      복구 작가가 한 번도 불리지 않아 빨개진다.
+    """
+    from src.features.composer import pipeline
+    from src.features.composer.evidence_availability import EvidenceAvailability
+    from src.features.composer.tests.test_pipeline import _FakeWriter
+
+    empty_draft = ComposedReport(tuple(ComposedSection(section_id, ())
+                                       for section_id in _ALL_SECTION_IDS))
+    original = pipeline.compose_sections
+    pipeline.compose_sections = lambda *args, **kwargs: empty_draft
+    try:
+        writer_calls = []
+        diagnostics = []
+        output = pipeline.run_v2(
+            "가나다전자", (_fragment(),), None,
+            writer_ask=_FakeWriter(), reviewer_ask=_FakeReviewer(),
+            empty_recovery_writer_ask=lambda prompt: writer_calls.append(prompt) or _response(
+                {"past_changes": [(PAST_TEXT, "1", GRADE_CONFIRMED)]}),
+            empty_recovery_reviewer_ask=_FakeReviewer(),
+            empty_recovery_can_start=lambda: True,
+            evidence_availability=EvidenceAvailability("partial"),
+            composition_diagnostics_sink=diagnostics,
+        )
+    finally:
+        pipeline.compose_sections = original
+    assert len(writer_calls) == 1, "초안이 빈 장은 복구 후보에서 빠졌습니다"
+    assert next(item for item in _recovery_steps(diagnostics)
+                if item.get("상태") == "검수완료")["복구장"] == ["past_changes"]
+    past = next(section for section in output.report.sections if section.cell == "past_changes")
+    assert any(PAST_TEXT in str(line) for line in past.prose_lines)

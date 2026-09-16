@@ -77,6 +77,20 @@ MANDATORY_TAIL_AI_CALLS: Final[int] = (
 # 판정 없이 버려진다 — 재작성을 시작하기 전에 이 몫까지 남아 있어야 한다.
 REWRITE_RECHECK_CALLS: Final[int] = 1
 
+# 빈 장 복구 한 번의 «자기» 호출 수. 묶음 작성 1회 + 그 문장만 보는 검수 1회이며,
+# 개수는 `composer/empty_section_recovery.py`가 구조로 강제한다(작성은 함수에
+# 단 한 번 나오고, 검수는 두 번째 호출에서 AskFatalError를 던진다).
+#
+# ★ 왜 «필수 후속»(MANDATORY_TAIL_AI_CALLS)에 더하지 않고 따로 두나 —
+#   복구는 빈 장이 있을 때만 도는 조건부 단계다. 필수 후속에 섞으면 빈 장이
+#   하나도 없는 정상 실행에서도 영구히 2회가 잠긴다. 유도식이 다른 값이므로
+#   값이 우연히 같아도 별칭으로 재사용하지 않는다.
+EMPTY_RECOVERY_WRITER_CALLS: Final[int] = 1
+EMPTY_RECOVERY_REVIEW_CALLS: Final[int] = 1
+EMPTY_RECOVERY_AI_CALLS: Final[int] = (
+    EMPTY_RECOVERY_WRITER_CALLS + EMPTY_RECOVERY_REVIEW_CALLS
+)
+
 # 본문 «앞»에서 도는 단계(뉴스 등)가 남겨야 하는 최소 몫.
 # ★ 보충(supplement) 몫이 아니라 «필수 단계»에서 유도한다. 예전에는
 #   MAX_TOTAL_AI_CALLS(보충 계산식)를 그대로 썼고 두 값이 우연히 같아
@@ -588,6 +602,9 @@ def decide_post_validation(
 
 
 __all__ = [
+    "EMPTY_RECOVERY_AI_CALLS",
+    "EMPTY_RECOVERY_REVIEW_CALLS",
+    "EMPTY_RECOVERY_WRITER_CALLS",
     "GenerationValidationReceipt",
     "MAX_SUPPLEMENT_SECTIONS",
     "QUALITY_DERIVED_STOP_REASON_CODES",

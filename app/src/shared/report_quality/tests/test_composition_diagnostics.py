@@ -15,7 +15,7 @@ def test_empty_recovery_records_closed_counts_and_machine_semantic_stages():
         {"step": "8_본문검수_처분", "장별빈본문": ["past_changes", "culture"],
          "문장재작성허용": False, "판정별": {"근거결속실패_제거": 2}},
         {"step": "8_빈장_복구", "상태": "작성완료", "대상장": ["past_changes"],
-         "작성문장수": 2, "원문": "비공개", "응답": "비공개", "tokens": 100},
+         "작성문장수": 2, "요청밖장수": 1, "원문": "비공개", "응답": "비공개", "tokens": 100},
         {"step": "8_빈장_복구", "상태": "검수완료", "대상장": ["past_changes"],
          "복구장": ["past_changes"], "error": "비공개"},
         {"step": "8_빈장_복구", "상태": "호출중단", "대상장": ["culture"],
@@ -26,9 +26,26 @@ def test_empty_recovery_records_closed_counts_and_machine_semantic_stages():
     assert result[0]["장별"]["past_changes"] == {"초안": 3, "기계통과": 0}
     assert result[0]["장별"]["culture"]["기계통과"] == 2
     assert result[1]["장별빈본문"] == ["past_changes", "culture"]
+    # 요청하지 않은 장을 몇 개 끼워 넣었는지까지 남는다 — 부분 수용으로 바뀌면서
+    # 「형식이 어긋났다」는 사실이 통째 포기와 함께 사라지지 않게 하는 칸이다.
+    assert result[2]["요청밖장수"] == 1
     assert result[3]["복구장"] == ["past_changes"]
     serialized = json.dumps(result, ensure_ascii=False)
     assert "비공개" not in serialized and "tokens" not in serialized
+
+
+def test_recovery_not_started_records_carry_only_state_and_targets():
+    """시작조차 못 한 두 사유가 닫힌 목록을 통과하고 원문 없이 남는다."""
+    records = [
+        {"step": "8_빈장_복구", "상태": "예산부족", "대상장": ["culture", "future_strategy"],
+         "원문": "비공개"},
+        {"step": "8_빈장_복구", "상태": "근거후보없음", "대상장": ["culture"], "tokens": 100},
+    ]
+    result = observed_composition_steps(records)
+    assert result == (
+        {"step": "8_빈장_복구", "상태": "예산부족", "대상장": ["culture", "future_strategy"]},
+        {"step": "8_빈장_복구", "상태": "근거후보없음", "대상장": ["culture"]},
+    )
 
 
 @pytest.mark.parametrize("record", [
@@ -36,6 +53,12 @@ def test_empty_recovery_records_closed_counts_and_machine_semantic_stages():
     {"step": "8_빈장_복구", "상태": "본문", "대상장": ["culture"]},
     {"step": "8_빈장_복구", "상태": "작성완료", "대상장": ["culture"], "작성문장수": True},
     {"step": "8_빈장_복구", "상태": "작성완료", "대상장": ["culture"], "작성문장수": -1},
+    # 요청밖장수·시도는 «있어야» 하는 칸이다. 빠지면 그 기록을 통째로 버린다.
+    {"step": "8_빈장_복구", "상태": "작성완료", "대상장": ["culture"], "작성문장수": 1},
+    {"step": "8_빈장_복구", "상태": "작성완료", "대상장": ["culture"], "작성문장수": 1,
+     "요청밖장수": -1},
+    {"step": "8_빈장_복구", "상태": "작성형식실패", "대상장": ["culture"]},
+    {"step": "8_빈장_복구", "상태": "작성형식실패", "대상장": ["culture"], "시도": 0},
     {"step": "8_빈장_복구", "상태": "검수완료", "대상장": ["culture"], "복구장": ["identity"]},
     {"step": "8_빈장_복구", "상태": "검수완료", "대상장": ["본문"], "복구장": []},
     {"step": "8_빈장_복구", "상태": "호출중단", "대상장": ["culture"], "오류종류": "비공개 오류문"},
