@@ -40,6 +40,7 @@ from src.features.homepage.constants import (
     WIDE_PRIORITY_HOST_KEYWORDS,
     WIDE_REASON_NO_USABLE_CONTENT,
     WIDE_REQUIRED_SLOT_IDS,
+    WIDE_SECTION_PAGE_QUOTA,
     WIDE_ROOT_IDENTITY_SUPPLEMENT_PATH_MARKERS,
     WIDE_SOURCE_KIND_IDENTITY_VERIFIED_WEB_PAGE,
     WIDE_SOURCE_KIND_IR_PDF,
@@ -224,6 +225,11 @@ class _CollectionState:
     robots_policies: dict[str, WideRobotsPolicy] = field(default_factory=dict)
     content_hashes: set[str] = field(default_factory=set)
     pages_fetched: int = 0
+    #: 장(section)별로 실제 접속한 일반 웹 페이지 수. 한 갈래가 페이지 예산을
+    #: 독점해 다른 장의 재료를 한 쪽도 못 읽는 것을 막는 «장별 최소 몫»의
+    #: 근거값이다(``_page_schedule_key`` 참조). 호스트가 여러 개여도 수집
+    #: 실행 하나의 예산은 하나이므로 이 집계도 실행 전체에 걸쳐 하나만 둔다.
+    section_pages: dict[str, int] = field(default_factory=dict)
     total_bytes: int = 0
     attempt_counter: int = 0
     # DART root(또는 그 고신뢰 하위호스트)의 실제 HTML이 직접 가리킨
@@ -804,8 +810,7 @@ def _run_web_crawl(
             state.record_truncation(WIDE_SOURCE_KIND_WEB_PAGE, "truncated_byte_cap")
             return
 
-        queue.sort(key=lambda queued: _priority_key(queued.url))
-        item = queue.pop(0)
+        item = _pop_next_page(state, queue)
         _visit_page(
             state,
             item=item,
@@ -1164,6 +1169,7 @@ def _collect_identity_verified_candidate(
         error = exc
     elapsed_ms = int((state.clock() - started) * 1000)
     state.pages_fetched += 1
+    _record_page_section(state, candidate_url)
 
     page_state, reason_code = classify_general_outcome(response, error)
     response_bytes = len(
@@ -1399,8 +1405,7 @@ def _collect_identity_verified_candidate(
                     WIDE_SOURCE_KIND_WEB_PAGE, "truncated_byte_cap"
                 )
                 break
-            queue.sort(key=lambda queued: _priority_key(queued.url))
-            item = queue.pop(0)
+            item = _pop_next_page(state, queue)
             _visit_page(
                 state,
                 item=item,
@@ -1571,6 +1576,9 @@ def _visit_page(
         error = exc
     elapsed_ms = int((state.clock() - started) * 1000)
     state.pages_fetched += 1
+    # 예산을 실제로 쓴 쪽만 그 장의 몫으로 센다(요청 URL 기준 — 실패해도
+    # 예산은 이미 썼고, 같은 장의 다른 후보에게 순서를 넘겨야 한다).
+    _record_page_section(state, item.url)
 
     page_state, reason_code = classify_general_outcome(response, error)
     requirement = REQUIREMENT_REQUIRED if binding.is_high_confidence else REQUIREMENT_OPTIONAL
@@ -2245,3 +2253,54 @@ def _priority_key(url: str) -> tuple[int, str]:
         if keyword in lowered:
             return (rank, url)
     return (len(_PRIORITY_KEYWORDS), url)
+
+
+def _page_section_id(url: str) -> str:
+    """URL이 어느 장(section)의 재료인지 하나로 줄인다.
+
+    페이지 유형 판정(``classify_official_page_url``)이 이미 쓰는 같은 표를
+    그대로 재사용한다 — 여기서 경로 어휘를 다시 세지 않는다. 유형을 못
+    알아낸 URL은 빈 문자열이고, 그런 페이지는 장별 최소 몫을 받지 않는다.
+    """
+
+    slot_ids = classify_official_page_url(url).slot_ids
+    return slot_ids[0].split(":", 1)[0] if slot_ids else ""
+
+
+def _page_schedule_key(state: _CollectionState, url: str) -> tuple[int, int, str]:
+    """장별 최소 몫을 먼저 채우고, 그다음은 기존 우선순위로 읽는 순서값.
+
+    ``(아직 몫을 못 채웠으면 0, 우선순위 rank, URL)``. 같은 단계 안에서는
+    기존 ``_priority_key`` 순서가 그대로 유지되므로, 바뀌는 것은 오직
+    «한 장이 예산을 독점하는 것을 막는» 첫 몫뿐이다.
+    """
+
+    section_id = _page_section_id(url)
+    under_quota = bool(section_id) and (
+        state.section_pages.get(section_id, 0) < WIDE_SECTION_PAGE_QUOTA
+    )
+    rank, tiebreak = _priority_key(url)
+    return (0 if under_quota else 1, rank, tiebreak)
+
+
+def _pop_next_page(state: _CollectionState, queue: list[_QueueItem]) -> _QueueItem:
+    """다음에 읽을 후보 하나를 꺼낸다(장별 최소 몫 → 기존 우선순위 순).
+
+    호출 전 큐가 비어 있지 않아야 한다 — 두 호출부 모두 ``while queue:`` 안에
+    있다. 매번 다시 고르는 이유는 몫 집계가 한 쪽 읽을 때마다 바뀌기 때문이다.
+    """
+
+    best_index = min(
+        range(len(queue)),
+        key=lambda index: _page_schedule_key(state, queue[index].url),
+    )
+    return queue.pop(best_index)
+
+
+def _record_page_section(state: _CollectionState, url: str) -> None:
+    """실제로 접속한 페이지 한 쪽을 그 장의 몫으로 센다."""
+
+    section_id = _page_section_id(url)
+    if not section_id:
+        return
+    state.section_pages[section_id] = state.section_pages.get(section_id, 0) + 1
