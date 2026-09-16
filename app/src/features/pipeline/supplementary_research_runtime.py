@@ -39,6 +39,9 @@ def enforce_supplementary_research_release(
         "step": SUPPLEMENTARY_RESEARCH_RELEASE_STEP,
         "허용": decision.allowed,
         "사유코드": decision.code,
+        # 시험 대역(SimpleNamespace)이나 옛 결정 객체에는 detail이 없을 수 있다 — 기록은
+        # 관측이라 본 기능을 막지 않는다.
+        "세부": str(getattr(decision, "detail", "") or ""),
         "검증본문장": list(decision.qualified_section_ids),
     })
     if decision.allowed:

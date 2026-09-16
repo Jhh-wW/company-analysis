@@ -11,7 +11,6 @@ import unicodedata
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Final
-from src.features.report_standard.constants import CULTURE_SCOPE_LIMITATION_TEXT
 from src.shared.report_generation.table_citations import validated_row_cites
 
 #: 구성 도식(100% 누적 막대)에 그릴 수 있는 분류 개수.
@@ -70,54 +69,12 @@ _CARD_TITLE_COLUMN_BY_HEADER_KEY: Final[dict[frozenset[str], str]] = {
     frozenset(("제품·서비스명", "제품·서비스 범위", "중점 추진 근거", "사업적 역할")): "제품·서비스명",
 }
 
-#: 카드 맨 아래에 붙는 「범위·한계」 줄의 라벨.
-#: ★ v1(section_content.py)의 8장 카드가 실제로 쓰는 라벨을 그대로
-#:   가져왔다(_culture_blocks의 _field("범위·한계", ...)) — 새로 지은
-#:   이름이 아니다.
-_CARD_LIMITATION_LABEL: Final[str] = "범위·한계"
-
-#: 카드로 낼 흐름표 중 «범위·한계」 줄을 붙일 칸 이름 집합 → 그 장의 고정
-#: 문구. AI가 아니라 코드가 정한다(사용자 승인 조건 — 층2만, 층1 AI
-#: 확장은 나중에 결정). 문구는 전부 전수대조가 정리한
-#: "빈틈 채운 문구" 표를 그대로 옮겼다 — 지어낸 말이 아니라 v1 폴백이
-#: 실제로 쓰던 절차적 사실 서술이다. 가치 판단(좋다·나쁘다·위험 등)은
-#: 한 글자도 없다 — v1도 13건 전수에서 0건이었다.
-#:
-#: ★ 왜 «citations 개수」 규칙(그 조사가 정한 최종 대체)은 안 쓰나 —
-#:   ``ReportTable.cite``는 표 하나에 «단일 문자열」(예: "[2]")이고, 원래
-#:   여러 인용 중 «최솟값 하나»로 이미 뭉개져 있다(composer/render.py의
-#:   `_flow_report_table`: ``cite=f"[{min(cited)}]"``). 줄마다 몇 건을
-#:   인용했는지는 이 단계에서 이미 사라진 정보라 셀 수 없다. 다행히
-#:   아래 4개 카드 전부 section_id 전용 문구가 있어(문서 §2-1) citations
-#:   개수로 갈라야 하는 경우가 없다 — 그래서 그 규칙은 구현하지 않았다.
-#:   (자세한 사유는 진행 보고에 남긴다.)
-#: ★ 1장(identity)은 «일부러» 뺐다 — v1도 목업도 1장 카드에는 이 줄이
-#:   없다(문서 §1 마지막 줄: "1장은 층2 고정 문구가 없는 유일한 장").
-#:   문서 §2-1은 1장에 신규 문구를 «지어낼 수 있다»고 적어 뒀지만, v1
-#:   선례가 없는 신규 문구를 넣으면 목업과 달라진다 — 그래서 뺐다.
-_CARD_LIMITATION_TEXT_BY_HEADER_KEY: Final[dict[frozenset[str], str]] = {
-    # 3장 — 문서 §2-1: portfolio, v1 선례 #3 그대로.
-    frozenset(("제품·서비스명", "제품·서비스 범위", "중점 추진 근거", "사업적 역할")): (
-        "공식 근거가 확인한 범위로 한정합니다"
-    ),
-    # 6장 — future_strategy.
-    # ★ 「아직 실행되지 않은 계획입니다」에서 바꿨다. 그 문장은
-    #   행마다 «실행됐는지»를 단정하는데, 이 층에는 그걸 판정할 재료가 없다:
-    #   `ReportTable` 에는 장 id·날짜·시간상태가 없고(`pipeline/port.py`),
-    #   한 행의 원본 `FlowRow` 도 칸 문자열과 인용뿐이다(`composer/port.py`).
-    #   조건도 «칸 이름이 6장 것인가» 하나뿐이라 그 표의 «모든 행»에 무조건 붙었다.
-    #   실측: 은행 4행 중 4행·카드사 2행 중 2행에 붙었고,
-    #   그중 4행은 같은 보고서 본문이 「출시하여 … 구축했으며」라고 과거형으로
-    #   쓰고 3장 표에도 「2025년 6월 출시」로 실려 있었다 — 정면으로 어긋났다.
-    #   눈가림 독립 평가에서 평가자 2명이 각각 이 모순을 지적했다.
-    # ★ 그래서 «판정»을 «사실»로 바꾼다. 우리는 실행 여부를 확인하지 않았고,
-    #   확인하지 않았다고 적는 것이 정직하다. 3·8장 문구처럼 행 내용과
-    #   무관하게 표시할 수 있는 검증 한계만 이 층에 둔다.
-    frozenset(("계획", "시점", "공시된 내용")): "실행 여부는 확인하지 않았습니다",
-    # 8장 — 표 머리말은 전사 적용이나 공식성의 증거가 아니다. 특정 부서
-    # 절차·목표를 전사 기준으로 격상하지 않고 인용 자료의 범위만 설명한다.
-    frozenset(("내건 가치", "일하는 원칙", "확인된 사례")): CULTURE_SCOPE_LIMITATION_TEXT,
-}
+#: ★ 2026-09-17 삭제 — 카드 맨 아래에 「범위·한계」 줄을 붙이던
+#:   ``_CARD_LIMITATION_LABEL``·``_CARD_LIMITATION_TEXT_BY_HEADER_KEY``를 모두 없앤다.
+#:   독자에게 우리가 무엇을 어떻게 확인했는지(처리 과정·범위)를 싣지
+#:   않는다는 결정에 따른다 — 웹·PDF·Notion 세 채널 모두 같이 뺀다.
+#:   사실 원장(``FactRecord.limitations``)의 값 자체는 그대로 남아 있고,
+#:   진단·관리자 화면은 영향받지 않는다 — 표시만 멈춘다.
 
 #: 위 튜플을 «순서 무관» 비교용으로 미리 굳힌다(실측 사고 대응).
 #:   composer/constants.py가 6장 칸 순서를 «시점→계획」에서 «계획→시점」으로
@@ -474,13 +431,12 @@ def _flow_cards(
       제목 역할을 한다(예: 「회사가 스스로를 어떻게 규정하나」). 줄이
       여러 개여도 어느 칸이 그 줄의 «주제»인지 이 표는 알려 주지
       않으므로 제목을 지어내지 않는다(빈 제목 — Card 문서 참조).
-    ★ 「범위·한계」 줄이 등록된 표(3·6·8장)는 카드 맨 아래에 그 장의
-      고정 문구를 한 줄 더 붙인다 — _CARD_LIMITATION_TEXT_BY_HEADER_KEY
-      주석 참조. AI가 쓴 값이 아니라 이 함수(코드)가 붙인 값이다.
+    ★ 2026-09-17부터 카드 맨 아래에 「범위·한계」 고정 문구 줄을 붙이지
+      않는다. 표가 준 칸만 그대로 낸다 — 이 함수는 더 이상 표에 없던
+      줄을 만들지 않는다.
     """
     key = frozenset(headers)
     title_column = _CARD_TITLE_COLUMN_BY_HEADER_KEY.get(key, "")
-    limitation_text = _CARD_LIMITATION_TEXT_BY_HEADER_KEY.get(key, "")
     return tuple(
         Card(
             title=(
@@ -491,17 +447,10 @@ def _flow_cards(
                 if title_column
                 else ""
             ),
-            fields=(
-                tuple(
-                    CardField(label=headers[index], value=value)
-                    for index, value in enumerate(row)
-                    if value and headers[index] != title_column
-                )
-                + (
-                    (CardField(label=_CARD_LIMITATION_LABEL, value=limitation_text),)
-                    if limitation_text
-                    else ()
-                )
+            fields=tuple(
+                CardField(label=headers[index], value=value)
+                for index, value in enumerate(row)
+                if value and headers[index] != title_column
             ),
         )
         for row in flows

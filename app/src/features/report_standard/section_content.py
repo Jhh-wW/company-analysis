@@ -1,7 +1,7 @@
 """장별 정본 질문을 같은 Report 사실 원장에서 읽는 공개 표현 모델.
 
 웹·PDF·Notion이 ``ReportSection.prose_lines``를 한 문단으로 합치면 사실은
-남아 있어도 제품·역할·상태·한계 같은 장별 답이 독자에게 보이지 않는다.
+남아 있어도 제품·역할·상태 같은 장별 답이 독자에게 보이지 않는다.
 이 모듈은 새 사실을 만들지 않고 이미 검증된 ``FactRecord``의 구조 필드를
 장별 카드로 투영한다. 따라서 세 채널은 같은 블록·같은 ``fact_id``·같은
 복수 출처를 사용한다.
@@ -24,7 +24,6 @@ from src.features.pipeline.section567_contract import (
 from src.features.provenance.sources import Source
 from src.features.report_standard.constants import (
     COMPARISON_JUDGMENT_LABELS,
-    CULTURE_SCOPE_LIMITATION_TEXT,
     RELATIONSHIP_KEY_FALLBACK_LABEL,
     RELATIONSHIP_KEY_LABELS,
 )
@@ -305,10 +304,6 @@ def _portfolio_blocks(
         role = fact.product_role
         if fact.portfolio_stage:
             role += f" · 보고서 선택 단계: {fact.portfolio_stage}"
-        limitation = _clean(
-            fact.limitations or fact.limitation,
-            "공식 근거가 확인한 범위로 한정",
-        )
         fields = (
             _field("제품·서비스 범위", fact.subject_scope),
             _field("사업적 역할", role),
@@ -317,9 +312,8 @@ def _portfolio_blocks(
                 revenue_fact.subject_scope if revenue_fact is not None else "",
             ),
             _field(
-                "중점 추진 근거·현재 확인·한계",
-                f"신호: {_joined(fact.priority_signals)} · "
-                f"확인: {fact.claim} · 한계: {limitation}",
+                "중점 추진 근거·현재 확인",
+                f"신호: {_joined(fact.priority_signals)} · 확인: {fact.claim}",
             ),
         )
         out.append(
@@ -398,16 +392,6 @@ def _past_blocks(
                         _joined((fact.claim for fact in linked)),
                         "공식 근거에서 결과를 별도로 확인하지 못함",
                     ),
-                    _field(
-                        "범위·한계",
-                        _joined(
-                            (
-                                fact.limitations or fact.limitation
-                                for fact in grouped
-                            )
-                        ),
-                        "확인된 실행 범위로 한정",
-                    ),
                 ),
                 fact_ids=tuple(fact.fact_id for fact in grouped),
                 source_numbers=_numbers(grouped, source_numbers),
@@ -426,11 +410,6 @@ def _past_blocks(
                         "근거 사실",
                         _joined((basis_label(basis) for basis in bases)),
                         "결속된 근거 사실을 확인하지 못함",
-                    ),
-                    _field(
-                        "범위·한계",
-                        fact.limitations or fact.limitation,
-                        "결속된 근거 사실 범위로 한정",
                     ),
                 ),
                 fact_ids=(fact.fact_id,),
@@ -457,11 +436,6 @@ def _current_blocks(
         initial_signals = _joined(
             fact.initial_signal for fact in linked if fact.initial_signal
         )
-        signal_limit = (
-            "동시 관찰·효과/인과 미확정"
-            if initial_signals
-            else "대응 진행 중·효과 미확인"
-        )
         out.append(
             SectionContentBlock(
                 title=_clean(issue.subject_scope, "현재 과제"),
@@ -475,7 +449,6 @@ def _current_blocks(
                     _field(
                         "초기 신호·남은 문제",
                         f"초기 신호: {initial_signals or '대응 진행 중·효과 미확인'} · "
-                        f"해석 한계: {signal_limit} · "
                         f"남은 문제: {remaining or '해결 결과는 아직 확인되지 않음'}",
                     ),
                     _field("다음 확인 지표", issue.next_check_metric),
@@ -502,9 +475,13 @@ def _future_blocks(
                     f"상태: {_clean(PLAN_STATUS_LABELS.get(fact.plan_status), '상태 미확인')}",
                 ),
                 _field(
-                    "회사 제시 효과·한계",
-                    f"효과: {_clean(fact.plan_expected_effect, '공식 효과 미공개')} · "
-                    f"한계: {_clean(fact.limitations or fact.limitation, '미실행 계획')}",
+                    "회사 제시 효과",
+                    # ★ 「효과: 」 접두는 뺀다(2026-09-17) — 라벨이 이미 「회사 제시
+                    #   효과」라 값에서 한 번 더 말하면 군더더기다. 접두는 원래 한
+                    #   칸에 효과와 한계 «두 조각»이 들어 있어서 필요했는데, 한계를
+                    #   뺀 뒤로는 조각이 하나뿐이라 구분할 것이 없다(9장 「판정」도
+                    #   같은 모양이다).
+                    _clean(fact.plan_expected_effect, "공식 효과 미공개"),
                 ),
                 _field(
                     "실행 확인 신호",
@@ -539,11 +516,6 @@ def _operations_blocks(
                         RELATIONSHIP_TYPE_LABELS.get(fact.relationship_type, ""),
                     ),
                     _field("확인된 역할", _relationship_display(fact.relationship_or_action)),
-                    _field(
-                        "운영 범위·한계",
-                        "현재 상태: 공식 근거에서 현재 운영 확인 · "
-                        f"한계: {_clean(fact.limitations or fact.limitation, '공식 근거가 확인한 현재 관계로 한정')}",
-                    ),
                 ),
                 fact_ids=(fact.fact_id,),
                 source_numbers=_numbers((fact,), source_numbers),
@@ -561,11 +533,6 @@ def _culture_blocks(
             fields=(
                 _field("적용 범위", fact.subject_scope),
                 _field("확인 내용", fact.claim),
-                _field(
-                    "범위·한계",
-                    fact.limitations or fact.limitation,
-                    CULTURE_SCOPE_LIMITATION_TEXT,
-                ),
             ),
             fact_ids=(fact.fact_id,),
             source_numbers=_numbers((fact,), source_numbers),
@@ -647,11 +614,7 @@ def _competitive_blocks(
                     ),
                     _field("비교축", fact.comparison_metric),
                     _field("확인된 차이", fact.claim),
-                    _field(
-                        "판정·비교 한계",
-                        f"{judgment} · "
-                        f"{_clean(fact.limitations or fact.limitation, '공식 근거가 확인한 비교축으로 한정')}",
-                    ),
+                    _field("판정", judgment),
                 ),
                 fact_ids=(fact.fact_id,),
                 source_numbers=_numbers((fact,), source_numbers),

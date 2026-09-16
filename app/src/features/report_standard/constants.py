@@ -272,5 +272,7 @@ RELATIONSHIP_KEY_LABELS: Final[dict[str, str]] = {
 #: 빈 값은 출고 게이트의 빈 항목 검사에 걸려 보고서 전체 차단을 일으킨다.
 RELATIONSHIP_KEY_FALLBACK_LABEL: Final[str] = "공식 자료 기반 확인 항목"
 
-# 표나 사실 카드의 종류만으로 전사 적용을 단정하지 않는다.
-CULTURE_SCOPE_LIMITATION_TEXT: Final[str] = "인용 자료에 나타난 범위로 한정합니다"
+# ★ 2026-09-17 삭제 — CULTURE_SCOPE_LIMITATION_TEXT("인용 자료에 나타난 범위로
+#   한정합니다")는 8장 문화 카드의 「범위·한계」 줄에만 쓰였다. 그 줄을 세 채널에서
+#   모두 뺐으므로 읽는 곳이 없어졌다. 값을 남겨 두면 다음 사람이 「어딘가 쓰이는
+#   문구」로 오해해 되살릴 수 있어 상수째 지운다.

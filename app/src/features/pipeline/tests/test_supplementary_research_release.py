@@ -670,3 +670,5 @@ def test_report_company_mismatch_with_collection_fails_closed():
 
     assert decision.allowed is False
     assert decision.code == "supplementary_release_invalid_report_dto"
+    # 어느 조건에서 거절했는지 닫힌 세부 코드로 남는다(2026-09-17 운영 추적 실측).
+    assert decision.detail == "company_id_mismatch"

@@ -242,9 +242,9 @@ def test_1장부터_9장은_각_질문에_답하는_구조화_블록을_낸다()
             "제품·서비스 범위",
             "사업적 역할",
             "2장 수익 분류 참조",
-            "중점 추진 근거·현재 확인·한계",
+            "중점 추진 근거·현재 확인",
         },
-        "past_changes": {"실행", "확인된 결과·의미", "범위·한계"},
+        "past_changes": {"실행", "확인된 결과·의미"},
         "current_challenges": {
             "현재 과제·증거",
             "진행 중 대응",
@@ -254,21 +254,20 @@ def test_1장부터_9장은_각_질문에_답하는_구조화_블록을_낸다()
         "future_strategy": {
             "공식 계획",
             "시점·조건·현재 상태",
-            "회사 제시 효과·한계",
+            "회사 제시 효과",
             "실행 확인 신호",
         },
         "operations_partners": {
             "가치사슬 단계",
             "관계 유형",
             "확인된 역할",
-            "운영 범위·한계",
         },
-        "culture": {"적용 범위", "확인 내용", "범위·한계"},
+        "culture": {"적용 범위", "확인 내용"},
         "competitive_position": {
             "비교군 선정 이유·동일 조건",
             "비교축",
             "확인된 차이",
-            "판정·비교 한계",
+            "판정",
         },
     }
     for section_id, required in required_labels.items():
@@ -278,6 +277,41 @@ def test_1장부터_9장은_각_질문에_답하는_구조화_블록을_낸다()
             for field in block.fields
         }
         assert required <= actual, f"{section_id} 누락: {sorted(required - actual)}"
+
+
+def test_어느_장_카드에도_범위한계_줄이_없다() -> None:
+    """★ 2026-09-17 — 독자에게 처리 과정·범위 설명을 싣지 않는다.
+
+    3·7·8장 카드와 4장(과거 변화) 카드에 붙던 「범위·한계」·「운영 범위·한계」
+    줄을 모두 뺐다. 사실 원장(``FactRecord.limitations``)의 값 자체는 그대로
+    남아 있다 — 화면에 싣지 않을 뿐이다. 이 시험은 그 줄이 어느 장에서도
+    되살아나지 않는지 «전 장 전수»로 확인한다.
+
+    ⚠️ 라벨 검사만 하면 라벨 이름만 바꿔 같은 문장을 되살릴 수 있으므로,
+    옛 폴백 문구도 값 전수에서 같이 찾는다. 생산 상수에 묶지 않고 리터럴로
+    적는다(묶으면 값이 되돌아가도 같이 따라가는 순환 검증이 된다).
+    """
+    _report, blocks_by_section = _section_blocks()
+
+    금지_라벨 = {"범위·한계", "운영 범위·한계"}
+    옛_폴백_문구 = (
+        "확인된 실행 범위로 한정",
+        "결속된 근거 사실 범위로 한정",
+        "현재 상태: 공식 근거에서 현재 운영 확인",
+        "공식 근거가 확인한 현재 관계로 한정",
+        "인용 자료에 나타난 범위로 한정합니다",
+    )
+    for section_id, blocks in blocks_by_section.items():
+        for block in blocks:
+            for field in block.fields:
+                assert field.label not in 금지_라벨, (
+                    f"{section_id}/{block.title}에 「{field.label}」 줄이 되살아났습니다"
+                )
+                for 문구 in 옛_폴백_문구:
+                    assert 문구 not in field.value, (
+                        f"{section_id}/{block.title}/{field.label}에 옛 한계 문구가 "
+                        f"되살아났습니다: 「{문구}」"
+                    )
 
 
 def test_모든_구조카드는_소제목_4개_이하이며_라벨과_값이_비지_않는다() -> None:
@@ -331,10 +365,11 @@ def test_제품_현재과제_미래계획의_필수_판단정보가_빈칸없이
         assert fields["제품·서비스 범위"] == block.title
         assert fields["사업적 역할"]
         assert fields["2장 수익 분류 참조"]
-        evidence = fields["중점 추진 근거·현재 확인·한계"]
+        evidence = fields["중점 추진 근거·현재 확인"]
         assert evidence.startswith("신호: ")
         assert " · 확인: " in evidence
-        assert " · 한계: " in evidence
+        # ★ 2026-09-17 — 값 끝에 붙던 「 · 한계: …」 조각을 뺐다(라벨에서도 뺐다).
+        assert " · 한계: " not in evidence
 
     current = blocks_by_section["current_challenges"]
     assert len(current) == 1
@@ -347,6 +382,8 @@ def test_제품_현재과제_미래계획의_필수_판단정보가_빈칸없이
     signal_and_remaining = current_fields["초기 신호·남은 문제"]
     assert "초기 신호: 대응 진행 중·효과 미확인" in signal_and_remaining
     assert "남은 문제:" in signal_and_remaining
+    # ★ 2026-09-17 — 가운데에 있던 「해석 한계: …」 조각을 뺐다.
+    assert "해석 한계:" not in signal_and_remaining
     assert current_fields["다음 확인 지표"] == "본계약"
 
     future = blocks_by_section["future_strategy"]
@@ -364,16 +401,23 @@ def test_제품_현재과제_미래계획의_필수_판단정보가_빈칸없이
             "조건: 공식 조건 미공개 · 상태: 발표·미실행"
         )
         assert fields["실행 확인 신호"]
-        assert "공식 효과 미공개" in fields["회사 제시 효과·한계"]
+        # ★ 2026-09-17 — 값에서 「 · 한계: …」 조각을 뺐고(라벨에서도 뺐다),
+        #   이어서 라벨과 겹치던 「효과: 」 접두도 뺐다. 이제 값은 내용 하나뿐이라
+        #   «포함»이 아니라 «같음»으로 못 박는다.
+        effect = fields["회사 제시 효과"]
+        assert effect == "공식 효과 미공개"
+        assert "효과: " not in effect
+        assert "한계:" not in effect
 
     operations = blocks_by_section["operations_partners"]
     operation_fields = {block.title: _field_map(block) for block in operations}
     assert operation_fields["한국에코에너지"]["가치사슬 단계"] == "생산·운영"
     assert operation_fields["한국에코에너지"]["관계 유형"] == "종속회사"
     assert set(operation_fields) == {"한국에코에너지"}
-    assert "operating_core" not in operation_fields["한국에코에너지"][
-        "운영 범위·한계"
-    ]
+    # 내부 키가 화면 글자로 새지 않는지 — 「운영 범위·한계」 줄을 뺀 뒤로는
+    # 이 카드에 남은 자유 문장이 「확인된 역할」뿐이라 거기서 확인한다.
+    assert "operating_core" not in operation_fields["한국에코에너지"]["확인된 역할"]
+    assert "운영 범위·한계" not in operation_fields["한국에코에너지"]
 
     competitive = blocks_by_section["competitive_position"]
     assert len(competitive) == 1
@@ -383,9 +427,11 @@ def test_제품_현재과제_미래계획의_필수_판단정보가_빈칸없이
         assert reason_and_conditions.startswith("선정 이유: ")
         assert " · 동일 조건: " in reason_and_conditions
         assert "2025 회계연도" in reason_and_conditions
-        judgment_and_limit = fields["판정·비교 한계"]
-        assert judgment_and_limit.startswith("운영 특성 · ")
-        assert len(judgment_and_limit.split(" · ", maxsplit=1)) == 2
+        # ★ 2026-09-17 — 판정 뒤에 붙던 비교 한계 설명을 뺐다. 이제 판정 «값
+        #   하나»만 남으므로 구분자 뒤 조각이 아예 없어야 한다.
+        judgment = fields["판정"]
+        assert judgment == "운영 특성"
+        assert " · " not in judgment
 
 
 def test_9장은_명시적으로_결속된_판정을_그대로_구분해_표시한다() -> None:
@@ -408,7 +454,9 @@ def test_9장은_명시적으로_결속된_판정을_그대로_구분해_표시�
     blocks = section_content_blocks(report, section)
 
     assert len(blocks) == 1
-    assert _field_map(blocks[0])["판정·비교 한계"].startswith("경쟁우위 · ")
+    # ★ 2026-09-17 — 판정 뒤 비교 한계 설명을 뺐으므로 판정 «값 그대로»가 남는다.
+    #   판정이 사실 원장을 따라 바뀌는지가 이 시험의 요점이라 그 성질은 그대로다.
+    assert _field_map(blocks[0])["판정"] == "경쟁우위"
 
 
 def test_9장은_자사와_비교사_공식출처를_함께_표시한다() -> None:

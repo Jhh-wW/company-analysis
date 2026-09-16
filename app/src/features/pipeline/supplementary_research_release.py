@@ -61,6 +61,10 @@ class SupplementaryResearchReleaseDecision:
     qualified_section_ids: tuple[str, ...] = ()
     official_grounded_core_section_ids: tuple[str, ...] = ()
     dart_grounded_section_ids: tuple[str, ...] = ()
+    #: 거절 조건을 가리키는 닫힌 세부 코드(진단용). 2026-09-17 운영 실측: 같은 사유 코드
+    #: `invalid_report_dto`가 아홉 조건 중 어느 것인지 알 수 없어 원인 추적이 막혔다.
+    #: ★ 위치 인자로 부르는 호출자가 있어 반드시 «마지막» 필드여야 한다.
+    detail: str = ""
 
     def __bool__(self) -> bool:
         return self.allowed
@@ -324,14 +328,14 @@ def _assess(
 ) -> SupplementaryResearchReleaseDecision:
     if type(official_evidence) is not OfficialEvidenceCollectionResult:
         return SupplementaryResearchReleaseDecision(
-            False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO
+            False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO, detail="official_evidence_type",
         )
     if (
         not report.company_id.strip()
         or report.company_id.strip() != official_evidence.company_id
     ):
         return SupplementaryResearchReleaseDecision(
-            False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO
+            False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO, detail="company_id_mismatch",
         )
     collected = _collected_documents(official_evidence)
     if (
@@ -356,18 +360,18 @@ def _assess(
 
     if type(report.fact_records) is not list or type(report.sections) is not list:
         return SupplementaryResearchReleaseDecision(
-            False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO
+            False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO, detail="records_not_list",
         )
     facts: dict[str, FactRecord] = {}
     for fact in report.fact_records:
         if type(fact) is not FactRecord:
             return SupplementaryResearchReleaseDecision(
-                False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO
+                False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO, detail="fact_not_record",
             )
         fact_id = str(fact.fact_id or "").strip()
         if not fact_id or fact_id in facts:
             return SupplementaryResearchReleaseDecision(
-                False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO
+                False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO, detail="fact_id_missing_or_duplicate",
             )
         facts[fact_id] = fact
 
@@ -379,13 +383,13 @@ def _assess(
     for section in report.sections:
         if type(section) is not ReportSection:
             return SupplementaryResearchReleaseDecision(
-                False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO
+                False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO, detail="section_not_record",
             )
         if section.cell not in canonical:
             continue
         if section.cell in seen_sections:
             return SupplementaryResearchReleaseDecision(
-                False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO
+                False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO, detail="section_duplicate_cell",
             )
         seen_sections.add(section.cell)
         visible_ids = _visible_fact_ids(section, facts, source_by_number)
@@ -484,7 +488,7 @@ def assess_supplementary_research_release(
 
     if type(report) is not Report or official_evidence is None:
         return SupplementaryResearchReleaseDecision(
-            False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO
+            False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO, detail="report_type_or_evidence_missing",
         )
     try:
         return _assess(
@@ -492,9 +496,12 @@ def assess_supplementary_research_release(
             official_evidence=official_evidence,
             source_verifier=source_verifier,
         )
-    except (AttributeError, TypeError, ValueError):
+    except (AttributeError, TypeError, ValueError) as error:
+        # 예외 «종류»만 남긴다(원문·경로 노출 금지). 어느 필드가 어긋났는지는 이 종류와
+        # 위 조건별 세부 코드로 좁힌다.
         return SupplementaryResearchReleaseDecision(
-            False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO
+            False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO,
+            detail=f"assessment_exception:{type(error).__name__}",
         )
 
 
