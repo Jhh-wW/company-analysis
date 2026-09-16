@@ -29,8 +29,9 @@ def test_withholds_numeric_body_without_claiming_section_has_no_data():
     safe, _ = enforce_public_numeric_safety(ComposedReport((ComposedSection("future_strategy", (_unsafe(),), flow_rows=(row,)),)))
     assert safe.sections[0].flow_rows == (row,)
     assert safe.sections[0].notice == NOTICE_NUMERIC_BODY_WITHHELD
-    assert "본문 설명" in safe.sections[0].notice
-    assert "자료가 없다는 뜻은 아닙니다" in safe.sections[0].notice
+    # 2026-09-16: 독자에게는 «확인된 자료 부족»이라는 결과만 말한다 — 수치 대조라는
+    # 처리 과정은 안내문에 싣지 않는다.
+    assert "대조" not in safe.sections[0].notice
 
 
 def test_adds_no_numeric_notice_when_valid_body_remains_or_section_was_empty():

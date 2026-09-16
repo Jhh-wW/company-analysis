@@ -17,6 +17,7 @@ from src.core.citations import (
 from src.features.pipeline.port import FactRecord, Report, ReportSection, ReportTable
 from src.features.pipeline.constants import EVIDENCE_AVAILABLE_PUBLICATION_POLICY
 from src.features.composer.constants import (
+    LEGACY_EVIDENCE_AVAILABLE_NOTICES,
     NOTICE_AI_UNAVAILABLE, NOTICE_EVIDENCE_NONE, NOTICE_EVIDENCE_NOT_COMPOSED,
 )
 from src.features.pipeline.supplementary_fact_binding import (
@@ -81,7 +82,12 @@ def _is_notice_only_section(section: object) -> bool:
     """빈 인용을 사실 검증으로 착각하지 않고 정해진 안내문만 허용한다."""
     if type(section) is not ReportSection or any((section.lines, section.tables, section.fact_ids)):
         return False
-    allowed = {NOTICE_AI_UNAVAILABLE, NOTICE_EVIDENCE_NONE, NOTICE_EVIDENCE_NOT_COMPOSED}
+    # 2026-09-16부터 안내문 글자가 «자료 부족»·«생성 미완료» 둘로 통일됐다. 저장된 옛
+    # 보고서의 안내문도 같은 «안내문 전용 장»이므로 옛 글자를 함께 인정한다.
+    allowed = {
+        NOTICE_AI_UNAVAILABLE, NOTICE_EVIDENCE_NONE, NOTICE_EVIDENCE_NOT_COMPOSED,
+        *LEGACY_EVIDENCE_AVAILABLE_NOTICES,
+    }
     if not section.prose_lines:
         return not section.prose_paragraphs
     if any(text not in allowed or cite != "" for text, cite in section.prose_lines):
