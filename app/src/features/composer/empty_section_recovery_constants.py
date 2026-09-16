@@ -2,6 +2,14 @@
 from src.shared.report_quality.composition_diagnostic_constants import EMPTY_RECOVERY_STEP
 
 MAX_EMPTY_RECOVERY_SECTIONS = 2
+#: 작가 응답의 최상위 포장 키. 계약 형식 ``{"장들": {...}}`` 의 그 키다.
+RESPONSE_SECTIONS_KEY = "장들"
+#: 응답 꼴 코드 — 진단에만 적는다(내용이 아니라 구조).
+RESPONSE_SHAPE_CONTRACT = "계약"
+RESPONSE_SHAPE_UNWRAPPED = "포장없음"
+RESPONSE_SHAPE_FLAT_SINGLE = "단일장평면"
+RESPONSE_SHAPE_NO_TARGET = "요청장없음"
+RESPONSE_SHAPE_UNREADABLE = "읽기실패"
 MAX_EMPTY_RECOVERY_SENTENCES = 3
 MAX_EMPTY_RECOVERY_FRAGMENTS = 6
 MAX_EMPTY_RECOVERY_EVIDENCE_CHARS = 12_000
