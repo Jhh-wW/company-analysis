@@ -199,6 +199,7 @@ def test_guard_rejection_removes_report_and_cache_authority_but_preserves_actual
             "step": SUPPLEMENTARY_RESEARCH_RELEASE_STEP,
             "허용": False,
             "사유코드": _REJECT_CODE,
+            "세부": "",
             "검증본문장": ["identity", "business_model"],
         }
     ]
