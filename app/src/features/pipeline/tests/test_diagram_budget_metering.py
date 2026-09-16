@@ -82,7 +82,7 @@ def test_diagram_cap_reaches_real_metered_boundary_without_changing_budget_or_mo
     assert len(messages.counts) == 1
     assert engine.MODEL == "claude-haiku-4-5"
     assert engine.current_stage == "unspecified" and not engine.prompt_cache_enabled
-    assert MAX_AI_CALLS_PER_REQUEST == 18
+    assert MAX_AI_CALLS_PER_REQUEST == 20
     assert real.V2_WRITER_MAX_TOKENS == 4000 and real.V2_REVIEWER_MAX_TOKENS == 16000
     if should_send:
         request, = messages.requests
@@ -212,7 +212,7 @@ def test_body_cap_reaches_reservation_and_request_with_actual_only_settlement(
     assert engine.MODEL == model and engine.current_stage == "unspecified"
     assert not engine.prompt_cache_enabled
     assert real.V2_WRITER_MAX_TOKENS == 4000 and real.V2_DIAGRAM_MAX_TOKENS == 4096
-    assert MAX_AI_CALLS_PER_REQUEST == 18
+    assert MAX_AI_CALLS_PER_REQUEST == 20
 
 
 @pytest.fixture
