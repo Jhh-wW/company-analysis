@@ -59,6 +59,30 @@ class ReclassifiableOfficialEvidenceCollectionResult(OfficialEvidenceCollectionR
     )
 
 
+def plain_official_evidence(
+    result: OfficialEvidenceCollectionResult,
+) -> OfficialEvidenceCollectionResult:
+    """재판정 원문 차선을 실은 하위 타입을 «정확한» 기본 타입으로 되돌린다.
+
+    ★ 왜 필요한가 (2026-09-17 운영 실측) — 스위치가 켜지면 수집 결과가
+      `ReclassifiableOfficialEvidenceCollectionResult`가 되는데, 재판정을 건너뛰거나
+      (빈 칸 없음·소유권 미확정·호출 실패) 실패한 경로는 그 하위 타입을 그대로
+      돌려줬다. 뒤의 보완조사 최종검사는 `type(x) is OfficialEvidenceCollectionResult`
+      로 «정확한 타입»만 받으므로 보고서 전체가 `invalid_report_dto(official_evidence_type)`
+      으로 멈췄다. 재판정 원문은 이 단계 밖에서 쓸 일이 없으니 여기서 떼어 낸다.
+    """
+
+    if type(result) is OfficialEvidenceCollectionResult:
+        return result
+    return OfficialEvidenceCollectionResult(
+        company_id=result.company_id,
+        candidates=result.candidates,
+        unclassified_evidence=result.unclassified_evidence,
+        comparison_candidates=result.comparison_candidates,
+        provenance_documents=result.provenance_documents,
+    )
+
+
 def attach_reclassify_source(
     result: OfficialEvidenceCollectionResult,
     *,
@@ -421,11 +445,13 @@ def reclassify_official_evidence(
     """빈 수집 칸이 있을 때만 캐시 또는 계량 client로 한 번 재판정한다."""
 
     if not evidence_reclassify_enabled():
+        # 스위치 OFF는 «바이트 경계까지 그대로»가 계약이다 — 어댑터가 하위 타입을 붙이지도
+        # 않으므로 되돌릴 것도 없다.
         return official_evidence
 
     empty_sections = empty_collector_sections(official_evidence)
     if not empty_sections:
-        return official_evidence
+        return plain_official_evidence(official_evidence)
 
     source = getattr(official_evidence, "reclassify_source", None)
     if not isinstance(source, ReclassifySource):
@@ -443,7 +469,7 @@ def reclassify_official_evidence(
                 failure="재판정 원문 차선 없음",
             )
         )
-        return official_evidence
+        return plain_official_evidence(official_evidence)
 
     try:
         candidates = _candidate_paragraphs(source)
@@ -471,7 +497,7 @@ def reclassify_official_evidence(
                 failure=f"입력:{type(error).__name__}",
             )
         )
-        return official_evidence
+        return plain_official_evidence(official_evidence)
 
     cache_state = "miss"
     ai_calls = 0
@@ -528,7 +554,7 @@ def reclassify_official_evidence(
                             failure=f"소유권미확정:{type(error).__name__}",
                         )
                     )
-                    return official_evidence
+                    return plain_official_evidence(official_evidence)
                 except Exception as error:  # noqa: BLE001 - 차선 실패는 보고서를 막지 않는다
                     raise_if_request_interrupted(error)
                     steps.append(
@@ -545,7 +571,7 @@ def reclassify_official_evidence(
                             failure=f"호출또는응답:{type(error).__name__}",
                         )
                     )
-                    return official_evidence
+                    return plain_official_evidence(official_evidence)
                 cached_diagnostics = _cached_diagnostics(parsed)
 
             additions, accepted_assignments, binding_rejected = _typed_additions(
@@ -584,7 +610,7 @@ def reclassify_official_evidence(
                         failure=f"병합:{type(error).__name__}",
                     )
                 )
-                return official_evidence
+                return plain_official_evidence(official_evidence)
 
             save_failure = ""
             if cache_state == "miss":
@@ -630,7 +656,7 @@ def reclassify_official_evidence(
                 failure=f"캐시:{type(error).__name__}",
             )
         )
-        return official_evidence
+        return plain_official_evidence(official_evidence)
 
     before_empty = {
         str(item.get("section_id") or "") for item in empty_sections
