@@ -49,6 +49,8 @@ from src.shared.report_quality.contract import contract_for_generation
 from src.shared.report_quality.review_diagnostic_constants import REVIEW_SCOPE_ITEMS
 from src.shared.report_quality.composition_diagnostic_constants import (
     DIAGRAM_STAGE_SECTION_EVIDENCE,
+    EMPTY_RECOVERY_NO_BUDGET,
+    EMPTY_RECOVERY_NO_EVIDENCE,
     SUMMARY_STEP,
 )
 from src.features.composer.logic import (
@@ -1806,13 +1808,36 @@ def run_v2(
                 )
 
     baseline_date = as_of_date or None
-    recovery_targets: tuple[str, ...] = ()
-    recovery_sources = {}
+    recovery_sources: dict[str, tuple] = {}
+    recovery_attempted: frozenset[str] = frozenset()
+    # ★ 2026-09-16 — 출시 모드(FULL) 조건을 뺐다. 예전에는 SHADOW에서만 켜져서
+    #   운영 실행의 빈 장은 «복구를 시도조차» 하지 않았다(실측: 단계 목록 53개에
+    #   `8_빈장_복구`가 아예 없고 6·8장이 빈 채로 출고). 복구 문장도 기존 검수·
+    #   중복 제거·수치 안전 검사를 그대로 거치므로 모드별로 기준이 달라지지
+    #   않는다 — 같은 판단을 이미 「빈 의미 칸 근거 재판정」이 쓰고 있다
+    #   (docs/출력물 기준/90_공통_규칙/근거_재판정.md §1 「FULL과 SHADOW에서
+    #   같은 조건으로 동작한다」).
     recovery_enabled = (
-        release_mode is ReleaseMode.SHADOW and (fallback_allowed or evidence_availability is not None)
-        and empty_recovery_writer_ask is not None and empty_recovery_reviewer_ask is not None
+        empty_recovery_writer_ask is not None and empty_recovery_reviewer_ask is not None
         and empty_recovery_can_start is not None
     )
+
+    def _recovery_targets(empty_ids) -> tuple[str, ...]:
+        """빈 장 중 «그 장 근거를 가진» 장만 고른다.
+
+        작가가 한 문장이라도 썼던 장을 먼저 세운다(그 장은 쓸거리가 있다는
+        증거가 한 번 더 있다). 그다음은 장 번호순이며 상한은 두 장이다.
+        ``attempted`` 를 «자격»으로 쓰지 않는 이유 — 작가가 아무것도 못 쓴 장이
+        오히려 복구가 가장 필요한 장이다(실측: 8장 culture 초안 8문장 중 7문장이
+        기계 검수를 통과했는데도 최종이 비었고, 초안 0문장인 장은 아예 후보에서
+        빠졌다).
+        """
+        eligible = [section_id for section_id in SECTION_IDS
+                    if section_id in empty_ids and section_id in recovery_sources]
+        eligible.sort(key=lambda section_id: (
+            section_id not in recovery_attempted, SECTION_IDS.index(section_id),
+        ))
+        return tuple(eligible[:MAX_EMPTY_RECOVERY_SECTIONS])
     try:
         # ① 본문 9장 작성 (작가)
         draft = compose_sections(
@@ -1879,15 +1904,27 @@ def run_v2(
         rewrite_gate = None
         if recovery_enabled:
             recovery_sources = recovery_evidence(_normalize_fragments(verification_fragments))
-            attempted = {section.section_id for section in draft.sections if section.sentences}
+            if prepared_evidence is not None:
+                # ★ 장별 packet 경로(FULL)에서는 장이 «들고 있는» 조각만 인용할 수
+                #   있다. 이 교집합을 빼면 복구 문장이 post-verify-dedupe 단계의
+                #   장별 근거 소유권 불변식을 깨뜨려, 검증을 마친 보고서 «전체»가
+                #   ValueError로 죽는다(logic._assert_composed_report_evidence_invariant).
+                allowed_by_section = prepared_evidence.allowed_fragment_ids_by_section
+                restricted: dict[str, tuple] = {}
+                for section_id, section_fragments in recovery_sources.items():
+                    allowed_ids = allowed_by_section.get(section_id) or frozenset()
+                    kept = tuple(fragment for fragment in section_fragments
+                                 if fragment.fragment_id in allowed_ids)
+                    if kept:
+                        restricted[section_id] = kept
+                recovery_sources = restricted
+            recovery_attempted = frozenset(
+                section.section_id for section in draft.sections if section.sentences
+            )
 
             def rewrite_gate(empty_ids: tuple[str, ...]) -> bool:
-                nonlocal recovery_targets
-                eligible = tuple(section_id for section_id in SECTION_IDS
-                                 if section_id in empty_ids and section_id in attempted
-                                 and section_id in recovery_sources)[:MAX_EMPTY_RECOVERY_SECTIONS]
+                eligible = _recovery_targets(empty_ids)
                 if eligible and empty_recovery_can_start():
-                    recovery_targets = eligible
                     composition_diagnostics.append({"step": EMPTY_RECOVERY_STEP, "상태": "문장재작성대신예약",
                                                     "대상장": list(eligible)})
                     return False
@@ -1979,10 +2016,32 @@ def run_v2(
     )
     if moved_sentences:
         logger.info("장 간 중복 %d문장을 소유 장으로 모았습니다", moved_sentences)
-    if recovery_targets and ai_failure is None and not rewrite_failures:
-        still_empty = {section.section_id for section in verified.sections if not section.sentences}
-        targets = tuple(section_id for section_id in recovery_targets if section_id in still_empty)
-        if targets and empty_recovery_can_start():
+    if recovery_enabled and ai_failure is None and not rewrite_failures:
+        # ★ 대상은 여기서 «다시» 고른다. 예전에는 검수 전 재작성 게이트가 정해
+        #   둔 장만 복구했는데, 그 게이트는 flat 검수 경로에만 달려 있어 FULL의
+        #   packet 경로에서는 한 번도 불리지 않았다 — 즉 대상이 영원히 비었다.
+        still_empty = frozenset(
+            section.section_id for section in verified.sections if not section.sentences
+        )
+        targets = _recovery_targets(still_empty)
+        empty_body_sections = tuple(
+            section_id for section_id in SECTION_IDS if section_id in still_empty
+        )
+        # 조용한 실패를 남기지 않는다 — 빈 장이 있는데 시작하지 못하면 그 사유를
+        # 남긴다. 기록이 없으면 다음 실행 진단에서 「복구가 꺼졌나 / 예산이
+        # 없었나 / 근거가 없었나」를 가릴 방법이 없다.
+        can_start = bool(targets) and empty_recovery_can_start()
+        if not targets and empty_body_sections:
+            composition_diagnostics.append({
+                "step": EMPTY_RECOVERY_STEP, "상태": EMPTY_RECOVERY_NO_EVIDENCE,
+                "대상장": list(empty_body_sections),
+            })
+        elif targets and not can_start:
+            composition_diagnostics.append({
+                "step": EMPTY_RECOVERY_STEP, "상태": EMPTY_RECOVERY_NO_BUDGET,
+                "대상장": list(targets),
+            })
+        if can_start:
             try:
                 verified = recover_empty_sections(
                     company_name, verified, targets=targets, evidence=recovery_sources,
@@ -1990,6 +2049,10 @@ def run_v2(
                     performance_table=performance_table, baseline_date=baseline_date,
                     diagnostics=review_diagnostics, protocol_diagnostics=composition_diagnostics,
                     comparison_fragments=_normalize_fragments(verification_fragments),
+                    # packet 계약에서는 의미 칸이 붙은 문장만 사실 장부에 오른다.
+                    # 칸 없는 문장을 실으면 그 장이 「결속되지 않은 공개 내용」이
+                    # 되어 보고서 «전체»가 공개 차단된다.
+                    require_claim_slot=prepared_evidence is not None,
                     rejected_fingerprints={
                         section.section_id: frozenset(rejected_sentence_fingerprint(sentence.text)
                                                      for sentence in section.sentences)

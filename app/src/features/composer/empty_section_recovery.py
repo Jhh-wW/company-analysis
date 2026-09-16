@@ -7,13 +7,16 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
-from src.features.composer.constants import GRADE_CONFIRMED, SECTION_IDS, SECTION_GUIDES
+from src.features.composer.constants import (
+    GRADE_CONFIRMED, PARSE_RETRY_LIMIT, SECTION_IDS, SECTION_GUIDES,
+)
 from src.features.composer.culture_constants import SOURCE_CLAUSE_SPLIT_RE
 from src.features.composer.culture_guard import _clause_carries_section_subject
 from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.empty_section_recovery_constants import (
-    EMPTY_RECOVERY_GUIDE, EMPTY_RECOVERY_STEP, MAX_EMPTY_RECOVERY_EVIDENCE_CHARS,
-    MAX_EMPTY_RECOVERY_FRAGMENTS, MAX_EMPTY_RECOVERY_SENTENCES, MAX_EMPTY_RECOVERY_SECTIONS,
+    EMPTY_RECOVERY_GUIDE, EMPTY_RECOVERY_RETRY_GUIDE, EMPTY_RECOVERY_STEP,
+    MAX_EMPTY_RECOVERY_EVIDENCE_CHARS, MAX_EMPTY_RECOVERY_FRAGMENTS,
+    MAX_EMPTY_RECOVERY_SENTENCES, MAX_EMPTY_RECOVERY_SECTIONS,
 )
 from src.features.composer.logic import AskFn, extract_json_payload, parse_section_response, _strip_inline_citation_markers
 from src.features.composer.port import AskFatalError, CollectedFragment, ComposedReport, ComposedSection
@@ -62,38 +65,85 @@ def recover_empty_sections(
     performance_table=None, baseline_date=None, diagnostics=None, protocol_diagnostics=None,
     comparison_fragments: Sequence[CollectedFragment] = (),
     rejected_fingerprints: Mapping[str, frozenset[str]] | None = None,
+    require_claim_slot: bool = False,
 ) -> ComposedReport:
-    """비대상 장은 그대로 두고 확인·verified 문장만 빈 본문에 반영한다."""
+    """비대상 장은 그대로 두고 확인·verified 문장만 빈 본문에 반영한다.
+
+    Args:
+        require_claim_slot: 참이면 의미 칸(claim slot)이 붙고 «인용한 조각이 그
+            칸을 실제로 지원하는» 문장만 남긴다. 장별 packet 계약(FULL)에서는
+            반드시 참이어야 한다 — 의미 칸 없는 문장은 사실 장부에 FactRecord로
+            오르지 못해, 그 장이 「fact_id와 결속되지 않은 공개 내용」으로
+            판정되고 «보고서 전체»가 공개 차단된다(2026-09-16 재현). 즉 복구가
+            빈 장 하나를 채우려다 보고서를 통째로 막는다.
+    """
     empty_ids = {section.section_id for section in report.sections if not section.sentences}
     targets = tuple(section_id for section_id in SECTION_IDS
                     if section_id in targets and section_id in empty_ids and evidence.get(section_id))
     targets = targets[:MAX_EMPTY_RECOVERY_SECTIONS]
     if not targets:
         return report
-    payload = {
+    # 조각마다 «그 장에서 지원하는 의미 칸»을 함께 준다. 이 목록이 없으면 작가가
+    # 칸 이름을 지어내고, 지어낸 칸은 파서가 빈 칸으로 떨어뜨린다.
+    supported_slots = {
         section_id: {
-            "작성범위": SECTION_GUIDES[section_id],
-            "공식근거": [{"id": f.fragment_id, "원문": f.text} for f in evidence[section_id]],
+            fragment.fragment_id: tuple(
+                slot for slot in fragment.supported_claim_slots
+                if slot.startswith(section_id + ":")
+            )
+            for fragment in evidence[section_id]
         }
         for section_id in targets
     }
-    raw = extract_json_payload(writer(
-        f"분석 회사: {company_name}\n{EMPTY_RECOVERY_GUIDE}" + json.dumps(payload, ensure_ascii=False)
-    ))
-    by_section = raw.get("장들") if isinstance(raw, Mapping) else None
-    if not isinstance(by_section, Mapping) or set(by_section) != set(targets):
+    payload = {
+        section_id: {
+            "작성범위": SECTION_GUIDES[section_id],
+            "공식근거": [{"id": f.fragment_id, "원문": f.text,
+                       "의미칸": list(supported_slots[section_id][f.fragment_id])}
+                      for f in evidence[section_id]],
+        }
+        for section_id in targets
+    }
+    prompt = f"분석 회사: {company_name}\n{EMPTY_RECOVERY_GUIDE}" + json.dumps(payload, ensure_ascii=False)
+    # 요청한 장만 골라 쓰고 요청 밖 장은 버린다. 예전에는 키 집합이 정확히
+    # 같지 않으면 답 전체를 버려서, 한 장을 덤으로 얹은 답 하나 때문에 빈 장이
+    # 둘 다 비어 나갔다(2026-09-14 실측). 쓸 장이 하나도 없을 때만 재요청한다.
+    requested = set(targets)
+    usable: dict[str, object] = {}
+    extra_sections = 0
+    attempts = 0
+    while True:
+        attempts += 1
+        raw = extract_json_payload(writer(
+            prompt if attempts == 1 else prompt + EMPTY_RECOVERY_RETRY_GUIDE
+        ))
+        by_section = raw.get("장들") if isinstance(raw, Mapping) else None
+        if isinstance(by_section, Mapping):
+            usable = {section_id: by_section[section_id]
+                      for section_id in targets if section_id in by_section}
+            extra_sections = sum(1 for key in by_section if key not in requested)
+        if usable or attempts > PARSE_RETRY_LIMIT:
+            break
+    if not usable:
         if protocol_diagnostics is not None:
-            protocol_diagnostics.append({"step": EMPTY_RECOVERY_STEP, "상태": "작성형식실패", "대상장": list(targets)})
+            protocol_diagnostics.append({"step": EMPTY_RECOVERY_STEP, "상태": "작성형식실패",
+                                         "대상장": list(targets), "시도": attempts})
         return report
+    targets = tuple(section_id for section_id in targets if section_id in usable)
     sections = []
     for section_id in targets:
-        parsed = parse_section_response(json.dumps(by_section[section_id], ensure_ascii=False), section_id,
+        parsed = parse_section_response(json.dumps(usable[section_id], ensure_ascii=False), section_id,
                                         reject_inline_citation_markers=True)
         allowed = {f.fragment_id for f in evidence[section_id]}
+        slots_by_fragment = supported_slots[section_id]
         sentences = tuple(
             sentence for sentence in (parsed or ())
             if sentence.grade == GRADE_CONFIRMED and sentence.citations
             and set(sentence.citations) <= allowed
+            and (not require_claim_slot or (
+                sentence.planned_claim_slot
+                and all(sentence.planned_claim_slot in slots_by_fragment.get(citation, ())
+                        for citation in sentence.citations)))
             and rejected_sentence_fingerprint(sentence.text)
             not in (rejected_fingerprints or {}).get(section_id, frozenset())
         )[:MAX_EMPTY_RECOVERY_SENTENCES]
@@ -105,7 +155,8 @@ def recover_empty_sections(
     if protocol_diagnostics is not None:
         protocol_diagnostics.append({"step": EMPTY_RECOVERY_STEP, "상태": "작성완료",
                                      "대상장": list(targets),
-                                     "작성문장수": sum(len(section.sentences) for section in sections)})
+                                     "작성문장수": sum(len(section.sentences) for section in sections),
+                                     "요청밖장수": extra_sections})
     called = False
 
     def review_once(prompt: str) -> str:

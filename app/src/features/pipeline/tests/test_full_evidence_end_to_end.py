@@ -22,6 +22,7 @@ import pytest
 from src.core import deployment_identity
 from src.features.budget import provider_budget
 from src.features.composer.constants import GRADE_CONFIRMED, SECTION_IDS
+from src.features.composer.empty_section_recovery_constants import EMPTY_RECOVERY_GUIDE
 from src.features.composer.port import filing_meta_from_raw
 from src.features.company_comparison.official_sources import (
     dart_profile_attestation_material,
@@ -262,6 +263,11 @@ class _ExactPacketWriter:
         assert len(matching_sections) == 1
         section_id = matching_sections[0]
         section_index = SECTION_IDS.index(section_id)
+        # 빈 장 복구 요청은 «장 작성»이 아니다(2026-09-16부터 FULL에서도 돈다).
+        # 이 가짜 작가는 장 packet 계약만 검사하므로, 복구 요청에는 「쓸 사실이
+        # 없다」는 정상 응답을 돌려주고 장 프롬프트 수에도 세지 않는다.
+        if EMPTY_RECOVERY_GUIDE in prompt:
+            return json.dumps({"장들": {section_id: {"문장들": []}}}, ensure_ascii=False)
         self.prompts.append(prompt)
         sentences = _section_sentences(section_index)
         source_text = " ".join(sentences)
