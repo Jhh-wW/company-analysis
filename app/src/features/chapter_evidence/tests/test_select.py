@@ -368,3 +368,142 @@ def test_최종_조각_순서는_fragment_id로_결정론적이다() -> None:
     )
 
     assert [fragment.fragment_id for fragment in selection.fragments] == ["f-a", "f-b"]
+
+
+def _typed_document(
+    *,
+    document_id: str,
+    source_kind: str,
+    source_tier: SourceTier,
+    requirement: SourceRequirement,
+    exact_evidence_hashes: tuple[str, ...],
+    company_id: str = "corp-1",
+) -> CollectedEvidenceDocument:
+    """등급·필수 여부·종류를 시험이 직접 정하는 문서.
+
+    ``_document``는 당기 사업보고서 한 모양만 만든다. Writer 자격 판정은
+    종류별 표를 보므로, 그 표를 실제로 지나가는 시험은 세 값을 모두 정해야
+    한다.
+    """
+
+    return CollectedEvidenceDocument(
+        company_id=company_id,
+        document_id=document_id,
+        canonical_url=f"https://example.com/{document_id}",
+        source_tier=source_tier,
+        source_kind=source_kind,
+        publisher="예시회사",
+        title="문서",
+        published_on="2026-03-01",
+        collected_at="2026-08-31T00:00:00+00:00",
+        content_sha256="b" * 64,
+        exact_evidence_hashes=exact_evidence_hashes,
+        identity_binding="binding",
+        usable_ranges=(DocumentTextRange(0, 500),),
+        collector_version="collector-v1",
+        parser_version="parser-v1",
+        requirement=requirement,
+    )
+
+
+def test_직전사업연도_연차공시_조각은_버려지지_않는다() -> None:
+    """2026-09-16 운영 실측 재현 — 조각 95개가 한 문서 때문에 통째로 사라졌다.
+
+    수집 엔진은 «직전 사업연도» 사업보고서·감사보고서를 필수 여부만 OPTIONAL로
+    낮춰 내보낸다(그 공시가 없어도 수집 실패가 아니라는 뜻이다). 등급은 그대로
+    TIER_1이고 발행처도 같은 전자공시다. 그런데 Writer 자격 판정이 필수 여부까지
+    정확히 같아야 한다고 요구해, 이 문서의 조각이 전부
+    ``low_trust_external_page_fragment_ignored``로 세어져 사라졌다.
+    """
+
+    current = _fragment(fragment_id="f-current", document_id="doc-current", text="당기 매출 구조 서술")
+    previous = _fragment(fragment_id="f-previous", document_id="doc-previous", text="직전 연도 매출 구조 서술")
+    documents = (
+        _typed_document(
+            document_id="doc-current",
+            source_kind="dart_business_report",
+            source_tier=SourceTier.TIER_1_OFFICIAL,
+            requirement=SourceRequirement.REQUIRED,
+            exact_evidence_hashes=(current.text_sha256,),
+        ),
+        _typed_document(
+            document_id="doc-previous",
+            source_kind="dart_business_report",
+            source_tier=SourceTier.TIER_1_OFFICIAL,
+            requirement=SourceRequirement.OPTIONAL,
+            exact_evidence_hashes=(previous.text_sha256,),
+        ),
+    )
+
+    selection = select_section_fragments(
+        section_id="business_model",
+        company_id="corp-1",
+        documents=documents,
+        fragments=(current, previous),
+    )
+
+    assert [fragment.fragment_id for fragment in selection.fragments] == [
+        "f-current",
+        "f-previous",
+    ]
+    assert not [
+        code
+        for code in selection.reason_codes
+        if code.startswith("low_trust_external_page_fragment_ignored:")
+    ]
+
+
+def test_등급이_낮은_외부페이지_조각은_계속_버려지고_닫힌사유를_남긴다() -> None:
+    """음성 대조 — 위 완화가 «등급이 낮은 문서»까지 열어 주지 않는다.
+
+    사유 코드에는 개수 뒤에 닫힌 사유 이름을 덧붙인다. 앞부분과 개수 자리는
+    그대로 두어 기존 진단 읽기와 호환한다.
+    """
+
+    fragment = _fragment(fragment_id="f-low", document_id="doc-low", text="외부 페이지 문장")
+    document = _typed_document(
+        document_id="doc-low",
+        source_kind="official_identity_verified_web_page",
+        source_tier=SourceTier.TIER_3_TRUSTED,
+        requirement=SourceRequirement.OPTIONAL,
+        exact_evidence_hashes=(fragment.text_sha256,),
+    )
+
+    selection = select_section_fragments(
+        section_id="business_model",
+        company_id="corp-1",
+        documents=(document,),
+        fragments=(fragment,),
+    )
+
+    assert selection.fragments == ()
+    assert (
+        "low_trust_external_page_fragment_ignored:1:formal_writer_trust_not_eligible"
+        in selection.reason_codes
+    )
+
+
+def test_필수여부를_올려_말한_보조공시_조각은_계속_버려진다() -> None:
+    """음성 대조 — 낮춰 말하는 것만 정직하다. 올려 말하면 위조다."""
+
+    fragment = _fragment(fragment_id="f-up", document_id="doc-up", text="반기 보고서 문장")
+    document = _typed_document(
+        document_id="doc-up",
+        source_kind="dart_semiannual_report",
+        source_tier=SourceTier.TIER_1_OFFICIAL,
+        requirement=SourceRequirement.REQUIRED,
+        exact_evidence_hashes=(fragment.text_sha256,),
+    )
+
+    selection = select_section_fragments(
+        section_id="business_model",
+        company_id="corp-1",
+        documents=(document,),
+        fragments=(fragment,),
+    )
+
+    assert selection.fragments == ()
+    assert (
+        "low_trust_external_page_fragment_ignored:1:formal_writer_trust_not_eligible"
+        in selection.reason_codes
+    )
