@@ -401,9 +401,12 @@ def test_제품_현재과제_미래계획의_필수_판단정보가_빈칸없이
             "조건: 공식 조건 미공개 · 상태: 발표·미실행"
         )
         assert fields["실행 확인 신호"]
-        # ★ 2026-09-17 — 값에서 「 · 한계: …」 조각을 뺐다(라벨에서도 뺐다).
+        # ★ 2026-09-17 — 값에서 「 · 한계: …」 조각을 뺐고(라벨에서도 뺐다),
+        #   이어서 라벨과 겹치던 「효과: 」 접두도 뺐다. 이제 값은 내용 하나뿐이라
+        #   «포함»이 아니라 «같음»으로 못 박는다.
         effect = fields["회사 제시 효과"]
-        assert "공식 효과 미공개" in effect
+        assert effect == "공식 효과 미공개"
+        assert "효과: " not in effect
         assert "한계:" not in effect
 
     operations = blocks_by_section["operations_partners"]

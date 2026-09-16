@@ -632,9 +632,12 @@ def test_웹_v2는_ledger를_렌더하지_않는다(monkeypatch: pytest.MonkeyPa
 #:   않았다 — 3장 2줄(라벨 「·한계」와 값 끝 「 · 한계: …」), 5장 1줄(값 가운데
 #:   「해석 한계: … · 」), 6장 3줄(라벨 「·한계」와 값 끝 「 · 한계: …」),
 #:   9장 1줄(라벨 「판정」, 값은 판정 하나만).
+#: ★ 2026-09-17(같은 날 세 번째): 6장 값의 「효과: 」 접두를 뺐다 — 라벨이 이미
+#:   「회사 제시 효과」라 값에서 한 번 더 말하던 자리다. 대조 결과 그 3줄의
+#:   ``<dd>`` 앞 네 글자만 빠졌고 다른 줄은 한 글자도 안 바뀌었다.
 _V1_GOLDEN = Path(__file__).with_name("result_v1_article_golden.html")
 _V1_GOLDEN_TEXT_SHA256_CURRENT_APPROVED = (
-    "903a3f915307cae7fbdd120b9d9013415ddf34fadb051dee529b5992678db760"
+    "a0fc023200750228c05b9fb5830708d51538c0df9a5762f93e81212093eca2c1"
 )
 
 
