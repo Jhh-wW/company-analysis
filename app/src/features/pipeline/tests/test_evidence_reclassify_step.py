@@ -174,7 +174,9 @@ def test_모든_장이_READY면_캐시와_AI를_모두_건너뛴다() -> None:
         generated_at="2026-09-06",
     )
 
-    assert result is official
+    # 2026-09-17: 건너뜀 경로도 «정확한 기본 타입»으로 돌려준다(하위 타입이면 새 객체).
+    assert type(result) is step.OfficialEvidenceCollectionResult
+    assert result.candidates == official.candidates and result.company_id == official.company_id
     assert messages.requests == []
     assert steps == []
 
@@ -363,7 +365,9 @@ def test_AI호출예외는_사유만_남기고_원결과로_진행한다() -> No
     finally:
         conn.close()
 
-    assert result is official
+    # 2026-09-17: 건너뜀 경로도 «정확한 기본 타입»으로 돌려준다(하위 타입이면 새 객체).
+    assert type(result) is step.OfficialEvidenceCollectionResult
+    assert result.candidates == official.candidates and result.company_id == official.company_id
     assert steps[0]["AI호출"] == 1
     assert steps[0]["실패"] == "호출또는응답:RuntimeError"
 
@@ -393,9 +397,41 @@ def test_소유권_확정전_조정오류는_재판정을_건너뛰고_기록만
     finally:
         conn.close()
 
-    assert result is official
+    # 2026-09-17: 건너뜀 경로도 «정확한 기본 타입»으로 돌려준다(하위 타입이면 새 객체).
+    assert type(result) is step.OfficialEvidenceCollectionResult
+    assert result.candidates == official.candidates and result.company_id == official.company_id
     assert steps[0]["AI호출"] == 0
     assert steps[0]["실패"] == "소유권미확정:GenerationCoordinationError"
+
+
+def test_재판정을_건너뛰어도_정확한_기본_타입으로_돌려준다() -> None:
+    """2026-09-17 운영 실측: 스위치 ON이면 수집 결과가 하위 타입이라 최종검사가 거절했다.
+
+    빈 칸 없음·조정 오류 두 건너뜀 경로 모두 `type(x) is OfficialEvidenceCollectionResult`
+    여야 뒤의 보완조사 최종검사를 통과한다.
+    """
+    from src.shared import generation_coordination
+    from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
+
+    official = _reclassifiable_result()
+    assert type(official) is not OfficialEvidenceCollectionResult  # 하위 타입 전제
+    conn = sqlite3.connect(":memory:")
+    try:
+        skipped = step.reclassify_official_evidence(
+            official,
+            client=SimpleNamespace(messages=FakeMessages(
+                error=generation_coordination.GenerationCoordinationError("owner 확정 전"),
+            )),
+            connect_db=_connection_factory(conn),
+            model=MODEL,
+            steps=[],
+            generated_at="2026-09-06",
+        )
+    finally:
+        conn.close()
+    assert type(skipped) is OfficialEvidenceCollectionResult
+    assert skipped.candidates == official.candidates
+    assert skipped.company_id == official.company_id
 
 
 def test_재판정조각은_문서hash에_결속되어_select를_통과한다() -> None:
