@@ -304,10 +304,6 @@ def _portfolio_blocks(
         role = fact.product_role
         if fact.portfolio_stage:
             role += f" · 보고서 선택 단계: {fact.portfolio_stage}"
-        limitation = _clean(
-            fact.limitations or fact.limitation,
-            "공식 근거가 확인한 범위로 한정",
-        )
         fields = (
             _field("제품·서비스 범위", fact.subject_scope),
             _field("사업적 역할", role),
@@ -316,9 +312,8 @@ def _portfolio_blocks(
                 revenue_fact.subject_scope if revenue_fact is not None else "",
             ),
             _field(
-                "중점 추진 근거·현재 확인·한계",
-                f"신호: {_joined(fact.priority_signals)} · "
-                f"확인: {fact.claim} · 한계: {limitation}",
+                "중점 추진 근거·현재 확인",
+                f"신호: {_joined(fact.priority_signals)} · 확인: {fact.claim}",
             ),
         )
         out.append(
@@ -441,11 +436,6 @@ def _current_blocks(
         initial_signals = _joined(
             fact.initial_signal for fact in linked if fact.initial_signal
         )
-        signal_limit = (
-            "동시 관찰·효과/인과 미확정"
-            if initial_signals
-            else "대응 진행 중·효과 미확인"
-        )
         out.append(
             SectionContentBlock(
                 title=_clean(issue.subject_scope, "현재 과제"),
@@ -459,7 +449,6 @@ def _current_blocks(
                     _field(
                         "초기 신호·남은 문제",
                         f"초기 신호: {initial_signals or '대응 진행 중·효과 미확인'} · "
-                        f"해석 한계: {signal_limit} · "
                         f"남은 문제: {remaining or '해결 결과는 아직 확인되지 않음'}",
                     ),
                     _field("다음 확인 지표", issue.next_check_metric),
@@ -486,9 +475,11 @@ def _future_blocks(
                     f"상태: {_clean(PLAN_STATUS_LABELS.get(fact.plan_status), '상태 미확인')}",
                 ),
                 _field(
-                    "회사 제시 효과·한계",
-                    f"효과: {_clean(fact.plan_expected_effect, '공식 효과 미공개')} · "
-                    f"한계: {_clean(fact.limitations or fact.limitation, '미실행 계획')}",
+                    "회사 제시 효과",
+                    # ★ 「효과: 」 접두는 그대로 둔다 — 이번 지시는 값에서 「한계: …」
+                    #   조각만 빼는 것이다. 라벨과 겹쳐 군더더기로 보이지만 그건
+                    #   별도 판단이라 여기서 바꾸지 않는다.
+                    f"효과: {_clean(fact.plan_expected_effect, '공식 효과 미공개')}",
                 ),
                 _field(
                     "실행 확인 신호",
@@ -621,11 +612,7 @@ def _competitive_blocks(
                     ),
                     _field("비교축", fact.comparison_metric),
                     _field("확인된 차이", fact.claim),
-                    _field(
-                        "판정·비교 한계",
-                        f"{judgment} · "
-                        f"{_clean(fact.limitations or fact.limitation, '공식 근거가 확인한 비교축으로 한정')}",
-                    ),
+                    _field("판정", judgment),
                 ),
                 fact_ids=(fact.fact_id,),
                 source_numbers=_numbers((fact,), source_numbers),

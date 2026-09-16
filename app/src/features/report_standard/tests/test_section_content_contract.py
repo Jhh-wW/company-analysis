@@ -242,7 +242,7 @@ def test_1장부터_9장은_각_질문에_답하는_구조화_블록을_낸다()
             "제품·서비스 범위",
             "사업적 역할",
             "2장 수익 분류 참조",
-            "중점 추진 근거·현재 확인·한계",
+            "중점 추진 근거·현재 확인",
         },
         "past_changes": {"실행", "확인된 결과·의미"},
         "current_challenges": {
@@ -254,7 +254,7 @@ def test_1장부터_9장은_각_질문에_답하는_구조화_블록을_낸다()
         "future_strategy": {
             "공식 계획",
             "시점·조건·현재 상태",
-            "회사 제시 효과·한계",
+            "회사 제시 효과",
             "실행 확인 신호",
         },
         "operations_partners": {
@@ -267,7 +267,7 @@ def test_1장부터_9장은_각_질문에_답하는_구조화_블록을_낸다()
             "비교군 선정 이유·동일 조건",
             "비교축",
             "확인된 차이",
-            "판정·비교 한계",
+            "판정",
         },
     }
     for section_id, required in required_labels.items():
@@ -365,10 +365,11 @@ def test_제품_현재과제_미래계획의_필수_판단정보가_빈칸없이
         assert fields["제품·서비스 범위"] == block.title
         assert fields["사업적 역할"]
         assert fields["2장 수익 분류 참조"]
-        evidence = fields["중점 추진 근거·현재 확인·한계"]
+        evidence = fields["중점 추진 근거·현재 확인"]
         assert evidence.startswith("신호: ")
         assert " · 확인: " in evidence
-        assert " · 한계: " in evidence
+        # ★ 2026-09-17 — 값 끝에 붙던 「 · 한계: …」 조각을 뺐다(라벨에서도 뺐다).
+        assert " · 한계: " not in evidence
 
     current = blocks_by_section["current_challenges"]
     assert len(current) == 1
@@ -381,6 +382,8 @@ def test_제품_현재과제_미래계획의_필수_판단정보가_빈칸없이
     signal_and_remaining = current_fields["초기 신호·남은 문제"]
     assert "초기 신호: 대응 진행 중·효과 미확인" in signal_and_remaining
     assert "남은 문제:" in signal_and_remaining
+    # ★ 2026-09-17 — 가운데에 있던 「해석 한계: …」 조각을 뺐다.
+    assert "해석 한계:" not in signal_and_remaining
     assert current_fields["다음 확인 지표"] == "본계약"
 
     future = blocks_by_section["future_strategy"]
@@ -398,7 +401,10 @@ def test_제품_현재과제_미래계획의_필수_판단정보가_빈칸없이
             "조건: 공식 조건 미공개 · 상태: 발표·미실행"
         )
         assert fields["실행 확인 신호"]
-        assert "공식 효과 미공개" in fields["회사 제시 효과·한계"]
+        # ★ 2026-09-17 — 값에서 「 · 한계: …」 조각을 뺐다(라벨에서도 뺐다).
+        effect = fields["회사 제시 효과"]
+        assert "공식 효과 미공개" in effect
+        assert "한계:" not in effect
 
     operations = blocks_by_section["operations_partners"]
     operation_fields = {block.title: _field_map(block) for block in operations}
@@ -418,9 +424,11 @@ def test_제품_현재과제_미래계획의_필수_판단정보가_빈칸없이
         assert reason_and_conditions.startswith("선정 이유: ")
         assert " · 동일 조건: " in reason_and_conditions
         assert "2025 회계연도" in reason_and_conditions
-        judgment_and_limit = fields["판정·비교 한계"]
-        assert judgment_and_limit.startswith("운영 특성 · ")
-        assert len(judgment_and_limit.split(" · ", maxsplit=1)) == 2
+        # ★ 2026-09-17 — 판정 뒤에 붙던 비교 한계 설명을 뺐다. 이제 판정 «값
+        #   하나»만 남으므로 구분자 뒤 조각이 아예 없어야 한다.
+        judgment = fields["판정"]
+        assert judgment == "운영 특성"
+        assert " · " not in judgment
 
 
 def test_9장은_명시적으로_결속된_판정을_그대로_구분해_표시한다() -> None:
@@ -443,7 +451,9 @@ def test_9장은_명시적으로_결속된_판정을_그대로_구분해_표시�
     blocks = section_content_blocks(report, section)
 
     assert len(blocks) == 1
-    assert _field_map(blocks[0])["판정·비교 한계"].startswith("경쟁우위 · ")
+    # ★ 2026-09-17 — 판정 뒤 비교 한계 설명을 뺐으므로 판정 «값 그대로»가 남는다.
+    #   판정이 사실 원장을 따라 바뀌는지가 이 시험의 요점이라 그 성질은 그대로다.
+    assert _field_map(blocks[0])["판정"] == "경쟁우위"
 
 
 def test_9장은_자사와_비교사_공식출처를_함께_표시한다() -> None:
