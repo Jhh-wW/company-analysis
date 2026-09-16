@@ -212,7 +212,17 @@ FRAGMENT_KIND: Final[str] = LEGACY_KIND_HOMEPAGE
 #:   앞(연혁·조직도보다는 먼저, `about`·사업·비전보다는 나중)에 둔다.
 PRIORITY_PATH_KEYWORDS: Final[tuple[str, ...]] = (
     "about",
-    # ── 8장 재료: 경영철학·핵심가치·인재상·윤리 ──
+    # ── 8장 재료: CEO 인사말·경영철학·핵심가치·인재상·윤리 ──
+    # ★ CEO 인사말과 윤리규범은 8장 「인재상과 일하는 방식」의 1차 재료다
+    #   (실측: CEO 인사말에 사훈과 조직 문화, 윤리규범에 임직원 존중·인재
+    #   육성 원칙이 실려 있었다). 둘 다 `about`·`business` 같은 이름이
+    #   없어서 예전에는 `company`(순위 뒷줄)로만 걸렸고, IR 목록 페이지가
+    #   먼저 예산을 다 써서 한 번도 열리지 않았다. `ethics`는 `ethical`
+    #   («윤리경영»을 그렇게 쓰는 사이트가 많다)을 놓치므로 어간
+    #   `ethic`으로 줄인다.
+    "ceo",
+    "greeting",
+    "인사말",
     "philosophy",
     "경영철학",
     "경영이념",
@@ -226,8 +236,13 @@ PRIORITY_PATH_KEYWORDS: Final[tuple[str, ...]] = (
     "company/overview",
     "company-overview",
     "company_overview",
-    "ethics",
+    "ethic",
     "윤리",
+    "행동강령",
+    "code-of-conduct",
+    "codeofconduct",
+    "compliance",
+    "준법",
     # ── 회사·사업 소개 ──
     "business",
     "vision",
@@ -236,7 +251,6 @@ PRIORITY_PATH_KEYWORDS: Final[tuple[str, ...]] = (
     "news",
     "companyintro",
     "introduce",
-    "greeting",
     # 맨몸 개요 — 연혁·조직도·CI/BI(`company`)보다는 먼저 읽는다.
     "overview",
     "company",
@@ -378,6 +392,28 @@ HTTPS_DEFAULT_PORT: Final[int] = 443
 #: 도메인군 전체(root+apex/www 짝+같은 등록 도메인 하위호스트)에서 시도하는
 #: 최대 일반 웹 페이지 수(robots.txt·sitemap.xml 조회는 포함하지 않는다).
 WIDE_MAX_PAGES: Final[int] = 12
+
+#: 한 장(section)이 ``WIDE_MAX_PAGES`` 예산에서 «먼저» 확보하는 쪽 수.
+#: 아직 이 수를 못 채운 장의 후보는, 이미 채운 장의 후보보다 항상 먼저 읽는다.
+#: 장 안에서의 순서와, 모든 장이 이 수를 채운 뒤의 순서는 기존 우선순위
+#: (``_priority_key``)를 그대로 쓴다.
+#:
+#: ★ 왜 필요한가 (실측 — 2026-09-17 코스닥 소프트웨어사): 한 사이트의 IR
+#:   공시 목록이 하위 링크를 계속 낳아 12쪽 예산 중 10쪽을 `/ir/…` 한 갈래가
+#:   다 썼다. 그 10쪽은 전부 future_strategy·past_changes 한 묶음으로만
+#:   분류돼, 8장(culture)·6장 재료가 있는 CEO 인사말·윤리규범 페이지는
+#:   후보 52개 중 15·16번째라 한 번도 열리지 않았다. 순위만 바꾸면 다음
+#:   회사에서 다른 갈래가 같은 방식으로 예산을 독점한다 — 그래서 순위가
+#:   아니라 «장별 최소 몫»으로 막는다.
+#: ★ 왜 1이 아니라 2인가: 각 장의 1순위 후보는 목록·메뉴만 있는 색인
+#:   페이지인 경우가 많다(실측: 같은 사이트 `/about/`는 본문 구간 0개).
+#:   1쪽만 주면 그 장이 색인 페이지 하나로 채워진 채 끝난다.
+#: ★ 대가: 한 장에 자료가 몰린 회사에서는 그 장이 예전보다 적게 읽힌다.
+#:   9개 장을 모두 채워야 하는 보고서라 넓게 읽는 쪽을 택한다.
+#: ★ 페이지 유형을 못 알아낸 URL(장 없음)은 이 몫을 «받지 않는다» —
+#:   연락처·개인정보처럼 근거가 될 수 없는 페이지에 예산을 예약하지
+#:   않기 위해서다. 그 페이지들은 모든 장이 몫을 채운 뒤 기존 순위로 읽힌다.
+WIDE_SECTION_PAGE_QUOTA: Final[int] = 2
 
 #: HTML 한 페이지에서 일반 탐색 큐로 옮기는 링크 상한. 응답 바이트가 작아도
 #: 수만 개의 짧은 ``<a>``가 queue 정렬과 중복 검사를 폭증시키지 못하게 한다.
@@ -545,6 +581,43 @@ WIDE_SLOT_KEYWORD_MAP: Final[tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]
         WIDE_REQUIRED_SLOT_IDS_BY_SECTION["culture"],
     ),
     (
+        # ── 회사 철학·윤리·인재 경로 ──
+        # ★ CEO 인사말·경영철학·윤리규범 페이지는 「그 회사가 일하는 원칙」을
+        #   직접 적어 두는 자리다(실측: 사훈과 조직 문화 한 문단, 임직원
+        #   존중·인재 육성 원칙 네 줄). 예전에는 아래 ``about``/``company``
+        #   묶음에 걸려 identity·competitive_position만 받았고, 그래서
+        #   페이지를 읽어도 8장 칸(culture)으로는 한 조각도 가지 않았다.
+        # ★ 기존 identity·competitive_position은 그대로 두고 culture만
+        #   «더한다» — 이 페이지들은 회사 소개 글이기도 하기 때문이다.
+        # ★ 채용 묶음(맨 위)보다 뒤에 둔다. 그래야 `/careers/`는 지금처럼
+        #   채용 페이지 종류를 유지하고, 회사소개 경로만 이 묶음에 걸린다.
+        #   슬롯 묶음이 culture 단독이 아니므로 종류도 일반 웹 페이지다.
+        (
+            "ceo",
+            "greeting",
+            "인사말",
+            "philosophy",
+            "경영철학",
+            "경영이념",
+            "핵심가치",
+            "corevalue",
+            "core-value",
+            "core_value",
+            "인재상",
+            "talent",
+            "ethic",
+            "윤리",
+            "행동강령",
+            "code-of-conduct",
+            "codeofconduct",
+            "compliance",
+            "준법",
+        ),
+        WIDE_REQUIRED_SLOT_IDS_BY_SECTION["culture"]
+        + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["identity"]
+        + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["competitive_position"],
+    ),
+    (
         ("product", "products", "service", "tech", "portfolio"),
         WIDE_REQUIRED_SLOT_IDS_BY_SECTION["portfolio"]
         + WIDE_REQUIRED_SLOT_IDS_BY_SECTION["business_model"],
@@ -602,7 +675,19 @@ WIDE_SLOT_BODY_KEYWORDS: Final[dict[str, tuple[str, ...]]] = {
     "future_strategy:plan_status": ("진행중", "진행 중", "추진", "착수", "실행 단계"),
     "operations_partners:value_chain": ("공급망", "밸류체인", "협력사", "원자재"),
     "operations_partners:operating_role": ("직접 운영", "공동 운영", "제조", "생산"),
-    "culture:work_principle": ("핵심가치", "인재상", "일하는 방식", "원칙"),
+    # 「사훈」·「행동강령」·「윤리규범」은 회사가 스스로 적어 둔 일하는 원칙의
+    # 이름이다(실측: CEO 인사말의 사훈 한 문단이 기존 낱말 넷 중 어느 것에도
+    # 걸리지 않아 8장 칸이 비었다). 뜻이 좁은 복합명사라 다른 장의 문장을
+    # 잘못 끌어오지 않는다.
+    "culture:work_principle": (
+        "핵심가치",
+        "인재상",
+        "일하는 방식",
+        "원칙",
+        "사훈",
+        "행동강령",
+        "윤리규범",
+    ),
     "culture:verified_case": ("사례", "후기", "인터뷰", "스토리"),
     "competitive_position:self_context": ("강점", "차별화", "경쟁력", "1위", "선도"),
 }

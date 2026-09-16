@@ -14,9 +14,14 @@ from src.features.pipeline.tests.test_real_cache import CORP_ID, FakeEngine
 from src.features.pipeline.tests.test_real_v2_switch import _build_identity, _frozen_v2_mode
 from src.features.pipeline.tests.test_mandatory_tail_call_reserve import _응답기록
 from src.shared.report_evidence.constants import ReleaseMode
+from src.core.constants import MAX_AI_CALLS_PER_REQUEST
+from src.shared.report_recovery import (
+    EMPTY_RECOVERY_AI_CALLS, MANDATORY_REPORT_AI_CALLS, WRITER_RETRY_ALLOWANCE_CALLS,
+)
 
 
-@pytest.mark.parametrize("already_called", [14, 15])
+# 복구(2) + 필수 후속(2) = 4회가 남아야 시작한다 — 상한에서 유도한다(숫자 고정 금지).
+@pytest.mark.parametrize("already_called", [MAX_AI_CALLS_PER_REQUEST - 4, MAX_AI_CALLS_PER_REQUEST - 3])
 def test_actual_recovery_closures_meter_calls_and_reserve_two_tail_calls(monkeypatch, already_called):
     monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
     monkeypatch.setattr(real, "_v2_cache_save", lambda **kwargs: None)
@@ -35,8 +40,8 @@ def test_actual_recovery_closures_meter_calls_and_reserve_two_tail_calls(monkeyp
         can_start = kwargs["empty_recovery_can_start"]
         writer = kwargs["empty_recovery_writer_ask"]
         reviewer = kwargs["empty_recovery_reviewer_ask"]
-        assert can_start() is (already_called == 14)
-        if already_called == 14:
+        assert can_start() is (already_called == MAX_AI_CALLS_PER_REQUEST - 4)
+        if already_called == MAX_AI_CALLS_PER_REQUEST - 4:
             writer("새로운 짧은 사실 작성")
             assert not can_start()
             reviewer("동일 근거 검수")
@@ -48,7 +53,7 @@ def test_actual_recovery_closures_meter_calls_and_reserve_two_tail_calls(monkeyp
         # 본문 복구가 끝나도 필수 후속 두 호출은 정상 전송된다.
         kwargs["diagram_ask"]("도식 검수")
         kwargs["writer_ask"]("검증 본문 요약 고르기")
-        if already_called == 14:
+        if already_called == MAX_AI_CALLS_PER_REQUEST - 4:
             with pytest.raises(AskFatalError) as caught:
                 reviewer("상한 초과 확인")
             assert caught.value.call_limit
@@ -68,9 +73,9 @@ def test_actual_recovery_closures_meter_calls_and_reserve_two_tail_calls(monkeyp
             build_identity=_build_identity(), generation_mode=_frozen_v2_mode(),
             release_mode_override=ReleaseMode.SHADOW,
         )
-    expected = 4 if already_called == 14 else 2
+    expected = 4 if already_called == MAX_AI_CALLS_PER_REQUEST - 4 else 2
     assert len(messages.requests) == len(observations) == expected
-    assert engine.available_provider_calls(reserved_calls=0) == 18 - already_called - expected
+    assert engine.available_provider_calls(reserved_calls=0) == MAX_AI_CALLS_PER_REQUEST - already_called - expected
 
 
 # ══════════════════════════════════════════════════════════
@@ -111,14 +116,18 @@ def _news_branch_budget(monkeypatch, *, already_called: int) -> int:
 
 
 def test_뉴스_분석_상한이_빈장_복구_2회를_남긴다(monkeypatch) -> None:
-    """리터럴 오라클 — 18 - (작성 9 + 검수 1 + 필수 후속 2) - 복구 2 = 4."""
+    """리터럴 오라클 — 20 - (작성 9 + 검수 1 + 필수 후속 2) - 복구 2 - 작가 재요청 여유 2 = 4.
+
+    2026-09-17: 상한이 18→20으로 올랐지만 뉴스 몫은 4 그대로다 — 늘어난 2회는
+    장 작성이 계획보다 더 쓰는 여유로 남겨 복구 몫이 굶지 않게 한다.
+    """
     assert _news_branch_budget(monkeypatch, already_called=0) == 4
     # 앞 단계가 이미 쓴 만큼 줄어들되 복구 몫은 계속 남는다.
     assert _news_branch_budget(monkeypatch, already_called=2) == 2
 
 
 def test_뉴스가_상한까지_써도_복구_2회와_필수후속_2회가_남는다(monkeypatch) -> None:
-    """실행 순서를 그대로 재생한다 — 뉴스 → 작성 9 → 검수 1 → 복구 2 → 도식·요약 2."""
+    """실행 순서를 그대로 재생한다 — 뉴스 → 작성 9 → 검수 1 → 복구 2 → 도식·요약 2 → 재요청 여유 2."""
     engine = real._MeteredEngine(SimpleNamespace())
     captured: list[int] = []
 
@@ -138,6 +147,10 @@ def test_뉴스가_상한까지_써도_복구_2회와_필수후속_2회가_남�
         company_name="가나다전자", business_date=real.today_kst(),
         pipeline_news_search=lambda *args, **kwargs: None,
     )
+    # 뉴스는 «본문 필수 + 복구 2 + 작가 재요청 여유 2»를 남긴 나머지만 쓴다.
+    assert captured[0] == MAX_AI_CALLS_PER_REQUEST - (
+        MANDATORY_REPORT_AI_CALLS + EMPTY_RECOVERY_AI_CALLS + WRITER_RETRY_ALLOWANCE_CALLS
+    )
     for _ in range(captured[0]):          # 뉴스 분석
         engine.reserve_provider_call()
     for _ in range(9 + 1):                # 장 작성 9 + 본문 검수 1
@@ -146,7 +159,12 @@ def test_뉴스가_상한까지_써도_복구_2회와_필수후속_2회가_남�
     assert engine.available_provider_calls(reserved_calls=2 + 1) > 0
     engine.reserve_provider_call(reserved_calls=2 + 1)   # 복구 작성
     engine.reserve_provider_call(reserved_calls=2)       # 복구 검수
-    assert engine.reserve_provider_call() == 17          # 도식 검수
-    assert engine.reserve_provider_call() == 18          # 요약 고르기
+    used = captured[0] + 9 + 1 + EMPTY_RECOVERY_AI_CALLS
+    assert engine.reserve_provider_call() == used + 1    # 도식 검수
+    assert engine.reserve_provider_call() == used + 2    # 요약 고르기
+    # 작가 재요청 여유(장 작성이 계획보다 더 쓴 몫)까지 다 쓴 뒤에야 상한에 닿는다.
+    for _ in range(WRITER_RETRY_ALLOWANCE_CALLS):
+        engine.reserve_provider_call()
+    assert engine.available_provider_calls(reserved_calls=0) == 0
     with pytest.raises(provider_budget.RequestCallLimitReached):
         engine.reserve_provider_call()

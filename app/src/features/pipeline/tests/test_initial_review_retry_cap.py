@@ -180,7 +180,7 @@ def test_줄인_상한이_사고와_같은_잔액에서_재요청을_통과시�
     # 진단에 남은 «출력상한»이 이 동작의 관측 수단이다 (새 단계를 만들지 않는다).
     assert [단계["출력상한"] for 단계 in 검수_진단.steps
             if 단계["step"] == V2_RESPONSE_STEP] == [_상한, _하한]
-    assert MAX_AI_CALLS_PER_REQUEST == 18
+    assert MAX_AI_CALLS_PER_REQUEST == 20
 
 
 def test_callable_상한은_클로저를_만들_때가_아니라_보낼_때_풀린다() -> None:

@@ -105,7 +105,8 @@ from src.features.company_comparison.official_sources import (
 )
 from src.features.company_comparison.stated_differentiator import (
     STATED_DIFFERENTIATOR_CLAIM_TYPE,
-    add_stated_differentiator_fragments,
+    STATED_DIFFERENTIATOR_PROMOTION_STEP,
+    promote_stated_differentiator_fragments,
     register_stated_differentiator_sentence_evidence,
 )
 from src.features.business_candidate import alias_resolution
@@ -195,6 +196,7 @@ from src.shared.report_recovery import (
     MANDATORY_REPORT_AI_CALLS as COMPOSER_RUNTIME_CALL_RESERVE,
     MANDATORY_TAIL_AI_CALLS,
     REWRITE_RECHECK_CALLS,
+    WRITER_RETRY_ALLOWANCE_CALLS,
 )
 from src.shared import runtime_failure_constants as failure_constants
 from src.shared import runtime_failure_diagnostic as runtime_failure
@@ -3997,7 +3999,7 @@ class RealPipeline:
                 # 승격은 보조 추가물이다 — 실패하면 9장이 비는 것으로 끝나야 하고,
                 # 보고서 전체를 내부 오류로 멈춰서는 안 된다(2026-09-06 운영 실측).
                 try:
-                    official_evidence = add_stated_differentiator_fragments(
+                    promotion = promote_stated_differentiator_fragments(
                         official_evidence,
                         company_name=company_name,
                         company_aliases=_official_company_aliases(profile),
@@ -4009,10 +4011,16 @@ class RealPipeline:
                     )
                     steps.append(
                         {
-                            "step": "9장_자기선언_승격",
+                            "step": STATED_DIFFERENTIATOR_PROMOTION_STEP,
                             "실패": type(promotion_error).__name__,
                         }
                     )
+                else:
+                    # 성공도 기록한다 — 승격 수와 «칸 소유권이 없어 건너뛴» 조각의
+                    # 종류별 수. 예전에는 성공 시 단계가 없어 운영에서 9장이 왜
+                    # 얇은지 알 수 없었다(2026-09-17 실측).
+                    official_evidence = promotion.result
+                    steps.append(promotion.step_record())
                 reclassified_official_evidence = reclassify_official_evidence(
                     official_evidence,
                     client=client,
@@ -6030,8 +6038,15 @@ def _run_news_search_branch(
                 #   알 수 있고 그때는 이미 뉴스가 몫을 다 쓴 뒤다. 그래서 «미리»
                 #   남긴다 — 값이 남으면 뒤 단계가 그대로 쓰므로 버려지지 않고,
                 #   빡빡한 실행에서만 뉴스 분석이 2회 줄어든다.
+                # ★ 작가 재요청 여유 2회도 함께 남긴다 (2026-09-17 실측) — 복구 2회를
+                #   남겼는데도 장 작성이 11회로 늘어 복구가 «호출한도»로 중단됐다.
+                #   상한 18→20과 짝이며, 뉴스 분석 여유는 이전과 같은 4회다.
                 news_analysis_call_budget = engine.available_provider_calls(
-                    reserved_calls=COMPOSER_RUNTIME_CALL_RESERVE + EMPTY_RECOVERY_AI_CALLS
+                    reserved_calls=(
+                        COMPOSER_RUNTIME_CALL_RESERVE
+                        + EMPTY_RECOVERY_AI_CALLS
+                        + WRITER_RETRY_ALLOWANCE_CALLS
+                    )
                 )
                 news_session = news_research_adapter.prepare_news_research(
                     search_news=(
