@@ -39,9 +39,13 @@ from src.shared import report_recovery
 _필수후속 = 2
 _재검수몫 = 1
 _재작성예약 = _필수후속 + _재검수몫  # 3
-_상한 = 18
-_뉴스몫 = 5
+# ★ 18 → 20 (2026-09-17 사용자 결정, lease 3600→3900과 짝). 늘어난 2회는 빈 장 복구 몫이다.
+_상한 = 20
 _장작성 = 9
+# 경계 재생용 뉴스 수: 뉴스 + 장 작성 9 + 본문 검수 1 뒤에 «정확히» 필수 후속 2 +
+# 재검수 1 = 3회만 남게 만든다(옛 상한 18에서는 5였다). 실제 뉴스 갈래는 이보다
+# 적게(복구·재요청 여유까지 남기고) 쓰지만, 이 시험은 «경계에서의 예약 동작»을 본다.
+_뉴스몫 = _상한 - _장작성 - 1 - _재작성예약
 
 
 class _응답기록:
@@ -155,15 +159,15 @@ def test_필수후속몫은_도식_요약고르기_2회다() -> None:
 def test_예약이_걸린_호출은_경계에서_정확히_한_번_더_거부된다() -> None:
     """N-1은 열리고 N은 닫힌다 — 예약을 0으로 낮추면 이 시험이 빨개진다."""
     engine = real._MeteredEngine(SimpleNamespace())
-    for _ in range(_상한 - _필수후속 - 1):  # 15회
+    for _ in range(_상한 - _필수후속 - 1):  # 상한 20이면 17회
         engine.reserve_provider_call()
-    # 16번째까지는 «필수 후속 2를 남기고도» 부를 수 있다.
-    assert engine.reserve_provider_call(reserved_calls=_필수후속) == 16
-    # 17번째부터는 남은 2가 필수 후속 몫이라 선택적 호출은 막힌다.
+    # (상한-2)번째까지는 «필수 후속 2를 남기고도» 부를 수 있다.
+    assert engine.reserve_provider_call(reserved_calls=_필수후속) == _상한 - _필수후속
+    # 그다음부터는 남은 2가 필수 후속 몫이라 선택적 호출은 막힌다.
     with pytest.raises(provider_budget.RequestCallLimitReached):
         engine.reserve_provider_call(reserved_calls=_필수후속)
     # 예약 없는(=필수) 호출은 그대로 나간다.
-    assert engine.reserve_provider_call() == 17
+    assert engine.reserve_provider_call() == _상한 - 1
 
 
 def test_예약수는_0이상의_정수여야_한다() -> None:
@@ -192,7 +196,7 @@ def test_예약값을_감싼_엔진에서_읽지_않는다() -> None:
     assert engine.reserved_calls == 0
 
 
-def test_뉴스5_작성9_검수1_뒤_재작성은_거부되고_도식요약이_실행된다() -> None:
+def test_뉴스가_경계까지_차면_재작성은_거부되고_도식요약이_실행된다() -> None:
     나갔다, 거부됐다, 전송 = _재생(
         재작성예약=_재작성예약, 재검수예약=_필수후속, 뉴스=_뉴스몫,
     )
@@ -200,7 +204,7 @@ def test_뉴스5_작성9_검수1_뒤_재작성은_거부되고_도식요약이_�
         "재검수를 못 할 재작성이 시작됐습니다 — 그 호출은 판정 없이 버려집니다"
     )
     assert 나갔다[-2:] == ["도식검수", "요약고르기"]
-    # 요약 검수가 없어져 필수 후속이 2회다 — 상한 18 중 17회만 나간다.
+    # 요약 검수가 없어져 필수 후속이 2회다 — 상한 중 1회(옛 요약 검수 자리)만 남는다.
     assert 전송 == _상한 - 1
 
 

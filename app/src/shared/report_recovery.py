@@ -91,6 +91,12 @@ EMPTY_RECOVERY_AI_CALLS: Final[int] = (
     EMPTY_RECOVERY_WRITER_CALLS + EMPTY_RECOVERY_REVIEW_CALLS
 )
 
+# 장 작성이 계획(9회)보다 더 쓰는 여유. 운영 실측(2026-09-16 22:12 10회, 2026-09-17
+# 01:09 11회)에서 파싱 재요청·보강 호출로 1~2회가 더 나갔고, 그만큼 뒤 단계(빈 장
+# 복구)가 굶었다. 뉴스처럼 «앞»에서 도는 단계가 이 여유까지 남겨야 복구 몫이 산다.
+# 값은 PARSE_RETRY_LIMIT(1)×관측된 재요청 단계 수(2: 본문 검수·도식)에서 유도한다.
+WRITER_RETRY_ALLOWANCE_CALLS: Final[int] = 2
+
 # 본문 «앞»에서 도는 단계(뉴스 등)가 남겨야 하는 최소 몫.
 # ★ 보충(supplement) 몫이 아니라 «필수 단계»에서 유도한다. 예전에는
 #   MAX_TOTAL_AI_CALLS(보충 계산식)를 그대로 썼고 두 값이 우연히 같아
