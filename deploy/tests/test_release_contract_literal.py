@@ -118,13 +118,17 @@ def test_NEWS_INTAKE는_render_yaml에_없다() -> None:
     )
 
 
-def test_EVIDENCE_RECLASSIFY는_render_yaml에_없다() -> None:
-    """운영 검증 전인 AI 근거 재판정을 출시와 함께 켜지 않는다."""
+def test_EVIDENCE_RECLASSIFY는_render_yaml에서_정확히_1로_켜져_있다() -> None:
+    """2026-09-16 사용자 결정: 빈 의미 칸을 채우는 근거 재판정을 운영에서 켠다.
+
+    스위치는 정확히 "1"일 때만 동작하므로(오타·관용 표기로 미검증 경로가 켜지지
+    않게) 값까지 단정한다. 되돌릴 때는 키를 지우고 재배포한다.
+    """
 
     render_values = _render_web_service_env()
 
-    assert EVIDENCE_RECLASSIFY_ENV_NAME not in render_values, (
-        "출시 릴리스는 근거 재판정을 끈 채로 나갑니다 — 검증 뒤 별도로 결정합니다"
+    assert render_values.get(EVIDENCE_RECLASSIFY_ENV_NAME) == "1", (
+        "출시 릴리스는 근거 재판정을 정확히 \"1\"로 켠 채 나갑니다(2026-09-16 결정)"
     )
 
 
