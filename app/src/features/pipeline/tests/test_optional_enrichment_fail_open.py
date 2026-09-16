@@ -96,7 +96,7 @@ def test_9장_자기선언_승격이_실패해도_보고서는_완성된다(
     def explode(*args: Any, **kwargs: Any) -> Any:
         raise KeyError("competitive_position")
 
-    monkeypatch.setattr(real, "add_stated_differentiator_fragments", explode)
+    monkeypatch.setattr(real, "promote_stated_differentiator_fragments", explode)
 
     with caplog.at_level("WARNING", logger="src.features.pipeline.real"):
         result = e2e._run(collector)  # noqa: SLF001

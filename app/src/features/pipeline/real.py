@@ -105,7 +105,8 @@ from src.features.company_comparison.official_sources import (
 )
 from src.features.company_comparison.stated_differentiator import (
     STATED_DIFFERENTIATOR_CLAIM_TYPE,
-    add_stated_differentiator_fragments,
+    STATED_DIFFERENTIATOR_PROMOTION_STEP,
+    promote_stated_differentiator_fragments,
     register_stated_differentiator_sentence_evidence,
 )
 from src.features.business_candidate import alias_resolution
@@ -3998,7 +3999,7 @@ class RealPipeline:
                 # 승격은 보조 추가물이다 — 실패하면 9장이 비는 것으로 끝나야 하고,
                 # 보고서 전체를 내부 오류로 멈춰서는 안 된다(2026-09-06 운영 실측).
                 try:
-                    official_evidence = add_stated_differentiator_fragments(
+                    promotion = promote_stated_differentiator_fragments(
                         official_evidence,
                         company_name=company_name,
                         company_aliases=_official_company_aliases(profile),
@@ -4010,10 +4011,16 @@ class RealPipeline:
                     )
                     steps.append(
                         {
-                            "step": "9장_자기선언_승격",
+                            "step": STATED_DIFFERENTIATOR_PROMOTION_STEP,
                             "실패": type(promotion_error).__name__,
                         }
                     )
+                else:
+                    # 성공도 기록한다 — 승격 수와 «칸 소유권이 없어 건너뛴» 조각의
+                    # 종류별 수. 예전에는 성공 시 단계가 없어 운영에서 9장이 왜
+                    # 얇은지 알 수 없었다(2026-09-17 실측).
+                    official_evidence = promotion.result
+                    steps.append(promotion.step_record())
                 reclassified_official_evidence = reclassify_official_evidence(
                     official_evidence,
                     client=client,
