@@ -292,11 +292,22 @@ FORMAL_ATTEMPT_SLOT_IDS_BY_SOURCE_KIND: Final = MappingProxyType(
 # 승격해도 필수 근거·문서 수를 채울 수 있다.
 FORMAL_DOCUMENT_TRUST_BY_SOURCE_KIND: Final = MappingProxyType(
     {
+        # 직전 사업연도 연차 공시는 수집기가 필수 여부만 OPTIONAL로 낮춰
+        # 등록한다(「그 공시가 없어도 수집 실패가 아니다」는 뜻이다). 등급·
+        # 발행처·결속은 당기 문서와 같은 전자공시 원문이므로 두 조합을 모두
+        # 생산 가능으로 둔다. 반대 방향(OPTIONAL 종류가 REQUIRED라고 주장)은
+        # 아래 OPTIONAL 전용 종류들에서 계속 막힌다.
         SOURCE_KIND_DART_BUSINESS_REPORT: frozenset(
-            {(SourceTier.TIER_1_OFFICIAL, SourceRequirement.REQUIRED)}
+            {
+                (SourceTier.TIER_1_OFFICIAL, SourceRequirement.REQUIRED),
+                (SourceTier.TIER_1_OFFICIAL, SourceRequirement.OPTIONAL),
+            }
         ),
         SOURCE_KIND_DART_AUDIT_REPORT: frozenset(
-            {(SourceTier.TIER_1_OFFICIAL, SourceRequirement.REQUIRED)}
+            {
+                (SourceTier.TIER_1_OFFICIAL, SourceRequirement.REQUIRED),
+                (SourceTier.TIER_1_OFFICIAL, SourceRequirement.OPTIONAL),
+            }
         ),
         SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT: frozenset(
             {(SourceTier.TIER_1_OFFICIAL, SourceRequirement.OPTIONAL)}
@@ -394,6 +405,26 @@ if frozenset(SUPPLEMENTARY_WRITER_TRUST) != SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS:
     raise FormalSourceKindContractError("보조 문서 종류와 Writer 자격 표가 다릅니다")
 if FORMAL_DOCUMENT_SOURCE_KINDS & SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS:
     raise FormalSourceKindContractError("공식 문서와 보조 문서 종류가 겹칩니다")
+
+
+# Writer 자격에서 «정직한 하향»만 인정하는 종류. 문서가 스스로를 정책보다 덜
+# 필수라고 말하는 것은 위조로 이득을 볼 수 없다 — 필수 자료 수도 슬롯 커버리지도
+# 그만큼 덜 주장하게 된다. 반대 방향(덜 필수인 종류가 REQUIRED라고 주장)은 필수
+# 문서 수를 채울 수 있으므로 절대 열지 않는다.
+#
+# 목록을 손으로 적지 않고 «생산자가 실제로 만들 수 있는 조합»에서 유도한다.
+# 두 표를 따로 적으면 한쪽만 고쳐져, Writer는 통과시킨 문서를 생산자 계약
+# (`_validate_document_trust`)이 예외로 거절해 그 회사 생산 전체가 죽는다.
+FORMAL_WRITER_HONEST_REQUIREMENT_DOWNGRADE_SOURCE_KINDS: Final = frozenset(
+    source_kind
+    for source_kind, (tier, requirement) in (
+        FORMAL_DOCUMENT_WRITER_TRUST_BY_SOURCE_KIND.items()
+    )
+    if requirement is SourceRequirement.REQUIRED
+    and (tier, SourceRequirement.OPTIONAL) in (
+        FORMAL_DOCUMENT_TRUST_BY_SOURCE_KIND[source_kind]
+    )
+)
 
 
 def _slots_for_source_kind(
@@ -539,9 +570,16 @@ def formal_source_writer_ineligibility_reason(
     expected_tier, expected_requirement = (
         FORMAL_DOCUMENT_WRITER_TRUST_BY_SOURCE_KIND[source_kind]
     )
-    if (
-        _enum_value(source_tier) != expected_tier.value
-        or _enum_value(requirement) != expected_requirement.value
+    # 신뢰 등급은 정확히 같아야 한다 — 낮은 등급은 「이 문서를 얼마나 믿는가」가
+    # 다르다는 뜻이라 어떤 방향으로도 인정하지 않는다.
+    if _enum_value(source_tier) != expected_tier.value:
+        return "formal_writer_trust_not_eligible"
+    # 필수 여부는 «더 약하게» 말한 경우만, 그것도 생산자가 그 조합을 실제로
+    # 만드는 종류에서만 인정한다(직전 사업연도 연차 공시). 필수 여부는 「이
+    # 자료가 없으면 수집 실패인가」를 말할 뿐 신뢰를 말하지 않는다.
+    if _enum_value(requirement) != expected_requirement.value and not (
+        source_kind in FORMAL_WRITER_HONEST_REQUIREMENT_DOWNGRADE_SOURCE_KINDS
+        and _enum_value(requirement) == SourceRequirement.OPTIONAL.value
     ):
         return "formal_writer_trust_not_eligible"
 

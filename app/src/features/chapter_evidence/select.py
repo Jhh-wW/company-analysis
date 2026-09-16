@@ -24,7 +24,7 @@
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
@@ -42,7 +42,7 @@ from src.shared.report_evidence.constants import (
 )
 from src.shared.report_evidence.policy import collector_slots_for
 from src.shared.report_evidence.source_kind_policy import (
-    formal_document_is_writer_eligible,
+    formal_document_writer_ineligibility_reason,
 )
 
 
@@ -138,8 +138,11 @@ def select_section_fragments(
     company_mismatch_count = 0
     missing_document_count = 0
     unbound_count = 0
-    low_trust_ir_count = 0
-    low_trust_external_page_count = 0
+    # 「무시했다」만 남기면 다음 실행 진단에서 원인을 찾을 수 없다. 어느 닫힌
+    # 사유로 Writer 자격을 잃었는지 사유별로 따로 센다(2026-09-16 운영 실측:
+    # 사유 이름이 없어 연차 공시 문제를 홈페이지 문제로 읽었다).
+    low_trust_ir_counts: Counter[str] = Counter()
+    low_trust_external_page_counts: Counter[str] = Counter()
     for fragment in fragments:
         if fragment.section_id != section_id:
             continue
@@ -164,14 +167,15 @@ def select_section_fragments(
             # 후단 preflight가 내부 오류로 분류할 수 있게 흔적을 남긴다.
             missing_document_count += 1
             continue
-        if not formal_document_is_writer_eligible(document):
+        writer_problem = formal_document_writer_ineligibility_reason(document)
+        if writer_problem:
             # 공식 HTML exact-link 외부 첨부는 provenance 후보일 뿐이다.
             # CDN 자료가 필수 슬롯을 채우는 근거로 승격되지 않게 통합
             # 경계에서도 한 번 더 fail-closed 한다.
             if document.source_kind == SOURCE_KIND_OFFICIAL_IR_PDF:
-                low_trust_ir_count += 1
+                low_trust_ir_counts[writer_problem] += 1
             else:
-                low_trust_external_page_count += 1
+                low_trust_external_page_counts[writer_problem] += 1
             continue
         # generation=7 결속 방어(fail-closed), 2층 — 조각의 text_sha256이
         # 원본 문서의 exact_evidence_hashes 허용 목록에 없으면 여기서
@@ -283,12 +287,13 @@ def select_section_fragments(
         reason_codes.append(f"fragment_document_missing:{missing_document_count}")
     if unbound_count:
         reason_codes.append(f"fragment_not_bound_to_document:{unbound_count}")
-    if low_trust_ir_count:
-        reason_codes.append(f"low_trust_ir_fragment_ignored:{low_trust_ir_count}")
-    if low_trust_external_page_count:
+    # 사유 이름은 개수 «뒤»에 붙인다 — 기존 진단 읽기가 쓰는 앞부분과 개수
+    # 자리를 그대로 두기 위함이다.
+    for reason, count in sorted(low_trust_ir_counts.items()):
+        reason_codes.append(f"low_trust_ir_fragment_ignored:{count}:{reason}")
+    for reason, count in sorted(low_trust_external_page_counts.items()):
         reason_codes.append(
-            "low_trust_external_page_fragment_ignored:"
-            f"{low_trust_external_page_count}"
+            f"low_trust_external_page_fragment_ignored:{count}:{reason}"
         )
     for slot_id in oversized_slots:
         reason_codes.append(f"fragment_exceeds_budget:{slot_id}")

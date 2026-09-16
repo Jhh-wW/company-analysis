@@ -72,7 +72,14 @@ _DART_DOCUMENT_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
 
 
 def _dart_requirement_by_source_kind() -> dict[str, str]:
-    """DART 종류별 필수 여부를 정책 정본의 TIER_1 항목에서 읽는다(정확히 하나)."""
+    """DART 종류별로 정책이 허용하는 «가장 강한» TIER_1 필수 여부를 읽는다.
+
+    아래 ``_dart_requirement_is_honest``는 「문서가 정책보다 강하게 주장하는가」만
+    본다. 그래서 여기서 필요한 값은 정책의 상한 하나다 — 한 종류가 REQUIRED와
+    OPTIONAL을 모두 만들 수 있으면(직전 사업연도 연차 공시) 상한인 REQUIRED를
+    쓴다. 「정확히 하나」를 요구하면 그 종류가 생기는 순간 이 모듈 적재 자체가
+    실패해 조사 전체가 멈춘다.
+    """
 
     result: dict[str, str] = {}
     for kind in sorted(_DART_DOCUMENT_SOURCE_KINDS):
@@ -81,11 +88,15 @@ def _dart_requirement_by_source_kind() -> dict[str, str]:
             for tier, requirement in FORMAL_DOCUMENT_TRUST_BY_SOURCE_KIND[kind]
             if tier is SourceTier.TIER_1_OFFICIAL
         }
-        if len(official) != 1:
+        if not official:
             raise RuntimeError(
-                f"DART 문서 종류 {kind}의 공식 필수 여부가 정책에서 하나로 정해지지 않았습니다"
+                f"DART 문서 종류 {kind}의 공식 필수 여부가 정책에 없습니다"
             )
-        result[kind] = next(iter(official)).value
+        result[kind] = (
+            SourceRequirement.REQUIRED
+            if SourceRequirement.REQUIRED in official
+            else SourceRequirement.OPTIONAL
+        ).value
     return result
 
 
