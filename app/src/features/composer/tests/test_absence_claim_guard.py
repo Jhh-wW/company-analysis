@@ -185,22 +185,15 @@ def test_어휘를_넓혀도_살려야_할_문장은_그대로_산다(문장):
 
 
 # ══════════════════════════════════════════════════════════
-# 문장을 «뺀 장»에 남기는 확인 범위 안내문 — 실제 진입점 배선
+# 문장을 «뺀 장»의 운영 진입점 배선 — 문장은 빠지고 안내문은 남기지 않는다
 #
 # ★ 왜 필요한가 (4차 유료 실행 실측) — 이 가드는 참·거짓을 가리지 않고 막는다.
 #   3차 실행 8장에 실렸던 「공식 자료에서 회사의 인재상, 핵심가치, 조직문화,
 #   일하는 방식에 관한 명시적 선언을 찾을 수 없다」는 네 낱말 모두 원문 출현
-#   0회라 «참»이었는데 4차에서 그대로 지워졌고, 그 장의 확인 범위 안내문은
-#   0개였다. 거짓말은 막았지만 정보가 통째로 사라졌다.
+#   0회라 «참»이었는데 4차에서 그대로 지워졌다. 2026-09-16 사용자 결정으로
+#   「확인 범위」 안내문은 더 이상 남기지 않는다 — 자료가 적으면 독자가 알아서 읽는다.
 # ★ 시험은 «운영 진입점»을 단정한다 — 가드 함수만 부르면 배선 결함을 못 잡는다.
 # ══════════════════════════════════════════════════════════
-
-from src.features.composer.absence_claim_constants import (  # noqa: E402
-    ABSENCE_SCOPE_GUIDANCE_NOTICE,
-)
-from src.features.composer.absence_claim_guard import (  # noqa: E402
-    with_absence_scope_guidance,
-)
 
 
 def _조각들() -> dict[int, dict[str, str]]:
@@ -265,14 +258,13 @@ def _허용(grouped: bool):
 
 
 @pytest.mark.parametrize("grouped", (False, True), ids=("legacy", "packet엄격"))
-def test_verify_report는_부재_단언을_뺀_장에_확인범위_안내문을_남긴다(grouped):
-    """★ 배선 시험 — 문장은 빠지고, 그 자리에 안내문 한 줄이 생긴다.
+def test_verify_report는_부재_단언을_빼되_확인범위_안내문을_남기지_않는다(grouped):
+    """★ 배선 시험 — 문장은 빠지고, 장은 빈 장 안내만 남는다(확인 범위 문구 없음).
 
-    두 검수 경로를 «같은 시험»이 함께 단정한다. 한쪽만 걸면 그 경로로 나간
-    보고서에서만 안내문이 사라진다.
+    두 검수 경로를 «같은 시험»이 함께 단정한다.
     """
 
-    from src.features.composer.verify import verify_report
+    from src.features.composer.verify import NOTICE_ALL_SENTENCES_REJECTED, verify_report
 
     보고서 = _문화보고서((
         _문장(N2_문장들[0], 인용=()),
@@ -284,8 +276,8 @@ def test_verify_report는_부재_단언을_뺀_장에_확인범위_안내문을_
 
     장 = 결과.sections[0]
     assert 장.sentences == ()  # 부재 단언 문장은 공개되지 않는다
-    assert ABSENCE_SCOPE_GUIDANCE_NOTICE in 장.notice
-    assert 장.notice.count(ABSENCE_SCOPE_GUIDANCE_NOTICE) == 1
+    assert 장.notice == NOTICE_ALL_SENTENCES_REJECTED
+    assert "확인 범위" not in 장.notice
 
 
 @pytest.mark.parametrize("grouped", (False, True), ids=("legacy", "packet엄격"))
@@ -304,13 +296,13 @@ def test_verify_report는_부재_단언이_없으면_안내문을_만들지_않�
 
     장 = 결과.sections[0]
     assert 장.sentences  # 정상 문장은 그대로 공개된다
-    assert ABSENCE_SCOPE_GUIDANCE_NOTICE not in 장.notice
+    assert 장.notice == ""
 
 
-def test_한_장에서_여러_문장이_걸려도_안내문은_한_줄이다():
+def test_한_장에서_여러_문장이_걸려도_빈_장_안내_한_줄뿐이다():
     """중복 금지 — 문장 수만큼 안내문이 늘어나면 안 된다."""
 
-    from src.features.composer.verify import verify_report
+    from src.features.composer.verify import NOTICE_ALL_SENTENCES_REJECTED, verify_report
 
     보고서 = _문화보고서((
         _문장(N2_문장들[0], 인용=()),
@@ -318,10 +310,11 @@ def test_한_장에서_여러_문장이_걸려도_안내문은_한_줄이다():
     ))
     결과 = verify_report(보고서, _조각들(), None, _언제나참())
 
-    assert 결과.sections[0].notice.count(ABSENCE_SCOPE_GUIDANCE_NOTICE) == 1
+    assert 결과.sections[0].sentences == ()
+    assert 결과.sections[0].notice == NOTICE_ALL_SENTENCES_REJECTED
 
 
-def test_check_diagrams도_부재_단언을_뺀_장에_같은_안내문을_남긴다():
+def test_check_diagrams도_부재_단언을_빼되_안내문을_남기지_않는다():
     """★ 도식 경로 배선 — 같은 거짓말이 칸으로 옮겨 적혀도 같은 처분이다."""
 
     from src.features.composer.diagram_check import check_diagrams
@@ -347,37 +340,12 @@ def test_check_diagrams도_부재_단언을_뺀_장에_같은_안내문을_남�
 
     장 = 결과.sections[0]
     assert 장.flow_rows == ()  # 부재 단언 행은 공개되지 않는다
-    assert ABSENCE_SCOPE_GUIDANCE_NOTICE in 장.notice
+    assert 장.notice == ""
     assert any(ABSENCE_CLAIM_UNSUPPORTED in 사유 for 사유 in 사유들)
 
 
-def test_기존_안내문이_있으면_지우지_않고_뒤에_붙인다():
-    """장이 통째로 비면 기존 안내문과 «둘 다» 있어야 한다 — 한쪽을 덮지 않는다."""
-
-    from src.features.composer.verify import NOTICE_ALL_SENTENCES_REJECTED
-
-    합친것 = with_absence_scope_guidance(NOTICE_ALL_SENTENCES_REJECTED)
-    assert NOTICE_ALL_SENTENCES_REJECTED in 합친것
-    assert ABSENCE_SCOPE_GUIDANCE_NOTICE in 합친것
-    # 두 번 불러도 늘어나지 않는다.
-    assert with_absence_scope_guidance(합친것) == 합친것
-
-
-def test_안내문은_지운_문장의_주제어를_담지_않는다():
-    """지어냄 방지 — 그 주제가 실제로 없는지는 작성부가 모른다."""
-
-    for 주제어 in ("인재상", "핵심가치", "조직문화", "일하는 방식", "복리후생"):
-        assert 주제어 not in ABSENCE_SCOPE_GUIDANCE_NOTICE
-
-
-def test_안내문_자체는_이_가드에_걸리지_않는다():
-    """음성 대조 — 안내문이 부재 단언으로 판정되면 유일한 통로가 막힌다."""
-
-    assert absence_claim_problem(ABSENCE_SCOPE_GUIDANCE_NOTICE) == ""
-
-
-def test_묶음_진입점에서_도식_행만_빠져도_안내문이_남는다():
-    """★ 독립 검토 P1-6 — 출시 모드(FULL)에서만 안내문이 사라지던 자리.
+def test_묶음_진입점에서_도식_행만_빠져도_안내문을_만들지_않는다():
+    """★ 독립 검토 P1-6 — 출시 모드(FULL)의 «묶음 진입점»에서 도식 행이 빠지는 자리.
 
     문장 경로는 두 검수 경로 모두 안내문을 남긴다. 그런데 도식 «행»을 실제로
     지우는 자리는 `verify.py::_apply_grounding`이고 거기엔 수집기가 없었다.
@@ -418,5 +386,4 @@ def test_묶음_진입점에서_도식_행만_빠져도_안내문이_남는다()
 
     장 = 결과.sections[0]
     assert 장.flow_rows == (), "부재 단언을 옮겨 적은 행이 그대로 남았다"
-    assert ABSENCE_SCOPE_GUIDANCE_NOTICE in 장.notice
-    assert 장.notice.count(ABSENCE_SCOPE_GUIDANCE_NOTICE) == 1
+    assert 장.notice == ""

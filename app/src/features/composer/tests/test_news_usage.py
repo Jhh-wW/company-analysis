@@ -43,46 +43,13 @@ def _empty():
     return ComposedReport(sections=tuple(ComposedSection(sid, ()) for sid in SECTION_IDS))
 
 
-@pytest.mark.parametrize("failure", [False, True])
-def test_조사_미완료와_실제장애를_구분하고_뉴스0건의_반영을_주장하지_않는다(failure):
-    from src.features.composer.news_usage import append_research_notice
-
-    report = append_research_notice(
-        _empty(), {"상태": "partial", "독립기사": 0, "실패": failure}
-    )
-    notice = report.sections[0].notice
-    assert ("문제가 있어" in notice) is failure
-    assert "반영했" not in notice
-    assert "관련 보도가 없다는 뜻은 아닙니다" in notice
-
-
-def test_뉴스확인범위가_검색완료_접속분석제한_상한을_따로_설명한다():
-    from src.features.composer.news_usage import append_research_notice
-
-    report = append_research_notice(_empty(), {
-        "상태": "partial", "독립기사": 1, "실패": True, "검색완료": True,
-        "관측문제": ("접속", "분석", "검증"), "상한도달": True,
-    })
-    notice = report.sections[0].notice
-    assert "뉴스 검색 요청은 완료했습니다" in notice
-    assert "일부 기사에 접속하거나 본문을 읽지 못했습니다" in notice
-    assert "본문 분석을 완료하지 못했습니다" in notice
-    assert "조사 상한에 도달" in notice
-    assert "뉴스 검색 일부를 완료하지 못했습니다" not in notice
-    assert "보강했습니다" not in notice
-    assert report == append_research_notice(report, {
-        "상태": "partial", "독립기사": 1, "실패": True, "검색완료": True,
-        "관측문제": ("접속", "분석", "검증"), "상한도달": True,
-    })
-
-
 def test_검수탈락_뉴스는_안내문없이_본문에서만_빠진다():
     """검수 탈락은 처리 과정이라 독자에게 안내하지 않는다(2026-09-16 사용자 결정).
 
     탈락 사유는 실행 진단에만 남고, 장 안내문에는 「검수·공개 기준을 통과하지
     못한 뉴스 후보를 제외했습니다」류 문구가 한 글자도 실리지 않아야 한다.
     """
-    from src.features.composer.news_usage import append_research_notice, retain_verified_news
+    from src.features.composer.news_usage import retain_verified_news
     from src.features.composer.port import ComposedSentence
 
     fragments = _fragments()
@@ -94,27 +61,10 @@ def test_검수탈락_뉴스는_안내문없이_본문에서만_빠진다():
     retained = retain_verified_news(draft, fragments, review_input=draft, diagnostics=rejections)
     assert retained.sections[1].sentences == ()
     assert [row["사유코드"] for row in rejections] == ["not_verified"]
-    final = append_research_notice(retained, None)
-    assert final == retained
-    assert all(section.notice == "" for section in final.sections)
+    assert all(section.notice == "" for section in retained.sections)
 
 
-def test_정상완료_뉴스조사는_확인범위_안내를_싣지_않는다():
-    """정상 완료는 «제한»이 아니다 — 「검수를 통과한 내용만 표시합니다」류 과정 설명을 싣지 않는다."""
-    from src.features.composer.news_usage import append_research_notice
-
-    assert append_research_notice(_empty(), {"상태": "ok", "독립기사": 2}) == _empty()
-
-
-def test_미확인_조사상태의_안내를_반복해_붙이지않는다():
-    from src.features.composer.news_usage import append_research_notice
-
-    first = append_research_notice(_empty(), {"상태": "unknown"})
-    assert append_research_notice(first, {"상태": "unknown"}) == first
-    assert append_research_notice(first, None) == first
-
-
-def _run(mode=ReleaseMode.FULL, *, verdict="참", exclude=False, diagnostics=None, fragments=None,
+def _run(mode=ReleaseMode.FULL, *, verdict="참", exclude=False, fragments=None,
          direct_news=False, news_transform=None, news_attribution=True):
     news = fragments or _fragments()
     base = _packets()
@@ -152,7 +102,6 @@ def _run(mode=ReleaseMode.FULL, *, verdict="참", exclude=False, diagnostics=Non
         "가나다전자", (), None, writer_ask=write, reviewer_ask=review,
         diagram_ask=_NoDiagram(), release_mode=mode, section_evidence_packets=packets,
         company_id="00123456", build_identity_sha256="b" * 64,
-        research_diagnostics=diagnostics,
     )
     return output, writer, reviewer, packets
 
@@ -400,28 +349,30 @@ def test_최종품질은_뉴스_수치변조와_공식숫자_대체를_거절한
 
 
 @pytest.mark.parametrize("mode", list(ReleaseMode))
-@pytest.mark.parametrize("status", ["failed", "insufficient"])
-def test_모드별_공통_확인범위와_뉴스본문을_PDF_Notion에_그대로_싣는다(mode, status):
+def test_모드별_뉴스본문은_PDF_Notion에_실리고_확인범위_안내는_없다(mode):
+    """2026-09-16: 뉴스 조사 상태·범위 안내(「확인 범위: …」)는 어느 채널에도 싣지 않는다."""
     from src.features.export_pdf.release import prepare_pdf_release
-    output, *_ = _run(mode, diagnostics={"상태": status})
+    output, *_ = _run(mode)
     report = output.report
     validate_v2(report)
-    notice = next(text for text in report.sections[0].prose_paragraphs if text.startswith("확인 범위:"))
-    assert ("접속에 문제가" in notice) == (status == "failed")
+    assert not any(text.startswith("확인 범위") for section in report.sections
+                   for text in section.prose_paragraphs)
     before = report.public_projection
     blocks = build_blocks(report)
     texts = json.dumps(blocks, ensure_ascii=False)
-    assert notice in texts
+    assert "확인 범위" not in texts
     assert "공급 계약을 3건" in texts
     assert _fragments()[0].source_url in texts
     assert report.public_projection is before
     candidate = prepare_pdf_release(report)
     pdf_text = "".join(page.extract_text() or "" for page in PdfReader(io.BytesIO(candidate.pdf_bytes)).pages)
-    assert re.sub(r"\s+", "", notice) in re.sub(r"\s+", "", pdf_text)
+    squeezed = re.sub(r"\s+", "", pdf_text)
+    assert "확인범위" not in squeezed
+    assert "공급계약을3건" in squeezed
 
 
 @pytest.mark.parametrize("mode", list(ReleaseMode))
-def test_모드별_웹도_같은_확인범위와_보도숫자를_공개한다(mode, monkeypatch):
+def test_모드별_웹도_같은_보도숫자를_공개하고_확인범위_안내는_없다(mode, monkeypatch):
     import uuid
     from fastapi.testclient import TestClient
     from src.features.auth import constants as auth_constants
@@ -431,7 +382,7 @@ def test_모드별_웹도_같은_확인범위와_보도숫자를_공개한다(mo
     from src.web.routers import reports as reports_router
     from src.web.tests.report_route_support import serve_legacy_report_snapshot
 
-    output, *_ = _run(mode, diagnostics={"상태": "failed"})
+    output, *_ = _run(mode)
     job_id = "news-usage-" + uuid.uuid4().hex
     monkeypatch.setenv(auth_constants.ENV_BETA_ADMIN_ONLY, "0")
     monkeypatch.setenv(auth_constants.ENV_ADMIN_EMAILS, "admin@example.com")
@@ -443,7 +394,7 @@ def test_모드별_웹도_같은_확인범위와_보도숫자를_공개한다(mo
     with TestClient(app) as client:
         response = client.get(f"/result/{job_id}", cookies={auth_constants.SESSION_COOKIE_NAME: session.token})
     assert response.status_code == 200
-    assert "관련 보도가 없다는 뜻은 아닙니다." in response.text
+    assert "확인 범위" not in response.text
     assert "공급 계약을 3건" in response.text
 
 

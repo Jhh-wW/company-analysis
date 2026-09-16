@@ -30,7 +30,6 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
-from src.features.composer.news_constants import NEWS_RESEARCH_NOTICES
 
 import pytest
 from pypdf import PdfReader
@@ -496,8 +495,8 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
             + structured_counts[section.cell]
         )
         research_lines = [text for text, _ in section.prose_lines if text.startswith("확인 범위:")]
-        assert research_lines == ([NEWS_RESEARCH_NOTICES["disabled"]] if section.cell == "identity" else [])
-        # 확인 범위 안내는 회사 사실 수나 장별 본문 하한을 채우지 않는다.
+        # 2026-09-16: 「확인 범위」 안내는 어느 장에도 싣지 않는다.
+        assert research_lines == []
         substantive_count = len(section.prose_lines) - len(research_lines)
         assert substantive_count == expected, section.cell
         assert substantive_count >= MIN_CLAIMS_PER_COVERED_SECTION

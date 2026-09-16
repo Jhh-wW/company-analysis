@@ -630,7 +630,6 @@ def test_전환_마무리는_프로그램_등록부_문장을_짝지어_렌더�
         composition_tables=(),
         citation_style=DEFAULT_CITATION_STYLE,
         company_id="00123456",
-        research_diagnostics=None,
         review_diagnostics=[],
         composition_diagnostics=[],
         draft_body_count=1,
