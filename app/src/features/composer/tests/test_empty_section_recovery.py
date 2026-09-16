@@ -296,7 +296,7 @@ def test_unreadable_response_retries_once_then_reports_format_failure():
     assert EMPTY_RECOVERY_RETRY_GUIDE not in calls[0] and EMPTY_RECOVERY_RETRY_GUIDE in calls[1]
     assert not reviewer.prompts
     assert diagnostics == [{"step": "8_빈장_복구", "상태": "작성형식실패",
-                            "대상장": ["past_changes"], "시도": 2}]
+                            "대상장": ["past_changes"], "시도": 2, "응답꼴": ["읽기실패", "읽기실패"]}]
 
 
 def test_retry_response_is_accepted_when_the_first_one_was_unreadable():
@@ -513,3 +513,52 @@ def test_section_the_writer_never_attempted_is_still_a_recovery_target():
                 if item.get("상태") == "검수완료")["복구장"] == ["past_changes"]
     past = next(section for section in output.report.sections if section.cell == "past_changes")
     assert any(PAST_TEXT in str(line) for line in past.prose_lines)
+
+
+def test_unwrapped_response_without_sections_key_is_accepted():
+    """「장들」 포장을 뺀 ``{"<장 ID>": {"문장들": [...]}}`` 도 같은 내용이므로 받는다."""
+    calls = []
+    diagnostics = []
+    payload = json.loads(_response({"past_changes": [(PAST_TEXT, "1", GRADE_CONFIRMED)]}))["장들"]
+    def writer(prompt):
+        calls.append(prompt)
+        return json.dumps(payload, ensure_ascii=False)
+    result = recover_empty_sections("가나다전자", _report("past_changes"), targets=("past_changes",),
+        evidence=recovery_evidence((_fragment(),)), writer=writer, reviewer=_FakeReviewer(),
+        protocol_diagnostics=diagnostics)
+    assert len(calls) == 1, "포장만 빠진 답은 재요청 없이 받는다"
+    assert result.sections[0].sentences[0].text == PAST_TEXT
+    written = next(item for item in diagnostics if item.get("상태") == "작성완료")
+    assert written["응답꼴"] == "포장없음"
+    done = next(item for item in diagnostics if item.get("상태") == "검수완료")
+    assert (done["검수통과"], done["안전검사후"], done["최종반영"]) == (1, 1, 1)
+
+
+def test_flat_sentences_response_is_accepted_only_for_a_single_target():
+    """요청 장이 하나면 ``{"문장들": [...]}`` 평면 꼴을 그 장으로 받고, 둘이면 받지 않는다."""
+    flat = json.dumps({"문장들": [{"글": PAST_TEXT, "인용": ["1"], "등급": GRADE_CONFIRMED}]}, ensure_ascii=False)
+    single = recover_empty_sections("가나다전자", _report("past_changes"), targets=("past_changes",),
+        evidence=recovery_evidence((_fragment(),)), writer=lambda _: flat, reviewer=_FakeReviewer())
+    assert single.sections[0].sentences[0].text == PAST_TEXT
+    diagnostics = []
+    fragments = (_fragment(), _fragment("culture", CULTURE_TEXT, "2"))
+    double = recover_empty_sections("가나다전자", _report("past_changes", "culture"),
+        targets=("past_changes", "culture"), evidence=recovery_evidence(fragments),
+        writer=lambda _: flat, reviewer=_FakeReviewer(), protocol_diagnostics=diagnostics)
+    assert double == _report("past_changes", "culture")
+    assert diagnostics[-1]["상태"] == "작성형식실패"
+    assert diagnostics[-1]["응답꼴"] == ["요청장없음", "요청장없음"]
+
+
+def test_requested_sections_from_response_shapes():
+    """응답 꼴 판별 함수의 계약 — 계약·포장없음·단일장평면·요청장없음·읽기실패."""
+    from src.features.composer.empty_section_recovery import requested_sections_from_response
+
+    body = {"문장들": []}
+    assert requested_sections_from_response({"장들": {"a": body, "z": body}}, ("a",)) == ({"a": body}, 1, "계약")
+    assert requested_sections_from_response({"장들": {"z": body}}, ("a",)) == ({}, 1, "요청장없음")
+    assert requested_sections_from_response({"a": body, "z": body}, ("a",)) == ({"a": body}, 1, "포장없음")
+    assert requested_sections_from_response(body, ("a",)) == ({"a": body}, 0, "단일장평면")
+    assert requested_sections_from_response(body, ("a", "b")) == ({}, 0, "요청장없음")
+    assert requested_sections_from_response([body], ("a",)) == ({}, 0, "읽기실패")
+    assert requested_sections_from_response(None, ("a",)) == ({}, 0, "읽기실패")
