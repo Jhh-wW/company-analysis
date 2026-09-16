@@ -8,13 +8,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from src.features.composer.constants import (
-    GRADE_CONFIRMED, PARSE_RETRY_LIMIT, SECTION_IDS, SECTION_GUIDES,
+    GRADE_CONFIRMED, PARSE_RETRY_LIMIT, RESPONSE_SENTENCES_KEY, SECTION_IDS, SECTION_GUIDES,
 )
 from src.features.composer.culture_constants import SOURCE_CLAUSE_SPLIT_RE
 from src.features.composer.culture_guard import _clause_carries_section_subject
 from src.features.composer.dedupe import drop_cross_section_duplicates
 from src.features.composer.empty_section_recovery_constants import (
     EMPTY_RECOVERY_GUIDE, EMPTY_RECOVERY_RETRY_GUIDE, EMPTY_RECOVERY_STEP,
+    RESPONSE_SECTIONS_KEY, RESPONSE_SHAPE_CONTRACT, RESPONSE_SHAPE_FLAT_SINGLE,
+    RESPONSE_SHAPE_NO_TARGET, RESPONSE_SHAPE_UNREADABLE, RESPONSE_SHAPE_UNWRAPPED,
     MAX_EMPTY_RECOVERY_EVIDENCE_CHARS, MAX_EMPTY_RECOVERY_FRAGMENTS,
     MAX_EMPTY_RECOVERY_SENTENCES, MAX_EMPTY_RECOVERY_SECTIONS,
 )
@@ -57,6 +59,39 @@ def recovery_evidence(fragments: Sequence[CollectedFragment]) -> dict[str, tuple
         if selected:
             result[section_id] = tuple(selected)
     return result
+
+
+def requested_sections_from_response(
+    raw: object, targets: Sequence[str],
+) -> tuple[dict[str, object], int, str]:
+    """작가 응답에서 «요청한 장»의 본문 묶음만 꺼낸다.
+
+    계약 형식은 ``{"장들": {"<장 ID>": {"문장들": [...]}}}`` 하나뿐이지만, 작가는
+    포장을 빼먹거나(``{"<장 ID>": {...}}``) 요청 장이 하나일 때 장 ID까지
+    빼고 ``{"문장들": [...]}`` 만 돌려주기도 한다(2026-09-17 실측: 같은 지침에
+    두 번 연속 「작성형식실패」). 셋 다 문장 내용은 같으므로 받아 준다.
+    요청 장이 둘 이상인데 평면 꼴이면 어느 장인지 알 수 없어 받지 않는다.
+
+    Returns:
+        (요청 장별 본문 묶음, 요청 밖 장 수, 응답 꼴 코드)
+    """
+    if not isinstance(raw, Mapping):
+        return {}, 0, RESPONSE_SHAPE_UNREADABLE
+    requested = set(targets)
+    by_section = raw.get(RESPONSE_SECTIONS_KEY)
+    if isinstance(by_section, Mapping):
+        usable = {section_id: by_section[section_id]
+                  for section_id in targets if section_id in by_section}
+        extra = sum(1 for key in by_section if key not in requested)
+        return usable, extra, (RESPONSE_SHAPE_CONTRACT if usable else RESPONSE_SHAPE_NO_TARGET)
+    unwrapped = {section_id: raw[section_id] for section_id in targets
+                 if isinstance(raw.get(section_id), Mapping)}
+    if unwrapped:
+        extra = sum(1 for key in raw if key not in requested and key != RESPONSE_SENTENCES_KEY)
+        return unwrapped, extra, RESPONSE_SHAPE_UNWRAPPED
+    if len(targets) == 1 and isinstance(raw.get(RESPONSE_SENTENCES_KEY), list):
+        return {targets[0]: raw}, 0, RESPONSE_SHAPE_FLAT_SINGLE
+    return {}, 0, RESPONSE_SHAPE_NO_TARGET
 
 
 def recover_empty_sections(
@@ -108,26 +143,25 @@ def recover_empty_sections(
     # 요청한 장만 골라 쓰고 요청 밖 장은 버린다. 예전에는 키 집합이 정확히
     # 같지 않으면 답 전체를 버려서, 한 장을 덤으로 얹은 답 하나 때문에 빈 장이
     # 둘 다 비어 나갔다(2026-09-14 실측). 쓸 장이 하나도 없을 때만 재요청한다.
-    requested = set(targets)
     usable: dict[str, object] = {}
     extra_sections = 0
     attempts = 0
+    shapes: list[str] = []
     while True:
         attempts += 1
         raw = extract_json_payload(writer(
             prompt if attempts == 1 else prompt + EMPTY_RECOVERY_RETRY_GUIDE
         ))
-        by_section = raw.get("장들") if isinstance(raw, Mapping) else None
-        if isinstance(by_section, Mapping):
-            usable = {section_id: by_section[section_id]
-                      for section_id in targets if section_id in by_section}
-            extra_sections = sum(1 for key in by_section if key not in requested)
+        usable, extra_sections, shape = requested_sections_from_response(raw, targets)
+        shapes.append(shape)
         if usable or attempts > PARSE_RETRY_LIMIT:
             break
     if not usable:
+        # 어떤 꼴로 실패했는지 남긴다 — 내용은 담지 않고 응답의 구조만 적는다.
         if protocol_diagnostics is not None:
             protocol_diagnostics.append({"step": EMPTY_RECOVERY_STEP, "상태": "작성형식실패",
-                                         "대상장": list(targets), "시도": attempts})
+                                         "대상장": list(targets), "시도": attempts,
+                                         "응답꼴": shapes})
         return report
     targets = tuple(section_id for section_id in targets if section_id in usable)
     sections = []
@@ -156,7 +190,7 @@ def recover_empty_sections(
         protocol_diagnostics.append({"step": EMPTY_RECOVERY_STEP, "상태": "작성완료",
                                      "대상장": list(targets),
                                      "작성문장수": sum(len(section.sentences) for section in sections),
-                                     "요청밖장수": extra_sections})
+                                     "요청밖장수": extra_sections, "응답꼴": shapes[-1]})
     called = False
 
     def review_once(prompt: str) -> str:
@@ -172,6 +206,10 @@ def recover_empty_sections(
         diagnostics=diagnostics, protocol_diagnostics=protocol_diagnostics,
         baseline_date=baseline_date, allow_sentence_rewrite=False,
     )
+    verified_count = sum(
+        1 for section in verified.sections for sentence in section.sentences
+        if sentence.grade == GRADE_CONFIRMED and sentence.verification_state == "verified"
+    )
     verified, _ = drop_cross_section_duplicates(verified, fragments=fragments)
     # 본문 출고와 같은 수치 안전 검사까지 살아남아야 복구한 장으로 센다.
     verified, _ = enforce_public_numeric_safety(verified)
@@ -180,6 +218,7 @@ def recover_empty_sections(
                                   if sentence.grade == GRADE_CONFIRMED and sentence.verification_state == "verified")
         for section in verified.sections
     }
+    safe_count = sum(len(sentences) for sentences in replacements.values())
     recovered = []
     merged = []
     for section in report.sections:
@@ -205,6 +244,11 @@ def recover_empty_sections(
         else:
             merged.append(section)
     if protocol_diagnostics is not None:
+        # 어느 관문에서 문장이 사라졌는지 세 숫자로 남긴다(검수 통과 → 수치·중복
+        # 검사 뒤 → 기존 장과의 중복 제거 뒤). 「복구장 []」만으로는 원인을 못 가린다.
         protocol_diagnostics.append({"step": EMPTY_RECOVERY_STEP, "상태": "검수완료",
-                                     "대상장": list(targets), "복구장": recovered})
+                                     "대상장": list(targets), "복구장": recovered,
+                                     "검수통과": verified_count, "안전검사후": safe_count,
+                                     "최종반영": sum(len(section.sentences) for section in merged
+                                                  if section.section_id in recovered)})
     return replace(report, sections=tuple(merged))
