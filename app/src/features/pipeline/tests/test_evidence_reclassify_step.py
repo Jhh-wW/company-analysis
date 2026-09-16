@@ -368,6 +368,36 @@ def test_AI호출예외는_사유만_남기고_원결과로_진행한다() -> No
     assert steps[0]["실패"] == "호출또는응답:RuntimeError"
 
 
+def test_소유권_확정전_조정오류는_재판정을_건너뛰고_기록만_남긴다() -> None:
+    """2026-09-17 운영 실측: EVIDENCE_RECLASSIFY=1 첫 실행이 여기서 통째로 죽었다.
+
+    계량 provider는 owner/bypass 확정 전에 `ensure_paid_phase()`가 조정 오류로 막는다.
+    재판정은 차선 단계라 그 오류를 전파하지 않고 건너뛰어야 보고서가 산다.
+    """
+    from src.shared import generation_coordination
+
+    official = _reclassifiable_result()
+    steps: list[dict[str, object]] = []
+    conn = sqlite3.connect(":memory:")
+    try:
+        result = step.reclassify_official_evidence(
+            official,
+            client=SimpleNamespace(messages=FakeMessages(
+                error=generation_coordination.GenerationCoordinationError("owner 확정 전"),
+            )),
+            connect_db=_connection_factory(conn),
+            model=MODEL,
+            steps=steps,
+            generated_at="2026-09-06",
+        )
+    finally:
+        conn.close()
+
+    assert result is official
+    assert steps[0]["AI호출"] == 0
+    assert steps[0]["실패"] == "소유권미확정:GenerationCoordinationError"
+
+
 def test_재판정조각은_문서hash에_결속되어_select를_통과한다() -> None:
     official = _reclassifiable_result()
     conn = sqlite3.connect(":memory:")

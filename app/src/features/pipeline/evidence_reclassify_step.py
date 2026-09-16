@@ -24,6 +24,7 @@ from src.features.evidence_reclassify.logic import (
 )
 from src.features.evidence_reclassify.models import ReclassifyAssignment, ReclassifyResult
 from src.features.pipeline.collection_recovery import raise_if_request_interrupted
+from src.shared import generation_coordination
 from src.features.pipeline.official_evidence_preflight import empty_collector_sections
 from src.features.storage import evidence_reclassify_cache
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
@@ -504,6 +505,30 @@ def reclassify_official_evidence(
                         },
                     )
                     parsed = parse_and_verify(_response_json(response), included)
+                except generation_coordination.GenerationCoordinationError as error:
+                    # ★ 소유권(owner/bypass) 확정 «전»에는 계량 provider를 열 수 없다 —
+                    #   `_MeteredMessages.create`의 `ensure_paid_phase()`가 네트워크 전에 막는다.
+                    #   2026-09-17 운영 실측: EVIDENCE_RECLASSIFY=1을 켠 첫 두 실행이 이 자리에서
+                    #   `GenerationSingleflightUnavailable`로 통째로 죽었다(무과금이지만 보고서 0건).
+                    #   재판정은 차선 단계이므로 건너뛰고 기록만 남긴다. 취소·마감 같은 조정
+                    #   오류는 다음 provider 호출이 같은 검사를 다시 하므로 여기서 삼켜도
+                    #   늦게 전파될 뿐 사라지지 않는다. 재판정이 실제로 돌려면 호출 자리를
+                    #   소유권 확정 뒤로 옮겨야 한다(후속 과제, docs 근거_재판정.md §6).
+                    steps.append(
+                        _step(
+                            empty_sections=empty_sections,
+                            candidate_count=len(included),
+                            prompt_chars=request.diagnostics.prompt_chars,
+                            cache_state=cache_state,
+                            adopted=0,
+                            rejected=0,
+                            rejected_by_reason={},
+                            removals=0,
+                            ai_calls=0,
+                            failure=f"소유권미확정:{type(error).__name__}",
+                        )
+                    )
+                    return official_evidence
                 except Exception as error:  # noqa: BLE001 - 차선 실패는 보고서를 막지 않는다
                     raise_if_request_interrupted(error)
                     steps.append(
