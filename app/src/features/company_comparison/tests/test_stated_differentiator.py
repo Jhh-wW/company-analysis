@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
+from typing import Sequence
 
 from src.features.company_comparison.stated_differentiator import (
     STATED_DIFFERENTIATOR_SLOT,
     add_stated_differentiator_fragments,
+    promote_stated_differentiator_fragments,
     stated_differentiator_sentence_is_eligible,
 )
 from src.features.company_comparison.logic import (
@@ -37,19 +40,123 @@ from src.shared.report_evidence.models import (
 )
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
+from src.shared.report_evidence.source_kind_policy import (
+    document_slots_for_formal_source_kind,
+    validate_formal_candidate_sources,
+)
 
 
 COMPANY_ID = "00000001"
 COMPANY_NAME = "가나다전자"
 SELF_SLOT = "competitive_position:self_context"
+PAST_CHANGES_SLOT = "past_changes:completed_execution"
+CULTURE_SLOT = "culture:work_principle"
 TEXT = "당사는 세계 최초로 초정밀 센서를 독자 개발했습니다."
+# 반기·분기보고서와 채용 페이지에 실린 자기 선언 문장. 표지·주어 조건은
+# 사업보고서 문장과 똑같이 만족시켜, 승격에서 갈리는 이유가 오직 「문서
+# 종류의 슬롯 소유권」 하나가 되게 한다.
+SEMIANNUAL_TEXT = "당사는 국내 최초로 실시간 품질 검사 장비를 독자 개발했습니다."
+QUARTERLY_TEXT = "당사는 업계 최다 특허를 보유하고 있습니다."
+RECRUIT_TEXT = "당사는 국내 유일의 무중단 검사 공정을 운영합니다."
+
+
+@dataclass(frozen=True)
+class _ExtraOfficialDocument:
+    """대상 장 밖에 있는 공식 문서 한 건 — 종류별 슬롯 소유권을 재현한다."""
+
+    source_kind: str
+    section_id: str
+    slot_id: str
+    text: str
+    requirement: SourceRequirement
 
 
 def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _result(*, text: str = TEXT) -> OfficialEvidenceCollectionResult:
+def _semiannual_extra() -> _ExtraOfficialDocument:
+    return _ExtraOfficialDocument(
+        source_kind="dart_semiannual_report",
+        section_id="past_changes",
+        slot_id=PAST_CHANGES_SLOT,
+        text=SEMIANNUAL_TEXT,
+        requirement=SourceRequirement.OPTIONAL,
+    )
+
+
+def _quarterly_extra() -> _ExtraOfficialDocument:
+    return _ExtraOfficialDocument(
+        source_kind="dart_quarterly_report",
+        section_id="past_changes",
+        slot_id=PAST_CHANGES_SLOT,
+        text=QUARTERLY_TEXT,
+        requirement=SourceRequirement.OPTIONAL,
+    )
+
+
+def _recruit_extra() -> _ExtraOfficialDocument:
+    return _ExtraOfficialDocument(
+        source_kind="official_recruit_page",
+        section_id="culture",
+        slot_id=CULTURE_SLOT,
+        text=RECRUIT_TEXT,
+        requirement=SourceRequirement.REQUIRED,
+    )
+
+
+def _extra_parts(
+    index: int, extra: _ExtraOfficialDocument
+) -> tuple[CollectedEvidenceDocument, EvidenceFragment, CollectionAttempt]:
+    document = CollectedEvidenceDocument(
+        company_id=COMPANY_ID,
+        document_id=f"official:extra-{index}",
+        canonical_url=f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo=90000000{index}",
+        source_tier=SourceTier.TIER_1_OFFICIAL,
+        source_kind=extra.source_kind,
+        publisher="금융감독원 전자공시시스템(DART)",
+        title=f"부가 공식 문서 {index}",
+        published_on="2026-06-30",
+        collected_at="2026-09-06",
+        content_sha256=_sha(f"document:{extra.text}"),
+        exact_evidence_hashes=(_sha(extra.text),),
+        identity_binding="corp_code_and_receipt_verified",
+        usable_ranges=(DocumentTextRange(0, len(extra.text)),),
+        collector_version="typed-dart-v1",
+        parser_version="typed-dart-parser-v1",
+        requirement=extra.requirement,
+    )
+    fragment = EvidenceFragment(
+        company_id=COMPANY_ID,
+        fragment_id=f"extra-fragment-{index}",
+        document_id=document.document_id,
+        location="본문 1문단",
+        text_sha256=_sha(extra.text),
+        text=extra.text,
+        section_id=extra.section_id,
+        slot_id=extra.slot_id,
+        covered_slot_ids=(extra.slot_id,),
+        score_millis=800,
+        reason_codes=("official_direct_statement",),
+    )
+    attempt = CollectionAttempt(
+        company_id=COMPANY_ID,
+        attempt_id=f"official-extra-{index}",
+        source_kind=extra.source_kind,
+        requirement=extra.requirement,
+        state=CollectionState.OK,
+        slot_ids=(extra.slot_id,),
+        reason_code="dart_document_ok",
+        documents_seen=1,
+    )
+    return document, fragment, attempt
+
+
+def _result(
+    *,
+    text: str = TEXT,
+    extra_documents: Sequence[_ExtraOfficialDocument] = (),
+) -> OfficialEvidenceCollectionResult:
     document = CollectedEvidenceDocument(
         company_id=COMPANY_ID,
         document_id="dart:202603310001",
@@ -91,23 +198,42 @@ def _result(*, text: str = TEXT) -> OfficialEvidenceCollectionResult:
         reason_code="dart_document_ok",
         documents_seen=1,
     )
+    extras_by_section: dict[
+        str, list[tuple[CollectedEvidenceDocument, EvidenceFragment, CollectionAttempt]]
+    ] = {}
+    for index, extra in enumerate(extra_documents):
+        extras_by_section.setdefault(extra.section_id, []).append(
+            _extra_parts(index, extra)
+        )
+
     candidates = []
     for section_id in REQUIRED_EVIDENCE_SECTION_IDS:
         target = section_id == "competitive_position"
+        extras = extras_by_section.get(section_id, [])
+        filled = target or bool(extras)
         candidates.append(
             ChapterEvidenceCandidates(
                 company_id=COMPANY_ID,
                 section_id=section_id,
-                documents=(document,) if target else (),
-                fragments=(fragment,) if target else (),
-                attempts=(attempt,) if target else (),
+                documents=(
+                    *((document,) if target else ()),
+                    *(item[0] for item in extras),
+                ),
+                fragments=(
+                    *((fragment,) if target else ()),
+                    *(item[1] for item in extras),
+                ),
+                attempts=(
+                    *((attempt,) if target else ()),
+                    *(item[2] for item in extras),
+                ),
                 candidate_readiness=(
                     EvidenceReadiness.INSUFFICIENT
-                    if target
+                    if filled
                     else EvidenceReadiness.UNKNOWN
                 ),
-                reason_codes=("missing_required_slot",) if target else (),
-                estimated_tokens=30 if target else 0,
+                reason_codes=("missing_required_slot",) if filled else (),
+                estimated_tokens=30 if filled else 0,
                 max_chars=10_000,
                 max_estimated_tokens=2_500,
             )
@@ -167,6 +293,122 @@ def test_absent_declaration_is_insufficient_without_optional_comparison() -> Non
     )
     assert bundle.readiness is EvidenceReadiness.INSUFFICIENT
     assert STATED_DIFFERENTIATOR_SLOT in bundle.missing_slot_ids
+
+
+def _promoted_texts(result: OfficialEvidenceCollectionResult) -> list[str]:
+    candidate = next(
+        item for item in result.candidates if item.section_id == "competitive_position"
+    )
+    return [
+        fragment.text
+        for fragment in candidate.fragments
+        if fragment.slot_id == STATED_DIFFERENTIATOR_SLOT
+    ]
+
+
+def test_ownerless_source_kind_declaration_is_skipped_instead_of_failing() -> None:
+    """반기·분기·채용 문서의 선언 문장 때문에 승격 전체가 죽지 않는다.
+
+    2026-09-16·17 운영 실행에서 이 조합이 ``FormalSourceKindContractError``로
+    9장 승격을 통째로 건너뛰게 만들었다.
+    """
+
+    # 이 시험이 허수가 되지 않도록 소유권 표의 전제를 먼저 못 박는다.
+    for source_kind in (
+        "dart_semiannual_report",
+        "dart_quarterly_report",
+        "official_recruit_page",
+    ):
+        assert STATED_DIFFERENTIATOR_SLOT not in document_slots_for_formal_source_kind(
+            source_kind
+        )
+    assert STATED_DIFFERENTIATOR_SLOT in document_slots_for_formal_source_kind(
+        "dart_business_report"
+    )
+
+    promotion = promote_stated_differentiator_fragments(
+        _result(
+            extra_documents=(_semiannual_extra(), _quarterly_extra(), _recruit_extra())
+        ),
+        company_name=COMPANY_NAME,
+    )
+
+    assert _promoted_texts(promotion.result) == [TEXT]
+    assert promotion.promoted == 1
+    assert dict(promotion.skipped_by_source_kind) == {
+        "dart_semiannual_report": 1,
+        "dart_quarterly_report": 1,
+        "official_recruit_page": 1,
+    }
+    # 승격 결과는 공식 문서 계약을 그대로 통과해야 한다.
+    validate_formal_candidate_sources(promotion.result.candidates)
+
+
+def test_ownerless_source_kind_declaration_does_not_break_thin_wrapper() -> None:
+    projected = add_stated_differentiator_fragments(
+        _result(extra_documents=(_semiannual_extra(),)),
+        company_name=COMPANY_NAME,
+    )
+
+    assert _promoted_texts(projected) == [TEXT]
+    validate_formal_candidate_sources(projected.candidates)
+
+
+def test_owned_source_kind_declaration_is_still_promoted_without_skips() -> None:
+    promotion = promote_stated_differentiator_fragments(
+        _result(),
+        company_name=COMPANY_NAME,
+    )
+
+    assert _promoted_texts(promotion.result) == [TEXT]
+    assert promotion.promoted == 1
+    assert promotion.skipped_by_source_kind == ()
+
+
+def test_sentence_without_declaration_marker_is_not_counted_as_skipped() -> None:
+    plain = _ExtraOfficialDocument(
+        source_kind="dart_semiannual_report",
+        section_id="past_changes",
+        slot_id=PAST_CHANGES_SLOT,
+        text="당사는 반기 중 생산 설비를 증설했습니다.",
+        requirement=SourceRequirement.OPTIONAL,
+    )
+
+    promotion = promote_stated_differentiator_fragments(
+        _result(extra_documents=(plain,)),
+        company_name=COMPANY_NAME,
+    )
+
+    assert promotion.promoted == 1
+    assert promotion.skipped_by_source_kind == ()
+
+
+def test_only_ownerless_declarations_promote_nothing_and_stay_valid() -> None:
+    promotion = promote_stated_differentiator_fragments(
+        _result(
+            text="당사는 초정밀 센서를 개발했습니다.",
+            extra_documents=(_semiannual_extra(),),
+        ),
+        company_name=COMPANY_NAME,
+    )
+
+    assert _promoted_texts(promotion.result) == []
+    assert promotion.promoted == 0
+    assert dict(promotion.skipped_by_source_kind) == {"dart_semiannual_report": 1}
+    validate_formal_candidate_sources(promotion.result.candidates)
+
+
+def test_promotion_step_record_carries_promoted_and_skipped_counts() -> None:
+    promotion = promote_stated_differentiator_fragments(
+        _result(extra_documents=(_semiannual_extra(), _quarterly_extra())),
+        company_name=COMPANY_NAME,
+    )
+
+    assert promotion.step_record() == {
+        "step": "9장_자기선언_승격",
+        "승격": 1,
+        "건너뜀": {"dart_semiannual_report": 1, "dart_quarterly_report": 1},
+    }
 
 
 def test_stated_differentiator_survives_when_same_condition_comparison_is_blocked() -> None:

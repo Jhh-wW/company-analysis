@@ -29,11 +29,18 @@ from src.features.report_standard.publish import fact_evidence_binding
 from src.shared.company_identity import exact_company_name_key
 from src.shared.report_evidence.models import ChapterEvidenceCandidates, EvidenceFragment
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
+from src.shared.report_evidence.source_kind_policy import (
+    FormalSourceKindContractError,
+    document_slots_for_formal_source_kind,
+)
 from src.shared.report_quality.constants import STATED_DIFFERENTIATOR_CLAIM_TYPE
 
 
 COMPETITIVE_SECTION_ID = "competitive_position"
 STATED_DIFFERENTIATOR_SLOT = "competitive_position:stated_differentiator"
+#: 파이프라인 진단 기록에 쓰는 단계 이름. 호출부의 실패 기록과 같은 이름이어야
+#: 한 단계의 성공·실패가 같은 열에서 읽힌다.
+STATED_DIFFERENTIATOR_PROMOTION_STEP = "9장_자기선언_승격"
 STATED_DIFFERENTIATOR_MARKERS = (
     "최초",
     "유일",
@@ -63,6 +70,26 @@ class StatedDifferentiatorResult:
     section: ReportSection
     facts: tuple[FactRecord, ...]
     sources: tuple[Source, ...]
+
+
+@dataclass(frozen=True)
+class StatedDifferentiatorPromotion:
+    """9장 승격을 마친 수집 결과와 무엇을 건너뛰었는지의 요약."""
+
+    result: OfficialEvidenceCollectionResult
+    promoted: int
+    #: 자기 선언 문장이 있었지만 그 문서 종류가 9장 칸을 소유하지 않아 건너뛴
+    #: 조각 수. 종류 이름순으로 고정해 진단 기록이 실행마다 흔들리지 않게 한다.
+    skipped_by_source_kind: tuple[tuple[str, int], ...] = ()
+
+    def step_record(self) -> dict[str, object]:
+        """파이프라인 진단(steps)에 그대로 넣을 수 있는 한 단계 기록."""
+
+        return {
+            "step": STATED_DIFFERENTIATOR_PROMOTION_STEP,
+            "승격": self.promoted,
+            "건너뜀": {kind: count for kind, count in self.skipped_by_source_kind},
+        }
 
 
 def _clean_sentence(value: object) -> str:
@@ -156,13 +183,33 @@ def stated_differentiator_sentences(
     )[:MAX_STATED_DIFFERENTIATORS]
 
 
-def add_stated_differentiator_fragments(
+def _owns_stated_differentiator_slot(document: object) -> bool:
+    """이 문서 종류가 9장 자기 선언 칸을 소유하는지 정책 표에 직접 묻는다."""
+
+    try:
+        allowed = document_slots_for_formal_source_kind(
+            getattr(document, "source_kind", "")
+        )
+    except FormalSourceKindContractError:
+        # 공식 문서 표에 없는 종류는 애초에 승격 대상이 아니다. 그 문서가 장
+        # 후보에 실제로 들어 있다면 수집 결과 자료형 계약이 따로 거절한다.
+        return False
+    return STATED_DIFFERENTIATOR_SLOT in allowed
+
+
+def promote_stated_differentiator_fragments(
     result: OfficialEvidenceCollectionResult,
     *,
     company_name: str,
     company_aliases: Iterable[str] = (),
-) -> OfficialEvidenceCollectionResult:
-    """사전검사 전에 공식 조각의 선언 문장을 9장 typed 조각으로 승격한다."""
+) -> StatedDifferentiatorPromotion:
+    """사전검사 전에 공식 조각의 선언 문장을 9장 typed 조각으로 승격한다.
+
+    9장 칸을 소유하지 않는 문서 종류(반기·분기보고서, 채용 페이지 등)의 선언
+    문장은 «조용히 건너뛰고» 요약에만 센다. 한 조각의 소유권 결핍 때문에 승격
+    전체가 계약 예외로 죽으면, 소유권 있는 사업보고서 선언까지 같이 사라진다
+    (2026-09-16·17 운영 실행에서 실제로 9장이 통째로 비었다).
+    """
 
     candidates_by_section = {item.section_id: item for item in result.candidates}
     target = candidates_by_section[COMPETITIVE_SECTION_ID]
@@ -189,6 +236,7 @@ def add_stated_differentiator_fragments(
         for document in candidate.documents
     }
     selected: list[tuple[EvidenceFragment, object]] = []
+    skipped_counts: dict[str, int] = {}
     seen_hashes: set[str] = set()
     remaining_chars = target.max_chars - sum(
         len(item.text) for item in sanitized_target_fragments
@@ -204,6 +252,10 @@ def add_stated_differentiator_fragments(
                 company_aliases=company_aliases,
                 publisher=document.publisher,
             ):
+                continue
+            if not _owns_stated_differentiator_slot(document):
+                source_kind = str(getattr(document, "source_kind", "") or "unknown")
+                skipped_counts[source_kind] = skipped_counts.get(source_kind, 0) + 1
                 continue
             if fragment.text_sha256 in seen_hashes or len(fragment.text) > remaining_chars:
                 continue
@@ -248,7 +300,26 @@ def add_stated_differentiator_fragments(
     )
     # 새 객체를 만들지 않고 replace 로 바꾼다 — 파이프라인이 넘긴 하위 타입
     # (재판정 원문 차선 reclassify_source 를 실은 결과)의 다른 필드를 보존해야 한다.
-    return replace(result, candidates=updated_candidates)
+    return StatedDifferentiatorPromotion(
+        result=replace(result, candidates=updated_candidates),
+        promoted=len(additions),
+        skipped_by_source_kind=tuple(sorted(skipped_counts.items())),
+    )
+
+
+def add_stated_differentiator_fragments(
+    result: OfficialEvidenceCollectionResult,
+    *,
+    company_name: str,
+    company_aliases: Iterable[str] = (),
+) -> OfficialEvidenceCollectionResult:
+    """승격 결과만 필요한 호출부를 위한 얇은 위임 — 판정은 승격 함수 한 곳뿐."""
+
+    return promote_stated_differentiator_fragments(
+        result,
+        company_name=company_name,
+        company_aliases=company_aliases,
+    ).result
 
 
 def register_stated_differentiator_sentence_evidence(
@@ -442,10 +513,13 @@ __all__ = [
     "MAX_STATED_DIFFERENTIATORS",
     "STATED_DIFFERENTIATOR_CLAIM_TYPE",
     "STATED_DIFFERENTIATOR_MARKERS",
+    "STATED_DIFFERENTIATOR_PROMOTION_STEP",
     "STATED_DIFFERENTIATOR_SLOT",
+    "StatedDifferentiatorPromotion",
     "StatedDifferentiatorResult",
     "add_stated_differentiator_fragments",
     "build_stated_differentiator_result",
+    "promote_stated_differentiator_fragments",
     "register_stated_differentiator_sentence_evidence",
     "stated_differentiator_sentence_is_eligible",
     "stated_differentiator_sentences",
