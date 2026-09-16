@@ -1,7 +1,7 @@
 """장별 정본 질문을 같은 Report 사실 원장에서 읽는 공개 표현 모델.
 
 웹·PDF·Notion이 ``ReportSection.prose_lines``를 한 문단으로 합치면 사실은
-남아 있어도 제품·역할·상태·한계 같은 장별 답이 독자에게 보이지 않는다.
+남아 있어도 제품·역할·상태 같은 장별 답이 독자에게 보이지 않는다.
 이 모듈은 새 사실을 만들지 않고 이미 검증된 ``FactRecord``의 구조 필드를
 장별 카드로 투영한다. 따라서 세 채널은 같은 블록·같은 ``fact_id``·같은
 복수 출처를 사용한다.
@@ -24,7 +24,6 @@ from src.features.pipeline.section567_contract import (
 from src.features.provenance.sources import Source
 from src.features.report_standard.constants import (
     COMPARISON_JUDGMENT_LABELS,
-    CULTURE_SCOPE_LIMITATION_TEXT,
     RELATIONSHIP_KEY_FALLBACK_LABEL,
     RELATIONSHIP_KEY_LABELS,
 )
@@ -398,16 +397,6 @@ def _past_blocks(
                         _joined((fact.claim for fact in linked)),
                         "공식 근거에서 결과를 별도로 확인하지 못함",
                     ),
-                    _field(
-                        "범위·한계",
-                        _joined(
-                            (
-                                fact.limitations or fact.limitation
-                                for fact in grouped
-                            )
-                        ),
-                        "확인된 실행 범위로 한정",
-                    ),
                 ),
                 fact_ids=tuple(fact.fact_id for fact in grouped),
                 source_numbers=_numbers(grouped, source_numbers),
@@ -426,11 +415,6 @@ def _past_blocks(
                         "근거 사실",
                         _joined((basis_label(basis) for basis in bases)),
                         "결속된 근거 사실을 확인하지 못함",
-                    ),
-                    _field(
-                        "범위·한계",
-                        fact.limitations or fact.limitation,
-                        "결속된 근거 사실 범위로 한정",
                     ),
                 ),
                 fact_ids=(fact.fact_id,),
@@ -539,11 +523,6 @@ def _operations_blocks(
                         RELATIONSHIP_TYPE_LABELS.get(fact.relationship_type, ""),
                     ),
                     _field("확인된 역할", _relationship_display(fact.relationship_or_action)),
-                    _field(
-                        "운영 범위·한계",
-                        "현재 상태: 공식 근거에서 현재 운영 확인 · "
-                        f"한계: {_clean(fact.limitations or fact.limitation, '공식 근거가 확인한 현재 관계로 한정')}",
-                    ),
                 ),
                 fact_ids=(fact.fact_id,),
                 source_numbers=_numbers((fact,), source_numbers),
@@ -561,11 +540,6 @@ def _culture_blocks(
             fields=(
                 _field("적용 범위", fact.subject_scope),
                 _field("확인 내용", fact.claim),
-                _field(
-                    "범위·한계",
-                    fact.limitations or fact.limitation,
-                    CULTURE_SCOPE_LIMITATION_TEXT,
-                ),
             ),
             fact_ids=(fact.fact_id,),
             source_numbers=_numbers((fact,), source_numbers),

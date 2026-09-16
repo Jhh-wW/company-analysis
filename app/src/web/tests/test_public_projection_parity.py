@@ -623,9 +623,13 @@ def test_웹_v2는_ledger를_렌더하지_않는다(monkeypatch: pytest.MonkeyPa
 #: base 커밋(0acf798)의 템플릿이 그린 v1 보고서 본문. 봉인 도입이 옛 화면을
 #: 한 글자도 바꾸지 않았음을 증명한다. f29f4e90에서 문화 카드 「범위·한계」
 #: 기본 문구가 두 곳(culture-01·culture-02) 바뀐 만큼만 golden도 함께 갱신했다.
+#: ★ 2026-09-17: 카드 「범위·한계」·「운영 범위·한계」 줄을 세 채널에서 «뺀»
+#:   변경으로 다시 찍었다. 갱신 전 파일과 직접 대조한 결과 «지워진 줄 5개»
+#:   (4장 2줄·7장 1줄·8장 2줄)와 그 줄이 있던 자리의 빈 줄뿐이고, 새로 생긴
+#:   줄·바뀐 줄은 0이다 — 단방향 삭제임을 파일 차이로 확인했다.
 _V1_GOLDEN = Path(__file__).with_name("result_v1_article_golden.html")
 _V1_GOLDEN_TEXT_SHA256_CURRENT_APPROVED = (
-    "4405f54d1bc6c006ef80805302985969f8a056cf67f4d7fa3f12ee8edfc9b248"
+    "e1e24b90775404ea8bff3849bff9b357fca18ac035ab0b3c543a1d10b6d8d22c"
 )
 
 

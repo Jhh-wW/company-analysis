@@ -11,8 +11,6 @@ from src.features.report_standard.visualization import (
     RelationPair,
     _CARD_HEADER_KEY_SETS,
     _CARD_HEADER_SETS,
-    _CARD_LIMITATION_LABEL,
-    _CARD_LIMITATION_TEXT_BY_HEADER_KEY,
     _CARD_TITLE_COLUMN_BY_HEADER_KEY,
     composition_tone,
 )
@@ -543,7 +541,6 @@ def test_old_column_order_from_stored_reports_still_becomes_a_card() -> None:
         CardField(label="시점", value="2026년 하반기"),
         CardField(label="계획", value="열분해 설비"),
         CardField(label="공시된 내용", value="중장기 기업가치 제고 계획"),
-        CardField(label="범위·한계", value="실행 여부는 확인하지 않았습니다"),
     )
 
 
@@ -586,7 +583,6 @@ def test_portfolio_four_column_headers_become_a_card_with_a_title() -> None:
         CardField(label="제품·서비스 범위", value="가전 표면재 납품 제품"),
         CardField(label="중점 추진 근거", value="생산확대·투자"),
         CardField(label="사업적 역할", value="전사 수익 경로"),
-        CardField(label="범위·한계", value="공식 근거가 확인한 범위로 한정합니다"),
     )
 
 
@@ -610,11 +606,11 @@ def test_portfolio_multiple_products_become_multiple_titled_cards() -> None:
         "리얼 알루미늄 합지 필름",
         "폐플라스틱 열분해유",
     ]
-    # 3칸(범위·중점근거·역할) + 「범위·한계」 1칸 = 4.
-    assert len(visualization.cards[0].fields) == 4
-    assert len(visualization.cards[1].fields) == 4
+    # 3칸(범위·중점근거·역할)뿐이다 — 2026-09-17부터 「범위·한계」 줄을 안 붙인다.
+    assert len(visualization.cards[0].fields) == 3
+    assert len(visualization.cards[1].fields) == 3
     assert visualization.cards[0].fields[-1] == CardField(
-        label="범위·한계", value="공식 근거가 확인한 범위로 한정합니다"
+        label="사업적 역할", value="전사 수익 경로"
     )
 
 
@@ -636,7 +632,6 @@ def test_portfolio_blank_product_name_falls_back_to_no_title() -> None:
         CardField(label="제품·서비스 범위", value="가전 표면재"),
         CardField(label="중점 추진 근거", value="생산확대"),
         CardField(label="사업적 역할", value="전사 수익 경로"),
-        CardField(label="범위·한계", value="공식 근거가 확인한 범위로 한정합니다"),
     )
 
 
@@ -706,100 +701,86 @@ def test_card_drops_blank_cells_and_titles_multi_row_tables_blank() -> None:
     assert visualization.cards[0].fields == (
         CardField(label="계획", value="열분해 설비"),
         CardField(label="시점", value="2026년 하반기"),
-        CardField(label="범위·한계", value="실행 여부는 확인하지 않았습니다"),
     )
     assert visualization.cards[1].fields == (
         CardField(label="계획", value="해외 납품 확대"),
         CardField(label="시점", value="2026~2028년"),
         CardField(label="공시된 내용", value="차량 외장재·방염 필름"),
-        CardField(label="범위·한계", value="실행 여부는 확인하지 않았습니다"),
     )
     assert all(card.title == "" for card in visualization.cards)
 
 
 # ══════════════════════════════════════════════════════════
-# ⑦-4 카드 맨 아래 「범위·한계」 행 — 층2(코드)만, AI 호출 0
+# ⑦-4 카드 맨 아래 「범위·한계」 행은 사라졌다 (2026-09-17)
 # ══════════════════════════════════════════════════════════
 #
-# ★ 왜 이 시험이 있나 (사용자 승인) — 목업 카드는 거의 항상
-#   마지막 줄에 「공식 근거가 확인한 범위로 한정」 같은 절차적 사실
-#   서술이 있다. 전수대조로 정리한 v1 폴백 문구를 그대로
-#   옮긴다 — citations 개수·section_id만으로 정하고, 가치 판단
-#   (좋다/나쁘다/위험 등)은 한 글자도 안 쓴다(v1도 13건 전수에서 0건이었다).
+# ★ 옛 시험은 무엇을 지켰나 — 이 자리에는 장별 고정 문구를 그 장의
+#   모든 행에 붙이는 규칙(_CARD_LIMITATION_TEXT_BY_HEADER_KEY)이 있었고,
+#   그 문구가 가치 판단을 하거나 행별 사실을 단정하지 않는지를 못 박았다.
+# ★ 지금은 그 줄 자체를 모든 채널에서 뺀다 — 독자에게 처리 과정·범위
+#   설명을 싣지 않는다는 결정(2026-09-16)의 연장이다. 문구가 없으므로
+#   「문구가 바른가」를 묻는 시험은 지킬 것이 없고, 대신 「그 줄이 다시
+#   생기지 않는다」를 못 박는 시험 하나로 바꾼다.
 
 
-def test_culture_card_does_not_assert_company_wide_scope() -> None:
-    """문화 표라는 이유만으로 특정 자료를 전사 공통 기준으로 격상하지 않는다."""
+@pytest.mark.parametrize(
+    ("caption", "headers", "rows"),
+    [
+        (
+            "회사가 스스로를 어떻게 규정하나",
+            ["공식 자기정의", "사업 범위", "이 보고서의 해석"],
+            [["소재 가공 회사", "가구·가전용 시트", "B2B 소재 회사"]],
+        ),
+        (
+            "지금 무엇을 미는가 — 핵심 제품·서비스와 역할",
+            ["제품·서비스명", "제품·서비스 범위", "중점 추진 근거", "사업적 역할"],
+            [["합지 필름", "가전 표면재", "생산확대", "전사 수익 경로"]],
+        ),
+        (
+            "회사가 밝힌 성장 계획",
+            ["계획", "시점", "공시된 내용"],
+            [["열분해 설비", "", ""]],
+        ),
+        (
+            "무엇을 내걸고 어떻게 일하나",
+            ["내건 가치", "일하는 원칙", "확인된 사례"],
+            [["고객 최우선", "공식 경영철학", ""]],
+        ),
+    ],
+)
+def test_카드에는_범위한계_줄이_붙지_않는다(
+    caption: str, headers: list[str], rows: list[list[str]]
+) -> None:
+    """★ 카드로 나가는 네 장(1·3·6·8) 전부에서 확인한다.
+
+    표가 준 칸만 카드에 남고, 코드가 만들어 붙이던 고정 문구 줄은
+    한 장도 없어야 한다. 예전 문구가 그대로 되살아나는 것까지 막기
+    위해 라벨뿐 아니라 그 문구들도 같이 리터럴로 적어 확인한다(생산
+    상수에 묶으면 값이 되돌아와도 같이 따라가는 순환 검증이 된다).
+    """
     visualization = table_visualization(
         ReportTable(
-            caption="무엇을 내걸고 어떻게 일하나",
-            headers=["내건 가치", "일하는 원칙", "확인된 사례"],
-            rows=[["고객 최우선", "공식 경영철학", ""]],
+            caption=caption,
+            headers=headers,
+            rows=[list(row) for row in rows],
             presentation="flow",
         )
     )
 
     assert visualization is not None
-    assert visualization.cards[0].fields[-1] == CardField(
-        label=_CARD_LIMITATION_LABEL, value="인용 자료에 나타난 범위로 한정합니다"
-    )
-
-
-def test_limitation_phrase_stays_neutral_when_a_column_is_blank() -> None:
-    """★ 실측(하이브) — 6장 「시점」 칸이 두 행 다 비었다.
-    이건 정상이다(제품 결정: 안 적혀 있으면 칸을 비우고 줄은 살린다).
-    「범위·한계」 문구가 그걸 보고 «자료 부족」류로 바뀌면 안 된다 — 빈
-    칸은 정직한 결과지 결함이 아니다. 이 문구는 «장 종류»만 보고 정하지
-    «어느 칸이 비었는지»는 아예 안 본다 — 이 시험이 그걸 못 박는다.
-    """
-    both_rows_missing_시점 = table_visualization(
-        ReportTable(
-            caption="회사가 밝힌 성장 계획",
-            headers=["계획", "시점", "공시된 내용"],
-            rows=[
-                ["글로벌 시장 진출", "", ""],
-                ["멀티 레이블 시스템의 글로벌 확대", "", "중장기 기업가치 제고 계획"],
-            ],
-            presentation="flow",
-        )
-    )
-
-    assert both_rows_missing_시점 is not None
-    for card in both_rows_missing_시점.cards:
-        limitation_fields = [f for f in card.fields if f.label == _CARD_LIMITATION_LABEL]
-        assert len(limitation_fields) == 1
-        assert limitation_fields[0].value == "실행 여부는 확인하지 않았습니다"
-        for word in ("자료", "부족", "미확인", "확인되지 않"):
-            assert word not in limitation_fields[0].value, (
-                f"빈 칸을 보고 「자료 부족」류 문구로 바뀌었습니다: {limitation_fields[0].value!r}"
-            )
-
-
-def test_identity_card_gets_no_limitation_row() -> None:
-    """★ 1장은 «일부러» 뺐다 — v1도 목업도 1장 카드엔 이 줄이 없다
-    (재현안 문서 §1: "1장은 층2 고정 문구가 없는 유일한 장"). 조건에
-    안 걸리면 문구를 지어내지 않고 그냥 없다 — 이 시험이 그걸 못 박는다.
-    """
-    visualization = table_visualization(
-        ReportTable(
-            caption="회사가 스스로를 어떻게 규정하나",
-            headers=["공식 자기정의", "사업 범위", "이 보고서의 해석"],
-            rows=[["소재 가공 회사", "가구·가전용 시트", "B2B 소재 회사"]],
-            presentation="flow",
-        )
-    )
-
-    assert visualization is not None
-    assert not any(field.label == _CARD_LIMITATION_LABEL for field in visualization.cards[0].fields)
-
-
-def test_limitation_text_never_uses_judgmental_words() -> None:
-    """★ 가치 판단(평가어) 금지 — 문구 사전 자체에 평가어가 없는지 못
-    박는다. 재현안 문서 §5: v1도 13건 전수에서 0건이었다."""
-    금지어 = ("좋", "나쁘", "우수", "위험", "우려", "미흡", "훌륭", "탁월")
-    for text in _CARD_LIMITATION_TEXT_BY_HEADER_KEY.values():
-        for word in 금지어:
-            assert word not in text, f"「범위·한계」 문구가 판단을 합니다: 「{word}」 in {text!r}"
+    assert visualization.kind == "card"
+    for card in visualization.cards:
+        라벨들 = [field.label for field in card.fields]
+        assert "범위·한계" not in 라벨들, 라벨들
+        assert "운영 범위·한계" not in 라벨들, 라벨들
+        assert set(라벨들) <= set(headers), 라벨들
+        for field in card.fields:
+            for 예전문구 in (
+                "공식 근거가 확인한 범위로 한정합니다",
+                "실행 여부는 확인하지 않았습니다",
+                "인용 자료에 나타난 범위로 한정합니다",
+            ):
+                assert 예전문구 not in field.value, field
 
 
 def test_card_header_sets_stay_in_sync_with_composer_constants() -> None:
@@ -1078,33 +1059,3 @@ def test_화살표_장_집합이_카드_판정과_어긋나지_않는다() -> No
     # 화살표 장은 정확히 셋이다(2·5·7장). 늘거나 줄면 위 대조가 통과해도
     # 사람이 한 번 더 보게 한다.
     assert len(composer_constants.FLOW_ARROW_SECTION_IDS) == 3
-
-
-def test_한계_문구는_행마다_달라지는_사실을_단정하지_않는다() -> None:
-    """★ 실측 — 6장 문구가 「아직 실행되지 않은 계획입니다」였다.
-
-    그 문장은 «각 행이 실행됐는지»를 단정하는데, 이 층에는 판정할 재료가 없다.
-    조건도 「칸 이름이 6장 것인가」 하나뿐이라 그 표의 «모든 행»에 무조건 붙었다.
-    실측: 우리은행 4/4행·현대카드 2/2행에 붙었고 그중 4행은 같은 보고서 본문이
-    과거형으로 「출시하여 … 구축했으며」라고 써서 정면으로 어긋났다.
-
-    ★ 이 층의 문구는 «행 내용과 무관하게 참»이어야 한다. 그렇지 않은 문구는
-      근거 없는 주장이다. 아래 낱말은 행마다 달라지는 상태를 단정한다.
-    ⚠️ 이 시험이 깨지면 보고서가 다시 「본문과 어긋나는 라벨」을 인쇄한다.
-    """
-    단정하는_말 = ("않은", "미실행", "완료됐", "실행됐", "중단된", "예정입니다")
-
-    for 칸이름, 문구 in _CARD_LIMITATION_TEXT_BY_HEADER_KEY.items():
-        for 말 in 단정하는_말:
-            assert 말 not in 문구, (
-                f"★ 한계 문구가 행별 사실을 단정한다: {sorted(칸이름)} → 「{문구}」"
-            )
-
-
-def test_계획_표_한계_문구는_확인하지_않았다고_말한다() -> None:
-    """★ 우리가 실제로 한 일(확인하지 않음)을 그대로 적는다."""
-    문구 = _CARD_LIMITATION_TEXT_BY_HEADER_KEY[
-        frozenset(("계획", "시점", "공시된 내용"))
-    ]
-
-    assert "확인하지 않았습니다" in 문구, f"★ 문구가 바뀌었다: 「{문구}」"

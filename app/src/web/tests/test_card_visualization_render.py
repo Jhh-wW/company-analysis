@@ -226,6 +226,8 @@ def test_portfolio_card_titles_render_as_h3_per_product() -> None:
     assert "<dt>제품·서비스 범위</dt>" in body
     assert "<dt>중점 추진 근거</dt>" in body
     assert "<dt>사업적 역할</dt>" in body
-    # 「범위·한계」 — 코드가 붙이는 고정 문구(층2). 카드마다 한 번씩, 총 2번.
-    assert body.count("<dt>범위·한계</dt>") == 2
-    assert "<dd>공식 근거가 확인한 범위로 한정합니다</dd>" in body
+    # ★ 2026-09-17 — 코드가 붙이던 「범위·한계」 고정 문구 줄을 뺐다. 화면
+    #   글자에 라벨도 문구도 한 번도 나오면 안 된다(웹 렌더까지 내려온 것을
+    #   여기서 확인한다 — 층 위쪽 단위 시험만으로는 틀이 되살릴 수 있다).
+    assert "<dt>범위·한계</dt>" not in body
+    assert "공식 근거가 확인한 범위로 한정합니다" not in body

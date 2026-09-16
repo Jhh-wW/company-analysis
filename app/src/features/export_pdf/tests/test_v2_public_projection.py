@@ -551,8 +551,12 @@ def test_v2_PDF_텍스트는_display_paragraphs와_글자_단위로_같다():
 #:   ``.local-artifacts/resume-20260909-pdf-running-header-fix/``). v1 데모는
 #:   1장 다음 자리에 그런 «순수 이어짐» 쪽이 없어 이 값 자체는 그대로다 —
 #:   그래도 수정 시점을 기록으로 남긴다.
-_V1_DEMO_PDF_SHA256 = "a95dbb3c2c2eeecf581a46fc51edef6bf37c3fb3b82bae00b8c57e1a8f5843dc"
-_V1_DEMO_PDF_LENGTH = 93519
+#: ★ 2026-09-17: 카드 「범위·한계」·「운영 범위·한계」 줄을 세 채널에서 뺀
+#:   변경으로 갱신했다. 인쇄 글자가 줄어드는 «의도된» 변경이라 이 값이
+#:   일부러 깨졌다. 갱신 전후 본문 글자 대조에서 삭제된 5줄(4장 2줄·7장
+#:   1줄·8장 2줄) 외에는 한 줄도 달라지지 않았고 새로 생긴 줄은 0이다.
+_V1_DEMO_PDF_SHA256 = "4c62d75a1bd5ca683882b80ca086b3f6413a47531c4ef93819404bcec16987a0"
+_V1_DEMO_PDF_LENGTH = 92796
 
 
 def test_v1_PDF는_바이트_불변이다():
