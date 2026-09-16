@@ -43,6 +43,12 @@ from src.features.composer.prose_own_source import (
 from src.shared.report_quality.composition_diagnostic_constants import (
     BODY_MACHINE_STEP,
     BODY_DISPOSITION_STEP,
+    BODY_SECTION_MOVE_STEP,
+    SECTION_MOVE_BLOCKED_DUPLICATE,
+    SECTION_MOVE_BLOCKED_NO_TARGET,
+    SECTION_MOVE_BLOCKED_OUT_OF_EVIDENCE,
+    SECTION_MOVE_BLOCKED_SOURCE_BINDING,
+    SECTION_MOVE_BLOCKED_TARGET_RULE,
     PATH_FLAT,
     PATH_PACKET,
     READ_VERDICTS_KEY_MISSING,
@@ -71,7 +77,9 @@ from src.features.composer.challenge_response_evidence import (
 from src.features.composer.constants import CHALLENGE_FLOW_SECTION_ID, STRATEGY_TABLE_SECTION_ID
 from src.features.composer.future_plan_constants import (
     FUTURE_PLAN_REVIEW_GUIDE,
+    FUTURE_SECTION_NO_FORWARD_STATEMENT,
 )
+from src.features.composer.dedupe import duplicates_kept_sentence
 from src.features.composer.future_plan_guard import (
     future_section_prose_problem,
     future_plan_entries_by_number, future_plan_problem,
@@ -177,6 +185,42 @@ REVIEW_SUMMARY_GROUP: Final[str] = "summary"
 DIAGNOSTIC_KIND_BODY: Final[str] = "본문"
 DIAGNOSTIC_KIND_SUMMARY: Final[str] = "요약"
 DIAGNOSTIC_KIND_FLOW: Final[str] = "도식"
+
+
+@dataclass(frozen=True)
+class _SectionMove:
+    """장 배치 위반 문장 하나의 «옮길 수 있나» 판정.
+
+    ``blocker`` 가 빈 문자열이면 옮길 수 있다는 뜻이고, 그때 이 후보는 «제외»가
+    아니다 — 재조립 단계가 그 문장을 도착 장에 붙인다. 빈 문자열이 아니면
+    닫힌 사유 하나이고, 그 후보는 예전과 똑같이 제외된다.
+    """
+
+    number: int
+    source_section_id: str
+    target_section_id: str
+    reason_code: str
+    blocker: str
+
+
+def _challenge_section_prose_problem(
+    text: str, sources: Mapping[str, str], *, culture_candidate: bool
+) -> str:
+    """5장(당면 과제와 대응) «본문 산문»에 걸리는 장별 검사만 모은다.
+
+    ★ 왜 이 목록이 전부인가 — `_apply_grounding` 에서 장을 보고 거는 검사는
+      ① 8장(culture) 본문 ② 6장(future_strategy) 본문 ③ 도식 칸이 있는 후보
+      ④ 문화 슬롯 후보의 `culture_problem` 네 갈래뿐이다. 5장 본문 산문은
+      ①②③에 들어가지 않으므로 ④만 남는다. 5장의 대응 검사
+      (`challenge_response_*`)는 «도식 칸»에만 걸린다 — 산문에는 걸리지 않는다.
+    ★ 장과 무관한 검사(자기 근거·부재 단언·수치·추세·시점)는 이미 같은 후보에
+      그대로 걸렸다. 장을 옮긴다고 다시 걸 것이 없다.
+    ⚠️ 이 목록이 `_apply_grounding` 과 어긋나면 옮긴 문장만 검사를 덜 받는다.
+      두 벌이 되지 않게 `test_future_section_contract.py` 의 대조 시험이 실제
+      `_apply_grounding` 을 5장 문맥으로 돌려 같은 판정이 나오는지 확인한다.
+    """
+
+    return culture_problem(text, sources) if culture_candidate else ""
 
 
 def _append_grounding_diagnostic(
@@ -1271,6 +1315,7 @@ def _ask_grouped_verdicts(
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
     allowed_fragment_ids_by_section: Optional[Mapping[str, frozenset[str]]] = None,
+    section_moves: Optional[list[_SectionMove]] = None,
 ) -> Optional[dict[int, str]]:
     """packet 본문·도식을 정확히 한 번에 검수한다.
 
@@ -1371,6 +1416,9 @@ def _ask_grouped_verdicts(
         ),
         baseline_date=baseline_date,
         verbatim_by_number=verbatim_by_number,
+        evidence_ids_by_number=evidence_ids_by_number,
+        allowed_fragment_ids_by_section=allowed_fragment_ids_by_section,
+        section_moves=section_moves,
     )
 
 
@@ -1401,6 +1449,158 @@ def _grouped_grounding_candidate(
         else FLOW_CELL_JOIN.join(item.flow_row.cells if item.flow_row else ())
     )
     return _grounding_candidate(text, item.citations, frag_by_id, table_source)
+
+
+def _section_move_ledger(
+    group_ids: Optional[Sequence[str]],
+) -> Optional[list[_SectionMove]]:
+    """이번 검수 묶음에 «도착 장»이 있을 때만 이동 장부를 연다.
+
+    ★ 왜 미리 닫나 — 장부를 열어 두고 나중에 «옮길 곳이 없다»고 판정하면, 그
+      문장은 이미 «제외 아님»으로 확정된 뒤라 6장에 그대로 남는다. 장 배치
+      관문이 그 묶음에서 통째로 꺼지는 것과 같다. 요약만 검수하는 호출
+      (`verify_sentences`)이 정확히 그 모양이다.
+    """
+
+    if group_ids is None or CHALLENGE_FLOW_SECTION_ID not in group_ids:
+        return None
+    return []
+
+
+def _pending_moves(
+    group_ids: Optional[Sequence[str]],
+    positions: Mapping[tuple[int, int], int],
+    section_moves: Optional[Sequence[_SectionMove]],
+) -> tuple[dict[tuple[int, int], int], dict[str, int]]:
+    """옮길 자리(위치 → 도착 묶음 번호)와 «못 옮긴 사유»의 개수를 정리한다.
+
+    도착 장이 이번 검수 묶음에 아예 없으면(요약만 검수하는 호출 등) 그 이동은
+    «도착장없음»으로 막힌다 — 옮길 곳이 없는데 옮겼다고 적지 않는다.
+    """
+
+    blocked: dict[str, int] = {}
+    for move in section_moves or ():
+        if move.blocker:
+            blocked[move.blocker] = blocked.get(move.blocker, 0) + 1
+    movable = [move for move in section_moves or () if not move.blocker]
+    if not movable:
+        return {}, blocked
+    target_index = (
+        group_ids.index(CHALLENGE_FLOW_SECTION_ID)
+        if group_ids is not None and CHALLENGE_FLOW_SECTION_ID in group_ids
+        else None
+    )
+    if target_index is None:
+        blocked[SECTION_MOVE_BLOCKED_NO_TARGET] = (
+            blocked.get(SECTION_MOVE_BLOCKED_NO_TARGET, 0) + len(movable)
+        )
+        return {}, blocked
+    movable_numbers = {move.number for move in movable}
+    return (
+        {
+            position: target_index
+            for position, number in positions.items()
+            if number in movable_numbers
+        },
+        blocked,
+    )
+
+
+def _relocate_into_groups(
+    rebuilt: list[list[ComposedSentence]],
+    relocating: Sequence[tuple[int, ComposedSentence]],
+    blocked: dict[str, int],
+    *,
+    fragments: Sequence[CollectedFragment],
+) -> int:
+    """옮길 문장을 도착 묶음 «끝»에 붙이고, 실제로 붙인 수를 돌려준다.
+
+    ★ 왜 중복을 여기서 보나 — 도착 장의 최종 생존 문장은 판정이 다 끝나야
+      정해진다. 그리고 장 «간» 중복 제거(`dedupe.drop_cross_section_duplicates`)는
+      한 장 «안»의 반복을 보지 않으므로, 여기서 안 보면 옮겨 온 문장과 원래
+      있던 문장이 한 장에 같은 말로 두 번 실린다.
+    ★ 붙이는 자리는 «끝»이다. 도착 장의 기존 문장 순서를 흔들지 않는다.
+    """
+
+    moved = 0
+    for target_index, sentence in relocating:
+        kept = rebuilt[target_index]
+        if duplicates_kept_sentence(sentence, kept, fragments=fragments):
+            blocked[SECTION_MOVE_BLOCKED_DUPLICATE] = (
+                blocked.get(SECTION_MOVE_BLOCKED_DUPLICATE, 0) + 1
+            )
+            continue
+        kept.append(sentence)
+        moved += 1
+    return moved
+
+
+def _append_section_move_step(
+    protocol_diagnostics: Optional[list[dict]],
+    section_moves: Optional[Sequence[_SectionMove]],
+    moved_count: int,
+    blocked: Mapping[str, int],
+) -> None:
+    """옮긴 수와 못 옮긴 사유를 «제외 장부가 아닌» 단계 기록에 남긴다.
+
+    ⚠️ 검수 제외 장부(`diagnostics`)에는 넣지 않는다. 화면 안내문을 만드는 쪽이
+       그 장부의 모든 항목을 「…개를 뺐습니다」로 세기 때문에, 보고서에 그대로
+       실린 문장을 뺐다고 말하게 된다.
+    """
+
+    if protocol_diagnostics is None or not section_moves:
+        return
+    protocol_diagnostics.append({
+        "step": BODY_SECTION_MOVE_STEP,
+        "출발장": STRATEGY_TABLE_SECTION_ID,
+        "도착장": CHALLENGE_FLOW_SECTION_ID,
+        "사유코드": FUTURE_SECTION_NO_FORWARD_STATEMENT,
+        "이동": moved_count,
+        "이동불가": dict(blocked),
+    })
+    logger.info(
+        "장 배치 이동: %s → %s, 사유 %s, 옮김 %d개, 못 옮김 %s",
+        STRATEGY_TABLE_SECTION_ID, CHALLENGE_FLOW_SECTION_ID,
+        FUTURE_SECTION_NO_FORWARD_STATEMENT, moved_count,
+        dict(blocked) or "없음",
+    )
+
+
+def _relocation_blocker(
+    text: str,
+    sources: Mapping[str, str],
+    *,
+    citations: frozenset[str],
+    allowed: Optional[frozenset[str]],
+    culture_candidate: bool,
+    source_binding_problem: str,
+) -> str:
+    """6장에서 «미래 표지 없음»으로 걸린 문장을 5장으로 옮길 수 있나.
+
+    빈 문자열이면 옮길 수 있다. 아니면 닫힌 사유 하나를 돌려준다.
+
+    순서가 곧 사유의 우선순위다:
+      ① 출발 장의 «근거 결속»에도 걸렸으면 옮기지 않는다. 결속 요구는 6장
+         표·산문 계약이고, 장을 바꿔 그 요구를 피해 가는 길을 만들지 않는다.
+         (근거 결속 검사 자체는 하나도 완화하지 않는다.)
+      ② packet 엄격 모드에서는 그 문장의 인용이 «전부» 도착 장에 허용된
+         조각이어야 한다. 아니면 옮긴 보고서가 장별 근거 불변식에서 죽는다.
+         평문(legacy) 경로에는 허용 표가 없으므로(``allowed`` 가 ``None``)
+         이 조건을 묻지 않는다 — 그 경로에는 불변식도 없다.
+      ③ 도착 장의 장별 규칙으로 다시 봐서 걸리면 옮기지 않는다.
+    ★ «도착 장에 같은 사실이 이미 있나»는 여기서 못 본다. 그 장의 최종 생존
+      문장은 판정이 다 끝나야 정해지기 때문이다 — 재조립 단계가 본다.
+    """
+
+    if source_binding_problem:
+        return SECTION_MOVE_BLOCKED_SOURCE_BINDING
+    if allowed is not None and not citations <= allowed:
+        return SECTION_MOVE_BLOCKED_OUT_OF_EVIDENCE
+    if _challenge_section_prose_problem(
+        text, sources, culture_candidate=culture_candidate
+    ):
+        return SECTION_MOVE_BLOCKED_TARGET_RULE
+    return ""
 
 
 def _numeric_binding_uses_table(evidence: object) -> bool:
@@ -1444,12 +1644,21 @@ def _apply_grounding(
     confirmed_prose_numbers: frozenset[int] = frozenset(),
     baseline_date: Optional[str] = None,
     verbatim_by_number: Optional[Mapping[int, VerbatimNewsSource]] = None,
+    evidence_ids_by_number: Optional[Mapping[int, frozenset[str]]] = None,
+    allowed_fragment_ids_by_section: Optional[
+        Mapping[str, frozenset[str]]
+    ] = None,
+    section_moves: Optional[list[_SectionMove]] = None,
 ) -> dict[int, str]:
     # ★ 보고서 기준일을 그대로 넘긴다. 안 넘기면 executive_status_guard 가 날짜
     #   문턱 없이 이탈 «표지» 존재만으로 판정해, 「기준일 이후에 물러날 예정」인
     #   임원 문장까지 근거 없음으로 뺀다(가드 머리말 참고).
     # ``verbatim_by_number``: 검수 단계가 수집 객체로 증명한 «원문 그대로인 보도»
     #   문맥. 안내 생성이 받은 것과 같은 값이어야 한다 — 역할·과금 결속에만 쓴다.
+    # ``section_moves``: 장 배치 위반 문장의 «이동» 판정을 담아 돌려주는 자리.
+    #   ``None`` 이면 이동 자체를 시도하지 않고 예전처럼 제외만 한다.
+    # ``evidence_ids_by_number``·``allowed_fragment_ids_by_section``: 이동 가능
+    #   판단에만 쓴다. 후보 자체의 허용 검사는 부르는 쪽이 이미 했다.
     constrained, problems = constrain_verdicts(
         raw, verdicts, candidates, cells_by_number=flow_cells_by_number,
         baseline_date=baseline_date, verbatim_by_number=verbatim_by_number,
@@ -1549,13 +1758,40 @@ def _apply_grounding(
         if (context and context[:2] == (STRATEGY_TABLE_SECTION_ID, DIAGNOSTIC_KIND_BODY)
                 and not (flow_cells_by_number and number in flow_cells_by_number)):
             problem = future_section_prose_problem(text)
-            if problem:
-                constrained[number] = REVIEW_GROUNDING_REJECTED
-                problems[number] = problem
-                continue
-            problem = future_plan_prose_problem(
+            # ★ 근거 결속은 «언제나» 함께 본다. 예전에는 장 배치 검사가 먼저
+            #   걸리면 결속 검사를 아예 돌리지 않았는데, 이제 장 배치 위반만
+            #   걸린 문장은 5장으로 옮기므로 «결속까지 걸린 문장»을 옮기지
+            #   않으려면 여기서 둘 다 알아야 한다. 사유 코드 우선순위는
+            #   예전 그대로다 — 장 배치가 먼저다.
+            plan_problem = future_plan_prose_problem(
                 text, sources, future_evidence.get(number)
             )
+            if (problem == FUTURE_SECTION_NO_FORWARD_STATEMENT
+                    and section_moves is not None):
+                blocker = _relocation_blocker(
+                    text,
+                    sources,
+                    citations=frozenset(
+                        (evidence_ids_by_number or {}).get(number, frozenset())
+                    ),
+                    allowed=(allowed_fragment_ids_by_section or {}).get(
+                        CHALLENGE_FLOW_SECTION_ID
+                    ) if allowed_fragment_ids_by_section is not None else None,
+                    culture_candidate=number in culture_candidate_numbers,
+                    source_binding_problem=plan_problem,
+                )
+                section_moves.append(_SectionMove(
+                    number=number,
+                    source_section_id=STRATEGY_TABLE_SECTION_ID,
+                    target_section_id=CHALLENGE_FLOW_SECTION_ID,
+                    reason_code=problem,
+                    blocker=blocker,
+                ))
+                if not blocker:
+                    # 제외가 아니다 — 판정을 그대로 두고 진단도 남기지 않는다.
+                    # 재조립 단계가 이 문장을 5장 끝에 붙인다.
+                    continue
+            problem = problem or plan_problem
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
@@ -1931,6 +2167,7 @@ def _ask_verdicts(
     initial_retry_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
+    section_moves: Optional[list[_SectionMove]] = None,
 ) -> Optional[dict[int, str]]:
     """검수 AI 1회 호출(+파싱 실패 시 1회 재요청). 그래도 실패면 None.
 
@@ -2025,6 +2262,12 @@ def _ask_verdicts(
         ),
         baseline_date=baseline_date,
         verbatim_by_number=verbatim_by_number,
+        evidence_ids_by_number={
+            item.number: frozenset(item.sentence.citations) for item in items
+        },
+        # 평문 경로에는 장별 허용 조각 표가 없다 — 이동 판정도 그 조건을 묻지
+        # 않는다(`_relocation_blocker` 머리말). 넘기지 않는 것이 곧 «표 없음»이다.
+        section_moves=section_moves,
     )
 
 
@@ -2263,6 +2506,10 @@ def _semantic_review(
     table_evidence = _render_table_evidence(table)
     table_source = _table_grounding_source(table)
     final: dict[int, Optional[ComposedSentence]] = {}
+    # ★ 도착 장이 이번 검수 묶음에 «없으면» 이동을 아예 시도하지 않는다. 시도만
+    #   해 두고 나중에 못 옮기면, 그 문장은 6장에서 빠지지도 5장으로 가지도
+    #   못한 채 6장에 그대로 남는다 — 장 배치 관문이 통째로 꺼지는 것과 같다.
+    section_moves = _section_move_ledger(group_ids)
     verdicts = _ask_verdicts(
         ask,
         items,
@@ -2274,7 +2521,10 @@ def _semantic_review(
         initial_retry_ask=initial_retry_ask,
         protocol_diagnostics=protocol_diagnostics,
         baseline_date=baseline_date,
+        section_moves=section_moves,
     )
+    moved_positions: dict[tuple[int, int], int] = {}
+    move_blocked: dict[str, int] = {}
     if verdicts is None:
         logger.warning(
             "의미 검수 응답을 받지 못해 안전을 확인할 수 없는 문장 %d개를 "
@@ -2345,15 +2595,25 @@ def _semantic_review(
             _센다["번호없음_제거"],
         )
         rewrite_allowed = allow_sentence_rewrite
+        # 장 배치 위반 문장의 이동은 «재작성 허용 판단보다 먼저» 정해진다 —
+        # 빈 장 계산이 「나간 문장·들어온 문장」을 알아야 하기 때문이다.
+        moved_positions, move_blocked = _pending_moves(
+            group_ids, position_numbers, section_moves
+        )
         empty_groups = []
         if sentence_rewrite_gate is not None or protocol_diagnostics is not None:
             for group_index, group in enumerate(groups):
+                # ★ 옮겨 갈 문장은 «출발 장의 생존자»로 세지 않는다. 6장에서
+                #   나가는 문장을 남은 것으로 세면 실제로는 빈 6장이 빈 장
+                #   복구 대상에서 빠진다. 반대로 도착 장은 그 문장 하나로도
+                #   비지 않는다.
                 has_survivor = any(
                     (group_index, sentence_index) not in absence_rejected_positions
+                    and (group_index, sentence_index) not in moved_positions
                     and (position_numbers.get((group_index, sentence_index)) is None
                          or final.get(position_numbers[(group_index, sentence_index)]) is not None)
                     for sentence_index, _sentence in enumerate(group)
-                )
+                ) or group_index in moved_positions.values()
                 if not has_survivor and group_ids is not None:
                     empty_groups.append(group_ids[group_index])
         if sentence_rewrite_gate is not None:
@@ -2403,6 +2663,7 @@ def _semantic_review(
                     final.setdefault(item.number, None)
 
     rebuilt: list[list[ComposedSentence]] = []
+    relocating: list[tuple[int, ComposedSentence]] = []
     for group_index, group in enumerate(groups):
         out: list[ComposedSentence] = []
         for sentence_index, sentence in enumerate(group):
@@ -2418,8 +2679,19 @@ def _semantic_review(
                 # 또는 라벨만 바꾼 채 살리지 않는다.
                 continue
             elif result is not None:
+                target = moved_positions.get((group_index, sentence_index))
+                if target is not None:
+                    relocating.append((target, result))
+                    continue
                 out.append(result)
         rebuilt.append(out)
+    moved_count = _relocate_into_groups(
+        rebuilt, relocating, move_blocked,
+        fragments=tuple(frag_by_id.values()),
+    )
+    _append_section_move_step(
+        protocol_diagnostics, section_moves, moved_count, move_blocked,
+    )
     return rebuilt
 
 
@@ -2520,12 +2792,14 @@ def _semantic_review_grouped(
             _groups_without_positions(groups, rejected_sentence_positions),
             {section_id: () for section_id in flow_rows_by_section},
         )
+    section_moves = _section_move_ledger(group_ids)
     verdicts = _ask_grouped_verdicts(
         ask, items, frag_by_id, table, diagnostics=diagnostics,
         initial_ask=initial_ask,
         protocol_diagnostics=protocol_diagnostics,
         baseline_date=baseline_date,
         allowed_fragment_ids_by_section=allowed_fragment_ids_by_section,
+        section_moves=section_moves,
     )
     sentence_by_number: dict[int, Optional[ComposedSentence]] = {}
     flow_kept_numbers: set[int] = set()
@@ -2547,7 +2821,11 @@ def _semantic_review_grouped(
         elif item.flow_row is not None and verdict == VERDICT_TRUE:
             flow_kept_numbers.add(item.number)
 
+    moved_positions, move_blocked = _pending_moves(
+        group_ids, sentence_positions, section_moves
+    )
     rebuilt_groups: list[list[ComposedSentence]] = []
+    relocating: list[tuple[int, ComposedSentence]] = []
     for group_index, group in enumerate(groups):
         rebuilt: list[ComposedSentence] = []
         for sentence_index, sentence in enumerate(group):
@@ -2561,8 +2839,19 @@ def _semantic_review_grouped(
                 continue
             reviewed = sentence_by_number.get(item_number)
             if reviewed is not None:
+                target = moved_positions.get((group_index, sentence_index))
+                if target is not None:
+                    relocating.append((target, reviewed))
+                    continue
                 rebuilt.append(reviewed)
         rebuilt_groups.append(rebuilt)
+    moved_count = _relocate_into_groups(
+        rebuilt_groups, relocating, move_blocked,
+        fragments=tuple(frag_by_id.values()),
+    )
+    _append_section_move_step(
+        protocol_diagnostics, section_moves, moved_count, move_blocked,
+    )
 
     rebuilt_flows: dict[str, tuple[FlowRow, ...]] = {}
     for section_id, rows in flow_rows_by_section.items():

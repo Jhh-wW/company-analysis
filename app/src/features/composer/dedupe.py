@@ -197,6 +197,75 @@ def _overlap(left: frozenset[str], right: frozenset[str]) -> float:
     return len(left & right) / min(len(left), len(right))
 
 
+def _same_fact(
+    left_signature: frozenset[str],
+    right_signature: frozenset[str],
+    left_citations: frozenset[str],
+    right_citations: frozenset[str],
+    left_documents: frozenset[str],
+    right_documents: frozenset[str],
+    *,
+    documents_known: bool,
+) -> bool:
+    """두 문장이 «같은 사실»인가 — 이 파일의 유일한 짝 판정.
+
+    조각을 공유하면 기존 문턱, 조각은 달라도 같은 문서를 근거로 들면 더 높은
+    문턱, 문서까지 다르면 아예 비교하지 않는다. 장 쌍을 가리지 않는다.
+
+    ★ 함수로 뽑은 이유 — 장 «간» 중복과 장 «안» 중복이 같은 잣대를 써야 한다.
+      두 벌로 적으면 한쪽 문턱만 고쳐져 「옮겨 온 문장은 지워지는데 원래 있던
+      문장은 안 지워지는」 어긋남이 생긴다.
+    """
+
+    if left_citations & right_citations:
+        threshold = _OVERLAP_THRESHOLD
+    elif documents_known and (left_documents & right_documents):
+        threshold = _SAME_DOCUMENT_OVERLAP_THRESHOLD
+    else:
+        return False
+    return _overlap(left_signature, right_signature) >= threshold
+
+
+def duplicates_kept_sentence(
+    sentence: ComposedSentence,
+    kept: Sequence[ComposedSentence],
+    *,
+    fragments: Optional[Sequence[CollectedFragment]] = None,
+) -> bool:
+    """이 문장이 «이미 그 장에 실린» 문장과 같은 사실인가.
+
+    ★ 왜 따로 필요한가 — `drop_cross_section_duplicates`는 «한 장 안의 반복»을
+      다루지 않는다(그 함수 본문: 「한 장 안의 반복은 이 단계가 다루지
+      않는다」). 그래서 다른 장에서 «옮겨 온» 문장이 그 장의 기존 문장과 같은
+      사실이면 어느 단계도 그것을 지우지 못하고, 한 장에 같은 말이 두 번 실린다.
+    ★ 문턱·지문·문서 열쇠는 위 함수와 «같은 한 벌»(`_same_fact`)을 쓴다.
+    ★ 인용이 없거나 너무 짧은 문장은 비교하지 않는다 — 장 간 중복과 같은
+      이유다(짧은 문장은 우연히 많이 겹친다). 비교하지 않으면 «중복 아님»이다.
+    """
+
+    citations = frozenset(sentence.citations)
+    if not citations or len(sentence.text) < _MIN_COMPARE_CHARS:
+        return False
+    keys = _document_keys(fragments)
+    signature = _signature(sentence.text)
+    documents = _documents_of(citations, keys)
+    for other in kept:
+        other_citations = frozenset(other.citations)
+        if not other_citations or len(other.text) < _MIN_COMPARE_CHARS:
+            continue
+        if _same_fact(
+            signature,
+            _signature(other.text),
+            citations,
+            other_citations,
+            documents,
+            _documents_of(other_citations, keys),
+            documents_known=fragments is not None,
+        ):
+            return True
+    return False
+
+
 def _section_order() -> dict[str, int]:
     return {section_id: order for order, section_id in enumerate(SECTION_IDS)}
 
@@ -421,16 +490,14 @@ def drop_cross_section_duplicates(
         for right in range(left + 1, len(flat)):
             if not comparable[right]:
                 continue
-            # 조각을 공유하면 기존 문턱, 조각은 달라도 같은 문서를 근거로 들면
-            # 더 높은 문턱, 문서까지 다르면 아예 비교하지 않는다.
-            # 장 쌍을 가리지 않는다 — 모든 장 쌍에 같은 규칙이 걸린다.
-            if citation_sets[left] & citation_sets[right]:
-                threshold = _OVERLAP_THRESHOLD
-            elif fragments is not None and (document_sets[left] & document_sets[right]):
-                threshold = _SAME_DOCUMENT_OVERLAP_THRESHOLD
-            else:
-                continue
-            if _overlap(signatures[left], signatures[right]) >= threshold:
+            # 짝 판정은 `_same_fact` 한 벌이다 — 장 안 중복(`duplicates_kept_sentence`)도
+            # 같은 함수를 쓴다. 장 쌍을 가리지 않는다.
+            if _same_fact(
+                signatures[left], signatures[right],
+                citation_sets[left], citation_sets[right],
+                document_sets[left], document_sets[right],
+                documents_known=fragments is not None,
+            ):
                 similar.setdefault(left, set()).add(right)
                 similar.setdefault(right, set()).add(left)
 
