@@ -76,25 +76,34 @@ def test_뉴스확인범위가_검색완료_접속분석제한_상한을_따로_
     })
 
 
-def test_검수탈락안내는_해당장에만_두고_보충성공시_갱신한다():
-    from src.features.composer.news_constants import NEWS_BODY_REJECTION_NOTICE
-    from src.features.composer.news_usage import append_research_notice
+def test_검수탈락_뉴스는_안내문없이_본문에서만_빠진다():
+    """검수 탈락은 처리 과정이라 독자에게 안내하지 않는다(2026-09-16 사용자 결정).
+
+    탈락 사유는 실행 진단에만 남고, 장 안내문에는 「검수·공개 기준을 통과하지
+    못한 뉴스 후보를 제외했습니다」류 문구가 한 글자도 실리지 않아야 한다.
+    """
+    from src.features.composer.news_usage import append_research_notice, retain_verified_news
     from src.features.composer.port import ComposedSentence
 
     fragments = _fragments()
-    rejections = [{"조각": "81", "장": "business_model", "사유코드": "review_removed"}]
-    first = append_research_notice(_empty(), None, fragments=fragments, review_rejections=rejections)
-    assert first.sections[0] == _empty().sections[0]
-    assert first.sections[1].notice == NEWS_BODY_REJECTION_NOTICE
-    recovered = replace(first, sections=tuple(
-        replace(section, sentences=(ComposedSentence(
-            "검수 통과 문장", ("81",), "확인", verification_state="verified"),))
-        if section.section_id == "business_model" else section for section in first.sections
+    draft = replace(_empty(), sections=tuple(
+        replace(section, sentences=(ComposedSentence("검수 미통과 뉴스 문장", ("81",), "확인"),))
+        if section.section_id == "business_model" else section for section in _empty().sections
     ))
-    final = append_research_notice(recovered, None, fragments=fragments, review_rejections=rejections)
-    assert final.sections[1].notice == ""
-    assert all(before == after for before, after in zip(first.sections, final.sections)
-               if before.section_id != "business_model")
+    rejections = []
+    retained = retain_verified_news(draft, fragments, review_input=draft, diagnostics=rejections)
+    assert retained.sections[1].sentences == ()
+    assert [row["사유코드"] for row in rejections] == ["not_verified"]
+    final = append_research_notice(retained, None)
+    assert final == retained
+    assert all(section.notice == "" for section in final.sections)
+
+
+def test_정상완료_뉴스조사는_확인범위_안내를_싣지_않는다():
+    """정상 완료는 «제한»이 아니다 — 「검수를 통과한 내용만 표시합니다」류 과정 설명을 싣지 않는다."""
+    from src.features.composer.news_usage import append_research_notice
+
+    assert append_research_notice(_empty(), {"상태": "ok", "독립기사": 2}) == _empty()
 
 
 def test_미확인_조사상태의_안내를_반복해_붙이지않는다():

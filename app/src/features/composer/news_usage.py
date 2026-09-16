@@ -13,7 +13,6 @@ from src.features.composer.news_constants import (
     NEWS_ATTRIBUTION_TEMPLATE, NEWS_DECISIONS_KEY, NEWS_PERIOD_MONTHS,
     NEWS_VALID_EXCLUSION_REASONS,
     NEWS_RESEARCH_NOTICES,
-    NEWS_NOTICE_REJECTED,
     NEWS_PARTIAL_FAILURE_NOTICE,
     NEWS_REJECTION_REASONS,
     NEWS_RESEARCH_DETAIL_PREFIX,
@@ -22,7 +21,6 @@ from src.features.composer.news_constants import (
     NEWS_RESEARCH_LIMIT_NOTICE,
     NEWS_RESEARCH_ABSENCE_NOTICE,
     NEWS_RESEARCH_UNKNOWN_NOTICE,
-    NEWS_BODY_REJECTION_NOTICE,
     NEWS_KOREAN_SYLLABLE_PATTERN,
 )
 from src.features.composer.news_block import _is_news_fragment, news_ownership_from_claim_slots
@@ -218,9 +216,9 @@ def retain_verified_news(report, fragments, *, review_input=None, diagnostics=No
                 alternative_claims.update(cited_claims)
             kept_sentences.append(sentence)
         kept = tuple(kept_sentences)
-        sections.append(replace(section, sentences=kept,
-            notice=(section.notice or NEWS_NOTICE_REJECTED)
-            if section.sentences and not kept else section.notice))
+        # 검수 탈락으로 장이 비어도 안내문을 남기지 않는다 — 탈락은 처리 과정이라
+        # 독자 정보가 아니다(2026-09-16). 사유는 위 record()가 진단에만 적는다.
+        sections.append(replace(section, sentences=kept))
     return replace(report, sections=tuple(sections))
 
 
@@ -281,8 +279,14 @@ def news_usage_diagnostics(report, fragments, supplemented=(), *, review_candida
     }
 
 
-def append_research_notice(report, diagnostics, *, fragments=(), review_rejections=()):
-    """수집 불능과 적격 자료 부족을 사실 문장이 아닌 공통 확인 범위로 알린다."""
+def append_research_notice(report, diagnostics):
+    """수집 불능과 적격 자료 부족을 사실 문장이 아닌 공통 확인 범위로 알린다.
+
+    ★ 독자에게 말하는 것은 조사 범위의 «제한»뿐이다. 검수 탈락·공개 기준 미달·
+      정상 완료 같은 «처리 과정»은 안내하지 않는다(2026-09-16 사용자 결정).
+      그래서 이 함수는 1장(identity)의 뉴스 조사 안내만 갱신하고, 다른 장의
+      안내문·문장·인용은 글자 하나 바꾸지 않는다.
+    """
     notice = ""
     if diagnostics is not None:
         status = str(diagnostics.get("상태", diagnostics.get("status", "")))
@@ -304,29 +308,20 @@ def append_research_notice(report, diagnostics, *, fragments=(), review_rejectio
                 details.insert(0, NEWS_RESEARCH_SEARCH_COMPLETE_NOTICE)
             notice = NEWS_RESEARCH_DETAIL_PREFIX + " ".join((*details, NEWS_RESEARCH_ABSENCE_NOTICE))
 
-    news = {fragment.fragment_id: fragment for fragment in fragments if _is_news_fragment(fragment)}
+    if diagnostics is None:
+        return report
+    managed_notices = {*NEWS_RESEARCH_NOTICES.values(),
+                       NEWS_PARTIAL_FAILURE_NOTICE, NEWS_RESEARCH_UNKNOWN_NOTICE}
     rebuilt = []
     for section in report.sections:
         # 보충 검수 뒤 안내도 갱신하되, 다른 장의 실제 사실·인용·사용자 안내는 보존한다.
-        research_owner = section.section_id == "identity" and diagnostics is not None
-        managed_notices = {NEWS_BODY_REJECTION_NOTICE}
-        if research_owner:
-            managed_notices.update((*NEWS_RESEARCH_NOTICES.values(),
-                                    NEWS_PARTIAL_FAILURE_NOTICE, NEWS_RESEARCH_UNKNOWN_NOTICE))
+        if section.section_id != "identity":
+            rebuilt.append(section)
+            continue
         paragraphs = [part for part in section.notice.split("\n\n") if part
                       and part not in managed_notices
-                      and not (research_owner and part.startswith(NEWS_RESEARCH_DETAIL_PREFIX))]
-        used_claims = {_original_claim_key(news[fid]) for sentence in section.sentences
-                       for fid in sentence.citations if fid in news}
-        rejected = any(
-            row.get("장") == section.section_id and row.get("조각") in news
-            and row.get("사유코드") != "duplicate_source"
-            and _original_claim_key(news[row["조각"]]) not in used_claims
-            for row in review_rejections
-        )
-        if section.section_id == "identity" and notice:
+                      and not part.startswith(NEWS_RESEARCH_DETAIL_PREFIX)]
+        if notice:
             paragraphs.append(notice)
-        if rejected:
-            paragraphs.append(NEWS_BODY_REJECTION_NOTICE)
         rebuilt.append(replace(section, notice="\n\n".join(paragraphs)))
     return replace(report, sections=tuple(rebuilt))

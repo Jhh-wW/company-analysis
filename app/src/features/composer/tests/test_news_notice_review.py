@@ -114,75 +114,47 @@ def test_normal_writer_survives_without_overstated_alternative_failure_notice():
 
     assert [sentence.citations for sentence in retained.sections[0].sentences] == [("writer",)]
     assert [row["사유코드"] for row in diagnostics] == ["duplicate_source"]
-    final = append_research_notice(
-        retained,
-        None,
-        fragments=(writer_fragment, alternative_fragment),
-        review_rejections=diagnostics,
-    )
+    final = append_research_notice(retained, None)
     assert final.sections[0].notice == ""
 
 
-def test_approved_exact_replacement_removes_stale_writer_failure_notice():
-    fragment = _fragment()
-    rejected = {
-        "조각": fragment.fragment_id,
-        "장": "business_model",
-        "사유코드": "review_removed",
-    }
-    report = _report(
-        ComposedSection("identity", (ComposedSentence("identity exact", (), GRADE_CONFIRMED),)),
-        ComposedSection("business_model", (_sentence(fragment, alternative=True),)),
-    )
+def test_review_rejection_leaves_no_notice_and_preserves_other_sections_exactly():
+    """검수 탈락은 처리 과정이라 장 안내문에 남기지 않는다(2026-09-16 사용자 결정).
 
-    recovered = append_research_notice(
-        report,
-        None,
-        fragments=(fragment,),
-        review_rejections=(rejected,),
-    )
-
-    assert recovered.sections[0].sentences[0].text == "identity exact"
-    assert recovered.sections[1].sentences[0].text.endswith(fragment.text)
-    assert recovered.sections[1].notice == ""
-
-
-def test_full_recovery_updates_only_target_notice_and_preserves_non_target_exactly():
+    탈락한 장은 문장만 빠지고 안내문은 빈 채로 두며, 사유는 진단 목록에만 남는다.
+    다른 장(identity)의 문장·기존 안내는 글자 하나 바뀌지 않는다.
+    """
     fragment = _fragment()
     identity_sentence = ComposedSentence("공식 원문 exact 보존", (), GRADE_CONFIRMED)
-    rejected = ({"조각": fragment.fragment_id, "장": "business_model", "사유코드": "review_removed"},)
     base = _report(
         ComposedSection("identity", (identity_sentence,), notice="identity 기존 안내"),
-        ComposedSection("business_model", (), notice=""),
-    )
-
-    blocked = append_research_notice(
-        base,
-        None,
-        fragments=(fragment,),
-        review_rejections=rejected,
-    )
-    assert blocked.sections[0] == base.sections[0]
-    assert blocked.sections[1].notice
-
-    recovered = replace(
-        blocked,
-        sections=tuple(
-            replace(
-                section,
-                sentences=(_sentence(fragment, alternative=True),),
-            )
-            if section.section_id == "business_model" else section
-            for section in blocked.sections
+        ComposedSection(
+            "business_model",
+            (replace(_sentence(fragment), verification_state="unverified"),),
         ),
     )
-    final = append_research_notice(
-        recovered,
-        None,
-        fragments=(fragment,),
-        review_rejections=rejected,
+    diagnostics = []
+
+    retained = retain_verified_news(base, (fragment,), review_input=base, diagnostics=diagnostics)
+    final = append_research_notice(retained, None)
+
+    assert [row["사유코드"] for row in diagnostics] == ["not_verified"]
+    assert final.sections[0] == base.sections[0]
+    assert final.sections[1].sentences == ()
+    assert final.sections[1].notice == ""
+
+
+def test_stale_process_notice_from_research_status_is_not_reintroduced():
+    """정상 완료(ok)는 안내문이 없고, 장애 안내는 identity 장에서만 갱신된다."""
+    base = _report(
+        ComposedSection("identity", (), notice="identity 기존 안내"),
+        ComposedSection("business_model", (), notice="다른 장 안내"),
     )
 
-    assert final.sections[0] == blocked.sections[0]
-    assert final.sections[1].notice == ""
-    assert final.sections[1].sentences == recovered.sections[1].sentences
+    ok = append_research_notice(base, {"상태": "ok", "독립기사": 3})
+    assert ok == base
+
+    failed = append_research_notice(base, {"상태": "failed", "독립기사": 0})
+    assert failed.sections[0].notice.startswith("identity 기존 안내\n\n확인 범위:")
+    assert failed.sections[1] == base.sections[1]
+    assert append_research_notice(failed, {"상태": "failed", "독립기사": 0}) == failed
