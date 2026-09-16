@@ -1,7 +1,10 @@
 """뉴스를 보조 근거로 공개할 때 사용하는 작성·검수 정책."""
 
 NEWS_DECISIONS_KEY = "뉴스근거판정"
-NEWS_NOTICE_REJECTED = "보도 근거 문장의 검수가 완료되지 않아 본문에 싣지 못했습니다."
+# ★ 독자에게 보이는 확인 범위 안내는 «조사 범위의 제한»만 말한다 (2026-09-16 사용자 결정).
+#   검수 탈락·공개 기준 미달·정상 완료 같은 «처리 과정»은 독자가 결정하는 데 필요
+#   없는 우리 사정이라 보고서에 싣지 않는다. 탈락 사유는 실행 진단
+#   (news_usage_diagnostics · NEWS_REJECTION_REASONS)에만 남긴다.
 NEWS_PARTIAL_FAILURE_NOTICE = "확인 범위: 뉴스 검색·기사 접속 또는 본문 분석에 문제가 있어 조사 범위에 제한이 있습니다. 관련 보도가 없다는 뜻은 아닙니다."
 NEWS_RESEARCH_DETAIL_PREFIX = "확인 범위: 뉴스 조사 — "
 NEWS_RESEARCH_DETAIL_NOTICES = {
@@ -14,7 +17,6 @@ NEWS_RESEARCH_SEARCH_COMPLETE_NOTICE = "뉴스 검색 요청은 완료했습니�
 NEWS_RESEARCH_LIMIT_NOTICE = "조사 상한에 도달해 일부 후보를 끝까지 확인하지 못했습니다."
 NEWS_RESEARCH_ABSENCE_NOTICE = "이러한 확인 제한은 관련 보도가 없다는 뜻은 아닙니다."
 NEWS_RESEARCH_UNKNOWN_NOTICE = "확인 범위: 뉴스 조사 완료 상태를 확인하지 못했습니다. 관련 보도가 없다는 뜻은 아닙니다."
-NEWS_BODY_REJECTION_NOTICE = "확인 범위: 이 장에서 본문 검수·공개 기준을 통과하지 못한 뉴스 후보는 본문과 뉴스 목록에서 제외했습니다. 관련 보도가 없다는 뜻은 아닙니다."
 NEWS_VALID_EXCLUSION_REASONS = frozenset({"중복", "장무관", "시간불일치", "공시충돌", "실질정보없음"})
 NEWS_ATTRIBUTION_TEMPLATE = "{date} {publisher} 보도에 따르면, "
 NEWS_KOREAN_SYLLABLE_PATTERN = r"[가-힣]"
@@ -37,7 +39,9 @@ NEWS_RESEARCH_NOTICES = {
     "failed": "확인 범위: 뉴스 검색 또는 기사 접속에 문제가 있어 최근 보도를 충분히 확인하지 못했습니다. 관련 보도가 없다는 뜻은 아닙니다.",
     "partial": "확인 범위: 일부 뉴스 후보의 확인을 끝내지 못해 조사 범위에 제한이 있습니다. 관련 보도가 없다는 뜻은 아닙니다.",
     "insufficient": "확인 범위: 최근 보도를 조사했으나 법인 관련성·실질 사업 사실·원문·시점을 확인한 보강 근거가 부족했습니다.",
-    "ok": "확인 범위: 공식 공시를 중심으로 최근 보도를 조사했습니다. 본문과 뉴스 목록에는 최종 검수를 통과한 내용만 표시합니다.",
+    # 정상 완료는 «제한»이 아니므로 안내문을 싣지 않는다. 키를 지우면
+    # append_research_notice가 「완료 상태를 확인하지 못했습니다」로 오인하므로 빈 값으로 둔다.
+    "ok": "",
 }
 NEWS_WRITER_GUIDE = """
 뉴스는 공시를 보강하는 보조 근거다. 기사 날짜·발행처·보도종류·사건시점을 읽고,

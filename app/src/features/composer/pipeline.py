@@ -1196,7 +1196,6 @@ def _finish_evidence_available(
     composition_diagnostics: list[dict],
     draft_body_count: int,
     news_review_candidates: frozenset[str] | set[str],
-    news_review_rejections: list,
     name_table: object | None = None,
     verified_program_facts: Sequence[FactRecord] = (),
     program_registry_sources: Sequence[Source] = (),
@@ -1241,11 +1240,7 @@ def _finish_evidence_available(
             body, fragments, None, enabled=True,
             review_candidates=frozenset(news_review_candidates),
         )
-        body = append_research_notice(
-            news_block.report, research_diagnostics,
-            fragments=_normalize_fragments(fragments),
-            review_rejections=news_review_rejections,
-        )
+        body = append_research_notice(news_block.report, research_diagnostics)
     # 확보 근거 보고서도 «같은» 정리를 거친다. FULL에서 내려온 본문
     # (tail_already_applied)은 이미 정리돼 있어 이 호출이 무동작이다(멱등).
     body = sanitize_stray_citation_markers(
@@ -1409,7 +1404,6 @@ def compose_evidence_available_report(
         ),
         draft_body_count=0,
         news_review_candidates=frozenset(),
-        news_review_rejections=[],
     )
 
 
@@ -2147,7 +2141,6 @@ def run_v2(
             composition_diagnostics=composition_diagnostics,
             draft_body_count=draft_body_count,
             news_review_candidates=news_review_candidates,
-            news_review_rejections=news_review_rejections,
             name_table=name_table,
             # 본문은 FULL 작성본 그대로라 프로그램 등록부에 결속된 문장이 살아
             # 있다. 같은 등록부를 넘겨야 renderer가 그 문장의 짝을 찾는다 —
@@ -2195,11 +2188,7 @@ def run_v2(
         verified, verification_fragments, prepared_evidence,
         enabled=True, review_candidates=news_review_candidates,
     )
-    verified = append_research_notice(
-        news_block.report, research_diagnostics,
-        fragments=_normalize_fragments(verification_fragments),
-        review_rejections=news_review_rejections,
-    )
+    verified = append_research_notice(news_block.report, research_diagnostics)
     # ★ 본 경로의 본문이 확정된 직후 인용 아닌 대괄호 숫자를 글자로 굳힌다.
     #   여기서 한 번 정리하면 아래의 요약 고르기·렌더·봉인·출고 검증이 모두
     #   «같은 글자»를 본다. 보충 경로는 이 뒤에 문장을 더하므로 그쪽 병합본에도
@@ -2547,11 +2536,7 @@ def run_v2(
                 merged_body, verification_fragments, prepared_evidence,
                 enabled=True, review_candidates=news_review_candidates,
             )
-            merged_body = append_research_notice(
-                news_block.report, research_diagnostics,
-                fragments=_normalize_fragments(verification_fragments),
-                review_rejections=news_review_rejections,
-            )
+            merged_body = append_research_notice(news_block.report, research_diagnostics)
             # 본 경로와 «같은» 정리를 병합본에도 건다. 비대상 장은 이미 정리된
             # 글자라 이 호출이 아무것도 바꾸지 않는다(멱등) — 아래 비대상 장
             # 불변 검사가 그대로 통과한다.

@@ -635,7 +635,6 @@ def test_전환_마무리는_프로그램_등록부_문장을_짝지어_렌더�
         composition_diagnostics=[],
         draft_body_count=1,
         news_review_candidates=frozenset(),
-        news_review_rejections=[],
         name_table=None,
         verified_program_facts=program.facts,
         program_registry_sources=program.registry_sources,
