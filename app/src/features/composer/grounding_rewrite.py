@@ -234,8 +234,15 @@ def rewrite_grounding_rejected(
         answer = _ask_once(
             ask, prompt if attempts == 1 else prompt + GROUNDING_REWRITE_RETRY_GUIDE,
         )
+        if answer is None:
+            # ★ 호출 «자체»가 죽은 것이라 형식 재요청을 하지 않는다. 재요청은
+            #   「답은 왔는데 모양이 틀렸다」를 고치는 수단이고, 여기서는 고칠
+            #   답이 없다. 한 번 더 부르면 유료 호출만 한 번 더 쓰고 같은 자리에
+            #   선다(`verify._ask_rewrite` 도 빈 응답이면 바로 포기한다).
+            shapes.append(EMPTY_RECOVERY_SHAPE_UNREADABLE)
+            break
         rewritten, abandoned, shape = _read_rewrites(
-            extract_json_payload(answer or ""), requested,
+            extract_json_payload(answer), requested,
         )
         shapes.append(shape)
         if shape == EMPTY_RECOVERY_SHAPE_CONTRACT or attempts > PARSE_RETRY_LIMIT:

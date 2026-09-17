@@ -571,6 +571,14 @@ _MAGNITUDE_SCALES: Final[dict[str, Decimal]] = MAGNITUDE_SCALES
 _PERCENT_SCALE: Final[Decimal] = Decimal("0.01")
 _NO_SCALE: Final[Decimal] = Decimal(1)
 
+#: 실적표 원문을 «근거로 쓸 수 있는» 유일한 장.
+#:
+#: ★ 왜 상수로 뽑나 — 같은 글자가 이 파일 안에서 네 자리(검수 프롬프트의 표 첨부·
+#:   평문 결속 원문·묶음 결속 원문·기계 검증 입력)에 흩어져 있었다. packet 경로는
+#:   장별 근거 불변식을 쓰기 때문에, 이 규칙이 한 자리에서만 바뀌면 다른 자리에서
+#:   표 숫자를 못 대거나 반대로 대 버린다.
+TABLE_EVIDENCE_SECTION_ID: Final[str] = "past_changes"
+
 #: 수치 검증 처분 (문장 단위)
 NUMERIC_PASS: Final[str] = "통과"
 NUMERIC_REMOVE: Final[str] = "제거"
@@ -1153,7 +1161,7 @@ def _build_grouped_review_prompt(
         )
         if section_id in SECTION_GUIDES:
             parts.append("장별 작성 범위: " + SECTION_GUIDES[section_id] + "\n")
-        if section_id == "past_changes" and table_evidence:
+        if section_id == TABLE_EVIDENCE_SECTION_ID and table_evidence:
             parts.append(table_evidence)
             parts.append(
                 f"[검증근거 {TABLE_SOURCE_ID}] 원문(JSON 문자열): "
@@ -1202,7 +1210,7 @@ def _build_grouped_review_prompt(
             candidate = _grouped_grounding_candidate(
                 item,
                 frag_by_id,
-                table_source if section_id == "past_changes" else "",
+                table_source if section_id == TABLE_EVIDENCE_SECTION_ID else "",
             )
             parts.append(grounding_hint(
                 *candidate,
@@ -1328,6 +1336,7 @@ def _ask_grouped_verdicts(
     baseline_date: Optional[str] = None,
     allowed_fragment_ids_by_section: Optional[Mapping[str, frozenset[str]]] = None,
     section_moves: Optional[list[_SectionMove]] = None,
+    grounding_problems: Optional[dict[int, str]] = None,
 ) -> Optional[dict[int, str]]:
     """packet 본문·도식을 정확히 한 번에 검수한다.
 
@@ -1336,6 +1345,8 @@ def _ask_grouped_verdicts(
 
     ``allowed_fragment_ids_by_section``: 장별 허용 조각. «원문 그대로인 보도» 문맥의
     장 소유권 대조에만 쓴다(항목 자체의 허용 검사는 부르는 쪽이 이미 했다).
+    ``grounding_problems``: 근거 결속 탈락의 «사유 코드»를 번호별로 담아 돌려주는
+    자리. 평문 경로의 `_ask_verdicts` 와 같은 뜻·같은 값이다.
     """
 
     # ★ 후보별 보도 원문 문맥은 «한 번» 계산해 안내와 판정에 같은 값을 준다.
@@ -1380,7 +1391,7 @@ def _ask_grouped_verdicts(
         item.number: _grouped_grounding_candidate(
             item,
             frag_by_id,
-            table_source if item.section_id == "past_changes" else "",
+            table_source if item.section_id == TABLE_EVIDENCE_SECTION_ID else "",
         )
         for item in items
     }
@@ -1431,6 +1442,7 @@ def _ask_grouped_verdicts(
         evidence_ids_by_number=evidence_ids_by_number,
         allowed_fragment_ids_by_section=allowed_fragment_ids_by_section,
         section_moves=section_moves,
+        grounding_problems=grounding_problems,
     )
 
 
@@ -2496,6 +2508,34 @@ def _grounding_abort_reason(error: AskFatalError) -> str:
     return "제공자오류"
 
 
+def _is_grounding_rewrite_target(
+    sentence: Optional[ComposedSentence],
+    section_id: str,
+    reason_code: str,
+) -> bool:
+    """근거 결속 탈락 후보 중 «묶어 고쳐 쓸» 것만 고른다 — flat·packet 공용.
+
+    ★ 두 경로가 «같은» 함수를 쓴다. 조건을 두 벌로 적으면 한쪽만 고쳐져, 어떤
+      문장은 평문 보고서에서만 살아나고 묶음 보고서에서는 사라진다(또는 반대).
+
+    고르는 조건:
+      ① 도식 행이 아니라 «문장»이어야 한다 — 표의 칸은 고쳐 쓰지 않는다.
+      ② «확인» 등급이어야 한다 — 해석을 고쳐 써서 확인으로 올리지 않는다.
+      ③ 자기 인용이 있어야 한다 — 기댈 원문이 없으면 부를 이유가 없다.
+      ④ 본문이어야 한다. 요약은 «본문에서 고른» 문장을 글자 그대로 싣는 자리라,
+         여기서 새 글자를 만들면 본문과 요약이 다른 문장이 된다.
+      ⑤ 탈락 사유 코드가 있어야 한다 — 무엇이 어긋났는지 못 말하면 못 고친다.
+    """
+
+    return bool(
+        sentence is not None
+        and sentence.grade == GRADE_CONFIRMED
+        and sentence.citations
+        and section_id != REVIEW_SUMMARY_GROUP
+        and reason_code
+    )
+
+
 def _grounding_aborted_record(
     targets: Sequence[_ReviewItem],
     error: AskFatalError,
@@ -2540,7 +2580,7 @@ def _grounding_rewrite_pass(
     targets: Sequence[_ReviewItem],
     reason_by_number: Mapping[int, str],
     frag_by_id: Mapping[str, CollectedFragment],
-    table_texts: Sequence[str],
+    table_texts_for_section: Callable[[str], Sequence[str]],
     final: dict[int, Optional[ComposedSentence]],
     *,
     rewrite_ask: Optional[AskFn] = None,
@@ -2551,6 +2591,11 @@ def _grounding_rewrite_pass(
       · 재검수가 필요한 항목들 — 부르는 쪽이 «거짓 재작성»분과 합쳐 한 번에 본다.
       · 진단 기록 초안 — 재검수 뒤에 채워질 칸(재검수참·재검수애매·최종반영)은
         아직 비어 있다. 부르는 쪽이 마저 채워 남긴다.
+
+    ``table_texts_for_section``: 그 장이 «실적표 원문을 근거로 쓸 수 있는가»를
+      장 id 로 묻는다. 평문 경로는 모든 장에 표를 주고, packet 경로는 4장만 준다 —
+      기계 검증(`_machine_check`)이 두 경로에 주는 것과 «같은» 값이어야 한다.
+      한쪽만 넓으면 고쳐 쓴 문장이 기계 검증을 통과하지 못할 숫자로 되살아난다.
 
     ⚠️ 여기서는 어떤 번호도 ``final`` 을 건드리지 않는다. 기계 검사에 걸린 글은
       전부 «제거»이고, 부르는 쪽이 이미 ``final[번호] = None`` 으로 두었기
@@ -2611,7 +2656,9 @@ def _grounding_rewrite_pass(
         #   결속 가드를 «한 번도 다시 지나지 않은» 문장이 본문에 남는다
         #   (강등된 문장은 재검수에 넣지 않으므로 가드가 다시 돌지 않는다).
         #   그래서 보수적으로 버린다.
-        if _numeric_disposal(candidate, frag_by_id, table_texts) != NUMERIC_PASS:
+        if _numeric_disposal(
+            candidate, frag_by_id, table_texts_for_section(item.section_id),
+        ) != NUMERIC_PASS:
             continue
         machine_passed += 1
         recheck_items.append(replace(item, sentence=candidate))
@@ -2620,6 +2667,113 @@ def _grounding_rewrite_pass(
     record["기계검사통과"] = machine_passed
     record["응답꼴"] = outcome.shapes[-1] if outcome.shapes else ""
     return recheck_items, record
+
+
+def _rewrite_grounding_and_recheck(
+    ask: AskFn,
+    targets: Sequence[_ReviewItem],
+    reason_by_number: Mapping[int, str],
+    frag_by_id: Mapping[str, CollectedFragment],
+    table_texts_for_section: Callable[[str], Sequence[str]],
+    final: dict[int, Optional[ComposedSentence]],
+    *,
+    table_evidence: str,
+    table_source: str,
+    pending_recheck_items: Sequence[_ReviewItem] = (),
+    diagnostics: Optional[list[dict]] = None,
+    protocol_diagnostics: Optional[list[dict]] = None,
+    baseline_date: Optional[str] = None,
+    rewrite_ask: Optional[AskFn] = None,
+    recheck_ask: Optional[AskFn] = None,
+) -> None:
+    """근거 결속 탈락 문장을 묶어 고쳐 쓰고, 재검수를 «한 번»으로 끝낸다.
+
+    평문(`_semantic_review`)과 묶음(`_semantic_review_grouped`) 두 경로가 이
+    함수 하나를 쓴다. 두 벌로 적으면 한쪽만 고쳐져, 어떤 문장이 평문 보고서에서만
+    살아나고 묶음 보고서에서는 사라진다 — 운영이 쓰는 쪽은 묶음이다.
+
+    ``pending_recheck_items``: 평문 경로의 «거짓» 재작성이 이미 만들어 둔 재검수
+    항목. 여기에 근거 결속 재작성분을 «합쳐» 한 호출로 보낸다. 두 갈래가 각자
+    재검수를 부르면 한 검수의 AI 호출이 통째로 1회 더 는다. 묶음 경로는 거짓
+    재작성 자체가 없으므로 언제나 비어 있다.
+
+    어디서 멈추든 결과는 예전과 같은 «제거»다 — ``final`` 의 기본값이 이미
+    ``None`` 이고, 이 함수는 살아난 문장만 그 값을 덮는다.
+    """
+    recheck_items: list[_ReviewItem] = list(pending_recheck_items)
+    grounding_record: Optional[dict[str, object]] = None
+    if targets:
+        try:
+            grounding_items, grounding_record = _grounding_rewrite_pass(
+                ask,
+                targets,
+                reason_by_number,
+                frag_by_id,
+                table_texts_for_section,
+                final,
+                rewrite_ask=rewrite_ask,
+            )
+            recheck_items.extend(grounding_items)
+        except AskFatalError as error:
+            # «거짓» 재작성과 같은 이유로 여기서도 멈추지 않는다 — 고쳐 쓰지
+            # 못한 문장은 예전처럼 제거되므로 결과는 오히려 더 보수적이다.
+            if not getattr(error, "degradable", False):
+                raise
+            logger.warning(
+                "요청 AI 한도에 닿아 근거 결속 탈락 문장 %d개의 재작성을 "
+                "포기하고 제거한다 — 나머지 보고서는 그대로 낸다",
+                len(targets),
+            )
+            grounding_record = _grounding_aborted_record(targets, error, final)
+    if recheck_items:
+        try:
+            recheck_verdicts = _recheck_rewritten(
+                ask,
+                recheck_items,
+                frag_by_id,
+                table_evidence,
+                table_source,
+                final,
+                diagnostics=diagnostics,
+                protocol_diagnostics=protocol_diagnostics,
+                baseline_date=baseline_date,
+                recheck_ask=recheck_ask,
+            )
+        except AskFatalError as error:
+            if not getattr(error, "degradable", False):
+                raise
+            logger.warning(
+                "요청 AI 한도에 닿아 고쳐 쓴 문장 %d개의 재검수를 포기하고 "
+                "제거한다 — 나머지 보고서는 그대로 낸다",
+                len(recheck_items),
+            )
+            recheck_verdicts = {}
+            for item in recheck_items:
+                final[item.number] = None
+            if (grounding_record is not None
+                    and grounding_record["상태"] == GROUNDING_REWRITE_STATE_DONE):
+                # 재검수를 못 했으면 이 단계는 «완료»가 아니다. 고쳐 쓰기가 살려
+                # 낸 문장이 하나도 없으므로 대상을 전부 제거한다.
+                # ⚠️ 이미 «호출중단»·«작성형식실패» 로 닫힌 기록은 덮지 않는다 —
+                #   먼저 난 사유가 진짜 원인이고, 재검수 실패는 그 결과다.
+                grounding_record = _grounding_aborted_record(targets, error, final)
+        if (grounding_record is not None
+                and grounding_record["상태"] == GROUNDING_REWRITE_STATE_DONE):
+            grounding_numbers = {item.number for item in targets}
+            grounding_record["재검수참"] = sum(
+                1 for item in recheck_items
+                if item.number in grounding_numbers
+                and recheck_verdicts.get(item.number) == VERDICT_TRUE
+            )
+            grounding_record["재검수애매"] = sum(
+                1 for item in recheck_items
+                if item.number in grounding_numbers
+                and recheck_verdicts.get(item.number) == VERDICT_UNCLEAR
+            )
+    if grounding_record is not None:
+        _finish_grounding_record(grounding_record, targets, final)
+        if protocol_diagnostics is not None:
+            protocol_diagnostics.append(grounding_record)
 
 
 def _semantic_review(
@@ -2767,11 +2921,11 @@ def _semantic_review(
                 #   아래에서 다시 판정을 받아 이 값을 덮는다 — 고쳐 쓰기가
                 #   어디서 멈추든 결과는 예전과 같은 «제거»가 된다.
                 final[item.number] = None
-                if (grounding_rewrite_enabled
-                        and item.kind == DIAGNOSTIC_KIND_BODY
-                        and item.sentence.grade == GRADE_CONFIRMED
-                        and item.sentence.citations
-                        and grounding_problems.get(item.number)):
+                if grounding_rewrite_enabled and _is_grounding_rewrite_target(
+                    item.sentence,
+                    item.section_id,
+                    grounding_problems.get(item.number, ""),
+                ):
                     grounding_targets.append(item)
             else:
                 # 응답에 번호가 없는 것은 «애매» 판정이 아니라 검수
@@ -2879,80 +3033,26 @@ def _semantic_review(
         #   «무관»하다. 그 게이트는 «거짓» 문장 재작성이 빈 장 복구 몫을 먼저
         #   쓰지 않게 막는 장치이고, 이쪽은 그 예약과 별개로 부르는 쪽이
         #   `grounding_rewrite_enabled` 하나로 켜고 끈다.
-        grounding_record: Optional[dict[str, object]] = None
-        if grounding_targets:
-            try:
-                grounding_items, grounding_record = _grounding_rewrite_pass(
-                    ask,
-                    grounding_targets,
-                    grounding_problems,
-                    frag_by_id,
-                    table_texts,
-                    final,
-                    rewrite_ask=rewrite_ask,
-                )
-                recheck_items.extend(grounding_items)
-            except AskFatalError as error:
-                # 위 «거짓» 재작성과 같은 이유로 여기서도 멈추지 않는다 —
-                # 고쳐 쓰지 못한 문장은 예전처럼 제거되므로 결과는 더 보수적이다.
-                if not getattr(error, "degradable", False):
-                    raise
-                logger.warning(
-                    "요청 AI 한도에 닿아 근거 결속 탈락 문장 %d개의 재작성을 "
-                    "포기하고 제거한다 — 나머지 보고서는 그대로 낸다",
-                    len(grounding_targets),
-                )
-                grounding_record = _grounding_aborted_record(
-                    grounding_targets, error, final,
-                )
-        if recheck_items:
-            try:
-                recheck_verdicts = _recheck_rewritten(
-                    ask,
-                    recheck_items,
-                    frag_by_id,
-                    table_evidence,
-                    table_source,
-                    final,
-                    diagnostics=diagnostics,
-                    protocol_diagnostics=protocol_diagnostics,
-                    baseline_date=baseline_date,
-                    recheck_ask=recheck_ask,
-                )
-            except AskFatalError as error:
-                if not getattr(error, "degradable", False):
-                    raise
-                logger.warning(
-                    "요청 AI 한도에 닿아 고쳐 쓴 문장 %d개의 재검수를 포기하고 "
-                    "제거한다 — 나머지 보고서는 그대로 낸다",
-                    len(recheck_items),
-                )
-                recheck_verdicts = {}
-                for item in recheck_items:
-                    final[item.number] = None
-                if grounding_record is not None:
-                    # 재검수를 못 했으면 이 단계는 «완료»가 아니다. 고쳐 쓰기가
-                    # 살려 낸 문장이 하나도 없으므로 대상을 전부 제거한다.
-                    grounding_record = _grounding_aborted_record(
-                        grounding_targets, error, final,
-                    )
-            if (grounding_record is not None
-                    and grounding_record["상태"] == GROUNDING_REWRITE_STATE_DONE):
-                grounding_numbers = {item.number for item in grounding_targets}
-                grounding_record["재검수참"] = sum(
-                    1 for item in recheck_items
-                    if item.number in grounding_numbers
-                    and recheck_verdicts.get(item.number) == VERDICT_TRUE
-                )
-                grounding_record["재검수애매"] = sum(
-                    1 for item in recheck_items
-                    if item.number in grounding_numbers
-                    and recheck_verdicts.get(item.number) == VERDICT_UNCLEAR
-                )
-        if grounding_record is not None:
-            _finish_grounding_record(grounding_record, grounding_targets, final)
-            if protocol_diagnostics is not None:
-                protocol_diagnostics.append(grounding_record)
+        # ★ 재검수는 이 검수에서 «한 번»이다 — 위에서 모은 «거짓» 재작성분을
+        #   그대로 넘겨 근거 결속 재작성분과 «합쳐» 한 호출로 보낸다.
+        _rewrite_grounding_and_recheck(
+            ask,
+            grounding_targets,
+            grounding_problems,
+            frag_by_id,
+            # 평문 경로의 기계 검증은 모든 장에 실적표 원문을 준다
+            # (`_verify_report_inner` 의 `_machine_check` 호출과 같은 규칙이다).
+            lambda _section_id: table_texts,
+            final,
+            table_evidence=table_evidence,
+            table_source=table_source,
+            pending_recheck_items=recheck_items,
+            diagnostics=diagnostics,
+            protocol_diagnostics=protocol_diagnostics,
+            baseline_date=baseline_date,
+            rewrite_ask=rewrite_ask,
+            recheck_ask=recheck_ask,
+        )
 
     rebuilt: list[list[ComposedSentence]] = []
     relocating: list[tuple[int, ComposedSentence]] = []
@@ -3000,12 +3100,22 @@ def _semantic_review_grouped(
     initial_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
+    rewrite_ask: Optional[AskFn] = None,
+    recheck_ask: Optional[AskFn] = None,
+    grounding_rewrite_enabled: bool = False,
 ) -> tuple[list[list[ComposedSentence]], dict[str, tuple[FlowRow, ...]]]:
     """packet 문장과 도식을 장별 근거 블록으로 묶어 AI 1회 검수한다.
 
     legacy의 거짓 문장 재작성은 문장마다 호출을 늘린다. 엄격 경로는 비용 계약
     (본문+도식 bundled reviewer 1회)을 지키며, 거짓·장 불일치·판정 누락은
     되살리지 않고 그 항목만 제거한다.
+
+    ``grounding_rewrite_enabled``: 근거 결속 탈락 «확인» 본문 문장만 한 번 묶어
+    고쳐 쓰고 다시 검수할지. 거짓이면 이 함수의 동작·호출 수는 예전과 같다.
+    ★ 켜도 «거짓 재작성 없음» 계약은 그대로다 — 거짓·장 불일치·판정 누락은
+      여전히 되살리지 않고 제거한다. 늘어나는 것은 근거 결속 탈락 문장 하나의
+      갈래뿐이고, 그 갈래도 작성 1회 + 재검수 1회로 고정이다.
+    ``rewrite_ask``/``recheck_ask``: 그 두 호출의 전용 호출자(선택).
     """
 
     if len(groups) != len(group_ids):
@@ -3085,6 +3195,8 @@ def _semantic_review_grouped(
             {section_id: () for section_id in flow_rows_by_section},
         )
     section_moves = _section_move_ledger(group_ids)
+    # 평문 경로와 «같은» 이유로 번호별 탈락 사유를 받아 둔다(`_semantic_review`).
+    grounding_problems: dict[int, str] = {}
     verdicts = _ask_grouped_verdicts(
         ask, items, frag_by_id, table, diagnostics=diagnostics,
         initial_ask=initial_ask,
@@ -3092,9 +3204,12 @@ def _semantic_review_grouped(
         baseline_date=baseline_date,
         allowed_fragment_ids_by_section=allowed_fragment_ids_by_section,
         section_moves=section_moves,
+        grounding_problems=grounding_problems,
     )
     sentence_by_number: dict[int, Optional[ComposedSentence]] = {}
     flow_kept_numbers: set[int] = set()
+    # 근거 결속으로 탈락한 «확인 본문» 문장 — 고쳐 쓰기를 켰을 때만 모은다.
+    grounding_targets: list[_ReviewItem] = []
     for item in items:
         verdict = None if verdicts is None else verdicts.get(item.number)
         if item.sentence is not None:
@@ -3109,9 +3224,55 @@ def _semantic_review_grouped(
                     else replace(item.sentence, verification_state="unverified")
                 )
             else:
+                # ★ «제거»가 기본값이고 그대로 둔다. 아래 고쳐 쓰기를 켠 경우에만
+                #   근거 결속 탈락 문장이 다시 판정을 받아 이 값을 덮는다 —
+                #   고쳐 쓰기가 어디서 멈추든 결과는 예전과 같은 «제거»가 된다.
                 sentence_by_number[item.number] = None
+                if (grounding_rewrite_enabled
+                        and verdict == REVIEW_GROUNDING_REJECTED
+                        and _is_grounding_rewrite_target(
+                            item.sentence,
+                            item.section_id,
+                            grounding_problems.get(item.number, ""),
+                        )):
+                    # 뒤 단계(`_grounding_rewrite_pass`·`_recheck_rewritten`)는
+                    # 평문 항목 모양만 안다. 여기서 한 번 옮겨 두 경로가 «같은»
+                    # 함수를 쓰게 한다 — 검수 종류는 본문으로 고정이다(위 판정이
+                    # 이미 문장·본문만 통과시켰다).
+                    grounding_targets.append(_ReviewItem(
+                        number=item.number,
+                        sentence=item.sentence,
+                        section_id=item.section_id,
+                        kind=DIAGNOSTIC_KIND_BODY,
+                    ))
         elif item.flow_row is not None and verdict == VERDICT_TRUE:
             flow_kept_numbers.add(item.number)
+    if grounding_targets:
+        # ★ 대상이 없으면 표 원문을 만들 일도 없다 — 꺼져 있을 때 이 경로가
+        #   하던 일을 한 톨도 늘리지 않으려고 통째로 감싼다.
+        #   packet 경로에는 «거짓» 재작성이 없으므로 합칠 대기 항목도 없다.
+        packet_table_texts = _table_texts(table)
+        _rewrite_grounding_and_recheck(
+            ask,
+            grounding_targets,
+            grounding_problems,
+            frag_by_id,
+            # packet 경로의 기계 검증은 4장에만 실적표 원문을 준다
+            # (`_verify_report_inner` 의 `_machine_check` 호출과 같은 규칙이다).
+            lambda section_id: (
+                packet_table_texts
+                if section_id == TABLE_EVIDENCE_SECTION_ID
+                else ()
+            ),
+            sentence_by_number,
+            table_evidence=_render_table_evidence(table),
+            table_source=_table_grounding_source(table),
+            diagnostics=diagnostics,
+            protocol_diagnostics=protocol_diagnostics,
+            baseline_date=baseline_date,
+            rewrite_ask=rewrite_ask,
+            recheck_ask=recheck_ask,
+        )
 
     moved_positions, move_blocked = _pending_moves(
         group_ids, sentence_positions, section_moves
@@ -3248,7 +3409,7 @@ def _verify_report_inner(
             (
                 table_texts
                 if allowed_fragment_ids_by_section is None
-                or section.section_id == "past_changes"
+                or section.section_id == TABLE_EVIDENCE_SECTION_ID
                 else ()
             ),
         )
@@ -3315,6 +3476,9 @@ def _verify_report_inner(
             initial_ask=initial_ask,
             protocol_diagnostics=protocol_diagnostics,
             baseline_date=baseline_date,
+            rewrite_ask=rewrite_ask,
+            recheck_ask=recheck_ask,
+            grounding_rewrite_enabled=grounding_rewrite_enabled,
         )
     reviewed_summary = reviewed_groups.pop()
 
@@ -3397,12 +3561,26 @@ def verify_report(
         grounding_rewrite_enabled: 근거 결속 검사에서 탈락한 «확인» 본문 문장을
             AI 1회로 묶어 고쳐 쓰고 재검수 1회로 되살릴지. 기본값 거짓이면
             동작·호출 수가 예전과 완전히 같다(탈락 문장은 그대로 제거).
-            ★ 켜면 이 검수의 AI 호출이 최대 «2회» 는다 — 묶음 재작성 1회와,
+            ★ 평문·packet 두 경로 «모두»에 적용된다. 운영 FULL 이 타는 쪽은
+              packet 이므로 한쪽만 배선하면 운영에서 효과가 0이다.
+            ★ 켜면 이 검수의 AI 호출이 «정상 2회» 는다 — 묶음 재작성 1회와,
               거짓 재작성분과 «합쳐진» 재검수 1회다. 거짓 재작성이 함께 돌아도
               재검수는 총 1회이므로, 거짓 재작성만 있던 때와 견주면 순증은
               묶음 재작성 1회뿐이다.
-            ⚠️ 이 인자는 평문(legacy) 경로에만 뜻이 있다. packet 엄격 경로는
-              검수 1회 고정 계약이라 재작성 자체가 없다.
+              ⚠️ 응답 형식 재요청까지 세면 «최대 4회»다 — 묶음 재작성이
+                `PARSE_RETRY_LIMIT` 만큼(1회) 다시 묻고, 합친 재검수도 평문
+                경로에서는 같은 만큼 다시 묻기 때문이다(packet 경로의 첫 검수만
+                재요청이 없다). 호출이 죽은 경우에는 재요청하지 않는다.
+            ★ 이 단계는 빈 장 복구 «양보» 게이트(``sentence_rewrite_gate``)를
+              일부러 지나지 않는다. 그 게이트는 선택적 다듬기가 복구 몫을 먼저
+              쓰지 않게 막는 장치인데, 운영 실측에서 두 단계가 건지는 문장 수의
+              자릿수가 다르다 — 빈 장 복구가 실제로 살려 낸 문장은 한 자리 수인
+              반면, 이 단계의 대상은 한 보고서에서 수십 문장이다(2026-09-17
+              실측: 생성 96문장 중 30문장이 이 사유로 지워졌다). 우선순위가
+              반대이므로 양보시키지 않는다.
+              ⚠️ 그래서 예산이 빠듯하면 빈 장 복구가 «예산부족»으로 기록되고 이
+                단계가 먼저 쓴다 — 조용한 결함이 아니라 의도된 순서다. 예약
+                상수(`report_recovery.EMPTY_RECOVERY_AI_CALLS`)는 그대로 둔다.
         baseline_date: 보고서 기준일 (ISO ``YYYY-MM-DD``). 근거 결속의
             executive_status_guard 에만 쓴다 — 넘기지 않으면 그 가드가 날짜
             문턱 없이 이탈 표지 존재만으로 판정한다. 기존 호출 계약은 그대로다.

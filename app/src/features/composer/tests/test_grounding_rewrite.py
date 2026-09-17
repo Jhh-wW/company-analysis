@@ -9,6 +9,8 @@
   ④ 형식 실패·예산 부족은 «전부 제거»로 닫히고, 그 사실이 진단에 남는다.
   ⑤ 진단 기록의 칸 이름은 공유 상수와 «글자까지» 같다(저장 정화기가 닫힌
      목록으로 거르기 때문에 한 글자만 달라도 그 칸이 통째로 사라진다).
+  ⑥ 평문·packet «두» 경로에서 다 돈다. 운영 FULL 이 타는 쪽은 packet 이라,
+     평문만 배선하면 시험은 초록인데 운영 효과는 0이다.
 
 ⚠️ 여기서는 가짜 호출자로 «실제» `verify_report` 를 돌린다. 검증기 안쪽 함수를
    직접 부르면 배선이 끊겨도 초록불이 된다.
@@ -16,7 +18,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import re
 
 import pytest
 
@@ -136,11 +140,17 @@ class _FakeAI:
         *,
         batch_responses: list[object] | None = None,
         rewrite_responses: list[object] | None = None,
+        grouped_auto: bool = False,
     ):
         self.review_responses = list(review_responses)
         self.batch_responses = list(batch_responses or [])
         self.rewrite_responses = list(rewrite_responses or [])
+        #: 참이면 묶음(packet) 검수 프롬프트를 알아보고 전부 «참»으로 답한다.
+        #: 그 호출은 `grouped_prompts` 에만 센다 — 평문 검수와 «따로» 세야
+        #: 「어느 경로가 실제로 돌았나」를 시험이 가릴 수 있다.
+        self.grouped_auto = grouped_auto
         self.review_prompts: list[str] = []
+        self.grouped_prompts: list[str] = []
         self.batch_prompts: list[str] = []
         self.rewrite_prompts: list[str] = []
 
@@ -151,6 +161,9 @@ class _FakeAI:
         if prompt.startswith(REWRITE_PROMPT_HEADER):
             self.rewrite_prompts.append(prompt)
             return self._next(self.rewrite_responses, len(self.rewrite_prompts))
+        if self.grouped_auto and _GROUPED_LINE_RE.search(prompt):
+            self.grouped_prompts.append(prompt)
+            return _grouped_all_true(prompt)
         self.review_prompts.append(prompt)
         return self._next(self.review_responses, len(self.review_prompts))
 
@@ -167,9 +180,31 @@ class _FakeAI:
     def total_calls(self) -> int:
         return (
             len(self.review_prompts)
+            + len(self.grouped_prompts)
             + len(self.batch_prompts)
             + len(self.rewrite_prompts)
         )
+
+
+#: packet(묶음) 검수 프롬프트의 후보 줄 — `verify._build_grouped_review_prompt` 모양.
+_GROUPED_LINE_RE = re.compile(
+    r"\[(\d+)\] \(장: ([^,]+), 종류: ([^,]+), 인용: ([^)]+)\)"
+)
+
+
+def _grouped_all_true(prompt: str) -> str:
+    """묶음 검수 프롬프트에 실린 번호 전부를 «참»으로 답한다.
+
+    ★ 프롬프트를 읽어서 답한다 — 번호를 시험에 박으면 후보 수가 달라질 때
+      조용히 범위 밖이 되어 배선이 끊겨도 초록불이 된다.
+    """
+    rows = _GROUPED_LINE_RE.findall(prompt)
+    return json.dumps(
+        {"판정": [{"번호": int(number), "장": section_id,
+                 "근거": re.findall(r"조각 (\d+)", citations), "결과": VERDICT_TRUE}
+                for number, section_id, _kind, citations in rows]},
+        ensure_ascii=False,
+    )
 
 
 def _record(protocol: list[dict]) -> dict | None:
@@ -586,7 +621,132 @@ def test_완료_기록의_칸_이름은_공유_상수와_정확히_같다():
 
 
 # ══════════════════════════════════════════════════════════
-# ⑥ 파이프라인 배선 — «실제 호출 인자»를 본다
+# ⑥ packet(묶음) 경로 — 운영 FULL 이 타는 쪽
+# ══════════════════════════════════════════════════════════
+#
+# ★ 왜 따로 시험하나 (독립 검토가 찾은 P0) — 운영 FULL 은
+#   `allowed_fragment_ids_by_section` 이 채워진 packet 경로
+#   (`_semantic_review_grouped`)를 탄다. 평문 경로에만 배선하면 여기 시험은
+#   전부 초록인데 운영에서는 고쳐 쓰기가 «한 번도» 돌지 않는다.
+
+
+def _packet_allowed() -> dict[str, frozenset[str]]:
+    return {"identity": frozenset({"1"})}
+
+
+def test_packet_경로에서도_재작성_1회_재검수_1회로_되살린다():
+    ask = _FakeAI(
+        [_verdicts({1: VERDICT_TRUE})],  # 합친 재검수(평문 꼴) 한 번
+        batch_responses=[_rewrites([{"번호": 1, "글": _FIXED[1], "포기": False}])],
+        grouped_auto=True,
+    )
+    protocol: list[dict] = []
+
+    verified = verify_report(
+        _report(), _raw_fragments(), None, ask,
+        allowed_fragment_ids_by_section=_packet_allowed(),
+        protocol_diagnostics=protocol, grounding_rewrite_enabled=True,
+    )
+
+    # 묶음 검수 1회 + 묶음 재작성 1회 + 재검수 1회 = 3
+    assert len(ask.grouped_prompts) == 1, "packet 경로를 타지 않았다"
+    assert len(ask.batch_prompts) == 1
+    assert len(ask.review_prompts) == 1
+    assert ask.total_calls == 3
+
+    sentences = verified.sections[0].sentences
+    assert [sentence.text for sentence in sentences] == [_FIXED[1]]
+    assert sentences[0].grade == GRADE_CONFIRMED
+    assert sentences[0].verification_state == "verified"
+    record = _record(protocol)
+    assert record["상태"] == GROUNDING_REWRITE_STATE_DONE
+    assert record["대상"] == 1
+    assert record["최종반영"] == 1
+
+
+def test_packet_경로도_끄면_제거되고_추가_호출이_없다():
+    ask = _FakeAI([], grouped_auto=True)
+    protocol: list[dict] = []
+
+    verified = verify_report(
+        _report(), _raw_fragments(), None, ask,
+        allowed_fragment_ids_by_section=_packet_allowed(),
+        protocol_diagnostics=protocol,
+    )
+
+    assert _texts(verified) == []
+    assert len(ask.grouped_prompts) == 1
+    assert ask.total_calls == 1  # 묶음 검수 1회뿐 — packet 계약 그대로다
+    assert _record(protocol) is None
+
+
+def test_packet_경로의_거짓_판정은_여전히_재작성하지_않는다():
+    """packet 의 «거짓 재작성 없음» 계약은 이 기능을 켜도 그대로다."""
+
+    ask = _FakeAI([], grouped_auto=False, batch_responses=[])
+    # 묶음 검수가 «거짓»을 답하게 직접 만든다(자동 참 응답을 쓰지 않는다).
+    ask.review_responses = [json.dumps(
+        {"판정": [{"번호": 1, "장": "identity", "근거": ["1"], "결과": VERDICT_FALSE}]},
+        ensure_ascii=False,
+    )]
+
+    verified = verify_report(
+        _report(), _raw_fragments(), None, ask,
+        allowed_fragment_ids_by_section=_packet_allowed(),
+        grounding_rewrite_enabled=True,
+    )
+
+    assert _texts(verified) == []
+    assert ask.rewrite_prompts == []  # 문장당 재작성 호출이 없다
+    assert ask.batch_prompts == []    # 근거 결속 탈락이 아니므로 묶음 재작성도 없다
+    assert ask.total_calls == 1
+
+
+# ══════════════════════════════════════════════════════════
+# ⑦ 요약 그룹은 고쳐 쓰지 않는다
+# ══════════════════════════════════════════════════════════
+
+
+def test_요약_그룹의_탈락_문장은_재작성_프롬프트에_실리지_않는다():
+    """요약은 «본문에서 고른» 문장을 글자 그대로 싣는 자리다.
+
+    여기서 새 글자를 만들면 같은 사실이 본문과 요약에서 다른 문장이 된다.
+    이 시험은 대상 수집에서 본문 조건을 빼면 빨개진다.
+    """
+    report = ComposedReport(
+        sections=(ComposedSection(
+            section_id="identity",
+            sentences=(ComposedSentence(text=_REJECTED[1], citations=("1",),
+                                        grade=GRADE_CONFIRMED),),
+        ),),
+        summary=(ComposedSentence(text=_REJECTED[2], citations=("1",),
+                                  grade=GRADE_CONFIRMED),),
+    )
+    ask = _FakeAI(
+        [_verdicts({1: VERDICT_TRUE, 2: VERDICT_TRUE}), _verdicts({1: VERDICT_TRUE})],
+        batch_responses=[_rewrites([{"번호": 1, "글": _FIXED[1], "포기": False}])],
+    )
+    protocol: list[dict] = []
+
+    verified = verify_report(
+        report, _raw_fragments(), None, ask,
+        protocol_diagnostics=protocol, grounding_rewrite_enabled=True,
+    )
+
+    prompt = ask.batch_prompts[0]
+    assert "번호 1 · 인용 조각" in prompt
+    assert "번호 2 · 인용 조각" not in prompt, "요약 문장이 고쳐 쓰기 대상에 들어갔다"
+    assert _REJECTED[2] not in prompt
+    # 요약 문장은 예전처럼 «제거»되고, 본문 문장만 되살아난다.
+    assert verified.summary == ()
+    assert _texts(verified) == [_FIXED[1]]
+    record = _record(protocol)
+    assert record["대상"] == 1
+    assert record["대상장"] == ["identity"]
+
+
+# ══════════════════════════════════════════════════════════
+# ⑧ 파이프라인 배선 — «실제 호출 인자»를 본다
 # ══════════════════════════════════════════════════════════
 
 
@@ -619,6 +779,117 @@ def test_run_v2가_켜짐을_verify_report의_실제_호출_인자로_넘긴다(
 
     assert calls, "run_v2가 verify_report를 한 번도 부르지 않았다"
     assert calls[0].get("grounding_rewrite_enabled") is True
+
+
+class _PacketWriter:
+    """packet 경로에서 «근거 결속에 걸릴» 확인 문장 하나씩을 아홉 장에 쓴다.
+
+    ★ 인용한 공식 자료와 낱말이 겹치지 않는 문장이라 `prose_own_source` 가
+      걸린다 — 실제 작가가 만들어 내는 결함 모양과 같은 자리다.
+    ★ 장마다 표지를 달리해 장 간 중복 제거가 여덟 장을 지우지 않게 한다.
+    """
+
+    #: 숫자 없는 장 표지 — 숫자를 넣으면 수치 검증이 근거에 없는 숫자로 본다.
+    MARKS = "가나다라마바사아자"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+        self.section_calls = 0
+
+    def __call__(self, prompt: str) -> str:
+        from src.features.composer.constants import SECTION_IDS
+        from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+
+        self.prompts.append(prompt)
+        section_id = SECTION_IDS[self.section_calls]
+        mark = self.MARKS[self.section_calls]
+        self.section_calls += 1
+        return json.dumps(
+            {"문장들": [{
+                "글": f"미르전자는 {mark} 위성 통신 장비를 수출한다.",
+                "인용": ["1"],
+                "등급": GRADE_CONFIRMED,
+                "주장슬롯": CLAIM_SLOTS_BY_SECTION[section_id][0],
+            }]},
+            ensure_ascii=False,
+        )
+
+
+def _packet_reviewer_class():
+    """`_FakeReviewer` 에 «묶음 재작성 응답»만 얹은 검수자.
+
+    run_v2 는 `rewrite_ask` 를 따로 주지 않으므로 재작성 호출도 검수 ask 로 간다
+    (`verify._grounding_rewrite_pass` 의 ``rewrite_ask or ask``).
+    """
+    from src.features.composer.tests.test_pipeline import _FakeReviewer
+
+    class _PacketReviewer(_FakeReviewer):
+        #: 고쳐 쓴 글 — 공식 자료 원문의 낱말을 그대로 써서 결속을 통과한다.
+        FIXED = "가나다전자는 공식 자료에서 회사 사업 실적을 설명한다."
+
+        def __init__(self):
+            super().__init__()
+            self.batch_prompts: list[str] = []
+
+        def __call__(self, prompt: str) -> str:
+            if prompt.startswith(GROUNDING_REWRITE_PROMPT_HEADER):
+                self.batch_prompts.append(prompt)
+                numbers = [
+                    int(number)
+                    for number in re.findall(r"번호 (\d+) · 인용 조각", prompt)
+                ]
+                return json.dumps(
+                    {"문장들": [{"번호": number, "글": self.FIXED, "포기": False}
+                             for number in numbers]},
+                    ensure_ascii=False,
+                )
+            return super().__call__(prompt)
+
+    return _PacketReviewer
+
+
+@pytest.mark.parametrize("켬", [True, False])
+def test_run_v2_packet_경로에서_재작성_프롬프트가_실제로_나간다(켬):
+    """★ 독립 검토가 찾은 P0 의 회귀 방지 — 운영 FULL 이 타는 경로다.
+
+    이 시험이 막는 것: 평문 경로에만 배선해 두면 단위 시험은 전부 초록인데
+    운영에서는 고쳐 쓰기가 한 번도 돌지 않는다.
+    ⚠️ 이 fixture 는 품질 하한 미달로 끝에서 V2ValidationError 가 난다. 그건 이
+      시험이 보는 것이 아니다 — 그 «전»에 어떤 호출이 나갔는지를 본다.
+    """
+    from src.features.composer.tests.test_pipeline import (
+        _strict_fragments,
+        _strict_packet_set,
+    )
+    from src.features.composer.validate import V2ValidationError
+
+    writer = _PacketWriter()
+    reviewer = _packet_reviewer_class()()
+
+    with contextlib.suppress(V2ValidationError):
+        run_v2(
+            "가나다전자",
+            _strict_fragments(),
+            None,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+            section_evidence_packets=_strict_packet_set(),
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
+            grounding_rewrite_enabled=켬,
+        )
+
+    assert len(writer.prompts) == 9  # 장 작성 9회는 양쪽 같다
+    if not 켬:
+        # 묶음 검수 1회뿐 — packet 계약이 예전 그대로다.
+        assert reviewer.batch_prompts == []
+        assert len(reviewer.prompts) == 1
+        return
+    # 묶음 재작성 1회 + 그 뒤 합친 재검수 1회가 «실제로» 나갔다.
+    assert len(reviewer.batch_prompts) == 1
+    assert len(reviewer.prompts) == 2
+    보낸번호 = re.findall(r"번호 (\d+) · 인용 조각", reviewer.batch_prompts[0])
+    assert 보낸번호 == [str(number) for number in range(1, 10)]
 
 
 def test_run_v2가_packet_경로의_verify_report에도_같은_값을_넘긴다(monkeypatch):
