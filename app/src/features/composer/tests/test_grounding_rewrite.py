@@ -30,6 +30,7 @@ from src.features.composer.grounding_rewrite_constants import (
     GROUNDING_REWRITE_MAX_SENTENCES,
     GROUNDING_REWRITE_PROMPT_HEADER,
     GROUNDING_REWRITE_REASON_TEXTS,
+    GROUNDING_REWRITE_RETRY_GUIDE,
 )
 from src.features.composer.pipeline import run_v2
 from src.features.composer.port import (
@@ -512,6 +513,77 @@ def test_예산이_부족하면_호출중단_기록만_남기고_나머지_문�
     assert record["상태"] == GROUNDING_REWRITE_STATE_CALL_ABORTED
     assert record["대상"] == 1
     assert record["오류종류"] == "호출한도"
+
+
+def test_호출이_죽으면_형식_재요청_없이_바로_닫는다():
+    """★ 유료 호출을 한 번 더 쓰지 않는다.
+
+    형식 재요청은 「답은 왔는데 모양이 틀렸다」를 고치는 수단이다. 호출 «자체»가
+    죽었으면 고칠 답이 없어서, 한 번 더 불러도 같은 자리에 선다.
+    이 시험은 그 조기 종료를 지우면 빨개진다(호출이 2회가 되고 두 번째
+    프롬프트에 재요청 안내가 붙는다).
+    ⚠️ 여기서 죽는 것은 «비치명» 실패다. 요청 전역 장애(AskFatalError)는 다른
+      갈래이며 바로 위 시험이 따로 못 박는다.
+    """
+    ask = _FakeAI(
+        [_verdicts({1: VERDICT_TRUE})],
+        batch_responses=[RuntimeError("작가 호출이 죽었다")],
+    )
+    protocol: list[dict] = []
+
+    verified = verify_report(
+        _report(), _raw_fragments(), None, ask,
+        protocol_diagnostics=protocol, grounding_rewrite_enabled=True,
+    )
+
+    assert len(ask.batch_prompts) == 1, "죽은 호출에 재요청까지 써서 유료 호출이 늘었다"
+    assert all(
+        GROUNDING_REWRITE_RETRY_GUIDE not in prompt for prompt in ask.batch_prompts
+    )
+    assert len(ask.review_prompts) == 1  # 재검수할 것이 없다
+    assert _texts(verified) == []
+    record = _record(protocol)
+    assert record["상태"] == GROUNDING_REWRITE_STATE_FORMAT_FAILED
+    assert record["응답꼴"] == ["읽기실패"]
+
+
+def test_먼저_난_호출중단_기록을_재검수_실패가_덮지_않는다():
+    """★ 먼저 난 사유가 진짜 원인이고, 재검수 실패는 그 결과다.
+
+    시나리오: «거짓» 재작성은 성공해 재검수 항목이 남았는데, 묶음 재작성 호출이
+    «호출한도»로 죽었고 이어진 합친 재검수마저 «요청예산»으로 죽는다. 이때 기록은
+    처음 사유(호출한도)여야 한다 — 두 번째 사유로 덮으면 「왜 이 단계가 멈췄나」를
+    되짚을 때 원인이 아니라 결과를 보게 된다.
+    이 시험은 덮어쓰기 방지 조건을 지우면 빨개진다(오류종류가 «요청예산»이 된다).
+    """
+    거짓문장 = ComposedSentence(
+        text=_REJECTED[2], citations=("1",), grade=GRADE_CONFIRMED,
+    )
+    ask = _FakeAI(
+        [
+            _verdicts({1: VERDICT_TRUE, 2: VERDICT_FALSE}),
+            # 합친 재검수 — 이쪽은 «요청예산»으로 죽는다.
+            AskFatalError(RuntimeError("예약액 소진"), request_budget=True),
+        ],
+        # 묶음 재작성 — 먼저 «호출한도»로 죽는다.
+        batch_responses=[AskFatalError(RuntimeError("호출 수 상한"), call_limit=True)],
+        rewrite_responses=[_FIXED[1]],
+    )
+    protocol: list[dict] = []
+
+    verified = verify_report(
+        _report((1,), extra=(거짓문장,)), _raw_fragments(), None, ask,
+        protocol_diagnostics=protocol, grounding_rewrite_enabled=True,
+    )
+
+    # 두 호출이 다 죽었어도 보고서는 나온다(문장만 빠진다).
+    assert _texts(verified) == []
+    assert len(ask.rewrite_prompts) == 1  # 거짓 재작성은 실제로 돌았다
+    assert len(ask.batch_prompts) == 1
+    assert len(ask.review_prompts) == 2  # 첫 검수 + 합친 재검수(죽은 호출)
+    record = _record(protocol)  # 기록이 정확히 하나임을 함께 본다
+    assert record["상태"] == GROUNDING_REWRITE_STATE_CALL_ABORTED
+    assert record["오류종류"] == "호출한도", "나중에 난 재검수 실패가 원래 사유를 덮었다"
 
 
 def test_돈_계정_장애는_삼키지_않고_그대로_올려_보낸다():
