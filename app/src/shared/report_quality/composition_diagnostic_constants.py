@@ -58,6 +58,21 @@ EMPTY_RECOVERY_RESPONSE_SHAPES = frozenset((
 #: 복구 «검수완료» 기록의 관문별 문장 수 칸 — 검수 통과 → 수치·중복 검사 뒤 → 최종 반영.
 EMPTY_RECOVERY_STAGE_COUNT_KEYS = ("검수통과", "안전검사후", "최종반영")
 
+#: 근거 결속 검사에서 탈락한 «확인» 문장을 한 번 묶어 고쳐 쓰는 단계의 진단 이름.
+#: 이 기록 하나가 「고쳐 쓰기를 안 했더라면 사라졌을 문장 수(대상)」와
+#: 「고쳐 써서 살아난 문장 수(최종반영)」를 함께 담아, 같은 실행 안에서
+#: 기능 유무를 비교할 수 있게 한다.
+GROUNDING_REWRITE_STEP = "8_근거결속_재작성"
+GROUNDING_REWRITE_STATE_DONE = "완료"
+GROUNDING_REWRITE_STATE_CALL_ABORTED = "호출중단"
+GROUNDING_REWRITE_STATE_FORMAT_FAILED = "작성형식실패"
+GROUNDING_REWRITE_STATES = frozenset((
+    GROUNDING_REWRITE_STATE_DONE, GROUNDING_REWRITE_STATE_CALL_ABORTED,
+    GROUNDING_REWRITE_STATE_FORMAT_FAILED,
+))
+#: «완료» 기록의 닫힌 개수 칸. 대상 → 재작성수신(포기 제외) → 기계검사통과 → 재검수참 → 최종반영.
+GROUNDING_REWRITE_COUNT_KEYS = ("대상", "재작성수신", "포기", "기계검사통과", "재검수참", "재검수애매", "최종반영")
+
 PROTOCOL_READ_CODES = frozenset((
     READ_OK, READ_EMPTY, READ_JSON_SYNTAX, READ_NOT_OBJECT,
     READ_VERDICTS_KEY_MISSING, READ_VERDICTS_NOT_LIST, READ_ALL_ROWS_INVALID,
