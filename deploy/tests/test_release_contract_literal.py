@@ -41,6 +41,9 @@ NEWS_INTAKE_ENV_NAME = "NEWS_INTAKE"
 EVIDENCE_RECLASSIFY_ENV_NAME = "EVIDENCE_RECLASSIFY"
 #: 1단계 매출표 범용 파서 kill switch 이름. 이것도 선언하지 않는 것이 off다.
 REVENUE_TABLE_V2_ENV_NAME = "REVENUE_TABLE_V2"
+#: 근거 결속 재작성 kill switch 이름. 위 스위치들과 방향이 반대 — 선언하지
+#: 않으면 켜진 것이고, 정확히 "0"일 때만 꺼진다.
+GROUNDING_REWRITE_ENV_NAME = "GROUNDING_REWRITE"
 #: 뉴스룸 글자 날짜의 AI 예비 단계. 프로그램 판정은 이 값과 무관하게 켜진다.
 NEWSROOM_DATE_AI_ENV_NAME = "NEWSROOM_DATE_AI"
 
@@ -132,6 +135,21 @@ def test_EVIDENCE_RECLASSIFY는_render_yaml에서_정확히_1로_켜져_있다()
     )
 
 
+def test_GROUNDING_REWRITE는_render_yaml에서_정확히_1로_켜져_있다() -> None:
+    """근거 결속 재작성은 기본이 켜짐이지만, 출시 Blueprint에도 값을 명시한다.
+
+    이 스위치는 다른 스위치들과 방향이 반대다(선언하지 않아도 켜짐, "0"만 끔).
+    render.yaml에 값을 적어 두지 않으면 「의도적으로 켠 것」인지 「그냥 빠뜨린
+    것」인지 코드만 봐서는 구분할 수 없으므로, 값까지 리터럴로 못 박는다.
+    """
+
+    render_values = _render_web_service_env()
+
+    assert render_values.get(GROUNDING_REWRITE_ENV_NAME) == "1", (
+        "출시 릴리스는 근거 결속 재작성을 정확히 \"1\"로 명시한 채 나갑니다"
+    )
+
+
 def test_NEWSROOM_DATE_AI는_render_yaml에_없다() -> None:
     """실제 provider 연결 전에는 프로그램 날짜 판정만 출시한다."""
 
@@ -167,6 +185,7 @@ def test_deploy_readme가_새_kill_switch를_적어_둔다() -> None:
     assert EVIDENCE_RECLASSIFY_ENV_NAME in readme
     assert NEWS_INTAKE_ENV_NAME in readme
     assert NEWSROOM_DATE_AI_ENV_NAME in readme
+    assert GROUNDING_REWRITE_ENV_NAME in readme
     assert "키를 지우고 재배포" in readme
 
 

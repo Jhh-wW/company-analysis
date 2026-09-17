@@ -7,6 +7,9 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     BODY_MACHINE_STEP, BODY_DISPOSITION_STEP, BODY_SECTION_IDS, BODY_DISPOSITIONS,
     BODY_SECTION_MOVE_STEP, SECTION_MOVE_BLOCKERS, SECTION_MOVE_REASONS,
     EMPTY_RECOVERY_STEP, EMPTY_RECOVERY_STATES, EMPTY_RECOVERY_ERRORS,
+    GROUNDING_REWRITE_STEP, GROUNDING_REWRITE_STATES, GROUNDING_REWRITE_COUNT_KEYS,
+    GROUNDING_REWRITE_STATE_DONE, GROUNDING_REWRITE_STATE_FORMAT_FAILED,
+    GROUNDING_REWRITE_STATE_CALL_ABORTED,
     DERIVED_RATIO_DECIMAL_FIELDS,
     DERIVED_RATIO_FINGERPRINT_FIELD,
     DERIVED_RATIO_KINDS,
@@ -169,7 +172,8 @@ def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], 
             _body_machine(record) if step == BODY_MACHINE_STEP else
             _body_disposition(record) if step == BODY_DISPOSITION_STEP else
             _body_section_move(record) if step == BODY_SECTION_MOVE_STEP else
-            _empty_recovery(record) if step == EMPTY_RECOVERY_STEP else None
+            _empty_recovery(record) if step == EMPTY_RECOVERY_STEP else
+            _grounding_rewrite(record) if step == GROUNDING_REWRITE_STEP else None
         )
         if normalized is not None:
             result.append(normalized)
@@ -242,6 +246,17 @@ def _body_section_move(record: Mapping) -> dict[str, object] | None:
             "사유코드": reason, "이동": moved, "이동불가": dict(blocked)}
 
 
+def _closed_shape_list(value: object) -> list[str] | None:
+    """시도별 응답 꼴 목록 — 비어 있지 않고 원소가 전부 닫힌 코드일 때만 돌려준다."""
+
+    if not isinstance(value, list) or not value:
+        return None
+    if any(not isinstance(item, str) or item not in EMPTY_RECOVERY_RESPONSE_SHAPES
+           for item in value):
+        return None
+    return list(value)
+
+
 def _empty_recovery(record: Mapping) -> dict[str, object] | None:
     state = record.get("상태")
     targets = _section_ids(record.get("대상장"))
@@ -272,12 +287,10 @@ def _empty_recovery(record: Mapping) -> dict[str, object] | None:
         result["시도"] = attempts
         # 시도마다 어떤 꼴이었는지 — 열린 문자열이 아니라 닫힌 코드만 남긴다.
         if "응답꼴" in record:
-            shapes = record.get("응답꼴")
-            if (not isinstance(shapes, list) or not shapes
-                    or any(not isinstance(item, str) or item not in EMPTY_RECOVERY_RESPONSE_SHAPES
-                           for item in shapes)):
+            shapes = _closed_shape_list(record.get("응답꼴"))
+            if shapes is None:
                 return None
-            result["응답꼴"] = list(shapes)
+            result["응답꼴"] = shapes
     if state == "검수완료":
         recovered = _section_ids(record.get("복구장"))
         if recovered is None or not set(recovered) <= set(targets):
@@ -291,6 +304,50 @@ def _empty_recovery(record: Mapping) -> dict[str, object] | None:
                 return None
             result[key] = record[key]
     if state == "호출중단":
+        error = record.get("오류종류")
+        if not isinstance(error, str) or error not in EMPTY_RECOVERY_ERRORS:
+            return None
+        result["오류종류"] = error
+    return result
+
+
+def _grounding_rewrite(record: Mapping) -> dict[str, object] | None:
+    """근거 결속 재작성 단계 — 대상장·개수·닫힌 코드만 통과시킨다.
+
+    「대상(고쳐 쓰지 않았다면 사라졌을 문장 수)」과 「최종반영(고쳐 써서 살아난
+    문장 수)」을 같은 기록에 담아, 같은 실행 안에서 기능 유무를 비교할 수 있게
+    한다. 원문·재작성 응답은 애초에 이 함수에 들어오지 않는 칸이라 걸러낼 것도
+    없지만, 열린 문자열 칸(응답꼴)은 닫힌 목록으로만 받는다.
+    """
+
+    state = record.get("상태")
+    targets = _section_ids(record.get("대상장"))
+    target_count = record.get("대상")
+    if (not isinstance(state, str) or state not in GROUNDING_REWRITE_STATES
+            or targets is None or not _count(target_count)):
+        return None
+    result: dict[str, object] = {
+        "step": GROUNDING_REWRITE_STEP, "상태": state, "대상장": targets,
+        "대상": target_count,
+    }
+    if state == GROUNDING_REWRITE_STATE_DONE:
+        for key in GROUNDING_REWRITE_COUNT_KEYS:
+            value = record.get(key)
+            if not _count(value):
+                return None
+            result[key] = value
+        if "응답꼴" in record:
+            shape = record.get("응답꼴")
+            if (not isinstance(shape, str)
+                    or shape not in EMPTY_RECOVERY_RESPONSE_SHAPES):
+                return None
+            result["응답꼴"] = shape
+    if state == GROUNDING_REWRITE_STATE_FORMAT_FAILED:
+        shapes = _closed_shape_list(record.get("응답꼴"))
+        if shapes is None:
+            return None
+        result["응답꼴"] = shapes
+    if state == GROUNDING_REWRITE_STATE_CALL_ABORTED:
         error = record.get("오류종류")
         if not isinstance(error, str) or error not in EMPTY_RECOVERY_ERRORS:
             return None
