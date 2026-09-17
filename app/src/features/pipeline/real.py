@@ -52,6 +52,7 @@ from src.core.provider_gateway.types import (
     ProviderObservation,
     TransportState,
 )
+from src.core.grounding_rewrite_switch import grounding_rewrite_enabled
 from src.core.constants import (
     AUDIT_WINDOW_YEARS,
     CACHE_HIT_LAYER1,
@@ -6697,6 +6698,9 @@ def _run_v2_composer(
             empty_recovery_can_start=lambda: engine.available_provider_calls(
                 reserved_calls=MANDATORY_TAIL_AI_CALLS + REWRITE_RECHECK_CALLS,
             ) > 0,
+            # 근거 결속 탈락 문장의 묶음 재작성 — 운영 스위치(GROUNDING_REWRITE)가
+            # 정확히 "0"일 때만 꺼진다. 호출마다 읽어 대시보드 변경이 바로 반영된다.
+            grounding_rewrite_enabled=grounding_rewrite_enabled(),
             corp_type=corp_type,
             generated_at=business_date.isoformat(),
             as_of_date=business_date.isoformat(),
