@@ -1440,6 +1440,7 @@ def run_v2(
     evidence_availability: EvidenceAvailability | None = None,
     evidence_available_fallback: bool = False,
     preserve_on_ask_failure: bool = False,
+    grounding_rewrite_enabled: bool = False,
     _downgraded_from: str = "",
 ) -> V2RunOutput:
     """엔진 v2 전체 흐름을 한 번 돌려 최종 보고서를 만든다 (04장 3-4절).
@@ -1457,6 +1458,11 @@ def run_v2(
             결함(구조 결속·생산 증거·manifest)은 여전히 예외로 끝난다.
       결과의 ``effective_release_mode``가 실제 적용 모드다 — FULL 요청이
       내려가면 SHADOW이며 파이프라인은 그 값으로 저장·차감을 다뤄야 한다.
+
+    ★ grounding_rewrite_enabled — 근거 결속 검사에서 탈락한 «확인» 본문 문장을
+      AI 1회로 묶어 고쳐 쓰고 재검수 1회로 되살릴지. 기본값이면 이 함수의
+      동작·AI 호출 수는 종전과 완전히 같다. 값은 `verify_report` 두 갈래에
+      «그대로» 넘어가며 이 함수는 다른 판단을 하지 않는다.
 
     흐름:
         ① compose_sections — 작가 AI가 9개 장을 산문으로 쓴다 (장 삭제 없음).
@@ -1947,6 +1953,7 @@ def run_v2(
                 sentence_rewrite_gate=rewrite_gate,
                 protocol_diagnostics=composition_diagnostics,
                 baseline_date=baseline_date,
+                grounding_rewrite_enabled=grounding_rewrite_enabled,
             )
         else:
             verified = verify_report(
@@ -1964,6 +1971,7 @@ def run_v2(
                 recheck_ask=recheck_for_run,
                 protocol_diagnostics=composition_diagnostics,
                 baseline_date=baseline_date,
+                grounding_rewrite_enabled=grounding_rewrite_enabled,
             )
             _assert_composed_report_evidence_invariant(
                 verified,
