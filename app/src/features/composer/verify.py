@@ -2552,8 +2552,11 @@ def _grounding_rewrite_pass(
       · 진단 기록 초안 — 재검수 뒤에 채워질 칸(재검수참·재검수애매·최종반영)은
         아직 비어 있다. 부르는 쪽이 마저 채워 남긴다.
 
-    ⚠️ 여기서 «제거»로 끝난 번호는 ``final`` 을 건드리지 않는다. 부르는 쪽이
-      이미 ``final[번호] = None`` 으로 두었고, 그 값이 곧 안전한 기본값이다.
+    ⚠️ 여기서는 어떤 번호도 ``final`` 을 건드리지 않는다. 기계 검사에 걸린 글은
+      전부 «제거»이고, 부르는 쪽이 이미 ``final[번호] = None`` 으로 두었기
+      때문이다. 그 값이 곧 안전한 기본값이다.
+    ⚠️ 수치 «강등»도 제거다 — «거짓» 재작성(`_rewrite_false_candidates`)과
+      일부러 다르다. 이유는 아래 판정 자리의 주석에 적었다.
     """
     ordered = sorted(targets, key=lambda item: item.number)
     record: dict[str, object] = {
@@ -2600,11 +2603,15 @@ def _grounding_rewrite_pass(
         # 기계 검증·거짓 재작성 경로와 «같은» 잣대다.
         if _has_raw_won_amount(candidate.text):
             continue
-        disposal = _numeric_disposal(candidate, frag_by_id, table_texts)
-        if disposal == NUMERIC_REMOVE:
-            continue
-        if disposal == NUMERIC_DEMOTE:
-            final[item.number] = _demoted(candidate)
+        # ★ «강등»도 여기서는 «제거»다 — «거짓» 재작성 경로와 일부러 다르다.
+        #   그쪽 문장은 검수 AI 가 내용을 «거짓»이라 본 것이라, 해석 등급으로
+        #   내려 남기는 것이 예전부터의 계약이다. 이쪽 문장은 «기계 가드»가
+        #   근거 결속으로 한 번 떨어뜨린 글의 새 판본이고, 그 두 번째 기계
+        #   검사에서도 숫자를 원문에 결속하지 못했다. 해석으로 되살리면 근거
+        #   결속 가드를 «한 번도 다시 지나지 않은» 문장이 본문에 남는다
+        #   (강등된 문장은 재검수에 넣지 않으므로 가드가 다시 돌지 않는다).
+        #   그래서 보수적으로 버린다.
+        if _numeric_disposal(candidate, frag_by_id, table_texts) != NUMERIC_PASS:
             continue
         machine_passed += 1
         recheck_items.append(replace(item, sentence=candidate))

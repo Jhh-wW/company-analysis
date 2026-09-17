@@ -333,6 +333,50 @@ def test_재작성문의_근거에_없는_수치는_재검수_전에_제거된�
     assert record["최종반영"] == 0
 
 
+def test_재작성문이_수치_강등_판정을_받으면_해석으로_살리지_않고_제거한다():
+    """★ «거짓» 재작성 경로와 일부러 다른 자리다.
+
+    그쪽은 검수 AI 가 내용을 «거짓»이라 본 문장이라 해석 등급으로 내려 남긴다.
+    이쪽은 «기계 가드»가 근거 결속으로 떨어뜨린 글의 새 판본이고, 두 번째 기계
+    검사에서도 숫자를 원문에 결속하지 못했다. 강등된 문장은 재검수에 넣지
+    않으므로, 해석으로 살리면 근거 결속 가드를 «한 번도 다시 지나지 않은»
+    문장이 본문에 남는다.
+    """
+    ask = _FakeAI(
+        [
+            _verdicts({1: VERDICT_TRUE, 2: VERDICT_TRUE}),
+            _verdicts({1: VERDICT_TRUE}),
+        ],
+        batch_responses=[_rewrites([
+            {"번호": 1, "글": _FIXED[1], "포기": False},
+            # 조각 2 원문에는 연도가 하나도 없다 → «강등» 처분이 된다(제거 아님).
+            {"번호": 2,
+             "글": "나래산업은 2019년부터 국내 완성차 회사를 주요 거래처로 두고 있다.",
+             "포기": False},
+        ])],
+    )
+    protocol: list[dict] = []
+
+    verified = verify_report(
+        _report((1, 2)), _raw_fragments((1, 2)), None, ask,
+        protocol_diagnostics=protocol, grounding_rewrite_enabled=True,
+    )
+
+    # 강등 판정을 받은 글은 어떤 등급으로도 남지 않는다.
+    assert _texts(verified) == [_FIXED[1]]
+    assert all(
+        "2019" not in sentence.text for sentence in verified.sections[0].sentences
+    )
+    # 재검수 프롬프트에 그 번호가 아예 없다 — 가드가 다시 돌 기회 자체가 없다.
+    재검수 = ask.review_prompts[1]
+    assert "[1] (등급: " in 재검수
+    assert "[2] (등급: " not in 재검수
+    record = _record(protocol)
+    assert record["재작성수신"] == 2
+    assert record["기계검사통과"] == 1  # 강등은 «통과»로 세지 않는다
+    assert record["최종반영"] == 1
+
+
 def test_재검수의_근거결속이_다시_탈락시키면_제거된다():
     """고쳐 쓴 글이 여전히 자기 인용에 기대지 못하면 살아나지 않는다."""
 
