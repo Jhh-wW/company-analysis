@@ -688,6 +688,13 @@ def test_부호_변화_문장도_표시값만_바꾸면_공개본에서_뺀다()
         ),
         pytest.param(
             Decimal("-301.6"),
+            Decimal("0.0"),
+            "별도 영업이익은 2024년 -301.6억원에서 2025년 0.0억원으로 "
+            "손실이 사라졌다.",
+            id="손실-소멸",
+        ),
+        pytest.param(
+            Decimal("-301.6"),
             Decimal("12.4"),
             "별도 영업이익은 2024년 -301.6억원에서 2025년 12.4억원으로 "
             "흑자로 돌아섰다.",
@@ -702,11 +709,19 @@ def test_부호_변화_문장도_표시값만_바꾸면_공개본에서_뺀다()
         ),
         pytest.param(
             Decimal("0.0"),
+            Decimal("-588.5"),
+            "별도 영업이익은 2024년 0.0억원에서 2025년 -588.5억원으로 "
+            "적자로 돌아섰다.",
+            id="기준값-0-적자-전환",
+        ),
+        pytest.param(
+            Decimal("0.0"),
             Decimal("471.2"),
             "별도 영업이익은 2024년 0.0억원에서 2025년 471.2억원이 됐다.",
             id="기준값-0",
         ),
         pytest.param(Decimal("-301.6"), Decimal("-301.6"), "", id="변화-없음"),
+        pytest.param(Decimal("0.0"), Decimal("0.0"), "", id="0-유지"),
     ],
 )
 def test_부호_구간_문장은_방향마다_정해진_한_문장이다(
@@ -727,6 +742,82 @@ def test_부호_구간_문장은_방향마다_정해진_한_문장이다(
         )
         == expected
     )
+
+
+@pytest.mark.parametrize(
+    ("start_raw", "end_raw", "expected", "incorrect_tail"),
+    [
+        pytest.param(
+            "-30,162,706,039",
+            "0",
+            "별도 영업이익은 2024년 -301.6억원에서 2025년 0.0억원으로 손실이 사라졌다.",
+            "흑자로 돌아섰다.",
+            id="손실-소멸",
+        ),
+        pytest.param(
+            "-30,162,706,039",
+            "1,240,000,000",
+            "별도 영업이익은 2024년 -301.6억원에서 2025년 12.4억원으로 흑자로 돌아섰다.",
+            "손실이 사라졌다.",
+            id="흑자-전환",
+        ),
+        pytest.param(
+            "0",
+            "-58,852,153,409",
+            "별도 영업이익은 2024년 0.0억원에서 2025년 -588.5억원으로 적자로 돌아섰다.",
+            "손실이 사라졌다.",
+            id="기준값-0-적자-전환",
+        ),
+    ],
+)
+def test_손익_0_경계도_원문표와_결속되며_다른_방향으로_바꾸면_제외한다(
+    start_raw: str,
+    end_raw: str,
+    expected: str,
+    incorrect_tail: str,
+) -> None:
+    # 실제 PDF 픽스처는 보존하고, 0의 열 위치가 명확한 경계 시험용 표를 만든다.
+    header = _WRTN_STATEMENT.split("과        목", 1)[0]
+    statement = (
+        f"<TABLE><TR><TD>{header}</TD></TR>\n"
+        "<TR><TD>영업수익</TD><TD>47,117,211,348</TD><TD>3,073,716,215</TD></TR>\n"
+        f"<TR><TD>영업이익</TD><TD>{end_raw}</TD><TD>{start_raw}</TD></TR>\n"
+        "<TR><TD>당기순손실</TD><TD>58,121,775,636</TD><TD>30,242,954,858</TD></TR>\n"
+        "</TABLE>"
+    )
+    table, fragments, filing = _audit_case(
+        statement,
+        fragment_number=28,
+        receipt_number=_WRTN_RECEIPT_NUMBER,
+    )
+    sentence = next(
+        sentence
+        for sentence in build_past_changes_numeric_claims(table, fragments, filing)
+        if sentence.structured_claim is not None
+        and sentence.structured_claim.metric == "영업이익"
+    )
+
+    assert sentence.text == expected
+    assert sentence.structured_claim is not None
+    assert sentence.structured_claim.formula == "signed_change"
+    assert is_release_ready_numeric_sentence(sentence, section_id="past_changes")
+    report = ComposedReport(
+        sections=(ComposedSection("past_changes", (sentence,)),),
+        summary=(),
+    )
+    safe, filtering = enforce_public_numeric_safety(report)
+    assert safe.sections[0].sentences == (sentence,)
+    assert filtering.removed_total == 0
+
+    # 숫자를 보존해도 방향어가 결속의 원래 두 값과 맞지 않으면 탈락해야 한다.
+    incorrect_text = expected.split("으로 ", 1)[0] + "으로 " + incorrect_tail
+    tampered = replace(sentence, text=incorrect_text)
+    tampered_report = replace(
+        report, sections=(ComposedSection("past_changes", (tampered,)),),
+    )
+    safe, filtering = enforce_public_numeric_safety(tampered_report)
+    assert safe.sections[0].sentences == ()
+    assert filtering.removed_total == 1
 
 
 def test_감사보고서_claim이_렌더_FactRecord와_원문지문까지_결속된다() -> None:

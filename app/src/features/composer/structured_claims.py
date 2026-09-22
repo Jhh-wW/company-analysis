@@ -243,14 +243,16 @@ def _signed_change_claim_text(
         f"{period_start}년 {_scaled_text(start_value, display_places)}{display_unit}에서 "
         f"{period_end}년 {_scaled_text(end_value, display_places)}{display_unit}"
     )
-    # 기준값이 0이면 「몇 배가 됐다」를 말할 수 없다. 방향어 없이 결과만 적는다.
-    if start_value == 0:
+    # 0에서 양수로 바뀌면 배율을 말할 수 없으므로 결과만 적는다.
+    if start_value == 0 and end_value > 0:
         return f"{head}{subject} 됐다."
     if start_value < 0 and end_value < 0:
         tail = "손실이 늘었다" if end_value < start_value else "손실이 줄었다"
-    elif start_value < 0 <= end_value:
+    elif start_value < 0 and end_value == 0:
+        tail = "손실이 사라졌다"
+    elif start_value < 0 < end_value:
         tail = "흑자로 돌아섰다"
-    elif start_value > 0 and end_value < 0:
+    elif start_value >= 0 and end_value < 0:
         tail = "적자로 돌아섰다"
     else:
         # 양수 구간은 증감률 문장이 맡는다.

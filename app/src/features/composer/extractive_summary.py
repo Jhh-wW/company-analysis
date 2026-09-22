@@ -229,9 +229,15 @@ def select_extractive_summary(
                     ExtractiveSummaryItem(section_id, sentence, fact.fact_id)
                 )
         if candidates:
-            # 안정 정렬로 동점의 본문 순서를 지키며, 장별 선택 순서는 바꾸지 않는다.
+            # 숫자 가점이 확인 우선을 뒤집지 않게 등급부터 비교한다.
+            # 등급과 점수가 같으면 안정 정렬로 본문 순서를 지킨다.
             pools[section_id] = sorted(
-                candidates, key=lambda item: _summary_score(item.sentence), reverse=True
+                candidates,
+                key=lambda item: (
+                    item.sentence.grade != GRADE_INTERPRETED,
+                    _summary_score(item.sentence),
+                ),
+                reverse=True,
             )
 
     selected: list[ExtractiveSummaryItem] = []
