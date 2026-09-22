@@ -77,6 +77,10 @@ from src.features.composer.constants import (
     SENTENCE_RANGE_GUIDE,
     VALID_GRADES,
 )
+from src.features.composer.diagram_review_constants import (
+    FLOW_GENERIC_CELL_PARTICLES,
+    FLOW_GENERIC_CELL_TERMS,
+)
 from src.features.composer.port import (
     AskFatalError,
     CollectedFragment,
@@ -814,6 +818,53 @@ def parse_section_response(
 # ══════════════════════════════════════════════════════════
 
 
+def _generic_cell_key(value: str) -> str:
+    """일반어 대조용 열쇠 — 호환문자를 펼치고 공백을 없앤 소문자 표면.
+
+    ★ 왜 여기에 따로 두나 — 같은 일을 하는 ``diagram_check._compact_surface``를
+      부르면 ``diagram_check → logic`` 방향의 import가 되돌아와 순환이 된다.
+      이 함수는 «한 낱말 대조»에만 쓰는 최소판이라 구두점까지 지우지 않는다.
+    """
+
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    return "".join(normalized.split()).casefold()
+
+
+#: 일반어 목록을 대조 열쇠로 미리 바꿔 둔다 — 칸마다 다시 만들지 않는다.
+_GENERIC_CELL_KEYS: Final[frozenset[str]] = frozenset(
+    _generic_cell_key(term) for term in FLOW_GENERIC_CELL_TERMS
+)
+
+
+def is_generic_flow_cell(value: str) -> bool:
+    """칸 값 «전체»가 어느 회사에나 들어맞는 한 낱말인가.
+
+    Args:
+        value: 도식 칸 하나의 값.
+
+    Returns:
+        「상품」·「고객」·「개인 사용자」처럼 회사를 전혀 가리키지 못하는 한
+        낱말이면 참. 빈 칸은 이 검사의 대상이 아니므로 거짓이다.
+
+    ★ 빈 칸에 거짓을 주는 것은 «검사 대상이 아니다»라는 뜻이다. 「칸이 비면
+      어떻게 하나」는 부르는 쪽(`_flow_row_from_item`·렌더러)이 이미 정해 뒀다.
+    ★ 조사는 «하나»만 뗀다. 「고객사」처럼 낱말을 이루는 글자는 떼지 않으므로
+      뜻이 있는 칸은 그대로 남는다.
+    """
+
+    key = _generic_cell_key(value)
+    if not key:
+        return False
+    if key in _GENERIC_CELL_KEYS:
+        return True
+    for particle in FLOW_GENERIC_CELL_PARTICLES:
+        if key.endswith(particle):
+            stem = key[: -len(particle)]
+            if stem and stem in _GENERIC_CELL_KEYS:
+                return True
+    return False
+
+
 def _flow_row_from_item(
     item: Any,
     cell_count: int,
@@ -839,6 +890,12 @@ def _flow_row_from_item(
         return None
     if len(cells) != cell_count:
         return None
+    # ★ 일반어 한 낱말 칸은 «빈 칸»으로 본다 (2026-09-22 산출 PDF 실측).
+    #   「상품 → 판매 → 고객」처럼 세 칸이 모두 그런 줄은 바로 아래 «전부 빈
+    #   줄» 규칙이 통째로 버리고, 일부만 그런 줄은 종전의 빈 칸 처리(화살표
+    #   장은 「미확인」, 카드 장은 칸 자체를 뺌)를 그대로 따른다.
+    #   ⚠️ 여기서 «줄»을 따로 버리지 않는다 — 빈 칸 처분은 한 곳에서만 정한다.
+    cells = tuple("" if is_generic_flow_cell(cell) else cell for cell in cells)
     # ★ 빈 칸을 허용한다 (제품 결정). 예전에는 한 칸이라도
     #   비면 줄을 버렸는데, 8장 「확인된 사례」처럼 «없을 수 있는» 칸 때문에
     #   쓸 만한 줄이 통째로 사라졌다. 다만 «전부» 빈 줄은 아무 말도 하지
