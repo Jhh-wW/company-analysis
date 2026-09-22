@@ -283,6 +283,9 @@ def _source_snapshot(
                 "unit": fragment.unit,
                 "company_scope": fragment.company_scope,
             }
+            # 구형/DART 지문은 보존하고, 현행 웹 위치의 해석에 필요한 값을 묶는다.
+            if fragment.range_index != -1 or fragment.item_url:
+                fragment_row.update(range_index=fragment.range_index, item_url=fragment.item_url)
             previous_fragment = fragment_rows_by_id.setdefault(
                 fragment.fragment_id,
                 fragment_row,

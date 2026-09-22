@@ -168,8 +168,12 @@ class EvidenceFragment:
     item_title: str = ""
     item_published_on: str = ""
     item_url: str = ""
+    #: 공식 웹 생산기가 확인한 usable_ranges 인덱스. 구형/DART 조각은 -1.
+    range_index: int = -1
 
     def __post_init__(self) -> None:
+        if type(self.range_index) is not int or self.range_index < -1:
+            raise ValueError("근거 원문 구간 인덱스는 -1 또는 0 이상의 정수여야 합니다")
         for label, value in (
             ("회사 식별자", self.company_id),
             ("근거 조각 식별자", self.fragment_id),
