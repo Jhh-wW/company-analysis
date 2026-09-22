@@ -198,6 +198,36 @@ def test_요약도_같은_인용_표기로_실린다():
     assert len(texts) == 3
 
 
+def test_메디라인_요약은_본문의_번호_미루기와_무관하게_자기_번호를_투영한다():
+    from src.features.composer.tests.test_summary_scoring import (
+        MEDILINE_ACCOUNTING, MEDILINE_BUSINESS,
+    )
+    from src.features.report_standard.public_projection import build_public_projection
+
+    sentences = (
+        _sentence(MEDILINE_BUSINESS, ("59",)),
+        _sentence(MEDILINE_ACCOUNTING, ("59",)),
+    )
+    composed = ComposedReport(
+        sections=tuple(
+            ComposedSection(section_id, sentences if section_id == "operations_partners" else ())
+            for section_id in SECTION_IDS
+        ),
+        summary=sentences,
+    )
+    fragments = {59: {"종류": "사업내용", "원문": " ".join(sentence.text for sentence in sentences)}}
+
+    rendered = render_report("메디라인액티브코리아", composed, fragments, None)
+    section = next(item for item in rendered.sections if item.cell == "operations_partners")
+    assert section.prose_lines[0][0] == MEDILINE_BUSINESS
+    assert section.prose_lines[1][0].endswith("[59]")
+    assert [item.text for item in rendered.summary_items] == [
+        f"{sentence.text} [59]" for sentence in sentences
+    ]
+    projection = build_public_projection(rendered)
+    assert [row.text for row in projection.summary] == [item.text for item in rendered.summary_items]
+
+
 def test_검증본문을_글자그대로_고른_요약은_같은_사실과_결속된다():
     sentence = ComposedSentence(
         text="고객의 성공이 최우선 가치다.",

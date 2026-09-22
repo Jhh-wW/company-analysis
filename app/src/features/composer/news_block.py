@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import calendar
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import date
@@ -19,6 +20,8 @@ from src.features.composer.news_constants import (
     NEWS_BODY_DUPLICATE_PREVIEW_CHARS,
     NEWS_BODY_REFERENCE_SUFFIX,
     NEWS_PERIOD_MONTHS,
+    NEWS_TABLE_DEDUPE_NGRAM_SIZE,
+    NEWS_TABLE_DEDUPE_OVERLAP_THRESHOLD,
 )
 from src.features.composer.port import (
     ComposedReport,
@@ -58,13 +61,13 @@ _SECTION_OF_SLOT: Final[dict[str, str]] = {
 NEWS_BLOCK_HEADERS: Final[tuple[str, ...]] = ("발행일", "매체 · 기사", "보도 내용")
 
 #: 조각 수와 혼동하지 않도록 기사 단위를 표시한다.
-NEWS_BLOCK_CAPTION_TEMPLATE: Final[str] = "최근 보도 (보조, {count}기사)"
+NEWS_BLOCK_CAPTION_TEMPLATE: Final[str] = "관련 보도 {count}건"
 
 #: 표에 실린 기사 중 1차 기간창(``NEWS_PERIOD_MONTHS[0]`` = 12개월)보다 오래된
 #: 발행일이 섞였을 때 쓴다. 「최근」이라는 말이 몇 년 전 기사에도 그대로
 #: 붙는 것을 막기 위해 가장 오래된 기사의 발행연도를 덧붙인다.
 NEWS_BLOCK_CAPTION_TEMPLATE_WITH_YEAR: Final[str] = (
-    "최근 보도 (보조, {count}기사 · {year}년 보도 포함)"
+    "관련 보도 {count}건 · {year}년 보도 포함"
 )
 
 #: 공개 표현. 도식이 아니라 «그냥 표»다 — 세 칸이 흐름으로 이어지지 않으므로
@@ -119,6 +122,49 @@ def news_block_caption(row_count: int, oldest_stale_year: Optional[int] = None) 
             count=int(row_count), year=int(oldest_stale_year)
         )
     return NEWS_BLOCK_CAPTION_TEMPLATE.format(count=int(row_count))
+
+
+def _news_comparison_text(text: str) -> str:
+    """공백·문장부호 차이로 같은 보도가 다시 실리지 않게 한다."""
+
+    return "".join(
+        char for char in unicodedata.normalize("NFKC", text).casefold()
+        if char.isalnum()
+    )
+
+
+def _news_trigrams(text: str) -> frozenset[str]:
+    return frozenset(
+        text[index:index + NEWS_TABLE_DEDUPE_NGRAM_SIZE]
+        for index in range(len(text) - NEWS_TABLE_DEDUPE_NGRAM_SIZE + 1)
+    )
+
+
+def _news_repeats_sentence(news_text: str, sentence_text: str) -> bool:
+    if not news_text or not sentence_text:
+        return False
+    if news_text in sentence_text or sentence_text in news_text:
+        return True
+    news_grams = _news_trigrams(news_text)
+    sentence_grams = _news_trigrams(sentence_text)
+    if not news_grams or not sentence_grams:
+        return False
+    # 기존 산문 중복 판정과 같이 짧은 쪽을 분모로 써 보도 접두어 길이에 흔들리지 않는다.
+    overlap = len(news_grams & sentence_grams) / min(len(news_grams), len(sentence_grams))
+    return overlap >= NEWS_TABLE_DEDUPE_OVERLAP_THRESHOLD
+
+
+def nonredundant_news_rows(section: ComposedSection) -> tuple[NewsRow, ...]:
+    """렌더와 공개 봉인이 같은 생존 행을 소비하도록 한 곳에서 고른다."""
+
+    prose = tuple(_news_comparison_text(sentence.text) for sentence in section.sentences)
+    return tuple(
+        row for row in section.news_rows
+        if not any(
+            _news_repeats_sentence(_news_comparison_text(row.cells[-1]), sentence)
+            for sentence in prose
+        )
+    )
 
 
 def _month_boundary(as_of: date, months: int) -> date:
