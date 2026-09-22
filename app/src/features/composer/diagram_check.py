@@ -86,6 +86,9 @@ from src.features.composer.challenge_response_evidence import (
 )
 from src.features.composer.diagram_review_constants import (
     BUSINESS_FLOW_PRODUCT_HEADER,
+    ACCOUNTING_REVENUE_LABEL_RE,
+    BUSINESS_FLOW_REVENUE_HEADER,
+    FLOW_ACCOUNTING_REVENUE_CODE,
     DIAGRAM_CITATIONS_PREFIX,
     DIAGRAM_EVIDENCE_GUIDE,
     DIAGRAM_EVIDENCE_PREFIX,
@@ -631,6 +634,27 @@ def _cell_index(section_id: str, header: str) -> Optional[int]:
     return headers.index(header) if header in headers else None
 
 
+def _drop_accounting_revenue_rows(
+    rows: tuple[FlowRow, ...],
+) -> tuple[tuple[FlowRow, ...], tuple[str, ...]]:
+    # 수익 확대 칸의 회계 처리 설명은 사업의 반복 수익 경로를 입증하지 않는다.
+    index = _cell_index(BUSINESS_FLOW_SECTION_ID, BUSINESS_FLOW_REVENUE_HEADER)
+    if index is None:
+        return rows, ()
+    kept: list[FlowRow] = []
+    problems: list[str] = []
+    for row in rows:
+        if index < len(row.cells) and ACCOUNTING_REVENUE_LABEL_RE.fullmatch(
+            _compact_surface(row.cells[index])
+        ):
+            problems.append(
+                f'{FLOW_ACCOUNTING_REVENUE_CODE}: 반복 수익 칸이 순수 회계 처리 설명인 경로 제외'
+            )
+        else:
+            kept.append(row)
+    return tuple(kept), tuple(problems)
+
+
 def _section_source_texts(
     section: ComposedSection, texts: Mapping[str, str]
 ) -> tuple[str, ...]:
@@ -1164,6 +1188,10 @@ def check_diagram_numbers(
                 f"[{section.section_id}] {reason}" for reason in conflicted
             )
         if section.section_id == BUSINESS_FLOW_SECTION_ID:
+            rows, accounting_rows = _drop_accounting_revenue_rows(rows)
+            problems.extend(
+                f'[{section.section_id}] {reason}' for reason in accounting_rows
+            )
             # ★ 줄을 빼지 않는 «관측»이다 — 빠진 매출원이 있다는 사실만 남긴다.
             #   프롬프트가 다음 실행에서 채우게 하고, 우리가 칸을 지어내지 않는다.
             missing = missing_revenue_streams(
