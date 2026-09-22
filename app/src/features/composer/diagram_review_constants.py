@@ -144,7 +144,20 @@ REVENUE_STREAM_AGGREGATE_NAMES: Final[frozenset[str]] = frozenset(
 #: 손익계산서 항목(「제품매출」)만 매출원 이름의 출처로 인정한다.
 #: ★ 왜 좁히나 — 「매출이 늘었다」 같은 산문에서 이름을 뽑으면 회사마다
 #:   엉뚱한 누락이 잡힌다. 매출원은 «구성을 밝힌 자리»에서만 읽는다.
-REVENUE_COMPOSITION_MARKERS: Final[tuple[str, ...]] = ("구성", "나뉘", "분류")
+#: ★ 「나뉜다」·「나뉩니다」는 「나뉘」를 부분문자열로 갖지 않는다(나·뉜·다).
+#:   한글은 어간이 어미와 한 글자로 합쳐져서, 활용형마다 따로 적어야 한다.
+REVENUE_COMPOSITION_MARKERS: Final[tuple[str, ...]] = (
+    "구성",
+    "나뉘",
+    "나뉜",
+    "나뉩",
+    "분류",
+)
+
+#: 연도는 매출«원» 이름이 아니다. 「2024년 매출과 2025년 매출로 구성된다」는
+#: 기간 비교지 구성 설명이 아니라, 있지도 않은 매출원 누락을 만들어 낸다.
+#: 집계어 목록은 글자 그대로 맞추는 방식이라 해마다 바뀌는 숫자를 못 담는다.
+REVENUE_STREAM_YEAR_NAME_RE: Final[re.Pattern[str]] = re.compile(r"(19|20)\d{2}년?")
 
 #: 문장 가르기 — 구성 표지가 «그 문장 안»에 있는지 보려면 먼저 문장을 나눈다.
 REVENUE_SENTENCE_SPLIT_RE: Final[re.Pattern[str]] = re.compile(r"[.!?\n]+")

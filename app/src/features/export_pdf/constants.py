@@ -6,6 +6,10 @@ import re
 from pathlib import Path
 from typing import Final
 
+from src.shared.report_generation.citation_constants import (
+    CITATIONS_NO_EXTERNAL_NEWS_NOTE as _CITATIONS_NO_EXTERNAL_NEWS_NOTE,
+)
+
 CONTENT_TYPE_PDF: Final[str] = "application/pdf"
 PDF_SUFFIX: Final[str] = ".pdf"
 FILENAME_PATTERN: Final[str] = "{company_slug}-company-analysis" + PDF_SUFFIX
@@ -123,7 +127,9 @@ EMPTY_DEFAULT_REASON: Final[str] = "해당 자료를 찾지 못했습니다"
 CITATIONS_NOTE: Final[str] = (
     "본문의 번호가 아래 원문을 가리킵니다."
 )
-CITATIONS_NO_EXTERNAL_NEWS_NOTE: Final[str] = "이 보고서에는 외부 언론 보도 출처가 없습니다."
+# 글자의 정본은 shared다 — 같은 문구를 Notion·웹·출처 계층도 쓴다.
+# 여기서는 이름만 그대로 재노출해 기존 `constants.CITATIONS_...` 참조를 지킨다.
+CITATIONS_NO_EXTERNAL_NEWS_NOTE: Final[str] = _CITATIONS_NO_EXTERNAL_NEWS_NOTE
 SOURCE_STATE_LABEL: Final[dict[str, str]] = {
     "ok": "찾음",
     "none": "없음",

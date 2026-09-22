@@ -28,14 +28,18 @@
 
 from __future__ import annotations
 
-from src.features.provenance.sources import source_label_display, source_status_display, external_news_notice
-
 import re
 from collections.abc import Mapping, Sequence
 from typing import Final, Optional
 
 from src.features.pipeline.port import Report, ReportSection, ReportTable
-from src.features.provenance.sources import Source, visible_citations
+from src.features.provenance.sources import (
+    Source,
+    external_news_notice,
+    source_label_display,
+    source_status_display,
+    visible_citations,
+)
 from src.features.report_standard.constants import SECTION_BY_ID
 from src.features.report_standard.cover_metrics import cover_metrics
 from src.features.report_standard.period_summary import period_summary_from_table

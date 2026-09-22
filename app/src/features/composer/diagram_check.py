@@ -101,6 +101,7 @@ from src.features.composer.diagram_review_constants import (
     REVENUE_STREAM_AGGREGATE_NAMES,
     REVENUE_STREAM_RE,
     REVENUE_STREAM_TRAILING_PARTICLES,
+    REVENUE_STREAM_YEAR_NAME_RE,
 )
 from src.features.composer.grounding import constrain_verdicts, grounding_hint
 from src.features.composer.grounding_constants import GROUNDING_GUIDE
@@ -690,6 +691,10 @@ def revenue_stream_names(source_texts: Sequence[str]) -> tuple[str, ...]:
                     # 「매출액」·「매출원가」·「수익률」 — 이름이 아니라 합계·지표다.
                     continue
                 if name in REVENUE_STREAM_AGGREGATE_NAMES:
+                    continue
+                if REVENUE_STREAM_YEAR_NAME_RE.fullmatch(name):
+                    # 「2024년 매출」의 「2024년」은 기간이지 매출원이 아니다.
+                    # 글자 목록으로는 해마다 바뀌는 숫자를 담을 수 없다.
                     continue
                 if not composition and gap:
                     # 붙여 쓰지 않은 「… 매출」은 구성 절 안에서만 이름으로 본다.
