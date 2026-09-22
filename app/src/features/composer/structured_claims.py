@@ -45,6 +45,10 @@ from src.features.composer.port import (
 )
 from src.shared.dart_financial_provenance import dart_payload_matches_table
 from src.shared.display_scale import display_places, format_display_value, quantum_for
+from src.features.composer.structured_claim_constants import (
+    RATE_AMOUNT_DIVISOR, RATE_AMOUNT_UNIT, RATE_AMOUNT_MIN_PLACES,
+    RATE_AMOUNT_DECIMAL_PRECISION,
+)
 from src.shared.report_evidence.legacy_fragment_kinds import (
     LEGACY_KIND_AUDIT_FINANCIAL,
 )
@@ -77,9 +81,6 @@ RATE_ROUNDING_PLACES = 2
 RATE_TOLERANCE = "0.000001"
 #: 전년 대비 문장에 읽을 금액은 원값 결속에서만 환산한다. 최소 한 자리를
 #: 유지하고 작은 금액은 공용 정밀도 규칙을 따른다(표의 반올림 값으로 비율 재계산 금지).
-RATE_AMOUNT_DIVISOR = Decimal("100000000")
-RATE_AMOUNT_UNIT = "억원"
-RATE_AMOUNT_MIN_PLACES = 1
 #: 부호 변화 문장의 계산은 표시 단위 두 값의 뺄셈뿐이라 오차가 생기지 않는다.
 #: 그래도 증감률과 같은 허용치를 쓰는 이유는, 두 계약이 다른 값을 쓰면 어느
 #: 쪽이 «느슨한 쪽»인지 사람이 매번 다시 확인해야 하기 때문이다.
@@ -205,7 +206,7 @@ def _rate_claim_text(binding: NumericBinding) -> str:
     unit = start.unit
     try:
         with localcontext() as decimal_context:
-            decimal_context.prec = 160
+            decimal_context.prec = RATE_AMOUNT_DECIMAL_PRECISION
             if unit == "원" and start.unit_dimension is UnitDimension.CURRENCY:
                 unit = RATE_AMOUNT_UNIT
                 places = max(
@@ -409,7 +410,17 @@ def _structured_numeric_fact(
     # NumericBinding과 공개 문장을 따로 검증하면, 결속은 24.28인데 글만 25로
     # 바꾼 손상이 통과한다. 현재 코드 생산자의 정확한 문장 계약까지 함께 잠근다.
     expected_text = _expected_claim_text(claim)
-    if not expected_text or sentence.text != expected_text:
+    # 새 생성물은 금액을 포함한 문장을 쓴다. 이미 결속된 구형 증감률 문장은
+    # 동일한 기간·비율의 옛 정형 문장과 정확히 일치할 때만 호환한다.
+    # 아래 수치 결속 검사는 두 표현에 똑같이 적용한다.
+    legacy_rate_text = (
+        _cumulative_rate_claim_text(
+            entity_scope=claim.subject_scope, metric=claim.metric,
+            period_start=claim.period_start, period_end=claim.period_end,
+            display_value=claim.display_value,
+        ) if claim.formula == NumericFormula.RATE.value else ""
+    )
+    if not expected_text or sentence.text not in (expected_text, legacy_rate_text):
         return None
     return ClaimFact(
         fact_id=claim.fact_id,

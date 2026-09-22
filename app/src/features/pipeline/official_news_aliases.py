@@ -143,7 +143,9 @@ def _fragment_matches_location(document: CollectedEvidenceDocument, fragment: Ev
                 return False
             if fragment.item_url:
                 item_url, document_url = urlsplit(fragment.item_url), urlsplit(document.canonical_url)
-                if (item_url.scheme, item_url.netloc) != (document_url.scheme, document_url.netloc):
+                # 항목 본문은 이미 검증된 목록 문서에서 읽었다. 같은 호스트의
+                # 구형 HTTP href도 생산기 계약대로 위치 메타데이터로 허용한다.
+                if item_url.scheme not in ("http", "https") or item_url.netloc != document_url.netloc:
                     return False
         else:
             prefix = f"{document.canonical_url}#"

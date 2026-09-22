@@ -154,3 +154,13 @@ def test_missing_definition_and_mutated_text_do_not_create_alias():
         for fragment in candidate.fragments:
             object.__setattr__(fragment, "text", PUBLIC_TEXT + "변경")
     assert official_news_aliases(PROFILE, result) == ()
+
+
+@pytest.mark.parametrize("scheme", ["https", "http"])
+def test_검증된_공식_목록의_같은_호스트_HTTP_항목도_약칭을_전달한다(scheme):
+    raw = ('<main><article><a href="' + scheme + '://wrtn.io/news/item/">'
+           + '2026-09-02 ' + PUBLIC_TEXT + '</a></article></main>')
+    _, result = collected_web(raw)
+    outcome, queries, _ = branch(result)
+    assert outcome.value.session.company.aliases == ("뤼튼",)
+    assert "뤼튼" in queries

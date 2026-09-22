@@ -993,3 +993,15 @@ def test_원화_원단위가_아니면_억원_축척을_추정하지_않는다()
         "별도 매출액은 2024년 3,073,716,215천원, 2025년 47,117,211,348천원이며, "
         "증감률은 1432.91%이다."
     )
+
+
+def test_기존_검증된_증감률_문장도_같은_수치결속으로_호환한다():
+    table, fragments, filing = _wrtn_case()
+    generated = build_past_changes_numeric_claims(table, fragments, filing)[0]
+    legacy_text = "별도 매출액의 2024년부터 2025년까지 누적 증감률은 1432.91%이다."
+    assert generated.text != legacy_text
+    legacy = replace(generated, text=legacy_text)
+    assert is_release_ready_numeric_sentence(legacy, section_id="past_changes")
+    for before, after in (("2024", "2023"), ("1432.91", "1434.85"), ("매출액", "영업이익")):
+        changed = replace(legacy, text=legacy.text.replace(before, after))
+        assert not is_release_ready_numeric_sentence(changed, section_id="past_changes")
