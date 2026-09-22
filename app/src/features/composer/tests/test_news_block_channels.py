@@ -207,14 +207,15 @@ def _news_table(report, section_id: str):
 # ══════════════════════════════════════════════════════════
 
 
-def test_조각을_받은_세_장에_보도표가_붙는다(보고서) -> None:
+def test_산문에_아직_없는_보도만_표로_붙는다(보고서) -> None:
+    """2026-09-22 결정: 산문 중복 행 제거로 2·5장 뉴스는 본문에만 남는다."""
     붙은_장 = [
         section.cell
         for section in 보고서.sections
         if _news_table(보고서, section.cell) is not None
     ]
 
-    assert 붙은_장 == list(_NEWS_SECTIONS)
+    assert 붙은_장 == ["identity"]
 
 
 def test_작가가_뉴스를_누락해도_검수한_유용근거는_본문에_반영한다(보고서) -> None:
@@ -258,6 +259,7 @@ def test_행은_최신순으로_상한까지만_실린다(보고서) -> None:
 
 
 def test_보도_문장은_조각_원문_그대로다(보고서) -> None:
+    """2026-09-22 결정: 산문 중복 행 제거 뒤에도 남는 글자는 원문 그대로다."""
     글자_by_id = {
         fragment_id: text
         for rows in _NEWS_BY_SECTION.values()
@@ -266,26 +268,31 @@ def test_보도_문장은_조각_원문_그대로다(보고서) -> None:
     실린_글자 = {
         row[2]
         for section_id in _NEWS_SECTIONS
-        for row in _news_table(보고서, section_id).rows
+        if (table := _news_table(보고서, section_id)) is not None
+        for row in table.rows
     }
 
     assert 실린_글자 <= set(글자_by_id.values())
-    # 5장은 인용문 조각만 온다 — 따옴표까지 그대로여야 한다.
-    인용문 = _news_table(보고서, "current_challenges").rows[0][2]
-    assert 인용문 == 글자_by_id["46"]
+    # 5장 인용문은 산문에 한 번만 남으며 따옴표와 출처를 보존한다.
+    section = next(section for section in 보고서.sections if section.cell == "current_challenges")
+    인용문 = " ".join(text for text, _cite in section.prose_lines)
+    assert 글자_by_id["46"] in 인용문
     assert '"인력을 더 늘려야 하는 것이 지금의 과제"' in 인용문
+    assert "[46]" in 인용문
+    assert _news_table(보고서, "current_challenges") is None
 
 
-def test_보도표는_그_장의_맨_끝에_온다(보고서) -> None:
-    """2장은 흐름표를 먼저 그리고 보도표를 뒤에 붙인다."""
+def test_산문과_중복인_보도표만_빼고_흐름표는_보존한다(보고서) -> None:
+    """2026-09-22 결정: 산문 중복 행 제거가 같은 장의 흐름표를 지우지 않는다."""
 
     section = next(
         section for section in 보고서.sections if section.cell == "business_model"
     )
 
-    assert len(section.tables) >= 2
-    assert section.tables[-1].headers == list(NEWS_BLOCK_HEADERS)
+    assert len(section.tables) == 1
     assert section.tables[0].headers != list(NEWS_BLOCK_HEADERS)
+    assert _news_table(보고서, "business_model") is None
+    assert any("[45]" in text for text, _cite in section.prose_lines)
 
 
 def test_9장에는_보도표가_없다(보고서) -> None:
@@ -306,11 +313,13 @@ def test_실행_기록용_수치가_결과에_실린다(FULL_실행결과) -> No
 
 
 def test_표에_실린_조각이_부록에_기사로_오른다(보고서) -> None:
+    """2026-09-22 결정: 산문 중복 행 제거 뒤 생존 표의 출처를 부록과 대조한다."""
     실린_id = {
         str(number)
         for section_id in _NEWS_SECTIONS
+        if (table := _news_table(보고서, section_id)) is not None
         for number in re.findall(
-            r"\[(\d+)\]", " ".join(_news_table(보고서, section_id).source_cites)
+            r"\[(\d+)\]", " ".join(table.source_cites)
         )
     }
     부록 = {str(source.number): source for source in 보고서.citations}
@@ -325,11 +334,16 @@ def test_표에_실린_조각이_부록에_기사로_오른다(보고서) -> Non
 
 
 def test_부록의_사용_장이_그_장을_가리킨다(보고서) -> None:
+    """2026-09-22 결정: 산문 중복 행 제거 뒤 산문 출처도 원래 사용 장을 가리킨다."""
     부록 = {str(source.number): source for source in 보고서.citations}
     for section_id in _NEWS_SECTIONS:
-        numbers = re.findall(
-            r"\[(\d+)\]", " ".join(_news_table(보고서, section_id).source_cites)
-        )
+        table = _news_table(보고서, section_id)
+        section = next(section for section in 보고서.sections if section.cell == section_id)
+        public_text = " ".join(text for text, _cite in section.prose_lines)
+        if table is not None:
+            public_text += " " + " ".join(table.source_cites)
+        numbers = set(re.findall(r"\[(\d+)\]", public_text))
+        assert {fragment_id for fragment_id, _date, _text in _NEWS_BY_SECTION[section_id]} <= numbers
         for number in numbers:
             assert section_id in 부록[number].used_in, (section_id, number)
 
@@ -435,7 +449,7 @@ def test_PDF가_보도표를_실제로_그린다(보고서) -> None:
         # CJK는 글자 사이에 공백이 낄 수 있어 느슨하게 찾는다.
         return r"\s*".join(map(re.escape, value))
 
-    assert re.search(_loose("최근 보도 (보조"), text)
+    assert re.search(_loose("관련 보도"), text)
     assert re.search(_loose(_PUBLISHER), text)
     첫_문장 = _NEWS_BY_SECTION["identity"][1][2]
     assert re.search(_loose(첫_문장), text), 첫_문장
@@ -528,14 +542,18 @@ def test_봉인_없는_SHADOW에서도_보도표가_출고검증을_통과한다
 
 
 def test_ENFORCE도_정확원문에_결속한_뉴스표를_공개한다() -> None:
+    """2026-09-22 결정: 산문 중복 행 제거는 ENFORCE에서도 같은 방식으로 적용한다."""
     from src.shared.report_evidence.constants import ReleaseMode
 
     output = _run_mode(ReleaseMode.ENFORCE_NO_PARTIAL, flow=False)
 
-    assert all(
-        _news_table(output.report, section_id) is not None
-        for section_id in _NEWS_SECTIONS
-    )
+    assert _news_table(output.report, "identity") is not None
+    for section_id in ("business_model", "current_challenges"):
+        assert _news_table(output.report, section_id) is None
+        section = next(section for section in output.report.sections if section.cell == section_id)
+        for fragment_id, _date, text in _NEWS_BY_SECTION[section_id]:
+            assert any(text in line for line, _cite in section.prose_lines)
+            assert int(fragment_id) in {source.number for source in output.report.citations}
     assert output.news_block_row_counts_by_section
     assert "release_mode_cannot_bind_structures" not in dict(output.news_block_blocked_counts_by_reason)
 
@@ -643,6 +661,7 @@ def packet없는_부분경로_실행결과():
 def test_packet_없는_부분_경로에서도_보도표가_붙고_출고검증을_통과한다(
     packet없는_부분경로_실행결과,
 ) -> None:
+    """2026-09-22 결정: 산문 중복 행 제거 후 부분 경로도 생존 표만 공개한다."""
     output = packet없는_부분경로_실행결과
     report = output.report
 
@@ -652,7 +671,7 @@ def test_packet_없는_부분_경로에서도_보도표가_붙고_출고검증�
         for section in report.sections
         if _news_table(report, section.cell) is not None
     ]
-    assert 붙은_장 == list(_NEWS_SECTIONS), 붙은_장
+    assert 붙은_장 == ["identity"], 붙은_장
     assert _news_table(report, "competitive_position") is None
     assert _news_table(report, "culture") is None
 
@@ -795,7 +814,8 @@ def 이름표와_보도표_실행결과():
     return output
 
 
-def test_3장에_이름_표와_보도표가_함께_실린다(이름표와_보도표_실행결과) -> None:
+def test_3장_중복_보도표가_빠져도_이름_표와_보도_산문은_남는다(이름표와_보도표_실행결과) -> None:
+    """2026-09-22 결정: 산문 중복 행 제거가 이름 표와 보도 근거를 지우지 않는다."""
     from src.features.composer.constants import PORTFOLIO_TABLE_SECTION_ID
     from src.features.composer.portfolio_name_table import (
         NAME_TABLE_CAPTION_PREFIX,
@@ -818,17 +838,17 @@ def test_3장에_이름_표와_보도표가_함께_실린다(이름표와_보도
         if section.cell == PORTFOLIO_TABLE_SECTION_ID
     )
     캡션들 = [table.caption for table in section.tables]
-    assert len(section.tables) == 2, 캡션들
-    # 순서: 이름 표(회사 공식 자료) → 보도표(보조). 작가 카드가 있으면 그
-    # 카드가 맨 앞에 오고 이 둘의 앞뒤 순서는 그대로다.
+    assert len(section.tables) == 1, 캡션들
     assert section.tables[0].headers == list(NAME_TABLE_HEADERS)
     assert 캡션들[0].startswith(NAME_TABLE_CAPTION_PREFIX)
-    assert section.tables[1].headers == list(NEWS_BLOCK_HEADERS)
-    assert 캡션들[1] == news_block_caption(len(_NEWS_IN_PORTFOLIO))
+    assert _news_table(output.report, PORTFOLIO_TABLE_SECTION_ID) is None
+    for fragment_id, _date, text in _NEWS_IN_PORTFOLIO:
+        assert any(text in line for line, _cite in section.prose_lines)
+        assert any(f"[{fragment_id}]" in line for line, _cite in section.prose_lines)
 
 
-def test_두_표가_같은_장에_있어도_봉인이_통과한다(이름표와_보도표_실행결과) -> None:
-    """표 index가 renderer와 봉인에서 어긋나면 보고서가 통째로 막힌다."""
+def test_중복_보도표가_빠져도_이름_표의_봉인이_통과한다(이름표와_보도표_실행결과) -> None:
+    """2026-09-22 결정: 산문 중복 행 제거 후에도 표 index와 봉인이 일치한다."""
 
     from src.features.composer.constants import PORTFOLIO_TABLE_SECTION_ID
     from src.features.composer.public_manifest import assert_stored_strict_manifest
@@ -841,12 +861,14 @@ def test_두_표가_같은_장에_있어도_봉인이_통과한다(이름표와_
         for section in report.sections
         if section.cell == PORTFOLIO_TABLE_SECTION_ID
     )
-    # 두 표 모두 자기 manifest 항목을 가리켜야 한다(비면 재로드가 막힌다).
+    assert len(section.tables) == 1
+    # 남은 표는 자기 manifest 항목을 가리켜야 한다(비면 재로드가 막힌다).
     assert all(table.manifest_ref for table in section.tables)
     assert_stored_strict_manifest(report_from_json(report_to_json(report)))
 
 
-def test_두_표의_인용이_모두_부록에_있다(이름표와_보도표_실행결과) -> None:
+def test_이름_표와_보도_산문의_인용이_모두_부록에_있다(이름표와_보도표_실행결과) -> None:
+    """2026-09-22 결정: 산문 중복 행 제거 뒤에도 각 보도의 부록 출처는 남는다."""
     from src.features.composer.constants import PORTFOLIO_TABLE_SECTION_ID
 
     report = 이름표와_보도표_실행결과.report
@@ -863,16 +885,18 @@ def test_두_표의_인용이_모두_부록에_있다(이름표와_보도표_실
         }
         assert 번호, table.caption
         assert 번호 <= 부록, (table.caption, sorted(번호))
-    # 보도표 쪽 번호가 이름 표 쪽과 섞이지 않았는지도 본다.
-    보도표_번호 = {
+    # 표에서 빠진 보도는 산문에서 자기 번호로 추적할 수 있어야 한다.
+    body_numbers = {
         int(value)
         for value in re.findall(
-            r"\[(\d+)\]", " ".join(section.tables[1].source_cites)
+            r"\[(\d+)\]", " ".join(text for text, _cite in section.prose_lines)
         )
     }
-    assert 보도표_번호 == {
+    news_numbers = {
         int(fragment_id) for fragment_id, _date, _text in _NEWS_IN_PORTFOLIO
     }
+    assert news_numbers <= body_numbers
+    assert news_numbers <= 부록
 
 
 class _ThinThenFullWriter:

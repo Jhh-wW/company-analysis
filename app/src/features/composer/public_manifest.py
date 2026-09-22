@@ -44,6 +44,7 @@ from src.features.composer.news_block import (
     NEWS_BLOCK_HEADERS,
     NEWS_BLOCK_PRESENTATION,
     news_block_caption,
+    nonredundant_news_rows,
     oldest_stale_report_year,
 )
 from src.features.composer.port import (
@@ -1025,7 +1026,7 @@ def _news_table_payload(
     ``as_of_date``를 넣어 계산해야 그 대조가 깨지지 않는다.
     """
 
-    news_rows = tuple(getattr(section, "news_rows", ()) or ())
+    news_rows = nonredundant_news_rows(section)
     if not news_rows:
         return None
     rows: list[list[str]] = []

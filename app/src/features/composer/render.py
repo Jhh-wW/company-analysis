@@ -52,6 +52,7 @@ from src.features.composer.news_block import (
     NEWS_BLOCK_HEADERS,
     NEWS_BLOCK_PRESENTATION,
     news_block_caption,
+    nonredundant_news_rows,
     oldest_stale_report_year,
 )
 from src.features.composer.port import (
@@ -401,8 +402,8 @@ def _marker_visibility(
       앞뒤를 봐야 그 판단이 선다.
 
     규칙(CITATION_STYLE_MERGED):
-      ① «해석» 문장은 번호를 뺀다 — 종합 판단이라 특정 출처를 가리키지 않고,
-         이미 « — 해석» 표지가 성격을 말해 준다.
+      ① «해석» 문장도 자기 번호를 보인다. 2026-09-22 결정에 따라 해석
+         표시만 붙여 근거 확인을 피할 수 없게 한다.
       ② «확인» 문장은 다음 문장이 «같은 출처 집합»을 인용하는 확인 문장이면
          번호를 미룬다. 그 묶음의 마지막 문장이 대표로 번호를 단다.
 
@@ -420,7 +421,7 @@ def _marker_visibility(
     visible: list[bool] = []
     for index, sentence in enumerate(sentences):
         if sentence.grade == GRADE_INTERPRETED:
-            visible.append(False)
+            visible.append(True)
             continue
         if not keys[index]:
             visible.append(False)
@@ -515,11 +516,9 @@ def _ensure_no_orphan_markers(
 ) -> None:
     """부록에 실릴 번호가 «본문 어디에도» 안 보이는 일을 막는다 (제자리 수정).
 
-    ★ 왜 필요한가 (골든 fixture가 잡은 결함) — 절충안 규칙 ①은 해석 문장의
-      번호를 뺀다. 그런데 어떤 조각이 «해석 문장에서만» 인용되면 그 번호가
-      본문에 한 번도 안 나온다. 부록은 인용된 조각으로 만들어지므로 그 줄이
-      고아가 되고, 출고 검증(validate_v2)이 「부록에 있는 번호를 본문
-      어디에서도 인용하지 않았습니다」로 보고서를 통째로 막는다.
+    ★ 번호를 미룬 결과 부록에만 남는 출처가 생기면 출고 검증(validate_v2)이
+      보고서 전체를 막는다. 해석 번호를 항상 보이도록 바꾼 뒤에도 이 방어는
+      유지해, 표기 규칙이 바뀌어도 인용과 부록의 대응을 지킨다.
     ★ 그래서 규칙을 적용한 «뒤»에 한 번 더 훑어, 어디에도 안 보이는 번호는
       그 번호를 인용한 «마지막» 문장에서 되살린다. 번호는 줄이되 추적은
       끊지 않는다 — 둘 중 하나를 고르는 문제가 아니다.
@@ -657,7 +656,7 @@ def _flow_report_table(
 def _news_report_table(
     section: ComposedSection, numbers: Mapping[str, int], *, as_of_date: str = ""
 ) -> Optional[ReportTable]:
-    """장 끝의 「최근 보도 (보조)」 표를 만든다. 실을 줄이 없으면 None.
+    """장 끝의 「관련 보도」 표를 만든다. 실을 줄이 없으면 None.
 
     ★ 세 칸은 흐름으로 «이어지지 않는다» — 발행일·매체는 그 문장이 어디서
       언제 나왔는지를 밝히는 표식이고, 보도 문장이 내용 전부다. 그래서
@@ -675,7 +674,7 @@ def _news_report_table(
     rows: list[list[str]] = []
     included_rows: list[NewsRow] = []
     cited: list[int] = []
-    for row in section.news_rows:
+    for row in nonredundant_news_rows(section):
         row_numbers = [
             numbers[str(citation).strip()]
             for citation in row.citations
@@ -1267,7 +1266,8 @@ def render_report(
         for section in report.sections
     ]
     visibility_groups.append(
-        (report.summary, list(_marker_visibility(report.summary, numbers, citation_style)))
+        # 요약은 서로 독립된 항목이므로 본문의 번호 미루기 규칙을 적용하지 않는다.
+        (report.summary, [True for _ in report.summary])
     )
     _ensure_no_orphan_markers(visibility_groups, numbers)
     section_shows = {
@@ -1412,14 +1412,14 @@ def render_report(
             #   보도표의 조각은 본문 문장이 인용하지 않는 조각이라, 여기서
             #   등록하지 않으면 부록에 그 기사가 한 줄도 안 생긴다 — 표에는
             #   [n]이 찍히는데 부록에 n이 없는 «고아 번호»가 된다.
-            for row in section.news_rows:
-                for citation in row.citations:
-                    row_number = numbers.get(str(citation).strip())
-                    if row_number is None or row_number not in meta_by_number:
-                        continue
-                    owners = used_sections.setdefault(row_number, [])
-                    if section.section_id not in owners:
-                        owners.append(section.section_id)
+            # 중복으로 빠진 행의 출처가 부록에만 남지 않도록 생존 행만 등록한다.
+            for citation in news_table.source_cites:
+                row_number_text = citation_number(citation)
+                if not row_number_text or int(row_number_text) not in meta_by_number:
+                    continue
+                owners = used_sections.setdefault(int(row_number_text), [])
+                if section.section_id not in owners:
+                    owners.append(section.section_id)
             tables.append(news_table)
 
         # FULL에서는 renderer가 구조를 결정한 뒤, 독립 canonicalizer가 미리
