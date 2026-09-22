@@ -285,6 +285,8 @@ def _summary_blocks(report: Report) -> list[NotionBlock]:
 
 
 def _source_list_blocks(report: Report) -> list[NotionBlock]:
+    from src.features.provenance.sources import external_news_notice, source_label_display, source_status_display
+
     sources: list[Source] = []
     seen_numbers: set[int] = set()
     for item in visible_citations(report.citations):
@@ -297,15 +299,16 @@ def _source_list_blocks(report: Report) -> list[NotionBlock]:
     rows: list[list[NotionCell]] = [
         [
             str(source.number),
-            _rich_text(_source_label(source), href=source.url),
-            _source_status(source),
+            _rich_text(source_label_display(source), href=source.url),
+            source_status_display(source),
             source_verification_label(report, source.source_id),
             source.location.strip() or "—",
             _source_used_sections(source),
         ]
         for source in sources
     ]
-    return [_table_block(list(constants.CITATION_TABLE_HEADERS), rows)]
+    notice = external_news_notice(sources)
+    return ([_paragraph(notice)] if notice else []) + [_table_block(list(constants.CITATION_TABLE_HEADERS), rows)]
 
 
 def _source_label(source: Source) -> str:
@@ -505,7 +508,7 @@ def _v2_source_list_blocks(
         return []
     return [
         _heading_2(constants.SOURCES_HEADING),
-        _paragraph(constants.SOURCES_SUBTITLE),
+        _paragraph(" ".join(filter(None, (constants.SOURCES_SUBTITLE, projection.citations_note)))),
         _table_block(
             list(constants.CITATION_TABLE_HEADERS),
             _v2_citation_rows(projection.citations),

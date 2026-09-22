@@ -39,6 +39,7 @@ from src.features.provenance.constants import (
 from src.features.provenance.sources import (
     Source,
     SourceKind,
+    official_web_source_fields,
     evidence_text_hash,
     exact_evidence_text_hash,
     official_web_currentness_is_usable,
@@ -327,9 +328,8 @@ def _homepage_source(
     return Source(
         number=number,
         kind=SourceKind.OTHER,
-        label=url or HOMEPAGE_FALLBACK_LABEL,
+        label=frag.get("문서명", "").strip() or company_publisher.strip() or url or HOMEPAGE_FALLBACK_LABEL,
         collected_at=collected_at,
-        published_at=published_at,
         reporting_period=reporting_period,
         ir_metadata_verification=str(
             frag.get(IR_METADATA_VERIFICATION_FIELD) or ""
@@ -345,34 +345,39 @@ def _homepage_source(
             frag.get(IR_DART_WWW_REDIRECT_TO_FIELD) or ""
         ).strip(),
         source_id=f"source-{number}",
-        title=frag.get("문서명", "").strip() or url or HOMEPAGE_FALLBACK_LABEL,
         publisher=frag.get("발행처", "").strip() or company_publisher.strip() or host,
         host=host,
-        url=url,
         document_id=document_id,
-        location=frag.get("원문위치", "").strip() or path,
         source_type=source_type,
-        fact_status=(
-            "문서일 미검증 수집 참고"
-            if (
-                source_type_is_official_ir(source_type)
-                and not (published_at and reporting_period)
-            ) or (
-                source_type_is_official_web(source_type)
-                and official_web_url_requires_document_date(url)
-                and not published_at
-            )
-            else "과거·현재성 미확정 문서 수집 참고"
-            if source_type_is_official_web(source_type)
-            and not official_web_currentness_is_usable(
-                source_type=source_type,
-                url=url,
-                published_at=published_at,
-                collected_at=collected_at,
-            )
-            else "공식 발행일·보고기간 확정"
-            if source_type_is_official_ir(source_type)
-            else "기준일 현재 확인"
+        **official_web_source_fields(
+            source_type=source_type, title=frag.get("문서명", "").strip(),
+            published_at=published_at, url=url,
+            location=frag.get("원문위치", "").strip() or url,
+            item_title=str(frag.get("item_title") or ""),
+            item_published_on=str(frag.get("item_published_on") or ""),
+            item_url=str(frag.get("item_url") or ""),
+            fact_status=(
+                "문서일 미검증 수집 참고"
+                if (
+                    source_type_is_official_ir(source_type)
+                    and not (published_at and reporting_period)
+                ) or (
+                    source_type_is_official_web(source_type)
+                    and official_web_url_requires_document_date(url)
+                    and not published_at
+                )
+                else "과거·현재성 미확정 문서 수집 참고"
+                if source_type_is_official_web(source_type)
+                and not official_web_currentness_is_usable(
+                    source_type=source_type,
+                    url=url,
+                    published_at=published_at,
+                    collected_at=collected_at,
+                )
+                else "공식 발행일·보고기간 확정"
+                if source_type_is_official_ir(source_type)
+                else "기준일 현재 확인"
+            ),
         ),
         domain_attestation_source_id=str(
             frag.get("도메인근거SourceID")

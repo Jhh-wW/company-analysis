@@ -59,6 +59,8 @@ from src.features.composer.portfolio_name_table import PortfolioNameTable
 from src.features.composer.style_normalizer import SentenceStyleNormalizer
 from src.features.pipeline.port import Report, ReportTable
 from src.features.provenance.sources import (
+    official_web_source_fields,
+    public_fragment_document_identity,
     Source,
     SourceKind,
     bind_document_content_sha256,
@@ -244,6 +246,7 @@ def _fragment_binding(
         raise PublicManifestError(
             f"조각 {fragment_id!r}의 문서 신원 또는 exact evidence hash가 없습니다"
         )
+    declared_identity = public_fragment_document_identity(fragment)
     return _FragmentBinding(
         fragment_id, declared_identity, exact_hash, fragment.text,
         fragment.document_date, fragment.source_publisher, fragment.document_title,
@@ -1411,20 +1414,17 @@ def _expected_source(
             kind=SourceKind.OTHER,
             label=_expected_source_label(fragment, filing_meta),
             collected_at=fragment.source_collected_on,
-            published_at=fragment.document_date,
             source_id=f"{_SOURCE_ID_PREFIX}{fragment.fragment_id}",
-            title=fragment.document_title,
             publisher=company_name,
             host=formal_web.host,
-            url=fragment.source_url,
             document_id=fragment.source_document_id,
-            location=fragment.location,
             source_type=formal_web.source_type,
-            fact_status=(
-                "공식 발행일·보고기간 확정"
-                if formal_web.source_type == "회사 공식 IR"
-                and fragment.document_date
-                else "기준일 현재 확인"
+            **official_web_source_fields(
+                source_type=formal_web.source_type,
+                title=fragment.document_title, published_at=fragment.document_date,
+                url=fragment.source_url, location=fragment.location,
+                item_title=fragment.item_title, item_published_on=fragment.item_published_on,
+                item_url=fragment.item_url,
             ),
             used_in=list(used_in),
             evidence_hashes=evidence_hashes,
@@ -1496,7 +1496,7 @@ def _expected_source(
         if (
             not sealed.is_canonical_valid
             or not has_valid_provenance_seal(sealed)
-            or document_identity(sealed) != fragment.document_identity
+            or document_identity(sealed) != public_fragment_document_identity(fragment)
         ):
             raise PublicManifestError(
                 "FULL typed 출처의 공개 신원·필수 필드·도장이 손상됐습니다"

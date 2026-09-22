@@ -35,6 +35,7 @@ from src.features.pipeline.evidence_transport import (
     RAW_EVIDENCE_REPORTING_PERIOD_KEY,
 )
 from src.features.provenance.sources import (
+    official_web_source_fields,
     Source,
     SourceKind,
     build_dart_profile_attester_source,
@@ -283,19 +284,17 @@ def _formal_source_from_document(
             kind=SourceKind.OTHER,
             label=title or source_url,
             collected_at=collected_at,
-            published_at=published_on,
             source_id=f"typed-comparison-source-{number}",
-            title=title or source_url,
             publisher=company_name,
             host=formal_web.host,
-            url=source_url,
             document_id=document.document_id,
-            location=location,
             source_type=formal_web.source_type,
-            fact_status=(
-                "공식 발행일·보고기간 확정"
-                if source_kind == SOURCE_KIND_OFFICIAL_IR_PDF
-                else "기준일 현재 확인"
+            **official_web_source_fields(
+                source_type=formal_web.source_type, title=title,
+                published_at=published_on, url=source_url, location=location,
+                item_title=str(raw.get("item_title") or ""),
+                item_published_on=str(raw.get("item_published_on") or ""),
+                item_url=str(raw.get("item_url") or ""),
             ),
             evidence_hashes=evidence_hashes,
             exact_evidence_hashes=exact_hashes,

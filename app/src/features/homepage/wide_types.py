@@ -98,6 +98,8 @@ class WideDocumentIdentity:
     domain_redirect_verification: str = ""
     domain_redirect_from_host: str = ""
     domain_redirect_to_host: str = ""
+    #: 이미 받은 목록 HTML에서 읽은 항목별 원문과 메타데이터다.
+    list_items: tuple[tuple[str, str, str, str], ...] = ()
 
     def __post_init__(self) -> None:
         for name in (
@@ -225,8 +227,7 @@ class WideCollectionAttempt:
 class WideFragment:
     """usable_ranges 구간 하나에 슬롯을 매긴 조각(fragment).
 
-    ★ ``location``은 ``canonical_url#조각index`` 형식이다 — index는 그
-      조각이 나온 문서의 ``usable_ranges`` 안 위치를 가리킨다(0부터 시작).
+    ★ ``location``은 항목 URL 또는 목록 URL과 항목 순번이다.
     ★ ``text_sha256``은 생성 시점에 ``text``의 실제 SHA-256과 일치하는지
       검증한다 — 둘이 어긋나면 조용히 통과시키지 않고 즉시 막는다.
     ★ ``slot_id``는 이 collector 전용 어휘(``_ALLOWED_SLOT_IDS``, 정본은
@@ -252,6 +253,10 @@ class WideFragment:
     score_millis: int
     reason_codes: tuple[str, ...]
     covered_slot_ids: tuple[str, ...] = ()
+    range_index: int = -1
+    item_title: str = ""
+    item_published_on: str = ""
+    item_url: str = ""
 
     def __post_init__(self) -> None:
         for name in (
@@ -264,11 +269,8 @@ class WideFragment:
             "slot_id",
         ):
             _require_nonblank(getattr(self, name), name)
-        if "#" not in self.location:
-            raise ValueError("location은 'canonical_url#조각index' 형식이어야 합니다")
-        _prefix, _separator, index_part = self.location.rpartition("#")
-        if not index_part.isdigit():
-            raise ValueError("location의 조각index는 0 이상 정수여야 합니다")
+        if self.range_index < -1:
+            raise ValueError("range_index는 0 이상이거나 미지정 값이어야 합니다")
         if not _SHA256_HEX.match(self.text_sha256):
             raise ValueError(
                 "text_sha256 형식이 올바르지 않습니다(64자리 소문자 16진수)"

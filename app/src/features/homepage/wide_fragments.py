@@ -29,12 +29,18 @@
 from __future__ import annotations
 
 import hashlib
+import re
+from datetime import date
+from urllib.parse import urljoin, urlsplit, urldefrag
+
+from lxml import etree, html
 
 from src.features.homepage.challenge_evidence import (
     ChallengeEvidence,
     classify_challenge_evidence,
 )
 from src.features.homepage.constants import (
+    WIDE_MAX_CHARS_PER_RANGE,
     WIDE_REQUIRED_SLOT_IDS,
     WIDE_SLOT_BODY_KEYWORDS,
     WIDE_SOURCE_KIND_IR_PDF,
@@ -64,6 +70,68 @@ _VERIFIED_CASE_MARKERS: tuple[str, ...] = (
 _VERIFIED_CASE_ACTIONS: tuple[str, ...] = (
     "실행", "적용", "도입", "운영", "개선", "달성", "완료", "수상", "인증"
 )
+
+
+def extract_list_items(raw_html: str, base_url: str) -> tuple[tuple[str, str, str, str], ...]:
+    """목록 카드의 원문·제목·날짜·href를 추가 조회 없이 함께 읽는다."""
+    try:
+        soup = html.fromstring(raw_html)
+    except (etree.ParserError, ValueError):
+        return ()
+    for node in soup.xpath("//nav|//header|//footer|//aside|//script|//style"):
+        if node.getparent() is not None:
+            node.drop_tree()
+    date_pattern = re.compile(r"(?<!\d)(20\d{2})\s*(?:[.-]|년)\s*(\d{1,2})\s*(?:[.-]|월)\s*(\d{1,2})(?:\s*일)?(?!\d)")
+    items: dict[str, tuple[str, str, str, str]] = {}
+    has_list_container = False
+    for anchor in soup.xpath(".//a[@href]"):
+        href = str(anchor.get("href", "")).strip()
+        try:
+            url = urldefrag(urljoin(base_url, href))[0]
+            parsed = urlsplit(url)
+        except ValueError:
+            continue
+        if not href or href.startswith("#") or url == urldefrag(base_url)[0]:
+            continue
+        if parsed.scheme not in {"http", "https"} or parsed.netloc != urlsplit(base_url).netloc:
+            continue
+        # 바깥 목록 전체의 날짜를 빌려 다른 링크에 붙이지 않는다.
+        card = anchor
+        while card is not None and card.tag not in {"body", "html", "main"}:
+            text = " ".join(" ".join(card.itertext()).split())
+            matches = list(date_pattern.finditer(text))
+            try:
+                urls = {
+                    urldefrag(urljoin(base_url, str(link.get("href", ""))))[0]
+                    for link in card.xpath(".//a[@href]")
+                }
+            except ValueError:
+                card = None
+                break
+            if len(matches) == 1 and len(urls | {url}) == 1:
+                break
+            if len(matches) > 1 or len(urls | {url}) > 1:
+                card = None
+                break
+            card = card.getparent()
+        if card is None or card.tag in {"body", "html", "main"}:
+            continue
+        match = matches[0]
+        try:
+            published_on = date(*(int(value) for value in match.groups())).isoformat()
+        except ValueError:
+            continue
+        headings = card.xpath(".//h1|.//h2|.//h3|.//h4|.//h5|.//h6|.//*[contains(@class, 'title')]")
+        title = " ".join(" ".join((headings[0] if headings else anchor).itertext()).split())
+        title = date_pattern.sub("", title).strip()
+        if not title:
+            continue
+        has_list_container |= card.tag in {"li", "article"} or any(
+            parent.tag in {"li", "article", "ul", "ol"} for parent in card.iterancestors()
+        )
+        items[url] = (text[:WIDE_MAX_CHARS_PER_RANGE], title, published_on, url)
+    # 날짜 한 개가 있는 상세 페이지를 목록으로 오인하지 않는다.
+    return tuple(items.values()) if len(items) > 1 or has_list_container else ()
 
 
 def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple[WideFragment, ...]:
@@ -124,7 +192,8 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
         )
 
         text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        location = f"{document.canonical_url}#{index}"
+        item = next((item for item in document.list_items if item[0] == text), None)
+        location = item[3] if item else f"{document.canonical_url} · 목록 {index + 1}번째 항목"
         slots_by_section: dict[str, list[str]] = {}
         for slot_id in slots_for_range:
             slots_by_section.setdefault(slot_id.split(":", 1)[0], []).append(slot_id)
@@ -143,6 +212,10 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
                     score_millis=score,
                     reason_codes=reason_codes,
                     covered_slot_ids=tuple(covered_slot_ids),
+                    range_index=index,
+                    item_title=item[1] if item else "",
+                    item_published_on=item[2] if item else "",
+                    item_url=item[3] if item else "",
                 )
             )
     return tuple(fragments)
@@ -208,6 +281,10 @@ def _has_slot_body_signal(
     range_index: int,
     challenge_evidence: ChallengeEvidence,
 ) -> bool:
+    if slot_id == "past_changes:completed_execution" and re.search(
+        r"투자(?:를)?\s*유치(?:했|하였|에\s*성공)", lowered_text
+    ):
+        return True
     if slot_id == "current_challenges:issue":
         return challenge_evidence.has_issue(range_index)
     if slot_id == "current_challenges:response":

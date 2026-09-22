@@ -475,8 +475,9 @@ class TestBuildBlocks:
             citations=[*base_report.citations, *base_report.citations],
         )
         blocks = logic._source_list_blocks(report)
-        assert len(blocks) == 1
-        source_table = blocks[0]["table"]
+        assert len(blocks) == 2
+        assert blocks[0]["paragraph"]["rich_text"][0]["text"]["content"] == "이 보고서에는 외부 언론 보도 출처가 없습니다."
+        source_table = blocks[1]["table"]
 
         rows = source_table["children"]
         assert len(rows) == len(base_report.citations) + 1
@@ -882,11 +883,13 @@ def test_v1_Notion_블록은_불변이다() -> None:
         assert 사라진_글자 not in rendered, f"뺀 「범위·한계」 줄이 되돌아왔다: {사라진_글자}"
     assert "전사 공통 공식 기준" not in rendered, "옛 전사 범위 단정 문구가 되돌아왔다"
 
+    # 2026-09-23: 기존 생성일 점 표기와 이번 부록 안내·공식 웹 라벨을 반영한다.
+    # HEAD 함수와 대조한 이번 변경은 안내 한 블록과 자료명 두 칸뿐이다.
     assert _blocks_sha256(full_blocks) == (
-        "4263ab52c50df5cd35e1c0c1a0722006522c3eb4a25cc15adfec0062abe297ef"
+        "99b35fbc2301208598af4decf9ced2b840bc5c5d50a427f33e11d54ab54129f5"
     )
     assert _blocks_sha256(logic.build_blocks(partial)) == (
-        "078f6d08afa01db7a7bd3377cd4368679c5007d1709514f47ddfb30134c59c25"
+        "1b72d1b49b5480fa39e56ce4cda1d6210c6fc2f0ef596c631c1497a65d852d8d"
     )
 
 

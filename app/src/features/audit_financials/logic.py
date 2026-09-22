@@ -28,6 +28,7 @@ from src.features.audit_financials.constants import (
     UNIT_DIVISORS,
 )
 from src.shared.display_scale import display_places, format_display_value
+from src.features.report_standard.period_summary import performance_caption_with_audit_status
 
 
 _TAG_RE = re.compile(r"<[^>]+>", re.DOTALL)
@@ -106,6 +107,7 @@ class AuditPerformanceTable:
     entity_scope: str = ""
     raw_unit: str = ""
     unit_dimension: str = "currency"
+    unaudited_years: tuple[str, ...] = ()
 
     @property
     def numeric_checks(self) -> list[list[str]]:
@@ -137,6 +139,7 @@ class AuditPerformanceTable:
             "entity_scope": self.entity_scope,
             "raw_unit": self.raw_unit,
             "unit_dimension": self.unit_dimension,
+            "unaudited_years": self.unaudited_years,
         }
 
 
@@ -509,6 +512,31 @@ def _row_evidence_payload(
     )
 
 
+def _unaudited_years(header: str, periods: tuple[_FiscalPeriod, ...]) -> tuple[str, ...]:
+    """손익계산서 머리에서 미감사 표기가 붙은 기의 연도만 찾는다."""
+    terms = list(re.finditer(r"제\s*(\d+)\s*(?:\(\s*(당|전)\s*\)\s*)?기", header))
+    blocks = [
+        header[term.start():terms[index + 1].start() if index + 1 < len(terms) else len(header)]
+        for index, term in enumerate(terms)
+    ]
+    term_years = {
+        term.group(1): dates[-1].group("year")
+        for term, block in zip(terms, blocks)
+        if (dates := list(_FULL_DATE_RE.finditer(block)))
+    }
+    years: set[str] = set()
+    for term, block in zip(terms, blocks):
+        if re.search(r"\(\s*감사받지\s*아니한\s*재무제표\s*\)", block) is None:
+            continue
+        year = term_years.get(term.group(1))
+        period_index = {"당": 0, "전": 1}.get(term.group(2))
+        if year:
+            years.add(year)
+        elif period_index is not None and period_index < len(periods):
+            years.add(str(periods[period_index].fiscal_year))
+    return tuple(sorted(years & {str(period.fiscal_year) for period in periods}))
+
+
 def _attempt_candidate(candidate: _StatementCandidate, *, cite: str) -> _Attempt:
     header = candidate.search_text[: _metric_anchor(candidate.search_text)]
     unit = _extract_unit(header)
@@ -566,10 +594,12 @@ def _attempt_candidate(candidate: _StatementCandidate, *, cite: str) -> _Attempt
     scope_value = "consolidated" if candidate.scope == "연결" else "separate"
     closing_month = KOREAN_MONTHS[selected_periods[0].end.month]
     headers = ["사업연도", *metrics]
+    unaudited_years = _unaudited_years(header, selected_periods)
     table = AuditPerformanceTable(
-        caption=(
+        caption=performance_caption_with_audit_status(
             f"전자공시 최근 두 사업연도 {candidate.scope} 주요 실적 "
-            f"(결산월: {closing_month}, 단위: {DISPLAY_UNIT})"
+            f"(결산월: {closing_month}, 단위: {DISPLAY_UNIT})",
+            unaudited_years,
         ),
         headers=headers,
         rows=rows,
@@ -584,6 +614,7 @@ def _attempt_candidate(candidate: _StatementCandidate, *, cite: str) -> _Attempt
         ],
         entity_scope=scope_value,
         raw_unit=unit,
+        unaudited_years=unaudited_years,
     )
     # 계산 경로가 달라지면 표를 만들지 않도록 내부 계약도 즉시 대조한다.
     if table.numeric_checks != checks:

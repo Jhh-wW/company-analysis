@@ -284,13 +284,22 @@ def _classified_evidence_location_bindings(
                 raise ValueError("typed DART 근거 위치가 usable range와 다릅니다")
         else:
             prefix, separator, raw_index = location.rpartition("#")
-            if (
+            explicit_index = raw_fragment.get("range_index", -1)
+            if type(explicit_index) is int and explicit_index >= 0:
+                index = explicit_index
+                expected_location = str(raw_fragment.get("item_url") or "") or (
+                    f"{document['canonical_url']} · 목록 {index + 1}번째 항목"
+                )
+                if location != expected_location:
+                    raise ValueError("typed 공식 웹 근거 위치가 목록 항목과 다릅니다")
+            elif (
                 not separator
                 or prefix != document["canonical_url"]
                 or re.fullmatch(r"[0-9]{1,10}", raw_index) is None
             ):
                 raise ValueError("typed 공식 웹 근거 위치가 URL#index 형식이 아닙니다")
-            index = int(raw_index)
+            else:
+                index = int(raw_index)
             if index >= len(ranges) or ranges[index][1] - ranges[index][0] != len(text):
                 raise ValueError("typed 공식 웹 근거 위치가 usable range와 다릅니다")
         actual_by_document[document_id].add((location, text_sha256))

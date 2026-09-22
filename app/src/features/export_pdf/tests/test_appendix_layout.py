@@ -68,7 +68,7 @@ class _LeaveHeight(Flowable):
         pass
 
 
-def _appendix_pdf(report, *, remaining=None, projection=None) -> bytes:
+def _appendix_pdf(report, *, remaining=None, projection=None, page_height=A4[1]) -> bytes:
     logic._register_fonts()
     styles = logic._styles()
     story = [Paragraph("9장 마지막 문단", styles["body"])]
@@ -77,7 +77,7 @@ def _appendix_pdf(report, *, remaining=None, projection=None) -> bytes:
     logic._add_citations(story, report, styles, projection=projection)
     output = io.BytesIO()
     SimpleDocTemplate(
-        output, pagesize=A4,
+        output, pagesize=(A4[0], page_height),
         leftMargin=constants.PAGE_MARGIN_PT,
         rightMargin=constants.PAGE_MARGIN_PT,
         topMargin=constants.PAGE_TOP_MARGIN_PT,
@@ -98,6 +98,62 @@ def _many_sources_report(*, long_label=False):
         for index in range(1, 41)
     ]
     return replace(report, citations=sources)
+
+
+def test_40행_부록의_마지막_한_행을_앞_행과_함께_넘긴다(monkeypatch, tmp_path):
+    import re
+    from reportlab.platypus import Table, TableStyle
+
+    class UnprotectedTable(Table):
+        def setStyle(self, style):
+            super().setStyle(TableStyle([command for command in style.getCommands() if command[0] != "NOSPLIT"]))
+
+    report = _many_sources_report()
+    def counts(data):
+        return [len(re.findall(r"출처행\d+", page.extract_text())) for page in PdfReader(io.BytesIO(data)).pages]
+
+    boundary = None
+    with monkeypatch.context() as patch:
+        patch.setattr(logic, "Table", UnprotectedTable)
+        for height in range(500, 1150, 5):
+            baseline = _appendix_pdf(report, page_height=height)
+            if counts(baseline)[-1] == 1:
+                boundary = height
+                break
+    assert boundary is not None, "마지막 한 행이 고립되는 쪽 높이를 재현해야 합니다"
+    fixed = _appendix_pdf(report, page_height=boundary)
+    assert counts(fixed)[-1] >= 2
+    assert sum(counts(fixed)) == 40
+    for page in PdfReader(io.BytesIO(fixed)).pages:
+        assert page.extract_text().count("원문 위치") == 1
+    (tmp_path / "appendix-before.pdf").write_bytes(baseline)
+    (tmp_path / "appendix-after.pdf").write_bytes(fixed)
+
+
+@pytest.mark.parametrize("has_news", [False, True])
+def test_외부_언론_0건_안내문이_PDF와_봉인에_같이_나온다(has_news):
+    import json
+    from src.features.export_notion.logic import _source_list_blocks, _v2_source_list_blocks
+    from src.features.provenance.sources import SourceKind
+    from src.features.report_standard.public_projection import build_public_projection
+    from src.shared.report_generation.public_projection import public_report_projection_to_dict, public_report_projection_from_dict
+    from src.shared.report_generation.public_projection import build_report_digest
+
+    report = _v2_full_report()
+    source = replace(report.citations[0], kind=SourceKind.NEWS if has_news else SourceKind.FILING)
+    report = replace(report, citations=[source])
+    projection = build_public_projection(report)
+    expected = "" if has_news else constants.CITATIONS_NO_EXTERNAL_NEWS_NOTE
+    assert projection.citations_note == expected
+    payload = public_report_projection_to_dict(projection)
+    assert public_report_projection_from_dict(payload) == projection
+    changed = replace(projection, citations_note="다른 안내")
+    assert build_report_digest(changed).display_sha256 != build_report_digest(projection).display_sha256
+    for blocks in (_source_list_blocks(report), _v2_source_list_blocks(projection)):
+        assert (constants.CITATIONS_NO_EXTERNAL_NEWS_NOTE in json.dumps(blocks, ensure_ascii=False)) is (not has_news)
+    for sealed in (None, projection):
+        text = "".join(page.extract_text() for page in PdfReader(io.BytesIO(_appendix_pdf(report, projection=sealed))).pages)
+        assert (constants.CITATIONS_NO_EXTERNAL_NEWS_NOTE in text) is (not has_news)
 
 
 @pytest.mark.parametrize("height_delta, appendix_page", [(-1, 1), (1, 0)])

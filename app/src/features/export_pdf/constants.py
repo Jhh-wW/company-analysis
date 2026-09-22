@@ -123,6 +123,7 @@ EMPTY_DEFAULT_REASON: Final[str] = "해당 자료를 찾지 못했습니다"
 CITATIONS_NOTE: Final[str] = (
     "본문의 번호가 아래 원문을 가리킵니다."
 )
+CITATIONS_NO_EXTERNAL_NEWS_NOTE: Final[str] = "이 보고서에는 외부 언론 보도 출처가 없습니다."
 SOURCE_STATE_LABEL: Final[dict[str, str]] = {
     "ok": "찾음",
     "none": "없음",

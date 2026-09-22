@@ -77,6 +77,8 @@ from src.features.pipeline.port import (
     SummaryItem,
 )
 from src.features.provenance.sources import (
+    official_web_source_fields,
+    public_fragment_document_identity,
     Source,
     SourceKind,
     bind_document_content_sha256,
@@ -172,6 +174,9 @@ class _FragmentMeta:
     text: str = ""
     source_url: str = ""
     document_title: str = ""
+    item_title: str = ""
+    item_published_on: str = ""
+    item_url: str = ""
     location: str = ""
     #: 홈페이지 조각의 «문서일» — CollectedFragment 어댑터에는 없는 필드라
     #: 원시 dict를 받았을 때만 채워진다 (port.py는 3-1 소유라 손대지 않는다).
@@ -231,6 +236,9 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
                     text=text,
                     source_url=source_url,
                     document_title=str(item.get("문서명") or "").strip(),
+                    item_title=str(item.get("item_title") or "").strip(),
+                    item_published_on=str(item.get("item_published_on") or "").strip(),
+                    item_url=str(item.get("item_url") or "").strip(),
                     location=str(item.get("원문위치") or "").strip(),
                     document_date=str(item.get("문서일") or "").strip(),
                     financial_api_disclosed_at=str(item.get("financial_api_disclosed_at") or ""),
@@ -246,6 +254,9 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
             text=str(getattr(fragment, "text", "") or ""),
             source_url=str(getattr(fragment, "source_url", "") or ""),
             document_title=str(getattr(fragment, "document_title", "") or ""),
+            item_title=fragment.item_title,
+            item_published_on=fragment.item_published_on,
+            item_url=fragment.item_url,
             location=str(getattr(fragment, "location", "") or ""),
             document_date=str(getattr(fragment, "document_date", "") or ""),
             financial_api_disclosed_at=fragment.financial_api_disclosed_at,
@@ -562,6 +573,7 @@ def _performance_report_table(
         entity_scope=table.entity_scope,
         raw_unit=table.raw_unit,
         unit_dimension=table.unit_dimension,
+        unaudited_years=table.unaudited_years,
     )
 
 
@@ -890,20 +902,17 @@ def _build_source(
             kind=SourceKind.OTHER,
             label=_source_label(meta, filing_meta),
             collected_at=meta.source_collected_on,
-            published_at=meta.document_date,
             source_id=f"{V2_SOURCE_ID_PREFIX}{meta.fragment_id}",
-            title=meta.document_title,
             publisher=company_name,
             host=formal_web.host,
-            url=meta.source_url,
             document_id=meta.source_document_id,
-            location=meta.location,
             source_type=formal_web.source_type,
-            fact_status=(
-                "공식 발행일·보고기간 확정"
-                if formal_web.source_type == "회사 공식 IR"
-                and meta.document_date
-                else "기준일 현재 확인"
+            **official_web_source_fields(
+                source_type=formal_web.source_type,
+                title=meta.document_title, published_at=meta.document_date,
+                url=meta.source_url, location=meta.location,
+                item_title=meta.item_title, item_published_on=meta.item_published_on,
+                item_url=meta.item_url,
             ),
             used_in=list(used_in),
             evidence_hashes=evidence_hashes,
@@ -984,7 +993,7 @@ def _build_source(
                 f"{meta.formal_source_kind}"
             )
         actual_document_identity = document_identity(sealed)
-        if actual_document_identity != meta.document_identity:
+        if actual_document_identity != public_fragment_document_identity(meta):
             raise ValueError(
                 "FULL typed 출처의 공개 문서 신원이 packet과 다릅니다: "
                 f"{meta.formal_source_kind}; "
@@ -1404,6 +1413,7 @@ def render_report(
                     numeric=converted.numeric,
                     display_unit=converted.display_unit,
                     presentation=converted.presentation,
+                    unaudited_years=converted.unaudited_years,
                 )
             tables.append(converted)
 

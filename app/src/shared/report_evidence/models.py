@@ -165,6 +165,9 @@ class EvidenceFragment:
     unit: str = ""
     company_scope: str = ""
     covered_slot_ids: tuple[str, ...] = ()
+    item_title: str = ""
+    item_published_on: str = ""
+    item_url: str = ""
 
     def __post_init__(self) -> None:
         for label, value in (

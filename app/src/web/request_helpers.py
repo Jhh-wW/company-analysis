@@ -60,7 +60,9 @@ from src.features.final_gate_diagnostic.presentation import (
 from src.features.observability import admin_audit
 from src.features.pipeline.demo import DemoPipeline, available_companies
 from src.features.pipeline.port import CompanyLookupResult, Outcome, RunResult, UserInput
-from src.features.provenance.sources import visible_citations
+from src.features.provenance.sources import (
+    visible_citations, external_news_notice, source_label_display, source_status_display,
+)
 from src.features.sharelink import allowlist as share_allow
 from src.features.sharelink import logic as share_logic
 from src.features.sharelink import store as share_store
@@ -205,6 +207,9 @@ def _ctx(request: Request, **kwargs) -> dict:
         "cover_metrics": cover_metrics,
         "section_content_blocks": section_content_blocks,
         "source_verification_label": source_verification_label,
+        "external_news_notice": external_news_notice,
+        "source_label_display": source_label_display,
+        "source_status_display": source_status_display,
         "summary_topic": summary_topic,
         # 표지 다음 첫 본문 페이지 마스트헤드 두 줄. PDF·Notion과
         # «같은 함수»여야 회사명·생성일 표기가 세 채널에서 안 어긋난다.

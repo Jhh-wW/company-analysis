@@ -301,6 +301,9 @@ class CollectedFragment:
     bound_source: object | None = field(default=None, repr=False, compare=True)
     #: 수집 어댑터가 API 회사·기간·접수에 결속한 공시일. 수집일과 별개다.
     financial_api_disclosed_at: str = ""
+    item_title: str = ""
+    item_published_on: str = ""
+    item_url: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.financial_api_disclosed_at, str):
@@ -1073,6 +1076,11 @@ class SectionEvidencePacket:
                     "document_title": fragment.document_title,
                     "location": fragment.location,
                     "document_date": fragment.document_date,
+                    **({
+                        "item_title": fragment.item_title,
+                        "item_published_on": fragment.item_published_on,
+                        "item_url": fragment.item_url,
+                    } if fragment.item_url else {}),
                     **(
                         {"financial_api_disclosed_at": fragment.financial_api_disclosed_at}
                         if fragment.financial_api_disclosed_at else {}
@@ -1195,6 +1203,9 @@ def fragments_from_raw(
                 text=text,
                 source_url=str(item.get("출처") or "").strip(),
                 document_title=str(item.get("문서명") or "").strip(),
+                item_title=str(item.get("item_title") or "").strip(),
+                item_published_on=str(item.get("item_published_on") or "").strip(),
+                item_url=str(item.get("item_url") or "").strip(),
                 location=str(item.get("원문위치") or "").strip(),
                 financial_api_disclosed_at=str(item.get("financial_api_disclosed_at") or ""),
             )
@@ -1225,11 +1236,13 @@ class PerformanceTable:
     #: 행이 원문 직접 결속 대신 이미 검증된 프로그램 사실을 주입할 때 쓰는 ID.
     #: 있으면 rows와 같은 길이여야 하며 manifest canonicalizer가 검증한다.
     row_fact_ids: tuple[str, ...] = ()
+    unaudited_years: tuple[str, ...] = ()
 
 
 def performance_table_from_report_table(table: Any) -> PerformanceTable:
     """파이프라인 ReportTable을 덕 타이핑으로 감싼다 (직접 import 회피)."""
     return PerformanceTable(
+        unaudited_years=tuple(getattr(table, "unaudited_years", ()) or ()),
         caption=str(getattr(table, "caption", "") or ""),
         headers=tuple(str(h) for h in (getattr(table, "headers", None) or ())),
         rows=tuple(
