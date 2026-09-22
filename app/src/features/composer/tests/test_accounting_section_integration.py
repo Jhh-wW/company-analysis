@@ -79,11 +79,13 @@ def test_accounting_policy_is_limited_by_actual_owner_with_one_review(section, g
         ]
         assert diagnostics[0]["candidate_sha256"] == sha256(ACCOUNTING_TEXT.encode()).hexdigest()
         assert ACCOUNTING_TEXT not in repr(diagnostics)
-        # ⚠️ 닫힌 전송 계약(`observed_review_outcomes`)은 아직 이 사유를 모른다 —
-        #    `shared/report_quality/review_diagnostic_constants.REVIEW_SCOPE_ITEMS`
-        #    등록이 필요하다(소유 밖 파일이라 요청으로 남긴다). 등록되면 이 단언은
-        #    «닫힌 진단에도 남는다»로 바뀐다.
-        assert outcomes == ()
+        # 2026-09-22: 닫힌 전송 계약(`REVIEW_SCOPE_ITEMS`)에 이 사유를 등록했다.
+        #   이제 닫힌 진단에도 «장별 작성범위» 항목으로 남는다(원문은 남기지 않는다).
+        assert len(outcomes) == 1
+        assert outcomes[0]["reason_code"] == "accounting_policy_boilerplate"
+        assert outcomes[0]["candidate_sha256"] == sha256(ACCOUNTING_TEXT.encode()).hexdigest()
+        assert outcomes[0]["verification_items"] == ("장별 작성범위",)
+        assert ACCOUNTING_TEXT not in repr(outcomes)
 
 
 def test_summary_is_not_classified_as_culture_from_old_planned_slot():

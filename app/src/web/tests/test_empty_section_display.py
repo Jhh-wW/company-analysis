@@ -108,4 +108,5 @@ def test_numeric_filter_render_storage_web_preserves_notice_without_increasing_f
     assert candidate.sections[0].notice_only
     html = render_result(restored)
     assert html.count(NOTICE_NUMERIC_BODY_WITHHELD) == 1
-    assert EMPTY_SECTION_NOTICE not in html
+    # 통일된 글자라 「없다」로는 못 가른다. 이 계층이 안내를 더했다면 2번 찍힌다.
+    assert html.count(EMPTY_SECTION_NOTICE) == 1

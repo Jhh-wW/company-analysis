@@ -15,6 +15,9 @@ REVIEW_SCOPE_ITEMS = {
     "future_section_no_forward_statement": "장별 작성범위",
     "culture_financial_risk_scope_misplaced": "장별 작성범위",
     "culture_section_evidence_offcontract": "장별 작성범위",
+    # ★ 전 장 공통 회계정책 상용구 가드(composer.accounting_policy_constants).
+    #   코드 문자열은 그 모듈의 상수와 «반드시 같은 값»이어야 한다.
+    "accounting_policy_boilerplate": "장별 작성범위",
     # ★ 장과 무관한 부재 단언(composer.absence_claim_constants). 코드 문자열은
     #   그 모듈의 상수와 «반드시 같은 값»이어야 한다.
     "absence_claim_unsupported": "자료 부재 단언",
