@@ -315,4 +315,3 @@ def test_padding을_빼지_않은_상한이면_경계_입력이_LayoutError로_�
     citations[-1] = replace(citations[-1], location=citations[-1].location + "x " * 36)
     with pytest.raises(LayoutError):
         _appendix_pdf(replace(report, citations=citations))
-
