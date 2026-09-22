@@ -141,7 +141,7 @@ def _project(payload: dict, request: AnalysisRequest, *, restore: bool) -> dict:
         for excerpt in item["excerpts"]:
             for name in c.ANALYSIS_CACHE_SOURCE_FIELDS:
                 excerpt[name] = convert(excerpt[name])
-            # 사건명·대상명도 본문 전체를 우연히 포함하면 범위로만 보관한다.
+            # 사건명·대상명 자체가 본문 범위이면 현재 본문에서 복원한다.
             for name in ("event_key", "subject"):
                 raw = excerpt[name]
                 if restore:
@@ -150,6 +150,18 @@ def _project(payload: dict, request: AnalysisRequest, *, restore: bool) -> dict:
                 elif raw and raw in body:
                     excerpt[name] = convert(raw)
     return value
+
+
+def _contains_full_body(value: Any, bodies: tuple[str, ...]) -> bool:
+    """JSON 이스케이프 전의 모든 문자열·키에서 배치 원문 잔존을 확인한다."""
+    if isinstance(value, str):
+        return any(body and body in value for body in bodies)
+    if isinstance(value, dict):
+        return any(_contains_full_body(key, bodies) or _contains_full_body(item, bodies)
+                   for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_full_body(item, bodies) for item in value)
+    return False
 
 
 class AnalysisResultCache:
@@ -201,8 +213,13 @@ class AnalysisResultCache:
 
     def _put(self, key: str, request: AnalysisRequest, payload: dict) -> None:
         try:
-            encoded = _bytes(_project(payload, request, restore=False))
-        except (TypeError, ValueError, KeyError, IndexError):
+            projected = _project(payload, request, restore=False)
+            # 접두·접미 metadata와 중첩 추가 필드에도 어느 기사 원문도 남기지 않는다.
+            # 분석 결과는 그대로 반환하고 이 응답의 캐시 저장만 생략한다.
+            if _contains_full_body(projected, tuple(body for _, body in request.articles)):
+                return
+            encoded = _bytes(projected)
+        except (TypeError, ValueError, KeyError, IndexError, RecursionError):
             return
         if len(encoded) > min(self._entry_max_bytes, self._max_bytes):
             return

@@ -137,6 +137,44 @@ def test_cold_warm_actual_ask_no_fake_usage_or_attempts_and_news_cost_decreases(
     assert spend[0] > spend[1] == 0
     assert engines[0][0].available_provider_calls(reserved_calls=0) == engines[1][0].available_provider_calls(reserved_calls=0)
     assert engines[1][0]._provider_call_count == 0 and engines[1][0]._cached_provider_call_slots == 1
+    assert cache.PROCESS_ANALYSIS_CACHE._entries
+    assert all(BODY.encode("utf-8") not in entry.encoded
+               for entry in cache.PROCESS_ANALYSIS_CACHE._entries.values())
+
+
+@pytest.mark.parametrize("prefix,suffix", [
+    ("event: ", ""), ("", " / event"), ("«사건» ⚙️ ", " 🚀"), ("사건:\n", "\n끝"),
+])
+def test_actual_adapter_wrapped_body_is_returned_without_cache_storage(attempts, prefix, suffix):
+    event_key = prefix + BODY + suffix
+
+    class WrappedEventMessages(Messages):
+        def create(self, **kwargs):
+            response = super().create(**kwargs)
+            payload = json.loads(response.content[0].text)
+            for row in payload["items"]:
+                for excerpt in row["excerpts"]:
+                    excerpt["event_key"] = event_key
+            # Unicode·줄바꿈이 JSON 이스케이프로 오더라도 같은 원문으로 검사한다.
+            response.content[0].text = json.dumps(payload, ensure_ascii=True)
+            return response
+
+    results, spend = [], []
+    for _ in range(2):
+        engine, client, messages = setup_engine(WrappedEventMessages())
+        with real.provider_budget.activate(1000) as budget:
+            result = collect(engine, client)
+            spend.append(budget.accounted_krw)
+        results.append(result)
+        assert len(result.fragments) == 1 and result.fragments[0].text == BODY
+        assert result.fragments[0].event_key == event_key.strip()
+        assert result.diagnostics["분석캐시적중"] == 0
+        assert result.diagnostics["분석provider호출"] == result.diagnostics["분석논리호출"] == 1
+        assert len(messages.requests) == len(messages.counts) == len(engine.usages) == 1
+        assert engine.available_provider_calls(reserved_calls=0) == MAX_AI_CALLS_PER_REQUEST - 1
+        assert engine._cached_provider_call_slots == 0 and not cache.PROCESS_ANALYSIS_CACHE._entries
+    assert results[0] == results[1] and spend[0] == spend[1] > 0
+    assert len(attempts[0]) == len(attempts[1]) == 2
 
 
 @pytest.mark.parametrize("reserved", [0, 2, 5])
@@ -291,6 +329,8 @@ def test_runtime_wrapper_keeps_current_body_fetch_on_hit(attempts):
 def test_runtime_unclear_namespace_or_default_off_always_uses_provider(monkeypatch, attempts, kind):
     if kind == "default_off":
         monkeypatch.delenv(cc.ANALYSIS_CACHE_ENV)
+        monkeypatch.setattr(cache, "_contains_full_body",
+                            lambda *args: pytest.fail("기본 OFF는 캐시 저장 검사를 실행하면 안 됩니다"))
     elif kind == "unknown_build":
         monkeypatch.setattr(engine_build_identity, "process_engine_build_identity",
                             lambda: engine_build_identity.EngineBuildIdentity("", "unknown"))

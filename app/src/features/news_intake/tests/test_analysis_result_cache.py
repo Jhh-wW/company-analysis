@@ -27,9 +27,9 @@ NAMESPACE = cache.AnalysisNamespace(
 )
 
 
-def request(*, count=1):
+def request(*, count=1, body_suffix=""):
     snap, _ = snapshot([item(i) for i in range(count)])
-    articles = [(candidate, BODY.replace("120대", f"{120 + i}대"))
+    articles = [(candidate, BODY.replace("120대", f"{120 + i}대") + body_suffix)
                 for i, candidate in enumerate(snap.candidates)]
     return cache.AnalysisRequest(
         COMPANY, AS_OF, POLICY, articles,
@@ -68,6 +68,56 @@ def test_cold_warm_equal_deep_copy_and_no_original_input_in_storage():
     encoded = json.loads(entry.encoded)
     assert encoded["items"][0]["entity_evidence"] == [0, len(BODY)]
     assert encoded["items"][0]["excerpts"][0]["text"] == [0, len(BODY)]
+
+
+@pytest.mark.parametrize("body_suffix,prefix,suffix", [
+    ("", "event: ", ""),
+    ("", "", " / event"),
+    (" 설비 명칭은 Café·Cafe\u0301·⚙️다.", "«사건» ", " 🚀"),
+    ("\n추가 산업설비를 공급했다.", "사건:\n", "\n끝"),
+    (' 설비 명칭은 "A\\B"다.', '"사건": ', ""),
+])
+@pytest.mark.parametrize("body_index", [0, 1], ids=("own-body", "other-batch-body"))
+def test_wrapped_full_body_skips_only_storage(body_suffix, prefix, suffix, body_index):
+    store, req, calls, hits = cache.AnalysisResultCache(), request(count=2, body_suffix=body_suffix), [], []
+    output = payload(req)
+    output["items"][0]["excerpts"][0]["event_key"] = prefix + req.articles[body_index][1] + suffix
+    original = copy.deepcopy(output)
+    assert req.valid(output)
+    for attempt in range(2):
+        assert execute(store, req, output=output, calls=calls, hits=hits) is output
+        assert output == original and len(calls) == attempt + 1
+        assert not store._entries and not hits and req.cache_hits == 0
+
+
+@pytest.mark.parametrize("location", ["root-key", "nested-key", "nested-value"])
+def test_storage_guard_checks_additional_nested_keys_and_values(location):
+    store, req = cache.AnalysisResultCache(), request(count=2, body_suffix="\n추가 설비를 공급했다.")
+    output = payload(req)
+    wrapped = "사건:\n" + req.articles[1][1] + "\n끝"
+    if location == "root-key":
+        output[wrapped] = "추가 metadata"
+    elif location == "nested-key":
+        output["items"][0]["extra"] = [{"nested": {wrapped: "추가 metadata"}}]
+    else:
+        output["items"][0]["extra"] = [{"nested": [wrapped]}]
+    original = copy.deepcopy(output)
+    # 현 검증기는 추가 필드를 거절한다. 저장 경계도 독립적으로 원문을 막아야 한다.
+    store._put(req.key(NAMESPACE), req, output)
+    assert not store._entries and output == original
+
+
+def test_event_key_equal_to_body_keeps_span_only_cache_hit():
+    store, req, calls, hits = cache.AnalysisResultCache(), request(), [], []
+    output = payload(req)
+    output["items"][0]["excerpts"][0]["event_key"] = req.articles[0][1]
+    assert req.valid(output)
+    assert execute(store, req, output=output, calls=calls, hits=hits) == output
+    assert execute(store, req, output=output, calls=calls, hits=hits) == output
+    assert calls == [1] and hits == [1]
+    entry = next(iter(store._entries.values()))
+    assert req.articles[0][1].encode("utf-8") not in entry.encoded
+    assert json.loads(entry.encoded)["items"][0]["excerpts"][0]["event_key"] == [0, len(BODY)]
 
 
 @pytest.mark.parametrize("field,value", [

@@ -14,6 +14,7 @@ coordinator는 최초 요구의 “요청 전체 실제 금액 무조건 불증�
 - 순서 있는 후보의 **모든 metadata**, 각 기사의 잘리기 전 본문 SHA-256, 분석 입력 본문 SHA-256, 정확한 prompt·schema·max_tokens를 결속한다. prompt가 같아도 잘린 뒤쪽 본문이 바뀌면 miss다.
 - 키로는 위 입력 전체를 직렬화한 SHA-256만 저장한다. 회사 문맥·본문·prompt·인증정보·provider usage는 저장하지 않는다.
 - 응답의 `entity_evidence`, `text`, `time_evidence`, `subject_evidence`는 정수 범위로 바꿔 저장한다. 새로 fetch한 본문 없이는 인용을 복원할 수 없다. 짧은 사건명·닫힌 분류값 등 검증된 분석 metadata만 유지하며, 사건명·대상명이 본문에 포함되면 이것도 범위로 저장한다.
+- 범위 변환 후에도 자유 문자열·딕셔너리 키·중첩 필드에 배치 내 어느 기사 본문 전체가 남으면 해당 응답의 캐시 저장만 생략한다. JSON 이스케이프 전 문자열을 확인하므로 Unicode·줄바꿈도 그대로 비교하며, 기사 결과·사건명·원문이나 provider 호출 흐름은 바꾸지 않는다.
 - TTL 300초, LRU 128개, 직렬화 값 합계 4 MiB, 항목당 64 KiB. TTL은 저장 시점 기준이고 적중으로 연장하지 않는다. 키·만료 시각·값을 함께 checksum으로 검증해 다른 키의 항목 이동, 손상, 임의 만료 연장을 miss 처리한다.
 - 읽기·쓰기·퇴출은 잠금 안에서 수행한다. 반환/저장 객체는 깊은 복사로 격리한다. provider를 잠그거나 요청을 합치지 않아 동시 cold miss는 각각 기존 요청 예산으로 분석한다.
 
@@ -61,3 +62,17 @@ root `.venv/Scripts/python.exe`와 현재 checkout의 `PYTHONPATH=app`을 사용
 최종 회귀 범위는 `news_intake/tests` 전체, pipeline의 `test_news_analysis_exact_cache`, `test_news_call_budget`, `test_news_parallel_runtime`, `test_request_metering`, `test_real_contract`, `test_provider_parallel`, `test_request_budget_degradation`, `test_empty_section_recovery_calls`, `test_diagram_budget_metering`, budget의 `test_provider_budget`이다. `--basetemp .local-artifacts/pytest-news-exact-final`로 실행했다.
 
 commit은 작업 완료 보고에 기록한다. 실제 비용 절감률·적중률·속도 개선 수치는 이번 offline 검증으로 추정하지 않는다.
+
+## 독립 검토 P2 후속 보완 — 원문이 남는 metadata의 저장 생략
+
+`4e4cdbab`의 실제 adapter에서 `event_key = "event: " + body`를 반환하면, 58자 본문 전체가 캐시 문자열에 남는 반례를 확인했다. 기존 `raw in body`는 사건명 자체가 원문 범위인 경우만 처리했으므로 접두·접미 문자열은 변환되지 않았다.
+
+`analysis_result_cache.py::_put`에서 범위 변환을 마친 객체의 모든 문자열 값과 딕셔너리 키를 재귀 검사한다. 현재 배치의 어떤 본문 전체라도 포함하면 저장을 생략하고 이미 받은 분석 결과를 그대로 반환한다. 문자열을 해시로 대체하지 않고, 인용·기사·사건명을 삭제하지 않으며, 같은 분석 안에서 재호출하지 않는다. 기본 OFF, 키·TTL·모델/빌드·원장·논리 호출 몫은 변경하지 않았다.
+
+접두/접미, Unicode 조합문자와 이모지, 실제 본문 줄바꿈, 따옴표·역슬래시, 다른 배치 기사 본문 포함, 중첩 추가 값·키를 확인했다. 추가 필드는 현재 검증기가 이미 거절하므로 그 경우에는 저장 경계를 직접 시험했다. 사건명 자체가 본문과 같아 범위로 보관할 수 있는 응답은 정상적으로 적중한다.
+
+실제 `_ask` AST와 adapter 회귀에서는 네 가지 접두·접미 변형 모두 두 요청의 조각과 사건명이 같고 각 요청이 tokenizer/SDK/usage/attempt를 정확히 한 번씩만 사용하며, 저장 항목과 적중은 0이었다. 일반 안전 응답은 cold 1회/warm 0회 전송, 논리 몫 보존, 캐시의 본문 비보관을 유지했다. OFF에서는 새 저장 검사를 호출하지 않는 것도 확인했다.
+
+한정 검증 결과: **125개 통과, 2.44초**. `test_analysis_result_cache.py`와 `test_news_analysis_exact_cache.py` 두 파일만 실행했으며 신규 변형 18개와 기존 정상 적중·OFF·요청 상한·금액 admission·미확정 비용·실패·키/TTL/손상 경계를 포함한다. 기존 861/122/3820 전체 묶음은 반복하지 않았다. root venv에서 `-B`, `--noconftest`, `-p no:cacheprovider`를 사용하고 임시 `TemporaryDirectory`를 pytest basetemp로 지정했으며, socket 연결과 SQLite 연결은 예외로 차단했다. 외부 API·유료 호출·실DB·비밀·push·deploy는 사용하지 않았다.
+
+검사 범위는 현재 분석 입력 본문 전체의 정확한 문자열 포함이다. 본문의 임의 변환·인코딩·의역 탐지는 추가하지 않았고, 기존 근거 범위 복원과 metadata 의미는 유지한다. 저장을 생략한 응답은 다음 별도 요청에서도 정상 provider 호출을 사용하므로, 해당 응답의 캐시 절감 효과는 없다.
