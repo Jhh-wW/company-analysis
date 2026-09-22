@@ -16,6 +16,11 @@ from src.features.report_standard.visualization import table_visualization
 from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
 
 
+from src.features.provenance.sources import (
+    external_news_notice, source_label_display, source_status_display,
+)
+
+
 def render_result(report, *, template_source=None, notice_fn=empty_section_notice):
     """실제 result.html을 렌더하되 서비스 바깥 머리말만 빈 틀로 둔다."""
     from src.core.constants import section_display_parts
@@ -33,6 +38,9 @@ def render_result(report, *, template_source=None, notice_fn=empty_section_notic
         report=report, job=SimpleNamespace(job_id="offline-empty-section"),
         engine_v2_schema_version=ENGINE_V2_SCHEMA_VERSION, legacy_readonly=True,
         public_citations=report.citations, empty_section_notice=notice_fn,
+        # 운영 request_helpers가 등록하는 부록 언론 0건 안내 전역을 같은 이름으로 넘긴다.
+        external_news_notice=external_news_notice,
+        source_label_display=source_label_display, source_status_display=source_status_display,
         citation_number=citation_number, location_display=location_display, split_citation_markers=split_citation_markers,
         split_interpretation_marker=split_interpretation_marker, interpretation_label="해석",
         cover_metrics=cover_metrics, masthead_lines=masthead_lines,

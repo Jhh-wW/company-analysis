@@ -373,6 +373,9 @@ from src.features.pipeline.port import (
     UserInput,
     outcome_for,
 )
+from src.features.report_standard.period_summary import (
+    analysis_period_with_audit_status,
+)
 from src.features.report_standard.constants import (
     CANONICAL_SCHEMA_VERSION,
     COMPARISON_SHORTFALL_REASON,
@@ -5387,6 +5390,8 @@ def _performance_period_labels(
     if years:
         low, high = min(years), max(years)
         analysis = f"{low}~{high} 완료 회계연도"
+        # 감사보고서 손익계산서가 전기를 미감사로 표시하면 표지에도 그 사실을 붙인다.
+        analysis = analysis_period_with_audit_status(analysis, table)
         return analysis, latest
 
     return "기준일 전 36개월", latest
