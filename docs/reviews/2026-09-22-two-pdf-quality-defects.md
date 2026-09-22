@@ -59,3 +59,8 @@
 | S12·뤼튼 #26/#27 출처 필드·미감사·부록 고아 행 | `homepage/wide_fragments.py:127` `#{index}` 가짜 앵커, 공식 웹 출처 제목·발표일 미전달, 미감사 표기 없음 | fix-sources (Codex) | homepage·provenance·composer 출처 부록·export_pdf 부록·audit_financials·period_summary | 병합 2334562a. 목록 항목의 제목·발표일·개별 URL을 출처로 전달, 언론 0건 안내 한 줄, 미감사 연도 파싱·표지/캡션 표기(파이프라인 호출은 총괄이 연결), 부록 마지막 2행 동반 넘김 |
 | S8 도식 일반어·매출원 누락 | `composer/constants.py` 도식 프롬프트, `composer/logic.py:866 parse_flow_rows` 커버리지 검사 없음, `diagram_check.py` 참/거짓만 판정 | fix-diagram (Claude) | constants.py(도식 프롬프트), logic.py, diagram_check.py, diagram_review_constants.py | 병합 d65772c0. 일반어 한 낱말 칸은 빈 칸 처리(줄 전체가 비면 제거), 매출원 누락은 운영 기록 사유, 제품/상품 모순 줄 제외 |
 | 통합 조정 | 병합 뒤 상호작용 3건(사유 코드 미등록, 해석 번호 시험 전제, 재분류 골든 16칸) | 총괄 | 사유 등록·시험·골든 | 커밋 3d4b50ea. 총괄 코덱스 커밋 3건(39d64907·dd0945b6·22844768)도 14f2873a로 병합 |
+| 1차 독립 검토(Opus) | 렌더는 해석 문장 번호를 보이는데 사전 봉인(public_manifest)은 옛 규칙 → FULL에서 PublicManifestError(치명). 가드 금액 문장 과차단, 요약 해석 우선 가능, 문체 진단 미배선 등 | review-integration | 읽기 전용 | 보고서 scratchpad review-integration.md. D1~D9 |
+| D1·D9 봉인 일치·문체 진단 배선 | `public_manifest.py` 독립 재계산이 render 규칙과 갈림 | fix-seal (Claude) | render.py 규칙 함수 공개화, public_manifest.py 호출, pipeline.py 3곳 인자 전달 | 병합 9eda8bab. 재현 스크립트 2건 빨강→초록, 음성 대조 6회 |
+| D2·D8 가드 금액 면제 | 금액·완료 사건이 든 절까지 상용구로 판정 | fix-guard-amounts (Claude) | accounting_policy_guard.py·constants | 병합 7d077d0f. 면제 5·비화폐 6·차단 12 유지 |
+| D3·D7 요약 정렬·손익 0 | 점수 정렬로 해석이 확인을 앞설 수 있음, 끝값 0을 흑자 전환으로 서술 | fix-summary-order (Codex) | extractive_summary.py, structured_claims.py | 병합 89626b4d |
+| 통합 조정 2 | 웹 시험 도우미 전역 누락, 출처 날짜 시험, 결과 화면 스냅샷(-7/+5줄), real.py 표지 미감사 호출 2줄 | 총괄 | 시험·스냅샷·real.py | 커밋 63782b12·0d2c74a3·13320828·b0243b72 |
