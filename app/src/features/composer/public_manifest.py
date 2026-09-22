@@ -56,6 +56,7 @@ from src.features.composer.port import (
     StructuredClaim,
 )
 from src.features.composer.portfolio_name_table import PortfolioNameTable
+from src.features.composer.style_normalizer import SentenceStyleNormalizer
 from src.features.pipeline.port import Report, ReportTable
 from src.features.provenance.sources import (
     Source,
@@ -1554,6 +1555,7 @@ def _expected_public_content_projection(
     program_registry_sources: Sequence[Source] = (),
 ) -> dict[str, object]:
     numbers = _citation_numbers_for_fragments(fragments)
+    style_normalizer = SentenceStyleNormalizer(report, fragments, as_of_date=as_of_date)
     groups = [
         (
             section.sentences,
@@ -1575,7 +1577,9 @@ def _expected_public_content_projection(
     for section_index, section in enumerate(report.sections):
         shows = groups[section_index][1]
         displays = [
-            _expected_display_text(sentence, numbers, show_markers=shows[index])
+            _expected_display_text(
+                style_normalizer.normalize(sentence), numbers, show_markers=shows[index],
+            )
             for index, sentence in enumerate(section.sentences)
         ]
         lines = ([[section.notice, ""]] if section.notice else []) + [
@@ -1642,7 +1646,7 @@ def _expected_public_content_projection(
         summary_items.append(
             {
                 "text": _expected_display_text(
-                    sentence,
+                    style_normalizer.normalize(sentence),
                     numbers,
                     show_markers=summary_shows[index],
                 ),

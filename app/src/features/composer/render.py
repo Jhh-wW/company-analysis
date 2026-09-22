@@ -67,6 +67,7 @@ from src.features.composer.portfolio_name_table import PortfolioNameTable
 from src.features.composer.public_manifest import PublicStructureSeal
 from src.features.composer.prose_facts import ProseEvidence, build_verified_prose_fact
 from src.features.composer.quality_projection import bound_summary_fact_id
+from src.features.composer.style_normalizer import SentenceStyleNormalizer
 from src.features.pipeline.port import (
     FactRecord,
     Grade,
@@ -1120,6 +1121,7 @@ def render_report(
     verified_program_facts: Sequence[FactRecord] = (),
     program_registry_sources: Sequence[Source] = (),
     name_table: Optional[PortfolioNameTable] = None,
+    style_diagnostics: dict[str, int] | None = None,
 ) -> Report:
     """검증 끝난 ComposedReport를 웹·PDF 공용 pipeline Report로 바꾼다.
 
@@ -1148,6 +1150,7 @@ def render_report(
         name_table: 3장에 덧붙일 「회사가 공시한 대표 이름」 표. 조각의 글자와
             인용만 투영한 결정적 표라 작가 카드와 달리 AI를 지나지 않는다.
             None이면 3장에 이 표를 넣지 않는다(빈 표를 만들지 않는다).
+        style_diagnostics: 원문 없이 최종 산문의 시제 사유별 개수만 받는 선택적 사전.
 
     Returns:
         pipeline `Report` — 9개 장 전부(prose_lines: 문장 + [n] + 해석 표지,
@@ -1275,6 +1278,7 @@ def render_report(
         for index, section in enumerate(report.sections)
     }
     summary_shows = visibility_groups[-1][1]
+    style_normalizer = SentenceStyleNormalizer(report, fragments, as_of_date=as_of_date)
 
     for section in report.sections:
         prose_lines: list[tuple[str, str]] = []
@@ -1290,7 +1294,7 @@ def render_report(
         buffer: list[str] = []
         for index, sentence in enumerate(section.sentences):
             display = sentence_display_text(
-                sentence, numbers, show_markers=shows[index]
+                style_normalizer.normalize(sentence), numbers, show_markers=shows[index]
             )
             # prose_lines는 «문장» 단위 그대로 둔다 — 출고 검증과 저장이 이
             # 단위를 쓴다. 문단은 화면·PDF 표시용으로 «따로» 모은다.
@@ -1519,7 +1523,7 @@ def render_report(
         summary_fact = facts_by_id.get(summary_fact_id)
         summary_fact_ids = [summary_fact_id] if summary_fact is not None else []
         display_text = sentence_display_text(
-            sentence, numbers, show_markers=summary_shows[index]
+            style_normalizer.normalize(sentence), numbers, show_markers=summary_shows[index]
         )
         summary_section_id = (
             summary_fact.section_owner
@@ -1618,6 +1622,14 @@ def render_report(
             reference_date=as_of_date,
         ):
             raise ValueError(f"FULL typed 공개 출처 계약 위반: {problem}")
+
+    if style_diagnostics is not None:
+        style_diagnostics.update(style_normalizer.diagnostics)
+    if style_normalizer.diagnostics:
+        logger.info(
+            "최종 산문 시제 진단: %s", style_normalizer.diagnostics,
+            extra={"style_diagnostics": dict(style_normalizer.diagnostics)},
+        )
 
     return Report(
         company=company_name,
