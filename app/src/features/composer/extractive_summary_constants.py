@@ -22,8 +22,8 @@ SUMMARY_FORMAL_ENDING_PATTERN: Final[str] = r"(?:습니다|입니다)\."
 # 지우지 않으며 다른 서술·추가 절·부정문에는 이 규칙을 적용하지 않는다.
 SUMMARY_REVENUE_COMPOSITION_PATTERN: Final[str] = (
     r"(?P<subject>.+?)의 (?:주된 )?영업수익은 "
-    r"(?P<service>.+?) 용역(?: 매출)?과 (?P<content>.+?) 매출"
-    r"(?: 두 가지 형태)?로 구성된다\."
+    r"(?P<service>.+?) 용역(?: 매출)?과 (?P<content>.+?)"
+    r"(?: 매출(?: 두 가지 (?:형태|경로))?| 두 가지 (?:형태|경로))로 구성된다\."
 )
 SUMMARY_LOW_VALUE_PATTERNS: Final[tuple[str, ...]] = (
     "인식한다",

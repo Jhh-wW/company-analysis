@@ -319,3 +319,48 @@ def test_실제_저장본_SHADOW_경계에서_중복을_재현하고_안전하�
         assert item.verification_binding == summary_verification_binding(
             item.text, item.section_id, item.fact_ids, item.evidence_text,
             item.verification_status, item.support_terms)
+
+
+@pytest.mark.parametrize("composition_ending", (
+    "매출 두 가지 형태", "매출 두 가지 경로", "두 가지 형태", "두 가지 경로",
+))
+def test_실제_두번째_PDF의_경로_표현도_중복_요약에서_한번만_남긴다(composition_ending):
+    # 27e9f03 운영 출력에서 확인한 두 문장이다. 문구가 달라도 양쪽 항목과
+    # 회사 및 공유 인용이 같을 때만 선택 후보를 줄이고 본문은 손대지 않는다.
+    observed = (
+        "뤼튼테크놀로지스의 영업수익은 인공지능 소프트웨어 개발 용역과 "
+        f"인공지능 콘텐츠 {composition_ending}로 구성된다."
+    )
+    candidates = _candidates(second=observed)
+    assert distinct_summary_candidates(candidates, company_name=COMPANY) == candidates[:1]
+    for replacement in ("2025년 인공지능 콘텐츠", "해외 인공지능 콘텐츠", "의료 콘텐츠"):
+        different = _candidates(second=observed.replace("인공지능 콘텐츠", replacement))
+        assert distinct_summary_candidates(different, company_name=COMPANY) == different
+    unrelated = replace(candidates[1], sentence=replace(candidates[1].sentence, citations=("9",)))
+    assert distinct_summary_candidates((candidates[0], unrelated), company_name=COMPANY) == (candidates[0], unrelated)
+
+
+def test_운영_PDF_수익구조_중복은_SHADOW의_요약_AI_입력부터_제외한다():
+    observed = (
+        "뤼튼테크놀로지스의 영업수익은 인공지능 소프트웨어 개발 용역과 "
+        "인공지능 콘텐츠 두 가지 경로로 구성된다."
+    )
+    body = _body()
+    business = ComposedSection("business_model", (
+        _sentence(observed, "business_model", planned_claim_slot="business_model:revenue_model"),
+    ))
+    body = replace(body, sections=(body.sections[0], business, body.sections[2]))
+    prompts = []
+
+    def ask(prompt):
+        prompts.append(prompt)
+        return '{}'
+
+    final, _, _ = _legacy_summary_stage(
+        body, writer_ask=ask, body_numeric_filtering=NumericSafetyFiltering(), company_name=COMPANY,
+    )
+    assert len(prompts) == 1 and IDENTITY not in prompts[0]
+    assert {sentence.text for sentence in final.summary} == {
+        ALTERNATIVE, observed, body.sections[2].sentences[0].text,
+    }
+    assert final.sections == body.sections
