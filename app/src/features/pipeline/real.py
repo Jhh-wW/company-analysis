@@ -301,6 +301,7 @@ from src.features.pipeline.news_research_context import (
     news_generation_digest,
     official_news_context,
 )
+from src.features.pipeline.official_news_aliases import official_news_aliases
 from src.features.pipeline import engine_mode
 from src.features.pipeline.collection_recovery import (
     audit_rows_from_response,
@@ -6152,6 +6153,10 @@ def _run_news_search_branch(
             verified_domain, identity_context = official_news_context(
                 profile, official_evidence
             )
+            profile_aliases = _official_company_aliases(profile)
+            alias_evidence = official_news_aliases(
+                profile, official_evidence, existing_aliases=profile_aliases
+            )
             try:
                 # FULL의 기본 작성·검수와 허용된 보충 검수 몫을 먼저 보호한다.
                 # 부분 모드도 같은 여유를 남기되 기존 선택적 다듬기 한도 저하는
@@ -6181,7 +6186,7 @@ def _run_news_search_branch(
                         or getattr(engine, "search_news", None)
                     ),
                     company_name=company_name,
-                    aliases=_official_company_aliases(profile),
+                    aliases=profile_aliases + tuple(item.alias for item in alias_evidence),
                     domain=verified_domain,
                     executive_names=tuple(
                         name.strip()
@@ -6202,6 +6207,8 @@ def _run_news_search_branch(
                         "AI분석호출상한": news_session.policy.max_analysis_calls,
                         "본문작성예약호출": COMPOSER_RUNTIME_CALL_RESERVE,
                         "빈장복구예약호출": EMPTY_RECOVERY_AI_CALLS,
+                        **({"공식약칭근거": [item.diagnostic() for item in alias_evidence]}
+                           if alias_evidence else {}),
                         **news_session.snapshot.transport_diagnostics,
                     }
                 )
