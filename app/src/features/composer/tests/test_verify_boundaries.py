@@ -2,10 +2,17 @@
 
 ★ 지키는 경계: 검증의 처분은 «문장 단위»뿐이다 — 깨진 인용·틀린 숫자·검수
   거짓은 그 문장만 제거/강등하고, 나머지 문장·장·보고서는 살아서 렌더와
-  출고 검증(validate_v2)까지 도달한다. 어떤 조합에서도 「보고서 전체 차단」은
-  없다. validate_v2의 3검사 실패만 예외인데(그건 정당한 fail-closed),
-  그 경로는 test_pipeline.py의 «본문이_통째로_비면» 시험이 이미 못 박았으므로
-  여기서 중복하지 않는다.
+  출고 검증(validate_v2)까지 도달한다. 문장 단위 처분이 «보고서 전체 차단»으로
+  번지지 않는다. validate_v2의 검사 실패만 예외인데(그건 정당한 fail-closed),
+  본문이 통째로 비는 경로는 test_pipeline.py의 «본문이_통째로_비면» 시험이 이미
+  못 박았다.
+★ 검수 AI «완전 불능»의 계약 (2026-09-23 총괄 결정) — 인용 문장이 전부 빠져
+  본문에 검수 표식이 있는 문장이 하나도 없으면, 표지 요약을 인용 0개·미검수
+  «해석»으로 채우지 않는다(운영 PDF 27e9f03 표지 04 실측 뒤 요약 잣대가
+  «검수 표식 + 인용»을 요구한다). 그래서 bare SHADOW는 요약 0문장으로
+  validate_v2의 3~5문장 검사에 걸려 V2ValidationError로 끝난다(fail-closed).
+  명시적 evidence-available 입력이 있으면 기존 정책대로 요약 0문장이 허용되되,
+  미검수 해석이 표지에 복원되지는 않는다. 4-B-4·4-B-5가 두 경로를 다 단정한다.
 ★ test_verify.py와의 역할 구분 — 그쪽은 verify_report 단품에 작은 합성
   보고서를 넣어 처분 규칙 하나하나를 보고, 여기는 골든 샘플 규모의 fixture로
   composer 전체(run_v2)를 돌려 처분이 «보고서 수준으로 번지지 않음»을 본다.
@@ -19,14 +26,21 @@ import re
 from pathlib import Path
 from typing import Any, Final, Optional, Sequence
 
+import pytest
+
 from src.features.composer.constants import GRADE_CONFIRMED, SECTION_GUIDES, SECTION_IDS
 from src.features.composer.diagram_check import (
     FLOW_REVIEW_PROMPT_HEADER,
     FLOW_REVIEW_ROW_NUMBER_PATTERN,
 )
 from src.features.composer.logic import AskFn, SUMMARY_PROMPT_HEADER
+from src.features.composer.evidence_availability import (
+    COLLECTION_STATE_PARTIAL,
+    EvidenceAvailability,
+)
 from src.features.composer.tests.test_pipeline import _summary_selection_json
 from src.features.composer.pipeline import V2RunOutput, run_v2
+from src.features.composer.validate import V2ValidationError
 from src.features.composer.render import (
     ENGINE_V2_SCHEMA_VERSION,
     INTERPRETATION_MARKER,
@@ -368,61 +382,101 @@ def test_검수_거짓_문장은_재작성_1회와_재검수를_거쳐_확인으
 # ══════════════════════════════════════════════════════════
 
 
-def test_검수가_완전_불능이면_미확인_인용_문장을_공개하지_않는다() -> None:
-    reviewer = _DeadReviewer()
+def _dead_reviewer_evidence_available_run(writer: _GoldenWriter) -> V2RunOutput:
+    """검수 완전 불능 + 명시적 확보 근거 입력 — 요약 하한이 완화되는 운영 SHADOW 모양."""
 
-    # 검수가 호출마다 죽어도 run_v2는 예외 없이 보고서를 돌려줘야 한다
-    output = _run(_GoldenWriter(), reviewer)
+    return run_v2(
+        COMPANY_NAME,
+        _fixture_fragments(),
+        None,
+        writer_ask=writer,
+        reviewer_ask=_DeadReviewer(),
+        evidence_availability=EvidenceAvailability(COLLECTION_STATE_PARTIAL),
+    )
+
+
+def _assert_only_uncited_interpretations_remain(
+    output: V2RunOutput, sections: dict[str, Any],
+) -> None:
+    """인용 문장은 전부 빠지고 인용 없는 해석만 남는다 — 라벨만 바꿔 살리지 않는다."""
+
     report = output.report
-
-    assert reviewer.calls >= 2  # 실제로 검수를 불렀고, 그때마다 죽었다
-    # 인용이 있는 AI 문장은 라벨만 바꿔 살리지 않는다. 인용 없는
-    # 해석은 아직 별도 정책으로 남지만, 품질 관측은 정직하게 공개 차단이다.
     assert not output.quality_observation.release_allowed
     for section_id in SECTION_IDS:
         texts = _section_texts(report, section_id)
-        expected = _uncited_interpretation_count(
-            _RESPONSES_FIXTURE["장별_응답"], section_id
-        )
+        expected = _uncited_interpretation_count(sections, section_id)
         if expected:
             assert len(texts) == expected, section_id
             assert all(text.endswith(INTERPRETATION_MARKER) for text in texts)
         else:
             # 원래 문장이 있었으므로 단순 자료 부재가 아닌 검수 탈락 안내가 남는다.
             assert section_id in output.quality_observation.notice_only_sections
-    assert report.summary_items
-    assert all(
-        item.text.endswith(INTERPRETATION_MARKER)
-        for item in report.summary_items
-    )
+
+
+def test_dead_reviewer_bare_shadow_fails_closed_instead_of_filling_summary_with_unverified() -> None:
+    """★ 검수 완전 불능 → 검수 표식 있는 문장 0 → 요약 0 → validate_v2 fail-closed.
+
+    예전에는 인용 0개·미검수 해석으로 요약을 채워 보고서를 돌려줬다. 그 요약이
+    운영 표지 04 결함과 같은 모양이라 더는 만들지 않는다. 검수 호출은 실제로
+    이뤄지고 그때마다 죽는다 — 예외는 요약 검사에서만 난다.
+    """
+    reviewer = _DeadReviewer()
+
+    with pytest.raises(V2ValidationError) as excinfo:
+        _run(_GoldenWriter(), reviewer)
+
+    assert reviewer.calls >= 2  # 실제로 검수를 불렀고, 그때마다 죽었다
+    assert "핵심 요약" in str(excinfo.value)
+    assert "0문장" in str(excinfo.value)
+
+
+def test_dead_reviewer_with_evidence_available_keeps_empty_summary_without_restoring_interpretations() -> None:
+    """★ 명시적 확보 근거 입력 — 요약 0문장은 허용되지만 미검수 해석을 표지에 되살리지 않는다."""
+    output = _dead_reviewer_evidence_available_run(_GoldenWriter())
+    report = output.report
+
+    assert report.schema_version == ENGINE_V2_SCHEMA_VERSION
+    _assert_only_uncited_interpretations_remain(output, _RESPONSES_FIXTURE["장별_응답"])
+    assert report.summary_items == []
+    assert report.publication_policy == "evidence-available-v1"
 
 
 # ══════════════════════════════════════════════════════════
-# 4-B-5. 역경이 겹쳐도 «보고서 전체 차단»은 없다
+# 4-B-5. 역경이 겹쳐도 처분은 문장 단위다 — 요약만은 검수 표식 없이 채우지 않는다
 # ══════════════════════════════════════════════════════════
 
 
-def test_역경_조합에서도_보고서_전체_차단은_없다() -> None:
-    """깨진 인용 + 틀린 단위 숫자 + 검수 불능이 겹쳐도 문장 단위 처분뿐이다."""
+def _adversity_sections() -> dict[str, Any]:
+    """깨진 인용 + 틀린 단위 숫자 — 검수 불능과 겹치는 역경 조합."""
     sections = _golden_sections()
     sections["identity"]["문장들"][1]["인용"] = ["99"]
     sections["business_model"]["문장들"][2]["글"] = (
         "2025년 수출 매출 비중은 99.9%다."
     )
+    return sections
 
-    output = _run(_GoldenWriter(sections), _DeadReviewer())
+
+def test_adversity_combination_bare_shadow_fails_closed_on_empty_summary() -> None:
+    """깨진 인용 + 틀린 단위 숫자 + 검수 불능 — 본문 처분은 문장 단위지만 요약은 비어 막힌다."""
+    with pytest.raises(V2ValidationError) as excinfo:
+        _run(_GoldenWriter(_adversity_sections()), _DeadReviewer())
+
+    assert "핵심 요약" in str(excinfo.value)
+
+
+def test_adversity_combination_with_evidence_available_has_sentence_level_disposal_only() -> None:
+    """확보 근거 입력에서는 보고서가 나오고, 처분은 여전히 문장 단위뿐이다."""
+    sections = _adversity_sections()
+
+    output = _dead_reviewer_evidence_available_run(_GoldenWriter(sections))
     report = output.report
 
     # 보고서는 렌더와 출고 검증(validate_v2)까지 통과해 나왔다 — 전체 차단 없음
     assert report.schema_version == ENGINE_V2_SCHEMA_VERSION
     assert [section.cell for section in report.sections] == list(SECTION_IDS)
     # 깨진 인용·틀린 수치·검수 미완료 인용 문장은 단위별로 빠진다.
-    assert output.composed_sentences == _expected_total()
-    assert not output.quality_observation.release_allowed
-    assert len(_section_texts(report, "identity")) == _uncited_interpretation_count(
-        sections, "identity"
-    )
-    assert len(
-        _section_texts(report, "business_model")
-    ) == _uncited_interpretation_count(sections, "business_model")
-    assert len(report.summary_items) >= 3
+    # 초안 수는 본문뿐이다 — 검수 표식 있는 후보가 없어 요약 고르기를 부르지 않는다.
+    assert output.composed_sentences == _expected_total() - _SUMMARY_PICKS
+    _assert_only_uncited_interpretations_remain(output, sections)
+    # 요약은 검수 표식 있는 문장이 없으므로 비어 있다 — 해석으로 채우지 않는다.
+    assert report.summary_items == []

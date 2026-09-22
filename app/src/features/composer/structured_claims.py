@@ -525,8 +525,23 @@ def is_release_ready_summary_sentence(
       길을 주지 않고 구조화 사실과 소유 장 일치를 요구한다. 두 잣대가 다르기
       때문에, 본문에 남은 문장을 요약으로 «옮기는» 경로는 반드시 이 함수를
       다시 통과해야 한다 — 안 그러면 요약이 본문보다 느슨해진다.
+    ★ 숫자가 없어도 «독립 검수 통과 표식 + 인용»은 요구한다 (2026-09-23 운영
+      PDF 27e9f03 실측) — 인용 0개·검수를 받은 적 없는 «해석» 문장 「회사는
+      공식 자료에서 자신의 차별점을 명시적으로 선언하지 않았다」가 요약 후보로
+      올라가 AI 고르기가 표지 04 「핵심결론」으로 실었다. 그 항목은
+      section_id·fact_ids·verification_status가 전부 빈 값이었다. 요약 계약
+      (`docs/출력물 기준/00_핵심_요약/README.md`)은 「원문 완전일치 코드 확정
+      또는 독립 Reviewer를 통과한 본문 문장」만 후보로 두고, 근거가 충분한
+      결론이 3개 미만이면 억지로 채우지 않는다고 적는다. 인용 없는 해석은
+      의미 검수가 대조할 자료가 없어 통째로 건너뛰므로 표식이 붙을 수 없고,
+      그래서 요약에 실을 자격도 없다. 본문 공개 여부는 여기서 바꾸지 않는다.
     """
 
+    if (
+        sentence.verification_state != VerificationState.VERIFIED.value
+        or not sentence.citations
+    ):
+        return False
     if not has_public_numeric_token(sentence.text):
         return True
     claim = sentence.structured_claim

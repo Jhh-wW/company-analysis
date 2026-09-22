@@ -1217,14 +1217,22 @@ def test_생성지표는_등록부전용_source가_아니라_실제_인용조각
 _요약_최소 = 3
 
 
-def _요약용_문장(text: str, *, numeric_verified: bool = False):
+def _요약용_문장(text: str):
+    """verify_report를 이미 통과한 본문 «확인» 문장 — 인용 1개·검수 표식 있음.
+
+    ★ 2026-09-23부터 요약 잣대(`is_release_ready_summary_sentence`)는 숫자
+      유무와 무관하게 «검수 통과 표식 + 인용»을 요구한다(운영 PDF 27e9f03
+      표지 04에 인용 0개·미검수 해석이 실린 실측). 그래서 이 재료는 항상
+      verified다 — 예전의 `numeric_verified` 스위치는 숫자 문장만 표식을
+      달아 주던 것이라 지금 잣대에서는 뜻이 없다.
+    """
     from src.features.composer.port import ComposedSentence
 
     return ComposedSentence(
         text=text,
         citations=("1",),
         grade=GRADE_CONFIRMED,
-        verification_state="verified" if numeric_verified else "unverified",
+        verification_state="verified",
     )
 
 
@@ -1304,7 +1312,6 @@ def test_수치_안전_검사가_뺀_문장은_요약_보충으로_되돌아오�
 
     수치_문장 = _요약용_문장(
         "설립일은 1997년 4월 25일이고 상장일은 2001년 11월 21일이다.",
-        numeric_verified=True,
     )
     assert has_public_numeric_token(수치_문장.text), "이 시험의 전제 — 공개 숫자 문장"
     # 장에 문장이 하나뿐이라, 거르기가 끊기면 보충이 «반드시» 이 문장을 집는다.
@@ -1365,7 +1372,6 @@ def test_보충으로_채운_요약을_다시_검사해도_아무것도_빠지�
                 _요약용_문장(f"{section_id} 첫 문장이다."),
                 _요약용_문장(
                     f"{section_id} 매출은 {100 + index}억원이다.",
-                    numeric_verified=True,
                 ),
             )))
         return ComposedReport(sections=tuple(sections))
@@ -1403,7 +1409,7 @@ def test_보충이_요약_잣대를_놓치면_뒷문이_그_문장을_뺀다(mon
     from src.features.composer.structured_claims import NumericSafetyFiltering
 
     새는_문장 = _요약용_문장(
-        "identity 매출은 999억원이다.", numeric_verified=True
+        "identity 매출은 999억원이다.",
     )
     verified = _요약용_본문(identity_sentences=(
         _요약용_문장("identity 첫 문장이다."),
