@@ -28,12 +28,24 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     SUMMARY_COUNT_FIELDS,
     SUMMARY_STAGES,
     SUMMARY_STEP,
+    SECTION_EXECUTION_STEP,
+    SECTION_EXECUTION_COUNT_FIELDS,
     EMPTY_RECOVERY_RESPONSE_SHAPES, EMPTY_RECOVERY_STAGE_COUNT_KEYS,
 )
 
 
 def _count(value: object, *, minimum: int = 0) -> bool:
     return type(value) is int and value >= minimum
+
+
+def _section_execution(record: Mapping) -> dict[str, object] | None:
+    if any(not _count(record.get(field)) for field in SECTION_EXECUTION_COUNT_FIELDS):
+        return None
+    if record["동시상한"] < 1:
+        return None
+    return {"step": SECTION_EXECUTION_STEP, **{
+        field: record[field] for field in SECTION_EXECUTION_COUNT_FIELDS
+    }}
 
 
 def _protocol(record: Mapping) -> dict[str, object] | None:
@@ -165,6 +177,7 @@ def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], 
             continue
         step = record.get("step")
         normalized = (
+            _section_execution(record) if step == SECTION_EXECUTION_STEP else
             _protocol(record) if step == PROTOCOL_STEP else
             _summary(record) if step == SUMMARY_STEP else
             _diagram_rows(record) if step == DIAGRAM_ROW_COUNT_STEP else

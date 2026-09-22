@@ -47,6 +47,7 @@ from src.core import (
 from src.core.clock import subtract_years, today_kst
 from src.core.provider_gateway import attempt_context, gateway
 from src.core.provider_gateway.anthropic_adapter import AnthropicAdapter
+from src.core.provider_gateway.concurrency import PIPELINE_PROVIDER_LIMITER
 from src.core.provider_gateway.types import (
     BillingDisposition,
     ProviderObservation,
@@ -81,6 +82,18 @@ from src.core.citations import citation_number
 from src.features.audit_financials.logic import parse_audit_financials
 from src.features.grading.constants import ACCOUNTING_POLICY_REASON
 from src.features.budget import provider_budget
+from src.features.pipeline.provider_parallel_constants import (
+    DEFAULT_PROVIDER_STAGE,
+    WRITER_MAX_PARALLEL_CALLS,
+    WRITER_PARALLEL_CALLS_ENV,
+    WRITER_SEQUENTIAL_CALLS,
+)
+from src.features.pipeline.news_parallel_constants import (
+    NEWS_BODY_CONCURRENCY_DEFAULT,
+    NEWS_BODY_CONCURRENCY_ENV,
+    NEWS_BODY_CONCURRENCY_MAX,
+    NEWS_BODY_SEQUENTIAL,
+)
 from src.features.company_performance.logic import build_three_year_table
 from src.features.company_specificity.logic import (
     filter_prose_lines as filter_specific_prose,
@@ -834,6 +847,16 @@ def _load_isolated_engine_module(engine_path: Path) -> Any:
     return module
 
 
+@dataclass(frozen=True)
+class _ProviderCallContext:
+    """복사된 실행 문맥에서도 다른 호출이 덮어쓸 수 없는 호출 설정."""
+
+    stage: str = DEFAULT_PROVIDER_STAGE
+    prompt_cache: bool = False
+    reserved_calls: int = 0
+    wait_for_pending: bool = False
+
+
 class _MeteredEngine:
     """1판 엔진을 고치지 않고 이 요청의 API 응답 사용량만 모으는 얇은 껍데기.
 
@@ -852,12 +875,9 @@ class _MeteredEngine:
         # 요청마다 자기 값을 들고 client 경계에서 덮어써야 Sonnet/Haiku가 섞이지 않는다.
         object.__setattr__(self, "_model", str(getattr(engine, "MODEL", "")))
         object.__setattr__(self, "_billing_uncertain", False)
-        object.__setattr__(self, "_stage", "unspecified")
-        object.__setattr__(self, "_prompt_cache", False)
-        # ★ 반드시 여기서 만든다. 이 껍데기의 __getattr__ 은 모르는 이름을
-        #   «감싼 1판 엔진»으로 넘기므로, 초기화를 빠뜨리면 뒤 단계 예약값을
-        #   남의 객체에서 읽을 수 있다.
-        object.__setattr__(self, "_reserved_calls", 0)
+        object.__setattr__(self, "_call_context", contextvars.ContextVar(
+            "pipeline_provider_call_context", default=_ProviderCallContext(),
+        ))
         object.__setattr__(self, "_provider_call_count", 0)
         object.__setattr__(self, "_provider_call_lock", threading.Lock())
         # 화면 단계가 바뀔 때마다 직전 단계 소요 시간을 재는 시계. 아직 어느
@@ -876,9 +896,7 @@ class _MeteredEngine:
             "_usages",
             "_model",
             "_billing_uncertain",
-            "_stage",
-            "_prompt_cache",
-            "_reserved_calls",
+            "_call_context",
             "_provider_call_count",
             "_provider_call_lock",
             "_stage_clock_key",
@@ -896,23 +914,36 @@ class _MeteredEngine:
 
     @property
     def usages(self) -> list[dict[str, Any]]:
-        return list(self._usages)
+        with self._provider_call_lock:
+            return [dict(usage) for usage in self._usages]
+
+    def record_usage(self, usage: dict[str, Any]) -> None:
+        """성공·실패 사용량을 호출 완료 순서대로 원자적으로 보존한다."""
+        with self._provider_call_lock:
+            self._usages.append(usage)
+
+    def mark_billing_uncertain(self) -> None:
+        with self._provider_call_lock:
+            object.__setattr__(self, "_billing_uncertain", True)
 
     @property
     def billing_uncertain(self) -> bool:
-        return bool(self._billing_uncertain)
+        with self._provider_call_lock:
+            return bool(self._billing_uncertain)
 
     @property
     def current_stage(self) -> str:
-        return str(self._stage)
+        return self._call_context.get().stage
 
     @property
     def prompt_cache_enabled(self) -> bool:
-        return bool(self._prompt_cache)
+        return self._call_context.get().prompt_cache
 
     def set_stage(self, stage: str) -> None:
         clean = str(stage).strip()
-        object.__setattr__(self, "_stage", clean or "unspecified")
+        self._call_context.set(replace(
+            self._call_context.get(), stage=clean or DEFAULT_PROVIDER_STAGE,
+        ))
 
     def stage_elapsed_mark(self, stage: str, *, steps: list[dict[str, Any]]) -> None:
         """화면 단계가 바뀌는 순간 직전 단계의 소요 시간(ms)을 steps에 남긴다.
@@ -987,6 +1018,10 @@ class _MeteredEngine:
         if type(reserved_calls) is not int or reserved_calls < 0:
             raise ValueError("남겨 둘 AI 호출 수는 0 이상의 정수여야 합니다")
         with self._provider_call_lock:
+            if self._billing_uncertain:
+                raise provider_budget.ProviderBudgetUnavailable(
+                    "미확정 provider 호출 뒤에는 같은 요청에서 다시 호출할 수 없습니다"
+                )
             if self._provider_call_count >= MAX_AI_CALLS_PER_REQUEST - reserved_calls:
                 # ★ 돈이 아니라 «횟수»다 — 전용 타입으로 구분해 던진다.
                 #   composer 의 «선택적 다듬기»는 이 구분을 보고 포기하고
@@ -1012,26 +1047,25 @@ class _MeteredEngine:
     @property
     def reserved_calls(self) -> int:
         """지금 단계가 «뒤 단계 몫으로» 남겨 두어야 하는 호출 수."""
-        return int(self._reserved_calls)
+        return self._call_context.get().reserved_calls
 
     @contextmanager
     def stage_context(
         self, stage: str, *, prompt_cache: bool = False, reserved_calls: int = 0,
+        wait_for_pending: bool = False,
     ):
-        previous_stage = self._stage
-        previous_cache = self._prompt_cache
-        previous_reserved = self.reserved_calls
-        self.set_stage(stage)
-        object.__setattr__(self, "_prompt_cache", bool(prompt_cache))
         if type(reserved_calls) is not int or reserved_calls < 0:
             raise ValueError("남겨 둘 AI 호출 수는 0 이상의 정수여야 합니다")
-        object.__setattr__(self, "_reserved_calls", reserved_calls)
+        token = self._call_context.set(_ProviderCallContext(
+            stage=str(stage).strip() or DEFAULT_PROVIDER_STAGE,
+            prompt_cache=bool(prompt_cache),
+            reserved_calls=reserved_calls,
+            wait_for_pending=wait_for_pending,
+        ))
         try:
             yield
         finally:
-            object.__setattr__(self, "_stage", previous_stage)
-            object.__setattr__(self, "_prompt_cache", previous_cache)
-            object.__setattr__(self, "_reserved_calls", previous_reserved)
+            self._call_context.reset(token)
 
 
 def _already_cache_marked_text_blocks(content: object) -> bool:
@@ -1160,9 +1194,11 @@ def _meter_stage(
     *,
     prompt_cache: bool = False,
     reserved_calls: int = 0,
+    wait_for_pending: bool = False,
 ):
     with metered.stage_context(
         stage, prompt_cache=prompt_cache, reserved_calls=reserved_calls,
+        wait_for_pending=wait_for_pending,
     ):
         yield
 
@@ -1226,24 +1262,27 @@ class _MeteredMessages:
         self._metered = metered
 
     def create(self, *args: Any, **kwargs: Any) -> Any:
-        # Once a call has no authoritative usage, another call in the same paid
-        # phase would stack a second unknown charge on top of the first.  Stop
-        # locally before schema work, admission, or provider I/O; the outer
-        # phase keeps the first unresolved reservation fail-closed.
+        with PIPELINE_PROVIDER_LIMITER.slot(check=self._check_admission):
+            return self._create_admitted(*args, **kwargs)
+
+    def _check_admission(self) -> None:
+        # 자리를 기다리는 동안 취소·lease 상실·다른 호출의 미확정 비용을 반영한다.
         if self._metered.billing_uncertain:
             raise provider_budget.ProviderBudgetUnavailable(
                 "미확정 provider 호출 뒤에는 같은 요청에서 다시 호출할 수 없습니다"
             )
+        generation_coordination.ensure_paid_phase()
+
+    def _create_admitted(self, *args: Any, **kwargs: Any) -> Any:
+        call_context = self._metered._call_context.get()
         # ``MAX_AI_CALLS_PER_REQUEST``가 문서와 시험에만 있으면 실패 응답처럼
         # usages에 안 쌓이는 호출은 무한히 반복될 수 있다. 실제 전송보다 먼저
         # 요청 로컬 계수를 잡아 상한을 넘는 호출을 원장·네트워크 앞에서 닫는다.
         self._metered.reserve_provider_call(
-            reserved_calls=self._metered.reserved_calls
+            reserved_calls=call_context.reserved_calls
         )
-        # 본조사는 DART snapshot과 single-flight owner가 확정된 뒤에만
-        # phase를 연다. 이 호출은 누락된 새 provider 경로도 예산 문맥
-        # 없이 밖으로 나가지 못하게 하는 마지막 방어선이다.
-        generation_coordination.ensure_paid_phase()
+        # 자리 배분 전 owner·유료 phase를 확인했어도 예산 문맥 누락은 허용하지 않는다.
+        budget = provider_budget.current()
         call_kwargs = dict(kwargs)
         # 1판 `_ask`는 모듈 전역 MODEL을 읽지만 그 값은 다른 요청과 공유된다.
         # provider에 나가는 마지막 경계에서 이 요청의 로컬 모델로 바로잡는다.
@@ -1253,7 +1292,7 @@ class _MeteredMessages:
             call_kwargs["output_config"] = _provider_output_config(
                 call_kwargs["output_config"]
             )
-        if self._metered.prompt_cache_enabled:
+        if call_context.prompt_cache:
             call_kwargs["messages"] = _prompt_cached_messages(
                 call_kwargs.get("messages")
             )
@@ -1279,30 +1318,38 @@ class _MeteredMessages:
             {"args": args, "kwargs": call_kwargs},
             exact_input_tokens=exact_input_tokens,
         )
-        if self._metered.prompt_cache_enabled:
+        if call_context.prompt_cache:
             # A five-minute cache write is 1.25x normal input pricing.
             estimated_input = (estimated_input * 5 + 3) // 4
-        call_reservation = provider_budget.current().reserve_call(
+        self._check_admission()
+        reservation_options = (
+            {"wait_for_pending": True, "check": self._check_admission}
+            if call_context.wait_for_pending else {}
+        )
+        call_reservation = budget.reserve_call(
             model=model,
             input_tokens_upper=estimated_input,
             max_tokens=max_tokens,
+            **reservation_options,
         )
         try:
             callbacks = attempt_context.current()
             attempt_token = callbacks.begin_attempt(
                 "anthropic",
-                self._metered.current_stage,
+                call_context.stage,
                 call_reservation.estimated_krw,
             )
-        except Exception as error:
+        except BaseException as error:
             # 영속 attempt를 열지 못했으므로 provider에는 아직 아무것도 보내지 않았다.
-            provider_budget.current().cancel_before_dispatch(call_reservation)
+            budget.cancel_before_dispatch(call_reservation)
+            if not isinstance(error, Exception):
+                raise
             raise provider_budget.ProviderBudgetUnavailable(
                 "provider 시도 원장을 시작할 수 없어 호출하지 않았습니다"
             ) from error
 
         fallback_model = str(call_kwargs.get("model", ""))
-        stage = self._metered.current_stage
+        stage = call_context.stage
 
         def usage_cost(value: object, *, failed: bool) -> float | None:
             event = _anthropic_usage_event(
@@ -1319,6 +1366,7 @@ class _MeteredMessages:
         )
 
         def before_dispatch() -> None:
+            self._check_admission()
             callbacks.heartbeat(attempt_token)
             callbacks.mark_dispatch_intent(attempt_token)
 
@@ -1333,7 +1381,17 @@ class _MeteredMessages:
                 ),
             )
         except gateway.ProviderDispatchNotStarted as error:
-            provider_budget.current().cancel_before_dispatch(call_reservation)
+            budget.cancel_before_dispatch(call_reservation)
+            if callbacks.cancel_before_dispatch is not None:
+                try:
+                    callbacks.cancel_before_dispatch(attempt_token)
+                except Exception as cleanup_error:
+                    self._metered.mark_billing_uncertain()
+                    raise provider_budget.ProviderBudgetUnavailable(
+                        "전송 전 취소를 provider 원장에 기록하지 못했습니다"
+                    ) from cleanup_error
+            if isinstance(error.__cause__, generation_coordination.GenerationCoordinationError):
+                raise error.__cause__
             raise provider_budget.ProviderBudgetUnavailable(
                 "provider 전송 의도를 기록하지 못해 호출하지 않았습니다"
             ) from error
@@ -1341,8 +1399,8 @@ class _MeteredMessages:
             # 전송은 이미 일어났다. 결과를 DB에 못 썼으므로 예약을 반환하지 않고
             # lease 만료가 보수부채로 회수하도록 같은 요청도 여기서 멈춘다.
             _log_billing_uncertain(stage, "observation_record_failed", error)
-            self._metered._billing_uncertain = True
-            provider_budget.current().mark_unknown(call_reservation)
+            self._metered.mark_billing_uncertain()
+            budget.mark_unknown(call_reservation)
             raise provider_budget.ProviderBudgetUnavailable(
                 "provider 호출 결과를 비용 원장에 기록하지 못했습니다"
             ) from error
@@ -1360,19 +1418,19 @@ class _MeteredMessages:
                 failed=True,
             )
             if failure_event is not None:
-                self._usages.append(failure_event)
+                self._metered.record_usage(failure_event)
             # persistent observation이 local 정산의 권위다. adapter가 usage를
             # 확정한 경우에만 그 확정액을 반환하고, 보수부채를 기록한 경우에는
             # status가 400이어도 예약을 0원으로 지우지 않는다.
             if observation.billing_disposition is BillingDisposition.KNOWN_COST:
                 try:
-                    provider_budget.current().settle_call(
+                    budget.settle_call(
                         call_reservation,
                         actual_krw=float(observation.known_cost_krw),
                     )
                 except provider_budget.ProviderCostInvariantError as invariant:
                     _log_billing_uncertain(stage, "settle_invariant_on_failure", invariant)
-                    self._metered._billing_uncertain = True
+                    self._metered.mark_billing_uncertain()
                 raise wrapped
             if _is_determinate_zero_cost(error, observation=observation):
                 logger.warning(
@@ -1382,15 +1440,22 @@ class _MeteredMessages:
                     getattr(error, "status_code", None)
                     or getattr(getattr(error, "response", None), "status_code", None),
                 )
-                provider_budget.current().settle_call(call_reservation, actual_krw=0.0)
+                budget.settle_call(call_reservation, actual_krw=0.0)
                 raise wrapped
             # 전송 후 usage가 없거나 observation이 보수부채이면 status와 무관하게
             # 예약을 유지한다. 원래 SDK 예외를 wrapper의 cause로 보존해 legacy
             # _ask/APIError catch가 None payload로 바꾸지 못하게 한다.
             _log_billing_uncertain(stage, "sdk_error_without_usage", error)
-            self._metered._billing_uncertain = True
-            provider_budget.current().mark_unknown(call_reservation)
+            self._metered.mark_billing_uncertain()
+            budget.mark_unknown(call_reservation)
             raise wrapped
+
+        except BaseException:
+            # SDK가 일반 Exception 밖의 취소를 던져도 형제 예산 대기를 깨운다.
+            # 전송 여부를 확정할 수 없으므로 예약을 보존하고 바깥 원장 회수에 맡긴다.
+            self._metered.mark_billing_uncertain()
+            budget.mark_unknown(call_reservation)
+            raise
 
         usage_event = _anthropic_usage_event(
             response,
@@ -1401,12 +1466,12 @@ class _MeteredMessages:
         if usage_event is None:
             # 응답은 왔지만 usage가 없으면 adapter도 같은 예약액을 부채로 남겼다.
             _log_billing_uncertain(stage, "response_without_usage", None)
-            self._metered._billing_uncertain = True
-            provider_budget.current().mark_unknown(call_reservation)
+            self._metered.mark_billing_uncertain()
+            budget.mark_unknown(call_reservation)
             return response
-        self._usages.append(usage_event)
+        self._metered.record_usage(usage_event)
         try:
-            provider_budget.current().settle_call(
+            budget.settle_call(
                 call_reservation,
                 actual_krw=float(usage_event["cost_krw"]),
             )
@@ -1414,7 +1479,7 @@ class _MeteredMessages:
             # usage는 먼저 보존했다. 이미 생긴 비용을 숨기지 않고 상위에서
             # billing-uncertain으로 phase를 닫게 한다.
             _log_billing_uncertain(stage, "settle_invariant_on_success", invariant)
-            self._metered._billing_uncertain = True
+            self._metered.mark_billing_uncertain()
             raise
         return response
 
@@ -5808,6 +5873,7 @@ def _v2_ask_via_provider(
                 stage,
                 prompt_cache=use_prompt_cache,
                 reserved_calls=reserved_calls,
+                wait_for_pending=getattr(ask, "parallel_safe", False) is True,
             ):
                 response = client.messages.create(
                     model=getattr(engine, "MODEL", "") or GENERATION_MODEL,
@@ -5888,6 +5954,61 @@ def _v2_ask_via_provider(
         blocks = getattr(response, "content", None) or []
         return "".join(str(getattr(block, "text", "") or "") for block in blocks)
 
+    def refresh_parallel_capability() -> None:
+        # 부모가 연 예산·정산 문맥과 검증된 계량 client만 병렬 실행할 수 있다.
+        metered_client = client._resolved if isinstance(client, _DeferredMeteredClient) else client
+        parallel_safe = (
+            stage == "v2_compose"
+            and not callable(max_tokens)
+            and isinstance(_MeteredEngine, type)
+            and isinstance(engine, _MeteredEngine)
+            and isinstance(metered_client, _MeteredClient)
+            and metered_client.messages._metered is engine
+        )
+        if parallel_safe:
+            try:
+                provider_budget.current()
+                limit = attempt_context.current().max_parallel_calls
+                parallel_safe = type(limit) is int and limit >= WRITER_MAX_PARALLEL_CALLS
+            except (
+                provider_budget.ProviderBudgetUnavailable,
+                attempt_context.ProviderAttemptContextUnavailable,
+            ):
+                parallel_safe = False
+        ask.parallel_safe = parallel_safe
+        configured_workers = WRITER_MAX_PARALLEL_CALLS
+        raw_workers = os.getenv(WRITER_PARALLEL_CALLS_ENV)
+        if raw_workers is not None:
+            try:
+                configured_workers = int(raw_workers)
+            except ValueError:
+                configured_workers = WRITER_SEQUENTIAL_CALLS
+            if not WRITER_SEQUENTIAL_CALLS <= configured_workers <= WRITER_MAX_PARALLEL_CALLS:
+                configured_workers = WRITER_SEQUENTIAL_CALLS
+        ask.max_parallel_calls = configured_workers if parallel_safe else WRITER_SEQUENTIAL_CALLS
+
+    def prepare_parallel() -> None:
+        """유효한 장별 입력 확인 뒤 부모 문맥에서 한 번만 준비한다."""
+        if (
+            stage != "v2_compose" or not isinstance(_MeteredEngine, type)
+            or not isinstance(engine, _MeteredEngine)
+        ):
+            return
+        try:
+            # 지연 phase의 ContextVar와 ExitStack은 부모에서 열고 부모에서 닫는다.
+            generation_coordination.ensure_paid_phase()
+            if isinstance(client, _DeferredMeteredClient):
+                client.messages
+        except (
+            provider_budget.ProviderBudgetExceeded,
+            provider_budget.ProviderBudgetUnavailable,
+            generation_coordination.GenerationCoordinationError,
+        ) as error:
+            raise AskFatalError(error, call_limit=False) from error
+        refresh_parallel_capability()
+
+    refresh_parallel_capability()
+    ask.prepare_parallel = prepare_parallel
     return ask
 
 
@@ -7265,10 +7386,17 @@ def _fetch_news_article_once(article_url: str) -> NewsBodyFetchResult:
     robots_url = urllib.parse.urlunsplit(
         (parsed.scheme, parsed.netloc, "/robots.txt", "", "")
     )
+    def fetch(url: str, url_allowed: Callable[[str], bool] | None = None) -> Any:
+        # robots 조회 뒤 요청 취소·마감이 와도 기사 전송을 새로 시작하지 않는다.
+        if _NEWS_BODY_RUNTIME_ACTIVE.get():
+            generation_coordination.check_active()
+            news_research_adapter.check_body_fetch_deadline()
+        return default_wide_transport(url, url_allowed)
+
     policy = load_robots_policy(
         robots_url=robots_url,
         host=str(parsed.hostname or ""),
-        fetch=default_wide_transport,
+        fetch=fetch,
         url_allowed=allowed_origin,
     )
     if policy.blocked or not policy.can_fetch(article_url):
@@ -7280,7 +7408,7 @@ def _fetch_news_article_once(article_url: str) -> NewsBodyFetchResult:
 
     started = time.monotonic()
     try:
-        response = default_wide_transport(article_url, allowed)
+        response = fetch(article_url, allowed)
     except WideTransportError as error:
         return NewsBodyFetchResult(
             reason_code=_news_transport_failure_code(
@@ -7321,6 +7449,11 @@ def _fetch_news_article_text(source_url: str) -> NewsBodyFetchResult:
 
     first_failure: NewsBodyFetchResult | None = None
     for article_url in news_url_variants(source_url):
+        if _NEWS_BODY_RUNTIME_ACTIVE.get():
+            # HTTPS·www 변형은 collector의 domain_host(앞의 www 제거)와
+            # 같은 슬롯이다. 콜백 전체가 그 슬롯 안이므로 중첩 잠금은 필요 없다.
+            generation_coordination.check_active()
+            news_research_adapter.check_body_fetch_deadline()
         result = _fetch_news_article_once(article_url)
         if result.succeeded:
             return result
@@ -7328,6 +7461,71 @@ def _fetch_news_article_text(source_url: str) -> NewsBodyFetchResult:
     return first_failure or NewsBodyFetchResult(
         reason_code=EXCLUDED_FETCH_ORIGIN_DENIED
     )
+
+
+# 함수 이름이 같거나 속성을 붙인 주입 콜백도 병렬 안전성이 검증된 것은 아니다.
+_DEFAULT_NEWS_FETCH_TEXT = _fetch_news_article_text
+_NEWS_BODY_RUNTIME_ACTIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "pipeline_news_body_runtime_active", default=False,
+)
+
+
+def _news_body_concurrency() -> int:
+    """기본 두 요청, 환경변수 1이면 즉시 순차로 복귀한다."""
+    raw = os.getenv(NEWS_BODY_CONCURRENCY_ENV)
+    if raw is None:
+        return NEWS_BODY_CONCURRENCY_DEFAULT
+    try:
+        requested = int(raw)
+    except ValueError:
+        return NEWS_BODY_SEQUENTIAL
+    if NEWS_BODY_SEQUENTIAL <= requested <= NEWS_BODY_CONCURRENCY_MAX:
+        return requested
+    return NEWS_BODY_SEQUENTIAL
+
+
+@contextmanager
+def _news_body_runtime(fetch_text: Callable[..., Any], steps: list[dict[str, Any]]):
+    """검증된 기본 콜백의 가변 문맥만 격리하고 진단은 부모에서 합친다."""
+    if fetch_text is not _DEFAULT_NEWS_FETCH_TEXT:
+        yield fetch_text, None
+        return
+    width = _news_body_concurrency()
+    concurrency = (
+        news_research_adapter.body_fetch_concurrency(width)
+        if width > NEWS_BODY_SEQUENTIAL else None
+    )
+    completed_cache = news_research_adapter.body_fetch_cache()
+    diagnostics: list[tuple[str, list[dict[str, Any]]]] = []
+    diagnostics_lock = threading.Lock()
+
+    def fetch(url: str) -> Any:
+        branch_steps: list[dict[str, Any]] = []
+        token = _NEWS_BODY_RUNTIME_ACTIVE.set(True)
+        try:
+            generation_coordination.check_active()
+            with run_diagnostics.use_steps(branch_steps):
+                with news_research_adapter.isolated_body_fetch_scope(
+                    completed_cache=completed_cache,
+                ):
+                    result = fetch_text(url)
+                    generation_coordination.check_active()
+                    news_research_adapter.check_body_fetch_deadline()
+                    return result
+        except TimeoutError:
+            return NewsBodyFetchResult(reason_code=EXCLUDED_FETCH_TIMEOUT)
+        finally:
+            _NEWS_BODY_RUNTIME_ACTIVE.reset(token)
+            with diagnostics_lock:
+                diagnostics.append((url, branch_steps))
+
+    try:
+        yield fetch, concurrency
+    finally:
+        # 수집기는 모든 본문 작업의 종료를 기다린 뒤 반환한다. 완료 순서와
+        # 무관하게 URL 순서로 합치되 각 요청 내부의 진단 순서는 보존한다.
+        for _, branch_steps in sorted(diagnostics, key=lambda item: item[0]):
+            steps.extend(branch_steps)
 
 
 def _news_default_classifier(engine: Any, client: Any) -> Callable[[str], str]:
@@ -7377,9 +7575,17 @@ def _collect_grounded_news(
     if session is not None:
         try:
             with collection_cache_scope():
-                result = session.collect(
-                    fetch_text=fetch_text, analyze_grounded=analyze
-                )
+                with _news_body_runtime(fetch_text, steps) as (body_text, body_fetch):
+                    def analyze_active(*args: Any) -> Any:
+                        generation_coordination.check_active()
+                        news_research_adapter.check_body_fetch_deadline()
+                        return analyze(*args)
+
+                    result = session.collect(
+                        fetch_text=body_text, analyze_grounded=analyze_active,
+                        body_fetch=body_fetch,
+                    )
+                    generation_coordination.check_active()
             raw_fragments = [
                 _news_raw_fragment(
                     fragment,

@@ -23,6 +23,9 @@ class ProviderAttemptCallbacks:
     heartbeat: Callable[[Any], None]
     mark_dispatch_intent: Callable[[Any], None]
     record_observation: Callable[[Any, ProviderObservation], None]
+    # 기존 주입자는 순차 계약을 유지하며 검증된 다중 시도 원장만 확장한다.
+    max_parallel_calls: int = 1
+    cancel_before_dispatch: Callable[[Any], None] | None = None
 
 
 _CURRENT: contextvars.ContextVar[ProviderAttemptCallbacks | None] = (

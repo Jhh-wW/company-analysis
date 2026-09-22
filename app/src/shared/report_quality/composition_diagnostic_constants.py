@@ -24,6 +24,8 @@ ROW_EVIDENCE_MISMATCH = "evidence_ids_mismatch"
 ROW_NUMBER_CONFLICT = "number_conflicting_duplicate"
 
 PROTOCOL_STEP = "8_본문검수_응답판독"
+SECTION_EXECUTION_STEP = "v2_작성_실행방식"
+SECTION_EXECUTION_COUNT_FIELDS = ("동시상한", "장수", "소요_ms")
 SUMMARY_STEP = "8_핵심요약_단계"
 BODY_MACHINE_STEP = "8_본문검수_기계통과"
 BODY_DISPOSITION_STEP = "8_본문검수_처분"

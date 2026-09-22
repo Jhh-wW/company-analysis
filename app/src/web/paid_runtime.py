@@ -23,6 +23,10 @@ from src.features.budget import logic as budget_logic
 from src.features.budget import provider_budget
 from src.features.budget import spend_store
 from src.features.budget import state_machine
+from src.features.budget.parallel_constants import (
+    MAX_PARALLEL_PROVIDER_ATTEMPTS,
+    SEQUENTIAL_ATTEMPT_LIMIT,
+)
 from src.features.budget.constants import (
     JOB_KEEP_SEC,
     MAX_CONCURRENT_PER_LINK,
@@ -32,6 +36,7 @@ from src.features.budget.constants import (
     PAID_PHASE_LEASE_SEC,
     PAID_PHASE_PROVIDER_BUDGET_KRW,
     SPEND_PHASE_OCR,
+    SPEND_PHASE_PIPELINE,
 )
 from src.features.observability import constants as obs
 from src.features.observability import lifecycle
@@ -1142,12 +1147,7 @@ def _settle_attempt_ledger_phase(
                     for item in attempts
                     if item.billing_state is state_machine.BillingState.RESERVED
                 )
-                if len(active_attempts) > 1:
-                    raise state_machine.AttemptStateError(
-                        "한 phase에 진행 중 provider 시도가 여러 개입니다"
-                    )
-                if active_attempts:
-                    active = active_attempts[0]
+                for active in active_attempts:
                     at = clock.iso_now_kst()
                     if active.transport_state is state_machine.TransportState.PLANNED:
                         # dispatch-intent commit 전 실패했으므로 provider send는 0회다.
@@ -1352,6 +1352,11 @@ def _provider_attempt_callbacks(
             "attempt 원장 전환 전에는 새 provider gateway를 열 수 없습니다"
         )
 
+    parallel_limit = (
+        MAX_PARALLEL_PROVIDER_ATTEMPTS
+        if ticket.phase == SPEND_PHASE_PIPELINE else SEQUENTIAL_ATTEMPT_LIMIT
+    )
+
     def begin_attempt(provider: str, operation: str, reserved_krw: float) -> str:
         attempt_id = f"attempt:{uuid.uuid4().hex}"
         recorded_at = clock.iso_now_kst()
@@ -1368,6 +1373,7 @@ def _provider_attempt_callbacks(
                 estimated_krw=reserved_krw,
                 lease_owner_id=ticket.lease_owner_id,
                 created_at=recorded_at,
+                max_inflight_attempts=parallel_limit,
             )
             # 여기서는 순수 조회만 한다. OPEN의 cooldown이 끝났더라도 probe
             # 소유권은 실제 전송 의도를 기록하는 transaction에서만 잡는다.
@@ -1400,6 +1406,9 @@ def _provider_attempt_callbacks(
         now = clock.now_kst()
         with storage_db.connect() as conn:
             spend_store.ensure_schema(conn)
+            # 형제 호출이 같은 만료시각을 읽고 같은 값으로 연장하는 경쟁을 막는다.
+            if not conn.in_transaction:
+                conn.execute("BEGIN IMMEDIATE")
             phase_account = state_machine.get_phase(
                 conn,
                 run_id=ticket.run_id,
@@ -1518,11 +1527,30 @@ def _provider_attempt_callbacks(
                     now_iso=recorded_at,
                 )
 
+    def cancel_before_dispatch(attempt_id: Any) -> None:
+        # 대기 중 취소 또는 형제 호출 실패 뒤에는 PLANNED를 0원으로 정리한다.
+        # 이미 전송 의도를 남긴 호출은 이 경로로 지우지 않고 lease 회수에 맡긴다.
+        with storage_db.connect() as conn:
+            attempt = state_machine.get_attempt(conn, attempt_id=str(attempt_id))
+            if (
+                attempt.transport_state is state_machine.TransportState.LOCAL_FAILURE
+                and attempt.billing_state is state_machine.BillingState.KNOWN_ZERO
+            ):
+                # 공급자 차단기가 이미 같은 transaction에서 0원으로 닫았을 수 있다.
+                return
+            state_machine.record_pre_dispatch_failure(
+                conn, attempt_id=str(attempt_id), lease_owner_id=ticket.lease_owner_id,
+                error_type="ProviderDispatchCancelled", close_phase=False,
+                recorded_at=clock.iso_now_kst(),
+            )
+
     return attempt_context.ProviderAttemptCallbacks(
         begin_attempt=begin_attempt,
         heartbeat=heartbeat,
         mark_dispatch_intent=mark_dispatch_intent,
         record_observation=record_observation,
+        max_parallel_calls=parallel_limit,
+        cancel_before_dispatch=cancel_before_dispatch,
     )
 
 

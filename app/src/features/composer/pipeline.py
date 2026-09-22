@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
@@ -197,6 +198,7 @@ from src.features.composer.validate import V2ValidationError, validate_v2
 # ★ verify_sentences를 «일부러» 들여오지 않는다 — 요약 재검증 단계가 없어졌고,
 #   import가 남아 있으면 다음 사람이 무심코 다시 부를 자리가 된다.
 from src.features.composer.verify import verify_report
+from src.features.composer.parallel_section_constants import SERIAL_SECTION_CALLS
 from src.features.pipeline.port import FactRecord, Grade, Report
 from src.features.provenance.sources import Source
 # ★ 경계 메모 — ``composer/render.py``·``port.py`` 머리말은 「composer는
@@ -309,11 +311,13 @@ class V2RunOutput:
 
 
 class _CallLedgerRecorder:
-    """FULL의 실제 writer/reviewer 호출을 원문 없이 순서대로 기록한다."""
+    """실제 호출 결과를 사전에 결속한 장별 배정 순서로 기록한다."""
 
     def __init__(self) -> None:
         self._records: list[GenerationCallRecord] = []
         self._role_counts: dict[tuple[ValidationRound, str], int] = {}
+        self._lock = threading.RLock()
+        self._next_sequence = 0
 
     def wrap(
         self,
@@ -331,58 +335,100 @@ class _CallLedgerRecorder:
         ):
             raise ValueError("AI 호출 장부에는 명시적 소유 장 tuple이 필요합니다")
 
-        def tracked(prompt: str) -> str:
-            key = (validation_round, role)
-            role_index = self._role_counts.get(key, 0) + 1
-            if role_index > len(section_ids):
-                raise RuntimeError(
-                    "승인한 validation round·role의 AI 호출 수를 넘었습니다"
-                )
-            self._role_counts[key] = role_index
-            section_id = section_ids[role_index - 1]
-            sequence = len(self._records) + 1
+        def reserve(section_id: str | None = None) -> tuple[int, int, str]:
+            # 네트워크 대기는 잠그지 않는다. 이 예약은 호출 장부의 배정 번호이며
+            # 실제 금액·횟수 admission은 공급자 경계가 별도로 보장한다.
+            with self._lock:
+                key = (validation_round, role)
+                role_index = self._role_counts.get(key, 0) + 1
+                if role_index > len(section_ids):
+                    raise RuntimeError("승인한 validation round·role의 AI 호출 수를 넘었습니다")
+                expected_section = section_ids[role_index - 1]
+                if section_id is not None and section_id != expected_section:
+                    raise ValueError("AI 호출 장의 배정 순서가 승인 목차와 다릅니다")
+                self._role_counts[key] = role_index
+                self._next_sequence += 1
+                return self._next_sequence, role_index, expected_section
+
+        def execute(reservation: tuple[int, int, str], prompt: str) -> str:
+            sequence, role_index, section_id = reservation
             try:
                 response = ask(prompt)
             except Exception as error:
-                self._records.append(
-                    GenerationCallRecord(
-                        sequence=sequence,
-                        role=role,
-                        role_index=role_index,
-                        section_id=section_id,
-                        prompt_sha256=exact_text_sha256(prompt),
-                        response_sha256="",
-                        outcome="failed",
-                        validation_round=validation_round,
-                        error_kind=type(error).__name__,
-                    )
-                )
-                raise
-            text = str(response)
-            self._records.append(
-                GenerationCallRecord(
+                record = GenerationCallRecord(
                     sequence=sequence,
                     role=role,
                     role_index=role_index,
                     section_id=section_id,
                     prompt_sha256=exact_text_sha256(prompt),
-                    response_sha256=exact_text_sha256(text),
-                    outcome="returned",
+                    response_sha256="",
+                    outcome="failed",
                     validation_round=validation_round,
+                    error_kind=type(error).__name__,
                 )
+                with self._lock:
+                    self._records.append(record)
+                raise
+            text = str(response)
+            record = GenerationCallRecord(
+                sequence=sequence,
+                role=role,
+                role_index=role_index,
+                section_id=section_id,
+                prompt_sha256=exact_text_sha256(prompt),
+                response_sha256=exact_text_sha256(text),
+                outcome="returned",
+                validation_round=validation_round,
             )
+            with self._lock:
+                self._records.append(record)
             return text
 
+        def tracked(prompt: str) -> str:
+            return execute(reserve(), prompt)
+
+        def bind_section(section_id: str) -> AskFn:
+            reservation = reserve(section_id)
+            used = False
+
+            def bound(prompt: str) -> str:
+                nonlocal used
+                with self._lock:
+                    if used:
+                        raise RuntimeError("배정된 장 작성 호출을 두 번 실행할 수 없습니다")
+                    used = True
+                return execute(reservation, prompt)
+
+            return bound
+
+        def refresh_capability() -> None:
+            tracked.parallel_safe = getattr(ask, "parallel_safe", False) is True
+            tracked.max_parallel_calls = getattr(ask, "max_parallel_calls", SERIAL_SECTION_CALLS)
+
+        def prepare_parallel() -> None:
+            prepare = getattr(ask, "prepare_parallel", None)
+            if callable(prepare):
+                prepare()
+            refresh_capability()
+
+        refresh_capability()
+        if role == "writer":
+            tracked.for_section = bind_section
+            tracked.prepare_parallel = prepare_parallel
         return tracked
 
     def freeze(self) -> GenerationCallLedger:
-        return GenerationCallLedger(tuple(self._records))
+        with self._lock:
+            # 배정만 된 작업은 호출로 세지 않는다. 실제 완료·실패 결과만 반환한다.
+            records = tuple(sorted(self._records, key=lambda record: record.sequence))
+            return GenerationCallLedger(records)
 
     def calls_for(self, validation_round: ValidationRound, *, role: str) -> int:
-        return sum(
-            record.validation_round is validation_round and record.role == role
-            for record in self._records
-        )
+        with self._lock:
+            return sum(
+                record.validation_round is validation_round and record.role == role
+                for record in self._records
+            )
 
 
 def _total_sentences(report: ComposedReport) -> int:

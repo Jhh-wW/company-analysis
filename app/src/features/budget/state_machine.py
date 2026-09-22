@@ -27,6 +27,12 @@ from typing import Final
 
 from src.features.budget import spend_store
 from src.features.budget.constants import PAID_PHASE_PROVIDER_BUDGET_KRW, SPEND_PHASES
+from src.features.budget.parallel_constants import (
+    MAX_PARALLEL_PROVIDER_ATTEMPTS,
+    PHASE_CLOSE_FAILED_REASON,
+    PHASE_CLOSE_SUCCEEDED_REASON,
+    SEQUENTIAL_ATTEMPT_LIMIT,
+)
 
 
 CUTOVER_VERSION: Final[str] = spend_store.BUDGET_STATE_CUTOVER_VERSION
@@ -747,6 +753,23 @@ SELECT a.attempt_id, a.run_id, a.phase, a.attempt_no, a.provider, a.operation,
    )
 """
 
+# 실제 비용이 예상액을 넘더라도 남아 있는 형제 호출의 예약은 노출에 포함한다.
+# 이 보호액을 phase의 새 호출 가용 잔액에 다시 넣으면 예산이 재생성되므로
+# 입장 잔액과 노출 집계에서만 쓰는 보호액을 구분한다.
+_PHASE_RESERVATION_EXPOSURE_SQL: Final[str] = f"""
+MAX(p.reservation_krw, COALESCE((
+    SELECT SUM(e.reservation_krw)
+      FROM {spend_store.TABLE_BUDGET_ATTEMPTS} a
+      JOIN {spend_store.TABLE_BUDGET_ATTEMPT_EVENTS} e
+        ON e.attempt_id = a.attempt_id
+       AND e.event_seq = (
+           SELECT MAX(e2.event_seq) FROM {spend_store.TABLE_BUDGET_ATTEMPT_EVENTS} e2
+            WHERE e2.attempt_id = a.attempt_id
+       )
+     WHERE a.run_id = p.run_id AND a.phase = p.phase
+), 0))
+"""
+
 
 def get_attempt(conn: sqlite3.Connection, *, attempt_id: str) -> AttemptAccount:
     _require_cutover(conn)
@@ -804,7 +827,7 @@ def _load_exposure_where(
     ).fetchone()
     phase_row = conn.execute(
         f"""
-        SELECT COALESCE(SUM(reservation_krw), 0), COUNT(*)
+        SELECT COALESCE(SUM({_PHASE_RESERVATION_EXPOSURE_SQL}), 0), COUNT(*)
           FROM {spend_store.TABLE_BUDGET_PHASES} AS p
          WHERE {where_sql} AND state = ?
         """,
@@ -837,8 +860,8 @@ def _load_bucket_lifetime_reservation(
     """
     row = conn.execute(
         f"""
-        SELECT COALESCE(SUM(reservation_krw), 0)
-          FROM {spend_store.TABLE_BUDGET_PHASES}
+        SELECT COALESCE(SUM({_PHASE_RESERVATION_EXPOSURE_SQL}), 0)
+          FROM {spend_store.TABLE_BUDGET_PHASES} AS p
          WHERE bucket_id = ? AND state = ?
         """,
         (stored_bucket, PhaseState.ACTIVE.value),
@@ -1148,9 +1171,9 @@ def heartbeat_phase(
     return get_phase(conn, run_id=account.run_id, phase=account.phase)
 
 
-def _active_attempt_for_phase(
+def _active_attempts_for_phase(
     conn: sqlite3.Connection, *, run_id: str, phase: str
-) -> AttemptAccount | None:
+) -> tuple[AttemptAccount, ...]:
     rows = conn.execute(
         _LATEST_ATTEMPT_SELECT
         + """
@@ -1167,9 +1190,58 @@ def _active_attempt_for_phase(
             TransportState.DISPATCH_INTENT_RECORDED.value,
         ),
     ).fetchall()
-    if len(rows) > 1:
-        raise AttemptStateError("한 phase에 진행 중 provider 시도가 둘 이상입니다")
-    return _attempt_from_row(rows[0]) if rows else None
+    return tuple(_attempt_from_row(row) for row in rows)
+
+
+def _phase_close_request(
+    conn: sqlite3.Connection, account: PhaseAccount,
+) -> PhaseState | None:
+    """닫힘 요청은 불변 사건에 남겨 재시작 뒤에도 새 전송을 막는다."""
+    rows = conn.execute(
+        f"""
+        SELECT e.reason_code
+          FROM {spend_store.TABLE_BUDGET_ATTEMPTS} a
+          JOIN {spend_store.TABLE_BUDGET_ATTEMPT_EVENTS} e
+            ON e.attempt_id = a.attempt_id
+         WHERE a.run_id = ? AND a.phase = ? AND e.reason_code IN (?, ?)
+        """,
+        (account.run_id, account.phase,
+         PHASE_CLOSE_FAILED_REASON, PHASE_CLOSE_SUCCEEDED_REASON),
+    ).fetchall()
+    reasons = {row[0] for row in rows}
+    if PHASE_CLOSE_FAILED_REASON in reasons:
+        return PhaseState.FAILED
+    return PhaseState.SUCCEEDED if reasons else None
+
+
+def _update_phase_after_attempt(
+    conn: sqlite3.Connection, *, account: PhaseAccount, owner: str,
+    consumed: float, event_time: str,
+) -> None:
+    """이미 전송한 형제 호출의 예약·소유권은 마지막 정산까지 보존한다."""
+    pending = _active_attempts_for_phase(conn, run_id=account.run_id, phase=account.phase)
+    requested = _phase_close_request(conn, account)
+    should_close = requested is not None and not pending
+    remaining = max(account.reservation_krw - consumed, 0.0)
+    cursor = conn.execute(
+        f"""
+        UPDATE {spend_store.TABLE_BUDGET_PHASES}
+           SET state = ?, reservation_krw = ?, lease_owner_id = ?,
+               lease_expires_at = ?, updated_at = ?, version = version + 1
+         WHERE run_id = ? AND phase = ? AND state = ?
+           AND lease_owner_id = ? AND version = ?
+        """,
+        (
+            requested.value if should_close else PhaseState.ACTIVE.value,
+            0.0 if should_close else remaining,
+            None if should_close else account.lease_owner_id,
+            None if should_close else account.lease_expires_at,
+            event_time, account.run_id, account.phase, PhaseState.ACTIVE.value,
+            owner, account.version,
+        ),
+    )
+    if cursor.rowcount != 1:
+        raise LeaseOwnershipError("provider 정산 중 DB lease가 바뀌었습니다")
 
 
 def _insert_event(
@@ -1231,6 +1303,7 @@ def begin_attempt(
     estimated_krw: float,
     lease_owner_id: str,
     created_at: str,
+    max_inflight_attempts: int = SEQUENTIAL_ATTEMPT_LIMIT,
 ) -> AttemptAccount:
     """현재 phase 예약 안에서 provider 시도를 append-only로 계획한다."""
     _begin_immediate(conn)
@@ -1242,6 +1315,11 @@ def begin_attempt(
     estimate = _amount(estimated_krw, label="attempt 예상액", positive=True)
     owner = _identifier(lease_owner_id, label="lease 소유자", maximum=80)
     event_time = _timestamp(created_at, label="attempt 생성 시각")
+    if (
+        type(max_inflight_attempts) is not int
+        or not SEQUENTIAL_ATTEMPT_LIMIT <= max_inflight_attempts <= MAX_PARALLEL_PROVIDER_ATTEMPTS
+    ):
+        raise ValueError("provider 동시 시도 상한이 올바르지 않습니다")
     existing_row = conn.execute(
         _LATEST_ATTEMPT_SELECT + " WHERE a.attempt_id = ?",
         (clean_attempt,),
@@ -1259,9 +1337,12 @@ def begin_attempt(
         raise AttemptStateError("같은 provider 시도 번호의 값이 기존 기록과 다릅니다")
     account = get_phase(conn, run_id=run_id, phase=phase)
     _require_active_owner(account, owner_id=owner, at=event_time)
-    if _active_attempt_for_phase(conn, run_id=account.run_id, phase=account.phase):
-        raise AttemptStateError("이 phase에는 이미 진행 중인 provider 시도가 있습니다")
-    if estimate > account.reservation_krw:
+    if _phase_close_request(conn, account) is not None:
+        raise AttemptStateError("종료 요청된 phase에서 새 provider 시도를 시작할 수 없습니다")
+    active = _active_attempts_for_phase(conn, run_id=account.run_id, phase=account.phase)
+    if len(active) >= max_inflight_attempts:
+        raise AttemptStateError("이 phase의 동시 provider 시도 상한을 넘었습니다")
+    if estimate + sum(item.reservation_krw for item in active) > account.reservation_krw:
         raise AdmissionLimitExceeded("provider 시도 예상액이 phase 예약 잔액을 넘습니다")
     next_no_row = conn.execute(
         f"""
@@ -1342,6 +1423,8 @@ def mark_dispatch_intent(
     attempt = get_attempt(conn, attempt_id=attempt_id)
     phase_account = get_phase(conn, run_id=attempt.run_id, phase=attempt.phase)
     _require_active_owner(phase_account, owner_id=owner, at=event_time)
+    if _phase_close_request(conn, phase_account) is not None:
+        raise AttemptStateError("종료 요청된 phase에서 새 provider를 전송할 수 없습니다")
     if (
         attempt.transport_state is TransportState.DISPATCH_INTENT_RECORDED
         and attempt.billing_state is BillingState.RESERVED
@@ -1403,30 +1486,12 @@ def record_pre_dispatch_failure(
         error_type=error_type,
         request_id="",
         actor_id=SYSTEM_ACTOR_ID,
-        reason_code="pre-dispatch-failure",
+        reason_code=PHASE_CLOSE_FAILED_REASON if close_phase else "pre-dispatch-failure",
         occurred_at=event_time,
     )
-    if close_phase:
-        cursor = conn.execute(
-            f"""
-            UPDATE {spend_store.TABLE_BUDGET_PHASES}
-               SET state = ?, reservation_krw = 0, lease_owner_id = NULL,
-                   lease_expires_at = NULL, updated_at = ?, version = version + 1
-             WHERE run_id = ? AND phase = ? AND state = ?
-               AND lease_owner_id = ? AND version = ?
-            """,
-            (
-                PhaseState.FAILED.value,
-                event_time,
-                phase_account.run_id,
-                phase_account.phase,
-                PhaseState.ACTIVE.value,
-                owner,
-                phase_account.version,
-            ),
-        )
-        if cursor.rowcount != 1:
-            raise LeaseOwnershipError("전송 전 실패 처리 중 DB lease가 바뀌었습니다")
+    _update_phase_after_attempt(
+        conn, account=phase_account, owner=owner, consumed=0.0, event_time=event_time,
+    )
     return get_attempt(conn, attempt_id=attempt.attempt_id)
 
 
@@ -1497,51 +1562,15 @@ def record_attempt_outcome(
         error_type=error_type,
         request_id=request_id,
         actor_id=SYSTEM_ACTOR_ID,
-        reason_code="provider-outcome-recorded",
+        reason_code=(
+            PHASE_CLOSE_SUCCEEDED_REASON if phase_succeeded else PHASE_CLOSE_FAILED_REASON
+        ) if close_phase else "provider-outcome-recorded",
         occurred_at=event_time,
     )
-    if close_phase:
-        new_state = PhaseState.SUCCEEDED if phase_succeeded else PhaseState.FAILED
-        cursor = conn.execute(
-            f"""
-            UPDATE {spend_store.TABLE_BUDGET_PHASES}
-               SET state = ?, reservation_krw = 0, lease_owner_id = NULL,
-                   lease_expires_at = NULL, updated_at = ?, version = version + 1
-             WHERE run_id = ? AND phase = ? AND state = ?
-               AND lease_owner_id = ? AND version = ?
-            """,
-            (
-                new_state.value,
-                event_time,
-                phase_account.run_id,
-                phase_account.phase,
-                PhaseState.ACTIVE.value,
-                owner,
-                phase_account.version,
-            ),
-        )
-    else:
-        consumed = known + liability
-        remaining = max(0.0, phase_account.reservation_krw - consumed)
-        cursor = conn.execute(
-            f"""
-            UPDATE {spend_store.TABLE_BUDGET_PHASES}
-               SET reservation_krw = ?, updated_at = ?, version = version + 1
-             WHERE run_id = ? AND phase = ? AND state = ?
-               AND lease_owner_id = ? AND version = ?
-            """,
-            (
-                remaining,
-                event_time,
-                phase_account.run_id,
-                phase_account.phase,
-                PhaseState.ACTIVE.value,
-                owner,
-                phase_account.version,
-            ),
-        )
-    if cursor.rowcount != 1:
-        raise LeaseOwnershipError("provider 결과를 기록하는 동안 DB lease가 바뀌었습니다")
+    _update_phase_after_attempt(
+        conn, account=phase_account, owner=owner, consumed=known + liability,
+        event_time=event_time,
+    )
     return get_attempt(conn, attempt_id=attempt.attempt_id)
 
 
@@ -1560,7 +1589,7 @@ def complete_phase(
     event_time = _timestamp(completed_at, label="phase 완료 시각")
     account = get_phase(conn, run_id=run_id, phase=phase)
     _require_active_owner(account, owner_id=owner, at=event_time)
-    if _active_attempt_for_phase(conn, run_id=account.run_id, phase=account.phase):
+    if _active_attempts_for_phase(conn, run_id=account.run_id, phase=account.phase):
         raise AttemptStateError("진행 중 provider 시도가 있어 phase를 닫을 수 없습니다")
     new_state = PhaseState.SUCCEEDED if succeeded else PhaseState.FAILED
     cursor = conn.execute(
@@ -1603,8 +1632,8 @@ def expire_phase_lease(
         account.lease_expires_at
     ):
         raise LeaseOwnershipError("아직 DB lease가 만료되지 않았습니다")
-    attempt = _active_attempt_for_phase(conn, run_id=account.run_id, phase=account.phase)
-    if attempt is not None:
+    attempts = _active_attempts_for_phase(conn, run_id=account.run_id, phase=account.phase)
+    for attempt in attempts:
         if attempt.transport_state is TransportState.DISPATCH_INTENT_RECORDED:
             _insert_event(
                 conn,

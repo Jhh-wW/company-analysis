@@ -28,9 +28,10 @@ import logging
 import math
 import threading
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from src.core.pricing import usage_cost_krw
+from src.features.budget.parallel_constants import PROVIDER_BUDGET_WAIT_SECONDS
 
 
 logger = logging.getLogger(__name__)
@@ -202,6 +203,8 @@ class ProviderBudget:
         self._next_id = 1
         self._pending: dict[int, float] = {}
         self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._unknown_calls: set[int] = set()
 
     @property
     def accounted_krw(self) -> float:
@@ -214,7 +217,8 @@ class ProviderBudget:
             return self._estimate_overrun_krw
 
     def reserve_call(
-        self, *, model: str, input_tokens_upper: int, max_tokens: int
+        self, *, model: str, input_tokens_upper: int, max_tokens: int,
+        wait_for_pending: bool = False, check: Callable[[], None] | None = None,
     ) -> CallReservation:
         """호출 전 방어적 예상비용을 원자적으로 잡는다."""
         clean_in = int(input_tokens_upper)
@@ -222,53 +226,66 @@ class ProviderBudget:
         if clean_in < 0 or clean_out <= 0:
             raise ProviderBudgetUnavailable("provider token 상한이 올바르지 않습니다")
         estimate = usage_cost_krw(model, clean_in, clean_out)
-        with self._lock:
-            if (
-                self._known_actual_krw
-                + self._held_estimated_krw
-                + estimate
-                > self.total_krw
-            ):
-                raise ProviderBudgetExceeded(
-                    "다음 provider 호출의 예상비용이 단계 예약 잔액을 넘습니다"
-                )
-            call_id = self._next_id
-            self._next_id += 1
-            self._pending[call_id] = estimate
-            self._held_estimated_krw += estimate
-        return CallReservation(call_id=call_id, estimated_krw=estimate)
+        while True:
+            if check is not None:
+                check()
+            with self._condition:
+                if wait_for_pending and self._unknown_calls:
+                    raise ProviderBudgetUnavailable("미확정 호출이 있어 예약 대기를 중단합니다")
+                if self._known_actual_krw + self._held_estimated_krw + estimate <= self.total_krw:
+                    call_id = self._next_id
+                    self._next_id += 1
+                    self._pending[call_id] = estimate
+                    self._held_estimated_krw += estimate
+                    return CallReservation(call_id=call_id, estimated_krw=estimate)
+                if (
+                    not wait_for_pending or not self._pending
+                    or self._known_actual_krw + estimate > self.total_krw
+                ):
+                    raise ProviderBudgetExceeded(
+                        "다음 provider 호출의 예상비용이 단계 예약 잔액을 넘습니다"
+                    )
+                # 실제 지출이 아니라 형제의 일시 예약만 부족하면 정산 뒤 재평가한다.
+                # 잠금은 대기 중 풀리며 취소·lease 확인도 잠금 밖에서 다시 수행한다.
+                self._condition.wait(PROVIDER_BUDGET_WAIT_SECONDS)
 
     def settle_call(self, reservation: CallReservation, *, actual_krw: float) -> None:
         """확정 usage를 전액 반영하고 예상비용과의 차액을 반환한다."""
         actual = float(actual_krw)
         if not math.isfinite(actual) or actual < 0:
             raise ProviderCostInvariantError("provider 실제 비용이 유효하지 않습니다")
-        with self._lock:
+        with self._condition:
             estimate = self._pending.pop(reservation.call_id, None)
             if estimate is None:
                 raise ProviderCostInvariantError("provider 호출 예약이 없거나 이미 마감됐습니다")
             self._held_estimated_krw -= estimate
+            self._unknown_calls.discard(reservation.call_id)
             self._known_actual_krw += actual
             if actual > estimate:
                 # 사전값은 운영 guard이지 청구 hard ceiling이 아니다. 이미 발생한
                 # 비용은 숨기지 않고 전액 반영하며 차이를 관측값으로 남긴다.
                 self._estimate_overrun_krw += actual - estimate
+            self._condition.notify_all()
 
     def cancel_before_dispatch(self, reservation: CallReservation) -> None:
         """provider에 보내지 않았음이 확실할 때만 호출 예약을 전액 반환한다."""
-        with self._lock:
+        with self._condition:
             estimate = self._pending.pop(reservation.call_id, None)
             if estimate is None:
                 raise ProviderCostInvariantError(
                     "취소할 provider 호출 예약이 없거나 이미 마감됐습니다"
                 )
             self._held_estimated_krw -= estimate
+            self._unknown_calls.discard(reservation.call_id)
+            self._condition.notify_all()
 
     def mark_unknown(self, reservation: CallReservation) -> None:
         """예외·usage 누락은 호출 전 예상비용을 반환하지 않는다."""
-        with self._lock:
+        with self._condition:
             if reservation.call_id not in self._pending:
                 raise ProviderCostInvariantError("미확정 처리할 provider 호출 예약이 없습니다")
+            self._unknown_calls.add(reservation.call_id)
+            self._condition.notify_all()
 
 
 _CURRENT: contextvars.ContextVar[ProviderBudget | None] = contextvars.ContextVar(

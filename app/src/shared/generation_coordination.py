@@ -79,6 +79,7 @@ class GenerationCallbacks:
     ]
     ensure_paid_phase: Callable[[], None]
     engine_build_identity: EngineBuildIdentity
+    check_active: Callable[[], None] | None = None
 
 
 _CURRENT: contextvars.ContextVar[GenerationCallbacks | None] = (
@@ -144,3 +145,11 @@ def ensure_paid_phase() -> None:
     callbacks = _CURRENT.get()
     if callbacks is not None:
         callbacks.ensure_paid_phase()
+
+
+def check_active() -> None:
+    """비용 예약이나 실행 문맥 생성 없이 취소·전체 마감을 검사한다."""
+
+    callbacks = _CURRENT.get()
+    if callbacks is not None and callbacks.check_active is not None:
+        callbacks.check_active()

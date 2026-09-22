@@ -117,6 +117,7 @@ from src.features.composer.review_schema import (
     FLAT_REVIEW_SCHEMA,
     ReviewPrompt,
 )
+from src.features.composer.prompt_metadata import with_review_prompt_cache
 
 import hashlib
 import json
@@ -1135,6 +1136,7 @@ def _build_grouped_review_prompt(
             "줄이거나 생략하라는 뜻이 아니다.\n"
         ),
     ]
+    fixed_prefix_chars = sum(map(len, parts))
     section_order: list[str] = []
     for item in items:
         if item.section_id not in section_order:
@@ -1219,7 +1221,7 @@ def _build_grouped_review_prompt(
             ))
         parts.append("===== 장별 검수 블록 끝 =====\n")
     parts.append(REVIEW_TRUSTED_TAIL)
-    return "".join(parts)
+    return with_review_prompt_cache("".join(parts), fixed_prefix_chars=fixed_prefix_chars)
 
 
 def _grouped_row_reason(
@@ -2081,6 +2083,7 @@ def _build_review_prompt(
         FUTURE_PLAN_REVIEW_GUIDE, REVIEW_JSON_GUIDE,
     ]
     # 단건·재검수 경로에도 실제 후보의 소유 장만 전달한다.
+    fixed_prefix_chars = sum(map(len, parts))
     section_ids = dict.fromkeys(_review_item_section(item) for item in items)
     for section_id in section_ids:
         if section_id in SECTION_GUIDES:
@@ -2120,7 +2123,7 @@ def _build_review_prompt(
             verbatim_source=(verbatim_by_number or {}).get(item.number),
         ))
     parts.append(REVIEW_TRUSTED_TAIL)
-    return "".join(parts)
+    return with_review_prompt_cache("".join(parts), fixed_prefix_chars=fixed_prefix_chars)
 
 
 def _parse_verdicts(

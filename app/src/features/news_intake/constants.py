@@ -388,6 +388,27 @@ BODY_CALL_BUDGET: Final[int] = 48
 BODY_CHARS_PER_ARTICLE: Final[int] = 12_000
 BODY_TOTAL_CHARS_BUDGET: Final[int] = 200_000
 COLLECTION_SECONDS_BUDGET: Final[int] = 180
+#: 본문 요청을 겹치지 않는 기본 실행 폭. 호출자가 ``BodyFetchConcurrency``로
+#: 명시적으로 opt-in하지 않으면 이 값이 쓰이고 오늘의 순차 동작과 같다.
+BODY_FETCH_SEQUENTIAL: Final[int] = 1
+#: opt-in 객체의 기본 동시 요청 폭. 제안서(2026-09-22)의 1→2→3 단계 적용 중
+#: 첫 단계다 — 운영 실측 없이 3으로 올리지 않는다.
+BODY_FETCH_CONCURRENCY_DEFAULT: Final[int] = 2
+#: 같은 기간·같은 분석 묶음 안에서 동시에 띄울 수 있는 기사 사슬의 절대 상한.
+BODY_FETCH_CONCURRENCY_MAX: Final[int] = 3
+#: 같은 호스트(언론사 원문·포털)에 동시에 보내는 요청 상한. 1이면 같은
+#: 도메인은 항상 차례로 요청한다 — 언론사 서버에 무리한 동시 요청을 막는다.
+BODY_FETCH_PER_HOST_LIMIT: Final[int] = 1
+BODY_FETCH_PER_HOST_MAX: Final[int] = 2
+BODY_FETCH_THREAD_NAME_PREFIX: Final[str] = "news-body"
+BODY_BUDGET_EXHAUSTED_CODE: Final[str] = "body_budget_exhausted"
+PLANNED_CARRIED: Final[str] = "carried"
+PLANNED_SKIPPED: Final[str] = "skipped"
+PLANNED_STOP: Final[str] = "stop"
+PLANNED_DUPLICATE: Final[str] = "duplicate"
+PLANNED_LAUNCHED: Final[str] = "launched"
+UNPARSED_BODY_HTML_RE: Final[re.Pattern[str]] = re.compile(r"<(?:html|body|article|script)(?:\s|>)", re.I)
+HTTP_STATUS_REASON_RE: Final[re.Pattern[str]] = re.compile(r"fetch_http_[1-5][0-9]{2}")
 GROUNDED_BATCH_SIZE: Final[int] = 4
 GROUNDED_CALL_BUDGET: Final[int] = 8
 GROUNDED_MAX_TOKENS: Final[int] = 5_000

@@ -25,6 +25,13 @@ FEATURE_KEYS = (
     "ENGINE_V2", "NEWS_INTAKE", "REVENUE_TABLE_V2", "TYPED_DART_COLLECTOR",
     "EVIDENCE_RECLASSIFY", "NEWSROOM_DATE_AI",
 )
+# 새 영수증은 네 값을 모두 남긴다. 과거 영수증의 생략은 실제 설정으로 추정하지 않는다.
+PERFORMANCE_SETTING_ALLOWED_VALUES = {
+    "REPORT_WRITER_MAX_PARALLEL_CALLS": ("1", "2", "3"),
+    "PROVIDER_MAX_CONCURRENT_CALLS": ("1", "2", "3", "4", "5"),
+    "NEWS_BODY_FETCH_CONCURRENCY": ("1", "2", "3"),
+    "COMPOSER_REVIEW_PROMPT_CACHE_ENABLED": ("0", "1"),
+}
 DIAGNOSTIC_EXPORTS = {
     "observability_run_lifecycle": ("run_id", "state", "elapsed_sec", "final_record_json"),
     "observability_run_steps": ("run_id", "steps_json", "step_count", "omitted_count"),

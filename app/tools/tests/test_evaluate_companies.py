@@ -27,6 +27,7 @@ from tools.evaluation_constants import (
     FEATURE_KEYS,
     LEDGER_CONSISTENCY_ERROR_CODES,
     MANIFEST_SCHEMA,
+    PERFORMANCE_SETTING_ALLOWED_VALUES,
 )
 
 ORIGIN = "http://127.0.0.1:8020"
@@ -120,6 +121,80 @@ def test_preflight_never_posts(harness):
     build, calls, _, _, _ = harness
     assert build().operate()["paid_posts"] == 0
     assert calls == [("GET", "/")]
+
+
+def _write_performance_settings(settings, value):
+    snapshot = json.loads(settings.read_bytes())
+    snapshot["performance_settings"] = value
+    settings.write_text(json.dumps(snapshot), encoding="utf-8")
+    settings.with_suffix(".sha256").write_text(digest(settings.read_bytes()), encoding="utf-8")
+
+
+@pytest.mark.parametrize("values", [("1", "1", "1", "0"), ("3", "5", "2", "0"), ("2", "4", "3", "1")])
+def test_performance_preflight_reports_explicit_values_without_paid_posts(harness, values):
+    build, calls, _, _, settings = harness
+    expected = dict(zip(PERFORMANCE_SETTING_ALLOWED_VALUES, values, strict=True))
+    _write_performance_settings(settings, expected)
+    result = build().operate()
+    assert result["performance_settings"] == expected
+    assert result["paid_posts"] == 0
+    assert calls == [("GET", "/")]
+
+
+def test_legacy_preflight_does_not_invent_performance_settings(harness):
+    build, calls, _, _, _ = harness
+    assert build().operate()["performance_settings"] is None
+    assert calls == [("GET", "/")]
+
+
+@pytest.mark.parametrize("change", [
+    "partial", "extra", "empty", "null", "list", "writer_zero", "writer_high",
+    "provider_zero", "provider_high", "news_zero", "news_high", "integer",
+    "boolean", "cache_true", "padded",
+])
+def test_invalid_performance_snapshot_is_rejected_before_http(harness, change):
+    build, calls, _, _, settings = harness
+    value = dict(zip(PERFORMANCE_SETTING_ALLOWED_VALUES, ("3", "5", "2", "0"), strict=True))
+    changes = {
+        "writer_zero": ("REPORT_WRITER_MAX_PARALLEL_CALLS", "0"),
+        "writer_high": ("REPORT_WRITER_MAX_PARALLEL_CALLS", "4"),
+        "provider_zero": ("PROVIDER_MAX_CONCURRENT_CALLS", "0"),
+        "provider_high": ("PROVIDER_MAX_CONCURRENT_CALLS", "6"),
+        "news_zero": ("NEWS_BODY_FETCH_CONCURRENCY", "0"),
+        "news_high": ("NEWS_BODY_FETCH_CONCURRENCY", "4"),
+        "integer": ("REPORT_WRITER_MAX_PARALLEL_CALLS", 3),
+        "boolean": ("COMPOSER_REVIEW_PROMPT_CACHE_ENABLED", False),
+        "cache_true": ("COMPOSER_REVIEW_PROMPT_CACHE_ENABLED", "true"),
+        "padded": ("REPORT_WRITER_MAX_PARALLEL_CALLS", " 3"),
+    }
+    if change == "partial":
+        value.pop("NEWS_BODY_FETCH_CONCURRENCY")
+    elif change == "extra":
+        value["UNKNOWN"] = "1"
+    elif change == "empty":
+        value = {}
+    elif change == "null":
+        value = None
+    elif change == "list":
+        value = list(value)
+    else:
+        key, invalid = changes[change]
+        value[key] = invalid
+    _write_performance_settings(settings, value)
+    with pytest.raises(EvaluationError, match="성능시험 설정"):
+        build()
+    assert calls == []
+
+
+def test_changed_performance_settings_cannot_resume_same_paid_batch(harness):
+    build, calls, _, _, settings = harness
+    baseline = dict(zip(PERFORMANCE_SETTING_ALLOWED_VALUES, ("1", "1", "1", "0"), strict=True))
+    _write_performance_settings(settings, baseline)
+    build().operate()
+    _write_performance_settings(settings, {**baseline, "REPORT_WRITER_MAX_PARALLEL_CALLS": "3"})
+    with pytest.raises(EvaluationError, match="자동 재개"):
+        build().operate(execute=True)
+    assert all(method == "GET" for method, _ in calls)
 
 
 @pytest.fixture

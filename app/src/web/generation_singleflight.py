@@ -387,6 +387,7 @@ class GenerationSession:
             coordinate=self.coordinate,
             ensure_paid_phase=self.ensure_paid_phase,
             engine_build_identity=self._frozen_build_identity,
+            check_active=self.check_active,
         )
 
     @property
@@ -1140,6 +1141,24 @@ class GenerationSession:
             )
         with self._lock:
             self._handle = refreshed
+
+    def check_active(self) -> None:
+        """본문 작업에서도 비용 예약 없이 취소·마감·관측된 임대 실패를 확인한다."""
+
+        build_identity_contract.assert_engine_build_identity_current(
+            self._frozen_build_identity
+        )
+        if self._cancel_wait.is_set():
+            raise generation_coordination.GenerationWaitCancelled(
+                "취소된 보고서 요청에서 자료 수집을 계속할 수 없습니다"
+            )
+        with self._lock:
+            lease_error = self._lease_error
+        if lease_error is not None:
+            raise GenerationSingleflightUnavailable(
+                "보고서 생성 임대 오류로 자료 수집을 계속할 수 없습니다"
+            ) from lease_error
+        self._bounded_owner_ttl(clock.now_kst())
 
     def ensure_paid_phase(self) -> None:
         """owner/bypass만 첫 provider 전에 비용 phase와 attempt 문맥을 연다."""

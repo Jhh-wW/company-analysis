@@ -15,12 +15,20 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable, Final, Optional, Union
 
 from src.core.citations import citation_number
+from src.features.composer.parallel_sections import run_section_jobs, section_worker_count
+from src.shared.report_quality.composition_diagnostic_constants import SECTION_EXECUTION_STEP
+from src.features.composer.parallel_section_constants import (
+    MILLISECONDS_PER_SECOND,
+    SERIAL_SECTION_CALLS,
+)
 from src.features.composer.constants import (
     ALREADY_WRITTEN_GUIDE,
     ALREADY_WRITTEN_HEAD,
@@ -1551,6 +1559,14 @@ def compose_sections(
         normalized = ()
     sections: list[ComposedSection] = []
     already_written: list[str] = []
+    jobs: list[Callable[[], ComposedSection]] = []
+    if prepared is not None:
+        prepare_parallel = getattr(ask, "prepare_parallel", None)
+        if callable(prepare_parallel):
+            # 유료 실행 Context와 지연 클라이언트는 부모에서 준비한 뒤 복사한다.
+            prepare_parallel()
+    workers = section_worker_count(ask) if prepared is not None else SERIAL_SECTION_CALLS
+    started_at = time.monotonic()
     for section_id in SECTION_IDS:
         section_fragments = (
             normalized if prepared is None else prepared.packets[section_id]
@@ -1561,7 +1577,11 @@ def compose_sections(
             else None
         )
         prompt_already_written = already_written if prepared is None else ()
-        section = _compose_one_section(
+        # 장부가 있으면 작업 스레드에 들어가기 전에 장 ID와 배정 순서를 고정한다.
+        bind_section = getattr(ask, "for_section", None)
+        section_ask = bind_section(section_id) if callable(bind_section) else ask
+        job = partial(
+            _compose_one_section,
             section_id,
             build_section_prompt(
                 company_name,
@@ -1579,15 +1599,28 @@ def compose_sections(
                 # 켜 봐야 캐시 «쓰기» 할증만 물고 읽기가 없어 손해다.
                 shared_evidence_prefix=prepared is None,
             ),
-            ask,
+            section_ask,
             reject_inline_citation_markers=prepared is not None,
             # packet/FULL 호출 계약은 장마다 정확히 한 번이다. 형식 오류를
             # 재호출로 감추지 않고 해당 장을 fail-closed 안내문으로 남긴다.
             parse_retry_limit=(0 if prepared is not None else PARSE_RETRY_LIMIT),
         )
-        sections.append(section)
+        if workers > SERIAL_SECTION_CALLS:
+            jobs.append(job)
+        else:
+            section = job()
+            sections.append(section)
         if prepared is None:
             already_written.extend(sentence.text for sentence in section.sentences)
+    if jobs:
+        sections = run_section_jobs(jobs, max_workers=workers)
+    if composition_diagnostics is not None:
+        composition_diagnostics.append({
+            "step": SECTION_EXECUTION_STEP,
+            "동시상한": workers,
+            "장수": len(sections),
+            "소요_ms": max(0, int((time.monotonic() - started_at) * MILLISECONDS_PER_SECOND)),
+        })
     report = ComposedReport(sections=tuple(sections), summary=())
     # 작가 응답을 읽은 «직후» 줄 수 — 아래 정리에서 사라진 줄과 구분하기 위해
     # 반드시 정리 «전»에 남긴다.

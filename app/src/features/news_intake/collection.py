@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import re
 import time
-from collections import Counter
-from dataclasses import replace
+from collections import Counter, deque
+from concurrent.futures import CancelledError, Future
+from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable
 
 from src.core.provider_gateway import gateway
 from src.features.news_intake import constants as c
+from src.features.news_intake.body_prefetch import (
+    ArticleFetchJob, ArticleFetchOutcome, BodyFetchConcurrency, BodyFetchLane,
+    CallBudgetPool, CallLease, eligible_body_urls, fetch_article_body,
+)
 from src.features.news_intake.identity_names import derived_company_names
-from src.features.news_intake.fetch import body_fetch_urls, decode_looks_broken, normalize_body_result
 from src.features.news_intake.grounded import (
     build_grounded_prompt, build_grounded_schema, validate_grounded_response,
 )
@@ -24,22 +28,38 @@ from src.features.news_intake.models import (
     GroundedNewsArticle, GroundedNewsExcerpt, NewsCandidate, NewsCollectionPolicy,
     NewsCollectionResult, NewsCompanyContext, NewsSearchSnapshot,
 )
-from src.features.news_intake.search_snapshot import (
-    candidate_window, collect_search_snapshot, company_digest, diverse_candidates, domain_host, host_matches,
-    policy_digest, snapshot_digest, source_category,
+from src.features.news_intake.search_snapshot import (  # noqa: F401 - collect_search_snapshot은 어댑터·시험이 이 모듈에서 가져간다
+    candidate_window, collect_search_snapshot, company_digest, diverse_candidates,
+    policy_digest, snapshot_digest,
 )
 from src.shared.report_generation.models import exact_text_sha256
-from src.shared.report_quality.source_identity import canonical_url
+from src.shared.engine_build_identity import EngineBuildIdentityChangedError
+from src.shared.generation_coordination import GenerationCoordinationError
 
 
 GroundedAnalyzer = Callable[[str, dict[str, Any], int], str | dict[str, Any]]
+
+@dataclass
+class _PlannedCandidate:
+    candidate: NewsCandidate
+    kind: str
+    budget_code: str | None = None
+    future: Future[ArticleFetchOutcome] | None = None
+    lease: CallLease | None = None
 
 
 def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyContext,
                           as_of: dt.date, fetch_text: Callable[[str], object],
                           analyze_grounded: GroundedAnalyzer,
-                          policy: NewsCollectionPolicy | None = None) -> NewsCollectionResult:
-    """검색·본문 callback을 섞지 않고, 검증 실패를 예전 휴리스틱으로 보충하지 않는다."""
+                          policy: NewsCollectionPolicy | None = None,
+                          body_fetch: BodyFetchConcurrency | None = None) -> NewsCollectionResult:
+    """검색·본문 callback을 섞지 않고, 검증 실패를 예전 휴리스틱으로 보충하지 않는다.
+
+    ``body_fetch``는 호출자가 «``fetch_text``를 여러 스레드에서 동시에 불러도
+    안전하다»고 선언하는 opt-in이다. 없으면 오늘과 같은 순차 수집이다. 있어도
+    기사 선택·소비 순서·원문·예산 계약은 같고, 같은 기간·같은 분석 묶음 안의
+    본문 요청 대기만 겹친다(``body_prefetch`` 모듈 설명 참조).
+    """
 
     policy = policy or NewsCollectionPolicy()
     if (snapshot.digest != snapshot_digest(snapshot) or snapshot.company_digest != company_digest(company)
@@ -51,7 +71,6 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     identity_diagnostics: Counter[str] = Counter()
     budget_codes: list[str] = [code for code in snapshot.reason_codes if code in c.SEARCH_BUDGET_REASON_CODES]
     stages: Counter[str] = Counter()
-    body_calls = 0
     body_articles = 0
     body_chars = 0
     analysis_calls = 0
@@ -77,6 +96,20 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     reusable_window_budget = sum(c.WINDOW_ARTICLE_BUDGETS) - sum(reserved_window_budgets.values())
     deadline = time.monotonic() + policy.max_collection_seconds
     stopped = False
+    # 본문 요청 상한은 원장이 지킨다. 순차든 동시든 «실제로 보낸 요청»만 「본문호출」로 센다.
+    call_pool = CallBudgetPool(policy.max_body_calls)
+    lane = BodyFetchLane(body_fetch)
+    #: 선행 요청 정산 — 출발한 사슬, 결과를 쓰지 않은 사슬과 그 요청 수, 요청 전 취소.
+    prefetch_stats: Counter[str] = Counter()
+
+    def clock() -> float:
+        # 모듈의 time을 호출 시점에 찾는다 — 시험이 마감 시계를 바꿔 끼울 수 있게 한다.
+        return time.monotonic()
+
+    job = ArticleFetchJob(
+        company=company, policy=policy, as_of=as_of, fetch_text=fetch_text, budget=call_pool,
+        deadline=deadline, clock=clock, stop_event=lane.stop_event, host_slots=lane.host_slots,
+    )
 
     def analyze_batch(batch: list[tuple[NewsCandidate, str]]) -> None:
         nonlocal analysis_calls, prompt_chars, response_chars, stopped
@@ -100,7 +133,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         prompt_chars += len(prompt)
         try:
             response = analyze_grounded(prompt, build_grounded_schema(batch), policy.analysis_max_tokens)
-        except gateway.ProviderCallFailed:
+        except (gateway.ProviderCallFailed, GenerationCoordinationError,
+                EngineBuildIdentityChangedError, CancelledError):
             # gateway가 이미 안전한 observation을 원장에 기록했다. provider
             # fatal을 콘텐츠 무효로 접으면 첫 원인이 사라지고 다음 배치의
             # ProviderBudgetUnavailable이 최종 원인처럼 보이므로 즉시 전파한다.
@@ -152,134 +186,207 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             analyze_batch(batch)
             batch.clear()
 
-    for months, reserved_window_budget in reserved_window_budgets.items():
-        if stopped or evidence_is_sufficient(all_excerpts, policy):
-            break
-        windows.append(months)
-        candidates = candidates_by_window[months]
-        carried = deferred.pop(months, [])
-        carried_bodies = {candidate.id: body for candidate, body in carried}
-        # 원문 날짜 보정으로 넘어온 기사도 같은 기간의 이름·주제 순위를 따른다.
-        ranked_candidates = diverse_candidates(
-            candidates + [candidate for candidate, _ in carried], len(candidates) + len(carried),
-        )
-        window_budget = min(reserved_window_budget + reusable_window_budget,
-                            policy.max_body_articles - body_articles) if candidates else 0
-        window_counts[str(months)] = {
-            "후보": len(candidates) + len(carried), "본문": len(carried), "검증기사": 0, "이월": 0,
-            "시도상한": window_budget, "시도": 0, "미시도": len(candidates),
-        }
-        batch: list[tuple[NewsCandidate, str]] = []
-        examined = 0
-        relevant_before = len(relevant_articles)
-        for candidate in ranked_candidates:
+    def discard_outcome(outcome: ArticleFetchOutcome) -> None:
+        """이미 보낸 요청의 결과를 쓰지 않고 버린다 — 요청은 있었으니 호출 수·시도 경고에는 남긴다."""
+        prefetch_stats["선행미사용"] += 1
+        prefetch_stats["선행미사용호출"] += outcome.calls_made
+        warnings.update(outcome.warnings)
+
+    try:
+        for months, reserved_window_budget in reserved_window_budgets.items():
             if stopped or evidence_is_sufficient(all_excerpts, policy):
                 break
-            if candidate.id in carried_bodies:
-                queue_body(candidate, carried_bodies[candidate.id], batch)
-                continue
-            if examined >= window_budget:
-                if len(candidates) > examined:
-                    budget_codes.append("body_budget_exhausted" if body_articles >= policy.max_body_articles
-                                        else "window_body_budget")
-                # 새 본문 요청은 멈추되 이미 읽어 이월한 본문은 재요청 없이 검증한다.
-                continue
-            if (body_articles >= policy.max_body_articles or body_calls >= policy.max_body_calls
-                    or body_chars >= policy.max_total_body_chars or time.monotonic() >= deadline):
-                budget_codes.append("body_budget_exhausted")
-                stopped = True
-                break
-            examined += 1
-            body_articles += 1
-            if candidate.source_url in seen_urls:
-                excluded["duplicate_effective_url"] += 1
-                continue
-            seen_urls.add(candidate.source_url)
-            article_failures: list[str] = []
-            read_candidate: NewsCandidate | None = None
-            full_body = ""
-            for url in body_fetch_urls(candidate):
-                if body_calls >= policy.max_body_calls or time.monotonic() >= deadline:
-                    budget_codes.append("body_budget_exhausted")
+            windows.append(months)
+            candidates = candidates_by_window[months]
+            carried = deferred.pop(months, [])
+            carried_bodies = {candidate.id: body for candidate, body in carried}
+            # 원문 날짜 보정으로 넘어온 기사도 같은 기간의 이름·주제 순위를 따른다.
+            ranked_candidates = diverse_candidates(
+                candidates + [candidate for candidate, _ in carried], len(candidates) + len(carried),
+            )
+            window_budget = min(reserved_window_budget + reusable_window_budget,
+                                policy.max_body_articles - body_articles) if candidates else 0
+            window_counts[str(months)] = {
+                "후보": len(candidates) + len(carried), "본문": len(carried), "검증기사": 0, "이월": 0,
+                "시도상한": window_budget, "시도": 0, "미시도": len(candidates), "선행미사용": 0,
+            }
+            batch: list[tuple[NewsCandidate, str]] = []
+            examined = 0
+            relevant_before = len(relevant_articles)
+            unused_before = prefetch_stats["선행미사용"]
+            # 후보를 순위 순서로 «계획»하고 같은 순서로만 «소비»한다. 사슬 완료 순서가
+            # 뒤집혀도 분석 묶음·중복 판정·이월은 순차 실행과 같은 순서로 일어난다.
+            planned: deque[_PlannedCandidate] = deque()
+            plan_index = 0
+            in_flight = 0
+            pending_carried = 0
+            planning_halted = False
+
+            def plan_more() -> None:
+                nonlocal plan_index, examined, body_articles, in_flight, pending_carried, planning_halted
+                while plan_index < len(ranked_candidates) and not planning_halted:
+                    if stopped or evidence_is_sufficient(all_excerpts, policy):
+                        return
+                    candidate = ranked_candidates[plan_index]
+                    # 분석 묶음의 빈자리가 동시 출발의 상한이다. 그래서 분석이 도는 순간에는
+                    # 진행 중인 사슬이 없고, 분석 결과(조기 충분·호출 상한)를 앞질러 읽는 본문도 없다.
+                    batch_slack = policy.batch_size - len(batch) - in_flight - pending_carried
+                    if candidate.id in carried_bodies:
+                        if batch_slack <= 0:
+                            return
+                        planned.append(_PlannedCandidate(candidate, c.PLANNED_CARRIED))
+                        pending_carried += 1
+                        plan_index += 1
+                        continue
+                    if examined >= window_budget:
+                        budget_code = None
+                        if len(candidates) > examined:
+                            budget_code = (c.BODY_BUDGET_EXHAUSTED_CODE if body_articles >= policy.max_body_articles
+                                           else "window_body_budget")
+                        # 새 본문 요청은 멈추되 이미 읽어 이월한 본문은 재요청 없이 검증한다.
+                        planned.append(_PlannedCandidate(candidate, c.PLANNED_SKIPPED, budget_code=budget_code))
+                        plan_index += 1
+                        continue
+                    calls_left = call_pool.unreserved
+                    if (body_articles >= policy.max_body_articles or body_chars >= policy.max_total_body_chars
+                            or clock() >= deadline or (calls_left <= 0 and in_flight == 0)):
+                        planned.append(_PlannedCandidate(candidate, c.PLANNED_STOP))
+                        plan_index += 1
+                        planning_halted = True
+                        return
+                    if calls_left <= 0 or in_flight >= lane.max_in_flight or batch_slack <= 0:
+                        # 진행 중인 사슬이 예약·묶음 자리를 돌려줄 때까지 기다린다.
+                        return
+                    examined += 1
+                    body_articles += 1
+                    if candidate.source_url in seen_urls:
+                        planned.append(_PlannedCandidate(candidate, c.PLANNED_DUPLICATE))
+                        plan_index += 1
+                        continue
+                    lease = CallLease()
+                    needed = len(eligible_body_urls(candidate, company, policy))
+                    if needed and not call_pool.try_reserve(needed, lease):
+                        if in_flight > 0:
+                            # 지금은 이 기사의 몫을 보장할 수 없다. 앞 사슬이 남는 예약을 돌려준 뒤 다시 본다.
+                            examined -= 1
+                            body_articles -= 1
+                            return
+                        # 마지막 몫은 순차 규칙 그대로 — 주소마다 남은 호출을 하나씩 확인한다.
+                    future = lane.submit(partial(fetch_article_body, job, candidate, lease))
+                    planned.append(_PlannedCandidate(candidate, c.PLANNED_LAUNCHED, future=future, lease=lease))
+                    prefetch_stats["출발"] += 1
+                    in_flight += 1
+                    plan_index += 1
+
+            while True:
+                plan_more()
+                if not planned:
+                    break
+                item = planned.popleft()
+                if stopped or evidence_is_sufficient(all_excerpts, policy):
+                    planned.appendleft(item)
+                    break
+                if item.kind == c.PLANNED_CARRIED:
+                    pending_carried -= 1
+                    queue_body(item.candidate, carried_bodies[item.candidate.id], batch)
+                    continue
+                if item.kind == c.PLANNED_SKIPPED:
+                    if item.budget_code:
+                        budget_codes.append(item.budget_code)
+                    continue
+                if item.kind == c.PLANNED_STOP:
+                    budget_codes.append(c.BODY_BUDGET_EXHAUSTED_CODE)
                     stopped = True
                     break
-                # 원문에 확인된 발행자가 있어야 포털의 같은 기사 URL을 폴백으로 쓸 수 있다.
-                original_source = source_category(url, company, policy)
-                portal = any(host_matches(domain_host(url), domain) for domain in c.NEWS_PORTAL_DOMAINS)
-                if not original_source and not (portal and candidate.source_category == "news_report"):
-                    excluded["untrusted_body_url"] += 1
-                    continue
-                body_calls += 1
-                try:
-                    result = normalize_body_result(fetch_text(url))
-                except Exception:
-                    article_failures.append("fetch_failed")
-                    continue
-                if not result.succeeded:
-                    reason = result.reason_code
-                    article_failures.append(reason if reason in c.BODY_FAILURE_CODES or re.fullmatch(r"fetch_http_[1-5][0-9]{2}", reason) else "fetch_failed")
-                    continue
-                if result.stage == c.BODY_STAGE_META_DESCRIPTION:
-                    excluded["metadata_only_not_body"] += 1
-                    continue
-                if re.search(r"<(?:html|body|article|script)(?:\s|>)", result.text, re.I):
-                    excluded["unparsed_html_not_body"] += 1
-                    continue
-                if decode_looks_broken(result.text):
-                    article_failures.append(c.EXCLUDED_FETCH_DECODE_ERROR)
-                    continue
-                effective = canonical_url(result.effective_url or url)
-                final_source = source_category(effective, company, policy)
-                final_portal = any(host_matches(domain_host(effective), domain) for domain in c.NEWS_PORTAL_DOMAINS)
-                if not effective or (not final_source and not (final_portal and candidate.source_category == "news_report")):
-                    excluded["untrusted_effective_url"] += 1
-                    continue
-                published_on = result.published_on or candidate.published_on
-                try:
-                    published_day = dt.date.fromisoformat(published_on)
-                except ValueError:
-                    excluded["invalid_body_published_date"] += 1
-                    continue
-                dated_candidate = replace(candidate, published_on=published_on)
-                if published_day > as_of or not candidate_window(dated_candidate, as_of):
-                    excluded["body_published_outside_window"] += 1
-                    continue
-                if result.published_on and result.published_on != candidate.published_on:
-                    warnings["search_body_date_corrected"] += 1
-                if len(result.text) < c.GROUNDED_MIN_EXCERPT_CHARS:
-                    excluded["body_too_short"] += 1
-                    continue
-                if effective != candidate.source_url and effective in seen_urls:
+                if item.kind == c.PLANNED_DUPLICATE:
                     excluded["duplicate_effective_url"] += 1
+                    continue
+                in_flight -= 1
+                outcome = item.future.result()
+                candidate = item.candidate
+                if body_chars >= policy.max_total_body_chars:
+                    # 앞 사슬의 본문이 글자 예산을 채웠다. 순차 규칙이면 시도 전에 멈췄을 자리다.
+                    discard_outcome(outcome)
+                    budget_codes.append(c.BODY_BUDGET_EXHAUSTED_CODE)
+                    stopped = True
                     break
-                full_body = result.text
-                read_candidate = replace(dated_candidate, source_url=effective,
-                                         published_on_source="article_metadata" if result.published_on else "search_index")
-                stages[result.stage] += 1
-                seen_urls.add(effective)
-                break
-            warnings.update(article_failures)
-            if read_candidate is None:
-                if article_failures:
-                    failures.append(article_failures[-1])
-                excluded["article_body_unavailable"] += 1
-                continue
-            actual_months = candidate_window(read_candidate, as_of)
-            if actual_months > months:
-                # 검색 등록일이 새로워도 실제 기사는 과거 자료일 수 있다. 이미 읽은
-                # 본문을 해당 기간까지 보류하고 검색·본문 요청은 반복하지 않는다.
-                deferred.setdefault(actual_months, []).append((read_candidate, full_body))
-                window_counts[str(months)]["이월"] += 1
-                continue
-            window_counts[str(months)]["본문"] += 1
-            queue_body(read_candidate, full_body, batch)
-            if stopped:
-                break
-        analyze_batch(batch)
-        reusable_window_budget -= max(0, examined - reserved_window_budget)
-        window_counts[str(months)]["시도"] = examined
-        window_counts[str(months)]["미시도"] = len(candidates) - examined
-        window_counts[str(months)]["검증기사"] = len(relevant_articles) - relevant_before
+                if outcome.urls_examined == 0 and (outcome.budget_exhausted or outcome.stop_requested):
+                    # 첫 주소를 보기 전에 상한·마감에 걸렸다. 순차 규칙의 «시도 전 검사»와 같은
+                    # 자리이므로 시도로 세지 않는다(요청도 없었다).
+                    examined -= 1
+                    body_articles -= 1
+                    budget_codes.append(c.BODY_BUDGET_EXHAUSTED_CODE)
+                    stopped = True
+                    break
+                if candidate.source_url in seen_urls:
+                    # 사슬이 떠난 뒤 앞 기사의 실제 주소가 이 후보와 같다고 밝혀졌다.
+                    excluded["duplicate_effective_url"] += 1
+                    discard_outcome(outcome)
+                    continue
+                seen_urls.add(candidate.source_url)
+                excluded.update(outcome.excluded)
+                warnings.update(outcome.warnings)
+                if outcome.budget_exhausted:
+                    budget_codes.append(c.BODY_BUDGET_EXHAUSTED_CODE)
+                    stopped = True
+                read_candidate = outcome.read_candidate
+                if (read_candidate is not None and read_candidate.source_url != candidate.source_url
+                        and read_candidate.source_url in seen_urls):
+                    excluded["duplicate_effective_url"] += 1
+                    read_candidate = None
+                if read_candidate is None:
+                    if outcome.article_failures:
+                        failures.append(outcome.article_failures[-1])
+                    excluded["article_body_unavailable"] += 1
+                    continue
+                stages[outcome.stage] += 1
+                seen_urls.add(read_candidate.source_url)
+                actual_months = candidate_window(read_candidate, as_of)
+                if actual_months > months:
+                    # 검색 등록일이 새로워도 실제 기사는 과거 자료일 수 있다. 이미 읽은
+                    # 본문을 해당 기간까지 보류하고 검색·본문 요청은 반복하지 않는다.
+                    deferred.setdefault(actual_months, []).append((read_candidate, outcome.full_body))
+                    window_counts[str(months)]["이월"] += 1
+                    continue
+                window_counts[str(months)]["본문"] += 1
+                queue_body(read_candidate, outcome.full_body, batch)
+                if stopped:
+                    break
+
+            if planned:
+                # 멈춘 뒤에도 이미 떠난 사슬은 되돌릴 수 없다. 새 요청은 막고, 보낸 요청은
+                # 성공·실패·취소를 가리지 않고 모두 정산한다.
+                lane.request_stop()
+                for item in planned:
+                    if item.kind != c.PLANNED_LAUNCHED:
+                        continue
+                    in_flight -= 1
+                    if item.future.cancel():
+                        call_pool.release(item.lease)
+                        examined -= 1
+                        body_articles -= 1
+                        prefetch_stats["취소"] += 1
+                        continue
+                    outcome = item.future.result()
+                    if outcome.calls_made == 0:
+                        # 요청을 하나도 보내지 않고 멈췄다 — 시도로 세지 않는다.
+                        examined -= 1
+                        body_articles -= 1
+                        prefetch_stats["취소"] += 1
+                        continue
+                    discard_outcome(outcome)
+                planned.clear()
+                lane.stop_event.clear()
+            analyze_batch(batch)
+            reusable_window_budget -= max(0, examined - reserved_window_budget)
+            window_counts[str(months)]["시도"] = examined
+            window_counts[str(months)]["미시도"] = len(candidates) - examined
+            window_counts[str(months)]["검증기사"] = len(relevant_articles) - relevant_before
+            window_counts[str(months)]["선행미사용"] = prefetch_stats["선행미사용"] - unused_before
+    finally:
+        lane.request_stop()
+        lane.close()
+    body_calls = call_pool.made
 
     chosen, selection_exclusions = select_diverse_excerpts(all_excerpts, policy)
     excluded.update(selection_exclusions)
@@ -338,6 +445,11 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         "실패": reason_codes[0] if reason_codes else None, "실패사유": reason_codes,
         "제외": {key: count for key, count in excluded.items() if count}, "본문단계": dict(stages),
         "시도경고": dict(warnings), "상한사유": budgets,
+        "본문동시수집": {
+            "동시상한": lane.max_in_flight, "호스트동시상한": lane.max_per_host,
+            "출발": prefetch_stats["출발"], "선행미사용": prefetch_stats["선행미사용"],
+            "선행미사용호출": prefetch_stats["선행미사용호출"], "취소": prefetch_stats["취소"],
+        },
         "상한잘림": excluded.get("fragment_budget", 0),
         "완전성": completeness, "자료부족": not enough and not reason_codes and not budgets and not incomplete_codes,
         "검증미완료": incomplete_codes,

@@ -33,6 +33,10 @@ PROVIDER_STATUS_NAMES = PAID_PROVIDER_NAMES + (
     "GOOGLE_PLACES_API_KEY",
     "GOOGLE_PLACES_TERMS_ACK",
 )
+PERFORMANCE_KEYS = (
+    "REPORT_WRITER_MAX_PARALLEL_CALLS", "PROVIDER_MAX_CONCURRENT_CALLS",
+    "NEWS_BODY_FETCH_CONCURRENCY", "COMPOSER_REVIEW_PROMPT_CACHE_ENABLED",
+)
 
 
 def test_launcher_has_fail_closed_real_evaluation_contract() -> None:
@@ -175,6 +179,10 @@ payload = {
     "feature_settings": {name: os.environ.get(name) for name in (
         "NEWS_INTAKE", "REVENUE_TABLE_V2", "TYPED_DART_COLLECTOR",
         "EVIDENCE_RECLASSIFY", "NEWSROOM_DATE_AI",
+    )},
+    "performance_settings": {name: os.environ.get(name) for name in (
+        "REPORT_WRITER_MAX_PARALLEL_CALLS", "PROVIDER_MAX_CONCURRENT_CALLS",
+        "NEWS_BODY_FETCH_CONCURRENCY", "COMPOSER_REVIEW_PROMPT_CACHE_ENABLED",
     )},
     "legacy_naver_keys_absent": all(name not in os.environ for name in (
         "NAVER_CLIENT_ID", "NAVER_CLIENT_SECRET",
@@ -578,6 +586,98 @@ def test_unknown_feature_switch_is_rejected_before_child_creation(tmp_path: Path
     )
     assert not records
     assert b"NEWS_INTAKE" in result.stdout
+
+
+@pytest.mark.skipif(WINDOWS_POWERSHELL is None, reason="Windows PowerShell 5.1 실제 자식 환경 시험")
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ("", ("3", "5", "2", "0")),
+        (" -WriterMaxParallelCalls 1 -ProviderMaxConcurrentCalls 1 -NewsBodyFetchConcurrency 1",
+         ("1", "1", "1", "0")),
+        (" -WriterMaxParallelCalls 3 -ProviderMaxConcurrentCalls 5 -NewsBodyFetchConcurrency 2",
+         ("3", "5", "2", "0")),
+        (" -WriterMaxParallelCalls 2 -ProviderMaxConcurrentCalls 4 -NewsBodyFetchConcurrency 3 -EnableReviewPromptCache",
+         ("2", "4", "3", "1")),
+    ],
+    ids=("defaults", "baseline", "parallel", "cache-enabled"),
+)
+def test_performance_arguments_bind_child_snapshot_and_runner(
+    tmp_path: Path, arguments: str, expected: tuple[str, ...],
+) -> None:
+    """가짜 공급자 자식의 실제 환경과 평가기 영수증이 같은 비교 조건을 가진다."""
+    import httpx
+    from tools.evaluate_companies import HttpEvaluation, digest
+    from tools.evaluation_constants import MANIFEST_SCHEMA
+
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+    environment.update({key: "parent-must-not-win" for key in PERFORMANCE_KEYS})
+    result, records = _run_fake(
+        app_copy, environment, paid=True, feature_arguments=arguments,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert len(records) == 1
+    payload = json.loads(records[0].read_bytes())
+    settings = records[0].parent / "evaluation-settings.json"
+    snapshot = json.loads(settings.read_bytes())
+    expected_settings = dict(zip(PERFORMANCE_KEYS, expected, strict=True))
+    assert payload["performance_settings"] == snapshot["performance_settings"] == expected_settings
+    assert settings.with_suffix(".sha256").read_text(encoding="utf-8") == digest(settings.read_bytes())
+    assert payload["sensitive_parent_inputs_absent"] is True
+    assert payload["dotenv_disabled"] == "1"
+    assert snapshot["production_parity"] == "not_verified"
+    assert b"parent-must-not-win" not in result.stdout + result.stderr + settings.read_bytes()
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"schema_version": MANIFEST_SCHEMA, "cases": [{
+        "case_id": "CUSTOM", "input_name": "예제", "expected_legal_name": "예제",
+        "corp_code": "00126380", "identity_confirmed": True,
+    }]}), encoding="utf-8")
+
+    def forbidden_request(request):
+        raise AssertionError("영수증 검사에서 HTTP 요청을 보냈습니다")
+
+    with httpx.Client(transport=httpx.MockTransport(forbidden_request)) as client:
+        runner = HttpEvaluation(
+            origin=snapshot["origin"], storage=settings.parent / "storage.db",
+            settings=settings, manifest=manifest, client=client,
+        )
+        assert runner.settings["performance_settings"] == expected_settings
+
+
+@pytest.mark.skipif(WINDOWS_POWERSHELL is None, reason="Windows PowerShell 5.1 실제 자식 환경 시험")
+@pytest.mark.parametrize("entry_mode", ["command", "file"])
+@pytest.mark.parametrize("arguments", [
+    " -WriterMaxParallelCalls 0", " -WriterMaxParallelCalls 4",
+    " -ProviderMaxConcurrentCalls 0", " -ProviderMaxConcurrentCalls 6",
+    " -NewsBodyFetchConcurrency 0", " -NewsBodyFetchConcurrency 4",
+    " -WriterMaxParallelCalls 1.5", " -WriterMaxParallelCalls 01",
+])
+def test_invalid_performance_argument_refuses_before_runtime_creation(
+    tmp_path: Path, arguments: str, entry_mode: str,
+) -> None:
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+    if entry_mode == "command":
+        result, records = _run_fake(
+            app_copy, environment, paid=True, feature_arguments=arguments,
+        )
+        # PowerShell -Command는 하위 스크립트의 비정상 종료를 1로 옮긴다.
+        # try/catch 래퍼가 거절을 0으로 삼키지 않는지를 확인한다.
+        assert result.returncode != 0
+    else:
+        result = subprocess.run(
+            [WINDOWS_POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-File", str(app_copy / LAUNCHER.name),
+             "-EnablePaidProviders", *arguments.split()],
+            cwd=app_copy, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        records = list(app_copy.rglob("child-environment.json"))
+        assert result.returncode == REFUSED_RELEASE_MODE_EXIT_CODE
+    assert not records
+    assert not (app_copy / ".local_evaluation_runs").exists()
 
 
 def test_launcher_is_utf8_with_bom_so_powershell_5_1_shows_korean() -> None:

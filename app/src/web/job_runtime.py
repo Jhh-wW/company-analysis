@@ -821,7 +821,16 @@ def _link_guarded_callbacks(
         _require_open_share_link(job)
         callbacks.ensure_paid_phase()
 
-    return replace(callbacks, ensure_paid_phase=guarded_ensure_paid_phase)
+    def guarded_check_active() -> None:
+        _require_open_share_link(job)
+        if callbacks.check_active is not None:
+            callbacks.check_active()
+
+    return replace(
+        callbacks,
+        ensure_paid_phase=guarded_ensure_paid_phase,
+        check_active=guarded_check_active,
+    )
 
 
 def _install_job_paid_phase(job: Job, ticket: PaidPhase) -> None:

@@ -34,26 +34,27 @@ from src.features.composer.grounding_constants import (
     TREND_KEY,
 )
 from src.features.composer.numeric_quote_refs import NUMERIC_QUOTE_REF_KEY
+from src.features.composer.prompt_metadata import PromptMetadata
 from src.features.composer.role_binding_constants import RELATION_KEY
 
 
-class ReviewPrompt(str):
+class ReviewPrompt(PromptMetadata):
     """기존 문자열과 메타데이터를 함께 전달하는 재요청 프롬프트."""
 
     response_schema: Mapping[str, Any]
 
     def __new__(
-        cls, value: str, response_schema: Mapping[str, Any]
+        cls, value: str, response_schema: Mapping[str, Any],
+        *, cache_prefix_chars: int | None = None,
     ) -> ReviewPrompt:
-        prompt = super().__new__(cls, value)
+        prompt = super().__new__(cls, value, cache_prefix_chars=cache_prefix_chars)
         prompt.response_schema = response_schema
         return prompt
 
-    def __add__(self, suffix: str) -> ReviewPrompt:
-        return ReviewPrompt(super().__add__(suffix), self.response_schema)
-
-    def __radd__(self, prefix: str) -> ReviewPrompt:
-        return ReviewPrompt(str.__add__(prefix, self), self.response_schema)
+    def _with_text(self, value: str, *, cache_prefix_chars: int) -> ReviewPrompt:
+        return ReviewPrompt(
+            value, self.response_schema, cache_prefix_chars=cache_prefix_chars,
+        )
 
 
 def _object(

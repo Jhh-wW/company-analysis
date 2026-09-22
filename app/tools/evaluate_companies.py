@@ -37,6 +37,7 @@ from tools.evaluation_constants import (
     LEDGER_CONSISTENCY_ERROR_CODES,
     MANIFEST_SCHEMA, MAX_CASES, MIN_DUPLICATE_LINE_CHARACTERS,
     NEWS_USAGE_STEP_NAMES,
+    PERFORMANCE_SETTING_ALLOWED_VALUES,
     POLL_INTERVAL_SECONDS, POLL_TIMEOUT_SECONDS,
 )
 
@@ -288,6 +289,20 @@ class HttpEvaluation:
                 or self.settings.get("schema_version") != "company-evaluation-settings-v1"
                 or any(self.settings.get("settings", {}).get(key) not in ("0", "1") for key in FEATURE_KEYS)):
             raise EvaluationError("평가 설정과 loopback 서버 계약이 일치하지 않습니다")
+        # 과거 영수증에는 이 묶음이 없다. 존재하면 전체 계약을 검증하며
+        # 빠진 값을 현재 기본값으로 채워 과거 실행 조건을 만들어내지 않는다.
+        if "performance_settings" in self.settings:
+            performance_settings = self.settings["performance_settings"]
+            if (
+                not isinstance(performance_settings, dict)
+                or set(performance_settings) != set(PERFORMANCE_SETTING_ALLOWED_VALUES)
+                or any(
+                    type(performance_settings[key]) is not str
+                    or performance_settings[key] not in allowed
+                    for key, allowed in PERFORMANCE_SETTING_ALLOWED_VALUES.items()
+                )
+            ):
+                raise EvaluationError("성능시험 설정의 네 항목과 허용 값이 일치하지 않습니다")
         if self.settings.get("paid_providers_enabled") and (
             self.settings.get("code_identity_verified") is not True
             or self.settings.get("execution_source_clean") is not True
@@ -358,6 +373,7 @@ class HttpEvaluation:
                 self.save()
             if not execute and not resume_only:
                 return {"mode": "사전검사", "cases": len(self.cases), "paid_posts": 0,
+                        "performance_settings": self.settings.get("performance_settings"),
                         "production_parity": self.settings.get("production_parity", "not_verified")}
             if not self.settings.get("paid_providers_enabled"):
                 raise EvaluationError("유료 공급자가 비활성화된 실행 설정입니다")
