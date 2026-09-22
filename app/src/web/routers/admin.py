@@ -80,28 +80,6 @@ _ADJUSTMENT_KIND_LABELS = {
     share_store.ADJUSTMENT_KIND_DAILY_BUDGET: "하루 한도",
     share_store.ADJUSTMENT_KIND_TOTAL_BUDGET: "누적 한도",
 }
-#: 회사 이름 비교에서 떼어 내는 법인격 표기. 같은 회사를 다르게 적은 것뿐이다.
-_COMPANY_LEGAL_FORMS = (
-    "주식회사",
-    "유한책임회사",
-    "유한회사",
-    "합자회사",
-    "합명회사",
-    "(주)",
-    "(유)",
-    # 한 글자로 합쳐 쓴 표기(U+321C·U+3232). casefold로는 안 풀려 따로 적는다.
-    "㈜",
-    "㈲",
-)
-_COMPANY_LEGAL_FORM_PATTERN = "|".join(
-    re.escape(legal_form) for legal_form in _COMPANY_LEGAL_FORMS
-)
-#: ★ 법인격 표기는 «이름의 맨 앞이나 맨 뒤»에 붙을 때만 떼어 낸다.
-#: 경계 없이 지우면 「질주식회사원」이 「질원」이 되어 고유번호가 다른 별개
-#: 회사가 같은 이름으로 통과한다. 첫 결속에는 대조할 고유번호가 없어서
-#: 이 이름 검사가 유일한 방어선이다.
-_COMPANY_LEGAL_PREFIX_RE = re.compile(rf"^(?:{_COMPANY_LEGAL_FORM_PATTERN})+")
-_COMPANY_LEGAL_SUFFIX_RE = re.compile(rf"(?:{_COMPANY_LEGAL_FORM_PATTERN})+$")
 
 
 class _AccessDataUnavailable(RuntimeError):
@@ -803,139 +781,15 @@ def render_member_admin_page(request: Request) -> HTMLResponse:
     return _access_page(request, template=ACCESS_MEMBERS_TEMPLATE)
 
 
-def _normalized_company_name(value: str) -> str:
-    """회사 표시명을 비교용으로 다듬는다.
-
-    ★ 「(주)회사이름」과 「회사이름」은 같은 회사다. 폼에 손으로 적는 이름은 법인격
-      표기·띄어쓰기가 매번 달라서 글자 그대로 비교하면 «같은 회사인데 막히는»
-      쪽으로 자주 틀린다. 이름이 정말 같은 «동명 회사»는 고유번호로 갈라낸다.
-
-    ★ 법인격 표기는 **맨 앞·맨 뒤에서만** 뗀다. 이름 가운데 우연히 같은 글자가
-      들어간 상호(예: 「질주식회사원」)를 다른 이름(「질원」)으로 바꿔 버리면
-      별개 회사가 서로 통과한다.
-    """
-    raw = "".join(str(value or "").split()).casefold()
-    if not raw:
-        return ""
-    stripped = _COMPANY_LEGAL_PREFIX_RE.sub("", raw)
-    stripped = _COMPANY_LEGAL_SUFFIX_RE.sub("", stripped)
-    # 법인격 표기만으로 된 이름은 통째로 사라지므로 그때는 원래 글자를 쓴다.
-    return stripped or raw
-
-
-def _report_company_id(conn, report_id: str, report=None) -> str | None:
-    """이 보고서의 회사 고유번호. **저장 표의 열을 먼저** 읽는다.
-
-    Args:
-        conn: 열린 DB 연결.
-        report_id: 볼 보고서 번호.
-        report: 이미 되살려 둔 본문이 있으면 다시 안 읽으려고 받는다.
-
-    Returns:
-        고유번호. 열도 본문도 비었으면 빈 문자열.
-        **읽지 못했으면 `None`** — 「확인 못 했다」와 「없다」는 다른 값이다.
-
-    ★ 열을 먼저 보는 이유 — 본문(`payload_json`)의 `company_id`는 출고 상태가
-      FULL일 때만 채워진다(`pipeline/real.py:3519`). 안전 확인 중에 나간 옛
-      저장본은 본문이 비어 있어, 본문만 보면 **이름이 같은 다른 법인을 못 가른다**.
-      저장 표의 `corp_id` 열은 출고 상태와 무관하게 저장 경로가
-      항상 채운다(`storage/cache.py:398`).
-    ★ 본문 값은 폴백으로 남긴다 — 열이 없던 시절에 다른 길로 저장된 행이 있을 수
-      있고, 값이 있는 쪽을 쓰는 편이 대조를 더 많이 해 준다.
-    ★ 열에서 값을 얻었더라도 **본문 읽기를 건너뛰지 않는다.** 「결속 보고서를 읽지
-      못하면 연결하지 않는다」는 기존 계약(`test_admin_access.py`
-      `test_결속_보고서를_읽지_못하면_연결을_거부한다`)을 이 변경으로 느슨하게
-      만들지 않기 위해서다. 바뀌는 것은 **대조에 쓰는 값**뿐이고, 「확인 못 하면
-      거부」라는 경계는 그대로다.
-    """
-    try:
-        return report_store.resolve_company_id(conn, report_id, report)
-    except Exception:  # noqa: BLE001 — 확인 실패는 통과가 아니라 거부로 넘긴다
-        logger.error("보고서의 회사 고유번호를 읽지 못했습니다")
-        return None
-
-
-def _link_company_id(conn, link) -> str | None:
-    """이 링크가 지금 가리키는 회사의 고유번호. 연결된 보고서에서만 읽는다.
-
-    ★ `share_links` 표에는 고유번호 열이 없다 — 링크와 보고서 두 곳에 같은 값을
-      두면 결속을 바꿀 때 어긋나기 때문이다. 그래서 이미 묶여 있는 보고서의
-      값을 그 링크의 회사 신원으로 삼는다.
-
-    Returns:
-        고유번호. 묶인 보고서가 없거나 그 보고서에 고유번호가 없으면 빈 문자열.
-        **읽지 못했으면 `None`** — 「확인 못 했다」와 「없다」는 다른 값이다.
-        같은 값으로 뭉개면 읽기 실패가 조용히 «검사 통과»가 된다(fail-open).
-    """
-    return _report_company_id(conn, str(getattr(link, "report_id", "") or ""))
-
-
-def _report_company_mismatch(
-    report,
-    *,
-    expected_company: str,
-    expected_company_id: str | None,
-    report_company_id: str | None = None,
-) -> str:
-    """링크의 회사와 보고서의 회사가 다르면 화면에 보여줄 이유를 만든다.
-
-    빈 문자열이면 같은 회사라는 뜻이다. 링크에 회사 꼬리표가 없으면(빈 값)
-    비교할 기준이 없으므로 막지 않는다.
-
-    Args:
-        report_company_id: 묶으려는 보고서의 고유번호. 본문이 아니라 저장 표의
-            열을 먼저 읽은 값이다(`_report_company_id`). 생략하면 본문 값을 쓴다 —
-            **옛 저장본은 본문이 비어 있어 대조가 헐거워지므로 되도록 넘긴다.**
-    """
-    if expected_company_id is None or report_company_id is None:
-        # ★ 대조에 쓸 값을 못 읽었으면 «통과»가 아니라 거부다. 여기서 이름
-        #   검사로만 되돌아가면 동명 다른 법인이 그대로 들어온다.
-        return "보고서 정보를 확인할 수 없어 연결하지 않았습니다."
-    link_company = str(expected_company or "").strip()
-    if not link_company:
-        return ""
-    report_company = str(getattr(report, "company", "") or "").strip()
-    if _normalized_company_name(report_company) != _normalized_company_name(
-        link_company
-    ):
-        return (
-            f"이 보고서는 다른 회사({report_company})의 것입니다. "
-            f"이 링크는 {link_company} 지원용으로 발급됐습니다."
-        )
-    candidate_company_id = str(
-        report_company_id
-        if report_company_id is not None
-        else getattr(report, "company_id", "")
-        or ""
-    ).strip()
-    link_company_id = str(expected_company_id or "").strip()
-    if (
-        link_company_id
-        and candidate_company_id
-        and link_company_id != candidate_company_id
-    ):
-        return (
-            f"이름은 같지만 다른 법인의 보고서입니다"
-            f"({report_company}, 고유번호 {candidate_company_id}). "
-            f"이 링크에 연결된 회사의 고유번호는 {link_company_id}입니다."
-        )
-    return ""
-
-
 def _validated_report_id(
     conn,
     reference: str,
-    *,
-    expected_company: str = "",
-    expected_company_id: str | None = "",
 ) -> tuple[str, str]:
-    """결과 참조가 저장돼 있고 아직 열리는 «이 회사의» 보고서인지 확인한다.
+    """관리자가 선택한 보고서의 저장·출고·공유 기간을 확인한다.
 
-    ★ 회사 대조를 서버에서 하는 이유 — 관리자가 화면의 회사명을 눈으로 거르는
-      것은 방어가 아니다. 한 번만 틀려도 받은 사람은 엉뚱한 회사 보고서를 본다.
-
-    ★ 참조가 비어 있으면(연결 해제) 대조 없이 통과시킨다. 연결을 «푸는» 쪽은
-      안전한 방향이라 확인 실패로 막을 이유가 없다.
+    링크의 회사명은 전달 맥락을 적는 표시용 이름이다. 약칭·옛 상호나 기존
+    보고서의 법인번호와 대조하지 않고, 지정한 보고서 자체의 공개 가능 여부를
+    확인한다. 빈 참조는 연결 해제다.
     """
     if not reference.strip():
         return "", ""
@@ -949,14 +803,6 @@ def _validated_report_id(
         return "", "자동출고가 완료되지 않은 임시 보고서는 연결할 수 없습니다."
     if job_runtime._link_expired(report):
         return "", "공유 기간이 지난 보고서입니다. 새 보고서를 만든 뒤 연결해주세요."
-    company_mismatch = _report_company_mismatch(
-        report,
-        expected_company=expected_company,
-        expected_company_id=expected_company_id,
-        report_company_id=_report_company_id(conn, report_id, report),
-    )
-    if company_mismatch:
-        return "", company_mismatch
     return report_id, ""
 
 
@@ -1058,9 +904,7 @@ async def admin_link_new(
     try:
         with storage_db.connect() as conn:
             _assert_access_write_ready(conn)
-            report_id, validation_error = _validated_report_id(
-                conn, report_reference, expected_company=company_clean
-            )
+            report_id, validation_error = _validated_report_id(conn, report_reference)
             if not validation_error:
                 now_iso = clock.iso_now_kst()
                 for _attempt in range(_KEY_ISSUE_ATTEMPTS):
@@ -1188,24 +1032,11 @@ def _link_detail_page(
     generated_runs: list[share_store.ShareLinkRun] = []
     run_report_states: dict[str, str] = {}
     adjustments: list[share_store.ShareLinkAdjustment] = []
-    link_company_id_state = "none"
     try:
         with storage_db.connect() as conn:
             link = share_store.load_by_hash(conn, key_hash)
             if link is not None:
                 report_state = _linked_report_state(conn, link)
-                # ★ 결속 보고서에 회사 고유번호가 없으면 이후 재결속은 «이름»만
-                #   대조하게 된다 — 같은 이름의 다른 회사가 통과한다.
-                # ★ 「없다」와 「못 읽었다」를 나눈다. 같은 침묵으로 두면 읽기가
-                #   깨진 동안 관리자는 아무 문제가 없다고 믿는다.
-                if report_state in ("active", "expired"):
-                    resolved_company_id = _link_company_id(conn, link)
-                    if resolved_company_id is None:
-                        link_company_id_state = "unknown"
-                    elif resolved_company_id:
-                        link_company_id_state = "present"
-                    else:
-                        link_company_id_state = "missing"
                 adjustments = share_store.list_link_adjustments(
                     conn, key_hash=link.key_hash
                 )
@@ -1329,7 +1160,6 @@ def _link_detail_page(
             is_deployed=False,
             qr_svg="",
             report_state=report_state,
-            link_company_id_state=link_company_id_state,
             link_adjustments=adjustments,
             link_adjustment_kind_labels=_ADJUSTMENT_KIND_LABELS,
             link_adjustment_at_labels={
@@ -1817,8 +1647,6 @@ async def admin_link_report(
                 report_id, validation_error = _validated_report_id(
                     conn,
                     report_reference,
-                    expected_company=link.company,
-                    expected_company_id=_link_company_id(conn, link),
                 )
                 if not validation_error:
                     changed = share_store.set_report_by_hash(

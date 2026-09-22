@@ -681,7 +681,7 @@ def test_결과주소를_붙여_링크를_만들면_받은사람이_보고서로
     created = admin.post(
         "/admin/links/new",
         data={
-            "company": CANONICAL_DEMO_COMPANY,
+            "company": "진영 지원용",
             "job": "",
             "report_reference": f"http://testserver/result/{report_id}",
         },
@@ -691,14 +691,18 @@ def test_결과주소를_붙여_링크를_만들면_받은사람이_보고서로
     key, _key_hash = _issued_link(created)
     with storage_db.connect() as conn:
         assert share_store.load(conn, key).report_id == report_id
+        assert share_store.load(conn, key).company == "진영 지원용"
     opened = admin.get(f"/k/{key}", follow_redirects=False)
     assert opened.headers["location"] == "/"
     # 공유 쿠키는 배포 기본값대로 Secure다 — 실제 브라우저처럼 HTTPS로 왕복시킨다.
     with TestClient(main.app, base_url="https://testserver") as 받은사람:
         받은사람.get(f"/k/{key}", follow_redirects=False)
         랜딩 = 받은사람.get("/")
+        report_page = 받은사람.get(f"/result/{report_id}")
+    assert report_page.status_code == 200
     assert f'href="/result/{report_id}"' in 랜딩.text
-    assert f"{CANONICAL_DEMO_COMPANY} 보고서 보기" in 랜딩.text
+    assert "진영 지원용 보고서 보기" in 랜딩.text
+    assert CANONICAL_DEMO_COMPANY in report_page.text
 
 
 @pytest.mark.parametrize(
@@ -780,15 +784,7 @@ def test_기존_링크에도_없는_보고서를_연결할수없다(admin: TestC
 def test_지원회사_꼬리표는_받은사람의_분석_대상을_묶지_않는다(
     admin: TestClient,
 ):
-    """★ 기대값 이전 — 앞선 시험은 「꼬리표와 다른 회사 보고서도
-    링크에 묶인다」를 지켰다. 제품 결정으로 그 동작을 뒤집었다.
-    실수로 다른 회사 보고서를 고정하면 받은 사람이 엉뚱한 보고서를 보기 때문이다.
-
-    다만 원래 이 시험이 지키려던 «진짜» 성질은 따로 있다 — 회사·직무는 권한
-    범위가 아니라 전달 맥락 꼬리표라는 것. 그 성질은 링크를 연 사람이 다른
-    회사를 자유롭게 분석할 수 있다는 것으로 그대로 지킨다.
-    묶기 거부 쪽은 `test_다른_회사_보고서는_링크에_묶이지_않는다`가 이어받는다.
-    """
+    """링크의 회사 꼬리표와 관계없이 받은 사람이 분석할 회사를 고른다."""
     created = admin.post(
         "/admin/links/new",
         data={"company": "카카오"},
@@ -2034,242 +2030,175 @@ def test_옛_계약에서는_발급이_여전히_404다(admin: TestClient, monke
 
 
 # ══════════════════════════════════════════════════════════
-# ⑥ 링크에 묶는 보고서는 그 링크의 회사와 같아야 한다
+# ⑥ 관리자가 지정한 보고서는 링크의 회사 표시명과 관계없이 연결한다
 # ══════════════════════════════════════════════════════════
 
 
-def _회사만_바꿔_보고서를_복사한다(
+def _copy_report_company(
     source_report_id: str,
     *,
     report_id: str,
     company: str,
     company_id: str = "",
 ) -> str:
-    """이미 만든 데모 보고서를 복사해 «회사 표시명·고유번호만» 바꿔 저장한다.
-
-    ★ 동명 회사 상황은 실제 조사로는 만들 수 없어서(데모 회사는 하나뿐) 저장소에
-      직접 만든다. 본문은 건드리지 않으므로 판정에 쓰이는 값만 달라진다.
-    """
+    """데모 보고서로 약칭·법인명·합병 전후 법인번호 사례를 만든다."""
     with storage_db.connect() as conn:
-        원본 = report_store.load(conn, source_report_id)
-        assert 원본 is not None
+        source_report = report_store.load(conn, source_report_id)
+        assert source_report is not None
         report_store.save(
             conn,
             report_id,
             company_id,
             "",
-            replace(원본, company=company, company_id=company_id),
+            replace(source_report, company=company, company_id=company_id),
         )
     return report_id
 
 
-def test_다른_회사_보고서는_링크에_묶이지_않는다(admin: TestClient):
-    """★ 「카카오 지원용 링크를 눌렀더니 다른 회사 보고서」를 서버가 막는다.
-
-    관리자가 회사명을 보고 눈으로 거르는 것은 방어가 아니다 — 실수 한 번이면
-    받은 사람이 엉뚱한 회사 보고서를 본다.
-    """
-    report_id = _보고서를_만든다(admin)  # (주)진영 보고서
-    created = admin.post(
-        "/admin/links/new", data={"company": "카카오"}, follow_redirects=False
-    )
-    key, key_hash = _issued_link(created)
-
-    새링크 = admin.post(
-        "/admin/links/new",
-        data={"company": "카카오", "report_reference": report_id},
-        follow_redirects=False,
-    )
-    기존링크 = admin.post(
-        "/admin/links/report",
-        data={"key": key_hash, "report_reference": report_id},
-        follow_redirects=False,
-    )
-
-    assert 새링크.status_code == 400
-    assert 기존링크.status_code == 400
-    for 응답 in (새링크, 기존링크):
-        assert "다른 회사" in 응답.text
-        assert CANONICAL_DEMO_COMPANY in 응답.text
-        assert 'role="alert"' in 응답.text
-    with storage_db.connect() as conn:
-        # 두 번째 발급은 저장 자체가 없었다 — 링크는 처음 것 하나뿐이다.
-        assert len(share_store.list_all(conn)) == 1
-        assert share_store.load(conn, key).report_id == ""
-
-
-def test_같은_회사는_묶인다(admin: TestClient):
-    """대조군 — 막는 것만 확인하면 「전부 막는 코드」와 구별되지 않는다.
-
-    법인격 표기 차이((주)·주식회사·공백)는 같은 회사로 본다.
-    """
-    report_id = _보고서를_만든다(admin)  # (주)진영 보고서
-
-    for 표기 in (CANONICAL_DEMO_COMPANY, "진영", "주식회사 진영"):
-        created = admin.post(
-            "/admin/links/new",
-            data={"company": 표기, "report_reference": report_id},
-            follow_redirects=False,
-        )
-        key, key_hash = _issued_link(created)
-        with storage_db.connect() as conn:
-            assert share_store.load(conn, key).report_id == report_id, 표기
-
-        떼었다 = admin.post(
-            "/admin/links/report",
-            data={"key": key_hash, "report_reference": ""},
-            follow_redirects=False,
-        )
-        다시_붙였다 = admin.post(
-            "/admin/links/report",
-            data={"key": key_hash, "report_reference": report_id},
-            follow_redirects=False,
-        )
-        assert 떼었다.status_code == 303
-        assert 다시_붙였다.status_code == 303, 표기
-        with storage_db.connect() as conn:
-            assert share_store.load(conn, key).report_id == report_id, 표기
-
-
-def test_법인격_토큰이_이름_중간에_끼어도_다른_회사로_본다(admin: TestClient):
-    """★ 「질원」과 「질주식회사원」은 고유번호가 다른 별개 회사다.
-
-    법인격 표기를 «단어 경계 없이» 지우면 두 이름이 같은 값이 되어 통과한다.
-    첫 결속에는 대조할 고유번호가 없어 이 이름 검사가 유일한 방어선이다.
-    """
-    base = _보고서를_만든다(admin)
-    질주식회사원 = _회사만_바꿔_보고서를_복사한다(
-        base, report_id="c" * 31 + "3", company="질주식회사원", company_id="00111111"
-    )
-
-    새링크 = admin.post(
-        "/admin/links/new",
-        data={"company": "질원", "report_reference": 질주식회사원},
-        follow_redirects=False,
-    )
-
-    assert 새링크.status_code == 400
-    assert "다른 회사" in 새링크.text
-    assert "질주식회사원" in 새링크.text
-    with storage_db.connect() as conn:
-        assert share_store.list_all(conn) == []
-
-
-def test_앞뒤_법인격_표기만_벗긴다(admin: TestClient):
-    """대조군 — 「같은 회사인데 막힌다」로 기울지 않는다는 것도 같이 지킨다."""
-    base = _보고서를_만든다(admin)
-    하이브 = _회사만_바꿔_보고서를_복사한다(
-        base, report_id="d" * 31 + "4", company="주식회사 하이브"
-    )
-
-    for 같은회사 in ("하이브", "하이브(주)", "㈜하이브", "하이브 주식회사", "(주) 하이브"):
-        created = admin.post(
-            "/admin/links/new",
-            data={"company": 같은회사, "report_reference": 하이브},
-            follow_redirects=False,
-        )
-        key, _key_hash = _issued_link(created)
-        with storage_db.connect() as conn:
-            assert share_store.load(conn, key).report_id == 하이브, 같은회사
-
-    for 다른회사 in ("하이브미디어", "하이", "질원"):
-        거부 = admin.post(
-            "/admin/links/new",
-            data={"company": 다른회사, "report_reference": 하이브},
-            follow_redirects=False,
-        )
-        assert 거부.status_code == 400, 다른회사
-        assert "다른 회사" in 거부.text, 다른회사
-
-
-def test_결속_보고서를_읽지_못하면_연결을_거부한다(
-    admin: TestClient, monkeypatch
+@pytest.mark.parametrize(
+    ("link_company", "report_company"),
+    [
+        ("HSAD", "(주)에이치에스애드"),
+        ("HSAD", "HS애드"),
+        ("진영 지원용", CANONICAL_DEMO_COMPANY),
+    ],
+)
+def test_report_company_label_does_not_restrict_attachment(
+    admin: TestClient, link_company: str, report_company: str
 ):
-    """★ 「확인 못 했다」는 「같은 회사다」가 아니다.
-
-    링크에 이미 묶인 보고서를 못 읽으면 고유번호를 대조할 수 없다. 그때 조용히
-    이름 검사로 되돌아가면(fail-open) 동명 다른 법인이 그대로 들어온다.
-    """
-    report_id = _보고서를_만든다(admin)
+    """약칭·법인명·전달용 이름이 달라도 신규 발급과 기존 링크 연결이 된다."""
+    base = _보고서를_만든다(admin)
+    report_id = _copy_report_company(
+        base, report_id="c" * 32, company=report_company, company_id="00140168"
+    )
+    empty_link = admin.post(
+        "/admin/links/new", data={"company": link_company}, follow_redirects=False
+    )
+    key, key_hash = _issued_link(empty_link)
     created = admin.post(
         "/admin/links/new",
+        data={"company": link_company, "report_reference": report_id},
+        follow_redirects=False,
+    )
+    new_key, _new_key_hash = _issued_link(created)
+    attached = admin.post(
+        "/admin/links/report",
         data={
-            "company": CANONICAL_DEMO_COMPANY,
-            "report_reference": report_id,
+            "key": key_hash,
+            "report_reference": f"http://testserver/result/{report_id}",
         },
         follow_redirects=False,
     )
-    key, key_hash = _issued_link(created)
-    바꿀보고서 = _회사만_바꿔_보고서를_복사한다(
-        report_id, report_id="e" * 31 + "5", company=CANONICAL_DEMO_COMPANY
-    )
-
-    원래_load = admin_router.report_store.load
-    남은_실패 = [1]
-
-    def 결속보고서_읽기가_한번_실패한다(conn, 찾는_id):
-        # 결속 보고서의 첫 조회만 깨뜨린다 — 거부 화면 자체는 그려져야
-        # 「저장소 장애 503」이 아니라 「연결 거부 400」임을 볼 수 있다.
-        if 찾는_id == report_id and 남은_실패[0]:
-            남은_실패[0] -= 1
-            raise sqlite3.DatabaseError("결속 보고서를 읽지 못했습니다")
-        return 원래_load(conn, 찾는_id)
-
-    monkeypatch.setattr(
-        admin_router.report_store, "load", 결속보고서_읽기가_한번_실패한다
-    )
-
-    거부 = admin.post(
-        "/admin/links/report",
-        data={"key": key_hash, "report_reference": 바꿀보고서},
-        follow_redirects=False,
-    )
-
-    assert 거부.status_code == 400
-    assert "보고서 정보를 확인할 수 없어 연결하지 않았습니다" in 거부.text
-    assert 남은_실패[0] == 0, "결속 보고서를 읽으려는 시도 자체가 없었습니다"
+    assert attached.status_code == 303
     with storage_db.connect() as conn:
-        assert share_store.load(conn, key).report_id == report_id
+        for link_key in (key, new_key):
+            link = share_store.load(conn, link_key)
+            assert link.company == link_company
+            assert link.report_id == report_id
+        report = report_store.load(conn, report_id)
+        assert report.company == report_company
+        assert report.company_id == "00140168"
+    for url in ("/admin/links", f"/admin/link/{key_hash}", f"/admin/links/{key_hash}"):
+        page = admin.get(url)
+        assert page.status_code == 200
+        assert "회사명이 달라도 연결할 수 있습니다" in page.text
+        assert "회사가 다른 보고서는 연결되지 않습니다" not in page.text
 
 
-def test_동명_회사는_corp_id로_구분한다(admin: TestClient):
-    """이름이 같아도 고유번호가 다르면 다른 회사다.
-
-    링크 자체에는 고유번호 열이 없다. 그래서 「이 링크가 지금 가리키는 회사」의
-    고유번호는 이미 묶여 있는 보고서에서 읽는다.
-    """
+@pytest.mark.parametrize("replacement_company", ["에이치에스애드", "HS애드"])
+def test_admin_can_replace_report_with_different_company_identity(
+    admin: TestClient, replacement_company: str
+):
+    """합병 전후 법인번호가 달라도 관리자가 선택한 보고서로 교체한다."""
     base = _보고서를_만든다(admin)
-    법인_A = _회사만_바꿔_보고서를_복사한다(
-        base, report_id="a" * 31 + "1", company="한빛", company_id="00126380"
+    previous_id = _copy_report_company(
+        base, report_id="a" * 32, company="에이치에스애드", company_id="00512392"
     )
-    법인_B = _회사만_바꿔_보고서를_복사한다(
-        base, report_id="b" * 31 + "2", company="한빛", company_id="00999999"
+    replacement_id = _copy_report_company(
+        base, report_id="b" * 32, company=replacement_company, company_id="00140168"
     )
-
     created = admin.post(
         "/admin/links/new",
-        data={"company": "한빛", "report_reference": 법인_A},
+        data={"company": "HSAD", "report_reference": previous_id},
         follow_redirects=False,
     )
     key, key_hash = _issued_link(created)
-    with storage_db.connect() as conn:
-        assert share_store.load(conn, key).report_id == 법인_A
-
-    다른법인 = admin.post(
+    replaced = admin.post(
         "/admin/links/report",
-        data={"key": key_hash, "report_reference": 법인_B},
+        data={"key": key_hash, "report_reference": replacement_id},
         follow_redirects=False,
     )
-    assert 다른법인.status_code == 400
-    assert "이름은 같지만" in 다른법인.text
+    assert replaced.status_code == 303
     with storage_db.connect() as conn:
-        assert share_store.load(conn, key).report_id == 법인_A
+        link = share_store.load(conn, key)
+        assert link.company == "HSAD"
+        assert link.report_id == replacement_id
+        assert report_store.load(conn, previous_id).company_id == "00512392"
+        assert report_store.load(conn, replacement_id).company_id == "00140168"
 
-    같은법인 = admin.post(
-        "/admin/links/report",
-        data={"key": key_hash, "report_reference": 법인_A},
+
+def test_replacement_does_not_require_loading_previous_report(
+    admin: TestClient, monkeypatch
+):
+    """예전 보고서를 읽지 못해도 정상인 새 보고서로 다시 연결할 수 있다."""
+    previous_id = _보고서를_만든다(admin)
+    replacement_id = _copy_report_company(
+        previous_id, report_id="e" * 32, company=CANONICAL_DEMO_COMPANY
+    )
+    created = admin.post(
+        "/admin/links/new",
+        data={"company": CANONICAL_DEMO_COMPANY, "report_reference": previous_id},
         follow_redirects=False,
     )
-    assert 같은법인.status_code == 303
+    key, key_hash = _issued_link(created)
+    original_load = admin_router.report_store.load
+    previous_reads = []
+
+    def load_report(conn, report_id):
+        if report_id == previous_id:
+            previous_reads.append(report_id)
+            raise sqlite3.DatabaseError("기존 보고서를 읽지 못했습니다")
+        return original_load(conn, report_id)
+
+    monkeypatch.setattr(admin_router.report_store, "load", load_report)
+    replaced = admin.post(
+        "/admin/links/report",
+        data={"key": key_hash, "report_reference": replacement_id},
+        follow_redirects=False,
+    )
+    assert replaced.status_code == 303
+    assert previous_reads == []
     with storage_db.connect() as conn:
-        assert share_store.load(conn, key).report_id == 법인_A
+        assert share_store.load(conn, key).report_id == replacement_id
+
+
+def test_unreadable_selected_report_preserves_existing_attachment(
+    admin: TestClient, monkeypatch
+):
+    """새로 선택한 보고서를 확인하지 못하면 기존 연결을 보존한다."""
+    previous_id = _보고서를_만든다(admin)
+    replacement_id = _copy_report_company(
+        previous_id, report_id="f" * 32, company=CANONICAL_DEMO_COMPANY
+    )
+    created = admin.post(
+        "/admin/links/new",
+        data={"company": "HSAD", "report_reference": previous_id},
+        follow_redirects=False,
+    )
+    key, key_hash = _issued_link(created)
+    original_load = admin_router.report_store.load
+
+    def load_report(conn, report_id):
+        if report_id == replacement_id:
+            raise sqlite3.DatabaseError("선택한 보고서를 읽지 못했습니다")
+        return original_load(conn, report_id)
+
+    monkeypatch.setattr(admin_router.report_store, "load", load_report)
+    response = admin.post(
+        "/admin/links/report",
+        data={"key": key_hash, "report_reference": replacement_id},
+        follow_redirects=False,
+    )
+    assert response.status_code == 503
+    with storage_db.connect() as conn:
+        assert share_store.load(conn, key).report_id == previous_id
