@@ -21,6 +21,28 @@ from src.features.pipeline.port import ReportTable
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+@pytest.mark.parametrize("marked, expected", [(True, ("2024",)), (False, ())])
+def test_손익계산서_미감사_비교연도와_캡션_표지_문구(marked, expected):
+    from src.features.composer.port import performance_table_from_report_table
+    from src.features.report_standard.period_summary import analysis_period_with_audit_status
+
+    marker = "(감사받지 아니한 재무제표)" if marked else ""
+    text = (
+        "손 익 계 산 서 제 5 (당) 기 2025년 1월 1일부터 2025년 12월 31일까지 "
+        f"제 4 (전) 기 2024년 1월 1일부터 2024년 12월 31일까지 {marker} "
+        "(단위: 원) 매출액 47,117,211,348 3,070,000,000 "
+        "영업손실 58,850,000,000 30,160,000,000 당기순손실 58,120,000,000 30,240,000,000"
+    )
+    table = parse_audit_financials(text, cite="[28]").performance_table
+    assert table is not None
+    assert table.unaudited_years == expected
+    report_table = ReportTable(**table.to_report_table_payload())
+    assert performance_table_from_report_table(report_table).unaudited_years == expected
+    period = "2024~2025 완료 회계연도"
+    assert analysis_period_with_audit_status(period, report_table) == period + (" (2024년 미감사)" if marked else "")
+    assert (" · 2024년은 감사받지 않은 비교 재무제표" in table.caption) is marked
+
+
 def _fixture(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
 
@@ -29,6 +51,15 @@ def _filing_plain_text(raw: str) -> str:
     """운영 ``read_filing_text``와 같은 태그 제거·공백 축약."""
 
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(raw)))
+
+
+def test_머리의_날짜와_본문표_기_열을_연결해_미감사_연도를_읽는다():
+    xml = _fixture("20260406001240_income.xml")
+    xml = xml.replace(" (감사받지 아니한 재무제표)", "")
+    xml = xml.replace("<TH>제 6(전)기</TH>", "<TH>제 6(전)기 (감사받지 아니한 재무제표)</TH>")
+    table = parse_audit_financials("", xml_text=xml).performance_table
+    assert table is not None
+    assert table.unaudited_years == ("2024",)
 
 
 def test_인이지_평문에서_당기와_전기_세_계정을_읽는다() -> None:

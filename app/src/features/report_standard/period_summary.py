@@ -35,6 +35,15 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Final, Optional
 
 
+# 미감사 비교연도 문구는 shared 정본을 같은 이름으로 재노출한다 — 표를 만드는
+# audit_financials와 표지 기간을 만드는 pipeline이 이 feature를 거꾸로 import하지
+# 않게 하기 위함이다(feature-atomic §2-2).
+from src.shared.report_generation.audit_status import (  # noqa: E402
+    analysis_period_with_audit_status,
+    performance_caption_with_audit_status,
+)
+
+
 #: 실적표를 알아보는 첫 열 이름. ``build_three_year_table``의 ``headers[0]``이다.
 #: ★ ``cover_metrics.PERIOD_HEADER``와 «같은 값»이어야 한다. 두 띠가 서로 다른
 #:   표를 고르면 표지와 4장의 숫자가 갈라진다. 시험이 두 값을 묶어 지킨다.

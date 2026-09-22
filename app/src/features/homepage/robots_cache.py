@@ -12,7 +12,9 @@ robots.txt 조회를 정확히 한 번만 하도록 공유하는 캐시.
   `with request_deadline_scope(...)` 블록을 벗어나면) 캐시도 함께 사라진다
   — 프로세스 전역·모듈 수준 캐시가 아니다(다른 회사·다른 요청으로 새면
   안 된다는 요구사항, DNS cache와 같은 패턴).
-★ scope 밖(단독 호출·`request_deadline_scope` 없이 부른 기존 단위시험)에서는
+★ 명시적인 `isolated_request_scope` 안에서는 전체 마감을 새로 만들지 않고도
+  독립 캐시를 재사용한다. 원래 요청별 시간 제한은 전송 계층이 유지한다.
+★ 위 두 scope 밖(단독 호출·기존 단위시험)에서는
   캐시가 아예 동작하지 않는다 — 매번 `loader`를 그대로 실행해 기존 단독
   호출 동작을 그대로 유지한다.
 ★ 캐시 키는 RFC 9309 origin(scheme+host+port)이다 — **host 문자열만
@@ -48,7 +50,7 @@ from dataclasses import dataclass
 from typing import Callable, Final
 from urllib import robotparser
 
-from src.features.homepage.safe_http import active_deadline_budget
+from src.features.homepage.safe_http import active_robots_cache
 
 #: robots.txt 자체를 확인하지 못했거나(네트워크·서버 오류) 명시적으로
 #: 거부돼(RFC 9309 세분류 기준) 이 host를 통째로 막을 때 쓰는 사유.
@@ -116,17 +118,16 @@ def cached_robots_decision(
     host+port) 문자열이어야 한다 — host만 넘기면 scheme이 다른 재시도가
     잘못된 판정을 물려받는다(모듈 docstring의 P0 참조).
 
-    scope 밖(``active_deadline_budget()``가 None) 또는 key가 빈 문자열이면
+    요청 예산과 명시적 작업 격리 scope가 모두 없거나 key가 빈 문자열이면
     캐시를 쓰지 않고 매번 ``loader``를 그대로 실행한다 — 기존 단독 호출
     동작을 바꾸지 않는다.
     """
 
     if not cache_key:
         return loader()
-    budget = active_deadline_budget()
-    if budget is None:
+    cache = active_robots_cache()
+    if cache is None:
         return loader()
-    cache = budget.robots_cache
     cached = cache.get(cache_key)
     if isinstance(cached, RobotsDecision):
         return cached

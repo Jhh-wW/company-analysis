@@ -1,7 +1,8 @@
-"""검수 JSON 파싱 실패의 기존 재요청에만 붙이는 네이티브 출력 계약.
+"""검수 JSON의 네이티브 출력 계약 — 최초 본문 검수의 첫 요청과 파싱 재요청에 붙인다.
 
-최초 검수에는 스키마 입력 비용을 더하지 않는다. 재요청이 없는 묶음 검수도
-적용 대상이 아니며, 이 모듈 때문에 호출이나 재시도가 생기지 않는다.
+최초 본문 검수는 첫 요청의 JSON 형식 오류와 재전송을 줄이기 위해 스키마를 싣는다.
+후속 재검수·요약 검수는 파싱 재요청에만 붙이고, 재요청이 없는 묶음 검수는
+적용 대상이 아니다. 이 모듈 때문에 호출이나 재시도가 추가되지는 않는다.
 스키마는 응답의 모양만 제한한다. 근거 필요 여부·원문 결속·번호 소유권은
 기존 검증기가 판정하며, 거짓·애매에 없는 증거를 만들어 넣도록 강제하지 않는다.
 선택 필드를 null로 채우지 않아 원문참조와 기존 생략 규칙도 그대로 유지한다.
@@ -34,26 +35,27 @@ from src.features.composer.grounding_constants import (
     TREND_KEY,
 )
 from src.features.composer.numeric_quote_refs import NUMERIC_QUOTE_REF_KEY
+from src.features.composer.prompt_metadata import PromptMetadata
 from src.features.composer.role_binding_constants import RELATION_KEY
 
 
-class ReviewPrompt(str):
+class ReviewPrompt(PromptMetadata):
     """기존 문자열과 메타데이터를 함께 전달하는 재요청 프롬프트."""
 
     response_schema: Mapping[str, Any]
 
     def __new__(
-        cls, value: str, response_schema: Mapping[str, Any]
+        cls, value: str, response_schema: Mapping[str, Any],
+        *, cache_prefix_chars: int | None = None,
     ) -> ReviewPrompt:
-        prompt = super().__new__(cls, value)
+        prompt = super().__new__(cls, value, cache_prefix_chars=cache_prefix_chars)
         prompt.response_schema = response_schema
         return prompt
 
-    def __add__(self, suffix: str) -> ReviewPrompt:
-        return ReviewPrompt(super().__add__(suffix), self.response_schema)
-
-    def __radd__(self, prefix: str) -> ReviewPrompt:
-        return ReviewPrompt(str.__add__(prefix, self), self.response_schema)
+    def _with_text(self, value: str, *, cache_prefix_chars: int) -> ReviewPrompt:
+        return ReviewPrompt(
+            value, self.response_schema, cache_prefix_chars=cache_prefix_chars,
+        )
 
 
 def _object(

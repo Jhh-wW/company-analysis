@@ -7,8 +7,50 @@
 from __future__ import annotations
 
 import datetime as dt
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Iterator
+
+if TYPE_CHECKING:
+    from src.features.news_intake.body_prefetch import BodyFetchConcurrency
+
+
+def body_fetch_concurrency(max_in_flight: int) -> BodyFetchConcurrency:
+    """검증된 운영 콜백만 사용할 본문 실행 옵션을 만든다."""
+    from src.features.news_intake.body_prefetch import BodyFetchConcurrency
+
+    return BodyFetchConcurrency(max_in_flight=max_in_flight)
+
+
+@contextmanager
+def isolated_body_fetch_scope(*, completed_cache: Any = None) -> Iterator[None]:
+    """기능 경계를 넘어 HTTP 캐시만 분리하고 상위 절대 마감은 유지한다."""
+    from src.features.homepage.safe_http import HomepageResponseError, isolated_request_scope
+
+    try:
+        with isolated_request_scope(completed=completed_cache):
+            yield
+    except HomepageResponseError as error:
+        raise TimeoutError("뉴스 본문 요청 전체 시간이 초과됐습니다") from error
+
+
+def body_fetch_cache() -> Any:
+    """부모 사전은 바꾸지 않고 완료된 본문 작업의 DNS·robots 판정을 재사용한다."""
+    from src.features.homepage.safe_http import IsolatedRequestCache
+
+    return IsolatedRequestCache()
+
+
+def check_body_fetch_deadline() -> None:
+    """호스트 대기나 robots 조회 뒤에도 기존 절대 마감을 다시 확인한다."""
+    from src.features.homepage.safe_http import HomepageResponseError, active_deadline_budget
+
+    budget = active_deadline_budget()
+    if budget is not None:
+        try:
+            budget.remaining()
+        except HomepageResponseError as error:
+            raise TimeoutError("뉴스 본문 요청 전체 시간이 초과됐습니다") from error
 
 
 def article_published_on(raw_html: str) -> str:
@@ -33,6 +75,7 @@ class NewsResearchSession:
         *,
         fetch_text: Callable[..., Any],
         analyze_grounded: Callable[..., Any],
+        body_fetch: BodyFetchConcurrency | None = None,
     ) -> Any:
         from src.features.news_intake.collection import collect_from_snapshot
 
@@ -43,6 +86,7 @@ class NewsResearchSession:
             fetch_text=fetch_text,
             analyze_grounded=analyze_grounded,
             policy=self.policy,
+            body_fetch=body_fetch,
         )
 
 

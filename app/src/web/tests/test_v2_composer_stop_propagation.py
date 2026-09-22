@@ -281,8 +281,14 @@ def test_v2_작성은_두번째_호출의_중단에서_즉시_멈춘다(
     단계: list[dict[str, Any]] = []
     fragments, financials, filing = _full_생산입력(가짜엔진)
 
+    def stop_after_first_dispatch() -> None:
+        # 부모 준비·대기·전송 직전의 검사는 여러 번 실행될 수 있다.
+        # 검사 횟수가 아니라 실제 첫 전송 이후의 링크/lease 중단을 재현한다.
+        if 응답기.보낸_횟수 >= 1:
+            raise 중단()
+
     with generation_coordination.activate(
-        _callbacks(_n번째_호출에서_멈춘다(2, 중단))
+        _callbacks(stop_after_first_dispatch)
     ):
         with pytest.raises(Exception) as 잡힘:  # noqa: PT011 - 타입은 아래에서 본다
             real._run_v2_composer(

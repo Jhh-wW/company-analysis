@@ -33,7 +33,6 @@ from src.features.composer.constants import (
     FLOW_PRESENTATION,
     FLOW_UNCONFIRMED_CELL,
     GRADE_INTERPRETED,
-    CITATION_STYLE_MERGED,
     PARAGRAPH_MAX_SENTENCES,
     PORTFOLIO_TABLE_SECTION_ID,
     SECTION_IDS,
@@ -44,6 +43,7 @@ from src.features.composer.news_block import (
     NEWS_BLOCK_HEADERS,
     NEWS_BLOCK_PRESENTATION,
     news_block_caption,
+    nonredundant_news_rows,
     oldest_stale_report_year,
 )
 from src.features.composer.port import (
@@ -55,8 +55,11 @@ from src.features.composer.port import (
     StructuredClaim,
 )
 from src.features.composer.portfolio_name_table import PortfolioNameTable
+from src.features.composer.style_normalizer import SentenceStyleNormalizer
 from src.features.pipeline.port import Report, ReportTable
 from src.features.provenance.sources import (
+    official_web_source_fields,
+    public_fragment_document_identity,
     Source,
     SourceKind,
     bind_document_content_sha256,
@@ -242,6 +245,7 @@ def _fragment_binding(
         raise PublicManifestError(
             f"조각 {fragment_id!r}의 문서 신원 또는 exact evidence hash가 없습니다"
         )
+    declared_identity = public_fragment_document_identity(fragment)
     return _FragmentBinding(
         fragment_id, declared_identity, exact_hash, fragment.text,
         fragment.document_date, fragment.source_publisher, fragment.document_title,
@@ -1025,7 +1029,7 @@ def _news_table_payload(
     ``as_of_date``를 넣어 계산해야 그 대조가 깨지지 않는다.
     """
 
-    news_rows = tuple(getattr(section, "news_rows", ()) or ())
+    news_rows = nonredundant_news_rows(section)
     if not news_rows:
         return None
     rows: list[list[str]] = []
@@ -1173,31 +1177,6 @@ def _sentence_numbers(
         if number is not None and number not in out:
             out.append(number)
     return tuple(out)
-
-
-def _marker_visibility_expected(
-    sentences: Sequence[ComposedSentence],
-    numbers: Mapping[str, int],
-    citation_style: str,
-) -> list[bool]:
-    if citation_style != CITATION_STYLE_MERGED:
-        return [True for _sentence in sentences]
-    keys = [frozenset(_sentence_numbers(sentence, numbers)) for sentence in sentences]
-    visible: list[bool] = []
-    for index, sentence in enumerate(sentences):
-        if sentence.grade == GRADE_INTERPRETED or not keys[index]:
-            visible.append(False)
-            continue
-        following = next(
-            (
-                position
-                for position in range(index + 1, len(sentences))
-                if sentences[position].grade != GRADE_INTERPRETED
-            ),
-            None,
-        )
-        visible.append(not (following is not None and keys[following] == keys[index]))
-    return visible
 
 
 def _ensure_expected_visible_markers(
@@ -1409,20 +1388,17 @@ def _expected_source(
             kind=SourceKind.OTHER,
             label=_expected_source_label(fragment, filing_meta),
             collected_at=fragment.source_collected_on,
-            published_at=fragment.document_date,
             source_id=f"{_SOURCE_ID_PREFIX}{fragment.fragment_id}",
-            title=fragment.document_title,
             publisher=company_name,
             host=formal_web.host,
-            url=fragment.source_url,
             document_id=fragment.source_document_id,
-            location=fragment.location,
             source_type=formal_web.source_type,
-            fact_status=(
-                "공식 발행일·보고기간 확정"
-                if formal_web.source_type == "회사 공식 IR"
-                and fragment.document_date
-                else "기준일 현재 확인"
+            **official_web_source_fields(
+                source_type=formal_web.source_type,
+                title=fragment.document_title, published_at=fragment.document_date,
+                url=fragment.source_url, location=fragment.location,
+                item_title=fragment.item_title, item_published_on=fragment.item_published_on,
+                item_url=fragment.item_url,
             ),
             used_in=list(used_in),
             evidence_hashes=evidence_hashes,
@@ -1494,7 +1470,7 @@ def _expected_source(
         if (
             not sealed.is_canonical_valid
             or not has_valid_provenance_seal(sealed)
-            or document_identity(sealed) != fragment.document_identity
+            or document_identity(sealed) != public_fragment_document_identity(fragment)
         ):
             raise PublicManifestError(
                 "FULL typed 출처의 공개 신원·필수 필드·도장이 손상됐습니다"
@@ -1552,21 +1528,29 @@ def _expected_public_content_projection(
     filing_meta: FilingMeta | None,
     program_registry_sources: Sequence[Source] = (),
 ) -> dict[str, object]:
+    # ★ 인용 번호 «표시 규칙»만은 렌더러 정본을 그대로 부른다. 나머지 기대
+    #   구조(글자 조립·문단 나눔·표·차례)는 여전히 이 파일이 독립으로 다시
+    #   만든다 — 봉인의 값은 거기에 있다. 표시 규칙까지 두 벌로 적었더니
+    #   한쪽만 고쳐져 FULL 보고서 생성이 통째로 죽었다(2026-09-22 실측).
+    # ★ 함수 «안»에서 import 하는 이유: render 쪽이 이 파일의
+    #   `PublicStructureSeal`을 모듈 수준에서 가져가므로, 여기서 모듈 수준으로
+    #   되가져오면 순환 import가 된다.
+    from src.features.composer.render import (  # noqa: PLC0415
+        marker_visibility,
+        summary_marker_visibility,
+    )
+
     numbers = _citation_numbers_for_fragments(fragments)
+    style_normalizer = SentenceStyleNormalizer(report, fragments, as_of_date=as_of_date)
     groups = [
         (
             section.sentences,
-            _marker_visibility_expected(
-                section.sentences, numbers, citation_style
-            ),
+            list(marker_visibility(section.sentences, numbers, citation_style)),
         )
         for section in report.sections
     ]
     groups.append(
-        (
-            report.summary,
-            _marker_visibility_expected(report.summary, numbers, citation_style),
-        )
+        (report.summary, list(summary_marker_visibility(report.summary)))
     )
     _ensure_expected_visible_markers(groups, numbers)
     used_sections: dict[int, list[str]] = {}
@@ -1574,7 +1558,9 @@ def _expected_public_content_projection(
     for section_index, section in enumerate(report.sections):
         shows = groups[section_index][1]
         displays = [
-            _expected_display_text(sentence, numbers, show_markers=shows[index])
+            _expected_display_text(
+                style_normalizer.normalize(sentence), numbers, show_markers=shows[index],
+            )
             for index, sentence in enumerate(section.sentences)
         ]
         lines = ([[section.notice, ""]] if section.notice else []) + [
@@ -1641,7 +1627,7 @@ def _expected_public_content_projection(
         summary_items.append(
             {
                 "text": _expected_display_text(
-                    sentence,
+                    style_normalizer.normalize(sentence),
                     numbers,
                     show_markers=summary_shows[index],
                 ),

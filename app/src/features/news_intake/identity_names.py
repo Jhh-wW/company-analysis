@@ -7,6 +7,7 @@ import re
 import unicodedata
 
 from src.features.news_intake import constants as c
+from src.features.news_intake import name_boundary_constants as nc
 from src.features.news_intake.models import NewsCompanyContext
 
 
@@ -90,12 +91,13 @@ def mentions_target(text: str, company: NewsCompanyContext) -> bool:
     for designator in c.CORPORATE_DESIGNATORS:
         normalized = normalized.replace(unicodedata.normalize("NFKC", designator).casefold(), " ")
     boundary = r"[\W_]"
+    particle = rf"(?:{c.NAME_PARTICLE_PATTERN}|{nc.ADDITIONAL_NAME_PARTICLE_PATTERN})"
     for raw_name in company_query_names(company):
         key = _name_key(raw_name)
         if not key:
             continue
         pattern = r"(?<![^\W_])" + c.NAME_SEPARATOR_PATTERN.join(re.escape(char) for char in key)
-        pattern += rf"(?=$|{boundary}|{c.NAME_PARTICLE_PATTERN}(?=$|{boundary}))"
+        pattern += rf"(?=$|{boundary}|{particle}(?=$|{boundary}))"
         if re.search(pattern, normalized):
             return True
     return False

@@ -11,7 +11,7 @@ import pytest
 
 from src.features.composer.constants import DART_FINANCIAL_API_PREFIX
 from src.features.composer.render import _build_source, _fragment_metas
-from src.features.provenance.sources import has_valid_provenance_seal
+from src.features.provenance.sources import has_valid_provenance_seal, source_status_display
 from src.features.storage.reports import _citation_from_dict, _citation_to_dict
 from src.features.export_pdf.logic import _source_status
 
@@ -33,9 +33,9 @@ def test_stored_source_signature_and_both_displays_preserve_date_meaning(disclos
     assert restored.exact_evidence_hashes == [hashlib.sha256(text.encode()).hexdigest()]
     assert _source_status(restored).startswith(label)
     assert not has_valid_provenance_seal(replace(restored, disclosed_at="2026-03-19"))
-    # 실제 웹 템플릿의 날짜 분기 두 곳만 평가한다. 네트워크나 앱 설정은 없다.
+    # 2026-09-22: 웹 템플릿의 날짜 분기 두 곳이 세 채널 공용 도우미
+    # ``source_status_display(c)`` 호출로 바뀌었다. 템플릿이 그 도우미를 두 곳에서
+    # 쓰는지와, 도우미가 같은 날짜 뜻을 내는지를 나눠 확인한다. 네트워크나 앱 설정은 없다.
     path = Path(__file__).resolve().parents[1] / "templates/result.html"
-    blocks = re.findall(r"\{%\- if c\.published_at.*?기준일 미확인\{% endif %\}", path.read_text(encoding="utf-8"), re.S)
-    assert len(blocks) == 2
-    for block in blocks:
-        assert Environment(autoescape=True).from_string(block).render(c=restored).strip() == label
+    assert path.read_text(encoding="utf-8").count("source_status_display(c)") == 2
+    assert source_status_display(restored).startswith(label)

@@ -46,14 +46,24 @@ def _inputs(section):
 @pytest.mark.parametrize("grouped", (False, True))
 @pytest.mark.parametrize("section", ("culture", "operations_partners"))
 def test_accounting_policy_is_limited_by_actual_owner_with_one_review(section, grouped):
+    """장이 달라도 빠지되, «사유 코드»는 소유 장에 따라 갈린다.
+
+    ★ 기대값이 바뀐 이유 (2026-09-22) — 예전에는 8장이 아닌 장의 회계정책
+      문장을 그대로 통과시켰다. 그 결과 실제 산출 PDF에서 9장 「회사가 밝힌
+      차별점」이 금융자산 측정·정부보조금·현금성자산 정의·대손충당금 4문장으로,
+      5장 「당면 과제」가 이연법인세 문장으로 채워졌다. 이제 전 장 공통 가드
+      (`accounting_policy_guard`)가 같은 문장을 막는다.
+    ★ 사유 코드는 그대로 갈린다 — 8장은 기존 `culture_accounting_policy_misplaced`,
+      다른 장은 새 `accounting_policy_boilerplate`. 8장 경로는 하나도 바뀌지 않았다.
+    """
+
     report, fragments = _inputs(section)
     calls, diagnostics = [], []
     checked = verify_report(
         report, fragments, None, _approval(calls), diagnostics=diagnostics,
         allowed_fragment_ids_by_section={section: frozenset(("accounting", "procedure"))} if grouped else None,
     )
-    expected = [PROCEDURE_TEXT] if section == "culture" else [ACCOUNTING_TEXT, PROCEDURE_TEXT]
-    assert [sentence.text for sentence in checked.sections[0].sentences] == expected
+    assert [sentence.text for sentence in checked.sections[0].sentences] == [PROCEDURE_TEXT]
     assert len(calls) == 1
     outcomes = final_review_outcomes(checked, diagnostics)
     if section == "culture":
@@ -63,7 +73,19 @@ def test_accounting_policy_is_limited_by_actual_owner_with_one_review(section, g
         assert outcomes[0]["verification_items"] == ("장별 작성범위",)
         assert ACCOUNTING_TEXT not in repr(outcomes)
     else:
-        assert outcomes == ()
+        # 원문 없는 요청 로컬 진단에는 새 사유가 그대로 남는다.
+        assert [item["reason_code"] for item in diagnostics] == [
+            "accounting_policy_boilerplate"
+        ]
+        assert diagnostics[0]["candidate_sha256"] == sha256(ACCOUNTING_TEXT.encode()).hexdigest()
+        assert ACCOUNTING_TEXT not in repr(diagnostics)
+        # 2026-09-22: 닫힌 전송 계약(`REVIEW_SCOPE_ITEMS`)에 이 사유를 등록했다.
+        #   이제 닫힌 진단에도 «장별 작성범위» 항목으로 남는다(원문은 남기지 않는다).
+        assert len(outcomes) == 1
+        assert outcomes[0]["reason_code"] == "accounting_policy_boilerplate"
+        assert outcomes[0]["candidate_sha256"] == sha256(ACCOUNTING_TEXT.encode()).hexdigest()
+        assert outcomes[0]["verification_items"] == ("장별 작성범위",)
+        assert ACCOUNTING_TEXT not in repr(outcomes)
 
 
 def test_summary_is_not_classified_as_culture_from_old_planned_slot():

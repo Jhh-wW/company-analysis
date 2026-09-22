@@ -16,6 +16,7 @@ import math
 import multiprocessing
 import socket
 import ssl
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -84,6 +85,9 @@ class _CollectionCache:
 _ACTIVE_CACHE: ContextVar[_CollectionCache | None] = ContextVar(
     "homepage_active_collection_cache",
     default=None,
+)
+_ISOLATED_ROBOTS_CACHE: ContextVar[dict[str, object] | None] = ContextVar(
+    "homepage_isolated_robots_cache", default=None,
 )
 
 
@@ -194,6 +198,82 @@ def active_deadline_budget() -> _DeadlineBudget | None:
     """
 
     return _ACTIVE_DEADLINE.get()
+
+
+class IsolatedRequestCache:
+    """한 수집의 완료된 판정만 잠금 아래 복사해 다음 작업에 전달한다."""
+
+    def __init__(self) -> None:
+        self._cache = _CollectionCache()
+        self._lock = threading.Lock()
+
+    def _seed(self, cache: _CollectionCache) -> None:
+        with self._lock:
+            cache.dns_cache.update(self._cache.dns_cache)
+            cache.robots_cache.update(self._cache.robots_cache)
+
+    def _remember(self, cache: _CollectionCache) -> None:
+        with self._lock:
+            self._cache.dns_cache.update(cache.dns_cache)
+            self._cache.robots_cache.update(cache.robots_cache)
+
+
+@contextmanager
+def isolated_request_scope(
+    timeout: float | None = None, *, completed: IsolatedRequestCache | None = None,
+) -> Iterator[_DeadlineBudget | None]:
+    """복사된 작업 문맥의 캐시를 분리하고 부모 절대 마감을 보존한다.
+
+    DNS 답과 이미 완성된 robots 판정은 읽기 전용으로 재사용하되, 새 판정을
+    저장하는 사전은 독립시킨다. 부모 예산 객체·캐시를 바꾸거나 마감을
+    새로 시작하지 않으며, 명시한 작업 제한이 더 짧으면 그만큼만 줄인다.
+    제한을 생략하면 기존 부모 마감만 보존한다. 부모도 없으면 각 전송이
+    원래의 요청별 제한을 만들며 본문 묶음 전체의 새 제한은 만들지 않는다.
+    """
+
+    parent = _ACTIVE_DEADLINE.get()
+    parent_cache = _ACTIVE_CACHE.get()
+    cache = _CollectionCache()
+    if parent_cache is not None:
+        cache.dns_cache.update(parent_cache.dns_cache)
+        cache.robots_cache.update(parent_cache.robots_cache)
+    if parent is not None:
+        cache.dns_cache.update(parent.dns_cache)
+        cache.robots_cache.update(parent.robots_cache)
+    if completed is not None:
+        completed._seed(cache)
+    cache_token = _ACTIVE_CACHE.set(cache)
+    robots_token = _ISOLATED_ROBOTS_CACHE.set(cache.robots_cache)
+    try:
+        if timeout is None:
+            budget = None if parent is None else _DeadlineBudget(
+                expires_at=parent.expires_at, clock=parent.clock,
+                dns_cache=cache.dns_cache, robots_cache=cache.robots_cache,
+            )
+        else:
+            budget = _DeadlineBudget.after(
+                timeout, clock=parent.clock if parent is not None else time.monotonic,
+            )
+            if parent is not None:
+                budget.expires_at = min(parent.expires_at, budget.expires_at)
+        deadline_token = _ACTIVE_DEADLINE.set(budget)
+        try:
+            if budget is not None:
+                budget.remaining()
+            yield budget
+        finally:
+            _ACTIVE_DEADLINE.reset(deadline_token)
+    finally:
+        _ISOLATED_ROBOTS_CACHE.reset(robots_token)
+        _ACTIVE_CACHE.reset(cache_token)
+        if completed is not None:
+            completed._remember(cache)
+
+
+def active_robots_cache() -> dict[str, object] | None:
+    """기존 요청 예산 또는 명시적으로 격리한 작업의 robots 사전을 돌려준다."""
+    budget = _ACTIVE_DEADLINE.get()
+    return budget.robots_cache if budget is not None else _ISOLATED_ROBOTS_CACHE.get()
 
 
 def response_deadline(

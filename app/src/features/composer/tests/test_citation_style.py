@@ -6,7 +6,7 @@
   의미 검수를 해서 확인/해석을 가르는데, 번호를 다 없애면 독자가 「이 수치가
   공시값인지 우리 해석인지」를 구분할 수 없다.
 ★ 그래서 절충안은 번호가 «정보를 주는 자리»에만 남긴다:
-  ① 해석 문장은 번호를 빼고 « — 해석» 표지만 남긴다.
+  ① 2026-09-22 결정: 해석 표시만 붙여 근거 확인을 피할 수 없으므로 번호도 남긴다.
   ② 같은 출처를 잇달아 인용하는 확인 문장은 묶음의 마지막에만 번호를 단다.
 ★ 가장 중요한 것: **어느 방식이든 부록과의 1:1이 깨지면 안 된다.**
   출고 검증(validate_v2)이 「본문에 없는 부록 번호」·「부록에 없는 본문 번호」를
@@ -109,11 +109,11 @@ def test_기존_방식은_문장마다_번호를_붙인다():
 
 
 # ══════════════════════════════════════════════════════════
-# 절충안 규칙 ① 해석 문장은 번호를 뺀다
+# 절충안 규칙 ① 해석 문장도 근거 번호를 보인다
 # ══════════════════════════════════════════════════════════
 
 
-def test_해석_문장은_번호를_빼고_표지만_남긴다():
+def test_해석_문장은_번호와_표지를_함께_남긴다():
     composed = _report(
         identity=(
             _s("검사 장비를 만든다.", ("1",)),
@@ -125,7 +125,7 @@ def test_해석_문장은_번호를_빼고_표지만_남긴다():
 
     해석줄 = lines[1]
     assert 해석줄.endswith(INTERPRETATION_MARKER)
-    assert not _MARKER_RE.search(해석줄)
+    assert "[1]" in 해석줄
 
 
 # ══════════════════════════════════════════════════════════
@@ -176,8 +176,25 @@ def test_해석_문장은_묶음을_끊지_않는다():
     lines = _identity_lines(_render(composed, CITATION_STYLE_MERGED))
 
     assert not _MARKER_RE.search(lines[0])
-    assert not _MARKER_RE.search(lines[1])
+    assert "[1]" in lines[1]
+    assert lines[1].endswith(INTERPRETATION_MARKER)
     assert lines[2].endswith("[1]")
+
+
+def test_뤼튼_해석_문장은_다른_곳에서_쓰인_자기_번호도_보인다():
+    text = "지급수수료와 광고선전비의 급증은 콘텐츠 플랫폼 확대와 사용자 확보에 집중하는 사업 전략을 시사한다."
+    sentence = _s(text, ("28",), GRADE_INTERPRETED)
+    composed = _report(portfolio=(sentence,), summary=(sentence,))
+    fragments = {28: {"종류": "재무", "원문": text}}
+
+    rendered = render_report(
+        "뤼튼테크놀로지스", composed, fragments, None,
+        citation_style=CITATION_STYLE_MERGED,
+    )
+
+    portfolio = next(section for section in rendered.sections if section.cell == "portfolio")
+    assert portfolio.prose_lines[0][0] == f"{text} [28] — 해석"
+    assert rendered.summary_items[0].text == f"{text} [28] — 해석"
 
 
 # ══════════════════════════════════════════════════════════
@@ -250,17 +267,10 @@ def test_부록_사용_장_기록은_표기_방식과_무관하다():
 
 
 def test_해석_문장에서만_인용된_조각도_번호가_살아남는다():
-    """★ 골든 fixture가 잡은 실측 결함.
-
-    절충안 규칙 ①은 해석 문장의 번호를 뺀다. 그런데 어떤 조각이 «해석
-    문장에서만» 인용되면 그 번호가 본문에 한 번도 안 나온다. 부록은 인용된
-    조각으로 만들어지므로 그 줄이 고아가 되고, 출고 검증이 「부록에 있는
-    번호를 본문 어디에서도 인용하지 않았습니다」로 보고서를 통째로 막는다.
-    그래서 어디에도 안 보이는 번호는 마지막 인용 문장에서 되살린다.
-    """
+    """2026-09-22 결정 뒤에도 해석 전용 근거와 부록의 대응을 지킨다."""
     composed = _report(
         identity=(_s("검사 장비를 만든다.", ("1",)),),
-        # 조각 2는 «해석» 문장에서만 인용된다 — 규칙대로면 번호가 사라진다.
+        # 조각 2는 해석 문장에서만 인용되어도 독자가 원문을 확인할 수 있어야 한다.
         business_model=(_s("성장 흐름으로 읽힌다.", ("2",), GRADE_INTERPRETED),),
         culture=(_s("고객 최우선을 내건다.", ("3",)),),
         summary=(

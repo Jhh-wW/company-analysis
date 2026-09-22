@@ -234,9 +234,10 @@ def test_fragment_reason_codes_형식이_잘못되면_ValueError():
 
 def test_fragment_location_형식이_잘못되면_ValueError():
     with pytest.raises(ValueError):
-        _fragment(location="https://company.example/about")  # '#index' 없음
+        _fragment(location="")
     with pytest.raises(ValueError):
-        _fragment(location="https://company.example/about#끝")  # 숫자 아님
+        _fragment(range_index=-2)
+    assert _fragment(location="https://company.example/about").location.endswith("about")
 
 
 def test_result은_documents와_attempts를_묶는다():

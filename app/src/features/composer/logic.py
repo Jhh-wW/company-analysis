@@ -15,12 +15,20 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Callable, Final, Optional, Union
 
 from src.core.citations import citation_number
+from src.features.composer.parallel_sections import run_section_jobs, section_worker_count
+from src.shared.report_quality.composition_diagnostic_constants import SECTION_EXECUTION_STEP
+from src.features.composer.parallel_section_constants import (
+    MILLISECONDS_PER_SECOND,
+    SERIAL_SECTION_CALLS,
+)
 from src.features.composer.constants import (
     ALREADY_WRITTEN_GUIDE,
     ALREADY_WRITTEN_HEAD,
@@ -68,6 +76,10 @@ from src.features.composer.constants import (
     MAX_INTERPRETED_SENTENCES_PER_SECTION,
     SENTENCE_RANGE_GUIDE,
     VALID_GRADES,
+)
+from src.features.composer.diagram_review_constants import (
+    FLOW_GENERIC_CELL_PARTICLES,
+    FLOW_GENERIC_CELL_TERMS,
 )
 from src.features.composer.port import (
     AskFatalError,
@@ -420,9 +432,8 @@ class CacheablePrompt(str):
       모른다. 그래서 글자 수로 경계를 넘긴다 — `prompt[:cache_prefix_chars]`가
       공유 앞부분, `prompt[cache_prefix_chars:]`가 호출마다 달라지는 뒷부분이며
       둘을 이어 붙이면 원래 프롬프트와 같다.
-    ★ 알아 둘 것: `prompt + RETRY_REMINDER`처럼 이어 붙이면 결과는 평범한 str이
-      되어 표식이 사라진다. 의도된 동작이다 — 재시도는 드물고, 그때는 캐시를
-      포기하고 통짜로 보내는 편이 경계를 잘못 잡는 것보다 안전하다.
+    ★ 일반 문자열 연산은 표식을 지운다. 작성 형식 재시도처럼 기존 앞부분을
+      그대로 두고 고정 뒷문구만 붙이는 경로만 경계를 명시적으로 보존한다.
     """
 
     #: 공유 앞부분의 «글자» 수. 바이트가 아니라 파이썬 문자열 인덱스다.
@@ -807,6 +818,53 @@ def parse_section_response(
 # ══════════════════════════════════════════════════════════
 
 
+def _generic_cell_key(value: str) -> str:
+    """일반어 대조용 열쇠 — 호환문자를 펼치고 공백을 없앤 소문자 표면.
+
+    ★ 왜 여기에 따로 두나 — 같은 일을 하는 ``diagram_check._compact_surface``를
+      부르면 ``diagram_check → logic`` 방향의 import가 되돌아와 순환이 된다.
+      이 함수는 «한 낱말 대조»에만 쓰는 최소판이라 구두점까지 지우지 않는다.
+    """
+
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    return "".join(normalized.split()).casefold()
+
+
+#: 일반어 목록을 대조 열쇠로 미리 바꿔 둔다 — 칸마다 다시 만들지 않는다.
+_GENERIC_CELL_KEYS: Final[frozenset[str]] = frozenset(
+    _generic_cell_key(term) for term in FLOW_GENERIC_CELL_TERMS
+)
+
+
+def is_generic_flow_cell(value: str) -> bool:
+    """칸 값 «전체»가 어느 회사에나 들어맞는 한 낱말인가.
+
+    Args:
+        value: 도식 칸 하나의 값.
+
+    Returns:
+        「상품」·「고객」·「개인 사용자」처럼 회사를 전혀 가리키지 못하는 한
+        낱말이면 참. 빈 칸은 이 검사의 대상이 아니므로 거짓이다.
+
+    ★ 빈 칸에 거짓을 주는 것은 «검사 대상이 아니다»라는 뜻이다. 「칸이 비면
+      어떻게 하나」는 부르는 쪽(`_flow_row_from_item`·렌더러)이 이미 정해 뒀다.
+    ★ 조사는 «하나»만 뗀다. 「고객사」처럼 낱말을 이루는 글자는 떼지 않으므로
+      뜻이 있는 칸은 그대로 남는다.
+    """
+
+    key = _generic_cell_key(value)
+    if not key:
+        return False
+    if key in _GENERIC_CELL_KEYS:
+        return True
+    for particle in FLOW_GENERIC_CELL_PARTICLES:
+        if key.endswith(particle):
+            stem = key[: -len(particle)]
+            if stem and stem in _GENERIC_CELL_KEYS:
+                return True
+    return False
+
+
 def _flow_row_from_item(
     item: Any,
     cell_count: int,
@@ -832,6 +890,12 @@ def _flow_row_from_item(
         return None
     if len(cells) != cell_count:
         return None
+    # ★ 일반어 한 낱말 칸은 «빈 칸»으로 본다 (2026-09-22 산출 PDF 실측).
+    #   「상품 → 판매 → 고객」처럼 세 칸이 모두 그런 줄은 바로 아래 «전부 빈
+    #   줄» 규칙이 통째로 버리고, 일부만 그런 줄은 종전의 빈 칸 처리(화살표
+    #   장은 「미확인」, 카드 장은 칸 자체를 뺌)를 그대로 따른다.
+    #   ⚠️ 여기서 «줄»을 따로 버리지 않는다 — 빈 칸 처분은 한 곳에서만 정한다.
+    cells = tuple("" if is_generic_flow_cell(cell) else cell for cell in cells)
     # ★ 빈 칸을 허용한다 (제품 결정). 예전에는 한 칸이라도
     #   비면 줄을 버렸는데, 8장 「확인된 사례」처럼 «없을 수 있는» 칸 때문에
     #   쓸 만한 줄이 통째로 사라졌다. 다만 «전부» 빈 줄은 아무 말도 하지
@@ -953,9 +1017,15 @@ def _compose_one_section(
     retries = 0
     while sentences is None and retries < parse_retry_limit:
         retries += 1
+        retry_prompt = prompt + RETRY_REMINDER
+        if isinstance(prompt, CacheablePrompt):
+            # 앞부분은 바꾸지 않았으므로 최초 호출과 같은 근거 블록을 재사용한다.
+            retry_prompt = CacheablePrompt(
+                retry_prompt, cache_prefix_chars=prompt.cache_prefix_chars,
+            )
         sentences, raw = _ask_and_parse(
             ask,
-            prompt + RETRY_REMINDER,
+            retry_prompt,
             section_id,
             reject_inline_citation_markers=reject_inline_citation_markers,
         )
@@ -1551,6 +1621,14 @@ def compose_sections(
         normalized = ()
     sections: list[ComposedSection] = []
     already_written: list[str] = []
+    jobs: list[Callable[[], ComposedSection]] = []
+    if prepared is not None:
+        prepare_parallel = getattr(ask, "prepare_parallel", None)
+        if callable(prepare_parallel):
+            # 유료 실행 Context와 지연 클라이언트는 부모에서 준비한 뒤 복사한다.
+            prepare_parallel()
+    workers = section_worker_count(ask) if prepared is not None else SERIAL_SECTION_CALLS
+    started_at = time.monotonic()
     for section_id in SECTION_IDS:
         section_fragments = (
             normalized if prepared is None else prepared.packets[section_id]
@@ -1561,7 +1639,11 @@ def compose_sections(
             else None
         )
         prompt_already_written = already_written if prepared is None else ()
-        section = _compose_one_section(
+        # 장부가 있으면 작업 스레드에 들어가기 전에 장 ID와 배정 순서를 고정한다.
+        bind_section = getattr(ask, "for_section", None)
+        section_ask = bind_section(section_id) if callable(bind_section) else ask
+        job = partial(
+            _compose_one_section,
             section_id,
             build_section_prompt(
                 company_name,
@@ -1579,15 +1661,28 @@ def compose_sections(
                 # 켜 봐야 캐시 «쓰기» 할증만 물고 읽기가 없어 손해다.
                 shared_evidence_prefix=prepared is None,
             ),
-            ask,
+            section_ask,
             reject_inline_citation_markers=prepared is not None,
             # packet/FULL 호출 계약은 장마다 정확히 한 번이다. 형식 오류를
             # 재호출로 감추지 않고 해당 장을 fail-closed 안내문으로 남긴다.
             parse_retry_limit=(0 if prepared is not None else PARSE_RETRY_LIMIT),
         )
-        sections.append(section)
+        if workers > SERIAL_SECTION_CALLS:
+            jobs.append(job)
+        else:
+            section = job()
+            sections.append(section)
         if prepared is None:
             already_written.extend(sentence.text for sentence in section.sentences)
+    if jobs:
+        sections = run_section_jobs(jobs, max_workers=workers)
+    if composition_diagnostics is not None:
+        composition_diagnostics.append({
+            "step": SECTION_EXECUTION_STEP,
+            "동시상한": workers,
+            "장수": len(sections),
+            "소요_ms": max(0, int((time.monotonic() - started_at) * MILLISECONDS_PER_SECOND)),
+        })
     report = ComposedReport(sections=tuple(sections), summary=())
     # 작가 응답을 읽은 «직후» 줄 수 — 아래 정리에서 사라진 줄과 구분하기 위해
     # 반드시 정리 «전»에 남긴다.

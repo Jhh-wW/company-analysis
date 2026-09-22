@@ -52,6 +52,7 @@ from src.features.composer.news_block import (
     NEWS_BLOCK_HEADERS,
     NEWS_BLOCK_PRESENTATION,
     news_block_caption,
+    nonredundant_news_rows,
     oldest_stale_report_year,
 )
 from src.features.composer.port import (
@@ -66,6 +67,7 @@ from src.features.composer.portfolio_name_table import PortfolioNameTable
 from src.features.composer.public_manifest import PublicStructureSeal
 from src.features.composer.prose_facts import ProseEvidence, build_verified_prose_fact
 from src.features.composer.quality_projection import bound_summary_fact_id
+from src.features.composer.style_normalizer import SentenceStyleNormalizer
 from src.features.pipeline.port import (
     FactRecord,
     Grade,
@@ -75,6 +77,8 @@ from src.features.pipeline.port import (
     SummaryItem,
 )
 from src.features.provenance.sources import (
+    official_web_source_fields,
+    public_fragment_document_identity,
     Source,
     SourceKind,
     bind_document_content_sha256,
@@ -170,6 +174,9 @@ class _FragmentMeta:
     text: str = ""
     source_url: str = ""
     document_title: str = ""
+    item_title: str = ""
+    item_published_on: str = ""
+    item_url: str = ""
     location: str = ""
     #: 홈페이지 조각의 «문서일» — CollectedFragment 어댑터에는 없는 필드라
     #: 원시 dict를 받았을 때만 채워진다 (port.py는 3-1 소유라 손대지 않는다).
@@ -229,6 +236,9 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
                     text=text,
                     source_url=source_url,
                     document_title=str(item.get("문서명") or "").strip(),
+                    item_title=str(item.get("item_title") or "").strip(),
+                    item_published_on=str(item.get("item_published_on") or "").strip(),
+                    item_url=str(item.get("item_url") or "").strip(),
                     location=str(item.get("원문위치") or "").strip(),
                     document_date=str(item.get("문서일") or "").strip(),
                     financial_api_disclosed_at=str(item.get("financial_api_disclosed_at") or ""),
@@ -244,6 +254,9 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
             text=str(getattr(fragment, "text", "") or ""),
             source_url=str(getattr(fragment, "source_url", "") or ""),
             document_title=str(getattr(fragment, "document_title", "") or ""),
+            item_title=fragment.item_title,
+            item_published_on=fragment.item_published_on,
+            item_url=fragment.item_url,
             location=str(getattr(fragment, "location", "") or ""),
             document_date=str(getattr(fragment, "document_date", "") or ""),
             financial_api_disclosed_at=fragment.financial_api_disclosed_at,
@@ -389,20 +402,26 @@ def sentence_display_text(
     return text
 
 
-def _marker_visibility(
+def marker_visibility(
     sentences: Sequence[ComposedSentence],
     numbers: Mapping[str, int],
     style: str,
 ) -> tuple[bool, ...]:
     """문장마다 인용 번호를 «보일지» 정한다.
 
+    ★ 왜 공개 함수인가 — FULL 사전 봉인(`public_manifest`)이 렌더 «전»에 같은
+      글자를 미리 계산한다. 그 규칙을 두 벌로 적어 두면 한쪽만 고쳐졌을 때
+      봉인과 렌더가 갈라져 `PublicManifestError`로 보고서 생성이 통째로 죽는다
+      (2026-09-22 실측: 해석 문장 번호를 보이게 바꾼 쪽이 렌더뿐이었다).
+      그래서 이 함수 하나가 표기 규칙의 정본이고, 봉인 쪽이 이것을 부른다.
+
     ★ 왜 문장 하나가 아니라 묶음을 보나 — 절충안의 핵심이 「같은 출처를
       잇달아 인용하는 문장은 묶음의 마지막에만 번호를 단다」이기 때문이다.
       앞뒤를 봐야 그 판단이 선다.
 
     규칙(CITATION_STYLE_MERGED):
-      ① «해석» 문장은 번호를 뺀다 — 종합 판단이라 특정 출처를 가리키지 않고,
-         이미 « — 해석» 표지가 성격을 말해 준다.
+      ① «해석» 문장도 자기 번호를 보인다. 2026-09-22 결정에 따라 해석
+         표시만 붙여 근거 확인을 피할 수 없게 한다.
       ② «확인» 문장은 다음 문장이 «같은 출처 집합»을 인용하는 확인 문장이면
          번호를 미룬다. 그 묶음의 마지막 문장이 대표로 번호를 단다.
 
@@ -420,7 +439,7 @@ def _marker_visibility(
     visible: list[bool] = []
     for index, sentence in enumerate(sentences):
         if sentence.grade == GRADE_INTERPRETED:
-            visible.append(False)
+            visible.append(True)
             continue
         if not keys[index]:
             visible.append(False)
@@ -437,6 +456,21 @@ def _marker_visibility(
         defer = following is not None and keys[following] == keys[index]
         visible.append(not defer)
     return tuple(visible)
+
+
+def summary_marker_visibility(
+    summary: Sequence[ComposedSentence],
+) -> tuple[bool, ...]:
+    """핵심 요약 항목은 «모두» 자기 인용 번호를 보인다.
+
+    ★ 왜 본문과 규칙이 다른가 — 요약 항목은 서로 독립된 줄이라 「앞 문장과
+      같은 출처면 뒤로 미룬다」는 본문의 묶음 규칙이 성립하지 않는다. 미루면
+      마지막 항목 하나만 번호를 달고 나머지는 근거 없이 읽힌다.
+    ★ 왜 함수인가 — `marker_visibility`와 같은 이유다. 봉인 쪽이 이 규칙을
+      따로 적으면 갈라진다(2026-09-22 실측: 같은 출처를 인용한 요약 두 항목만
+      있어도 FULL 봉인 대조가 깨졌다).
+    """
+    return tuple(True for _sentence in summary)
 
 
 # ══════════════════════════════════════════════════════════
@@ -515,11 +549,9 @@ def _ensure_no_orphan_markers(
 ) -> None:
     """부록에 실릴 번호가 «본문 어디에도» 안 보이는 일을 막는다 (제자리 수정).
 
-    ★ 왜 필요한가 (골든 fixture가 잡은 결함) — 절충안 규칙 ①은 해석 문장의
-      번호를 뺀다. 그런데 어떤 조각이 «해석 문장에서만» 인용되면 그 번호가
-      본문에 한 번도 안 나온다. 부록은 인용된 조각으로 만들어지므로 그 줄이
-      고아가 되고, 출고 검증(validate_v2)이 「부록에 있는 번호를 본문
-      어디에서도 인용하지 않았습니다」로 보고서를 통째로 막는다.
+    ★ 번호를 미룬 결과 부록에만 남는 출처가 생기면 출고 검증(validate_v2)이
+      보고서 전체를 막는다. 해석 번호를 항상 보이도록 바꾼 뒤에도 이 방어는
+      유지해, 표기 규칙이 바뀌어도 인용과 부록의 대응을 지킨다.
     ★ 그래서 규칙을 적용한 «뒤»에 한 번 더 훑어, 어디에도 안 보이는 번호는
       그 번호를 인용한 «마지막» 문장에서 되살린다. 번호는 줄이되 추적은
       끊지 않는다 — 둘 중 하나를 고르는 문제가 아니다.
@@ -562,6 +594,7 @@ def _performance_report_table(
         entity_scope=table.entity_scope,
         raw_unit=table.raw_unit,
         unit_dimension=table.unit_dimension,
+        unaudited_years=table.unaudited_years,
     )
 
 
@@ -657,7 +690,7 @@ def _flow_report_table(
 def _news_report_table(
     section: ComposedSection, numbers: Mapping[str, int], *, as_of_date: str = ""
 ) -> Optional[ReportTable]:
-    """장 끝의 「최근 보도 (보조)」 표를 만든다. 실을 줄이 없으면 None.
+    """장 끝의 「관련 보도」 표를 만든다. 실을 줄이 없으면 None.
 
     ★ 세 칸은 흐름으로 «이어지지 않는다» — 발행일·매체는 그 문장이 어디서
       언제 나왔는지를 밝히는 표식이고, 보도 문장이 내용 전부다. 그래서
@@ -675,7 +708,7 @@ def _news_report_table(
     rows: list[list[str]] = []
     included_rows: list[NewsRow] = []
     cited: list[int] = []
-    for row in section.news_rows:
+    for row in nonredundant_news_rows(section):
         row_numbers = [
             numbers[str(citation).strip()]
             for citation in row.citations
@@ -890,20 +923,17 @@ def _build_source(
             kind=SourceKind.OTHER,
             label=_source_label(meta, filing_meta),
             collected_at=meta.source_collected_on,
-            published_at=meta.document_date,
             source_id=f"{V2_SOURCE_ID_PREFIX}{meta.fragment_id}",
-            title=meta.document_title,
             publisher=company_name,
             host=formal_web.host,
-            url=meta.source_url,
             document_id=meta.source_document_id,
-            location=meta.location,
             source_type=formal_web.source_type,
-            fact_status=(
-                "공식 발행일·보고기간 확정"
-                if formal_web.source_type == "회사 공식 IR"
-                and meta.document_date
-                else "기준일 현재 확인"
+            **official_web_source_fields(
+                source_type=formal_web.source_type,
+                title=meta.document_title, published_at=meta.document_date,
+                url=meta.source_url, location=meta.location,
+                item_title=meta.item_title, item_published_on=meta.item_published_on,
+                item_url=meta.item_url,
             ),
             used_in=list(used_in),
             evidence_hashes=evidence_hashes,
@@ -984,7 +1014,7 @@ def _build_source(
                 f"{meta.formal_source_kind}"
             )
         actual_document_identity = document_identity(sealed)
-        if actual_document_identity != meta.document_identity:
+        if actual_document_identity != public_fragment_document_identity(meta):
             raise ValueError(
                 "FULL typed 출처의 공개 문서 신원이 packet과 다릅니다: "
                 f"{meta.formal_source_kind}; "
@@ -1121,6 +1151,7 @@ def render_report(
     verified_program_facts: Sequence[FactRecord] = (),
     program_registry_sources: Sequence[Source] = (),
     name_table: Optional[PortfolioNameTable] = None,
+    style_diagnostics: dict[str, int] | None = None,
 ) -> Report:
     """검증 끝난 ComposedReport를 웹·PDF 공용 pipeline Report로 바꾼다.
 
@@ -1149,6 +1180,7 @@ def render_report(
         name_table: 3장에 덧붙일 「회사가 공시한 대표 이름」 표. 조각의 글자와
             인용만 투영한 결정적 표라 작가 카드와 달리 AI를 지나지 않는다.
             None이면 3장에 이 표를 넣지 않는다(빈 표를 만들지 않는다).
+        style_diagnostics: 원문 없이 최종 산문의 시제 사유별 개수만 받는 선택적 사전.
 
     Returns:
         pipeline `Report` — 9개 장 전부(prose_lines: 문장 + [n] + 해석 표지,
@@ -1263,11 +1295,12 @@ def render_report(
     # 표기 방식을 적용한 가시성을 먼저 전부 계산한다 — 고아 번호를 되살리려면
     # 본문과 요약을 «함께» 봐야 한다.
     visibility_groups: list[tuple[Sequence[ComposedSentence], list[bool]]] = [
-        (section.sentences, list(_marker_visibility(section.sentences, numbers, citation_style)))
+        (section.sentences, list(marker_visibility(section.sentences, numbers, citation_style)))
         for section in report.sections
     ]
     visibility_groups.append(
-        (report.summary, list(_marker_visibility(report.summary, numbers, citation_style)))
+        # 요약은 서로 독립된 항목이므로 본문의 번호 미루기 규칙을 적용하지 않는다.
+        (report.summary, list(summary_marker_visibility(report.summary)))
     )
     _ensure_no_orphan_markers(visibility_groups, numbers)
     section_shows = {
@@ -1275,6 +1308,7 @@ def render_report(
         for index, section in enumerate(report.sections)
     }
     summary_shows = visibility_groups[-1][1]
+    style_normalizer = SentenceStyleNormalizer(report, fragments, as_of_date=as_of_date)
 
     for section in report.sections:
         prose_lines: list[tuple[str, str]] = []
@@ -1290,7 +1324,7 @@ def render_report(
         buffer: list[str] = []
         for index, sentence in enumerate(section.sentences):
             display = sentence_display_text(
-                sentence, numbers, show_markers=shows[index]
+                style_normalizer.normalize(sentence), numbers, show_markers=shows[index]
             )
             # prose_lines는 «문장» 단위 그대로 둔다 — 출고 검증과 저장이 이
             # 단위를 쓴다. 문단은 화면·PDF 표시용으로 «따로» 모은다.
@@ -1400,6 +1434,7 @@ def render_report(
                     numeric=converted.numeric,
                     display_unit=converted.display_unit,
                     presentation=converted.presentation,
+                    unaudited_years=converted.unaudited_years,
                 )
             tables.append(converted)
 
@@ -1412,14 +1447,14 @@ def render_report(
             #   보도표의 조각은 본문 문장이 인용하지 않는 조각이라, 여기서
             #   등록하지 않으면 부록에 그 기사가 한 줄도 안 생긴다 — 표에는
             #   [n]이 찍히는데 부록에 n이 없는 «고아 번호»가 된다.
-            for row in section.news_rows:
-                for citation in row.citations:
-                    row_number = numbers.get(str(citation).strip())
-                    if row_number is None or row_number not in meta_by_number:
-                        continue
-                    owners = used_sections.setdefault(row_number, [])
-                    if section.section_id not in owners:
-                        owners.append(section.section_id)
+            # 중복으로 빠진 행의 출처가 부록에만 남지 않도록 생존 행만 등록한다.
+            for citation in news_table.source_cites:
+                row_number_text = citation_number(citation)
+                if not row_number_text or int(row_number_text) not in meta_by_number:
+                    continue
+                owners = used_sections.setdefault(int(row_number_text), [])
+                if section.section_id not in owners:
+                    owners.append(section.section_id)
             tables.append(news_table)
 
         # FULL에서는 renderer가 구조를 결정한 뒤, 독립 canonicalizer가 미리
@@ -1519,7 +1554,7 @@ def render_report(
         summary_fact = facts_by_id.get(summary_fact_id)
         summary_fact_ids = [summary_fact_id] if summary_fact is not None else []
         display_text = sentence_display_text(
-            sentence, numbers, show_markers=summary_shows[index]
+            style_normalizer.normalize(sentence), numbers, show_markers=summary_shows[index]
         )
         summary_section_id = (
             summary_fact.section_owner
@@ -1618,6 +1653,14 @@ def render_report(
             reference_date=as_of_date,
         ):
             raise ValueError(f"FULL typed 공개 출처 계약 위반: {problem}")
+
+    if style_diagnostics is not None:
+        style_diagnostics.update(style_normalizer.diagnostics)
+    if style_normalizer.diagnostics:
+        logger.info(
+            "최종 산문 시제 진단: %s", style_normalizer.diagnostics,
+            extra={"style_diagnostics": dict(style_normalizer.diagnostics)},
+        )
 
     return Report(
         company=company_name,

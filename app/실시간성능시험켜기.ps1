@@ -24,6 +24,12 @@ param(
     [string]$EvidenceReclassify = "",
     [string]$NewsroomDateAI = "",
 
+    # 부모 환경은 상속하지 않는다. 순차 비교는 세 값을 모두 1로 지정한다.
+    [string]$WriterMaxParallelCalls = "3",
+    [string]$ProviderMaxConcurrentCalls = "5",
+    [string]$NewsBodyFetchConcurrency = "2",
+    [switch]$EnableReviewPromptCache,
+
     # 엔진을 명시적으로 덮어쓴다. 생략하면 선택한 profile의 값을 사용한다.
     [switch]$EngineV2,
 
@@ -55,6 +61,26 @@ if ($allowedReleaseModes -cnotcontains $ReleaseMode) {
     Write-Host ("쓸 수 있는 값은 {0} 입니다. 대문자 그대로 적습니다." -f ($allowedReleaseModes -join " · "))
     Write-Host ""
     exit 2
+}
+
+# 바인더의 예외가 호출자의 try/catch에 삼켜져도 성공으로 보이지 않게 직접 거절한다.
+$performanceAllowedValues = [ordered]@{
+    REPORT_WRITER_MAX_PARALLEL_CALLS = @("1", "2", "3")
+    PROVIDER_MAX_CONCURRENT_CALLS = @("1", "2", "3", "4", "5")
+    NEWS_BODY_FETCH_CONCURRENCY = @("1", "2", "3")
+    COMPOSER_REVIEW_PROMPT_CACHE_ENABLED = @("0", "1")
+}
+$performanceSettings = [ordered]@{
+    REPORT_WRITER_MAX_PARALLEL_CALLS = $WriterMaxParallelCalls
+    PROVIDER_MAX_CONCURRENT_CALLS = $ProviderMaxConcurrentCalls
+    NEWS_BODY_FETCH_CONCURRENCY = $NewsBodyFetchConcurrency
+    COMPOSER_REVIEW_PROMPT_CACHE_ENABLED = $(if ($EnableReviewPromptCache) { "1" } else { "0" })
+}
+foreach ($name in @($performanceSettings.Keys)) {
+    if ($performanceAllowedValues[$name] -cnotcontains $performanceSettings[$name]) {
+        Write-Host ("성능시험 설정 {0}에는 {1} 중 하나를 지정해야 합니다." -f $name, ($performanceAllowedValues[$name] -join ", ")) -ForegroundColor Red
+        exit 2
+    }
 }
 
 # OWASP least privilege 원칙에 따라 자식은 Windows/Python 실행에 필요한 OS 값과
@@ -559,6 +585,9 @@ if ($featureProfile.Settings["ENGINE_V2"] -eq "1") {
 foreach ($name in @("NEWS_INTAKE", "REVENUE_TABLE_V2", "TYPED_DART_COLLECTOR", "EVIDENCE_RECLASSIFY", "NEWSROOM_DATE_AI")) {
     $childEnvironment[$name] = $featureProfile.Settings[$name]
 }
+foreach ($name in @($performanceSettings.Keys)) {
+    $childEnvironment[$name] = $performanceSettings[$name]
+}
 
 # 비밀이나 부모 환경 전체를 직렬화하지 않는다. 관측값은 스위치 범위만 뜻한다.
 $observedProductionSwitches = [ordered]@{
@@ -584,6 +613,7 @@ $snapshot = [ordered]@{
     repository_contract_sha256 = $featureProfile.ContractSha256
     origin = "http://127.0.0.1:$Port"
     settings = $featureProfile.Settings
+    performance_settings = $performanceSettings
     paid_providers_enabled = [bool]$EnablePaidProviders
     per_run_expected_cost_cap_krw = $PerRunExpectedCostCapKrw
     daily_expected_cost_cap_krw = $DailyExpectedCostCapKrw
@@ -611,7 +641,9 @@ $allowedChildEnvironmentNames = $allowedParentNames + @(
     "GOOGLE_PLACES_TERMS_ACK", "BUSINESS_CANDIDATE_PROVIDER", "ENGINE_V2",
     "REPORT_RELEASE_MODE", "NEWS_INTAKE", "REVENUE_TABLE_V2", "TYPED_DART_COLLECTOR",
     "EVIDENCE_RECLASSIFY", "NEWSROOM_DATE_AI",
-    "APP_GIT_COMMIT"
+    "APP_GIT_COMMIT",
+    "REPORT_WRITER_MAX_PARALLEL_CALLS", "PROVIDER_MAX_CONCURRENT_CALLS",
+    "NEWS_BODY_FETCH_CONCURRENCY", "COMPOSER_REVIEW_PROMPT_CACHE_ENABLED"
 )
 foreach ($name in @($childEnvironment.Keys)) {
     if ($allowedChildEnvironmentNames -notcontains [string]$name) {

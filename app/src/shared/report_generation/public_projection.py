@@ -950,8 +950,11 @@ class PublicReportProjection:
     summary_source_grade_contribution: tuple[tuple[str, tuple[str, ...]], ...]
     #: (title, detail).
     grade_notice: tuple[str, str]
+    citations_note: str = ""
 
     def __post_init__(self) -> None:
+        if type(self.citations_note) is not str:
+            raise PublicProjectionError("부록 안내문은 문자열이어야 합니다")
         if type(self.version) is not str or self.version != PUBLIC_PROJECTION_VERSION:
             raise PublicProjectionError("공개 projection 버전이 지원하지 않는 값입니다")
         if not isinstance(self.header, Mapping):
@@ -1037,6 +1040,8 @@ def public_report_projection_to_dict(value: PublicReportProjection) -> dict[str,
     if not isinstance(payload, dict):  # pragma: no cover - dataclass 계약 방어
         raise PublicProjectionError("공개 projection을 canonical 객체로 만들 수 없습니다")
     payload = dict(payload)
+    if not value.citations_note:
+        payload.pop("citations_note", None)
     # canonical_value의 일반 dataclass 순회는 각 section의 field(init=False)인
     # display_sha256·block_sha256을 건너뛴다 — 전용 to_dict로 다시 채운다.
     payload["sections"] = [
@@ -1058,7 +1063,7 @@ def public_report_projection_from_dict(
         "summary_source_grade_contribution",
         "grade_notice",
     }
-    if type(data) is not dict or set(data) != expected:
+    if type(data) is not dict or set(data) not in (expected, expected | {"citations_note"}):
         raise PublicProjectionError("공개 projection의 key 또는 객체 형식이 계약과 다릅니다")
     header_raw = data["header"]
     if type(header_raw) is not dict:
@@ -1101,6 +1106,7 @@ def public_report_projection_from_dict(
             label="공개 projection summary_source_grade_contribution",
         ),
         grade_notice=tuple(grade_notice_raw),
+        citations_note=str(data.get("citations_note", "")),
     )
     if public_report_projection_to_dict(value) != data:
         raise PublicProjectionError("공개 projection이 canonical wire 왕복과 다릅니다")

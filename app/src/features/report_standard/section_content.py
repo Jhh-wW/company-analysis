@@ -74,13 +74,12 @@ def summary_topic(section_id: str) -> str:
 _ISO_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}(?:$|T|\s)")
 
 
-def _generated_at_iso_date(report: Report) -> str:
-    """``report.generated_at``을 KST 기준 ``YYYY-MM-DD``로 옮긴다.
+def _generated_at_display_date(report: Report) -> str:
+    """``report.generated_at``을 KST 기준 ``YYYY.MM.DD``로 옮긴다.
 
     표지 메타(``export_pdf.logic._cover_metadata``)의 「내용 생성」 라벨이
-    읽는 것과 **같은 필드**(``generated_at``)·같은 KST 변환을 쓴다. 표지는
-    구분자로 마침표(``2026.08.19``)를 쓰지만, 이 마스트헤드는 대시(ISO
-    ``2026-08-19``)를 쓴다 — 날짜 값 자체는 항상 같고 구분자 모양만 다르다.
+    읽는 것과 **같은 필드**(``generated_at``)·같은 KST 변환을 쓴다.
+    독자가 표지와 본문에서 같은 날짜를 읽도록 구분자도 마침표로 맞춘다.
     저장값이 ISO 날짜가 아니면(옛 저장본 등) 빈 문자열을 돌려준다.
     """
 
@@ -89,11 +88,11 @@ def _generated_at_iso_date(report: Report) -> str:
         return ""
     try:
         if len(raw) == 10:
-            return dt.date.fromisoformat(raw).isoformat()
+            return dt.date.fromisoformat(raw).strftime("%Y.%m.%d")
         parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if parsed.tzinfo is not None:
             parsed = parsed.astimezone(clock.KST)
-        return parsed.date().isoformat()
+        return parsed.date().strftime("%Y.%m.%d")
     except ValueError:
         return ""
 
@@ -112,7 +111,7 @@ def masthead_lines(report: Report) -> tuple[str, str]:
         그 부분만 빠진다 — 회사명은 항상 그대로 남는다.
     """
 
-    generated = _generated_at_iso_date(report)
+    generated = _generated_at_display_date(report)
     meta_line = (
         f"기업 분석 보고서 · 생성일 {generated} · 공개 자료 기반"
         if generated

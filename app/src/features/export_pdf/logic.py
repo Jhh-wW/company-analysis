@@ -2436,7 +2436,7 @@ def _add_section(
     )
     if empty_notice:
         story.extend(_lead_with_heading(
-            heading_flowables, [Paragraph(_escape(empty_notice), styles["body"])]
+            heading_flowables, [_numbered_paragraph(1, empty_notice, styles, width)]
         ))
         return
     if not section.is_filled:
@@ -2832,6 +2832,48 @@ def _appendix_heading_markup() -> str:
     )
 
 
+class _AppendixStart(KeepTogether):
+    """긴 출처 표 전체 대신 제목과 첫 행들만 같은 쪽에서 시작하게 한다."""
+
+    def __init__(
+        self, heading: Sequence[Flowable], table: Table, leading_table: Table
+    ) -> None:
+        super().__init__([*heading, table])
+        self._table = table
+        self._leading_table = leading_table
+
+    def wrap(self, avail_width: float, avail_height: float) -> tuple[float, float]:
+        result = super().wrap(avail_width, avail_height)
+        full_height = self._table.wrap(avail_width, avail_height)[1]
+        leading_height = self._leading_table.wrap(avail_width, avail_height)[1]
+        # KeepTogether가 첫 3행까지만 묶도록 측정 높이를 줄인다. 실제 내용은
+        # 원래 표 하나이므로 같은 쪽에서 머리행이 중복되거나 테두리가 끊기지 않는다.
+        self._H -= full_height - leading_height
+        return result
+
+
+def _appendix_tail_fits_one_page(
+    rows: Sequence[Sequence[Flowable]],
+    column_widths: Sequence[float],
+    table_style: TableStyle,
+    width: float,
+) -> bool:
+    """머리행과 마지막 두 본문 행이 A4 한 쪽 본문 영역에 들어가는지 잰다.
+
+    reportlab의 NOSPLIT은 묶인 행 안에서 쪼개기를 금지할 뿐, 묶음이 한 쪽보다
+    크면 쪼갤 자리가 없어 ``LayoutError``를 던진다(잡는 곳 없음). 그래서 묶기
+    «전에» 같은 열 너비·같은 서식으로 그 세 행만 재어 본다. 내부 속성
+    (``_rowHeights``)은 읽지 않고 공개 ``wrap``만 쓴다.
+    """
+
+    tail = Table(
+        [rows[0], *rows[-2:]], colWidths=list(column_widths), repeatRows=1, hAlign="LEFT"
+    )
+    tail.setStyle(table_style)
+    _, tail_height = tail.wrap(width, constants.APPENDIX_MEASURE_HEIGHT_PT)
+    return tail_height <= constants.APPENDIX_TAIL_MAX_HEIGHT_PT
+
+
 def _add_citations(
     story: list[Flowable],
     report: Report,
@@ -2844,6 +2886,10 @@ def _add_citations(
     봉인이 있으면 행 여섯 칸이 전부 봉인 값이다 — 특히 「사실 검증」 라벨을
     렌더 시점에 다시 세지 않는다(``source_verification_label`` 미호출).
     """
+
+    from src.features.provenance.sources import (
+        external_news_notice, source_label_display, source_status_display,
+    )
 
     #: (번호, 자료 마크업, 기준일·상태, 사실 검증, 원문 위치, 본문 사용 장)
     entries: list[tuple[str, str, str, str, str, str]]
@@ -2863,8 +2909,8 @@ def _add_citations(
         entries = [
             (
                 str(source.number),
-                _source_label_markup(source),
-                _source_status(source),
+                _link_markup(source_label_display(source), source.url),
+                source_status_display(source),
                 source_verification_label(report, source.source_id),
                 location_display(source.location.strip()) or "—",
                 _source_used_sections(source),
@@ -2873,22 +2919,20 @@ def _add_citations(
         ]
     if not entries:
         return
-    story.extend(
-        [
-            # 부록 표가 앞 장 끝에서 잘려 다음 장에 맥락 없는 행 몇 개만 남지
-            # 않도록 본문 1~9장과 출처 원장을 페이지 경계로 분리한다.
-            PageBreak(),
-            _OutlineAnchor("sources", "부록. 출처와 검증 상태", level=0),
-            _SectionHeading(
-                _appendix_heading_markup(),
-                "출처와 검증 상태",
-                "부록",
-                styles["heading"],
-                A4[0] - (constants.PAGE_MARGIN_PT * 2),
-            ),
-            Paragraph(_escape(constants.CITATIONS_NOTE), styles["small"]),
-        ]
-    )
+    heading: list[Flowable] = [
+        _OutlineAnchor("sources", "부록. 출처와 검증 상태", level=0),
+        _SectionHeading(
+            _appendix_heading_markup(),
+            "출처와 검증 상태",
+            "부록",
+            styles["heading"],
+            A4[0] - (constants.PAGE_MARGIN_PT * 2),
+        ),
+        Paragraph(_escape(" ".join(filter(None, (
+            constants.CITATIONS_NOTE,
+            projection.citations_note if projection is not None else external_news_notice(report.citations),
+        )))), styles["small"]),
+    ]
     width = A4[0] - (constants.PAGE_MARGIN_PT * 2)
     rows: list[list[Paragraph]] = [
         [
@@ -2907,40 +2951,53 @@ def _add_citations(
                 Paragraph(label_markup, styles["table"]),
                 Paragraph(_escape(status), styles["table"]),
                 Paragraph(_escape(verification), styles["table"]),
-                Paragraph(_escape(location), styles["table"]),
+                Paragraph(_link_markup(location, location), styles["table"]),
                 Paragraph(_escape(used_in), styles["table"]),
             ]
         )
-    table = Table(
-        rows,
-        colWidths=[
-            width * 0.06,
-            width * 0.27,
-            width * 0.20,
-            width * 0.15,
-            width * 0.18,
-            width * 0.14,
-        ],
+    column_widths = [
+        width * 0.06,
+        width * 0.27,
+        width * 0.20,
+        width * 0.15,
+        width * 0.18,
+        width * 0.14,
+    ]
+    padding = constants.APPENDIX_CELL_PADDING_PT
+    table_style = TableStyle(
+        [
+            ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor(constants.COLOR_LINE)),
+            ("LINEABOVE", (0, 0), (-1, 0), 1.0, colors.HexColor(constants.COLOR_INK)),
+            ("LINEBELOW", (0, -1), (-1, -1), 1.0, colors.HexColor(constants.COLOR_INK)),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(constants.COLOR_HEADER)),
+            ("BACKGROUND", (0, 1), (0, -1), colors.HexColor(constants.COLOR_SURFACE)),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), padding),
+            ("RIGHTPADDING", (0, 0), (-1, -1), padding),
+            ("TOPPADDING", (0, 0), (-1, -1), padding),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), padding),
+        ]
+    )
+    table = Table(rows, colWidths=column_widths, repeatRows=1, hAlign="LEFT")
+    table.setStyle(table_style)
+    if len(entries) > 1 and _appendix_tail_fits_one_page(
+        rows, column_widths, table_style, width
+    ):
+        # 마지막 한 행 때문에 빈 쪽이 생기지 않게 두 본문 행을 함께 넘긴다.
+        # 두 행이 한 쪽에 못 들어가면 묶지 않는다 — 묶으면 LayoutError로 생성이 죽는다.
+        table.setStyle(TableStyle([("NOSPLIT", (0, len(rows) - 2), (-1, len(rows) - 1))]))
+    leading_table = Table(
+        rows[: constants.APPENDIX_MIN_START_ROWS + 1],
+        colWidths=column_widths,
         repeatRows=1,
         hAlign="LEFT",
     )
-    table.setStyle(
-        TableStyle(
-            [
-                ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor(constants.COLOR_LINE)),
-                ("LINEABOVE", (0, 0), (-1, 0), 1.0, colors.HexColor(constants.COLOR_INK)),
-                ("LINEBELOW", (0, -1), (-1, -1), 1.0, colors.HexColor(constants.COLOR_INK)),
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(constants.COLOR_HEADER)),
-                ("BACKGROUND", (0, 1), (0, -1), colors.HexColor(constants.COLOR_SURFACE)),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ]
-        )
-    )
-    story.extend([table, Spacer(1, 5)])
+    leading_table.setStyle(table_style)
+    story.extend([
+        CondPageBreak(constants.APPENDIX_MIN_START_HEIGHT_PT),
+        _AppendixStart(heading, table, leading_table),
+        Spacer(1, 5),
+    ])
 
 
 def _source_label(source: Source) -> str:

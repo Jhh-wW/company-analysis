@@ -552,7 +552,7 @@ def test_이_필드를_모르는_옛_결과는_아무_줄도_안_남긴다() -> 
 
 def test_표_머리글과_캡션은_한_곳에서만_나온다() -> None:
     assert NEWS_BLOCK_HEADERS == ("발행일", "매체 · 기사", "보도 내용")
-    assert news_block_caption(2) == "최근 보도 (보조, 2기사)"
+    assert news_block_caption(2) == "관련 보도 2건"
 
 
 def test_9장_제외_목록은_수집과_싣기가_같은_객체를_쓴다() -> None:
@@ -647,12 +647,12 @@ def test_행이_없으면_None이다() -> None:
 
 
 def test_연도를_주면_캡션에_그_연도를_덧붙인다() -> None:
-    assert news_block_caption(1, 2023) == "최근 보도 (보조, 1기사 · 2023년 보도 포함)"
+    assert news_block_caption(1, 2023) == "관련 보도 1건 · 2023년 보도 포함"
 
 
 def test_연도가_없으면_기존_캡션_그대로다() -> None:
-    assert news_block_caption(2, None) == "최근 보도 (보조, 2기사)"
-    assert news_block_caption(2) == "최근 보도 (보조, 2기사)"
+    assert news_block_caption(2, None) == "관련 보도 2건"
+    assert news_block_caption(2) == "관련 보도 2건"
 
 
 def test_실제_렌더_진입점이_오래된_기사에_연도를_붙인다() -> None:
@@ -673,7 +673,7 @@ def test_실제_렌더_진입점이_오래된_기사에_연도를_붙인다() ->
     )
 
     assert table is not None
-    assert table.caption == "최근 보도 (보조, 1기사 · 2023년 보도 포함)"
+    assert table.caption == "관련 보도 1건 · 2023년 보도 포함"
 
 
 def test_실제_렌더_진입점은_최근_기사면_기존_캡션을_쓴다() -> None:
@@ -688,7 +688,7 @@ def test_실제_렌더_진입점은_최근_기사면_기존_캡션을_쓴다() -
     )
 
     assert table is not None
-    assert table.caption == "최근 보도 (보조, 1기사)"
+    assert table.caption == "관련 보도 1건"
 
 
 def test_기준일을_안_주면_오래된_기사여도_기존_캡션이다() -> None:
@@ -703,7 +703,7 @@ def test_기준일을_안_주면_오래된_기사여도_기존_캡션이다() ->
     table = render_module._news_report_table(section, {"40": 1})  # noqa: SLF001
 
     assert table is not None
-    assert table.caption == "최근 보도 (보조, 1기사)"
+    assert table.caption == "관련 보도 1건"
 
 
 def test_FULL_봉인_표_항목도_같은_as_of_date로_같은_캡션을_만든다() -> None:
@@ -734,7 +734,7 @@ def test_FULL_봉인_표_항목도_같은_as_of_date로_같은_캡션을_만든�
     payload = _news_table_payload(section, {"40": binding}, as_of_date="2026-09-11")
 
     assert payload is not None
-    assert payload["caption"] == "최근 보도 (보조, 1기사 · 2023년 보도 포함)"
+    assert payload["caption"] == "관련 보도 1건 · 2023년 보도 포함"
 
     from src.features.composer import render as render_module
 
@@ -818,7 +818,7 @@ def test_배선1_render_report_진입점이_기준일을_실제로_전달한다(
     news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
 
     table = _news_table_from(rendered)
-    assert table.caption == "최근 보도 (보조, 1기사 · 2023년 보도 포함)"
+    assert table.caption == "관련 보도 1건 · 2023년 보도 포함"
 
 
 def test_배선2_seal_진입점이_기준일을_실제로_전달해_렌더와_일치한다() -> None:
@@ -877,7 +877,7 @@ def test_배선2_seal_진입점이_기준일을_실제로_전달해_렌더와_�
     assert_report_matches_public_structure(rendered, seal)  # 예외 없으면 통과
     assert (
         _news_table_from(rendered).caption
-        == "최근 보도 (보조, 1기사 · 2023년 보도 포함)"
+        == "관련 보도 1건 · 2023년 보도 포함"
     )
 
 

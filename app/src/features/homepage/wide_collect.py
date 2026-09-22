@@ -138,6 +138,7 @@ from src.features.homepage.wide_types import (
     WideCollectionResult,
     WideDocumentIdentity,
 )
+from src.features.homepage.wide_fragments import extract_list_items
 
 _PRIORITY_KEYWORDS: tuple[str, ...] = WIDE_PRIORITY_HOST_KEYWORDS + PRIORITY_PATH_KEYWORDS
 
@@ -1706,6 +1707,11 @@ def _build_web_document(
     if not origin.allows_content_url(response.effective_url):
         return None, _DOCUMENT_SKIP_SCOPE_MISMATCH
     body_ranges, title = extract_usable_ranges(response.text)
+    list_items = extract_list_items(response.text, response.effective_url)
+    if list_items:
+        body_ranges = tuple(item[0] for item in list_items) + tuple(
+            text for text in body_ranges if not any(text in item[0] for item in list_items)
+        )
     ranges = body_ranges + extract_json_ld_ranges(response.text) + extract_inline_spa_ranges(response.text)
     ranges = tuple(dict.fromkeys(ranges))[:WIDE_MAX_USABLE_RANGES_PER_DOCUMENT]
     if not ranges:
@@ -1741,6 +1747,7 @@ def _build_web_document(
             origin.scope_digest,
         ),
         usable_ranges=ranges,
+        list_items=list_items,
         collector_version=WIDE_COLLECTOR_VERSION,
         parser_version=WIDE_PARSER_VERSION,
         requirement=requirement,

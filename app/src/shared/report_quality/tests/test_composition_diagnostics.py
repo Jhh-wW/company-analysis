@@ -7,6 +7,20 @@ import pytest
 from src.shared.report_quality.composition_diagnostics import observed_composition_steps
 
 
+def test_작성_시간과_상한만_남기고_원문은_버린다():
+    record = {"step": "v2_작성_실행방식", "동시상한": 3, "장수": 9, "소요_ms": 200}
+    assert observed_composition_steps([{**record, "원문": "비공개"}]) == (record,)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("동시상한", 0), ("동시상한", True), ("장수", -1), ("소요_ms", "원문"),
+])
+def test_작성_시간의_열린_값을_거부한다(field, value):
+    record = {"step": "v2_작성_실행방식", "동시상한": 3, "장수": 9, "소요_ms": 200}
+    record[field] = value
+    assert observed_composition_steps([record]) == ()
+
+
 def test_empty_recovery_records_closed_counts_and_machine_semantic_stages():
     records = [
         {"step": "8_본문검수_기계통과", "장별": {

@@ -225,14 +225,14 @@ def test_출처는_내부_수집과정_대신_원문과_검증상태를_표로_�
     assert "수집" not in text
 
 
-def test_부록은_본문과_분리된_새_페이지에서_전체_출처_맥락을_보여준다() -> None:
+def test_부록은_9장_뒤_공간이_충분하면_같은_페이지에서_시작한다() -> None:
     with pdfplumber.open(io.BytesIO(build_pdf(_report()))) as document:
         pages = [page.extract_text() or "" for page in document.pages]
 
     ninth_page = next(
         index for index, text in enumerate(pages) if "9. 동종업계 비교 결과" in text
     )
-    assert ninth_page < len(pages) - 1
+    assert ninth_page == len(pages) - 1
     assert all("부록. 출처와 검증 상태" not in text for text in pages[:-1])
     assert "부록. 출처와 검증 상태" in pages[-1]
     assert "주식회사 진영 반기보고서 (2026.06)" in pages[-1]

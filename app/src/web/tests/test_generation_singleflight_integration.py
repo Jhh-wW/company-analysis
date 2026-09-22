@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import datetime as dt
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
@@ -103,6 +105,80 @@ def _session(
         on_paid_phase=on_paid_phase,
         build_identity=build_identity,
     )
+
+
+def test_readonly_collection_checks_never_open_paid_phase_or_context(monkeypatch):
+    session = _session("본문-읽기검사", "본문-통장")
+
+    def unexpected_reservation(**kwargs):
+        pytest.fail("본문 중단 검사에서 비용 예약을 열었습니다")
+
+    monkeypatch.setattr(paid_runtime, "_begin_paid_phase", unexpected_reservation)
+    with generation_coordination.activate(session.callbacks):
+        contexts = [contextvars.copy_context() for _ in range(3)]
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            pending = [pool.submit(context.run, generation_coordination.check_active) for context in contexts]
+            for future in pending:
+                future.result(timeout=_OWNER_RELEASE_TIMEOUT_SEC)
+    assert session.paid_phase is None and session._provider_stack is None
+
+
+def test_readonly_collection_check_propagates_cancel_without_reservation():
+    session = _session("본문-취소검사", "본문-통장")
+    session.cancel_waiter()
+    with generation_coordination.activate(session.callbacks):
+        with pytest.raises(generation_coordination.GenerationWaitCancelled):
+            generation_coordination.check_active()
+    assert session.paid_phase is None and session._provider_stack is None
+
+
+@pytest.mark.parametrize("clock_kind", ["wall", "monotonic"])
+def test_readonly_collection_check_obeys_original_execution_deadline(monkeypatch, clock_kind):
+    session = _session("본문-마감검사", "본문-통장")
+    if clock_kind == "wall":
+        deadline = session._execution_started_at + generation_singleflight.OWNER_MAX_AGE
+        monkeypatch.setattr(generation_singleflight.clock, "now_kst", lambda: deadline)
+    else:
+        deadline = session._execution_started_monotonic + generation_singleflight.OWNER_MAX_AGE.total_seconds()
+        monkeypatch.setattr(generation_singleflight.time, "monotonic", lambda: deadline)
+    with generation_coordination.activate(session.callbacks):
+        with pytest.raises(generation_coordination.GenerationExecutionDeadlineExceeded):
+            generation_coordination.check_active()
+    assert session.paid_phase is None and session._provider_stack is None
+
+
+def test_readonly_collection_check_stops_on_observed_lease_failure():
+    session = _session("본문-임대검사", "본문-통장")
+    failure = OSError("시험용 임대 저장 실패")
+    session._lease_error = failure
+    with generation_coordination.activate(session.callbacks):
+        with pytest.raises(generation_singleflight.GenerationSingleflightUnavailable) as caught:
+            generation_coordination.check_active()
+    assert caught.value.__cause__ is failure
+    assert session.paid_phase is None
+
+
+def test_readonly_collection_check_rechecks_link_without_entering_paid_phase(monkeypatch):
+    session = _session("본문-링크검사", "본문-통장")
+    closed = [False]
+    checks = []
+    job = SimpleNamespace(share_link_hash="시험용 링크")
+
+    def require_open(actual_job):
+        assert actual_job is job
+        checks.append(closed[0])
+        if closed[0]:
+            raise job_runtime.LinkAccessClosedDuringRun(job_runtime.LINK_STOP_REASON_REVOKED)
+
+    monkeypatch.setattr(job_runtime, "_require_open_share_link", require_open)
+    callbacks = job_runtime._link_guarded_callbacks(job, session.callbacks)
+    with generation_coordination.activate(callbacks):
+        generation_coordination.check_active()
+        closed[0] = True
+        with pytest.raises(job_runtime.LinkAccessClosedDuringRun):
+            generation_coordination.check_active()
+    assert checks == [False, True]
+    assert session.paid_phase is None and session._provider_stack is None
 
 
 def _persist_shared_content(

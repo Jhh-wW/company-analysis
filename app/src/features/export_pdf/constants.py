@@ -6,6 +6,10 @@ import re
 from pathlib import Path
 from typing import Final
 
+from src.shared.report_generation.citation_constants import (
+    CITATIONS_NO_EXTERNAL_NEWS_NOTE as _CITATIONS_NO_EXTERNAL_NEWS_NOTE,
+)
+
 CONTENT_TYPE_PDF: Final[str] = "application/pdf"
 PDF_SUFFIX: Final[str] = ".pdf"
 FILENAME_PATTERN: Final[str] = "{company_slug}-company-analysis" + PDF_SUFFIX
@@ -86,6 +90,25 @@ BODY_LEADING_PT: Final[float] = 14.1
 SHORT_TEXT_SECTION_MAX_HEIGHT_PT: Final[float] = 200.0
 CARD_LEADING_PT: Final[float] = 11.8
 TABLE_LEADING_PT: Final[float] = 10.0
+# 부록 시작에는 제목 블록 49pt, 안내문 15pt, 머리행 22pt와
+# 두 줄짜리 본문 3행(각 32pt)을 확보해 제목만 쪽 끝에 남지 않게 한다.
+APPENDIX_MIN_START_HEIGHT_PT: Final[float] = 182.0
+APPENDIX_MIN_START_ROWS: Final[int] = 3
+APPENDIX_CELL_PADDING_PT: Final[float] = 6.0
+#: A4 세로 길이(297mm). 부록 꼬리 두 행이 한 쪽에 들어가는지 잴 때 쓴다.
+A4_HEIGHT_PT: Final[float] = 297 * 72 / 25.4
+#: 부록 표의 «머리행 + 마지막 두 본문 행»이 이 높이 안에 들어갈 때만 두 행을
+#: 함께 넘긴다(NOSPLIT). 안 들어가는데 묶으면 reportlab이 쪼갤 자리를 못 찾아
+#: LayoutError로 PDF 생성이 통째로 죽는다(2026-09-23 독립 검토 N1 실측).
+#: reportlab ``Frame``의 기본 위·아래 padding(각 6pt). SimpleDocTemplate이 만드는
+#: 본문 틀은 여백 안쪽에서 이만큼을 더 빼므로, 빼지 않으면 12pt만큼 큰 값을
+#: «들어간다»고 잘못 판정해 경계에서 LayoutError가 난다(2026-09-23 총괄 실측).
+FRAME_VERTICAL_PADDING_PT: Final[float] = 6.0 * 2
+APPENDIX_TAIL_MAX_HEIGHT_PT: Final[float] = (
+    A4_HEIGHT_PT - PAGE_TOP_MARGIN_PT - PAGE_BOTTOM_MARGIN_PT - FRAME_VERTICAL_PADDING_PT
+)
+#: 꼬리 높이를 잴 때 넘겨 주는 «충분히 큰» 가용 높이. 실제 쪽 높이가 아니다.
+APPENDIX_MEASURE_HEIGHT_PT: Final[float] = 100000.0
 META_FONT_SIZE_PT: Final[float] = 6.8
 # 표지 다음 첫 본문 페이지 맨 위 마스트헤드 — 표지 제목(34pt)보다
 # 한 단계 작고 장 제목(20pt)보다 커서, 표지와 겹치지 않으면서도 눈에 띄는
@@ -118,6 +141,9 @@ EMPTY_DEFAULT_REASON: Final[str] = "해당 자료를 찾지 못했습니다"
 CITATIONS_NOTE: Final[str] = (
     "본문의 번호가 아래 원문을 가리킵니다."
 )
+# 글자의 정본은 shared다 — 같은 문구를 Notion·웹·출처 계층도 쓴다.
+# 여기서는 이름만 그대로 재노출해 기존 `constants.CITATIONS_...` 참조를 지킨다.
+CITATIONS_NO_EXTERNAL_NEWS_NOTE: Final[str] = _CITATIONS_NO_EXTERNAL_NEWS_NOTE
 SOURCE_STATE_LABEL: Final[dict[str, str]] = {
     "ok": "찾음",
     "none": "없음",

@@ -637,8 +637,25 @@ def test_웹_v2는_ledger를_렌더하지_않는다(monkeypatch: pytest.MonkeyPa
 #:   ``<dd>`` 앞 네 글자만 빠졌고 다른 줄은 한 글자도 안 바뀌었다.
 _V1_GOLDEN = Path(__file__).with_name("result_v1_article_golden.html")
 _V1_GOLDEN_TEXT_SHA256_CURRENT_APPROVED = (
-    "a0fc023200750228c05b9fb5830708d51538c0df9a5762f93e81212093eca2c1"
+    # 2026-09-23: 기존 날짜 점 표기와 부록 안내·공식 웹 라벨을 반영했다.
+    "9e31b84f75c32bde2a1f5e39539f7e76c9c26245d807ae67449b2796912b12c2"
 )
+
+
+@pytest.mark.parametrize("has_news", [False, True])
+@pytest.mark.parametrize("sealed", [False, True])
+def test_웹_부록에_외부_언론_0건만_알린다(monkeypatch, has_news, sealed):
+    from src.features.provenance.sources import SourceKind
+
+    report = _sealed_v2_report() if sealed else build_demo_report()
+    citations = [replace(source, kind=SourceKind.FILING) for source in report.citations]
+    if has_news:
+        citations[0] = replace(citations[0], kind=SourceKind.NEWS)
+    report = replace(report, citations=citations)
+    if sealed:
+        report = replace(report, public_projection=build_public_projection(report))
+    body = _render(report, monkeypatch, report_id="external-news-notice")
+    assert ("이 보고서에는 외부 언론 보도 출처가 없습니다." in body) is (not has_news)
 
 
 class _TextExtractor(HTMLParser):

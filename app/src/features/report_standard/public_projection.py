@@ -33,7 +33,13 @@ from collections.abc import Mapping, Sequence
 from typing import Final, Optional
 
 from src.features.pipeline.port import Report, ReportSection, ReportTable
-from src.features.provenance.sources import Source, visible_citations
+from src.features.provenance.sources import (
+    Source,
+    external_news_notice,
+    source_label_display,
+    source_status_display,
+    visible_citations,
+)
 from src.features.report_standard.constants import SECTION_BY_ID
 from src.features.report_standard.cover_metrics import cover_metrics
 from src.features.report_standard.period_summary import period_summary_from_table
@@ -199,6 +205,7 @@ def build_public_projection(report: Report) -> PublicReportProjection:
         summary=_summary_rows(report),
         sections=sections,
         citations=citation_rows,
+        citations_note=external_news_notice(report.citations),
         summary_source_grade_contribution=ledgers.summary_contribution,
         grade_notice=_grade_notice(report),
     )
@@ -453,37 +460,11 @@ def _period_summary_block(table: ReportTable) -> Optional[PublicPeriodSummaryBlo
 
 
 def _source_label_display(source: Source) -> str:
-    """문서명 + 발행 주체. 웹·PDF가 «이미 같은 규칙»으로 만들던 값이다."""
-
-    label = (source.title or source.label).strip()
-    publisher = source.publisher.strip()
-    if publisher and publisher.casefold() not in label.casefold():
-        return f"{label}{_APPENDIX_JOINER}{publisher}"
-    return label
+    return source_label_display(source)
 
 
 def _source_status_display(source: Source) -> str:
-    """기준일과 자료 상태. 지금 PDF 부록이 쓰는 조립 규칙 그대로다.
-
-    ★ 웹 v2는 ``fact_status``를 빼고 그린다(채널이 갈라지던 자리다).
-      봉인은 «더 많이 말하는» PDF 쪽을 정본으로 삼는다 — 다운로드본이 정본이고,
-      빼는 것은 사실을 감추는 방향이라 되돌리기 어렵다.
-    """
-
-    parts: list[str] = []
-    if source.published_at:
-        parts.append(f"{source.published_at}{_PUBLISHED_SUFFIX}")
-    elif source.disclosed_at:
-        parts.append(f"{source.disclosed_at}{_DISCLOSED_SUFFIX}")
-    elif source.collected_at:
-        parts.append(f"{source.collected_at}{_COLLECTED_SUFFIX}")
-    else:
-        parts.append(_UNKNOWN_AS_OF_TEXT)
-    for value in (source.domain, source.source_type, source.fact_status):
-        cleaned = str(value or "").strip()
-        if cleaned and cleaned not in parts:
-            parts.append(cleaned)
-    return _APPENDIX_JOINER.join(parts)
+    return source_status_display(source)
 
 
 def _source_used_in_display(source: Source) -> str:

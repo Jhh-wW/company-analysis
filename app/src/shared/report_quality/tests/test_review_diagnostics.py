@@ -30,6 +30,9 @@ def test_transport_contract_matches_the_actual_producer():
     from src.features.composer.absence_claim_constants import (
         ABSENCE_CLAIM_UNSUPPORTED,
     )
+    from src.features.composer.accounting_policy_constants import (
+        ACCOUNTING_POLICY_BOILERPLATE,
+    )
     from src.features.composer.challenge_constants import CHALLENGE_RESPONSE_MISSING
     from src.features.composer.future_plan_constants import (
         FUTURE_REASON_CODES, FUTURE_SECTION_NO_FORWARD_STATEMENT,
@@ -60,6 +63,8 @@ def test_transport_contract_matches_the_actual_producer():
         # 둘 다 새 사유 코드를 쓰므로 이 전송 계약에도 함께 등록한다.
         CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
         ABSENCE_CLAIM_UNSUPPORTED,
+        # 전 장 공통 회계정책 상용구 가드의 사유 코드(2026-09-22).
+        ACCOUNTING_POLICY_BOILERPLATE,
         *PROSE_OWN_SOURCE_REASON_CODES,
         *EXECUTIVE_STATUS_REASON_TEXTS,
         # 수량 범위 결속(«결합» 유형) — 진단 우선 모드라도 전송 계약에는 항상 있어야

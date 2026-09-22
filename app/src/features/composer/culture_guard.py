@@ -24,6 +24,14 @@ from src.features.composer.culture_constants import (
     CULTURE_ARTICLES_CONTEXT_RE,
     CULTURE_ARTICLES_RE,
     CULTURE_ATTRIBUTION_RE,
+    CULTURE_AUDIT_COMMITTEE_RE,
+    CULTURE_AUDIT_COMPOSITION_RE,
+    CULTURE_AUDIT_QUALIFICATION_RE,
+    CULTURE_BOARD_BODY_RE,
+    CULTURE_BOARD_CHARTER_RE,
+    CULTURE_BOARD_PEOPLE_PROCEDURE_RE,
+    CULTURE_EMPLOYEE_BENEFICIARY_RE,
+    CULTURE_EMPLOYEE_FINANCIAL_BENEFIT_RE,
     CULTURE_EVIDENCE_SCOPE_MISMATCH,
     CULTURE_EXTERNAL_AUDIT_RE,
     CULTURE_ORG_UNIT_STOPWORDS,
@@ -40,6 +48,7 @@ from src.features.composer.culture_constants import (
     CULTURE_FINANCIAL_RISK_RULE_RE,
     CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,
     CULTURE_FLOW_CELL_COUNT,
+    CULTURE_GOVERNANCE_TRANSACTION_RE,
     CULTURE_PEOPLE_INSTITUTION_RE,
     CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
     CULTURE_SECTION_ORG_ACTION_NEGATION_RE,
@@ -55,6 +64,8 @@ from src.features.composer.culture_constants import (
     CULTURE_SUPPORT_PARTICLES,
     CULTURE_SUPPORT_STOPWORDS,
     CULTURE_SUPPORT_TOKEN_SPLIT_RE,
+    CULTURE_TRANSACTION_APPROVAL_BODY_RE,
+    CULTURE_TRANSACTION_APPROVAL_RE,
     CURRENT_CULTURE_DENIAL_RE,
     EXPLICIT_CULTURE_RE,
     FLOW_GOAL_QUALIFIER_RE,
@@ -218,6 +229,42 @@ def _has_org_actor(clause: str) -> bool:
     return False
 
 
+def _is_board_charter_clause(surface_clause: str) -> bool:
+    """이사회 «자체»의 구성·운영·규정만 말한 절인가.
+
+    세 표지가 같은 절에 함께 있을 때만 참이다 — 이사회라는 기관 이름, 그 기관
+    자체의 구성·운영·규정 표현, 그리고 사람·업무 절차 어휘의 «부재». 실제 8장
+    첫 문장이 기댄 정관 제31조 ②가 조직 주체+행위(②)와 「권한의 위임」(④)으로
+    통과하던 자리다. 직원교육·보상·「부서장에게 위임」처럼 실제 절차가 같은
+    절에 있으면 그대로 보존한다 — 상수 주석에 실측 근거가 있다.
+    """
+
+    if not (CULTURE_BOARD_BODY_RE.search(surface_clause)
+            and CULTURE_BOARD_CHARTER_RE.search(surface_clause)):
+        return False
+    return not CULTURE_BOARD_PEOPLE_PROCEDURE_RE.search(surface_clause)
+
+
+def _is_statutory_governance_clause(surface_clause: str) -> bool:
+    """일반 기관 구성·거래 승인 규정을 실제 사람·업무 제도와 구분한다."""
+
+    if (CULTURE_AUDIT_COMMITTEE_RE.search(surface_clause)
+            and CULTURE_AUDIT_COMPOSITION_RE.search(surface_clause)
+            and CULTURE_AUDIT_QUALIFICATION_RE.search(surface_clause)):
+        return True
+    if _is_board_charter_clause(surface_clause):
+        return True
+    if not (CULTURE_GOVERNANCE_TRANSACTION_RE.search(surface_clause)
+            and CULTURE_TRANSACTION_APPROVAL_BODY_RE.search(surface_clause)
+            and CULTURE_TRANSACTION_APPROVAL_RE.search(surface_clause)):
+        return False
+    employee_benefit = (
+        CULTURE_EMPLOYEE_BENEFICIARY_RE.search(surface_clause)
+        and CULTURE_EMPLOYEE_FINANCIAL_BENEFIT_RE.search(surface_clause)
+    )
+    return not employee_benefit
+
+
 def _clause_carries_section_subject(clause: str) -> bool:
     """그 절이 8장(인재상·조직문화·일하는 방식)의 소재를 담고 있는가.
 
@@ -229,6 +276,12 @@ def _clause_carries_section_subject(clause: str) -> bool:
        본다 — 「회사측 : 감사위원회 위원 3명 … 감사인 : 업무수행이사 외 2명」
        같은 참석자 표가 위원회와 절차 동사를 함께 담고 있어 ②로 통과하던
        자리다(실측 29건).
+    ①'' 법정 감사위원 구성 요건과 금융·자산 거래 승인 규정도 제외한다.
+       사외이사·이사회 의결이라는 말만으로 문화 근거가 생기지 않는다.
+       이사회 «자체»의 구성·운영·규정(정관 이사회 조항·이사회 규정·헌장)도
+       같은 자리에서 제외한다 — 사람·업무 절차 어휘가 같은 절에 없을 때만.
+       ②·④보다 «먼저» 본다: 실제 8장 문장은 「이사회」+「운영에」로 ②를,
+       「권한의 위임」으로 ④를 통과했다.
     ② 조직 주체 + 부정되지 않은 절차 동사 = 「누가 맡는지」를 말한 절. 8장
        안내문이 밝힌 예외(재무 위험을 누가 맡는지 조직으로 설명한 문장)가
        여기다. 동사만으로는 인정하지 않는다 — 「손상여부를 검토하는」 같은
@@ -243,6 +296,8 @@ def _clause_carries_section_subject(clause: str) -> bool:
     if SOURCE_UNAVAILABLE_RE.search(surface_clause):
         return False
     if CULTURE_EXTERNAL_AUDIT_RE.search(surface_clause):
+        return False
+    if _is_statutory_governance_clause(surface_clause):
         return False
     if (_has_org_actor(clause)
             and CULTURE_SECTION_ORG_ACTION_RE.search(surface_clause)

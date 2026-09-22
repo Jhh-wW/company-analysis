@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
@@ -51,6 +52,12 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     DIAGRAM_STAGE_SECTION_EVIDENCE,
     EMPTY_RECOVERY_NO_BUDGET,
     EMPTY_RECOVERY_NO_EVIDENCE,
+    STYLE_COUNTS_FIELD,
+    STYLE_RENDER_EVIDENCE_AVAILABLE,
+    STYLE_RENDER_FIELD,
+    STYLE_RENDER_PRIMARY,
+    STYLE_RENDER_SUPPLEMENT,
+    STYLE_STEP,
     SUMMARY_STEP,
 )
 from src.features.composer.logic import (
@@ -106,6 +113,7 @@ from src.features.composer.evidence_availability import (
 )
 from src.features.composer.dedupe import (
     drop_cross_section_duplicates,
+    reconcile_section_notices,
     sections_with_program_tables,
 )
 from src.features.composer.news_usage import supplement_news_candidates, retain_verified_news, news_usage_diagnostics, news_citation_ids
@@ -197,6 +205,7 @@ from src.features.composer.validate import V2ValidationError, validate_v2
 # ★ verify_sentences를 «일부러» 들여오지 않는다 — 요약 재검증 단계가 없어졌고,
 #   import가 남아 있으면 다음 사람이 무심코 다시 부를 자리가 된다.
 from src.features.composer.verify import verify_report
+from src.features.composer.parallel_section_constants import SERIAL_SECTION_CALLS
 from src.features.pipeline.port import FactRecord, Grade, Report
 from src.features.provenance.sources import Source
 # ★ 경계 메모 — ``composer/render.py``·``port.py`` 머리말은 「composer는
@@ -309,11 +318,13 @@ class V2RunOutput:
 
 
 class _CallLedgerRecorder:
-    """FULL의 실제 writer/reviewer 호출을 원문 없이 순서대로 기록한다."""
+    """실제 호출 결과를 사전에 결속한 장별 배정 순서로 기록한다."""
 
     def __init__(self) -> None:
         self._records: list[GenerationCallRecord] = []
         self._role_counts: dict[tuple[ValidationRound, str], int] = {}
+        self._lock = threading.RLock()
+        self._next_sequence = 0
 
     def wrap(
         self,
@@ -331,58 +342,100 @@ class _CallLedgerRecorder:
         ):
             raise ValueError("AI 호출 장부에는 명시적 소유 장 tuple이 필요합니다")
 
-        def tracked(prompt: str) -> str:
-            key = (validation_round, role)
-            role_index = self._role_counts.get(key, 0) + 1
-            if role_index > len(section_ids):
-                raise RuntimeError(
-                    "승인한 validation round·role의 AI 호출 수를 넘었습니다"
-                )
-            self._role_counts[key] = role_index
-            section_id = section_ids[role_index - 1]
-            sequence = len(self._records) + 1
+        def reserve(section_id: str | None = None) -> tuple[int, int, str]:
+            # 네트워크 대기는 잠그지 않는다. 이 예약은 호출 장부의 배정 번호이며
+            # 실제 금액·횟수 admission은 공급자 경계가 별도로 보장한다.
+            with self._lock:
+                key = (validation_round, role)
+                role_index = self._role_counts.get(key, 0) + 1
+                if role_index > len(section_ids):
+                    raise RuntimeError("승인한 validation round·role의 AI 호출 수를 넘었습니다")
+                expected_section = section_ids[role_index - 1]
+                if section_id is not None and section_id != expected_section:
+                    raise ValueError("AI 호출 장의 배정 순서가 승인 목차와 다릅니다")
+                self._role_counts[key] = role_index
+                self._next_sequence += 1
+                return self._next_sequence, role_index, expected_section
+
+        def execute(reservation: tuple[int, int, str], prompt: str) -> str:
+            sequence, role_index, section_id = reservation
             try:
                 response = ask(prompt)
             except Exception as error:
-                self._records.append(
-                    GenerationCallRecord(
-                        sequence=sequence,
-                        role=role,
-                        role_index=role_index,
-                        section_id=section_id,
-                        prompt_sha256=exact_text_sha256(prompt),
-                        response_sha256="",
-                        outcome="failed",
-                        validation_round=validation_round,
-                        error_kind=type(error).__name__,
-                    )
-                )
-                raise
-            text = str(response)
-            self._records.append(
-                GenerationCallRecord(
+                record = GenerationCallRecord(
                     sequence=sequence,
                     role=role,
                     role_index=role_index,
                     section_id=section_id,
                     prompt_sha256=exact_text_sha256(prompt),
-                    response_sha256=exact_text_sha256(text),
-                    outcome="returned",
+                    response_sha256="",
+                    outcome="failed",
                     validation_round=validation_round,
+                    error_kind=type(error).__name__,
                 )
+                with self._lock:
+                    self._records.append(record)
+                raise
+            text = str(response)
+            record = GenerationCallRecord(
+                sequence=sequence,
+                role=role,
+                role_index=role_index,
+                section_id=section_id,
+                prompt_sha256=exact_text_sha256(prompt),
+                response_sha256=exact_text_sha256(text),
+                outcome="returned",
+                validation_round=validation_round,
             )
+            with self._lock:
+                self._records.append(record)
             return text
 
+        def tracked(prompt: str) -> str:
+            return execute(reserve(), prompt)
+
+        def bind_section(section_id: str) -> AskFn:
+            reservation = reserve(section_id)
+            used = False
+
+            def bound(prompt: str) -> str:
+                nonlocal used
+                with self._lock:
+                    if used:
+                        raise RuntimeError("배정된 장 작성 호출을 두 번 실행할 수 없습니다")
+                    used = True
+                return execute(reservation, prompt)
+
+            return bound
+
+        def refresh_capability() -> None:
+            tracked.parallel_safe = getattr(ask, "parallel_safe", False) is True
+            tracked.max_parallel_calls = getattr(ask, "max_parallel_calls", SERIAL_SECTION_CALLS)
+
+        def prepare_parallel() -> None:
+            prepare = getattr(ask, "prepare_parallel", None)
+            if callable(prepare):
+                prepare()
+            refresh_capability()
+
+        refresh_capability()
+        if role == "writer":
+            tracked.for_section = bind_section
+            tracked.prepare_parallel = prepare_parallel
         return tracked
 
     def freeze(self) -> GenerationCallLedger:
-        return GenerationCallLedger(tuple(self._records))
+        with self._lock:
+            # 배정만 된 작업은 호출로 세지 않는다. 실제 완료·실패 결과만 반환한다.
+            records = tuple(sorted(self._records, key=lambda record: record.sequence))
+            return GenerationCallLedger(records)
 
     def calls_for(self, validation_round: ValidationRound, *, role: str) -> int:
-        return sum(
-            record.validation_round is validation_round and record.role == role
-            for record in self._records
-        )
+        with self._lock:
+            return sum(
+                record.validation_round is validation_round and record.role == role
+                for record in self._records
+            )
 
 
 def _total_sentences(report: ComposedReport) -> int:
@@ -1110,6 +1163,47 @@ def _table_cite_is_bound(
     return int(raw_number) in numbers
 
 
+def _record_style_diagnostics(
+    diagnostics: Mapping[str, int], composition_diagnostics: list[dict],
+    *, render: str,
+) -> None:
+    """최종 렌더가 «지난 일정 미래형»으로 센 문장 수를 운영 기록에 남긴다.
+
+    ★ 왜 필요한가 (2026-09-22 독립 검토 실측) — `render_report`에
+      `style_diagnostics` 인자를 만들어 뒀는데 «어느 호출부도 넘기지 않았다».
+      시험은 인자를 직접 넘겨서 초록이었고, 그래서 배선 공백이 안 보였다.
+      개수를 여기서 받아 기록해야 운영이 실제로 이 값을 받았는지가 남는다.
+    ★ 왜 실행 기록 싱크에도 넣나 (2026-09-23 실측) — 처음 배선(9eda8bab)은
+      운영 로그에만 남겼다. 로그는 실행별로 되짚기 어렵고, 실행 진단(steps)
+      에는 이 값이 한 번도 실리지 않았다. 싱크에 넣으면 실행 기능이 finally
+      에서 공유 계약(`observed_composition_steps`)으로 걸러 steps 에 옮기므로
+      차단·예외로 끝난 실행에서도 남는다.
+    ★ 왜 닫힌 진단 목록(`REVIEW_SCOPE_ITEMS`)에 넣지 않나 — 그 목록은 화면
+      안내문이 「…개를 뺐습니다」로 세는 «제외» 장부다. 시제 표기는 문장을
+      빼지 않고 표시만 고쳐 그대로 싣기 때문에, 거기에 넣으면 빠지지 않은
+      문장을 뺐다고 말하게 된다(도식 «파생 비율» 기록과 같은 이유).
+    ★ 0건이면 로그도 싱크 기록도 만들지 않는다 — 매 실행 빈 이벤트가 쌓이면
+      운영 기록이 의미 없는 줄로 찬다.
+    ★ `render` 는 닫힌 렌더 구분(1차/보충/확보근거)이다 — 본 경로 1차 렌더를
+      기록한 뒤 보충이 돌면 병합본 렌더가 «다시» 기록되고 출고되는 것은 보충
+      쪽이다. 구분 없이 두 기록을 더하면 보충 대상이 아닌 장의 같은 문장을
+      두 번 센다(2026-09-23 독립 검토).
+    ⚠️ 회사 원문 글자는 담지 않는다 — 사유 이름과 개수만 남긴다.
+    """
+
+    if not diagnostics:
+        return
+    logger.info(
+        "최종 렌더 문체 진단(운영): %s",
+        dict(sorted(diagnostics.items())),
+        extra={"pipeline_style_diagnostics": dict(diagnostics)},
+    )
+    composition_diagnostics.append({
+        "step": STYLE_STEP, STYLE_RENDER_FIELD: render,
+        STYLE_COUNTS_FIELD: dict(diagnostics),
+    })
+
+
 def _notice_only_sections(final: ComposedReport) -> dict[str, str]:
     """문장이 하나도 없고 안내만 남은 장 → 안내문. 파이프라인 빈 등록부 guard용."""
 
@@ -1248,6 +1342,7 @@ def _finish_evidence_available(
         body, fragments, diagnostics=review_diagnostics,
     )
     final, numeric_filtering = _rule_summary_stage(body, numeric_filtering)
+    style_diagnostics: dict[str, int] = {}
     rendered = render_report(
         company_name,
         final,
@@ -1268,6 +1363,11 @@ def _finish_evidence_available(
         verified_program_facts=verified_program_facts,
         program_registry_sources=program_registry_sources,
         name_table=name_table,
+        style_diagnostics=style_diagnostics,
+    )
+    _record_style_diagnostics(
+        style_diagnostics, composition_diagnostics,
+        render=STYLE_RENDER_EVIDENCE_AVAILABLE,
     )
     quality_candidate = build_generation_quality_candidate(rendered, final)
     generation_assessment, quality_observation = assess_and_observe_generation(
@@ -2278,6 +2378,21 @@ def run_v2(
             ),
         )
 
+    # ②-f 안내문 최종 대조 — 여기가 «문장이 더 이상 바뀌지 않는» 마지막 자리다.
+    #     중복 제거가 「그쪽으로 모았습니다」를 붙인 뒤에도 본문 검수·수치 안전·
+    #     빈 장 복구·보도표 보강이 문장을 지우거나 더한다. 그래서 안내문을 붙인
+    #     자리에서는 참이던 말이 화면에서는 거짓이 된다(실측 — 뤼튼 8장은
+    #     「다른 장에 있다」는데 어느 장에도 없었고, 메디라인 4장은 「비어
+    #     있다」면서 바로 아래에 실적 표가 실렸다).
+    #     ★ 요약 고르기·렌더·봉인 «앞»에 둔다. 뒤에 두면 봉인된 글자와 화면이
+    #       갈라진다 — 안내문은 render_report가 장 첫 문단으로 그대로 싣는다.
+    #     ★ 표 자리는 중복 제거 때와 «같은 함수»로 만든다. 두 벌이 되면 한쪽만
+    #       고쳐져 「표가 남는다」와 「비어 있다」가 다시 어긋난다.
+    verified = reconcile_section_notices(
+        verified,
+        sections_with_program_tables(performance_table, composition_tables),
+    )
+
     # ③ 요약. 두 갈래 모두 «본문에 없던 말을 새로 만들지 않는다». SHADOW는
     # 검증된 본문 문장 중 AI가 고른 3~5문장을 쓰고(AI 1회), 엄격 모드는
     # 렌더러가 만든 검증 FactRecord에 정확히 결속된 본문 문장을 0원으로
@@ -2400,6 +2515,12 @@ def run_v2(
         if public_structure_seal is None
         else {"public_structure_seal": public_structure_seal}
     )
+    # ★ 문체 진단은 후보 본문의 «최종» 렌더에서만 받는다. 위 `body_rendered`는
+    #   요약 후보를 고르려고 버리는 중간 산출이라, 거기서도 받으면 같은 문장을
+    #   두 번 세어 개수가 부풀려진다. 이 1차 렌더는 보충(RUN_SUPPLEMENTS)이
+    #   돌면 출고되지 않고 보충 병합본이 대신 나간다 — 그래서 기록에 닫힌
+    #   «렌더» 칸(1차/보충)을 실어 소비자가 구별하게 한다.
+    style_diagnostics: dict[str, int] = {}
     rendered = render_report(
         company_name,
         final,
@@ -2428,7 +2549,11 @@ def run_v2(
             else ()
         ),
         name_table=name_table,
+        style_diagnostics=style_diagnostics,
         **seal_render_kwargs,
+    )
+    _record_style_diagnostics(
+        style_diagnostics, composition_diagnostics, render=STYLE_RENDER_PRIMARY,
     )
     primary_block_sha256s: tuple[tuple[str, str], ...] = ()
     if public_structure_seal is not None:
@@ -2635,6 +2760,18 @@ def run_v2(
                 supplement_numeric_filtering
             ).merged(merged_numeric_filtering)
 
+            # 본 경로와 같은 안내문 대조를 병합본에도 건다 — 보충이 대상 장을
+            # 다시 채웠으면 그 장에 남은 「비어 있습니다」를 여기서 지운다.
+            # ★ 대상 장«만» 고친다. 비대상 장이 1회차와 한 글자라도 달라지면
+            #   보충 결속 검사가 「승인하지 않은 장이 보충 중 바뀌었습니다」로
+            #   보고서 전체를 막는다(shared/report_recovery.py). 비대상 장의
+            #   본문은 1회차와 같으므로 1회차 대조 결과가 그대로 유효하다.
+            verified = reconcile_section_notices(
+                verified,
+                sections_with_program_tables(performance_table, composition_tables),
+                section_ids=frozenset(targets),
+            )
+
             # 요약·manifest·render·quality candidate/assessment는 보충 병합본에서
             # 모두 새로 만든다. 첫 후보의 전역 파생물을 재사용하지 않는다.
             body_rendered = render_report(
@@ -2696,6 +2833,9 @@ def run_v2(
                 program_registry_sources=prepared_evidence.program_sources,
                 name_table=name_table,
             )
+            # 본 경로와 같은 이유로 중간 렌더가 아닌 병합본의 «최종» 렌더에서만
+            # 받는다. 이 기록은 «보충» 렌더로 구별돼 위 1차 기록과 더해지지 않는다.
+            supplement_style_diagnostics: dict[str, int] = {}
             rendered = render_report(
                 company_name,
                 final,
@@ -2717,6 +2857,11 @@ def run_v2(
                 verified_program_facts=prepared_evidence.program_facts,
                 program_registry_sources=prepared_evidence.program_sources,
                 name_table=name_table,
+                style_diagnostics=supplement_style_diagnostics,
+            )
+            _record_style_diagnostics(
+                supplement_style_diagnostics, composition_diagnostics,
+                render=STYLE_RENDER_SUPPLEMENT,
             )
             assert_report_matches_public_structure(
                 rendered,

@@ -33,10 +33,8 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
         if os.name == "nt":
             import msvcrt  # Windows에서만 존재한다.  # noqa: PLC0415
 
-            lock_file.seek(0, os.SEEK_END)
-            if lock_file.tell() == 0:
-                lock_file.write(b"\0")
-                lock_file.flush()
+            # Windows는 EOF 밖의 범위도 잠근다. 초기화용 바이트를 먼저 쓰면
+            # 다른 프로세스가 잠근 첫 바이트와 충돌하므로 빈 파일 그대로 잡는다.
             lock_file.seek(0)
             msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
             try:

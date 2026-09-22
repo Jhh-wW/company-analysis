@@ -24,6 +24,8 @@ ROW_EVIDENCE_MISMATCH = "evidence_ids_mismatch"
 ROW_NUMBER_CONFLICT = "number_conflicting_duplicate"
 
 PROTOCOL_STEP = "8_본문검수_응답판독"
+SECTION_EXECUTION_STEP = "v2_작성_실행방식"
+SECTION_EXECUTION_COUNT_FIELDS = ("동시상한", "장수", "소요_ms")
 SUMMARY_STEP = "8_핵심요약_단계"
 BODY_MACHINE_STEP = "8_본문검수_기계통과"
 BODY_DISPOSITION_STEP = "8_본문검수_처분"
@@ -182,4 +184,41 @@ SECTION_MOVE_BLOCKERS = frozenset((
     SECTION_MOVE_BLOCKED_TARGET_RULE,
     SECTION_MOVE_BLOCKED_DUPLICATE,
     SECTION_MOVE_BLOCKED_NO_TARGET,
+))
+
+# ── 최종 렌더 «문체·시점 표기» 기록 ──────────────────────────────────────
+#
+# ★ 왜 실행 기록까지 올리나 (2026-09-23 실측) — 최종 렌더의 문체 정규화기는
+#   «지난 일정의 미래형» 절 수를 세어 두었지만, composer 는 그 수를 운영
+#   로그(logger extra)에만 남기고 실행 기록 싱크에는 넣지 않았다. 로그는
+#   실행별로 되짚기 어렵고 보존 기간도 다르므로, 「이 실행에서 시제 표기가
+#   몇 번 붙었나」가 실행 진단(steps)에는 한 번도 남지 않았다.
+# ★ 원문 글자는 담지 않는다 — 닫힌 사유 코드와 «개수»만 통과시킨다.
+# ★ 이 기록은 «검수 제외» 장부(review_diagnostic_constants.REVIEW_SCOPE_ITEMS)
+#   가 아니다. 시제 표기는 문장을 빼지 않고 표시만 고쳐 그대로 싣기 때문에,
+#   제외 장부에 넣으면 화면 안내문이 안 뺀 문장을 「…개를 뺐습니다」로 센다
+#   (도식 «파생 비율»·«장 이동» 기록과 같은 이유).
+STYLE_STEP = "8_문체_표기"
+#: 지난 일정(기준일 이전 날짜)의 미래형 절에 원문 기준 표기를 붙인 수의 사유 코드.
+#: composer 의 `style_normalizer_constants.PAST_DATED_FUTURE_TENSE` 와 «반드시
+#: 같은 값»이어야 한다 — 공유 계층이 feature 를 import 하지 않도록 장 이동
+#: 사유 코드(SECTION_MOVE_REASONS)와 같은 방식으로 글자를 적고, composer 쪽
+#: 시험이 두 값을 맞댄다.
+STYLE_REASON_PAST_DATED_FUTURE_TENSE = "past_dated_future_tense"
+STYLE_REASONS = frozenset((STYLE_REASON_PAST_DATED_FUTURE_TENSE,))
+#: 사유별 개수를 담는 칸 이름. 값은 «1 이상의 정수»만 받는다 — 0건이면
+#: composer 가 기록 자체를 만들지 않으므로(빈 이벤트 금지) 0은 계약 밖이다.
+STYLE_COUNTS_FIELD = "사유별"
+#: 어느 렌더의 관측인지 — 닫힌 값. 같은 실행에서 문체 기록이 둘 생길 수 있다:
+#: 본 경로 «1차» 렌더를 기록한 뒤 보충(RUN_SUPPLEMENTS)이 돌면 «보충» 병합본
+#: 렌더가 다시 기록되고, 그때 출고되는 것은 보충 쪽이다. 구별 칸이 없으면
+#: 소비자가 출고본의 개수를 고를 수 없고, 보충 대상이 아닌 장의 같은 문장이
+#: 두 기록에 거듭 세어진 것도 알 수 없다(2026-09-23 독립 검토). 확보 근거
+#: (강등) 보고서의 렌더는 «확보근거»다.
+STYLE_RENDER_FIELD = "렌더"
+STYLE_RENDER_PRIMARY = "1차"
+STYLE_RENDER_SUPPLEMENT = "보충"
+STYLE_RENDER_EVIDENCE_AVAILABLE = "확보근거"
+STYLE_RENDERS = frozenset((
+    STYLE_RENDER_PRIMARY, STYLE_RENDER_SUPPLEMENT, STYLE_RENDER_EVIDENCE_AVAILABLE,
 ))

@@ -306,7 +306,7 @@ def test_CacheablePrompt는_str처럼_행동한다():
     assert isinstance(prompt, str)
     assert str(prompt) == prompt
     assert exact_text_sha256(prompt) == exact_text_sha256(str(prompt))
-    # 이어 붙이면 표식이 사라진다 — 의도된 동작(재시도는 캐시를 포기한다).
+    # 일반 덧셈은 표식을 지운다. 작성 형식 재시도만 경계를 명시적으로 보존한다.
     이어붙임 = prompt + "x"
     assert isinstance(이어붙임, str)
     assert not isinstance(이어붙임, CacheablePrompt)

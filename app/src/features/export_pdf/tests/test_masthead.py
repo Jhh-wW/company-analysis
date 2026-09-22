@@ -60,7 +60,7 @@ def test_표지_다음_장_첫_줄은_회사명이다() -> None:
 
 
 def test_마스트헤드_둘째줄은_표지_메타와_같은_생성일을_쓴다() -> None:
-    report = _report(generated_at="2026-08-19T09:30:00+09:00")
+    report = _report(generated_at="2026-09-22T09:30:00+09:00")
     _company_line, meta_line = masthead_lines(report)
 
     lines = _page2_lines(build_pdf(report))
@@ -68,10 +68,11 @@ def test_마스트헤드_둘째줄은_표지_메타와_같은_생성일을_쓴�
     assert lines[2] == meta_line
 
     # 표지(_cover_metadata)의 「내용 생성」 라벨과 같은 generated_at 필드·
-    # 같은 KST 변환을 쓴다 — 구분자(마침표 vs 대시)만 다르고 날짜는 같다.
+    # 같은 KST 변환과 점 구분자를 쓴다.
     cover_generated = _display_generated_at(report)
     assert cover_generated
-    assert cover_generated.replace(".", "-") in meta_line
+    assert cover_generated == "2026.09.22"
+    assert f"생성일 {cover_generated}" in meta_line
 
 
 def test_마스트헤드_회사명은_표지_제목보다_작고_장제목보다_크다() -> None:

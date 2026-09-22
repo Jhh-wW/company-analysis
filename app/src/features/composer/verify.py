@@ -30,6 +30,12 @@ from src.features.composer.news_constants import NEWS_REVIEW_GUIDE
 from src.features.composer.news_usage import attribution_prefix, news_metadata
 from src.features.composer.news_block import _is_news_fragment
 from src.features.composer.absence_claim_guard import absence_claim_problem
+from src.features.composer.accounting_policy_constants import (
+    ACCOUNTING_POLICY_MIXED,
+)
+from src.features.composer.accounting_policy_guard import (
+    accounting_policy_mixed, accounting_policy_problem,
+)
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_accounting_policy_problem,
     culture_financial_risk_goal_problem,
@@ -117,6 +123,7 @@ from src.features.composer.review_schema import (
     FLAT_REVIEW_SCHEMA,
     ReviewPrompt,
 )
+from src.features.composer.prompt_metadata import with_review_prompt_cache
 
 import hashlib
 import json
@@ -227,6 +234,10 @@ def _challenge_section_prose_problem(
       (`challenge_response_*`)는 «도식 칸»에만 걸린다 — 산문에는 걸리지 않는다.
     ★ 장과 무관한 검사(자기 근거·부재 단언·수치·추세·시점)는 이미 같은 후보에
       그대로 걸렸다. 장을 옮긴다고 다시 걸 것이 없다.
+    ★ 회계정책 상용구 가드(`accounting_policy_problem`)도 이 목록에 «없다» —
+      culture 를 뺀 모든 장 본문에 «같은 잣대»로 걸리고, 거기 걸린 후보는 6장
+      이동 분기에 닿기 전에 이미 제외된다. 출발 장과 도착 장의 답이 같으므로
+      도착 장에서 다시 볼 것이 없다.
     ⚠️ 이 목록이 `_apply_grounding` 과 어긋나면 옮긴 문장만 검사를 덜 받는다.
       두 벌이 되지 않게 `test_future_section_contract.py` 의 대조 시험이 실제
       `_apply_grounding` 을 5장 문맥으로 돌려 같은 판정이 나오는지 확인한다.
@@ -1135,6 +1146,7 @@ def _build_grouped_review_prompt(
             "줄이거나 생략하라는 뜻이 아니다.\n"
         ),
     ]
+    fixed_prefix_chars = sum(map(len, parts))
     section_order: list[str] = []
     for item in items:
         if item.section_id not in section_order:
@@ -1219,7 +1231,7 @@ def _build_grouped_review_prompt(
             ))
         parts.append("===== 장별 검수 블록 끝 =====\n")
     parts.append(REVIEW_TRUSTED_TAIL)
-    return "".join(parts)
+    return with_review_prompt_cache("".join(parts), fixed_prefix_chars=fixed_prefix_chars)
 
 
 def _grouped_row_reason(
@@ -1767,6 +1779,29 @@ def _apply_grounding(
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
                 continue
+        # ★ 회계정책 주석 상용구는 «장을 가리지 않는다». 8장에만 가드가 있어서
+        #   실제 PDF의 9장이 금융자산 측정·정부보조금·현금성자산 정의·대손충당금
+        #   4문장으로, 5장이 이연법인세 문장으로, 1·2·5장이 수익인식 기준·재고자산
+        #   총평균법·유동성 관리 상용구로 채워졌다.
+        # ⚠️ culture 장은 «건드리지 않는다» — 아래 전용 경로가 그대로 맡아야
+        #   기존 사유 코드(culture_accounting_policy_misplaced)가 유지된다.
+        # ⚠️ 요약·도식에는 걸지 않는다. 요약은 본문 문장을 다시 쓰는 것이라
+        #   본문에서 걸리면 충분하고, 도식 칸은 자기 계약이 따로 있다.
+        if (context and context[1] == DIAGNOSTIC_KIND_BODY
+                and context[0] != "culture"):
+            problem = accounting_policy_problem(text)
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
+            if accounting_policy_mixed(text):
+                # 차단하지 않는다 — 회사 고유 사실이 같은 항목에 섞여 있어서
+                # 통째로 지우면 그 사실까지 함께 사라진다. 관측만 남긴다.
+                logger.info(
+                    "회계정책 상용구 혼합 관측: %s, 후보 %d, 장 %s, 후보지문 %s",
+                    ACCOUNTING_POLICY_MIXED, number, context[0],
+                    hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                )
         # 실제 소유 장을 따른다. 오래된 주장 슬롯만으로 요약이나 다른 장의
         # 정상 회계 설명까지 문화 장의 배치 제한에 넣지 않는다.
         if context and context[:2] == ("culture", DIAGNOSTIC_KIND_BODY):
@@ -2081,6 +2116,7 @@ def _build_review_prompt(
         FUTURE_PLAN_REVIEW_GUIDE, REVIEW_JSON_GUIDE,
     ]
     # 단건·재검수 경로에도 실제 후보의 소유 장만 전달한다.
+    fixed_prefix_chars = sum(map(len, parts))
     section_ids = dict.fromkeys(_review_item_section(item) for item in items)
     for section_id in section_ids:
         if section_id in SECTION_GUIDES:
@@ -2120,7 +2156,7 @@ def _build_review_prompt(
             verbatim_source=(verbatim_by_number or {}).get(item.number),
         ))
     parts.append(REVIEW_TRUSTED_TAIL)
-    return "".join(parts)
+    return with_review_prompt_cache("".join(parts), fixed_prefix_chars=fixed_prefix_chars)
 
 
 def _parse_verdicts(
@@ -2257,8 +2293,13 @@ def _ask_verdicts(
             requested_count=len(requested_numbers),
         )
 
-    raw = _safe_ask(reviewer, prompt)
-    observe = _observe_attempt(1, prompt, raw)
+    # 최초 본문 검수의 JSON 형식 재시도를 줄이되 원문과 캐시 경계는 보존한다.
+    # 후속 재검수는 기존처럼 일반 문자열로 시작한다.
+    initial_prompt = (
+        ReviewPrompt(prompt, FLAT_REVIEW_SCHEMA) if initial_ask is not None else prompt
+    )
+    raw = _safe_ask(reviewer, initial_prompt)
+    observe = _observe_attempt(1, initial_prompt, raw)
     verdicts = _parse_verdicts(
         raw, observe=observe, requested_numbers=requested_numbers,
     )

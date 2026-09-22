@@ -8,9 +8,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import re
 from typing import Final, Sequence
 
 from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
+from src.features.composer.extractive_summary_constants import (
+    SUMMARY_FORMAL_ENDING_PATTERN,
+    SUMMARY_FORMAL_ENDING_SCORE,
+    SUMMARY_INTERPRETED_SCORE,
+    SUMMARY_LOW_VALUE_PATTERNS,
+    SUMMARY_LOW_VALUE_SCORE,
+    SUMMARY_NAMED_ENTITY_PATTERN,
+    SUMMARY_NAMED_ENTITY_SCORE,
+    SUMMARY_NUMERIC_PATTERN,
+    SUMMARY_NUMERIC_SCORE,
+)
 from src.features.composer.port import ComposedReport, ComposedSentence
 from src.features.pipeline.port import FactRecord
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
@@ -172,6 +184,19 @@ def _bound_fact_for_sentence(
     return fact
 
 
+def _summary_score(sentence: ComposedSentence) -> int:
+    """회계 상용구보다 회사의 구체적 사업 사실을 먼저 읽게 한다."""
+
+    text = sentence.text
+    return sum((
+        SUMMARY_NUMERIC_SCORE if re.search(SUMMARY_NUMERIC_PATTERN, text) else 0,
+        SUMMARY_NAMED_ENTITY_SCORE if re.search(SUMMARY_NAMED_ENTITY_PATTERN, text) else 0,
+        SUMMARY_LOW_VALUE_SCORE if any(pattern in text for pattern in SUMMARY_LOW_VALUE_PATTERNS) else 0,
+        SUMMARY_INTERPRETED_SCORE if sentence.grade == GRADE_INTERPRETED else 0,
+        SUMMARY_FORMAL_ENDING_SCORE if re.search(SUMMARY_FORMAL_ENDING_PATTERN, text) else 0,
+    ))
+
+
 def select_extractive_summary(
     report: ComposedReport,
     facts: Sequence[FactRecord],
@@ -192,24 +217,28 @@ def select_extractive_summary(
         if section is None:
             continue
         candidates: list[ExtractiveSummaryItem] = []
-        # 같은 장에서는 확인 문장을 해석 문장보다 먼저 고르되 원래 문장 순서는
-        # 각 등급 안에서 유지한다.
-        for grade in (GRADE_CONFIRMED, GRADE_INTERPRETED):
-            for sentence in section.sentences:
-                if sentence.grade != grade:
-                    continue
-                fact = _bound_fact_for_sentence(
-                    section_id,
-                    sentence,
-                    by_id=by_id,
-                    by_key=by_key,
+        for sentence in section.sentences:
+            fact = _bound_fact_for_sentence(
+                section_id,
+                sentence,
+                by_id=by_id,
+                by_key=by_key,
+            )
+            if fact is not None:
+                candidates.append(
+                    ExtractiveSummaryItem(section_id, sentence, fact.fact_id)
                 )
-                if fact is not None:
-                    candidates.append(
-                        ExtractiveSummaryItem(section_id, sentence, fact.fact_id)
-                    )
         if candidates:
-            pools[section_id] = candidates
+            # 숫자 가점이 확인 우선을 뒤집지 않게 등급부터 비교한다.
+            # 등급과 점수가 같으면 안정 정렬로 본문 순서를 지킨다.
+            pools[section_id] = sorted(
+                candidates,
+                key=lambda item: (
+                    item.sentence.grade != GRADE_INTERPRETED,
+                    _summary_score(item.sentence),
+                ),
+                reverse=True,
+            )
 
     selected: list[ExtractiveSummaryItem] = []
     seen_claims: set[str] = set()

@@ -11,7 +11,7 @@
 ★ 이 시험이 지키는 것
   ① 표식이 실린 프롬프트는 두 블록으로 나뉘고 «앞부분에만» 캐시 표식이 붙는다
   ② 두 블록을 이으면 원래 프롬프트와 글자 하나까지 같다  ← 내용 변조 금지
-  ③ 표식이 없으면(평범한 str·재시도 프롬프트) 예전처럼 통짜로 보낸다
+  ③ 표식이 없는 일반 문자열은 통짜로 보내고, 작성 형식 재시도는 경계를 보존한다
   ④ 이미 나뉜 블록을 계량 경계가 «다시 한 덩어리로» 감싸지 않는다
      (감싸면 매 호출 cache write만 나고 read가 0이 된다 — 실측과 같은 결말)
   ⑤ 실제 아홉 장 호출에서 첫 블록이 «바이트 동일»하다  ← 캐시가 맞는 유일한 조건
@@ -31,6 +31,7 @@ from src.features.budget import provider_budget
 from src.features.composer.constants import RETRY_REMINDER, SECTION_IDS
 from src.features.composer.logic import (
     CacheablePrompt,
+    _compose_one_section,
     build_section_prompt,
     compose_sections,
 )
@@ -199,6 +200,39 @@ def test_재시도로_이어붙인_프롬프트는_표식을_잃고_통짜로_�
     assert not isinstance(이어붙임, CacheablePrompt)
     assert _content(messages) == 이어붙임
     assert messages.cache_flags == [False]
+
+
+@pytest.mark.parametrize("shared_prefix", [False, True])
+def test_writer_format_retry_preserves_only_existing_evidence_cache(shared_prefix):
+    """형식 재시도도 원문·호출 수·계량을 유지하면서 같은 근거 블록을 재사용한다."""
+    prompt = build_section_prompt(
+        _COMPANY, "identity", _fragments(), None, (),
+        shared_evidence_prefix=shared_prefix,
+    )
+    ask, messages, _metered = _ask_and_messages(response_text="잘못된 JSON")
+
+    def retrying_ask(candidate):
+        response = ask(candidate)
+        messages._response_text = _EMPTY_SECTION_RESPONSE
+        return response
+
+    _compose_one_section("identity", prompt, retrying_ask)
+
+    assert len(messages.requests) == 2
+    first, second = _content(messages, 0), _content(messages, 1)
+    if shared_prefix:
+        assert isinstance(second, list)
+        assert first[0] == second[0]
+        assert first[0]["cache_control"] == _EPHEMERAL
+        assert "cache_control" not in second[1]
+        assert "".join(block["text"] for block in second) == str(prompt) + RETRY_REMINDER
+    else:
+        assert first == prompt
+        assert second == str(prompt) + RETRY_REMINDER
+    assert messages.cache_flags == [shared_prefix, shared_prefix]
+    for field in ("model", "temperature", "max_tokens"):
+        assert messages.requests[0][field] == messages.requests[1][field]
+    assert len(messages.counted_messages) == 2
 
 
 @pytest.mark.parametrize(

@@ -242,6 +242,7 @@ class ReportTable:
     cell_binding_refs: list[list[str]] = field(default_factory=list)
     #: 공개 행과 같은 순서의 실제 인용. 빈 값은 행 정보가 없는 옛 표다.
     row_cites: list[list[str]] = field(default_factory=list)
+    unaudited_years: tuple[str, ...] = ()
 
     @property
     def is_valid(self) -> bool:

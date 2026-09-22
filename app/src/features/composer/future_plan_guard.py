@@ -22,8 +22,8 @@
     양태가 원문에서 실제로 확인되는 것과 다르면 그 자체가 실패다.
   · 빈 문자열은 «이 검사에서 반례를 찾지 못했다»는 뜻이지 그 줄의 승인이 아니다.
     나머지 판정은 기존 수치·추세·시점·범위·인과·문화 검수가 그대로 한다.
-  · 표 계약은 그대로다. 6장 «본문 문장»은 회사를 주어로 세운 계획·전망 주장이
-    있을 때만 같은 근거를 요구한다(`future_plan_prose_problem`). 그 밖의 후보에는
+  · 표 계약은 그대로다. 6장 «본문 문장»은 회사에 명시적으로 귀속한 계획·전망
+    주장이 있을 때만 같은 근거를 요구한다(`future_plan_prose_problem`). 그 밖의 후보에는
     아무 판정도 하지 않는다.
 """
 
@@ -85,6 +85,7 @@ from src.features.composer.future_plan_constants import (
     MIN_QUOTE_CHARS,
     MIN_TARGET_CHARS,
     MODALITY_FUTURE_KINDS,
+    PROSE_COMPANY_ATTRIBUTION_RE,
     PROSE_SUBJECT_RE,
     MEANS_BRIDGE_RE,
     MODALITY_RE,
@@ -670,23 +671,25 @@ def future_section_prose_problem(text: str) -> str:
 
 
 def _prose_plan_claims(text: str) -> tuple[tuple[int, str, int, int], ...]:
-    """산문에서 «회사를 주어로 세운 계획·전망 주장»의 자리만 돌려준다.
+    """산문에서 «회사에 명시적으로 귀속한 계획·전망 주장»의 자리만 돌려준다.
 
     돌려주는 값: (문장 번호, 그 문장, 표지 시작, 표지 끝). 하나도 없으면 이 검사는 아무 판정도
     하지 않는다 — 산업·시장의 현재 서술, 회사의 진행·완료 서술, 배경 설명은 여기서
     걸러져 원래대로 기존 검수의 몫으로 남는다.
 
     ★ 문 두 개가 «같은 문장»에서 함께 열려야 한다.
-      ① 명시된 주어가 일반 주어(회사·당사·당행…)다. 고유명사를 알아보지 않는다.
+      ① 일반 주어(회사·당사·당행…) 또는 「회사의 … 전략의 일환이다」처럼
+         단정한 귀속 구문이다. 고유명사를 알아보지 않는다.
       ② 그 문장에 계획 또는 전망 표지가 있다(진행·완료는 아니다).
-    ⚠️ 주어가 생략된 문장은 발동하지 않는다. 6장 본문에는 산업 서술이 함께 오는데,
-       주어 없는 문장까지 회사 계획으로 보면 정상 배경 설명이 대량으로 걸린다.
+    ⚠️ 주어도 명시적 귀속도 없는 문장은 발동하지 않는다. 6장 본문에는 산업
+       서술이 함께 오므로 모든 주어 생략문을 회사 계획으로 보지 않는다.
     """
 
     claims: list[tuple[int, str, int, int]] = []
     for index, sentence in enumerate(_sentences(_normalized(text))):
         subjects = [match.group(1) for match in PROSE_SUBJECT_RE.finditer(sentence)]
-        if not any(subject in GENERIC_SUBJECTS for subject in subjects):
+        if not (any(subject in GENERIC_SUBJECTS for subject in subjects)
+                or PROSE_COMPANY_ATTRIBUTION_RE.search(sentence)):
             continue
         markers = [match for match in MODALITY_RE.finditer(sentence)
                    if _modality_kind(match) in MODALITY_FUTURE_KINDS]

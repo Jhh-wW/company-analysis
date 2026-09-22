@@ -8,7 +8,7 @@ from src.features.news_intake.models import NewsBodyFetchResult, NewsCollectionP
 from src.features.news_intake.tests.test_collection import AS_OF, BODY, COMPANY, analyzer, item, snapshot
 
 
-@pytest.mark.parametrize("domain", ["etoday.co.kr", "inews24.com", "nocutnews.co.kr"])
+@pytest.mark.parametrize("domain", ["etoday.co.kr", "inews24.com", "nocutnews.co.kr", "ddaily.co.kr"])
 def test_verified_publisher_passes_body_validation_as_supplementary_news(domain):
     policy = NewsCollectionPolicy()
     snap, _ = snapshot([item(host=domain)], policy=policy)
@@ -23,6 +23,7 @@ def test_verified_publisher_passes_body_validation_as_supplementary_news(domain)
 
 @pytest.mark.parametrize("host", [
     "etoday.co.kr.attacker.example", "fakeinews24.com", "nocutnews.co.kr.attacker.example", "unknown.example",
+    "ddaily.co.kr.attacker.example", "fakeddaily.co.kr",
 ])
 def test_similar_or_unregistered_domain_is_still_held_for_verification(host):
     snap, _ = snapshot([item(host=host)], policy=NewsCollectionPolicy())
@@ -30,9 +31,10 @@ def test_similar_or_unregistered_domain_is_still_held_for_verification(host):
     assert snap.exclusion_counts["publisher_verification_required"] == 1
 
 
-def test_verified_publisher_does_not_bypass_robots_or_company_validation():
+@pytest.mark.parametrize("domain", ["etoday.co.kr", "ddaily.co.kr"])
+def test_verified_publisher_does_not_bypass_robots_or_company_validation(domain):
     policy = NewsCollectionPolicy()
-    snap, _ = snapshot([item(host="etoday.co.kr")], policy=policy)
+    snap, _ = snapshot([item(host=domain)], policy=policy)
     blocked = collect_from_snapshot(snap, company=COMPANY, as_of=AS_OF, policy=policy,
         fetch_text=lambda url: NewsBodyFetchResult(reason_code=c.EXCLUDED_FETCH_ROBOTS_BLOCKED),
         analyze_grounded=analyzer())

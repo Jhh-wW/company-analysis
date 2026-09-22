@@ -145,6 +145,7 @@ def test_fragment_mapping은_평범한_dict_list다():
         assert set(mapping.keys()) == {
             "company_id", "fragment_id", "document_id", "location", "text_sha256", "text",
             "section_id", "slot_id", "covered_slot_ids", "score_millis", "reason_codes",
+            "range_index", "item_title", "item_published_on", "item_url",
         }
 
 

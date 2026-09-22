@@ -12,6 +12,9 @@ NEWS_KOREAN_SYLLABLE_PATTERN = r"[가-힣]"
 NEWS_PERIOD_MONTHS = (12, 24, 36)
 NEWS_BODY_DUPLICATE_PREVIEW_CHARS = 160
 NEWS_BODY_REFERENCE_SUFFIX = "… (전체 보도 근거는 이 장 본문 참조)"
+# 산문을 표에서 다시 읽게 하지 않도록 표기 차이를 넘어서 겹침을 잰다.
+NEWS_TABLE_DEDUPE_NGRAM_SIZE = 3
+NEWS_TABLE_DEDUPE_OVERLAP_THRESHOLD = 0.8
 NEWS_REJECTION_REASONS = {
     "review_removed": "본문 검수 단계에서 후보가 제거됐습니다. 의미·숫자 중 세부 판정은 이 기록만으로 단정하지 않습니다.",
     "not_verified": "독립 검수의 확인 사실 승인을 받지 못했습니다.",

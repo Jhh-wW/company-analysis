@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from src.features.export_pdf.logic import _display_generated_at
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.report_standard.section_content import masthead_lines
@@ -24,7 +26,7 @@ def test_masthead_lines는_회사명과_생성일을_글자_그대로_쓴다() -
     company_line, meta_line = masthead_lines(report)
 
     assert company_line == "(주)진영"
-    assert meta_line == "기업 분석 보고서 · 생성일 2026-08-19 · 공개 자료 기반"
+    assert meta_line == "기업 분석 보고서 · 생성일 2026.08.19 · 공개 자료 기반"
 
 
 def test_masthead_lines는_as_of_date가_아니라_generated_at을_읽는다() -> None:
@@ -43,14 +45,14 @@ def test_masthead_lines는_as_of_date가_아니라_generated_at을_읽는다() -
 
     _company_line, meta_line = masthead_lines(report)
 
-    assert "생성일 2026-08-19" in meta_line
-    assert "2026-08-20" not in meta_line
+    assert "생성일 2026.08.19" in meta_line
+    assert "2026.08.20" not in meta_line
 
 
 def test_masthead_lines_둘째줄_생성일은_표지_메타_함수와_같은_날짜다() -> None:
     """PDF 표지(``_cover_metadata``)가 실제로 쓰는 판정 함수와 대조한다.
 
-    형식(마침표 vs 대시)만 다르고 가리키는 날짜 자체는 항상 같아야 한다.
+    날짜 값과 구분자 형식이 모두 같아야 한다.
     """
 
     report = replace(build_demo_report(), generated_at="2026-08-19T09:30:00+09:00")
@@ -59,8 +61,22 @@ def test_masthead_lines_둘째줄_생성일은_표지_메타_함수와_같은_�
 
     cover_generated = _display_generated_at(report)  # "2026.08.19" 형식
     assert cover_generated
-    expected_dashes = cover_generated.replace(".", "-")
-    assert f"생성일 {expected_dashes}" in meta_line
+    assert f"생성일 {cover_generated}" in meta_line
+
+
+@pytest.mark.parametrize("generated_at", [
+    "2026-09-22",
+    "2026-09-22T00:30:00",
+    "2026-09-22T00:30:00+09:00",
+    "2026-09-21T15:30:00Z",
+])
+def test_생성일은_KST_날짜와_점_구분자를_함께_지킨다(generated_at: str) -> None:
+    report = replace(build_demo_report(), generated_at=generated_at)
+
+    assert masthead_lines(report)[1] == (
+        "기업 분석 보고서 · 생성일 2026.09.22 · 공개 자료 기반"
+    )
+    assert _display_generated_at(report) == "2026.09.22"
 
 
 def test_masthead_lines는_생성일을_못_읽으면_둘째줄에서_그_부분만_뺀다() -> None:
