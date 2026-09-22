@@ -125,7 +125,10 @@ from src.features.composer.empty_section_recovery import (
 from src.features.composer.empty_section_recovery_constants import EMPTY_RECOVERY_STEP, MAX_EMPTY_RECOVERY_SECTIONS
 from src.features.composer.diagram_check import check_diagram_numbers, check_diagrams
 from src.features.composer.dup_detect import CONFIDENCE_CONFIRMED, find_numeric_duplicates
-from src.features.composer.extractive_summary import select_extractive_summary
+from src.features.composer.extractive_summary import (
+    distinct_summary_candidates,
+    select_extractive_summary,
+)
 from src.features.composer.news_block import (
     NewsBlockResult,
     augment_news_blocks,
@@ -652,6 +655,7 @@ def _legacy_summary_stage(
     writer_ask: AskFn,
     body_numeric_filtering: NumericSafetyFiltering,
     summary_diagnostics: list[dict] | None = None,
+    company_name: str = "",
 ) -> tuple[ComposedReport, int, NumericSafetyFiltering]:
     """검증된 본문 문장 중 AI가 고른 3~5문장으로 핵심 요약을 채운다.
 
@@ -711,7 +715,10 @@ def _legacy_summary_stage(
             sentence, safe_owner_by_fact_id=safe_owner_by_fact_id
         )
 
-    candidates = summary_candidates(verified, accept=_summary_ready)
+    candidates = distinct_summary_candidates(
+        summary_candidates(verified, accept=_summary_ready), company_name=company_name,
+    )
+    candidate_ids = {id(candidate.sentence) for candidate in candidates}
     #: 정규화 본문 → 소유 장. «장당 최대 1개» 계약을 규칙 보충에서도 지킨다.
     section_by_key = {
         _normalized_text(candidate.sentence.text): candidate.section_id
@@ -771,7 +778,7 @@ def _legacy_summary_stage(
         # 장의 다른 문장이 보충으로 다시 들어와 계약이 깨진다.
         summary = _supplement_safe_summary(
             summary, verified,
-            accept=_summary_ready,
+            accept=lambda sentence: id(sentence) in candidate_ids,
             section_by_key=section_by_key,
         )
         if record is not None:
@@ -1117,6 +1124,7 @@ def _is_quality_stop(decision: RecoveryDecision) -> bool:
 def _rule_summary_stage(
     verified: ComposedReport,
     body_numeric_filtering: NumericSafetyFiltering,
+    *, company_name: str = "",
 ) -> tuple[ComposedReport, NumericSafetyFiltering]:
     """AI 없이 검증 본문 문장으로만 요약을 채운다(0~5문장).
 
@@ -1133,13 +1141,17 @@ def _rule_summary_stage(
             sentence, safe_owner_by_fact_id=safe_owner_by_fact_id
         )
 
-    candidates = summary_candidates(verified, accept=_summary_ready)
+    candidates = distinct_summary_candidates(
+        summary_candidates(verified, accept=_summary_ready), company_name=company_name,
+    )
+    candidate_ids = {id(candidate.sentence) for candidate in candidates}
     section_by_key = {
         _normalized_text(candidate.sentence.text): candidate.section_id
         for candidate in candidates
     }
     summary = _supplement_safe_summary(
-        (), verified, accept=_summary_ready, section_by_key=section_by_key,
+        (), verified, accept=lambda sentence: id(sentence) in candidate_ids,
+        section_by_key=section_by_key,
     )
     final = ComposedReport(
         sections=verified.sections,
@@ -1341,7 +1353,9 @@ def _finish_evidence_available(
     body = sanitize_stray_citation_markers(
         body, fragments, diagnostics=review_diagnostics,
     )
-    final, numeric_filtering = _rule_summary_stage(body, numeric_filtering)
+    final, numeric_filtering = _rule_summary_stage(
+        body, numeric_filtering, company_name=company_name,
+    )
     style_diagnostics: dict[str, int] = {}
     rendered = render_report(
         company_name,
@@ -2407,6 +2421,7 @@ def run_v2(
                 writer_ask=writer_ask,
                 body_numeric_filtering=body_numeric_filtering,
                 summary_diagnostics=composition_diagnostics,
+                company_name=company_name,
             )
         except AskFatalError as error:
             if not fallback_allowed or _fallback_blocked(error):
@@ -2415,7 +2430,7 @@ def run_v2(
             ai_failure = ai_failure or error
             ai_stages_skipped.append(AI_STAGE_SUMMARY)
             final, numeric_filtering = _rule_summary_stage(
-                verified, body_numeric_filtering,
+                verified, body_numeric_filtering, company_name=company_name,
             )
             summary_draft_count = 0
     else:

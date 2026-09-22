@@ -18,6 +18,13 @@ SUMMARY_NAMED_ENTITY_PATTERN: Final[str] = (
     r"|(?<![A-Za-z0-9_])[A-Z][A-Za-z0-9]*(?![A-Za-z0-9_])"
 )
 SUMMARY_FORMAL_ENDING_PATTERN: Final[str] = r"(?:습니다|입니다)\."
+# 수익 구성의 두 항목이 모두 같은 경우만 비교한다. 숫자·시점·제품명은
+# 지우지 않으며 다른 서술·추가 절·부정문에는 이 규칙을 적용하지 않는다.
+SUMMARY_REVENUE_COMPOSITION_PATTERN: Final[str] = (
+    r"(?P<subject>.+?)의 (?:주된 )?영업수익은 "
+    r"(?P<service>.+?) 용역(?: 매출)?과 (?P<content>.+?) 매출"
+    r"(?: 두 가지 형태)?로 구성된다\."
+)
 SUMMARY_LOW_VALUE_PATTERNS: Final[tuple[str, ...]] = (
     "인식한다",
     "인식하고",

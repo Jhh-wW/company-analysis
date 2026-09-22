@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import re
-from typing import Final, Sequence
+from typing import Final, Mapping, Sequence
 
 from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
 from src.features.composer.extractive_summary_constants import (
@@ -22,7 +22,9 @@ from src.features.composer.extractive_summary_constants import (
     SUMMARY_NAMED_ENTITY_SCORE,
     SUMMARY_NUMERIC_PATTERN,
     SUMMARY_NUMERIC_SCORE,
+    SUMMARY_REVENUE_COMPOSITION_PATTERN,
 )
+from src.features.composer.logic import SummaryCandidate
 from src.features.composer.port import ComposedReport, ComposedSentence
 from src.features.pipeline.port import FactRecord
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
@@ -95,6 +97,77 @@ class ExtractiveSummary:
 
 def _normalized_text(value: object) -> str:
     return " ".join(str(value or "").split())
+
+
+def _revenue_composition_key(text: str, company_name: str) -> tuple[str, str] | None:
+    """실측된 수익 구성 표현만 비교하고 공개 문장은 절대로 고치지 않는다."""
+
+    match = re.fullmatch(SUMMARY_REVENUE_COMPOSITION_PATTERN, _normalized_text(text))
+    company = _normalized_text(company_name)
+    if match is None or not company:
+        return None
+    aliases = {"회사", company, company.removeprefix("주식회사 ")}
+    if match["subject"] not in aliases:
+        return None
+    service = match["service"].removesuffix("과 관련된")
+    return service, match["content"]
+
+
+def distinct_summary_candidates(
+    candidates: Sequence[SummaryCandidate], *, company_name: str,
+    facts_by_sentence_id: Mapping[int, FactRecord] | None = None,
+) -> tuple[SummaryCandidate, ...]:
+    """같은 원문을 인용한 수익 구성 바꿔쓰기를 후보 단계에서 한 번만 둔다.
+
+    확인을 먼저 남기고, 동급이면 다른 사실이 없는 장의 문장을 남겨 대체
+    후보가 있는 장에서 다른 사실을 고를 수 있게 한다. 일반 유사도나 공통
+    단어 수로 의미를 추정하지 않으며 검증 상태·인용·본문은 그대로 둔다.
+    """
+
+    keys = [
+        _revenue_composition_key(candidate.sentence.text, company_name)
+        if candidate.sentence.verification_state == "verified" else None
+        for candidate in candidates
+    ]
+    if not any(key is not None for key in keys):
+        return tuple(candidates)
+
+    def repeats(left: int, right: int) -> bool:
+        if facts_by_sentence_id is not None:
+            left_fact = facts_by_sentence_id[id(candidates[left].sentence)]
+            right_fact = facts_by_sentence_id[id(candidates[right].sentence)]
+            if any(
+                getattr(left_fact, field) != getattr(right_fact, field)
+                for field in (
+                    "legal_entity", "subject_scope", "time_state", "as_of",
+                    "fiscal_year", "event_date", "period_start", "period_end",
+                )
+            ):
+                return False
+        return bool(
+            keys[left] is not None and keys[left] == keys[right]
+            and set(candidates[left].sentence.citations)
+            & set(candidates[right].sentence.citations)
+        )
+
+    # 다른 사실의 수만 비교한다. 같은 구성 문장의 바꿔쓰기 수는 대안이 아니다.
+    alternative_counts = [
+        sum(
+            other.section_id == candidate.section_id and keys[j] != keys[i]
+            for j, other in enumerate(candidates)
+        )
+        for i, candidate in enumerate(candidates)
+    ]
+    kept: list[int] = []
+    for index in sorted(
+        range(len(candidates)),
+        key=lambda i: (
+            candidates[i].sentence.grade != GRADE_CONFIRMED, alternative_counts[i],
+        ),
+    ):
+        if not any(repeats(index, previous) for previous in kept):
+            kept.append(index)
+    return tuple(candidates[index] for index in sorted(kept))
 
 
 def _fact_key(
@@ -212,6 +285,7 @@ def select_extractive_summary(
     by_id, by_key = _verified_fact_registry(facts)
     sections = {section.section_id: section for section in report.sections}
     pools: dict[str, list[ExtractiveSummaryItem]] = {}
+    facts_by_sentence_id: dict[int, FactRecord] = {}
     for section_id in SUMMARY_SECTION_PRIORITY:
         section = sections.get(section_id)
         if section is None:
@@ -225,6 +299,7 @@ def select_extractive_summary(
                 by_key=by_key,
             )
             if fact is not None:
+                facts_by_sentence_id[id(sentence)] = fact
                 candidates.append(
                     ExtractiveSummaryItem(section_id, sentence, fact.fact_id)
                 )
@@ -239,6 +314,21 @@ def select_extractive_summary(
                 ),
                 reverse=True,
             )
+
+    # 엄격 경로도 동일한 후보 중복 규칙을 쓰되 FactRecord의 회사·시점이
+    # 다르면 같은 문구라도 서로 다른 사실로 보존한다.
+    all_items = [item for pool in pools.values() for item in pool]
+    companies = {fact.legal_entity for fact in facts_by_sentence_id.values()}
+    distinct = distinct_summary_candidates(
+        tuple(SummaryCandidate(item.section_id, item.sentence) for item in all_items),
+        company_name=next(iter(companies)) if len(companies) == 1 else "",
+        facts_by_sentence_id=facts_by_sentence_id,
+    )
+    distinct_ids = {id(candidate.sentence) for candidate in distinct}
+    pools = {
+        section_id: [item for item in pool if id(item.sentence) in distinct_ids]
+        for section_id, pool in pools.items()
+    }
 
     selected: list[ExtractiveSummaryItem] = []
     seen_claims: set[str] = set()
