@@ -81,9 +81,9 @@ robots·sitemap 조회를 뺀 HTML 요청 순서는 다음과 같다. 목록은 
 지정 Python으로 기존 conftest를 유지하고 `PYTHON_DOTENV_DISABLED=1`, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, 임시 DB·진단 경로를 적용했다. 이 작업폴더의 `app`에서 실행한 명령은 다음과 같다.
 
 ```text
-C:/Users/jh-wo/.claude/workspace/기업분석2/.venv/Scripts/python.exe -m pytest src/features/homepage/tests/test_wrtn_public_crawl.py src/features/homepage/tests/test_wide_page_budget.py -q --tb=short
+.venv/Scripts/python.exe -m pytest src/features/homepage/tests/test_wrtn_public_crawl.py src/features/homepage/tests/test_wide_page_budget.py -q --tb=short
 ```
 
 **13개 통과, 1개 건너뜀.** 건너뛴 것은 기존 실시간 사이트 통합시험으로, 활성화 환경변수가 없어서 실행하지 않았다. 새 공개 스냅샷 시험 2개는 모두 실행·통과했다. 새 시험은 `local_integration` 표시가 있고 보존 자료가 없는 환경에서는 명시적으로 건너뛰며, 다른 위치의 스냅샷은 `WRTN_PUBLIC_CRAWL_FIXTURE_DIR`로 지정할 수 있다.
 
-이번 작업은 수집 순서 변경 불필요라는 결론이다. 선행 `282fcf05`의 위치 계약 수정은 여전히 필요하지만, 새로운 우선순위 변경·추측 복구·원문 일치 완화는 추가하지 않았다. 배포 후 실제 기사 채택 복구 및 기존 4건의 개별 원인은 총괄의 별도 검증으로 남는다. 유료 실행·비용 상한 확대·배포·push·비밀/DB 접근은 하지 않았고, 진행과 완료 보고에는 [Orca orchestration 스킬](C:/Users/jh-wo/.agents/skills/orchestration/SKILL.md)의 CLI만 사용했다.
+이번 작업은 수집 순서 변경 불필요라는 결론이다. 선행 `282fcf05`의 위치 계약 수정은 여전히 필요하지만, 새로운 우선순위 변경·추측 복구·원문 일치 완화는 추가하지 않았다. 배포 후 실제 기사 채택 복구 및 기존 4건의 개별 원인은 총괄의 별도 검증으로 남는다. 유료 실행·비용 상한 확대·배포·push·비밀/DB 접근은 하지 않았고, 진행과 완료 보고에는 Orca orchestration 스킬의 CLI만 사용했다.
