@@ -39,6 +39,11 @@ _SUMMARY_EVENT = {
     "첫보충후수": None, "수치검사후수": None, "최종수": None,
     "작성한도도달": False, "검수한도도달": False,
 }
+#: 최종 렌더 «문체·시점 표기» 기록 — 닫힌 렌더 구분·닫힌 사유 코드·1 이상의 정수만.
+#: (2026-09-23) 이전에는 이 기록이 운영 로그에만 남고 싱크에 들어오지 않았다.
+_STYLE_EVENT = {
+    "step": "8_문체_표기", "렌더": "1차", "사유별": {"past_dated_future_tense": 1},
+}
 
 
 def _contaminated_sink() -> list[Any]:
@@ -47,12 +52,20 @@ def _contaminated_sink() -> list[Any]:
         # 살아남아야 하는 것 — 닫힌 필드만 남기고 정상 정규화된다.
         {**_PROTOCOL_EVENT, "본문": "원문 후보 문장 전체", "응답": "provider 원문 응답"},
         {**_SUMMARY_EVENT, "response": "비공개 응답", "error": "비공개 오류문"},
+        {**_STYLE_EVENT, "원문": "지난 일정 원문 문장", "본문": "렌더 산문 전체"},
         # 죽어야 하는 것 — 아래 전부 observed_composition_steps()가 걸러야 한다.
         "오염",  # Mapping이 아닌 raw 문자열
         {**_PROTOCOL_EVENT, "판독": "지원하지않는_코드"},  # 지원하지 않는 enum
         {**_SUMMARY_EVENT, "최종수": "본문"},  # 오염된 숫자(문자열)
         {**_PROTOCOL_EVENT, "시도": -1},  # 오염된 숫자(허용 범위 밖 음수)
         {"step": "알수없는_단계", "아무거나": 1},  # 계약에 없는 step
+        {**_STYLE_EVENT, "사유별": {"past_dated_future_tense": "1"}},  # 문자열 개수
+        {**_STYLE_EVENT, "사유별": {"past_dated_future_tense": 0}},  # 0건 빈 이벤트
+        {**_STYLE_EVENT, "사유별": {"past_dated_future_tense": True}},  # bool
+        {**_STYLE_EVENT, "사유별": {"임의_사유": 1}},  # 사유 목록 밖 코드
+        {**_STYLE_EVENT, "사유별": {}},  # 사유별이 비어 있음
+        {**_STYLE_EVENT, "렌더": "임의_렌더"},  # 닫힌 렌더 구분 밖
+        {"step": "8_문체_표기", "사유별": {"past_dated_future_tense": 1}},  # 렌더 칸 없음
     ]
 
 
@@ -82,7 +95,7 @@ def _run(*, steps: list[dict], mutate_sink, raise_exc: BaseException):
 
 def _closed_only(steps: list[dict]) -> list[dict]:
     return [step for step in steps if step.get("step") in (
-        _PROTOCOL_EVENT["step"], _SUMMARY_EVENT["step"],
+        _PROTOCOL_EVENT["step"], _SUMMARY_EVENT["step"], _STYLE_EVENT["step"],
     )]
 
 
@@ -106,10 +119,12 @@ def test_manifest_error_preserves_reason_and_delivers_closed_diagnostics() -> No
     delivered = _closed_only(steps)
     assert {**_PROTOCOL_EVENT} in delivered
     assert {**_SUMMARY_EVENT} in delivered
-    # 정확히 이 두 닫힌 레코드와 같아야 한다 — 딕셔너리 동등 비교 자체가
-    # sink에 얹었던 "response"/"error"/"본문"/"응답" 여분 키가 새지 않았음을
-    # 증명한다("행탈락" 값도 계약이 허용한 사유만 남아야 같은 dict가 된다).
-    assert len(delivered) == 2, "오염 항목이 닫힌 필드 대신 그대로 새면 안 됩니다"
+    assert {**_STYLE_EVENT} in delivered
+    # 정확히 이 세 닫힌 레코드와 같아야 한다 — 딕셔너리 동등 비교 자체가
+    # sink에 얹었던 "response"/"error"/"본문"/"응답"/"원문" 여분 키가 새지
+    # 않았음을 증명한다("행탈락" 값도 계약이 허용한 사유만 남아야 같은 dict가
+    # 된다). 오염된 문체 기록 7건은 하나도 살아남지 않아야 3건이 된다.
+    assert len(delivered) == 3, "오염 항목이 닫힌 필드 대신 그대로 새면 안 됩니다"
 
 
 def test_budget_error_preserves_reason_cost_and_delivers_closed_diagnostics() -> None:
@@ -126,7 +141,8 @@ def test_budget_error_preserves_reason_cost_and_delivers_closed_diagnostics() ->
     delivered = _closed_only(steps)
     assert {**_PROTOCOL_EVENT} in delivered
     assert {**_SUMMARY_EVENT} in delivered
-    assert len(delivered) == 2, "오염 항목이 닫힌 필드 대신 그대로 새면 안 됩니다"
+    assert {**_STYLE_EVENT} in delivered
+    assert len(delivered) == 3, "오염 항목이 닫힌 필드 대신 그대로 새면 안 됩니다"
 
 
 def test_nonbudget_fatal_reraises_original_cause() -> None:
@@ -144,4 +160,5 @@ def test_nonbudget_fatal_reraises_original_cause() -> None:
     delivered = _closed_only(steps)
     assert {**_PROTOCOL_EVENT} in delivered
     assert {**_SUMMARY_EVENT} in delivered
-    assert len(delivered) == 2
+    assert {**_STYLE_EVENT} in delivered
+    assert len(delivered) == 3
