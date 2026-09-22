@@ -40,7 +40,7 @@
 
 ## 3. 시험
 
-새 파일 `composer/tests/test_initial_review_missing_followup.py`(13건):
+새 파일 `composer/tests/test_initial_review_missing_followup.py`(시험 함수 11개 · 매개변수 사례 17개):
 
 - 요청 50·응답 20 → 후속 프롬프트에 빠진 30번만 원래 번호로 실리고 30건 회복, 호출 2회, 관측 [요청 50·미응답 30], [요청 30·미응답 0]
 - 첫 응답의 거짓·애매·요청 밖 번호를 후속이 덮어쓰지 못함
