@@ -116,7 +116,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         if not batch:
             return
         if analysis_calls >= policy.max_analysis_calls or time.monotonic() >= deadline:
-            budget_codes.append("analysis_budget_exhausted")
+            budget_codes.append(c.ANALYSIS_BUDGET_EXHAUSTED_CODE)
             stopped = True
             return
         prompt = build_grounded_prompt(company, batch, as_of)
@@ -223,9 +223,15 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             planning_halted = False
 
             def plan_more() -> None:
-                nonlocal plan_index, examined, body_articles, in_flight, pending_carried, planning_halted
+                nonlocal plan_index, examined, body_articles, in_flight, pending_carried, planning_halted, stopped
                 while plan_index < len(ranked_candidates) and not planning_halted:
                     if stopped or evidence_is_sufficient(all_excerpts, policy):
+                        return
+                    # 다음 분석 호출이 불가능하면 사용할 수 없는 본문도 요청하지 않는다.
+                    # 마지막 묶음으로 모든 후보를 처리한 경우에는 이 분기에 들어오지 않는다.
+                    if analysis_calls >= policy.max_analysis_calls:
+                        budget_codes.append(c.ANALYSIS_BUDGET_EXHAUSTED_CODE)
+                        stopped = True
                         return
                     candidate = ranked_candidates[plan_index]
                     # 분석 묶음의 빈자리가 동시 출발의 상한이다. 그래서 분석이 도는 순간에는
