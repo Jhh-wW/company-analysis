@@ -668,6 +668,86 @@ def _source_provenance_payload(source: Source) -> bytes:
     ).encode("utf-8")
 
 
+def official_web_source_fields(
+    *, source_type: str, title: str, published_at: str, url: str, location: str,
+    item_title: str = "", item_published_on: str = "", item_url: str = "",
+    fact_status: str = "기준일 현재 확인",
+) -> dict[str, str]:
+    """공식 웹의 목록 항목을 모든 출처 생성 경계에서 같은 규칙으로 투영한다."""
+    if source_type_is_official_ir(source_type):
+        return dict(title=title, published_at=published_at, url=url, location=location,
+                    fact_status="공식 발행일·보고기간 확정" if published_at else fact_status)
+    if item_url and item_title:
+        parsed_item = urllib.parse.urlsplit(item_url)
+        if (
+            parsed_item.scheme not in {"http", "https"}
+            or parsed_item.hostname != urllib.parse.urlsplit(url).hostname
+            or parsed_item.username or parsed_item.password
+            or (item_published_on and not _valid_iso_date(item_published_on))
+        ):
+            raise ValueError("목록 항목 URL·발표일이 공식 웹 원문과 다릅니다")
+        return dict(title=item_title, published_at=item_published_on, url=item_url,
+                    location=item_url, fact_status=fact_status)
+    # 이전 저장 조각의 가짜 앵커도 공개 출처로 옮기는 경계에서 없앤다.
+    match = re.fullmatch(r"(.+)#(\d+)", location)
+    if match:
+        location = f"{match[1]} · 목록 {int(match[2]) + 1}번째 항목"
+    if " · 목록 " in location:
+        published_at = ""
+    return dict(title="", published_at=published_at, url=url,
+                location=location or url, fact_status=fact_status)
+
+
+def public_fragment_document_identity(fragment: object) -> str:
+    """목록으로 수집한 조각의 공개 인용 신원은 검증된 항목 URL을 따른다."""
+    from src.shared.report_quality.source_identity import collected_document_identity
+
+    if getattr(fragment, "item_url", ""):
+        return collected_document_identity(
+            source_kind=fragment.formal_source_kind,
+            document_id=fragment.source_document_id,
+            url=fragment.item_url,
+        )
+    return fragment.document_identity
+
+
+def source_label_display(source: Source) -> str:
+    """자료 열의 공개 문자열 정본."""
+    if source_type_is_official_web(source.source_type) and source.title:
+        return f"{source.title.strip()} · 회사 공식 웹"
+    label = (source.title or source.label).strip()
+    publisher = source.publisher.strip()
+    return f"{label} · {publisher}" if publisher and publisher.casefold() not in label.casefold() else label
+
+
+def source_status_display(source: Source) -> str:
+    """발표일과 확인일을 구분한 기준일·자료 상태 열의 공개 문자열 정본."""
+    if source_type_is_official_web(source.source_type) and source.published_at:
+        parts = [f"{source.published_at} 발표", "회사 공식 웹"]
+        if source.collected_at:
+            parts.append(f"{source.collected_at} 확인")
+        return " · ".join(parts)
+    parts = [
+        f"{source.published_at} 보도" if source.published_at else
+        f"{source.disclosed_at} 공시" if source.disclosed_at else
+        f"{source.collected_at} 확인" if source.collected_at else "기준일 미확인"
+    ]
+    for value in (source.domain, source.source_type, source.fact_status):
+        if value.strip() and value.strip() not in parts:
+            parts.append(value.strip())
+    return " · ".join(parts)
+
+
+def external_news_notice(sources: Iterable[object]) -> str:
+    """사용한 외부 언론 출처의 부재만 알리고 수집 과정은 공개하지 않는다."""
+    from src.features.export_pdf.constants import CITATIONS_NO_EXTERNAL_NEWS_NOTE
+
+    return "" if any(
+        source.kind is SourceKind.NEWS or source.source_type in {"언론 보도", "외부 보도"}
+        for source in visible_citations(sources)
+    ) else CITATIONS_NO_EXTERNAL_NEWS_NOTE
+
+
 def seal_collected_source(source: Source) -> Source:
     """신뢰된 수집 경계가 완성 Source에 붙이는 사후변조 방지 seal."""
 

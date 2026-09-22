@@ -35,6 +35,23 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Final, Optional
 
 
+def performance_caption_with_audit_status(caption: str, years: tuple[str, ...]) -> str:
+    """원문에서 미감사로 확인한 비교연도만 표 캡션에 덧붙인다."""
+    if not years:
+        return caption
+    suffix = f"{'·'.join(years)}년은 감사받지 않은 비교 재무제표"
+    return caption if suffix in caption else f"{caption} · {suffix}"
+
+
+def analysis_period_with_audit_status(period: str, table: object) -> str:
+    """표지의 완료 회계연도 뒤에 미감사 비교연도를 표시한다."""
+    years = tuple(getattr(table, "unaudited_years", ()) or ())
+    if not years:
+        return period
+    suffix = f"({'·'.join(years)}년 미감사)"
+    return period if suffix in period else f"{period} {suffix}"
+
+
 #: 실적표를 알아보는 첫 열 이름. ``build_three_year_table``의 ``headers[0]``이다.
 #: ★ ``cover_metrics.PERIOD_HEADER``와 «같은 값»이어야 한다. 두 띠가 서로 다른
 #:   표를 고르면 표지와 4장의 숫자가 갈라진다. 시험이 두 값을 묶어 지킨다.

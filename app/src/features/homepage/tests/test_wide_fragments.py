@@ -193,7 +193,8 @@ def test_바로_앞_문단의_문제와_명시적으로_연결된_회사행동�
         for fragment in fragments
         if "current_challenges:response" in fragment.covered_slot_ids
     )
-    assert response.location.endswith("#1")
+    assert response.location.endswith("목록 2번째 항목")
+    assert "#" not in response.location
 
 
 @pytest.mark.parametrize(
@@ -299,8 +300,8 @@ def test_location은_문서_canonical_url과_구간_index를_가리킨다():
     )
     fragments = build_fragments(document, company_id=_COMPANY_ID)
     locations = {f.location for f in fragments}
-    assert "https://company.example/careers#0" in locations
-    assert "https://company.example/careers#1" in locations
+    assert "https://company.example/careers · 목록 1번째 항목" in locations
+    assert "https://company.example/careers · 목록 2번째 항목" in locations
 
 
 def test_fragment_text는_원본_usable_range와_같다():

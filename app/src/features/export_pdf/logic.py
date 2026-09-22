@@ -2865,6 +2865,10 @@ def _add_citations(
     렌더 시점에 다시 세지 않는다(``source_verification_label`` 미호출).
     """
 
+    from src.features.provenance.sources import (
+        external_news_notice, source_label_display, source_status_display,
+    )
+
     #: (번호, 자료 마크업, 기준일·상태, 사실 검증, 원문 위치, 본문 사용 장)
     entries: list[tuple[str, str, str, str, str, str]]
     if projection is not None:
@@ -2883,8 +2887,8 @@ def _add_citations(
         entries = [
             (
                 str(source.number),
-                _source_label_markup(source),
-                _source_status(source),
+                _link_markup(source_label_display(source), source.url),
+                source_status_display(source),
                 source_verification_label(report, source.source_id),
                 location_display(source.location.strip()) or "—",
                 _source_used_sections(source),
@@ -2902,7 +2906,10 @@ def _add_citations(
             styles["heading"],
             A4[0] - (constants.PAGE_MARGIN_PT * 2),
         ),
-        Paragraph(_escape(constants.CITATIONS_NOTE), styles["small"]),
+        Paragraph(_escape(" ".join(filter(None, (
+            constants.CITATIONS_NOTE,
+            projection.citations_note if projection is not None else external_news_notice(report.citations),
+        )))), styles["small"]),
     ]
     width = A4[0] - (constants.PAGE_MARGIN_PT * 2)
     rows: list[list[Paragraph]] = [
@@ -2951,6 +2958,9 @@ def _add_citations(
     )
     table = Table(rows, colWidths=column_widths, repeatRows=1, hAlign="LEFT")
     table.setStyle(table_style)
+    if len(entries) > 1:
+        # 마지막 한 행 때문에 빈 쪽이 생기지 않게 두 본문 행을 함께 넘긴다.
+        table.setStyle(TableStyle([("NOSPLIT", (0, len(rows) - 2), (-1, len(rows) - 1))]))
     leading_table = Table(
         rows[: constants.APPENDIX_MIN_START_ROWS + 1],
         colWidths=column_widths,
