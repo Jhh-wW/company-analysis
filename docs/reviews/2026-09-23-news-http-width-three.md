@@ -34,7 +34,7 @@
 root `.venv`를 사용하고 실제 네트워크 및 SQLite 연결을 실패하도록 차단한다. pytest 공통 fixture와 캐시를 끄므로 실DB나 임시 DB도 필요 없으며 제품 파일의 bytecode도 생성하지 않는다.
 
 ```powershell
-Set-Location -LiteralPath 'C:/Users/jh-wo/orca/workspaces/기업분석2/fix-live-report-followup-20260923/app'
+Set-Location -LiteralPath '<작업 폴더>/app'
 @'
 import sys, socket, sqlite3
 sys.dont_write_bytecode = True
@@ -51,7 +51,7 @@ raise SystemExit(pytest.main([
     'src/features/news_intake/tests/test_collection_body_concurrency.py',
     'src/features/news_intake/tests/test_body_prefetch.py',
 ]))
-'@ | & 'C:/Users/jh-wo/.claude/workspace/기업분석2/.venv/Scripts/python.exe' -B -
+'@ | & '.venv/Scripts/python.exe' -B -
 ```
 
 확인 결과: `122 passed in 3.31s`. 첫 회귀 실행에서는 실패 fixture가 원주소만 403으로 만들어 www 변형으로 정상 복구됐다. 모든 표기 변형이 403인 fixture로 수정한 뒤 실패 사유 보존과 결과 동등성을 확인했다.

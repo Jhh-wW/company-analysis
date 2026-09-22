@@ -4,7 +4,7 @@
 
 ## 실측 입력과 확인 범위
 
-원본 디렉터리는 `C:/Users/jh-wo/.claude/workspace/기업분석2/app/.local_evaluation_runs/deployment-20260923`이다. 세 원본은 읽기만 했다.
+원본 디렉터리는 `app/.local_evaluation_runs/deployment-20260923`이다. 세 원본은 읽기만 했다.
 
 | 파일 | SHA-256 |
 |---|---|
@@ -74,7 +74,7 @@
 
 `range_index` 형식·범위·위치 불일치, 잘못된 URL, 타회사, 정의 부재, 원문 변조, frozen 객체 변조, snapshot 변경을 검사했다. `-1` 구형 기본값의 기존 지문 `c133914793d502568b6ca16a9d9f04e9fa8466273f9033ee2a45b155c7fbe0c3`도 그대로 유지됨을 확인했다.
 
-실행 Python은 지정된 `C:/Users/jh-wo/.claude/workspace/기업분석2/.venv/Scripts/python.exe`이다. 모든 무료 실행은 `PYTHON_DOTENV_DISABLED=1`, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, 임시 `STORAGE_DB_PATH`와 `OBSERVABILITY_RECORDS_PATH`를 설정했고 기존 `app/conftest.py`를 유지했다. 테스트 작업 디렉터리는 이 작업폴더의 `app`이다.
+실행 Python은 지정된 `.venv/Scripts/python.exe`이다. 모든 무료 실행은 `PYTHON_DOTENV_DISABLED=1`, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, 임시 `STORAGE_DB_PATH`와 `OBSERVABILITY_RECORDS_PATH`를 설정했고 기존 `app/conftest.py`를 유지했다. 테스트 작업 디렉터리는 이 작업폴더의 `app`이다.
 
 ```text
 python -m pytest src/features/pipeline/tests/test_official_news_alias_locations.py src/features/pipeline/tests/test_official_news_aliases.py src/features/pipeline/tests/test_news_intake_wiring.py src/features/pipeline/tests/test_news_research_context.py src/features/pipeline/tests/test_news_call_budget.py src/features/news_intake/tests src/features/chapter_evidence/tests src/shared/report_evidence/tests src/features/homepage/tests/test_news_list_metadata.py src/features/homepage/tests/test_wide_evidence_mapping.py src/web/tests/test_official_evidence_adapter.py -q --tb=short
@@ -90,4 +90,4 @@ python -m pytest src/features/pipeline/tests/test_official_news_alias_locations.
 
 공식 수집에는 `truncated_page_cap=2`, sitemap 실패 1건, 채용 경로 실패가 있고 사전검사도 `transient_web_failure`로 부분 보고서 전환했다. 이 수집 한계와 본문/주체/실질성/매체 검증은 별개다. 다음 운영 확인은 총괄이 보유한 정확한 공식 조각·기업개황 이름 입력과 기사별 원응답을 대조하고 새 실행의 `공식약칭근거` 및 최종 기사 채택을 확인해야 한다.
 
-유료 실행, 비용 상한 확대, 배포, push는 하지 않았다. 진행·범위 승인·완료 보고에는 [Orca orchestration 스킬](C:/Users/jh-wo/.agents/skills/orchestration/SKILL.md)의 CLI를 사용했다.
+유료 실행, 비용 상한 확대, 배포, push는 하지 않았다. 진행·범위 승인·완료 보고에는 Orca orchestration 스킬의 CLI를 사용했다.

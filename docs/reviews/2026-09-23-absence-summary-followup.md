@@ -6,7 +6,7 @@
 
 ## 읽은 자료 (읽기 전용)
 
-`C:/Users/jh-wo/.claude/workspace/기업분석2/app/.local_evaluation_runs/deployment-20260923/`
+`app/.local_evaluation_runs/deployment-20260923/`
 
 | 파일 | SHA-256 |
 |---|---|
