@@ -44,7 +44,7 @@ from src.features.composer.port import (
     StructuredClaim,
 )
 from src.shared.dart_financial_provenance import dart_payload_matches_table
-from src.shared.display_scale import format_display_value, quantum_for
+from src.shared.display_scale import display_places, format_display_value, quantum_for
 from src.shared.report_evidence.legacy_fragment_kinds import (
     LEGACY_KIND_AUDIT_FINANCIAL,
 )
@@ -75,6 +75,11 @@ from src.shared.report_quality.numeric_validation import validate_versioned_nume
 PAST_CHANGES_SECTION_ID = "past_changes"
 RATE_ROUNDING_PLACES = 2
 RATE_TOLERANCE = "0.000001"
+#: 전년 대비 문장에 읽을 금액은 원값 결속에서만 환산한다. 최소 한 자리를
+#: 유지하고 작은 금액은 공용 정밀도 규칙을 따른다(표의 반올림 값으로 비율 재계산 금지).
+RATE_AMOUNT_DIVISOR = Decimal("100000000")
+RATE_AMOUNT_UNIT = "억원"
+RATE_AMOUNT_MIN_PLACES = 1
 #: 부호 변화 문장의 계산은 표시 단위 두 값의 뺄셈뿐이라 오차가 생기지 않는다.
 #: 그래도 증감률과 같은 허용치를 쓰는 이유는, 두 계약이 다른 값을 쓰면 어느
 #: 쪽이 «느슨한 쪽»인지 사람이 매번 다시 확인해야 하기 때문이다.
@@ -160,6 +165,66 @@ def _cumulative_rate_claim_text(
     return (
         f"{scope_label} {metric}의 {period_start}년부터 {period_end}년까지 "
         f"누적 증감률은 {display_value}%이다."
+    )
+
+
+def _rate_claim_text(binding: NumericBinding) -> str:
+    """한 해 차이는 결속의 두 원값과 증감률, 그보다 긴 구간은 누적 증감률.
+
+    생성과 공개 안전 검사가 같은 결속으로 같은 문장을 재현한다. 금액 표시를
+    위해 원값 피연산자나 비율의 계산·반올림 계약을 바꾸지 않는다.
+    """
+
+    if binding.formula is not NumericFormula.RATE:
+        return ""
+    start_year, end_year = binding.period_start, binding.period_end
+    if not all(len(year) == 4 and year.isdigit() for year in (start_year, end_year)):
+        return ""
+    if int(end_year) - int(start_year) != 1:
+        return _cumulative_rate_claim_text(
+            entity_scope=binding.entity_scope.value,
+            metric=binding.metric,
+            period_start=start_year,
+            period_end=end_year,
+            display_value=binding.display_value,
+        )
+    operands = {operand.role: operand for operand in binding.operands}
+    start, end = operands.get("start"), operands.get("end")
+    if start is None or end is None:
+        return ""
+    start_value, end_value = _decimal_cell(start.value), _decimal_cell(end.value)
+    scope_label = SCOPE_LABELS.get(binding.entity_scope.value, "")
+    topic = _topic_particle(binding.metric)
+    if (
+        start_value is None or end_value is None
+        or start_value <= 0 or end_value < 0
+        or not scope_label or not topic
+        or (start.unit, start.unit_dimension) != (end.unit, end.unit_dimension)
+    ):
+        return ""
+    unit = start.unit
+    try:
+        with localcontext() as decimal_context:
+            decimal_context.prec = 160
+            if unit == "원" and start.unit_dimension is UnitDimension.CURRENCY:
+                unit = RATE_AMOUNT_UNIT
+                places = max(
+                    RATE_AMOUNT_MIN_PLACES,
+                    display_places((start_value, end_value), RATE_AMOUNT_DIVISOR),
+                )
+                amounts = tuple(
+                    format_display_value(value, RATE_AMOUNT_DIVISOR, places)
+                    for value in (start_value, end_value)
+                )
+            else:
+                # 다른 통화·단위는 환율이나 축척을 추정하지 않고 결속 그대로 읽는다.
+                amounts = tuple(f"{value:,f}" for value in (start_value, end_value))
+    except (DecimalException, OverflowError, ValueError):
+        return ""
+    return (
+        f"{scope_label} {binding.metric}{topic} "
+        f"{start_year}년 {amounts[0]}{unit}, {end_year}년 {amounts[1]}{unit}이며, "
+        f"증감률은 {binding.display_value}%이다."
     )
 
 
@@ -302,13 +367,13 @@ def _expected_claim_text(claim: StructuredClaim) -> str:
     """이 구조화 claim이 만들었어야 할 공개 문장 — 공식마다 정확히 하나다."""
 
     if claim.formula == NumericFormula.RATE.value:
-        return _cumulative_rate_claim_text(
-            entity_scope=claim.subject_scope,
-            metric=claim.metric,
-            period_start=claim.period_start,
-            period_end=claim.period_end,
-            display_value=claim.display_value,
-        )
+        if len(claim.numeric_checks) != 1:
+            return ""
+        try:
+            binding = decode_numeric_check(claim.numeric_checks[0])
+        except ValueError:
+            return ""
+        return _rate_claim_text(binding)
     if claim.formula == NumericFormula.SIGNED_CHANGE.value:
         return _signed_change_text_from_binding(claim)
     return ""
@@ -937,13 +1002,7 @@ def _rate_claim(
     return _composed_claim(
         context,
         binding=binding,
-        claim_text=_cumulative_rate_claim_text(
-            entity_scope=context.entity_scope.value,
-            metric=metric,
-            period_start=context.period_start,
-            period_end=context.period_end,
-            display_value=display_value,
-        ),
+        claim_text=_rate_claim_text(binding),
     )
 
 
