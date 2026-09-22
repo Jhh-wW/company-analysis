@@ -86,6 +86,11 @@ BODY_LEADING_PT: Final[float] = 14.1
 SHORT_TEXT_SECTION_MAX_HEIGHT_PT: Final[float] = 200.0
 CARD_LEADING_PT: Final[float] = 11.8
 TABLE_LEADING_PT: Final[float] = 10.0
+# 부록 시작에는 제목 블록 49pt, 안내문 15pt, 머리행 22pt와
+# 두 줄짜리 본문 3행(각 32pt)을 확보해 제목만 쪽 끝에 남지 않게 한다.
+APPENDIX_MIN_START_HEIGHT_PT: Final[float] = 182.0
+APPENDIX_MIN_START_ROWS: Final[int] = 3
+APPENDIX_CELL_PADDING_PT: Final[float] = 6.0
 META_FONT_SIZE_PT: Final[float] = 6.8
 # 표지 다음 첫 본문 페이지 맨 위 마스트헤드 — 표지 제목(34pt)보다
 # 한 단계 작고 장 제목(20pt)보다 커서, 표지와 겹치지 않으면서도 눈에 띄는

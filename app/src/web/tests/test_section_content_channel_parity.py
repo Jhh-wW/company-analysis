@@ -171,11 +171,12 @@ def test_마스트헤드_문자열은_웹_PDF_Notion이_같다(
     """
     report = replace(
         build_demo_report(),
-        generated_at="2026-08-19",
-        as_of_date="2026-08-20",
+        generated_at="2026-09-22",
+        as_of_date="2026-09-23",
     )
     company_line, meta_line = masthead_lines(report)
-    assert "2026-08-20" not in meta_line  # 잘못된 필드를 읽지 않는지 자기 점검
+    assert meta_line == "기업 분석 보고서 · 생성일 2026.09.22 · 공개 자료 기반"
+    assert "2026.09.23" not in meta_line  # 잘못된 필드를 읽지 않는지 자기 점검
 
     _web_document, _notion_blocks, outputs = _channel_outputs(report, monkeypatch)
     for medium, output in outputs.items():

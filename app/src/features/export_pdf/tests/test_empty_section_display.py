@@ -4,10 +4,12 @@ import io
 from dataclasses import replace
 
 from pypdf import PdfReader
+from reportlab.lib.pagesizes import A4
 
 from src.features.export_pdf import logic as pdf_logic
 from src.features.export_pdf.tests.test_v2_public_projection import _report, _v2_full_report
 from src.features.export_pdf.tests.test_export_pdf import _report as _v1_report
+from src.features.export_pdf.tests.test_export_pdf import _flowables_pdf
 from src.core.report_display import empty_section_notice
 
 
@@ -26,6 +28,7 @@ def test_adds_neutral_notice_only_to_empty_section_and_preserves_body_tables_cit
     notice = empty_section_notice(report, empty)
     result = _text(pdf_logic.build_pdf(report))
     assert result.count("".join(notice.split())) == 1
+    assert f"1.{''.join(notice.split())}" in result
     assert "공식자료로확인한공개본문문장이다." in result
     assert all("".join(table.caption.split()) in result for table in tables)
     assert report.sections[-1].tables == tables
@@ -48,3 +51,20 @@ def test_full_and_v1_pdf_do_not_call_empty_section_notice(monkeypatch):
     monkeypatch.setattr(pdf_logic, "empty_section_notice", forbidden)
     assert pdf_logic.build_pdf(_v2_full_report()).startswith(b"%PDF")
     assert pdf_logic.build_pdf(_v1_report()).startswith(b"%PDF")
+
+
+def test_sealed_notice_paragraph_keeps_the_sealed_number():
+    """봉인에 안내문이 있으면 다른 문단과 같은 번호 열로 그리는지 확인한다."""
+    notice = "확인된 자료가 부족해 이 장은 비어 있습니다."
+    projection = _v2_full_report().public_projection
+    display = replace(
+        projection.sections[-1].display,
+        paragraphs=(("1.", notice),), sentences=((notice, ""),),
+        tables=(), visuals=(), period_summary=None,
+    )
+    story = [pdf_logic._OutlineAnchor("root", "본문", level=0)]
+    pdf_logic._add_projection_section(
+        story, display, pdf_logic._styles(), A4[0] - 124, "section-9",
+    )
+
+    assert f"1.{''.join(notice.split())}" in _text(_flowables_pdf(story))

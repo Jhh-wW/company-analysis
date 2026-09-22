@@ -2436,7 +2436,7 @@ def _add_section(
     )
     if empty_notice:
         story.extend(_lead_with_heading(
-            heading_flowables, [Paragraph(_escape(empty_notice), styles["body"])]
+            heading_flowables, [_numbered_paragraph(1, empty_notice, styles, width)]
         ))
         return
     if not section.is_filled:
@@ -2832,6 +2832,26 @@ def _appendix_heading_markup() -> str:
     )
 
 
+class _AppendixStart(KeepTogether):
+    """긴 출처 표 전체 대신 제목과 첫 행들만 같은 쪽에서 시작하게 한다."""
+
+    def __init__(
+        self, heading: Sequence[Flowable], table: Table, leading_table: Table
+    ) -> None:
+        super().__init__([*heading, table])
+        self._table = table
+        self._leading_table = leading_table
+
+    def wrap(self, avail_width: float, avail_height: float) -> tuple[float, float]:
+        result = super().wrap(avail_width, avail_height)
+        full_height = self._table.wrap(avail_width, avail_height)[1]
+        leading_height = self._leading_table.wrap(avail_width, avail_height)[1]
+        # KeepTogether가 첫 3행까지만 묶도록 측정 높이를 줄인다. 실제 내용은
+        # 원래 표 하나이므로 같은 쪽에서 머리행이 중복되거나 테두리가 끊기지 않는다.
+        self._H -= full_height - leading_height
+        return result
+
+
 def _add_citations(
     story: list[Flowable],
     report: Report,
@@ -2873,22 +2893,17 @@ def _add_citations(
         ]
     if not entries:
         return
-    story.extend(
-        [
-            # 부록 표가 앞 장 끝에서 잘려 다음 장에 맥락 없는 행 몇 개만 남지
-            # 않도록 본문 1~9장과 출처 원장을 페이지 경계로 분리한다.
-            PageBreak(),
-            _OutlineAnchor("sources", "부록. 출처와 검증 상태", level=0),
-            _SectionHeading(
-                _appendix_heading_markup(),
-                "출처와 검증 상태",
-                "부록",
-                styles["heading"],
-                A4[0] - (constants.PAGE_MARGIN_PT * 2),
-            ),
-            Paragraph(_escape(constants.CITATIONS_NOTE), styles["small"]),
-        ]
-    )
+    heading: list[Flowable] = [
+        _OutlineAnchor("sources", "부록. 출처와 검증 상태", level=0),
+        _SectionHeading(
+            _appendix_heading_markup(),
+            "출처와 검증 상태",
+            "부록",
+            styles["heading"],
+            A4[0] - (constants.PAGE_MARGIN_PT * 2),
+        ),
+        Paragraph(_escape(constants.CITATIONS_NOTE), styles["small"]),
+    ]
     width = A4[0] - (constants.PAGE_MARGIN_PT * 2)
     rows: list[list[Paragraph]] = [
         [
@@ -2907,40 +2922,47 @@ def _add_citations(
                 Paragraph(label_markup, styles["table"]),
                 Paragraph(_escape(status), styles["table"]),
                 Paragraph(_escape(verification), styles["table"]),
-                Paragraph(_escape(location), styles["table"]),
+                Paragraph(_link_markup(location, location), styles["table"]),
                 Paragraph(_escape(used_in), styles["table"]),
             ]
         )
-    table = Table(
-        rows,
-        colWidths=[
-            width * 0.06,
-            width * 0.27,
-            width * 0.20,
-            width * 0.15,
-            width * 0.18,
-            width * 0.14,
-        ],
+    column_widths = [
+        width * 0.06,
+        width * 0.27,
+        width * 0.20,
+        width * 0.15,
+        width * 0.18,
+        width * 0.14,
+    ]
+    padding = constants.APPENDIX_CELL_PADDING_PT
+    table_style = TableStyle(
+        [
+            ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor(constants.COLOR_LINE)),
+            ("LINEABOVE", (0, 0), (-1, 0), 1.0, colors.HexColor(constants.COLOR_INK)),
+            ("LINEBELOW", (0, -1), (-1, -1), 1.0, colors.HexColor(constants.COLOR_INK)),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(constants.COLOR_HEADER)),
+            ("BACKGROUND", (0, 1), (0, -1), colors.HexColor(constants.COLOR_SURFACE)),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), padding),
+            ("RIGHTPADDING", (0, 0), (-1, -1), padding),
+            ("TOPPADDING", (0, 0), (-1, -1), padding),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), padding),
+        ]
+    )
+    table = Table(rows, colWidths=column_widths, repeatRows=1, hAlign="LEFT")
+    table.setStyle(table_style)
+    leading_table = Table(
+        rows[: constants.APPENDIX_MIN_START_ROWS + 1],
+        colWidths=column_widths,
         repeatRows=1,
         hAlign="LEFT",
     )
-    table.setStyle(
-        TableStyle(
-            [
-                ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor(constants.COLOR_LINE)),
-                ("LINEABOVE", (0, 0), (-1, 0), 1.0, colors.HexColor(constants.COLOR_INK)),
-                ("LINEBELOW", (0, -1), (-1, -1), 1.0, colors.HexColor(constants.COLOR_INK)),
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(constants.COLOR_HEADER)),
-                ("BACKGROUND", (0, 1), (0, -1), colors.HexColor(constants.COLOR_SURFACE)),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ]
-        )
-    )
-    story.extend([table, Spacer(1, 5)])
+    leading_table.setStyle(table_style)
+    story.extend([
+        CondPageBreak(constants.APPENDIX_MIN_START_HEIGHT_PT),
+        _AppendixStart(heading, table, leading_table),
+        Spacer(1, 5),
+    ])
 
 
 def _source_label(source: Source) -> str:
