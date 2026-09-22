@@ -3018,7 +3018,13 @@ def _link_markup(label_text: str, url_text: str) -> str:
 
     label = _escape(label_text)
     url = url_text.strip()
-    if not url.startswith(("https://", "http://")):
+    if (not url.startswith(("https://", "http://"))
+            or constants.PDF_LINK_INVALID_CHARACTERS.search(url)):
+        return label
+    try:
+        if not urllib.parse.urlsplit(url).hostname:
+            return label
+    except ValueError:
         return label
     escaped_url = html.escape(_normalize_pdf_text(url), quote=True)
     return (

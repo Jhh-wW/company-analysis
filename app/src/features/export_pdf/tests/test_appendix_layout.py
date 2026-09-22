@@ -193,6 +193,9 @@ def test_긴_첫_행들에도_부록_제목만_앞_쪽에_남지_않는다() -> 
     "https://wrtn.io/news/?a=1&b=2#1",
     "사업내용",
     "9453-9682",
+    "https://wrtn.io/company/ · 목록 11번째 항목",
+    "https://wrtn.io/news/ 게시글 1",
+    "https:///news/",
 ])
 def test_원문_위치는_URL만_링크로_만들고_표시_글자는_유지한다(
     sealed: bool, location: str,
@@ -219,7 +222,10 @@ def test_원문_위치는_URL만_링크로_만들고_표시_글자는_유지한�
 
     assert "".join(location.split()) in "".join(text.split())
     expected_urls = {source_url}
-    if location.startswith(("http://", "https://")):
+    if location in {
+        "https://wrtn.io/news/#1", "http://wrtn.io/news/#2",
+        "https://wrtn.io/news/?a=1&b=2#1",
+    }:
         expected_urls.add(location)
     assert urls == expected_urls
 
@@ -315,3 +321,11 @@ def test_padding을_빼지_않은_상한이면_경계_입력이_LayoutError로_�
     citations[-1] = replace(citations[-1], location=citations[-1].location + "x " * 36)
     with pytest.raises(LayoutError):
         _appendix_pdf(replace(report, citations=citations))
+
+
+@pytest.mark.parametrize("url", [
+    "https://example.com/\n본문", "https://example.com/\x00본문",
+    "https://[잘못된주소/", "javascript:alert(1)",
+])
+def test_잘못된_위치_주소도_표시_문구는_보존한다(url):
+    assert logic._link_markup("원문 위치", url) == "원문 위치"

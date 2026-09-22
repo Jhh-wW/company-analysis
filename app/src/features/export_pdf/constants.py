@@ -12,6 +12,8 @@ from src.shared.report_generation.citation_constants import (
 
 CONTENT_TYPE_PDF: Final[str] = "application/pdf"
 PDF_SUFFIX: Final[str] = ".pdf"
+# 사람이 읽는 위치 설명과 제어 문자는 PDF 링크 주소로 쓰지 않는다.
+PDF_LINK_INVALID_CHARACTERS: Final[re.Pattern[str]] = re.compile(r"[\s\x00-\x1f\x7f]")
 FILENAME_PATTERN: Final[str] = "{company_slug}-company-analysis" + PDF_SUFFIX
 FILENAME_FALLBACK: Final[str] = "company"
 # Windows 금지 문자뿐 아니라 HTTP 헤더 주입/모호성을 만드는 제어문자와 %도 뺀다.
