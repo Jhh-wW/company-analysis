@@ -25,6 +25,7 @@ from src.features.audit_financials.constants import (
     METRIC_ALIASES,
     OUTPUT_YEAR_COUNT,
     PLAIN_METRIC_WINDOW_CHARS,
+    PLAIN_NOTE_NUMBER_MAX,
     UNIT_DIVISORS,
 )
 from src.shared.display_scale import display_places, format_display_value
@@ -58,6 +59,12 @@ _AMOUNT_TOKEN_RE = re.compile(
     r"|[△▲+\-−]\s*(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?"
     r"|(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?"
     r")(?![\d,])"
+)
+_PLAIN_NUMERIC_PREFIX_RE = re.compile(r"[\d\s,().+△▲−-]*")
+_PLAIN_SEPARATED_SIGN_RE = re.compile(r"[△▲+−-](?:\s|$)")
+_PLAIN_NOTE_HEADER_RE = re.compile(r"주\s*석")
+_PLAIN_PERIOD_SUFFIX_RE = re.compile(
+    r"(?:년(?:도|말|초)?|월|일|기말|기초)(?=\s|$|\d|부터|까지)"
 )
 _ENUMERATION_PREFIX_RE = re.compile(
     r"^[\s\u3000]*(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩIVX]+|\d+)[.)．]?\s*",
@@ -394,17 +401,18 @@ def _parse_amount(token: str, *, force_negative: bool) -> _Amount | None:
 def _row_amounts(
     cells: tuple[str, ...], *, period_count: int, force_negative: bool
 ) -> tuple[_Amount, ...]:
-    amounts: list[_Amount] = []
-    for cell in cells:
-        if _AMOUNT_TOKEN_RE.fullmatch(cell.strip()) is None:
-            continue
-        parsed = _parse_amount(cell, force_negative=force_negative)
-        if parsed is not None:
-            amounts.append(parsed)
-    if len(amounts) < period_count:
+    if len(cells) < period_count:
         return ()
-    # 주석 번호가 숫자인 표가 많으므로 실제 기간 값은 행의 오른쪽 끝에서 고른다.
-    return tuple(amounts[-period_count:])
+    amounts: list[_Amount] = []
+    # 실제 기간 칸을 먼저 고정해야 결측 칸 대신 앞쪽 주석 번호가 밀려오지 않는다.
+    for cell in cells[-period_count:]:
+        if _AMOUNT_TOKEN_RE.fullmatch(cell.strip()) is None:
+            return ()
+        parsed = _parse_amount(cell, force_negative=force_negative)
+        if parsed is None:
+            return ()
+        amounts.append(parsed)
+    return tuple(amounts)
 
 
 def _structured_observations(
@@ -432,39 +440,76 @@ def _loose_alias_pattern(alias: str) -> str:
     return r"\s*".join(re.escape(character) for character in alias)
 
 
+def _plain_row_amounts(
+    window: str, *, period_count: int, force_negative: bool, has_note_column: bool
+) -> tuple[_Amount, ...]:
+    # 다른 계정·설명문을 넘어 수치를 주워 오지 않고 계정 직후의 숫자 구간만 읽는다.
+    prefix = _PLAIN_NUMERIC_PREFIX_RE.match(window)
+    if prefix is None:
+        return ()
+    row = prefix.group(0)
+    # 2025 같은 정상 금액은 허용하되 숫자에 명시된 기간 단위는 금액으로 쓰지 않는다.
+    if _PLAIN_PERIOD_SUFFIX_RE.match(window[prefix.end():]):
+        return ()
+    # 평문은 칸 경계가 소실되므로 독립된 대시와 다음 칸을 음수로 합칠 수 없다.
+    if _PLAIN_SEPARATED_SIGN_RE.search(row):
+        return ()
+    tokens: list[str] = []
+    end = 0
+    for match in _AMOUNT_TOKEN_RE.finditer(row):
+        if row[end:match.start()].strip():
+            return ()
+        tokens.append(match.group(0).strip())
+        end = match.end()
+    if row[end:].strip() or not tokens:
+        return ()
+
+    first_is_note = tokens[0].isdecimal() and 0 < int(tokens[0]) <= PLAIN_NOTE_NUMBER_MAX
+    if has_note_column and first_is_note:
+        # 주석과 결측 금액을 구별할 수 없으면 표를 만들지 않는다.
+        if len(tokens) != period_count + 1:
+            return ()
+        tokens = tokens[1:]
+    if len(tokens) != period_count:
+        return ()
+    return _row_amounts(
+        tuple(tokens), period_count=period_count, force_negative=force_negative
+    )
+
+
 def _plain_observation(
-    text: str, *, aliases: tuple[str, ...], period_count: int
+    text: str, *, aliases: tuple[str, ...], period_count: int, has_note_column: bool
 ) -> tuple[_Amount, ...]:
     for alias in sorted(aliases, key=lambda value: (-len(value), value)):
-        pattern = re.compile(_loose_alias_pattern(alias) + r"(?![가-힣A-Za-z])")
+        pattern = re.compile(
+            r"(?<![가-힣A-Za-z])" + _loose_alias_pattern(alias) + r"(?![가-힣A-Za-z])"
+        )
         for match in pattern.finditer(text):
             window = text[match.end() : match.end() + PLAIN_METRIC_WINDOW_CHARS]
-            parsed: list[_Amount] = []
-            for token_match in _AMOUNT_TOKEN_RE.finditer(window):
-                amount = _parse_amount(
-                    token_match.group(0), force_negative=alias in LOSS_ONLY_ALIASES
-                )
-                if amount is not None:
-                    parsed.append(amount)
-            grouped = [amount for amount in parsed if amount.had_grouping]
-            if len(grouped) >= period_count:
-                return tuple(grouped[:period_count])
-            if len(parsed) == period_count:
-                return tuple(parsed)
-            if len(parsed) == period_count + 1 and abs(parsed[0].value) <= 999:
-                return tuple(parsed[1:])
+            amounts = _plain_row_amounts(
+                window,
+                period_count=period_count,
+                force_negative=alias in LOSS_ONLY_ALIASES,
+                has_note_column=has_note_column,
+            )
+            if amounts:
+                return amounts
     return ()
 
 
 def _plain_observations(
     text: str, *, period_count: int
 ) -> dict[str, tuple[_Amount, ...]]:
+    has_note_column = _PLAIN_NOTE_HEADER_RE.search(text[:_metric_anchor(text)]) is not None
     return {
         metric: amounts
         for metric, aliases in METRIC_ALIASES
         if (
             amounts := _plain_observation(
-                text, aliases=aliases, period_count=period_count
+                text,
+                aliases=aliases,
+                period_count=period_count,
+                has_note_column=has_note_column,
             )
         )
     }
@@ -628,7 +673,8 @@ def parse_audit_financials(
         sources.append(("xml", xml_text))
     if isinstance(text, str) and text.strip():
         kind = "xml" if "<TABLE" in text.upper() else "plain"
-        if not sources or text != sources[0][1]:
+        # 같은 XML의 평문 사본은 빈 칸 위치를 잃으므로 독립된 재시도 근거가 아니다.
+        if not sources or _plain_text(text) != _plain_text(sources[0][1]):
             sources.append((kind, text))
     if not sources:
         return AuditFinancialsResult(
@@ -640,9 +686,19 @@ def parse_audit_financials(
     found_statement = False
     for kind, source in sources:
         candidate_groups: list[list[_StatementCandidate]] = []
+        structured: list[_StatementCandidate] = []
         if kind == "xml":
-            candidate_groups.append(_xml_candidates(source))
-        candidate_groups.append(_plain_candidates(source, source_kind=kind))
+            structured = _xml_candidates(source)
+            candidate_groups.append(structured)
+        # 계정 칸이 있는 XML을 평탄화하면 빈 칸의 위치를 잃는다. 구조가 없는
+        # 원문에만 평문 fallback을 유지해 거절한 결측을 다시 금액으로 채우지 않는다.
+        if not any(
+            _metric_key(cell) is not None
+            for candidate in structured
+            for row in candidate.rows
+            for cell in row
+        ):
+            candidate_groups.append(_plain_candidates(source, source_kind=kind))
         for candidates in candidate_groups:
             found_statement = found_statement or bool(candidates)
             result, attempt = _parse_candidates(candidates, cite=cite)
