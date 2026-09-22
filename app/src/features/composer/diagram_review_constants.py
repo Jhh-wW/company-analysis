@@ -115,6 +115,13 @@ ACCOUNTING_REVENUE_LABEL_RE: Final[re.Pattern[str]] = re.compile(
 )
 
 OPERATIONS_FLOW_ORIGIN_HEADER: Final[str] = "무엇으로 시작하나"
+OPERATIONS_FLOW_TARGET_HEADER: Final[str] = "누구에게 닿나"
+FLOW_UNINFORMATIVE_OPERATIONS_CODE: Final[str] = "flow_uninformative_operations"
+# 대상도 없고 나머지도 아래 일반 설명뿐인 도식만 제외한다. 고유명·수치는 보존한다.
+OPERATIONS_GENERIC_LABELS: Final[frozenset[str]] = frozenset({
+    "", "미확인", "콘텐츠", "인공지능콘텐츠", "ai콘텐츠", "콘텐츠제공",
+    "상품", "제품", "서비스", "제공", "판매", "운영",
+})
 
 #: 매출원 이름을 뽑는 자리 — 「<이름>매출」·「<이름> 매출」·「<이름>수익」.
 #: ★ 뒤 글자를 함께 잡아 두고 판정 함수가 «조사인지 합성어인지»를 가른다.

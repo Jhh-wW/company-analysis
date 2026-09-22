@@ -113,3 +113,20 @@ def test_legacy_review_does_not_spend_a_call_on_the_rejected_flow():
     checked, problems = check_diagrams(report, fragments, unexpected_call)
     assert checked.sections[0].flow_rows == ()
     assert any(FLOW_ACCOUNTING_REVENUE_CODE in reason for reason in problems)
+
+@pytest.mark.parametrize("cells,kept", [
+    (("인공지능 콘텐츠", "콘텐츠 제공", "미확인"), False),
+    (("AI 콘텐츠", "콘텐츠 제공", ""), False),
+    (("뤼튼 크랙", "콘텐츠 제공", ""), True),
+    (("인공지능 콘텐츠", "콘텐츠 제공", "기업 고객"), True),
+    (("AI 콘텐츠", "개인별 학습 자료 생성", ""), True),
+])
+def test_운영_도식은_대상이_없고_일반_설명뿐인_경우만_제외한다(cells, kept):
+    from dataclasses import replace
+    from src.features.composer.constants import OPERATIONS_FLOW_SECTION_ID
+    report, fragments = make_report(section_id=OPERATIONS_FLOW_SECTION_ID)
+    row = replace(report.sections[0].flow_rows[0], cells=cells)
+    report = replace(report, sections=(replace(report.sections[0], flow_rows=(row,)),))
+    checked, _ = check_diagram_numbers(report, fragments)
+    assert bool(checked.sections[0].flow_rows) is kept
+    assert checked.sections[0].sentences == report.sections[0].sentences

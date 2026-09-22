@@ -97,6 +97,9 @@ from src.features.composer.diagram_review_constants import (
     FLOW_PRODUCT_GOODS_CONFLICT_CODE,
     FLOW_REVENUE_STREAM_MISSING_CODE,
     OPERATIONS_FLOW_ORIGIN_HEADER,
+    OPERATIONS_FLOW_TARGET_HEADER,
+    OPERATIONS_GENERIC_LABELS,
+    FLOW_UNINFORMATIVE_OPERATIONS_CODE,
     PRODUCT_GOODS_OPPOSITE,
     PRODUCT_GOODS_PRIMACY_RE,
     REVENUE_COMPOSITION_MARKERS,
@@ -632,6 +635,27 @@ def _cell_index(section_id: str, header: str) -> Optional[int]:
 
     headers = FLOW_HEADERS_BY_SECTION.get(section_id, ())
     return headers.index(header) if header in headers else None
+
+
+def _drop_uninformative_operations_rows(
+    rows: tuple[FlowRow, ...],
+) -> tuple[tuple[FlowRow, ...], tuple[str, ...]]:
+    """대상이 미확인이고 모든 칸이 일반 설명뿐인 운영 도식을 제외한다."""
+    index = _cell_index(OPERATIONS_FLOW_SECTION_ID, OPERATIONS_FLOW_TARGET_HEADER)
+    if index is None:
+        return rows, ()
+    kept: list[FlowRow] = []
+    problems: list[str] = []
+    for row in rows:
+        cells = tuple(_compact_surface(cell) for cell in row.cells)
+        if (index < len(cells) and cells[index] in {"", "미확인"}
+                and all(cell in OPERATIONS_GENERIC_LABELS for cell in cells)):
+            problems.append(
+                f"{FLOW_UNINFORMATIVE_OPERATIONS_CODE}: 대상이 미확인이고 일반 설명뿐인 운영 경로 제외"
+            )
+        else:
+            kept.append(row)
+    return tuple(kept), tuple(problems)
 
 
 def _drop_accounting_revenue_rows(
@@ -1183,6 +1207,10 @@ def check_diagram_numbers(
                 f"[{section.section_id}] {reason}" for reason in rejected
             )
         if section.section_id == OPERATIONS_FLOW_SECTION_ID:
+            rows, uninformative = _drop_uninformative_operations_rows(rows)
+            problems.extend(
+                f"[{section.section_id}] {reason}" for reason in uninformative
+            )
             rows, conflicted = _drop_product_goods_conflict_rows(section, rows)
             problems.extend(
                 f"[{section.section_id}] {reason}" for reason in conflicted
