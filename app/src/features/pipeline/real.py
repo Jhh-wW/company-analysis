@@ -182,6 +182,9 @@ from src.features.news_intake.constants import (
     NEWS_TRIGGER_NONE,
     NEWS_TRIGGER_WEB_ZERO,
 )
+from src.shared.news_analysis_port import (
+    AnalysisNamespace, ProviderAnalysis, analyze_with_cache, record_news_provider_calls,
+)
 from src.features.observability import run_diagnostics
 from src.features.product_names.constants import MAX_NAME_FRAGMENTS_PER_FILING
 from src.features.product_names.fragments import (
@@ -883,6 +886,8 @@ class _MeteredEngine:
             "pipeline_provider_call_context", default=_ProviderCallContext(),
         ))
         object.__setattr__(self, "_provider_call_count", 0)
+        object.__setattr__(self, "_provider_dispatch_count", 0)
+        object.__setattr__(self, "_cached_provider_call_slots", 0)
         object.__setattr__(self, "_provider_call_lock", threading.Lock())
         # 화면 단계가 바뀔 때마다 직전 단계 소요 시간을 재는 시계. 아직 어느
         # 단계도 지나지 않았으면 None — 「닫을 구간이 없다」는 뜻이다.
@@ -902,6 +907,8 @@ class _MeteredEngine:
             "_billing_uncertain",
             "_call_context",
             "_provider_call_count",
+            "_provider_dispatch_count",
+            "_cached_provider_call_slots",
             "_provider_call_lock",
             "_stage_clock_key",
             "_stage_clock_start",
@@ -1026,7 +1033,7 @@ class _MeteredEngine:
                 raise provider_budget.ProviderBudgetUnavailable(
                     "미확정 provider 호출 뒤에는 같은 요청에서 다시 호출할 수 없습니다"
                 )
-            if self._provider_call_count >= MAX_AI_CALLS_PER_REQUEST - reserved_calls:
+            if self._provider_call_count + self._cached_provider_call_slots >= MAX_AI_CALLS_PER_REQUEST - reserved_calls:
                 # ★ 돈이 아니라 «횟수»다 — 전용 타입으로 구분해 던진다.
                 #   composer 의 «선택적 다듬기»는 이 구분을 보고 포기하고
                 #   지금까지 만든 보고서로 끝낸다(실측 근거는
@@ -1041,12 +1048,25 @@ class _MeteredEngine:
             )
             return int(self._provider_call_count)
 
+    def reserve_cached_provider_call(self) -> None:
+        """실제 시도·usage를 만들지 않고 적중 전 분석의 논리 호출 몫을 남긴다."""
+        generation_coordination.ensure_paid_phase()
+        provider_budget.current()
+        with self._provider_call_lock:
+            if self._billing_uncertain:
+                raise provider_budget.ProviderBudgetUnavailable("미확정 provider 호출 뒤에는 캐시를 사용할 수 없습니다")
+            used = self._provider_call_count + self._cached_provider_call_slots
+            if used >= MAX_AI_CALLS_PER_REQUEST - self.reserved_calls:
+                raise provider_budget.RequestCallLimitReached("한 요청의 AI 호출 횟수 상한을 넘었습니다")
+            object.__setattr__(self, "_cached_provider_call_slots", self._cached_provider_call_slots + 1)
+
     def available_provider_calls(self, *, reserved_calls: int) -> int:
         """기존 사용량과 뒤 단계의 보호 몫을 뺀 호출 여유만 돌려준다."""
         if type(reserved_calls) is not int or reserved_calls < 0:
             raise ValueError("보호할 AI 호출 수는 0 이상의 정수여야 합니다")
         with self._provider_call_lock:
-            return max(0, MAX_AI_CALLS_PER_REQUEST - self._provider_call_count - reserved_calls)
+            return max(0, MAX_AI_CALLS_PER_REQUEST - self._provider_call_count
+                       - self._cached_provider_call_slots - reserved_calls)
 
     @property
     def reserved_calls(self) -> int:
@@ -1374,12 +1394,18 @@ class _MeteredMessages:
             callbacks.heartbeat(attempt_token)
             callbacks.mark_dispatch_intent(attempt_token)
 
+        def send() -> Any:
+            # 캐시와 admission 거절은 실제 provider 전송 진단에 섞지 않는다.
+            with self._metered._provider_call_lock:
+                self._metered._provider_dispatch_count += 1
+            return self._messages.create(*args, **call_kwargs)
+
         try:
             response = gateway.call_once(
                 adapter=adapter,
                 reserved_krw=call_reservation.estimated_krw,
                 before_dispatch=before_dispatch,
-                send=lambda: self._messages.create(*args, **call_kwargs),
+                send=send,
                 record_observation=lambda observation: callbacks.record_observation(
                     attempt_token, observation
                 ),
@@ -7488,7 +7514,7 @@ _NEWS_BODY_RUNTIME_ACTIVE: contextvars.ContextVar[bool] = contextvars.ContextVar
 
 
 def _news_body_concurrency() -> int:
-    """기본 두 요청, 환경변수 1이면 즉시 순차로 복귀한다."""
+    """기본 세 요청, 환경변수 1이면 즉시 순차로 복귀한다."""
     raw = os.getenv(NEWS_BODY_CONCURRENCY_ENV)
     if raw is None:
         return NEWS_BODY_CONCURRENCY_DEFAULT
@@ -7569,10 +7595,37 @@ def _news_grounded_analyzer(
 
     def analyze(prompt: str, schema: dict[str, Any], max_tokens: int) -> Any:
         _set_meter_stage(engine, "news_grounding")
-        payload, _usage = engine._ask(
-            client, prompt, schema, max_tokens=max_tokens
+        if type(engine) is not _MeteredEngine:
+            payload, _usage = engine._ask(client, prompt, schema, max_tokens=max_tokens)
+            return payload
+        metered = engine
+
+        def provider() -> ProviderAnalysis:
+            before_calls, before_usage = metered._provider_call_count, len(metered.usages)
+            before_dispatch = metered._provider_dispatch_count
+            try:
+                payload, usage = engine._ask(client, prompt, schema, max_tokens=max_tokens)
+            finally:
+                record_news_provider_calls(metered._provider_dispatch_count - before_dispatch)
+            events = metered.usages[before_usage:]
+            # retry·미관측 전송·부분 응답은 저장하지 않는다. 기존 _ask는 1회 전송이다.
+            complete = (
+                metered._provider_call_count - before_calls == 1 and len(events) == 1
+                and metered._provider_dispatch_count - before_dispatch == 1
+                and events[0].get("failed") is False and not metered.billing_uncertain
+                and isinstance(usage, dict) and usage.get("stop_reason") == "end_turn"
+                and not usage.get("error") and not usage.get("refusal")
+                and not usage.get("parse_failed") and not usage.get("output_limit_reached")
+                and not usage.get("truncation_suspected")
+            )
+            return ProviderAnalysis(payload, complete=complete)
+
+        namespace = AnalysisNamespace(
+            model=engine.MODEL, build=engine_build_identity.process_engine_build_identity(),
         )
-        return payload
+        return analyze_with_cache(
+            provider, namespace=namespace, reserve_hit=engine.reserve_cached_provider_call,
+        )
 
     return analyze
 

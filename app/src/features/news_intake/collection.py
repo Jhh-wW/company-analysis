@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from src.core.provider_gateway import gateway
 from src.features.news_intake import constants as c
+from src.features.news_intake.analysis_result_cache import analysis_request
 from src.features.news_intake.body_prefetch import (
     ArticleFetchJob, ArticleFetchOutcome, BodyFetchConcurrency, BodyFetchLane,
     CallBudgetPool, CallLease, eligible_body_urls, fetch_article_body,
@@ -76,6 +77,9 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     analysis_calls = 0
     prompt_chars = 0
     response_chars = 0
+    analysis_cache_hits = 0
+    analysis_provider_calls = 0
+    analysis_provider_unobserved = 0
     relevant_articles: set[str] = set()
     document_hashes: dict[str, str] = {}
     seen_body_hashes: set[str] = set()
@@ -112,7 +116,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     )
 
     def analyze_batch(batch: list[tuple[NewsCandidate, str]]) -> None:
-        nonlocal analysis_calls, prompt_chars, response_chars, stopped
+        nonlocal analysis_calls, prompt_chars, response_chars, stopped, analysis_cache_hits
+        nonlocal analysis_provider_calls, analysis_provider_unobserved
         if not batch:
             return
         if analysis_calls >= policy.max_analysis_calls or time.monotonic() >= deadline:
@@ -132,7 +137,20 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         analysis_calls += 1
         prompt_chars += len(prompt)
         try:
-            response = analyze_grounded(prompt, build_grounded_schema(batch), policy.analysis_max_tokens)
+            schema = build_grounded_schema(batch)
+            with analysis_request(
+                company=company, as_of=as_of, policy=policy, articles=batch,
+                full_body_hashes=document_hashes, prompt=prompt, schema=schema,
+                max_tokens=policy.analysis_max_tokens,
+            ) as request:
+                try:
+                    response = analyze_grounded(prompt, schema, policy.analysis_max_tokens)
+                finally:
+                    analysis_cache_hits += request.cache_hits
+                    if request.provider_calls is None:
+                        analysis_provider_unobserved += 1
+                    else:
+                        analysis_provider_calls += request.provider_calls
         except (gateway.ProviderCallFailed, GenerationCoordinationError,
                 EngineBuildIdentityChangedError, CancelledError):
             # gateway가 이미 안전한 observation을 원장에 기록했다. provider
@@ -429,6 +447,10 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         "본문읽기": sum(stage_count for stage_count in stages.values()),
         "본문글자": body_chars, "분류AI호출": analysis_calls, "분석AI호출": analysis_calls,
         "분석호출상한": policy.max_analysis_calls, "분석잔여호출": policy.max_analysis_calls - analysis_calls,
+        "분석캐시적중": analysis_cache_hits, "분석캐시보존호출": analysis_cache_hits,
+        "분석논리호출": analysis_calls,
+        "분석provider호출": None if analysis_provider_unobserved else analysis_provider_calls,
+        "분석provider미관측": analysis_provider_unobserved,
         "분류프롬프트글자": prompt_chars, "분석입력글자": prompt_chars, "분석응답글자": response_chars,
         "관련성통과": len(relevant_articles), "조각": len(fragments),
         "조각글자": sum(len(item.text) for item in fragments), "독립기사": len(articles),
