@@ -402,6 +402,7 @@ BODY_FETCH_PER_HOST_LIMIT: Final[int] = 1
 BODY_FETCH_PER_HOST_MAX: Final[int] = 2
 BODY_FETCH_THREAD_NAME_PREFIX: Final[str] = "news-body"
 BODY_BUDGET_EXHAUSTED_CODE: Final[str] = "body_budget_exhausted"
+ANALYSIS_BUDGET_EXHAUSTED_CODE: Final[str] = "analysis_budget_exhausted"
 PLANNED_CARRIED: Final[str] = "carried"
 PLANNED_SKIPPED: Final[str] = "skipped"
 PLANNED_STOP: Final[str] = "stop"
@@ -475,12 +476,14 @@ GROUNDED_SOURCE_TYPES: Final[tuple[str, ...]] = (
 )
 # 매체 도메인은 회사별 예외가 아니다. 확인된 전문 매체는 정책의 추가 목록으로
 # 확장하되 검색 결과에 URL이 있다는 이유만으로 자동 승격하지 않는다.
-# 2026-09-13 공식 회사소개·운영 주체·신문 등록정보를 확인한 추가 매체.
+# 공식 회사소개·운영 주체·신문 등록정보를 확인한 추가 매체.
 # 매체 확인은 기사 사실 검증이나 본문 접근 허가를 대신하지 않는다.
 ADDITIONAL_PUBLISHER_REFERENCES: Final[tuple[tuple[str, str, str], ...]] = (
     ("etoday.co.kr", "이투데이", "https://company.etoday.co.kr/"),
     ("inews24.com", "아이뉴스24", "https://www.inews24.com/customer/company/overview/"),
     ("nocutnews.co.kr", "CBS노컷뉴스", "https://www.nocutnews.co.kr/about/contents.aspx"),
+    # 2026-09-22 공식 하단의 발행 주체와 등록번호 서울아00039 확인.
+    ("ddaily.co.kr", "디지털데일리", "https://www.ddaily.co.kr/"),
 )
 TRUSTED_PUBLISHER_DOMAINS: Final[tuple[str, ...]] = (
     "yna.co.kr", "yonhapnews.co.kr", "newsis.com", "news1.kr", "reuters.com",

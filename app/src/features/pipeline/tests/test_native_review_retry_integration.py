@@ -149,7 +149,9 @@ def test_only_initial_parse_retry_sends_schema_with_separate_cap(
         initial_ask=calls.initial, initial_retry_ask=calls.retry,
     ) == expected
     prompts = [prompt] if len(caps) == 1 else [prompt, str(prompt) + RETRY_REMINDER]
-    schemas = [None] if len(caps) == 1 else [None, FLAT_REVIEW_SCHEMA]
+    # 2026-09-22: 최초 본문 검수(initial_ask)는 첫 요청부터 스키마를 싣는다.
+    #   재요청의 별도 상한·같은 계량 경계는 그대로다(test_initial_review_schema.py 참조).
+    schemas = [FLAT_REVIEW_SCHEMA] * len(caps)
     _assert_payloads(calls, caps, prompts, schemas)
     assert calls.engine.usages[0]["out"] == first_output
 
