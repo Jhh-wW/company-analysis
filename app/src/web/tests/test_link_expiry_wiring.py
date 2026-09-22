@@ -191,13 +191,13 @@ def test_보고서_공개기간_문구는_LINK_수명을_바꿔도_60일이다(
 
 
 # ══════════════════════════════════════════════════════════
-# ③ 고유번호 경고가 상세 화면에도 뜬다
+# ③ 고유번호가 없어도 상세 화면에서 연결을 편집할 수 있다
 # ══════════════════════════════════════════════════════════
 
 _경고문 = "이 보고서에는 회사 고유번호가 없어 같은 이름의 다른 회사와 구분하지 못합니다"
 
 
-def test_고유번호_없는_결속은_상세화면에도_경고를_보인다(admin: TestClient):
+def test_detail_attachment_form_does_not_require_company_id(admin: TestClient):
     report_id = uuid.uuid4().hex
     report = replace(build_demo_report(), company_id="")
     with storage_db.connect() as conn:
@@ -208,11 +208,13 @@ def test_고유번호_없는_결속은_상세화면에도_경고를_보인다(ad
     화면 = admin.get(f"/admin/links/{key_hash}")
 
     assert 화면.status_code == 200
-    assert _경고문 in 화면.text
+    assert _경고문 not in 화면.text
+    assert 'name="report_reference"' in 화면.text
+    assert f'value="{report_id}"' in 화면.text
 
 
 def test_고유번호가_있으면_상세화면도_조용하다(admin: TestClient):
-    """★ 대조군 — 경고가 늘 뜨면 아무것도 알려 주지 않는다."""
+    """고유번호 유무와 관계없이 연결 제한 경고를 표시하지 않는다."""
 
     key_hash = _아직_안_닫힌_링크(_보고서를_굽는다())
 
