@@ -15,6 +15,8 @@
   가드가 전부 막아도 녹색이 되기 때문이다.
 """
 
+import json
+
 import pytest
 
 from src.features.composer.absence_claim_constants import ABSENCE_CLAIM_UNSUPPORTED
@@ -387,3 +389,166 @@ def test_묶음_진입점에서_도식_행만_빠져도_안내문을_만들지_�
     장 = 결과.sections[0]
     assert 장.flow_rows == (), "부재 단언을 옮겨 적은 행이 그대로 남았다"
     assert 장.notice == ""
+
+
+# ══════════════════════════════════════════════════════════
+# 2026-09-23 운영 PDF(배포 27e9f03) 실측 — 규칙이 «어휘»에서 뚫린 자리
+#
+# ★ 독립 검수(review-fable-final.md G1·G2·G3) — 표지 04·8장·9장에 아래 네 문장이
+#   그대로 인쇄됐다. 코드를 읽으면 `verify.py` 두 검수 경로 모두 등급·인용과
+#   «무관하게» 이 가드를 먼저 부르고 있었다. 즉 배선이 아니라 낱말 목록이
+#   뚫렸다: 「선언이 없다」·「선언하지 않았다」·「자료가 없다」는 술어 목록 밖이었고,
+#   「정책 공시가 확인되지 않는다」는 주격 「공시가」가 지시어 목록 밖이었다.
+# ★ 9장 문장은 같은 감사보고서 주석 7에 산업재산권 잔액(기말 123,558천원)이
+#   있어 독자가 사실 오류로 읽을 수 있다. 잔액이 곧 «특허 보유»는 아니므로 여기서
+#   «확인된 모순»이라고 단정하지 않는다 — 작성부가 문서 전체를 본 적이 없으니
+#   «증거 없는 전체 부재 단언»으로 뺀다. 그 문장에는 인용 3개가 붙어 있었고
+#   검수 AI가 «참»으로 판정했다 — 인용 번호가 붙어 검증된 사실처럼 보이는 것이
+#   더 위험하다는 검수 의견 그대로다.
+# ══════════════════════════════════════════════════════════
+
+#: 운영 PDF의 문장을 «글자 그대로» 옮긴 것(인용 표식·«— 해석» 꼬리는 렌더가 붙인다).
+LIVE_27E9F03_SENTENCES = {
+    "9장_2번_특허선언없다": (
+        "감사보고서와 공시 자료에는 회사의 기술 우위, 특허 보유, 독자 개발 기술, "
+        "또는 경쟁사 대비 선도성에 관한 공식 선언이 없다."
+    ),
+    "표지04_9장_1번_차별점선언하지않았다": (
+        "회사는 공식 자료에서 자신의 차별점을 명시적으로 선언하지 않았다."
+    ),
+    "8장_1번_공시자료가없다": (
+        "조직개편, 부서 구성, 의사결정 및 승인 절차에 관한 공식 공시 자료가 없다."
+    ),
+    "8장_2번_정책공시가확인되지않는다": (
+        "노사 관계 및 노동 조건에 관한 공식 선언이나 정책 공시가 확인되지 않는다."
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "sentence", list(LIVE_27E9F03_SENTENCES.values()), ids=list(LIVE_27E9F03_SENTENCES),
+)
+def test_live_27e9f03_absence_claims_are_all_rejected(sentence):
+    assert absence_claim_problem(sentence) == ABSENCE_CLAIM_UNSUPPORTED
+
+
+@pytest.mark.parametrize("sentence", [
+    # 회사가 «밝힌» 선언 — 「선언」이 술어 목록에 들어가도 긍정문은 걸리지 않는다.
+    "회사는 보도자료에서 청소년 보호 정책을 2027년 초부터 적용하겠다고 선언했다.",
+    "회사는 사업보고서에서 인공지능 소프트웨어 개발을 주요 사업으로 선언했다.",
+    # ★ 출처가 «그렇게 밝혔다»는 회사 행동의 부정 — 문서 전체 부재 단언이 아니다
+    #   (총괄 검토 지적). 보고 구절을 지운 뒤 판정하므로 살아남는다.
+    "회사는 공시에서 중간배당을 선언하지 않았다고 밝혔다.",
+    "회사는 사업보고서에서 중간배당을 선언하지 않았다고 밝혔다.",
+    "원문에는 회사가 진행 중인 중요 소송이 없다고 적혀 있다.",
+    # 같은 감사보고서 주석 7의 사실 — 부재 단언을 뺀다고 해서 이런 수치까지 빼지 않는다.
+    "감사보고서 주석에 따르면 산업재산권 장부금액은 123,558천원이다.",
+    # 회사가 스스로 밝힌 «한정된» 부재 — 지시어를 근거로 전달하는 정상 문장.
+    "사업보고서에 따르면 당사는 등록된 특허가 없다.",
+    "회사는 사업보고서에서 종속기업 Wrtn Technologies Japan을 100% 보유한다고 공시했다.",
+    # 「없이」는 수단 서술이지 부재 단언이 아니다 — ⑤에 「자료」를 넣으며 생긴 경계.
+    "회사는 별도 자료 없이 보도자료로 계획을 밝혔다.",
+    # 「공시가격」은 자료 지시어가 아니다 — 주격 「공시가」를 넣으며 생긴 경계.
+    "공시가격은 2026년 기준으로 확인되지 않는다.",
+    # 부재 자체를 부정하는 구절 — 안내문 변형 두 꼴(아닙니다·아니다).
+    "공식 자료가 없다는 뜻은 아닙니다.",
+    "공시 자료가 없다는 뜻이 아니다.",
+], ids=(
+    "declared_policy", "declared_business",
+    "reported_no_dividend_disclosure", "reported_no_dividend_report", "reported_no_lawsuit",
+    "ipr_balance", "company_no_patent", "disclosed_subsidiary",
+    "without_material", "disclosed_price", "notice_polite", "notice_plain",
+))
+def test_live_27e9f03_vocabulary_keeps_legitimate_sentences(sentence):
+    assert absence_claim_problem(sentence) == ""
+
+
+@pytest.mark.parametrize("sentence", [
+    # 같은 절 — 부정된 부재 구절만 지우고 뒤의 진짜 부재 단언은 그대로 잡는다.
+    "자료가 없다는 뜻은 아니지만 공시에는 관련 선언이 없다.",
+    # 다른 절 — 앞 절의 안내문이 뒤 절의 부재 단언을 면제하지 않는다.
+    "공식 자료가 없다는 뜻은 아닙니다. 감사보고서와 공시 자료에는 특허 보유에 관한 공식 선언이 없다.",
+    # 「…없다고 판단된다」는 보고 구절이 아니다 — 작성부의 판단은 그대로 부재 단언이다.
+    "공식 자료에는 특허 보유에 관한 선언이 없다고 판단된다.",
+], ids=("same_clause_mix", "next_clause", "judged_not_reported"))
+def test_negation_and_report_exemptions_do_not_shield_real_absence_claims(sentence):
+    """★ 총괄 검토 지적 — 면제는 «구절»에만 미쳐야 한다. 절 전체를 면제하면 새어 나간다."""
+
+    assert absence_claim_problem(sentence) == ABSENCE_CLAIM_UNSUPPORTED
+
+
+def _competitive_position_report(sentences):
+    from src.features.composer.port import ComposedReport, ComposedSection
+
+    return ComposedReport(
+        sections=(
+            ComposedSection(section_id="competitive_position", sentences=sentences),
+        )
+    )
+
+
+def _confirmed_sentence(text: str, citations=("1",)):
+    from src.features.composer.constants import GRADE_CONFIRMED
+    from src.features.composer.port import ComposedSentence
+
+    return ComposedSentence(text=text, citations=citations, grade=GRADE_CONFIRMED)
+
+
+class _AlwaysTrueCompetitiveReviewer:
+    """검수 AI 대역 — 9장 후보를 전부 «참»으로 판정한다(운영 실측과 같은 판정)."""
+
+    def __call__(self, prompt: str) -> str:
+        import re
+
+        numbers = [int(n) for n in re.findall(r"^\[(\d+)\] \(", prompt, re.MULTILINE)]
+        if not numbers:
+            numbers = list(range(1, 10))
+        return json.dumps(
+            {"판정": [{"번호": n, "결과": "참", "장": "competitive_position",
+                      "근거": ["1"]} for n in numbers]},
+            ensure_ascii=False,
+        )
+
+
+@pytest.mark.parametrize("grouped", (False, True), ids=("legacy", "packet엄격"))
+def test_cited_confirmed_absence_claim_is_rejected_even_when_reviewer_says_true(grouped):
+    """★ 9장 2번 재현 — 인용 3개·확인 등급·검수 «참»이었는데도 공개되면 안 된다.
+
+    운영에서는 인용 조각이 문서 «일부»라 문서 «전체»의 부재를 뒷받침할 수
+    없었다. 가드는 인용 «앞»에서 걸리므로 검수 AI의 판정과 무관하게 빠져야
+    하고, 같은 장의 정상 확인 문장은 그대로 남아야 한다(빈 장 안내가 아니라).
+    """
+
+    from src.features.composer.verify import DIAGNOSTIC_KIND_BODY, verify_report
+
+    absence_sentence = LIVE_27E9F03_SENTENCES["9장_2번_특허선언없다"]
+    normal_sentence = "회사는 인공지능 소프트웨어와 인공지능 콘텐츠 개발 및 공급을 주요 사업으로 영위한다."
+    fragments = {1: {"종류": "사업내용", "원문": (
+        "회사는 인공지능 소프트웨어와 인공지능 콘텐츠 개발 및 공급을 주요 사업으로 "
+        "영위하고 있다. 산업재산권 기말 잔액은 123,558천원이다."
+    )}}
+    diagnostics: list[dict] = []
+    result = verify_report(
+        _competitive_position_report(
+            (_confirmed_sentence(normal_sentence), _confirmed_sentence(absence_sentence))
+        ),
+        fragments, None, _AlwaysTrueCompetitiveReviewer(),
+        allowed_fragment_ids_by_section=(
+            {"competitive_position": frozenset({"1"})} if grouped else None
+        ),
+        diagnostics=diagnostics,
+    )
+
+    section = result.sections[0]
+    remaining = [sentence.text for sentence in section.sentences]
+    assert absence_sentence not in remaining, "인용이 붙은 부재 단언이 검수 «참»을 업고 공개됐다"
+    assert normal_sentence in remaining, "같은 장의 정상 확인 문장까지 사라졌다"
+    assert section.notice == ""
+    rejected = [
+        entry for entry in diagnostics
+        if entry.get("reason_code") == ABSENCE_CLAIM_UNSUPPORTED
+    ]
+    assert len(rejected) == 1
+    assert rejected[0]["section_id"] == "competitive_position"
+    assert rejected[0]["kind"] == DIAGNOSTIC_KIND_BODY
+    assert absence_sentence not in json.dumps(rejected, ensure_ascii=False), "진단에 원문이 새어 나갔다"

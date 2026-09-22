@@ -16,9 +16,9 @@ import pytest
 from src.core import news_research_adapter
 from src.features.homepage import safe_http
 from src.features.homepage.wide_fetch import WideRawResponse
-from src.features.news_intake.body_prefetch import HostSlots
+from src.features.news_intake.body_prefetch import BodyFetchLane, HostSlots
 from src.features.news_intake.models import NewsCollectionPolicy
-from src.features.news_intake.search_snapshot import domain_host
+from src.features.news_intake.search_snapshot import diverse_candidates, domain_host
 from src.features.observability import run_diagnostics
 from src.features.pipeline import real
 from src.shared import engine_build_identity, generation_coordination
@@ -124,9 +124,14 @@ def active_request(check):
         yield
 
 
-def test_default_two_overlaps_through_real_session_and_preserves_parent_context(monkeypatch):
-    prepared = session()
-    transport = Transport(width=2)
+@pytest.mark.parametrize("setting,width", [(None, 3), ("2", 2), ("3", 3)],
+                         ids=("default-three", "explicit-two", "explicit-three"))
+def test_runtime_width_overlaps_through_real_session_and_preserves_parent_context(monkeypatch, setting, width):
+    if setting is not None:
+        monkeypatch.setenv(real.NEWS_BODY_CONCURRENCY_ENV, setting)
+    urls = URLS[:width]
+    prepared = session(urls)
+    transport = Transport(width=width)
     monkeypatch.setattr(real, "default_wide_transport", transport)
     parent_steps, calls = [{"step": "부모"}], []
     signal = threading.Event()
@@ -147,16 +152,18 @@ def test_default_two_overlaps_through_real_session_and_preserves_parent_context(
                 assert set(cache.robots_cache) == {"seed"}
     finally:
         SIGNAL.reset(token)
-    assert len(fragments) == 2 and len(calls) == 1
-    assert len({row[0] for row in transport.observed}) == 2
-    first, second = [row[1] for row in transport.observed]
-    assert first is not parent and second is not parent
-    assert first.dns_cache is not second.dns_cache and first.robots_cache is not second.robots_cache
+    assert len(fragments) == width and len(calls) == 1
+    assert len({row[0] for row in transport.observed}) == width
+    budgets = [row[1] for row in transport.observed]
+    assert all(budget is not parent for budget in budgets)
+    assert len({id(budget.dns_cache) for budget in budgets}) == width
+    assert len({id(budget.robots_cache) for budget in budgets}) == width
     assert all(row[2] is not parent_steps for row in transport.observed)
     assert all(row[1].expires_at <= expires for row in transport.observed)
     assert all(item is signal for item in seen_signals) and len(seen_signals) > 2
-    assert parent_steps[-1]["본문동시수집"]["동시상한"] == 2
-    assert [row["주소"] for row in parent_steps if row["step"] == "기사조회"] == sorted(URLS[:2])
+    assert parent_steps[-1]["본문동시수집"]["동시상한"] == width
+    assert parent_steps[-1]["본문동시수집"]["호스트동시상한"] == 1
+    assert [row["주소"] for row in parent_steps if row["step"] == "기사조회"] == sorted(urls)
     assert not real._NEWS_BODY_RUNTIME_ACTIVE.get()
 
 
@@ -172,14 +179,58 @@ def test_environment_sequential_fallback_uses_calling_thread(monkeypatch, settin
     assert len(calls) == 1
 
 
-def test_explicit_three_is_the_runtime_upper_limit(monkeypatch):
-    monkeypatch.setenv(real.NEWS_BODY_CONCURRENCY_ENV, "3")
-    transport = Transport(width=3)
-    monkeypatch.setattr(real, "default_wide_transport", transport)
-    steps, calls = [], []
-    assert len(collect(session(URLS), steps, calls)) == 3
-    assert steps[-1]["본문동시수집"]["동시상한"] == 3
-    assert len(calls) == 1
+@pytest.mark.parametrize("failed_article", [False, True])
+def test_two_and_three_preserve_exact_evidence_and_analyzer_inputs_after_reordered_completion(monkeypatch, failed_article):
+    urls = tuple(f"https://h{index}.example/article/{index}" for index in range(8))
+    prepared = session(urls)
+    ranked = diverse_candidates(list(prepared.snapshot.candidates), len(urls))
+    first, second = (candidate.source_url for candidate in ranked[:2])
+    failed_url = ranked[-1].source_url if failed_article else None
+    results = []
+    for width in (2, 3):
+        second_finished = threading.Event()
+        finished = []
+
+        class ReorderedTransport(Transport):
+            def __call__(self, url, allowed=None):
+                if url == first:
+                    assert second_finished.wait(WAIT_SECONDS), "둘째 기사가 먼저 끝나지 않았습니다"
+                response = super().__call__(url, allowed)
+                if not url.endswith("/robots.txt"):
+                    with self.lock:
+                        finished.append(url)
+                    if url == second:
+                        second_finished.set()
+                # 같은 기사의 www 변형도 실패시켜 성공 폴백과 구분한다.
+                if failed_url and not url.endswith("/robots.txt") and domain_host(url) == domain_host(failed_url):
+                    return WideRawResponse(403, "", url, "text/html")
+                return response
+
+        transport = ReorderedTransport()
+        monkeypatch.setenv(real.NEWS_BODY_CONCURRENCY_ENV, str(width))
+        monkeypatch.setattr(real, "default_wide_transport", transport)
+        steps, calls, analyzer_inputs = [], [], []
+        answer = analyze_recording(calls)
+
+        def analyze(prompt, schema, max_tokens):
+            analyzer_inputs.append((str(prompt), schema, max_tokens))
+            return answer(prompt, schema, max_tokens)
+
+        fragments = real._collect_grounded_news(
+            session=prepared, analyze=analyze, fetch_text=real._fetch_news_article_text,
+            corp_id="00123456", official_web_documents=0, collected_on=AS_OF.isoformat(), steps=steps,
+        )
+        assert finished.index(second) < finished.index(first)
+        assert len(calls) == 2
+        diagnostics = dict(steps[-1])
+        assert diagnostics.pop("본문동시수집")["동시상한"] == width
+        assert diagnostics["분석AI호출"] == 2
+        assert diagnostics["본문호출"] == len(urls)
+        assert len(fragments) == len(urls) - int(failed_article)
+        if failed_article:
+            assert diagnostics["시도경고"]["fetch_http_403"] == 1
+        results.append((fragments, analyzer_inputs, diagnostics, sorted(transport.requests)))
+    assert results[0] == results[1]
 
 
 def test_parallel_runtime_preserves_sequential_fragments_and_analysis_inputs(monkeypatch):
@@ -200,7 +251,7 @@ def test_parallel_runtime_preserves_sequential_fragments_and_analysis_inputs(mon
     assert parallel_diagnostics == sequential_diagnostics
 
 
-@pytest.mark.parametrize("width", ["1", "2"])
+@pytest.mark.parametrize("width", ["1", "2", "3"])
 def test_same_origin_reuses_completed_robots_without_mutating_parent(monkeypatch, width):
     monkeypatch.setenv(real.NEWS_BODY_CONCURRENCY_ENV, width)
     urls = tuple(f"https://a.example/article/{index}" for index in range(3))
@@ -216,7 +267,7 @@ def test_same_origin_reuses_completed_robots_without_mutating_parent(monkeypatch
     assert len({id(row[1].robots_cache) for row in transport.observed}) == 3
 
 
-@pytest.mark.parametrize("width", ["1", "2"])
+@pytest.mark.parametrize("width", ["1", "2", "3"])
 def test_robots_and_article_keep_separate_original_time_allowances(monkeypatch, width):
     monkeypatch.setenv(real.NEWS_BODY_CONCURRENCY_ENV, width)
     prepared = session(URLS[:1])
@@ -310,9 +361,12 @@ def test_production_url_variants_stay_in_collector_host_slot(url):
     assert all(domain_host(variant) == domain_host(url) for variant in variants)
 
 
+@pytest.mark.parametrize("width", [2, 3])
 @pytest.mark.parametrize("stop", [False, True])
-def test_www_variants_share_host_slot_and_waiting_request_observes_cancellation(monkeypatch, stop):
-    urls = ("https://media.example/article/0", "https://www.media.example/article/1")
+def test_www_variants_share_host_slot_and_waiting_request_observes_cancellation(monkeypatch, stop, width):
+    monkeypatch.setenv(real.NEWS_BODY_CONCURRENCY_ENV, str(width))
+    urls = ("https://media.example/article/0", "https://www.media.example/article/1",
+            "https://media.example/article/2")
     prepared = session(urls)
     entered, waiting, release, cancel = (threading.Event() for _ in range(4))
     original_slot = HostSlots.slot
@@ -321,7 +375,7 @@ def test_www_variants_share_host_slot_and_waiting_request_observes_cancellation(
     @contextmanager
     def observed_slot(self, url):
         slot_calls.append(url)
-        if len(slot_calls) == 2:
+        if len(slot_calls) == width:
             waiting.set()
         with original_slot(self, url):
             yield
@@ -354,6 +408,58 @@ def test_www_variants_share_host_slot_and_waiting_request_observes_cancellation(
             with pytest.raises(generation_coordination.GenerationWaitCancelled):
                 future.result(WAIT_SECONDS)
         else:
-            assert len(future.result(WAIT_SECONDS)) == 2
-    assert len(transport.observed) == (1 if stop else 2)
+            assert len(future.result(WAIT_SECONDS)) == 3
+    assert len(transport.observed) == (1 if stop else 3)
     assert len(calls) == (0 if stop else 1)
+
+
+@pytest.mark.parametrize("kind", [CancelledError, generation_coordination.GenerationWaitCancelled])
+def test_default_three_joins_inflight_articles_on_failure_before_returning(monkeypatch, kind):
+    urls = (*URLS, "https://d.example/article/3")
+    prepared = session(urls)
+    ranked = diverse_candidates(list(prepared.snapshot.candidates), len(urls))
+    first_wave = {candidate.source_url for candidate in ranked[:3]}
+    failing_url = ranked[0].source_url
+    barrier = threading.Barrier(3)
+    failed, joining, release = (threading.Event() for _ in range(3))
+    settled = []
+    error = kind("첫 기사 요청에서 중단됐습니다")
+    original_close = BodyFetchLane.close
+
+    def observed_close(lane):
+        joining.set()
+        original_close(lane)
+        assert set(settled) == first_wave, "실행기를 닫기 전에 모든 요청이 끝나야 합니다"
+
+    monkeypatch.setattr(BodyFetchLane, "close", observed_close)
+
+    def gate(url):
+        if url.endswith("/robots.txt"):
+            return
+        try:
+            barrier.wait(WAIT_SECONDS)
+            if url == failing_url:
+                raise error
+            assert release.wait(WAIT_SECONDS), "진행 중 기사를 해제하지 않았습니다"
+        finally:
+            settled.append(url)
+            if url == failing_url:
+                failed.set()
+
+    transport = Transport(on_request=gate)
+    monkeypatch.setattr(real, "default_wide_transport", transport)
+    steps, calls = [], []
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(contextvars.copy_context().run, lambda: collect(prepared, steps, calls))
+        try:
+            assert failed.wait(WAIT_SECONDS) and joining.wait(WAIT_SECONDS)
+            assert not future.done(), "진행 중 본문 요청을 기다리지 않고 반환했습니다"
+            assert set(settled) == {failing_url}
+        finally:
+            release.set()
+        with pytest.raises(kind) as caught:
+            future.result(WAIT_SECONDS)
+    assert caught.value is error
+    assert set(settled) == first_wave
+    assert {url for url in transport.requests if not url.endswith("/robots.txt")} == first_wave
+    assert not calls and not real._NEWS_BODY_RUNTIME_ACTIVE.get()

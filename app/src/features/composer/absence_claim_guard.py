@@ -21,7 +21,9 @@ import unicodedata
 from src.features.composer.absence_claim_constants import (
     ABSENCE_CLAIM_UNSUPPORTED,
     ABSENCE_CLAUSE_SPLIT_RE,
+    ABSENCE_NEGATED_RE,
     ABSENCE_PREDICATE_RE,
+    ABSENCE_REPORTED_RE,
     SOURCE_REFERENT_RE,
 )
 
@@ -46,12 +48,19 @@ def absence_claim_problem(text: str) -> str:
       때문이다. 「당사」·「회사」는 지시어로 세지 않는다.
     ★ 빈 문자열은 그 문장이 옳다는 뜻이 아니다. 주어·시점·근거 결속은 기존
       의미 검수가 그대로 판정한다.
+    ★ 판정 «전에» 두 구절을 절에서 지운다(2026-09-23, ⑤ 술어에 「자료」·②에
+      「선언」을 넣으면서 생긴 자리) — 「…없다는 뜻은 아닙니다」처럼 부재 자체를
+      부정하는 구절과, 「…선언하지 않았다고 밝혔다」처럼 출처가 그렇게 밝혔다는
+      보고 구절. 구절만 지우고 절의 나머지는 그대로 판정하므로, 같은 절에 남은
+      진짜 부재 단언은 여전히 걸린다.
     """
 
     for clause in ABSENCE_CLAUSE_SPLIT_RE.split(text):
         surface_clause = _surface(clause)
         if not surface_clause:
             continue
+        surface_clause = ABSENCE_NEGATED_RE.sub("", surface_clause)
+        surface_clause = ABSENCE_REPORTED_RE.sub("", surface_clause)
         if (SOURCE_REFERENT_RE.search(surface_clause)
                 and ABSENCE_PREDICATE_RE.search(surface_clause)):
             return ABSENCE_CLAIM_UNSUPPORTED
