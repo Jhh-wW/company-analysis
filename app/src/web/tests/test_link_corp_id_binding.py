@@ -1,15 +1,7 @@
-"""옛 저장본도 동명 회사를 가르는지 못 박는다.
+"""옛 저장본도 회사 고유번호 대조 없이 관리자가 연결할 수 있다.
 
-★ 무엇이 문제였나 — 보고서 본문의 `company_id`는 **출고 상태가 FULL일 때만**
-  채워진다(`pipeline/real.py:3519`). 안전 확인 중에 나간 옛 저장본은 본문이 비어
-  있어서, 본문만 보고 대조하면 「이름이 같은 다른 법인」이 그대로 통과한다.
-
-★ 무엇으로 막나 — 저장 표 `reports`의 **`corp_id` 열**은 출고 상태와 무관하게
-  저장 경로가 항상 채운다(`storage/cache.py:398` → `storage/reports.py:save`).
-  결속 대조는 본문이 아니라 이 열을 먼저 읽어야 한다.
-
-⚠️ 여기서 쓰는 두 고유번호는 **서로 다른 리터럴**이다. 같은 값을 쓰면 「가른다」를
-  확인하는 것이 아니라 아무것도 확인하지 않는 것이 된다.
+보고서 본문과 저장 열의 고유번호가 다르거나 비어 있어도 연결을 허용한다.
+보고서 자체의 존재·출고·공유 기간 검사는 별도로 유지한다.
 """
 
 from __future__ import annotations
@@ -100,30 +92,31 @@ def _결속된_보고서() -> str:
 
 
 # ══════════════════════════════════════════════════════════
-# ① 본문이 비어도 열로 가른다
+# ① 본문이나 저장 열의 고유번호는 연결을 제한하지 않는다
 # ══════════════════════════════════════════════════════════
 
 
-def test_본문에_고유번호가_없어도_동명_다른법인은_묶이지_않는다(admin: TestClient):
-    처음, 회사 = _옛저장본(_우리회사)
-    key_hash = _링크에_묶는다(처음, 회사)
-    남의것, 같은이름 = _옛저장본(_동명타사)
-    assert 같은이름 == 회사, "이름이 같아야 «이름만으로는 못 가른다»를 확인한다"
+def test_legacy_report_with_different_stored_company_id_can_be_attached(admin: TestClient):
+    original_id, company = _옛저장본(_우리회사)
+    key_hash = _링크에_묶는다(original_id, company)
+    replacement_id, replacement_company = _옛저장본(_동명타사)
+    assert replacement_company == company
 
-    응답 = admin.post(
+    response = admin.post(
         "/admin/links/report",
-        data={"key": key_hash, "report_reference": 남의것},
+        data={"key": key_hash, "report_reference": replacement_id},
         follow_redirects=False,
     )
 
-    assert 응답.status_code == 400
-    assert "다른 법인의 보고서입니다" in 응답.text
-    assert _동명타사 in 응답.text
-    assert _결속된_보고서() == 처음
+    assert response.status_code == 303
+    assert _결속된_보고서() == replacement_id
+    with storage_db.connect() as conn:
+        assert report_store.load_corp_id(conn, original_id) == _우리회사
+        assert report_store.load_corp_id(conn, replacement_id) == _동명타사
 
 
 def test_같은_법인의_다른_보고서는_본문이_비어도_묶인다(admin: TestClient):
-    """★ 대조군 — 전부 막으면 「가른다」가 아니라 「아무것도 못 묶는다」다."""
+    """같은 고유번호의 옛 보고서도 계속 연결할 수 있다."""
 
     처음, 회사 = _옛저장본(_우리회사)
     key_hash = _링크에_묶는다(처음, 회사)
@@ -140,7 +133,7 @@ def test_같은_법인의_다른_보고서는_본문이_비어도_묶인다(admi
 
 
 # ══════════════════════════════════════════════════════════
-# ② 화면 경고는 «둘 다 없을 때»만
+# ② 고유번호가 없어도 연결 폼을 제공한다
 # ══════════════════════════════════════════════════════════
 
 _경고문 = "이 보고서에는 회사 고유번호가 없어 같은 이름의 다른 회사와 구분하지 못합니다"
@@ -156,41 +149,45 @@ def test_열에만_고유번호가_있으면_경고를_보이지_않는다(admin
     assert _경고문 not in 화면.text
 
 
-def test_열도_본문도_비면_경고를_보인다(admin: TestClient):
-    처음, 회사 = _옛저장본("")
-    key_hash = _링크에_묶는다(처음, 회사)
+def test_missing_company_id_does_not_restrict_attachment_form(admin: TestClient):
+    report_id, company = _옛저장본("")
+    key_hash = _링크에_묶는다(report_id, company)
 
-    화면 = admin.get(f"/admin/link/{key_hash}/extend")
+    page = admin.get(f"/admin/link/{key_hash}/extend")
 
-    assert 화면.status_code == 200
-    assert _경고문 in 화면.text
+    assert page.status_code == 200
+    assert _경고문 not in page.text
+    assert 'name="report_reference"' in page.text
+    assert f'value="{report_id}"' in page.text
 
 
 # ══════════════════════════════════════════════════════════
-# ③ 읽기 실패는 여전히 «거부»
+# ③ 고유번호 조회는 연결에 필요하지 않다
 # ══════════════════════════════════════════════════════════
 
 
-def test_열을_읽지_못하면_연결하지_않는다(admin: TestClient, monkeypatch):
-    """★ 열 읽기를 새로 넣었다고 fail-open이 생기면 안 된다."""
+def test_attachment_does_not_read_company_id_column(admin: TestClient, monkeypatch):
+    """선택한 보고서를 읽을 수 있으면 별도 고유번호 조회 없이 연결한다."""
 
-    처음, 회사 = _옛저장본(_우리회사)
-    key_hash = _링크에_묶는다(처음, 회사)
-    새것, _같은이름 = _옛저장본(_우리회사)
+    original_id, company = _옛저장본(_우리회사)
+    key_hash = _링크에_묶는다(original_id, company)
+    replacement_id, _ = _옛저장본(_우리회사)
+    calls = []
 
-    def 터진다(*_args, **_kwargs):
+    def fail_company_id_lookup(*args, **kwargs):
+        calls.append((args, kwargs))
         raise RuntimeError("저장소를 읽지 못했습니다")
 
     monkeypatch.setattr(
-        "src.web.routers.admin.report_store.load_corp_id", 터진다
+        "src.web.routers.admin.report_store.load_corp_id", fail_company_id_lookup
     )
 
-    응답 = admin.post(
+    response = admin.post(
         "/admin/links/report",
-        data={"key": key_hash, "report_reference": 새것},
+        data={"key": key_hash, "report_reference": replacement_id},
         follow_redirects=False,
     )
 
-    assert 응답.status_code == 400
-    assert "확인할 수 없어" in 응답.text
-    assert _결속된_보고서() == 처음
+    assert response.status_code == 303
+    assert _결속된_보고서() == replacement_id
+    assert calls == []

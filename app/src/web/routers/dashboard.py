@@ -139,33 +139,6 @@ def _dashboard_link_report_state(conn, link: share_store.ShareLink) -> str:
     return "expired" if job_runtime._link_expired(report) else "active"
 
 
-def _dashboard_link_company_id_state(
-    conn, link: share_store.ShareLink, report_state: str
-) -> str:
-    """결속 보고서의 회사 고유번호 상태.
-
-    Returns:
-        ``"none"``(결속 없음) · ``"present"``(있음) · ``"missing"``(없음) ·
-        ``"unknown"``(확인 못 함).
-
-    ★ 고유번호가 없으면 이후 재결속이 «이름»만 대조하게 되어, 이름이 같은 다른
-      법인이 그대로 들어온다. 관리자가 그 사실을 알아야 보고서를 다시 만든다.
-    ★ 「없다」와 「못 읽었다」를 나눈다 — 같은 침묵으로 두면 읽기가 깨진 동안
-      관리자는 아무 문제가 없다고 믿는다.
-    ★ 저장 표의 열과 본문이 둘 다 비었을 때만 ``"missing"``이다. 열만 차 있어도
-      대조는 된다.
-    """
-
-    if report_state not in ("active", "expired"):
-        return "none"
-    try:
-        resolved = report_store.resolve_company_id(conn, link.report_id)
-    except Exception:  # noqa: BLE001 — 안내 한 줄 때문에 상세 화면을 깨지 않는다
-        logger.error("결속 보고서의 회사 고유번호를 읽지 못했습니다")
-        return "unknown"
-    return "present" if resolved else "missing"
-
-
 def _admin_response(request: Request, response: Response) -> Response:
     response.headers["Cache-Control"] = "no-store"
     return response
@@ -1242,11 +1215,6 @@ async def link_detail(request: Request, key_hash: str):
             report_state = (
                 "none" if link is None else _dashboard_link_report_state(conn, link)
             )
-            link_company_id_state = (
-                "none"
-                if link is None
-                else _dashboard_link_company_id_state(conn, link, report_state)
-            )
             run_report_states = {
                 run.run_id: (
                     _dashboard_stored_report_state(conn, run.report_id)
@@ -1273,7 +1241,6 @@ async def link_detail(request: Request, key_hash: str):
                 dashboard_link_report_state=report_state,
                 dashboard_run_report_states=run_report_states,
                 dashboard_link_expired=share_logic.link_expired(link),
-                dashboard_link_company_id_state=link_company_id_state,
                 # ★ 이 값은 «보고서 공개 기간»이지 LINK 수명이 아니다. 두 값이
                 #   60일로 같던 시절에는 LINK 수명을 넣어도 맞아 보였다.
                 dashboard_result_share_days=REPORT_LINK_MAX_AGE_DAYS,

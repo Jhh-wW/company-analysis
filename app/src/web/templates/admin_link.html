@@ -21,22 +21,6 @@
   {% endif %}
   {% if link.note %}<p class="muted">메모 · {{ link.note }}</p>{% endif %}
 
-  {% if link_company_id_state == "missing" %}
-  <div class="warn-line" role="alert" style="margin-top:16px">
-    <span aria-hidden="true">⚠️</span>
-    <span>이 보고서에는 회사 고유번호가 없어 같은 이름의 다른 회사와 구분하지 못합니다.
-      <br>보고서를 다시 만들어 연결하면 이름이 같은 다른 회사가 잘못 연결되는 것을 막을 수 있습니다.</span>
-  </div>
-  {% elif link_company_id_state == "unknown" %}
-  {# 「없다」와 「못 읽었다」를 나눠 말한다 — 읽기가 깨진 동안 아무 문제가 없다고
-     믿게 두면 안 된다. 이 상태에서는 보고서 교체 자체가 막힌다. #}
-  <div class="warn-line" role="alert" style="margin-top:16px">
-    <span aria-hidden="true">⚠️</span>
-    <span>이 보고서의 회사 고유번호를 확인하지 못했습니다.
-      <br>확인될 때까지는 연결된 보고서를 바꿀 수 없습니다. 잠시 후 다시 확인해 주세요.</span>
-  </div>
-  {% endif %}
-
   <div class="warn-line" style="margin-top:16px">
     <span aria-hidden="true">ℹ️</span>
     <span>
@@ -73,9 +57,7 @@
   <p class="muted" style="margin-top:6px">
     결과 화면의 주소 또는 32자리 ID를 붙여 넣으세요. 저장된 보고서인지 확인한 뒤에만
     연결합니다. 입력을 비우고 저장하면 연결을 해제합니다.
-    <strong>이 링크의 회사와 다른 회사의 보고서는 연결되지 않습니다.</strong>
-    이름이 같은 다른 법인은 이미 연결된 보고서가 있을 때만 걸러낼 수 있으니,
-    처음 연결할 때는 법인명과 주소를 한 번 더 확인하세요.
+    링크의 회사명과 보고서의 회사명이 달라도 연결할 수 있습니다.
   </p>
   <form method="post" action="/admin/links/report" style="margin-top:14px">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

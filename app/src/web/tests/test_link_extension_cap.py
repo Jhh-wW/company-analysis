@@ -1,13 +1,12 @@
-"""링크 총 수명 상한과 「확인 불가」 경고를 못 박는다.
+"""링크 총 수명 상한과 고유번호 조회 없이 열리는 관리 화면을 확인한다.
 
 ★ 왜 총 상한이 필요한가 — 한 번에 90일까지만 미룰 수 있어도, 미루기를 반복하면
   링크는 영원히 산다. QR은 한 번 뿌리면 회수할 수 없으므로 **발급일로부터 세는
   천장**이 따로 있어야 한다. 1회 상한(90일)은 「실수로 2099년」을 막고, 총 상한
   (365일)은 「조금씩 계속 미루기」를 막는다. 둘은 다른 위험을 막는다.
 
-★ 함께 보는 것 — 고유번호를 «확인하지 못했을 때»도 관리자에게 말한다. 「없다」와
-  「못 읽었다」를 같은 침묵으로 처리하면, 읽기가 깨진 동안 관리자는 아무 문제가
-  없다고 믿는다.
+★ 함께 보는 것 — 회사 고유번호 조회는 수동 보고서 연결의 조건이 아니다.
+  조회가 불가능하거나 고유번호가 없는 보고서도 연결 폼을 제공한다.
 
 ⚠️ 날짜 수는 **리터럴**이다. 생산 상수를 import해 같은 상수와 비교하면 값이 몰래
   바뀌어도 시험이 그대로 통과한다.
@@ -232,7 +231,7 @@ def test_상한_근처에서는_남은_기간까지만_보여준다(admin: TestC
 
 
 # ══════════════════════════════════════════════════════════
-# ② 고유번호를 «확인하지 못했을» 때도 말한다
+# ② 고유번호 조회 없이 연결 폼을 제공한다
 # ══════════════════════════════════════════════════════════
 
 _없음문구 = "이 보고서에는 회사 고유번호가 없어 같은 이름의 다른 회사와 구분하지 못합니다"
@@ -249,40 +248,43 @@ def _보고서(corp_id: str) -> str:
 
 
 @pytest.mark.parametrize(
-    "경로",
+    "path",
     ["/admin/link/{}/extend", "/admin/links/{}"],
 )
-def test_고유번호를_확인하지_못하면_두_화면_모두_확인불가를_말한다(
-    admin: TestClient, monkeypatch, 경로
+def test_management_pages_do_not_require_company_id_lookup(
+    admin: TestClient, monkeypatch, path
 ):
-    """★ 「없다」와 「못 읽었다」를 같은 침묵으로 두면, 읽기가 깨진 동안
-    관리자는 아무 문제가 없다고 믿는다.
-    """
+    """별도 고유번호 조회가 실패할 환경에서도 연결 정보를 편집할 수 있다."""
 
-    key_hash = _링크(만료가_발급후=30, report_id=_보고서("00126380"))
+    report_id = _보고서("00126380")
+    key_hash = _링크(만료가_발급후=30, report_id=report_id)
+    calls = []
 
-    def 터진다(*_args, **_kwargs):
+    def fail_company_id_lookup(*args, **kwargs):
+        calls.append((args, kwargs))
         raise RuntimeError("저장소를 읽지 못했습니다")
 
-    monkeypatch.setattr(report_store, "load_corp_id", 터진다)
+    monkeypatch.setattr(report_store, "load_corp_id", fail_company_id_lookup)
 
-    화면 = admin.get(경로.format(key_hash))
+    page = admin.get(path.format(key_hash))
 
-    assert 화면.status_code == 200
-    assert _불가문구 in 화면.text
-    assert _없음문구 not in 화면.text
+    assert page.status_code == 200
+    assert _불가문구 not in page.text
+    assert _없음문구 not in page.text
+    assert 'name="report_reference"' in page.text
+    assert f'value="{report_id}"' in page.text
+    assert calls == []
 
 
 @pytest.mark.parametrize(
-    "경로",
+    "path",
     ["/admin/link/{}/extend", "/admin/links/{}"],
 )
-def test_고유번호가_있으면_두_화면_모두_조용하다(admin: TestClient, 경로):
-    """★ 대조군."""
+def test_management_pages_allow_reports_with_company_id(admin: TestClient, path):
 
     key_hash = _링크(만료가_발급후=30, report_id=_보고서("00126380"))
 
-    화면 = admin.get(경로.format(key_hash))
+    화면 = admin.get(path.format(key_hash))
 
     assert 화면.status_code == 200
     assert _불가문구 not in 화면.text
@@ -290,14 +292,17 @@ def test_고유번호가_있으면_두_화면_모두_조용하다(admin: TestCli
 
 
 @pytest.mark.parametrize(
-    "경로",
+    "path",
     ["/admin/link/{}/extend", "/admin/links/{}"],
 )
-def test_고유번호가_없으면_두_화면_모두_없음을_말한다(admin: TestClient, 경로):
-    key_hash = _링크(만료가_발급후=30, report_id=_보고서(""))
+def test_management_pages_allow_reports_without_company_id(admin: TestClient, path):
+    report_id = _보고서("")
+    key_hash = _링크(만료가_발급후=30, report_id=report_id)
 
-    화면 = admin.get(경로.format(key_hash))
+    page = admin.get(path.format(key_hash))
 
-    assert 화면.status_code == 200
-    assert _없음문구 in 화면.text
-    assert _불가문구 not in 화면.text
+    assert page.status_code == 200
+    assert _없음문구 not in page.text
+    assert _불가문구 not in page.text
+    assert 'name="report_reference"' in page.text
+    assert f'value="{report_id}"' in page.text
