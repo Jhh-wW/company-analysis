@@ -137,6 +137,7 @@ from typing import Any, Callable, Final, Optional
 from src.features.composer.constants import (
     GRADE_CONFIRMED,
     GRADE_INTERPRETED,
+    MISSING_VERDICTS_REMINDER,
     PARSE_RETRY_LIMIT,
     RETRY_REMINDER,
     SECTION_GUIDES,
@@ -443,6 +444,9 @@ REVIEW_JSON_GUIDE: Final[str] = (
     '"결과": "참" 또는 "거짓" 또는 "애매", '
     '"검증근거": {<위에서 요구한 수치·추세·시점 배열>}}]}\n'
     "번호는 따옴표 없는 정수로 쓴다.\n"
+    "«대조할 문장»의 번호마다 판정 행을 하나씩 빠짐없이 출력한다. 번호를 "
+    "건너뛰거나 일부만 출력하지 않는다 — 판정이 없는 번호는 검수된 것으로 "
+    "보지 않는다.\n"
     "후보의 «추가 검증 필요»가 없음일 때만 검증근거를 생략할 수 있다.\n"
     "JSON은 줄바꿈·들여쓰기·마크다운 코드블록 없이 한 줄로 간결하게 출력한다. "
     "이 출력 형식 지침은 문자열 값 안에 실제로 옮겨 적는 근거·검증근거 배열 "
@@ -2226,6 +2230,46 @@ def _parse_verdicts(
     return out
 
 
+def _merge_review_payloads(
+    first_raw: Optional[str],
+    first_numbers: Sequence[int] | Mapping[int, str],
+    followup_raw: Optional[str],
+    followup_numbers: Sequence[int] | Mapping[int, str],
+) -> str:
+    """첫 응답의 «판정» 행은 그대로 두고, 후속 응답에서는 후속 대상 번호의 행만 더한 응답 JSON.
+
+    근거 결속 파서(constrain_verdicts·support_entries_by_number·
+    future_plan_entries_by_number)는 응답 «원문»에서 판정 행을 번호로 다시 읽는다.
+    두 응답을 한 응답처럼 넘기려면 행을 번호 기준으로 합쳐야 한다.
+
+    ★ 첫 응답의 행(검증근거 포함)은 한 글자도 바꾸지 않는다 — 첫 응답이 판정한
+      번호(요청 밖 번호 포함) 밖의 행만 뺀다. 그래서 첫 판정의 원문·근거 결속은
+      후속이 있어도 예전과 같은 입력으로 검사된다.
+    ★ 후속 응답에서 «대상 번호가 아닌 행»은 버린다 — 첫 응답이 이미 판정한 번호를
+      후속 응답이 참으로 덮어쓰거나, 후속에서 새로 나온 요청 밖 번호가 끼어들지
+      못하게 한다.
+    """
+    from src.features.composer.verdict_number import coerce_verdict_number
+
+    def _rows(raw: Optional[str], numbers: frozenset[int]) -> list[Mapping]:
+        payload = extract_json_payload(raw or "")
+        entries = (
+            payload.get(REVIEW_VERDICTS_KEY) if isinstance(payload, Mapping) else None
+        )
+        if not isinstance(entries, list):
+            return []
+        return [
+            entry for entry in entries
+            if isinstance(entry, Mapping)
+            and coerce_verdict_number(entry.get(REVIEW_NUMBER_KEY)) in numbers
+        ]
+
+    merged = _rows(first_raw, frozenset(first_numbers)) + _rows(
+        followup_raw, frozenset(followup_numbers)
+    )
+    return json.dumps({REVIEW_VERDICTS_KEY: merged}, ensure_ascii=False)
+
+
 def _ask_verdicts(
     ask: AskFn,
     items: Sequence[_ReviewItem],
@@ -2242,6 +2286,13 @@ def _ask_verdicts(
     grounding_problems: Optional[dict[int, str]] = None,
 ) -> Optional[dict[int, str]]:
     """검수 AI 1회 호출(+파싱 실패 시 1회 재요청). 그래도 실패면 None.
+
+    ★ 최초 본문 검수(``initial_ask``)는 첫 응답이 읽히긴 했는데 요청한 번호 일부의
+      판정이 빠졌을 때, 같은 재요청 예산(PARSE_RETRY_LIMIT) 안에서 «빠진 문장만»
+      다시 묻는다(2026-09-23 뤼튼 실측: 요청 50·응답 20·미응답 30 → 30문장 제거).
+      부분 응답은 파싱 실패와 같은 «완전성 실패»다. 빠진 번호를 참으로 간주하지
+      않으며, 후속 응답도 빠지거나 못 읽으면 예전처럼 그 번호는 제거된다.
+      호출은 최대 2회(첫 요청 + 파싱 재요청 «또는» 누락 후속) 그대로다.
 
     ``initial_ask``: 최초 본문 검수 전용 호출자. 주어지면 이 호출과 그 파싱
     재요청에만 쓴다 — 재작성·재검수는 언제나 ``ask`` 를 그대로 쓴다.
@@ -2281,8 +2332,12 @@ def _ask_verdicts(
     # 등)는 initial_ask 가 없으므로 예전 그대로 ask 하나로 재요청한다.
     requested_numbers = [item.number for item in items]
 
-    def _observe_attempt(attempt: int, sent: str, answer: Optional[str]):
+    def _observe_attempt(
+        attempt: int, sent: str, answer: Optional[str],
+        *, requested_count: Optional[int] = None,
+    ):
         # 실제로 보낸 호출에만 관측을 만든다 — 도달하지 않은 시도는 기록하지 않는다.
+        # ``requested_count``: 누락 후속 요청은 «빠진 번호 수»만 묻는다. 안 주면 전체.
         if protocol_diagnostics is None:
             return None
         return new_protocol_observation(
@@ -2290,7 +2345,9 @@ def _ask_verdicts(
             attempt,
             prompt_chars=len(sent),
             response_chars=len(answer or ""),
-            requested_count=len(requested_numbers),
+            requested_count=(
+                len(requested_numbers) if requested_count is None else requested_count
+            ),
         )
 
     # 최초 본문 검수의 JSON 형식 재시도를 줄이되 원문과 캐시 경계는 보존한다.
@@ -2318,6 +2375,53 @@ def _ask_verdicts(
             protocol_diagnostics.append(observe)
     if verdicts is None:
         return None
+    # ★ 부분 응답은 «완전성 실패»다 (2026-09-23 뤼튼 실측: 요청 50 · 응답 20 ·
+    #   미응답 30 → 30문장이 재질의 없이 제거돼 9장 중 6장이 안내문만 남았다).
+    #   빠진 번호를 참으로 간주하지도, 라벨만 바꿔 공개하지도 않는다 — 파싱
+    #   실패와 같은 재요청 예산(PARSE_RETRY_LIMIT) 안에서 «빠진 문장만» 다시 묻는다.
+    #   파싱 재요청을 이미 썼으면(retries == 상한) 후속 없이 예전처럼 제거된다.
+    # ⚠️ 최초 본문 검수(initial_ask)에서만이다. 재검수·요약 검수는 자기 호출 수
+    #   계약(«1회 고정»)이 따로 있어 그대로 둔다.
+    # ⚠️ 첫 응답의 판정과 근거는 한 글자도 바꾸지 않는다. 후속 응답은 «후속 대상
+    #   번호»에만 적용하고, 첫 응답이 이미 판정한 번호(거짓·애매·요청 밖 포함)를
+    #   후속 응답이 덮어쓰지 못한다. 후속 응답이 못 읽히거나 또 빠진 번호는 예전처럼
+    #   «검수 미완료»로 제거된다(부르는 쪽의 번호없음 처분).
+    if initial_ask is not None and retries < PARSE_RETRY_LIMIT:
+        missing_items = [item for item in items if item.number not in verdicts]
+        if missing_items:
+            retries += 1
+            missing_numbers = frozenset(item.number for item in missing_items)
+            followup_prompt = ReviewPrompt(
+                _build_review_prompt(
+                    missing_items, frag_by_id, table_evidence, table_source,
+                    verbatim_by_number=verbatim_by_number,
+                ) + MISSING_VERDICTS_REMINDER,
+                FLAT_REVIEW_SCHEMA,
+            )
+            followup_raw = _safe_ask(retry_reviewer, followup_prompt)
+            observe = _observe_attempt(
+                retries + 1, followup_prompt, followup_raw,
+                requested_count=len(missing_numbers),
+            )
+            followup_verdicts = _parse_verdicts(
+                followup_raw, observe=observe,
+                requested_numbers=sorted(missing_numbers),
+            )
+            if observe is not None:
+                protocol_diagnostics.append(observe)
+            recovered = {
+                number: verdict
+                for number, verdict in (followup_verdicts or {}).items()
+                if number in missing_numbers
+            }
+            # ⚠️ 문장 본문은 넣지 않는다 — 개수만.
+            logger.info(
+                "검수 부분 응답 후속: 요청 %d · 첫 응답 미응답 %d · 후속 판정 회복 %d",
+                len(requested_numbers), len(missing_numbers), len(recovered),
+            )
+            if recovered:
+                raw = _merge_review_payloads(raw, verdicts, followup_raw, recovered)
+                verdicts = {**verdicts, **recovered}
     candidates = {item.number: _grounding_candidate(
         item.sentence.text, item.sentence.citations, frag_by_id, table_source,
     ) for item in items}

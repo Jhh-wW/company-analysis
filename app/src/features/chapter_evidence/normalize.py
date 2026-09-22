@@ -199,6 +199,7 @@ def to_fragment(
             item_title=_coerce_str(value.get("item_title", ""), label="목록 항목 제목"),
             item_published_on=_coerce_str(value.get("item_published_on", ""), label="목록 항목 발표일"),
             item_url=_coerce_str(value.get("item_url", ""), label="목록 항목 URL"),
+            range_index=_coerce_int(value.get("range_index", -1), label="원문 구간 인덱스"),
             text_sha256=_coerce_str(value["text_sha256"], label="근거 원문 해시"),
             text=_coerce_str(value["text"], label="근거 원문"),
             section_id=_coerce_str(value["section_id"], label="장 식별자"),

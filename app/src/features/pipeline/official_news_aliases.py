@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import Any
+from urllib.parse import urlsplit
 
 from src.features.pipeline import official_news_alias_constants as c
 from src.shared.company_identity import (
@@ -43,6 +44,7 @@ class OfficialNewsAliasEvidence:
     document_sha256: str
     fragment_id: str
     location: str
+    range_index: int
     fragment_sha256: str
     definition_start: int
     definition_end: int
@@ -132,13 +134,29 @@ def _document_matches_profile(document: CollectedEvidenceDocument, profile: Mapp
 
 def _fragment_matches_location(document: CollectedEvidenceDocument, fragment: EvidenceFragment) -> bool:
     if document.source_kind in OFFICIAL_WEB_SOURCE_KINDS:
-        prefix = f"{document.canonical_url}#"
-        index = fragment.location.removeprefix(prefix)
-        if not fragment.location.startswith(prefix) or re.fullmatch(c.WEB_FRAGMENT_INDEX_PATTERN, index) is None:
+        if fragment.range_index >= 0:
+            index = fragment.range_index
+            # 현행 수집기의 위치는 항목 URL 또는 사람이 읽는 목록 순번이다.
+            # 제목·URL을 구형 #N으로 바꾸거나 원문 길이로 인덱스를 추측하지 않는다.
+            expected_location = fragment.item_url or f"{document.canonical_url} · 목록 {index + 1}번째 항목"
+            if fragment.location != expected_location:
+                return False
+            if fragment.item_url:
+                item_url, document_url = urlsplit(fragment.item_url), urlsplit(document.canonical_url)
+                # 항목 본문은 이미 검증된 목록 문서에서 읽었다. 같은 호스트의
+                # 구형 HTTP href도 생산기 계약대로 위치 메타데이터로 허용한다.
+                if item_url.scheme not in ("http", "https") or item_url.netloc != document_url.netloc:
+                    return False
+        else:
+            prefix = f"{document.canonical_url}#"
+            raw_index = fragment.location.removeprefix(prefix)
+            if (fragment.item_url or not fragment.location.startswith(prefix)
+                    or re.fullmatch(c.WEB_FRAGMENT_INDEX_PATTERN, raw_index) is None):
+                return False
+            index = int(raw_index)
+        if index >= len(document.usable_ranges):
             return False
-        if int(index) >= len(document.usable_ranges):
-            return False
-        span = document.usable_ranges[int(index)]
+        span = document.usable_ranges[index]
         return span.end - span.start == len(fragment.text)
     match = re.fullmatch(c.DART_FRAGMENT_LOCATION_PATTERN, fragment.location)
     if match is None:
@@ -206,7 +224,8 @@ def official_news_aliases(
                         alias=alias, company_id=official_evidence.company_id,
                         document_id=document.document_id, canonical_url=document.canonical_url,
                         document_sha256=document.content_sha256, fragment_id=fragment.fragment_id,
-                        location=fragment.location, fragment_sha256=fragment.text_sha256,
+                        location=fragment.location, range_index=fragment.range_index,
+                        fragment_sha256=fragment.text_sha256,
                         definition_start=start, definition_end=end, definition_text=definition,
                         definition_sha256=_sha(definition), identity_binding=document.identity_binding,
                         source_snapshot_sha256=official_evidence.source_snapshot_sha256,

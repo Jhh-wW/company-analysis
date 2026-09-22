@@ -237,10 +237,12 @@ SCRIPTS = {
     "정상": (ITEMS, FRAGMENTS, [_response(_row(1))], {1: "참"}),
     "거짓": (ITEMS, FRAGMENTS, [_response(_row(1, "거짓"))], {1: "거짓"}),
     "애매": (ITEMS, FRAGMENTS, [_response(_row(1, "애매"))], {1: "애매"}),
-    "번호누락": (TWO_ITEMS, FRAGMENTS, [_response(_row(1))], {1: "참"}),
+    # «번호누락»은 이 표에 없다 — 최초 검수 경로는 빠진 번호를 한 번 더 묻고
+    # (test_initial_review_missing_followup.py), 일반 경로는 예전처럼 1회로 끝나
+    # 두 경로의 호출 수가 «의도적으로» 다르다. 아래 전용 시험이 그 차이를 지킨다.
     "요청밖번호": (ITEMS, FRAGMENTS, [_response(_row(1), _row(99))], {1: "참", 99: "참"}),
-    "계약밖판정": (TWO_ITEMS, FRAGMENTS, [_response(_row(1), _row(2, "모름"))], {1: "참"}),
-    "모순중복": (TWO_ITEMS, FRAGMENTS, [_response(_row(1), _row(2), _row(2, "거짓"))], {1: "참"}),
+    # «계약밖판정»·«모순중복»도 표에 없다 — 그 번호는 파서가 «미응답»으로 닫으므로
+    # 번호누락과 같은 후속 요청 대상이다(아래 PARTIAL_SCRIPTS).
     "장오인": (ITEMS, FRAGMENTS, [_response(_row(1, section="culture"))], {1: "참"}),
     "수치증명일치": (
         NUMERIC_ITEMS, NUMERIC_FRAGMENTS,
@@ -279,7 +281,7 @@ def test_disposal_matches_plain_path_for_the_same_response_script(name):
     assert [type(p) for p in schema.calls[1:]] == [type(p) for p in plain.calls[1:]]
 
 
-@pytest.mark.parametrize("name", ("번호누락", "수치증명없는참", "인용불일치"))
+@pytest.mark.parametrize("name", ("수치증명없는참", "인용불일치"))
 def test_schema_valid_rows_are_still_rejected_by_semantic_review(name):
     items, fragments, replies, expected = SCRIPTS[name]
     for raw in replies:
@@ -287,17 +289,62 @@ def test_schema_valid_rows_are_still_rejected_by_semantic_review(name):
     run = _run(items, fragments, deepcopy(replies), schema_first=True)
     assert run.result == expected
     assert len(run.calls) == 1
-    if name == "번호누락":
-        assert 2 not in run.result
-        assert run.protocol[0]["미응답번호수"] == 1
-        assert not run.problems
-    else:
-        assert run.result[1] == REVIEW_GROUNDING_REJECTED
-        assert run.problems[1]
-        assert run.diagnostics
+    assert run.result[1] == REVIEW_GROUNDING_REJECTED
+    assert run.problems[1]
+    assert run.diagnostics
 
 
-def test_report_level_disposal_matches_plain_path_when_a_number_is_missing():
+def test_schema_valid_partial_answer_asks_the_missing_number_once_then_rejects_it():
+    """번호가 빠진 스키마 적합 응답은 «참»이 되지 않는다 — 한 번 더 묻고, 그 답도
+    못 읽으면 예전처럼 그 번호만 제거된다 (호출은 2회, 세 번째는 없다)."""
+    replies = [_response(_row(1)), INVALID]
+    _assert_schema_valid(replies[0])
+    run = _run(TWO_ITEMS, FRAGMENTS, deepcopy(replies), schema_first=True)
+    assert run.result == {1: "참"}
+    assert 2 not in run.result
+    assert len(run.calls) == PARSE_RETRY_LIMIT + 1
+    assert run.protocol[0]["요청번호수"] == 2 and run.protocol[0]["미응답번호수"] == 1
+    assert run.protocol[1]["요청번호수"] == 1 and run.protocol[1]["판독"] == READ_JSON_SYNTAX
+    assert not run.problems
+
+
+#: 첫 응답이 «읽히긴 했는데» 2번의 판정이 없는 세 가지 모양 — 번호가 아예 없거나,
+#: 계약 밖 판정이거나, 같은 번호가 모순되게 겹치거나. 파서는 셋 다 «미응답»으로 닫는다.
+PARTIAL_SCRIPTS = {
+    "번호누락": [_response(_row(1))],
+    "계약밖판정": [_response(_row(1), _row(2, "모름"))],
+    "모순중복": [_response(_row(1), _row(2), _row(2, "거짓"))],
+}
+
+
+@pytest.mark.parametrize("name", tuple(PARTIAL_SCRIPTS), ids=tuple(PARTIAL_SCRIPTS))
+def test_missing_number_diverges_from_plain_path_by_exactly_one_followup_call(name):
+    """같은 «부분 응답» 대본에서 최초 검수 경로만 빠진 번호를 한 번 더 묻는다.
+    일반 경로(재검수·요약)는 예전 그대로 1회로 끝난다."""
+    from src.features.composer.constants import MISSING_VERDICTS_REMINDER
+    from src.features.composer.tests.review_evidence_fixture import review_items
+
+    first_reply = deepcopy(PARTIAL_SCRIPTS[name])
+    schema = _run(TWO_ITEMS, FRAGMENTS, first_reply + [_response(_row(2))], schema_first=True)
+    plain = _run(TWO_ITEMS, FRAGMENTS, deepcopy(PARTIAL_SCRIPTS[name]), schema_first=False)
+    assert schema.result == {1: "참", 2: "참"}
+    assert plain.result == {1: "참"}
+    assert len(schema.calls) == 2 and len(plain.calls) == 1
+    assert schema.calls[0].encode("utf-8") == plain.calls[0].encode("utf-8")
+    followup = schema.calls[1]
+    assert isinstance(followup, ReviewPrompt) and followup.response_schema is FLAT_REVIEW_SCHEMA
+    assert followup.endswith(MISSING_VERDICTS_REMINDER) and RETRY_REMINDER not in followup
+    assert [item.number for item in review_items(followup)] == [2]
+    assert [record["요청번호수"] for record in schema.protocol] == [2, 1]
+    assert [record["미응답번호수"] for record in schema.protocol] == [1, 0]
+    assert plain.protocol[0]["미응답번호수"] == 1 and len(plain.protocol) == 1
+
+
+def test_report_level_disposal_matches_plain_path_when_the_followup_answers_another_number():
+    """후속 응답이 «후속 대상이 아닌» 번호만 돌려주면 아무것도 바뀌지 않는다 — 두 경로의
+    보고서·진단이 같고, 최초 검수 경로만 호출이 한 번 더 있다."""
+    from src.features.composer.constants import MISSING_VERDICTS_REMINDER
+
     report = ComposedReport((ComposedSection("identity", (SENTENCE, SECOND_SENTENCE)),))
 
     def run(schema_first):
@@ -320,7 +367,13 @@ def test_report_level_disposal_matches_plain_path_when_a_number_is_missing():
     assert [s.text for s in schema_report.sections[0].sentences] == [TEXT]
     assert schema_report == plain_report
     assert schema_sinks["diagnostics"] == plain_sinks["diagnostics"]
-    assert schema_sinks["protocol_diagnostics"] == plain_sinks["protocol_diagnostics"]
-    assert len(schema_calls) == len(plain_calls) == 1
+    assert len(schema_calls) == 2 and len(plain_calls) == 1
     assert schema_calls[0].encode("utf-8") == plain_calls[0].encode("utf-8")
     assert isinstance(schema_calls[0], ReviewPrompt) and type(plain_calls[0]) is str
+    assert isinstance(schema_calls[1], ReviewPrompt) and schema_calls[1].endswith(MISSING_VERDICTS_REMINDER)
+    # 첫 시도의 관측은 두 경로가 같다. 후속 시도는 «2번 하나»만 물었는데 1번만 돌아와
+    # 미응답 1·요청밖 1이다 — 1번은 후속 대상이 아니라 첫 판정을 덮어쓰지 않는다.
+    assert schema_sinks["protocol_diagnostics"][0] == plain_sinks["protocol_diagnostics"][0]
+    followup_record = schema_sinks["protocol_diagnostics"][1]
+    assert followup_record["요청번호수"] == 1
+    assert followup_record["미응답번호수"] == 1 and followup_record["요청밖번호수"] == 1

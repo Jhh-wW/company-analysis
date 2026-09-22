@@ -17,6 +17,8 @@ from src.features.composer.port import (
     performance_table_from_report_table,
 )
 from src.features.composer.render import render_report
+from src.features.report_standard.publish import _numeric_problems
+from src.features.storage.reports import report_from_json, report_to_json
 from src.features.composer import structured_claims
 from src.features.composer.structured_claims import (
     append_past_changes_numeric_claims,
@@ -35,6 +37,11 @@ from src.shared.report_quality.fact_binding import (
 from src.shared.report_quality.numeric_validation import (
     validate_versioned_numeric_record,
 )
+from src.shared.report_quality.numeric_codec import (
+    decode_numeric_check,
+    encode_numeric_check,
+)
+from src.shared.report_quality.numeric_models import NumericSign, UnitDimension
 from src.shared.report_evidence.policy import injected_slots_for
 
 
@@ -565,7 +572,7 @@ def test_감사보고서_평문표도_변화_문장_세_개를_만든다() -> No
     claims = build_past_changes_numeric_claims(table, fragments, filing)
 
     assert [sentence.text for sentence in claims] == [
-        "별도 매출액의 2024년부터 2025년까지 누적 증감률은 1432.91%이다.",
+        "별도 매출액은 2024년 30.7억원, 2025년 471.2억원이며, 증감률은 1432.91%이다.",
         "별도 영업이익은 2024년 -301.6억원에서 2025년 -588.5억원으로 손실이 늘었다.",
         "별도 당기순이익은 2024년 -302.4억원에서 2025년 -581.2억원으로 손실이 늘었다.",
     ]
@@ -601,9 +608,9 @@ def test_감사보고서_2개년_표에서_증감률_세_문장이_나온다() -
     claims = build_past_changes_numeric_claims(table, fragments, filing)
 
     assert [sentence.text for sentence in claims] == [
-        "별도 매출액의 2024년부터 2025년까지 누적 증감률은 6.90%이다.",
-        "별도 영업이익의 2024년부터 2025년까지 누적 증감률은 -15.87%이다.",
-        "별도 당기순이익의 2024년부터 2025년까지 누적 증감률은 -10.92%이다.",
+        "별도 매출액은 2024년 397.4억원, 2025년 424.8억원이며, 증감률은 6.90%이다.",
+        "별도 영업이익은 2024년 34.1억원, 2025년 28.7억원이며, 증감률은 -15.87%이다.",
+        "별도 당기순이익은 2024년 23.4억원, 2025년 20.8억원이며, 증감률은 -10.92%이다.",
     ]
     for sentence in claims:
         assert sentence.structured_claim is not None
@@ -862,8 +869,139 @@ def test_감사보고서_claim이_렌더_FactRecord와_원문지문까지_결속
             rendered.citations[0].exact_evidence_hashes
         )
         assert validate_versioned_numeric_record(fact) == ()
+        assert _numeric_problems(fact) == []
+        assert fact.evidence_binding == fact_evidence_binding(fact)
+    rate_fact = rendered.fact_records[0]
+    assert rate_fact.raw_value == "start=3073716215 | end=47117211348"
+    assert rate_fact.display_value == "1432.91"
+    assert rate_fact.unit == "%"
+    assert rate_fact.rounding_rule == "ROUND_HALF_UP:2"
+    # 30.7·471.2는 원값을 읽기 쉽게 표시한 것일 뿐, 비율의 피연산자가 아니다.
+    assert (Decimal("471.2") / Decimal("30.7") - 1) * 100 != Decimal("1432.91")
+    assert table.unaudited_years == ()
+    assert "미감사" not in rate_fact.claim
+    restored = report_from_json(report_to_json(rendered))
+    assert restored == rendered
+    for fact in restored.fact_records:
+        assert _numeric_problems(fact) == []
         assert fact.evidence_binding == fact_evidence_binding(fact)
     loss_fact = rendered.fact_records[1]
     assert loss_fact.raw_value == "start=-301.6 | end=-588.5"
     assert loss_fact.unit == "억원"
     assert loss_fact.display_value == "-286.9"
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("30.7억원", "30.8억원"),
+        ("471.2억원", "471.3억원"),
+        ("30.7억원", "-30.7억원"),
+        ("471.2억원", "471.2백만원"),
+        ("2024년", "2023년"),
+        ("1432.91%", "1434.85%"),
+        ("증감률은", "누적 증감률은"),
+    ],
+)
+def test_두_연도_금액_기간_단위_부호_비율_문장변조를_차단한다(before, after):
+    table, fragments, filing = _wrtn_case()
+    sentence = build_past_changes_numeric_claims(table, fragments, filing)[0]
+    tampered = replace(sentence, text=sentence.text.replace(before, after))
+
+    assert not is_release_ready_numeric_sentence(tampered, section_id="past_changes")
+    safe, filtering = enforce_public_numeric_safety(
+        ComposedReport(sections=(ComposedSection("past_changes", (tampered,)),))
+    )
+    assert safe.sections[0].sentences == ()
+    assert filtering.removed_total == 1
+
+
+@pytest.mark.parametrize("change", ["value", "sign", "unit", "dimension", "period"])
+def test_두_연도_문장이_같아도_원값결속_변조를_차단한다(change):
+    table, fragments, filing = _wrtn_case()
+    sentence = build_past_changes_numeric_claims(table, fragments, filing)[0]
+    claim = sentence.structured_claim
+    assert claim is not None
+    binding = decode_numeric_check(claim.numeric_checks[0])
+    edits = {
+        "value": {"value": "3073716216"},
+        "sign": {"sign": NumericSign.NEGATIVE},
+        "unit": {"unit": "천원"},
+        "dimension": {"unit_dimension": UnitDimension.COUNT},
+        "period": {"period": "2023"},
+    }
+    changed = replace(
+        binding,
+        operands=(replace(binding.operands[0], **edits[change]), binding.operands[1]),
+    )
+    tampered = replace(sentence, structured_claim=replace(
+        claim, numeric_checks=(encode_numeric_check(changed),),
+    ))
+    assert not is_release_ready_numeric_sentence(tampered, section_id="past_changes")
+
+
+@pytest.mark.parametrize(
+    ("start_raw", "end_raw", "amounts", "rate"),
+    [
+        ("47,117,211,348", "3,073,716,215", "471.2억원, 2025년 30.7억원", "-93.48"),
+        ("3,073,716,215", "0", "30.7억원, 2025년 0.0억원", "-100.00"),
+        ("3,073,716,215", "3,073,716,215", "30.7억원, 2025년 30.7억원", "0.00"),
+        ("100,000,000", "200,000,000", "1.00억원, 2025년 2.00억원", "100.00"),
+    ],
+)
+def test_두_연도_감소_종료값0_동일값_작은금액도_원값으로_검산한다(
+    start_raw, end_raw, amounts, rate,
+):
+    header = _WRTN_STATEMENT.split("과        목", 1)[0]
+    statement = (
+        f"<TABLE><TR><TD>{header}</TD></TR>"
+        f"<TR><TD>영업수익</TD><TD>{end_raw}</TD><TD>{start_raw}</TD></TR>"
+        "<TR><TD>영업손실</TD><TD>58,852,153,409</TD><TD>30,162,706,039</TD></TR>"
+        "<TR><TD>당기순손실</TD><TD>58,121,775,636</TD><TD>30,242,954,858</TD></TR>"
+        "</TABLE>"
+    )
+    table, fragments, filing = _audit_case(
+        statement, fragment_number=28, receipt_number=_WRTN_RECEIPT_NUMBER,
+    )
+    sentence = build_past_changes_numeric_claims(table, fragments, filing)[0]
+    assert sentence.text == f"별도 매출액은 2024년 {amounts}이며, 증감률은 {rate}%이다."
+    assert is_release_ready_numeric_sentence(sentence, section_id="past_changes")
+
+
+def test_두_피연산자라도_기간차가_2년이면_누적이다():
+    # RATE 결속은 3개년 표에서도 양 끝 두 값만 가진다. 피연산자 개수로
+    # 전년 대비를 판단하면 안 되므로 실제 3개년 표의 결속을 직접 재현한다.
+    sentence = build_past_changes_numeric_claims(_table(), _fragments(), _filing())[0]
+    claim = sentence.structured_claim
+    assert claim is not None
+    binding = decode_numeric_check(claim.numeric_checks[0])
+    assert len(binding.operands) == 2
+    assert structured_claims._rate_claim_text(binding) == sentence.text == (
+        "연결 매출액의 2023년부터 2025년까지 누적 증감률은 24.28%이다."
+    )
+
+
+def test_원화_원단위가_아니면_억원_축척을_추정하지_않는다():
+    table, fragments, filing = _wrtn_case()
+    claim = build_past_changes_numeric_claims(table, fragments, filing)[0].structured_claim
+    assert claim is not None
+    binding = decode_numeric_check(claim.numeric_checks[0])
+    binding = replace(binding, operands=tuple(
+        replace(operand, unit="천원") for operand in binding.operands
+    ))
+    assert structured_claims._rate_claim_text(binding) == (
+        "별도 매출액은 2024년 3,073,716,215천원, 2025년 47,117,211,348천원이며, "
+        "증감률은 1432.91%이다."
+    )
+
+
+def test_기존_검증된_증감률_문장도_같은_수치결속으로_호환한다():
+    table, fragments, filing = _wrtn_case()
+    generated = build_past_changes_numeric_claims(table, fragments, filing)[0]
+    legacy_text = "별도 매출액의 2024년부터 2025년까지 누적 증감률은 1432.91%이다."
+    assert generated.text != legacy_text
+    legacy = replace(generated, text=legacy_text)
+    assert is_release_ready_numeric_sentence(legacy, section_id="past_changes")
+    for before, after in (("2024", "2023"), ("1432.91", "1434.85"), ("매출액", "영업이익")):
+        changed = replace(legacy, text=legacy.text.replace(before, after))
+        assert not is_release_ready_numeric_sentence(changed, section_id="past_changes")

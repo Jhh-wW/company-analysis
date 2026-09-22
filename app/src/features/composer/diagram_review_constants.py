@@ -104,7 +104,24 @@ FLOW_PRODUCT_GOODS_CONFLICT_CODE: Final[str] = "flow_product_goods_conflict"
 #: ★ 글자는 `constants.BUSINESS_FLOW_HEADERS`·`OPERATIONS_FLOW_HEADERS`와
 #:   같아야 한다. 어긋나면 `test_flow_generic_cells` 의 대조 시험이 잡는다.
 BUSINESS_FLOW_PRODUCT_HEADER: Final[str] = "제품·서비스"
+BUSINESS_FLOW_REVENUE_HEADER: Final[str] = "반복·확장 수익"
+FLOW_ACCOUNTING_REVENUE_CODE: Final[str] = "flow_accounting_revenue"
+# 실제 뤼튼 도식의 순수 회계 처리 딱지만 가린다. 선결제·구독 등 거래 설명을
+# 덧붙인 혼합 칸이나 다른 열은 이 완전 일치 규칙으로 지우지 않는다.
+ACCOUNTING_REVENUE_LABEL_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:(?:선수수익|계약부채)(?:으로|로)?(?:미수행|미이행|수행)의무(?:를)?"
+    r"|(?:미수행|미이행|수행)의무(?:를)?(?:선수수익|계약부채)(?:으로|로)?)"
+    r"(?:관리|인식|계상)(?:한다|함)?"
+)
+
 OPERATIONS_FLOW_ORIGIN_HEADER: Final[str] = "무엇으로 시작하나"
+OPERATIONS_FLOW_TARGET_HEADER: Final[str] = "누구에게 닿나"
+FLOW_UNINFORMATIVE_OPERATIONS_CODE: Final[str] = "flow_uninformative_operations"
+# 대상도 없고 나머지도 아래 일반 설명뿐인 도식만 제외한다. 고유명·수치는 보존한다.
+OPERATIONS_GENERIC_LABELS: Final[frozenset[str]] = frozenset({
+    "", "미확인", "콘텐츠", "인공지능콘텐츠", "ai콘텐츠", "콘텐츠제공",
+    "상품", "제품", "서비스", "제공", "판매", "운영",
+})
 
 #: 매출원 이름을 뽑는 자리 — 「<이름>매출」·「<이름> 매출」·「<이름>수익」.
 #: ★ 뒤 글자를 함께 잡아 두고 판정 함수가 «조사인지 합성어인지»를 가른다.
