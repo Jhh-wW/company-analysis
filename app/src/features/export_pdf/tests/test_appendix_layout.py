@@ -272,3 +272,47 @@ def test_가드를_강제로_켜면_같은_입력이_LayoutError로_죽는다(mo
     with pytest.raises(LayoutError):
         _appendix_pdf(_tail_overflow_report(800))
 
+
+def test_틀_padding만큼_넘치는_경계_입력도_PDF가_나온다():
+    """2026-09-23 총괄 실측 — 꼬리 높이 736pt는 여백 기준(745.5)엔 들어가지만
+    Frame 위·아래 padding 12pt를 뺀 실제 본문(733.5)엔 안 들어간다."""
+
+    import re
+
+    report = _tail_overflow_report(524)
+    citations = list(report.citations)
+    citations[-1] = replace(citations[-1], location=citations[-1].location + "x " * 36)
+    data = _appendix_pdf(replace(report, citations=citations))
+    pages = PdfReader(io.BytesIO(data)).pages
+    assert sum(len(re.findall(r"출처행\d+", page.extract_text())) for page in pages) == 40
+
+
+def test_꼬리_최대_높이는_틀_padding을_뺀_값이다():
+    from reportlab.lib.pagesizes import A4 as _A4
+    from reportlab.platypus import SimpleDocTemplate as _Doc
+
+    document = _Doc(io.BytesIO(), pagesize=_A4, topMargin=constants.PAGE_TOP_MARGIN_PT,
+                    bottomMargin=constants.PAGE_BOTTOM_MARGIN_PT)
+    frame = document.pageTemplates[0].frames[0] if document.pageTemplates else None
+    if frame is None:
+        document.build([])
+        frame = document.pageTemplates[0].frames[0]
+    usable = frame._height - frame._topPadding - frame._bottomPadding
+    assert abs(constants.APPENDIX_TAIL_MAX_HEIGHT_PT - usable) < 0.01
+
+
+def test_padding을_빼지_않은_상한이면_경계_입력이_LayoutError로_죽는다(monkeypatch):
+    """음성 대조 — 위 경계 시험이 지키는 것은 정확히 padding 12pt다."""
+
+    from reportlab.platypus.doctemplate import LayoutError
+
+    monkeypatch.setattr(
+        constants, "APPENDIX_TAIL_MAX_HEIGHT_PT",
+        constants.APPENDIX_TAIL_MAX_HEIGHT_PT + constants.FRAME_VERTICAL_PADDING_PT,
+    )
+    report = _tail_overflow_report(524)
+    citations = list(report.citations)
+    citations[-1] = replace(citations[-1], location=citations[-1].location + "x " * 36)
+    with pytest.raises(LayoutError):
+        _appendix_pdf(replace(report, citations=citations))
+

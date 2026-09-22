@@ -100,7 +100,13 @@ A4_HEIGHT_PT: Final[float] = 297 * 72 / 25.4
 #: 부록 표의 «머리행 + 마지막 두 본문 행»이 이 높이 안에 들어갈 때만 두 행을
 #: 함께 넘긴다(NOSPLIT). 안 들어가는데 묶으면 reportlab이 쪼갤 자리를 못 찾아
 #: LayoutError로 PDF 생성이 통째로 죽는다(2026-09-23 독립 검토 N1 실측).
-APPENDIX_TAIL_MAX_HEIGHT_PT: Final[float] = A4_HEIGHT_PT - PAGE_TOP_MARGIN_PT - PAGE_BOTTOM_MARGIN_PT
+#: reportlab ``Frame``의 기본 위·아래 padding(각 6pt). SimpleDocTemplate이 만드는
+#: 본문 틀은 여백 안쪽에서 이만큼을 더 빼므로, 빼지 않으면 12pt만큼 큰 값을
+#: «들어간다»고 잘못 판정해 경계에서 LayoutError가 난다(2026-09-23 총괄 실측).
+FRAME_VERTICAL_PADDING_PT: Final[float] = 6.0 * 2
+APPENDIX_TAIL_MAX_HEIGHT_PT: Final[float] = (
+    A4_HEIGHT_PT - PAGE_TOP_MARGIN_PT - PAGE_BOTTOM_MARGIN_PT - FRAME_VERTICAL_PADDING_PT
+)
 #: 꼬리 높이를 잴 때 넘겨 주는 «충분히 큰» 가용 높이. 실제 쪽 높이가 아니다.
 APPENDIX_MEASURE_HEIGHT_PT: Final[float] = 100000.0
 META_FONT_SIZE_PT: Final[float] = 6.8
