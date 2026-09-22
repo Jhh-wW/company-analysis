@@ -212,6 +212,17 @@ class ComposedSection:
     news_rows: tuple[NewsRow, ...] = ()
     #: 작가가 뉴스 본문 활용에서 제외한 구체적인 사유. 공개 사실 장부와 구분한다.
     news_decisions: tuple[tuple[str, str, str], ...] = ()
+    #: 장 간 중복 제거가 이 장을 비우면서 그 문장을 «가져간» 소유 장 id들.
+    #: 그 밖의 이유로 비었거나 문장이 남아 있으면 빈 튜플이다.
+    #: ★ 왜 필요한가 (실측 — 뤼튼 8장) — 「그쪽으로 모았습니다」 안내문은 중복
+    #:   제거 시점에는 참이지만, 그 뒤 단계(본문 검수·수치 안전·2차 중복 제거)가
+    #:   소유 장의 같은 문장을 지우면 «어느 장에도 없는» 내용을 가리키는 거짓말로
+    #:   남는다. 마지막 대조(`dedupe.reconcile_section_notices`)가 그것을
+    #:   확인하려면 «어디로 갔는지»가 남아 있어야 한다.
+    #: ★ 기본값이 빈 튜플이라 이 칸을 모르는 기존 생성·저장 경로는 그대로 돈다
+    #:   (새 칸 추가만, 읽기 호환 유지). 맨 뒤에 두어 위치 인자로 만드는
+    #:   호출부(`ComposedSection(section_id, sentences)`)도 그대로 돈다.
+    moved_to_sections: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

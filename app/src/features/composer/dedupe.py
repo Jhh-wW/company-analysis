@@ -29,12 +29,15 @@ import logging
 import re
 import unicodedata
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Final, Optional
 
 from src.features.composer.constants import (
     CHALLENGE_FLOW_SECTION_ID,
     NOTICE_DUPLICATE_MOVED,
     NOTICE_DUPLICATE_MOVED_TABLE_KEPT,
+    NOTICE_INSUFFICIENT_EVIDENCE,
+    NOTICE_INSUFFICIENT_EVIDENCE_TABLE_KEPT,
     SECTION_IDS,
     STRATEGY_TABLE_SECTION_ID,
 )
@@ -372,6 +375,25 @@ def sections_with_program_tables(
     return frozenset(section_ids)
 
 
+def _keeps_a_table(
+    section: ComposedSection, sections_with_tables: frozenset[str]
+) -> bool:
+    """이 장에 «문장과 별개로» 남는 표가 있나.
+
+    ★ 한 벌로 쓴다 — 중복 제거가 장을 비울 때와 마지막 안내문 대조
+      (`reconcile_section_notices`)가 «같은 잣대»를 봐야 한다. 두 벌로 적으면
+      한쪽만 고쳐져 「표가 남는다」와 「비어 있다」가 다시 어긋난다.
+    ★ 장이 «들고 있는» 표(`flow_rows`·`news_rows`)와 렌더 인자로 «밖에서»
+      들어오는 표(`sections_with_tables`)를 함께 본다.
+    """
+
+    return bool(
+        section.flow_rows
+        or section.news_rows
+        or section.section_id in sections_with_tables
+    )
+
+
 def _empty_section_notice(
     section: ComposedSection, sections_with_tables: frozenset[str]
 ) -> str:
@@ -388,11 +410,7 @@ def _empty_section_notice(
       같은 어긋남이 그대로 난다.
     """
 
-    if (
-        section.flow_rows
-        or section.news_rows
-        or section.section_id in sections_with_tables
-    ):
+    if _keeps_a_table(section, sections_with_tables):
         return NOTICE_DUPLICATE_MOVED_TABLE_KEPT
     return NOTICE_DUPLICATE_MOVED
 
@@ -503,6 +521,9 @@ def drop_cross_section_duplicates(
 
     order = _section_order()
     drop: set[int] = set()
+    # 장 색인 → 그 장의 문장을 «가져간» 소유 장 색인들. 안내문이 가리키는 곳을
+    # 뒤 단계가 다시 확인할 수 있게 남긴다(`ComposedSection.moved_to_sections`).
+    moved_owner_indexes: dict[int, set[int]] = {}
     for group in _tight_groups(similar, len(flat)):
         if len({flat[index][0] for index in group}) < 2:
             continue  # 한 장 안의 반복은 이 단계가 다루지 않는다
@@ -542,6 +563,7 @@ def drop_cross_section_duplicates(
         for index in group:
             if flat[index][0] != owner:
                 drop.add(index)
+                moved_owner_indexes.setdefault(flat[index][0], set()).add(owner)
 
     if not drop:
         _log_chapter_sentence_counts(report, report)
@@ -569,8 +591,18 @@ def drop_cross_section_duplicates(
         #   실려 글과 화면이 어긋난다(실측 — 6장 「회사가 밝힌 성장 계획」).
         #   그래서 표가 남는 장에는 남는다는 사실까지 적는다.
         notice = section.notice
+        moved_to = section.moved_to_sections
         if not kept and not notice:
             notice = _empty_section_notice(section, table_sections)
+            # ★ 안내문이 가리키는 «그쪽»을 함께 적는다. 이 값이 없으면 마지막
+            #   대조가 「정말 그 장에 남아 있나」를 확인할 수 없어, 소유 장의
+            #   문장이 뒤 단계에서 지워져도 안내문이 그대로 남는다(뤼튼 8장).
+            moved_to = tuple(
+                report.sections[owner_index].section_id
+                for owner_index in sorted(
+                    moved_owner_indexes.get(section_index, set())
+                )
+            )
         rebuilt.append(
             ComposedSection(
                 section_id=section.section_id,
@@ -585,9 +617,147 @@ def drop_cross_section_duplicates(
                 #   빈 값이라 안 넘기면 이 단계가 조용히 지운다.
                 news_rows=section.news_rows,
                 news_decisions=section.news_decisions,
+                moved_to_sections=moved_to,
             )
         )
 
     result = ComposedReport(sections=tuple(rebuilt), summary=report.summary)
     _log_chapter_sentence_counts(report, result)
     return result, len(drop)
+
+
+# ══════════════════════════════════════════════════════════
+# 안내문 최종 대조 — 「적어 둔 말」과 「실제 화면」을 맞춘다
+# ══════════════════════════════════════════════════════════
+# ★ 왜 필요한가 (실측 — 2026-09-22 산출 PDF 2건)
+#   · 뤼튼 8장: 「다른 장에서 더 자세히 다뤄져 그쪽으로 모았습니다」라고 적혔는데
+#     그 내용이 어느 장에도 없다. 중복 제거가 안내문을 붙인 «시점»에는 참이었지만,
+#     그 뒤 단계(본문 검수·수치 안전·2차 중복 제거)가 소유 장의 같은 문장을
+#     지우면서 거짓이 됐다.
+#   · 메디라인 4장: 「확인된 자료가 부족해 이 장은 비어 있습니다」 바로 아래에
+#     2개년 실적 표가 실렸다.
+#   안내문을 «붙이는 자리»마다 고치면 단계가 늘어날 때마다 같은 어긋남이 다시
+#   생긴다. 그래서 문장이 더 이상 바뀌지 않는 «마지막 자리»에서 한 번 대조한다.
+
+#: 「자료가 부족하다」로 읽히는 안내문의 «글자» 목록.
+#: ★ 사유별 상수는 여럿(`NOTICE_INSUFFICIENT_EVIDENCE`·
+#:   `NOTICE_NUMERIC_BODY_WITHHELD`·`NOTICE_EVIDENCE_NONE`·
+#:   `NOTICE_EVIDENCE_NOT_COMPOSED`·verify의 `NOTICE_ALL_SENTENCES_REJECTED`)
+#:   이지만 독자에게 보이는 문장은 하나뿐이다(2026-09-16 결정: 결과만 말한다).
+#:   그래서 상수를 다 모으지 않고 «글자»로 판정한다 — 새 사유 상수가 늘어도
+#:   같은 문장이면 자동으로 걸린다. 글자가 갈라지면 시험이 알려 준다
+#:   (test_notice_reconcile.py 의 «같은 문장» 단정).
+_INSUFFICIENT_EVIDENCE_NOTICES: Final[frozenset[str]] = frozenset(
+    {NOTICE_INSUFFICIENT_EVIDENCE, NOTICE_INSUFFICIENT_EVIDENCE_TABLE_KEPT}
+)
+
+#: 「다른 장으로 모았다」로 읽히는 안내문의 글자 목록(표 유무 두 변형).
+_DUPLICATE_MOVED_NOTICES: Final[frozenset[str]] = frozenset(
+    {NOTICE_DUPLICATE_MOVED, NOTICE_DUPLICATE_MOVED_TABLE_KEPT}
+)
+
+
+def _insufficient_notice(keeps_table: bool) -> str:
+    """자료 부족 계열 안내문 — 표가 남으면 그 사실까지 적는다."""
+
+    return (
+        NOTICE_INSUFFICIENT_EVIDENCE_TABLE_KEPT
+        if keeps_table
+        else NOTICE_INSUFFICIENT_EVIDENCE
+    )
+
+
+def _reconciled_notice(
+    section: ComposedSection,
+    sentence_counts: dict[str, int],
+    sections_with_tables: frozenset[str],
+) -> str:
+    """이 장의 «지금» 상태에 맞는 안내문. 바꿀 것이 없으면 원래 글자 그대로.
+
+    Args:
+        section: 본문이 확정된 장.
+        sentence_counts: 장 id → 지금 그 장에 남은 문장 수. 「그쪽으로
+            모았습니다」가 가리키는 장이 정말 그 내용을 들고 있는지 본다.
+        sections_with_tables: 렌더 인자로 밖에서 들어오는 표가 실릴 장 id들.
+    """
+
+    notice = section.notice
+    if not notice:
+        # 없는 안내문을 새로 만들지 않는다 — 이 대조는 «적힌 말»만 고친다.
+        return notice
+    if section.sentences:
+        # ⓐ 문장이 실리는 장에 「비어 있습니다」가 남아 있으면 그 자체가 거짓이다.
+        #    뒤 단계가 문장을 다시 채웠다는 뜻이므로 안내문을 지운다.
+        return ""
+    keeps_table = _keeps_a_table(section, sections_with_tables)
+    if notice in _DUPLICATE_MOVED_NOTICES:
+        # ⓑ 「그쪽으로 모았습니다」는 가리키는 장이 그 내용을 들고 있을 때만 참이다.
+        #    소유 장이 이후 단계에서 비었으면 자료 부족 계열로 내린다.
+        if any(
+            sentence_counts.get(owner_id, 0) > 0
+            for owner_id in section.moved_to_sections
+        ):
+            return (
+                NOTICE_DUPLICATE_MOVED_TABLE_KEPT
+                if keeps_table
+                else NOTICE_DUPLICATE_MOVED
+            )
+        return _insufficient_notice(keeps_table)
+    if notice in _INSUFFICIENT_EVIDENCE_NOTICES:
+        # ⓒ 표가 남는 장에는 「비어 있다」가 아니라 「표만 실었다」고 적는다.
+        return _insufficient_notice(keeps_table)
+    # ⓓ 「생성이 끝나지 않았다」 같은 «우리 쪽 실패» 안내문은 건드리지 않는다.
+    #    그것은 장의 내용이 아니라 실행 상태를 말하는 문장이다.
+    return notice
+
+
+def reconcile_section_notices(
+    report: ComposedReport,
+    sections_with_tables: frozenset[str],
+    *,
+    section_ids: Optional[frozenset[str]] = None,
+) -> ComposedReport:
+    """본문이 확정된 뒤 안내문을 실제 상태와 맞춘다 (이 모듈의 마지막 관문).
+
+    Args:
+        report: 문장이 더 이상 바뀌지 않는 시점의 보고서.
+        sections_with_tables: `ComposedSection` «밖»에서 렌더 인자로 들어오는
+            표(실적표·매출 구성표)가 실릴 장 id들.
+            `sections_with_program_tables`로 만들어 넘긴다 — 중복 제거 때와
+            «같은 값»이어야 안내문이 두 자리에서 갈라지지 않는다.
+        section_ids: 고칠 장을 이 집합으로 제한한다. ``None``이면 전부.
+            ★ 보충(2회차) 경로에서만 쓴다. 그 경로는 «승인하지 않은 장이 보충
+              중 바뀌면» 보고서 전체를 막는 계약이 걸려 있어
+              (`shared/report_recovery.py` 의 장별 봉인 블록 대조), 비대상 장의
+              안내문을 여기서 바꾸면 산출 자체가 실패한다. 비대상 장의 본문은
+              1회차와 글자까지 같으므로 1회차 대조 결과가 그대로 유효하다.
+
+    Returns:
+        안내문만 고친 보고서. 고칠 것이 없으면 «같은 객체»를 그대로 돌려준다.
+
+    ★ 문장·표·도식은 건드리지 않는다. 이 함수가 바꾸는 것은 `notice` 글자뿐이다.
+    ★ 멱등이다 — 두 번 불러도 같은 결과다(대조 결과가 다시 입력이 된다).
+    """
+
+    sentence_counts = {
+        section.section_id: len(section.sentences) for section in report.sections
+    }
+    rebuilt: list[ComposedSection] = []
+    fixed: list[str] = []
+    for section in report.sections:
+        if section_ids is not None and section.section_id not in section_ids:
+            rebuilt.append(section)
+            continue
+        notice = _reconciled_notice(
+            section, sentence_counts, sections_with_tables
+        )
+        if notice == section.notice:
+            rebuilt.append(section)
+            continue
+        fixed.append(section.section_id)
+        rebuilt.append(replace(section, notice=notice))
+    if not fixed:
+        return report
+    # 어느 장의 안내문을 고쳤는지만 남긴다 — 회사 원문은 로그에 넣지 않는다.
+    logger.info("안내문을 본문 상태에 맞춰 고쳤습니다 — 장 %s", ", ".join(fixed))
+    return replace(report, sections=tuple(rebuilt))

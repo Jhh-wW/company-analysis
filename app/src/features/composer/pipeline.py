@@ -107,6 +107,7 @@ from src.features.composer.evidence_availability import (
 )
 from src.features.composer.dedupe import (
     drop_cross_section_duplicates,
+    reconcile_section_notices,
     sections_with_program_tables,
 )
 from src.features.composer.news_usage import supplement_news_candidates, retain_verified_news, news_usage_diagnostics, news_citation_ids
@@ -2324,6 +2325,21 @@ def run_v2(
             ),
         )
 
+    # ②-f 안내문 최종 대조 — 여기가 «문장이 더 이상 바뀌지 않는» 마지막 자리다.
+    #     중복 제거가 「그쪽으로 모았습니다」를 붙인 뒤에도 본문 검수·수치 안전·
+    #     빈 장 복구·보도표 보강이 문장을 지우거나 더한다. 그래서 안내문을 붙인
+    #     자리에서는 참이던 말이 화면에서는 거짓이 된다(실측 — 뤼튼 8장은
+    #     「다른 장에 있다」는데 어느 장에도 없었고, 메디라인 4장은 「비어
+    #     있다」면서 바로 아래에 실적 표가 실렸다).
+    #     ★ 요약 고르기·렌더·봉인 «앞»에 둔다. 뒤에 두면 봉인된 글자와 화면이
+    #       갈라진다 — 안내문은 render_report가 장 첫 문단으로 그대로 싣는다.
+    #     ★ 표 자리는 중복 제거 때와 «같은 함수»로 만든다. 두 벌이 되면 한쪽만
+    #       고쳐져 「표가 남는다」와 「비어 있다」가 다시 어긋난다.
+    verified = reconcile_section_notices(
+        verified,
+        sections_with_program_tables(performance_table, composition_tables),
+    )
+
     # ③ 요약. 두 갈래 모두 «본문에 없던 말을 새로 만들지 않는다». SHADOW는
     # 검증된 본문 문장 중 AI가 고른 3~5문장을 쓰고(AI 1회), 엄격 모드는
     # 렌더러가 만든 검증 FactRecord에 정확히 결속된 본문 문장을 0원으로
@@ -2680,6 +2696,18 @@ def run_v2(
             numeric_filtering = numeric_filtering.merged(
                 supplement_numeric_filtering
             ).merged(merged_numeric_filtering)
+
+            # 본 경로와 같은 안내문 대조를 병합본에도 건다 — 보충이 대상 장을
+            # 다시 채웠으면 그 장에 남은 「비어 있습니다」를 여기서 지운다.
+            # ★ 대상 장«만» 고친다. 비대상 장이 1회차와 한 글자라도 달라지면
+            #   보충 결속 검사가 「승인하지 않은 장이 보충 중 바뀌었습니다」로
+            #   보고서 전체를 막는다(shared/report_recovery.py). 비대상 장의
+            #   본문은 1회차와 같으므로 1회차 대조 결과가 그대로 유효하다.
+            verified = reconcile_section_notices(
+                verified,
+                sections_with_program_tables(performance_table, composition_tables),
+                section_ids=frozenset(targets),
+            )
 
             # 요약·manifest·render·quality candidate/assessment는 보충 병합본에서
             # 모두 새로 만든다. 첫 후보의 전역 파생물을 재사용하지 않는다.
