@@ -112,9 +112,9 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "b51d7b16f27aca79efaf34ee0d53323716af67df1d17683c04dca643fc6705a6"),
+    (_golden_case, False, "932bbb0c3766856a9a5ad72284be92d2be310799559a3e458443146216fbb7de"),
     (_golden_case, True, "e514adce8e826170e6774c43c36300a66618ca8d12f54f9d3ba3f6ee934759eb"),
-    (_boundary_case, False, "6cfb69b96d01858edd44d47764459ca639271a18cae48b0430aa117395cfe0c5"),
+    (_boundary_case, False, "a3d40640d5ee2139066dd43a5f6d691d0657349da0b6e13263ae1de74c11c9b1"),
     (_boundary_case, True, "9266901272c8817372917081e848d82323d84add65573e2e1711feeb16c78510"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
@@ -123,6 +123,8 @@ def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected)
     #   바뀌면(2026-09-14: 역할·과금 안내의 유형 이름을 「」로 교체) 값도 함께 갱신한다 —
     #   스키마 포장 자체는 이 프롬프트를 바꾸지 않음을 같은 날 문구만 되돌려 재계산해 확인했다.
     # 2026-09-22 회사 계획 귀속 안내 126자 추가: 옛 안내문만 복원하면 옛 해시와 같다.
+    # 2026-09-23 평면 경로 REVIEW_JSON_GUIDE 에 «모든 번호를 빠짐없이 판정» 안내 88자 추가
+    #   (뤼튼 실측 요청 50·응답 20). 묶음(grouped) 안내문은 그대로라 그쪽 해시는 같다.
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
 
