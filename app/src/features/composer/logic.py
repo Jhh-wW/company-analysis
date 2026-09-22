@@ -428,9 +428,8 @@ class CacheablePrompt(str):
       모른다. 그래서 글자 수로 경계를 넘긴다 — `prompt[:cache_prefix_chars]`가
       공유 앞부분, `prompt[cache_prefix_chars:]`가 호출마다 달라지는 뒷부분이며
       둘을 이어 붙이면 원래 프롬프트와 같다.
-    ★ 알아 둘 것: `prompt + RETRY_REMINDER`처럼 이어 붙이면 결과는 평범한 str이
-      되어 표식이 사라진다. 의도된 동작이다 — 재시도는 드물고, 그때는 캐시를
-      포기하고 통짜로 보내는 편이 경계를 잘못 잡는 것보다 안전하다.
+    ★ 일반 문자열 연산은 표식을 지운다. 작성 형식 재시도처럼 기존 앞부분을
+      그대로 두고 고정 뒷문구만 붙이는 경로만 경계를 명시적으로 보존한다.
     """
 
     #: 공유 앞부분의 «글자» 수. 바이트가 아니라 파이썬 문자열 인덱스다.
@@ -961,9 +960,15 @@ def _compose_one_section(
     retries = 0
     while sentences is None and retries < parse_retry_limit:
         retries += 1
+        retry_prompt = prompt + RETRY_REMINDER
+        if isinstance(prompt, CacheablePrompt):
+            # 앞부분은 바꾸지 않았으므로 최초 호출과 같은 근거 블록을 재사용한다.
+            retry_prompt = CacheablePrompt(
+                retry_prompt, cache_prefix_chars=prompt.cache_prefix_chars,
+            )
         sentences, raw = _ask_and_parse(
             ask,
-            prompt + RETRY_REMINDER,
+            retry_prompt,
             section_id,
             reject_inline_citation_markers=reject_inline_citation_markers,
         )

@@ -27,6 +27,9 @@ from src.features.composer.culture_constants import (
     CULTURE_AUDIT_COMMITTEE_RE,
     CULTURE_AUDIT_COMPOSITION_RE,
     CULTURE_AUDIT_QUALIFICATION_RE,
+    CULTURE_BOARD_BODY_RE,
+    CULTURE_BOARD_CHARTER_RE,
+    CULTURE_BOARD_PEOPLE_PROCEDURE_RE,
     CULTURE_EMPLOYEE_BENEFICIARY_RE,
     CULTURE_EMPLOYEE_FINANCIAL_BENEFIT_RE,
     CULTURE_EVIDENCE_SCOPE_MISMATCH,
@@ -226,12 +229,30 @@ def _has_org_actor(clause: str) -> bool:
     return False
 
 
+def _is_board_charter_clause(surface_clause: str) -> bool:
+    """이사회 «자체»의 구성·운영·규정만 말한 절인가.
+
+    세 표지가 같은 절에 함께 있을 때만 참이다 — 이사회라는 기관 이름, 그 기관
+    자체의 구성·운영·규정 표현, 그리고 사람·업무 절차 어휘의 «부재». 실제 8장
+    첫 문장이 기댄 정관 제31조 ②가 조직 주체+행위(②)와 「권한의 위임」(④)으로
+    통과하던 자리다. 직원교육·보상·「부서장에게 위임」처럼 실제 절차가 같은
+    절에 있으면 그대로 보존한다 — 상수 주석에 실측 근거가 있다.
+    """
+
+    if not (CULTURE_BOARD_BODY_RE.search(surface_clause)
+            and CULTURE_BOARD_CHARTER_RE.search(surface_clause)):
+        return False
+    return not CULTURE_BOARD_PEOPLE_PROCEDURE_RE.search(surface_clause)
+
+
 def _is_statutory_governance_clause(surface_clause: str) -> bool:
     """일반 기관 구성·거래 승인 규정을 실제 사람·업무 제도와 구분한다."""
 
     if (CULTURE_AUDIT_COMMITTEE_RE.search(surface_clause)
             and CULTURE_AUDIT_COMPOSITION_RE.search(surface_clause)
             and CULTURE_AUDIT_QUALIFICATION_RE.search(surface_clause)):
+        return True
+    if _is_board_charter_clause(surface_clause):
         return True
     if not (CULTURE_GOVERNANCE_TRANSACTION_RE.search(surface_clause)
             and CULTURE_TRANSACTION_APPROVAL_BODY_RE.search(surface_clause)
@@ -257,6 +278,10 @@ def _clause_carries_section_subject(clause: str) -> bool:
        자리다(실측 29건).
     ①'' 법정 감사위원 구성 요건과 금융·자산 거래 승인 규정도 제외한다.
        사외이사·이사회 의결이라는 말만으로 문화 근거가 생기지 않는다.
+       이사회 «자체»의 구성·운영·규정(정관 이사회 조항·이사회 규정·헌장)도
+       같은 자리에서 제외한다 — 사람·업무 절차 어휘가 같은 절에 없을 때만.
+       ②·④보다 «먼저» 본다: 실제 8장 문장은 「이사회」+「운영에」로 ②를,
+       「권한의 위임」으로 ④를 통과했다.
     ② 조직 주체 + 부정되지 않은 절차 동사 = 「누가 맡는지」를 말한 절. 8장
        안내문이 밝힌 예외(재무 위험을 누가 맡는지 조직으로 설명한 문장)가
        여기다. 동사만으로는 인정하지 않는다 — 「손상여부를 검토하는」 같은

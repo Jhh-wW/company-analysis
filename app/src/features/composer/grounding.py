@@ -23,6 +23,7 @@ import unicodedata
 
 from src.features.composer.executive_status_guard import executive_status_problem
 from src.features.composer.modality_guard import modality_problem
+from src.features.composer.plan_timing_guard import plan_timing_problem
 from src.features.composer.role_binding import (
     role_binding_hint_lines, role_binding_problem, role_binding_requirements,
 )
@@ -868,9 +869,9 @@ def constrain_verdicts(
     거짓 판정의 기존 재작성 기회는 유지한다. 참·애매의 결속 실패는 별도
     처분으로 반환해 해석 강등이나 형식 재시도로 우회하지 못하게 한다.
 
-    ``baseline_date``(ISO ``YYYY-MM-DD``, 보고서 기준일)는 executive_status_guard
-    에만 쓰인다 — 생략하면 그 가드는 날짜 문턱 없이 이탈 표지 존재만으로
-    판정한다(§executive_status_constants 참고). 기존 호출자는 그대로 동작한다.
+    ``baseline_date``(ISO ``YYYY-MM-DD``, 보고서 기준일)는 임원 재직과 지난 목표의
+    현재화 검사에 쓰인다. 생략하면 임원 가드는 종전 이탈 표지 계약을 유지하고,
+    목표연도 가드는 기준연도를 추정하지 않는다.
     ``verbatim_by_number`` 는 검수 단계가 수집 객체로 증명한 «원문 그대로인 보도»
     문맥이다. 역할·과금 결속에만 쓰이며, 안내 생성과 같은 값을 받아야 한다.
     ``confirmed_prose_numbers``는 수량 범위 결속(«결합» 유형)만 거른다 — 「해석」
@@ -918,6 +919,9 @@ def constrain_verdicts(
                 (verbatim_by_number or {}).get(number),
             )
             or executive_status_problem(
+                text, sources, cells, baseline_date=baseline_date,
+            )
+            or plan_timing_problem(
                 text, sources, cells, baseline_date=baseline_date,
             )
             or (

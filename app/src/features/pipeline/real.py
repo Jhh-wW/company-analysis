@@ -5839,7 +5839,7 @@ def _v2_ask_via_provider(
         # 캐시는 앞부분이 바이트 단위로 같을 때만 맞으므로, 장마다 달라지는
         # 뒷부분을 같은 블록에 섞으면 매번 새로 써야 한다(실측: 호출 6번까지
         # cache_read 0, 685원 소진).
-        # 표식이 없으면(재시도로 이어 붙인 평범한 str 등) 예전처럼 통짜로 보낸다.
+        # 표식이 없으면(평범한 str 등) 예전처럼 통짜로 보낸다.
         text = str(prompt)
         raw_prefix = getattr(prompt, "cache_prefix_chars", 0)
         prefix_chars = raw_prefix if type(raw_prefix) is int and raw_prefix > 0 else 0

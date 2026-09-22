@@ -44,7 +44,7 @@ def test_explicit_opt_in_only_attaches_metadata(monkeypatch, configured):
     assert getattr(prompt, "response_schema", None) is None
 
 
-@pytest.mark.parametrize("grouped,prefix_chars", ((False, 10580), (True, 11722)))
+@pytest.mark.parametrize("grouped,prefix_chars", ((False, 10706), (True, 11848)))
 @pytest.mark.parametrize("factory", (_golden_case, _large_case, _boundary_case))
 def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
     monkeypatch, grouped, prefix_chars, factory,
@@ -68,15 +68,15 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "42780485a8c79ba3c887d3460dcc2f6bb16d26ffb4a302290f254a43939ba958"),
-    (_golden_case, True, "452c8fc61344d3926546733b6adccd2f85d45683deabbba70bfe3ee2f4b0671f"),
-    (_boundary_case, False, "9db1c4f8a61fd7550a71fef5f68dd14f276223da796be5f890498170e6d128a2"),
-    (_boundary_case, True, "58abb2b5f0f31380dcdeeadff19e69ba9781ca584a67d1b0361aadc2a8257ab7"),
+    (_golden_case, False, "b51d7b16f27aca79efaf34ee0d53323716af67df1d17683c04dca643fc6705a6"),
+    (_golden_case, True, "e514adce8e826170e6774c43c36300a66618ca8d12f54f9d3ba3f6ee934759eb"),
+    (_boundary_case, False, "6cfb69b96d01858edd44d47764459ca639271a18cae48b0430aa117395cfe0c5"),
+    (_boundary_case, True, "9266901272c8817372917081e848d82323d84add65573e2e1711feeb16c78510"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
 ):
-    # 기존 test_review_schema의 캐시 도입 전 전체 프롬프트 해시를 그대로 쓴다.
+    # test_review_schema와 같은 현재 안내문 기준이다. 캐시 포장은 원문을 바꾸지 않는다.
     monkeypatch.setenv(REVIEW_PROMPT_CACHE_ENV, "1")
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
@@ -129,7 +129,7 @@ def test_diagram_cache_excludes_card_switch_sources_and_rows(monkeypatch, items)
     cached = diagram_check._review_prompt(items, texts)
     reference = diagram_check._review_prompt((), {})
     assert cached.encode("utf-8") == plain.encode("utf-8")
-    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 8200
+    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 8326
     assert cached[:cached.cache_prefix_chars] == reference[:reference.cache_prefix_chars]
     assert texts["2"] not in cached[:cached.cache_prefix_chars]
     assert getattr(cached, "response_schema", None) is None

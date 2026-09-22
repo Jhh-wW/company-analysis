@@ -112,23 +112,24 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "42780485a8c79ba3c887d3460dcc2f6bb16d26ffb4a302290f254a43939ba958"),
-    (_golden_case, True, "452c8fc61344d3926546733b6adccd2f85d45683deabbba70bfe3ee2f4b0671f"),
-    (_boundary_case, False, "9db1c4f8a61fd7550a71fef5f68dd14f276223da796be5f890498170e6d128a2"),
-    (_boundary_case, True, "58abb2b5f0f31380dcdeeadff19e69ba9781ca584a67d1b0361aadc2a8257ab7"),
+    (_golden_case, False, "b51d7b16f27aca79efaf34ee0d53323716af67df1d17683c04dca643fc6705a6"),
+    (_golden_case, True, "e514adce8e826170e6774c43c36300a66618ca8d12f54f9d3ba3f6ee934759eb"),
+    (_boundary_case, False, "6cfb69b96d01858edd44d47764459ca639271a18cae48b0430aa117395cfe0c5"),
+    (_boundary_case, True, "9266901272c8817372917081e848d82323d84add65573e2e1711feeb16c78510"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
     # de0a68e1의 원래 builder로 재생한 전체 UTF-8 프롬프트 해시다.
     # ★ 기준값은 «스키마 포장 이전 builder»가 «현재 안내문»으로 만든 프롬프트다. 안내문이
     #   바뀌면(2026-09-14: 역할·과금 안내의 유형 이름을 「」로 교체) 값도 함께 갱신한다 —
     #   스키마 포장 자체는 이 프롬프트를 바꾸지 않음을 같은 날 문구만 되돌려 재계산해 확인했다.
+    # 2026-09-22 회사 계획 귀속 안내 126자 추가: 옛 안내문만 복원하면 옛 해시와 같다.
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
 
 
 @pytest.mark.parametrize("items,expected", (
-    ((), "d1dbdb4351e79577fc78263d160e9288fa407283c4d68a08f166447f89ab9213"),
-    (FLOW_ITEMS, "3e3d8173f5a018370c630e7b91686409fc878790dd8ce98390ae23241319ad4e"),
+    ((), "a370eb2bc54ccf413f01805ba1cd5ef083b0b5a0ce6e0084c9a0615a99c1eff1"),
+    (FLOW_ITEMS, "f769528b88dffc065e7bcfabb7953ffec183c28260ed80e499f392d19392a40f"),
 ))
 def test_diagram_prompt_bytes_match_pre_schema_baseline(items, expected):
     prompt = diagram_check._review_prompt(items, {"1": TEXT})
