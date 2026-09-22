@@ -265,11 +265,28 @@ def test_verify_report_culture_keeps_governance_and_blocks_compensation_accounti
     assert CULTURE_ACCOUNTING_POLICY_MISPLACED in reason_codes
 
 
-def test_verify_report_other_section_preserves_the_same_text():
-    """current_challenges 같은 다른 장은 같은 문장이라도 그대로 보존한다."""
+def test_verify_report_other_section_uses_the_general_reason_not_the_culture_one():
+    """다른 장에서도 빠지되, «culture 사유 코드»는 그 장에 새지 않는다.
+
+    ★ 기대값이 바뀐 이유 (2026-09-22) — 예전에는 current_challenges 같은 다른
+      장이 같은 회계 측정 문장을 그대로 실었다. 그래서 실제 산출 PDF에서 9장
+      「회사가 밝힌 차별점」이 금융자산 측정·정부보조금·현금성자산 정의·대손충당금
+      4문장으로, 5장 「당면 과제」가 이연법인세 문장으로 채워졌다. 이제 전 장
+      공통 가드(`composer.accounting_policy_guard`)가 같은 절을 막는다.
+    ★ 이 시험이 «원래 지키던 것»은 그대로 살아 있다 — culture 전용 사유 코드가
+      다른 장으로 새면 안 된다는 경계다. 아래 두 단언이 그것을 확인한다.
+    ★ 절차가 결속된 짝(PRESERVED_PROCEDURE_TEXT)은 다른 장에서도 그대로
+      보존된다 — `tests/test_accounting_policy_guard.py` 의 대조 시험이 지킨다.
+      「막아야 하는 것」과 「살려야 하는 것」의 짝은 깨지지 않았다.
+    """
     sentences = (ComposedSentence(TARGET_SENTENCE, ("comp",), "확인"),)
     report = ComposedReport((ComposedSection("current_challenges", sentences),))
     fragments = (CollectedFragment("comp", "공시", TARGET_SENTENCE),)
-    calls = []
-    checked = verify_report(report, fragments, None, _approval(calls))
-    assert [s.text for s in checked.sections[0].sentences] == [TARGET_SENTENCE]
+    calls, diagnostics = [], []
+    checked = verify_report(
+        report, fragments, None, _approval(calls), diagnostics=diagnostics,
+    )
+    assert [s.text for s in checked.sections[0].sentences] == []
+    reason_codes = [d["reason_code"] for d in diagnostics if d.get("reason_code")]
+    assert reason_codes == ["accounting_policy_boilerplate"]
+    assert CULTURE_ACCOUNTING_POLICY_MISPLACED not in reason_codes
