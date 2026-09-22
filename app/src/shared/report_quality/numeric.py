@@ -123,6 +123,7 @@ def _formula_value(binding: NumericBinding) -> tuple[Decimal | None, list[str]]:
         NumericFormula.RATE,
         NumericFormula.CAGR,
         NumericFormula.PERCENTAGE_POINT,
+        NumericFormula.SIGNED_CHANGE,
     }:
         required_roles = {"start", "end"}
     elif formula is NumericFormula.MARGIN:
@@ -145,6 +146,10 @@ def _formula_value(binding: NumericBinding) -> tuple[Decimal | None, list[str]]:
             if formula is NumericFormula.DELTA:
                 return values["end"] - values["start"], problems
             if formula is NumericFormula.PERCENTAGE_POINT:
+                return values["end"] - values["start"], problems
+            # 부호 있는 변화도 계산 자체는 차이다. 비율을 쓰지 않는다는 «의미»가
+            # delta와 다르므로 공식 이름만 분리하고 검산은 같은 식으로 한다.
+            if formula is NumericFormula.SIGNED_CHANGE:
                 return values["end"] - values["start"], problems
             if formula is NumericFormula.RATE:
                 # 손익처럼 음수 기준값이나 0을 가로지르는 값에는 일반적인
@@ -206,6 +211,7 @@ def _period_problems(binding: NumericBinding, roles: dict[str, NumericOperand]) 
         NumericFormula.RATE,
         NumericFormula.CAGR,
         NumericFormula.PERCENTAGE_POINT,
+        NumericFormula.SIGNED_CHANGE,
     }:
         if "start" not in roles or "end" not in roles:
             return [f"{formula.value} 공식의 start/end 피연산자가 없습니다"]
@@ -246,6 +252,7 @@ def _period_problems(binding: NumericBinding, roles: dict[str, NumericOperand]) 
             NumericFormula.RATE,
             NumericFormula.CAGR,
             NumericFormula.PERCENTAGE_POINT,
+            NumericFormula.SIGNED_CHANGE,
         }
         and start_key is not None
         and end_key is not None
@@ -265,6 +272,7 @@ def _unit_metric_problems(binding: NumericBinding) -> list[str]:
         NumericFormula.CAGR,
         NumericFormula.PERCENTAGE_POINT,
         NumericFormula.PEAK,
+        NumericFormula.SIGNED_CHANGE,
     }
     if binding.formula in common_formulas and any(
         operand.metric != binding.metric for operand in operands
@@ -279,6 +287,7 @@ def _unit_metric_problems(binding: NumericBinding) -> list[str]:
         NumericFormula.IDENTITY,
         NumericFormula.DELTA,
         NumericFormula.PEAK,
+        NumericFormula.SIGNED_CHANGE,
     }:
         if any(
             operand.unit != binding.unit
@@ -287,7 +296,8 @@ def _unit_metric_problems(binding: NumericBinding) -> list[str]:
         ):
             problems.append("결과 단위와 피연산자 단위 차원이 일치하지 않습니다")
         if (
-            binding.formula is NumericFormula.DELTA
+            binding.formula
+            in {NumericFormula.DELTA, NumericFormula.SIGNED_CHANGE}
             and any(
                 operand.unit_dimension is UnitDimension.PERCENT
                 for operand in operands

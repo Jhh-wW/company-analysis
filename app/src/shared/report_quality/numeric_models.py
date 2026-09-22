@@ -18,6 +18,11 @@ class NumericFormula(str, Enum):
     MARGIN = "margin"
     PERCENTAGE_POINT = "percentage_point"
     PEAK = "peak"
+    #: 손익처럼 음수·0을 가로지르는 구간의 «부호 있는 변화». 증감률이 의미를
+    #: 잃는 구간(-100→+100을 200% 성장이라 부르는 오류)을 비율 대신 두 시점의
+    #: 값 자체로 서술하려고 둔다. 계산은 delta와 같은 ``end - start``지만,
+    #: 공개 문장이 비율이 아니라 두 값을 그대로 읽는다는 점이 다르다.
+    SIGNED_CHANGE = "signed_change"
 
 
 class NumericSign(str, Enum):
