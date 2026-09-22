@@ -29,7 +29,7 @@ from src.features.audit_financials.constants import (
     UNIT_DIVISORS,
 )
 from src.shared.display_scale import display_places, format_display_value
-from src.features.report_standard.period_summary import performance_caption_with_audit_status
+from src.shared.report_generation.audit_status import performance_caption_with_audit_status
 
 
 _TAG_RE = re.compile(r"<[^>]+>", re.DOTALL)

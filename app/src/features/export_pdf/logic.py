@@ -2852,6 +2852,28 @@ class _AppendixStart(KeepTogether):
         return result
 
 
+def _appendix_tail_fits_one_page(
+    rows: Sequence[Sequence[Flowable]],
+    column_widths: Sequence[float],
+    table_style: TableStyle,
+    width: float,
+) -> bool:
+    """머리행과 마지막 두 본문 행이 A4 한 쪽 본문 영역에 들어가는지 잰다.
+
+    reportlab의 NOSPLIT은 묶인 행 안에서 쪼개기를 금지할 뿐, 묶음이 한 쪽보다
+    크면 쪼갤 자리가 없어 ``LayoutError``를 던진다(잡는 곳 없음). 그래서 묶기
+    «전에» 같은 열 너비·같은 서식으로 그 세 행만 재어 본다. 내부 속성
+    (``_rowHeights``)은 읽지 않고 공개 ``wrap``만 쓴다.
+    """
+
+    tail = Table(
+        [rows[0], *rows[-2:]], colWidths=list(column_widths), repeatRows=1, hAlign="LEFT"
+    )
+    tail.setStyle(table_style)
+    _, tail_height = tail.wrap(width, constants.APPENDIX_MEASURE_HEIGHT_PT)
+    return tail_height <= constants.APPENDIX_TAIL_MAX_HEIGHT_PT
+
+
 def _add_citations(
     story: list[Flowable],
     report: Report,
@@ -2958,8 +2980,11 @@ def _add_citations(
     )
     table = Table(rows, colWidths=column_widths, repeatRows=1, hAlign="LEFT")
     table.setStyle(table_style)
-    if len(entries) > 1:
+    if len(entries) > 1 and _appendix_tail_fits_one_page(
+        rows, column_widths, table_style, width
+    ):
         # 마지막 한 행 때문에 빈 쪽이 생기지 않게 두 본문 행을 함께 넘긴다.
+        # 두 행이 한 쪽에 못 들어가면 묶지 않는다 — 묶으면 LayoutError로 생성이 죽는다.
         table.setStyle(TableStyle([("NOSPLIT", (0, len(rows) - 2), (-1, len(rows) - 1))]))
     leading_table = Table(
         rows[: constants.APPENDIX_MIN_START_ROWS + 1],

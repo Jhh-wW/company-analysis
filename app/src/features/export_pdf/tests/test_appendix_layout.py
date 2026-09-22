@@ -222,3 +222,53 @@ def test_원문_위치는_URL만_링크로_만들고_표시_글자는_유지한�
     if location.startswith(("http://", "https://")):
         expected_urls.add(location)
     assert urls == expected_urls
+
+
+def _tail_overflow_report(chars: int):
+    """마지막 두 행의 「원문 위치」 칸을 한 쪽에 못 들어갈 만큼 길게 만든다."""
+
+    report = _many_sources_report()
+    long_location = "긴 원문 위치 " * (chars // 7)
+    citations = list(report.citations)
+    for index in (-2, -1):
+        citations[index] = replace(citations[index], location=long_location)
+    return replace(report, citations=citations)
+
+
+@pytest.mark.parametrize("chars", [500, 800])
+def test_마지막_두_행이_한_쪽에_못_들어가도_PDF가_나온다(chars):
+    """2026-09-23 독립 검토 N1 — 꼬리 두 행 NOSPLIT이 LayoutError를 만들던 경로."""
+
+    import re
+
+    data = _appendix_pdf(_tail_overflow_report(chars))
+    pages = PdfReader(io.BytesIO(data)).pages
+    assert sum(len(re.findall(r"출처행\d+", page.extract_text())) for page in pages) == 40
+
+
+def test_꼬리_두_행_높이_판정은_짧으면_참_길면_거짓이다():
+    from reportlab.platypus import Paragraph, TableStyle
+
+    logic._register_fonts()
+    styles = logic._styles()
+    width = A4[0] - constants.PAGE_MARGIN_PT * 2
+    widths = [width * share for share in (0.06, 0.27, 0.20, 0.15, 0.18, 0.14)]
+
+    def rows(location: str):
+        header = [Paragraph(text, styles["table_head_on_ink"]) for text in ("#", "자료", "상태", "검증", "원문 위치", "장")]
+        body = [Paragraph(cell, styles["table"]) for cell in ("1", "자료", "상태", "검증", location, "1장")]
+        return [header, body, body]
+
+    assert logic._appendix_tail_fits_one_page(rows("사업내용"), widths, TableStyle([]), width)
+    assert not logic._appendix_tail_fits_one_page(rows("긴 원문 위치 " * 120), widths, TableStyle([]), width)
+
+
+def test_가드를_강제로_켜면_같은_입력이_LayoutError로_죽는다(monkeypatch):
+    """음성 대조 — 위 시험이 지키는 것은 정확히 이 가드다."""
+
+    from reportlab.platypus.doctemplate import LayoutError
+
+    monkeypatch.setattr(logic, "_appendix_tail_fits_one_page", lambda *args: True)
+    with pytest.raises(LayoutError):
+        _appendix_pdf(_tail_overflow_report(800))
+

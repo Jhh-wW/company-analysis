@@ -35,21 +35,13 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Final, Optional
 
 
-def performance_caption_with_audit_status(caption: str, years: tuple[str, ...]) -> str:
-    """원문에서 미감사로 확인한 비교연도만 표 캡션에 덧붙인다."""
-    if not years:
-        return caption
-    suffix = f"{'·'.join(years)}년은 감사받지 않은 비교 재무제표"
-    return caption if suffix in caption else f"{caption} · {suffix}"
-
-
-def analysis_period_with_audit_status(period: str, table: object) -> str:
-    """표지의 완료 회계연도 뒤에 미감사 비교연도를 표시한다."""
-    years = tuple(getattr(table, "unaudited_years", ()) or ())
-    if not years:
-        return period
-    suffix = f"({'·'.join(years)}년 미감사)"
-    return period if suffix in period else f"{period} {suffix}"
+# 미감사 비교연도 문구는 shared 정본을 같은 이름으로 재노출한다 — 표를 만드는
+# audit_financials와 표지 기간을 만드는 pipeline이 이 feature를 거꾸로 import하지
+# 않게 하기 위함이다(feature-atomic §2-2).
+from src.shared.report_generation.audit_status import (  # noqa: E402
+    analysis_period_with_audit_status,
+    performance_caption_with_audit_status,
+)
 
 
 #: 실적표를 알아보는 첫 열 이름. ``build_three_year_table``의 ``headers[0]``이다.

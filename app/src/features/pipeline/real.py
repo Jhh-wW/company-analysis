@@ -373,7 +373,7 @@ from src.features.pipeline.port import (
     UserInput,
     outcome_for,
 )
-from src.features.report_standard.period_summary import (
+from src.shared.report_generation.audit_status import (
     analysis_period_with_audit_status,
 )
 from src.features.report_standard.constants import (

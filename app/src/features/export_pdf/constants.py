@@ -95,6 +95,14 @@ TABLE_LEADING_PT: Final[float] = 10.0
 APPENDIX_MIN_START_HEIGHT_PT: Final[float] = 182.0
 APPENDIX_MIN_START_ROWS: Final[int] = 3
 APPENDIX_CELL_PADDING_PT: Final[float] = 6.0
+#: A4 세로 길이(297mm). 부록 꼬리 두 행이 한 쪽에 들어가는지 잴 때 쓴다.
+A4_HEIGHT_PT: Final[float] = 297 * 72 / 25.4
+#: 부록 표의 «머리행 + 마지막 두 본문 행»이 이 높이 안에 들어갈 때만 두 행을
+#: 함께 넘긴다(NOSPLIT). 안 들어가는데 묶으면 reportlab이 쪼갤 자리를 못 찾아
+#: LayoutError로 PDF 생성이 통째로 죽는다(2026-09-23 독립 검토 N1 실측).
+APPENDIX_TAIL_MAX_HEIGHT_PT: Final[float] = A4_HEIGHT_PT - PAGE_TOP_MARGIN_PT - PAGE_BOTTOM_MARGIN_PT
+#: 꼬리 높이를 잴 때 넘겨 주는 «충분히 큰» 가용 높이. 실제 쪽 높이가 아니다.
+APPENDIX_MEASURE_HEIGHT_PT: Final[float] = 100000.0
 META_FONT_SIZE_PT: Final[float] = 6.8
 # 표지 다음 첫 본문 페이지 맨 위 마스트헤드 — 표지 제목(34pt)보다
 # 한 단계 작고 장 제목(20pt)보다 커서, 표지와 겹치지 않으면서도 눈에 띄는

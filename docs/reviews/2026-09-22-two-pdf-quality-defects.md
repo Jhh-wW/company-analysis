@@ -66,4 +66,5 @@
 | 통합 조정 2 | 웹 시험 도우미 전역 누락, 출처 날짜 시험, 결과 화면 스냅샷(-7/+5줄), real.py 표지 미감사 호출 2줄 | 총괄 | 시험·스냅샷·real.py | 커밋 63782b12·0d2c74a3·13320828·b0243b72 |
 | 2차 독립 검토(Opus) | 배포 가능 판정. 1차 D1~D9 중 6건 해소 확인, 골든·스냅샷 변화가 문서화된 것뿐임을 직접 대조. 새 지적 N1(부록 NOSPLIT이 극단 입력에서 LayoutError, 중)·N2~N9(하) | review-integration-2 | 읽기 전용 | 보고서 scratchpad review-integration-2.md |
 | N2·N3·N6·N8·N9 | IR 갈래 옛 #N 앵커, 「나뉜다」 표지·연도 오탐, provenance→export_pdf 역방향 import, 공식 웹 상태 열 host 누락, import 중복 | fix-review2-minor (Claude) | provenance/sources.py, diagram_review_constants.py, 새 shared/report_generation/citation_constants.py, public_projection.py | 병합 f97f5d58. feature 경계 허용 목록 시험 추가 |
-| N1 부록 NOSPLIT 안전 가드 | 마지막 두 행이 한 쪽에 못 들어가면 LayoutError | fix-nosplit-guard (Codex) | export_pdf/logic.py·constants.py | 4차 진행 |
+| N1 부록 NOSPLIT 안전 가드 | 마지막 두 행이 한 쪽에 못 들어가면 LayoutError | 총괄(코덱스 작업자 무응답으로 직접) | export_pdf/logic.py·constants.py·test_appendix_layout.py | 머리행+마지막 두 행을 미리 재어 A4 본문 높이를 넘으면 묶지 않음. 500·800자 시험 + 가드 강제 시 LayoutError 음성 대조 |
+| 미감사 도우미 feature 경계 | audit_financials→report_standard 직접 import(총괄 코덱스 지적) | 총괄 | 새 shared/report_generation/audit_status.py, period_summary 재노출, audit_financials·real.py import | 경계 시험 추가. 총괄 코덱스 0값 파서 수정 f7dc7714도 9d315a54로 병합 |
