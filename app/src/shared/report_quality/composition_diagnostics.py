@@ -31,6 +31,11 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     SECTION_EXECUTION_STEP,
     SECTION_EXECUTION_COUNT_FIELDS,
     EMPTY_RECOVERY_RESPONSE_SHAPES, EMPTY_RECOVERY_STAGE_COUNT_KEYS,
+    STYLE_COUNTS_FIELD,
+    STYLE_REASONS,
+    STYLE_RENDER_FIELD,
+    STYLE_RENDERS,
+    STYLE_STEP,
 )
 
 
@@ -163,6 +168,30 @@ def _derived_ratio(record: Mapping) -> dict[str, object] | None:
     return result
 
 
+def _style(record: Mapping) -> dict[str, object] | None:
+    """문체·시점 표기 기록 — 닫힌 렌더 구분·닫힌 사유 코드·«개수»만 통과시킨다.
+
+    렌더 구분이 닫힌 값(1차/보충/확보근거) 밖이거나, 사유 목록 밖 키·정수가
+    아닌 값(bool 포함)·0 이하·빈 사유별이면 기록을 통째로 버린다(장 이동·
+    처분 기록과 같은 fail-closed). 원문·응답 같은 여분 칸은 애초에 결과에
+    옮겨 적지 않는다.
+    """
+
+    render = record.get(STYLE_RENDER_FIELD)
+    counts = record.get(STYLE_COUNTS_FIELD)
+    if not isinstance(render, str) or render not in STYLE_RENDERS:
+        return None
+    if not isinstance(counts, Mapping) or not counts:
+        return None
+    if any(not isinstance(key, str) or key not in STYLE_REASONS
+           or not _count(value, minimum=1) for key, value in counts.items()):
+        return None
+    return {
+        "step": STYLE_STEP, STYLE_RENDER_FIELD: render,
+        STYLE_COUNTS_FIELD: dict(counts),
+    }
+
+
 def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], ...]:
     """원문·응답·임의 오류문을 버리고 시도 순서와 단계 미도달을 보존한다.
 
@@ -186,7 +215,8 @@ def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], 
             _body_disposition(record) if step == BODY_DISPOSITION_STEP else
             _body_section_move(record) if step == BODY_SECTION_MOVE_STEP else
             _empty_recovery(record) if step == EMPTY_RECOVERY_STEP else
-            _grounding_rewrite(record) if step == GROUNDING_REWRITE_STEP else None
+            _grounding_rewrite(record) if step == GROUNDING_REWRITE_STEP else
+            _style(record) if step == STYLE_STEP else None
         )
         if normalized is not None:
             result.append(normalized)

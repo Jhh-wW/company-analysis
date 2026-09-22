@@ -52,6 +52,12 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     DIAGRAM_STAGE_SECTION_EVIDENCE,
     EMPTY_RECOVERY_NO_BUDGET,
     EMPTY_RECOVERY_NO_EVIDENCE,
+    STYLE_COUNTS_FIELD,
+    STYLE_RENDER_EVIDENCE_AVAILABLE,
+    STYLE_RENDER_FIELD,
+    STYLE_RENDER_PRIMARY,
+    STYLE_RENDER_SUPPLEMENT,
+    STYLE_STEP,
     SUMMARY_STEP,
 )
 from src.features.composer.logic import (
@@ -1157,17 +1163,31 @@ def _table_cite_is_bound(
     return int(raw_number) in numbers
 
 
-def _record_style_diagnostics(diagnostics: Mapping[str, int]) -> None:
+def _record_style_diagnostics(
+    diagnostics: Mapping[str, int], composition_diagnostics: list[dict],
+    *, render: str,
+) -> None:
     """최종 렌더가 «지난 일정 미래형»으로 센 문장 수를 운영 기록에 남긴다.
 
     ★ 왜 필요한가 (2026-09-22 독립 검토 실측) — `render_report`에
       `style_diagnostics` 인자를 만들어 뒀는데 «어느 호출부도 넘기지 않았다».
       시험은 인자를 직접 넘겨서 초록이었고, 그래서 배선 공백이 안 보였다.
       개수를 여기서 받아 기록해야 운영이 실제로 이 값을 받았는지가 남는다.
+    ★ 왜 실행 기록 싱크에도 넣나 (2026-09-23 실측) — 처음 배선(9eda8bab)은
+      운영 로그에만 남겼다. 로그는 실행별로 되짚기 어렵고, 실행 진단(steps)
+      에는 이 값이 한 번도 실리지 않았다. 싱크에 넣으면 실행 기능이 finally
+      에서 공유 계약(`observed_composition_steps`)으로 걸러 steps 에 옮기므로
+      차단·예외로 끝난 실행에서도 남는다.
     ★ 왜 닫힌 진단 목록(`REVIEW_SCOPE_ITEMS`)에 넣지 않나 — 그 목록은 화면
       안내문이 「…개를 뺐습니다」로 세는 «제외» 장부다. 시제 표기는 문장을
       빼지 않고 표시만 고쳐 그대로 싣기 때문에, 거기에 넣으면 빠지지 않은
       문장을 뺐다고 말하게 된다(도식 «파생 비율» 기록과 같은 이유).
+    ★ 0건이면 로그도 싱크 기록도 만들지 않는다 — 매 실행 빈 이벤트가 쌓이면
+      운영 기록이 의미 없는 줄로 찬다.
+    ★ `render` 는 닫힌 렌더 구분(1차/보충/확보근거)이다 — 본 경로 1차 렌더를
+      기록한 뒤 보충이 돌면 병합본 렌더가 «다시» 기록되고 출고되는 것은 보충
+      쪽이다. 구분 없이 두 기록을 더하면 보충 대상이 아닌 장의 같은 문장을
+      두 번 센다(2026-09-23 독립 검토).
     ⚠️ 회사 원문 글자는 담지 않는다 — 사유 이름과 개수만 남긴다.
     """
 
@@ -1178,6 +1198,10 @@ def _record_style_diagnostics(diagnostics: Mapping[str, int]) -> None:
         dict(sorted(diagnostics.items())),
         extra={"pipeline_style_diagnostics": dict(diagnostics)},
     )
+    composition_diagnostics.append({
+        "step": STYLE_STEP, STYLE_RENDER_FIELD: render,
+        STYLE_COUNTS_FIELD: dict(diagnostics),
+    })
 
 
 def _notice_only_sections(final: ComposedReport) -> dict[str, str]:
@@ -1341,7 +1365,10 @@ def _finish_evidence_available(
         name_table=name_table,
         style_diagnostics=style_diagnostics,
     )
-    _record_style_diagnostics(style_diagnostics)
+    _record_style_diagnostics(
+        style_diagnostics, composition_diagnostics,
+        render=STYLE_RENDER_EVIDENCE_AVAILABLE,
+    )
     quality_candidate = build_generation_quality_candidate(rendered, final)
     generation_assessment, quality_observation = assess_and_observe_generation(
         quality_candidate, contract_version="",
@@ -2488,9 +2515,11 @@ def run_v2(
         if public_structure_seal is None
         else {"public_structure_seal": public_structure_seal}
     )
-    # ★ 문체 진단은 «출고되는» 렌더에서만 받는다. 위 `body_rendered`는 요약
-    #   후보를 고르려고 버리는 중간 산출이라, 거기서도 받으면 같은 문장을 두
-    #   번 세어 개수가 부풀려진다.
+    # ★ 문체 진단은 후보 본문의 «최종» 렌더에서만 받는다. 위 `body_rendered`는
+    #   요약 후보를 고르려고 버리는 중간 산출이라, 거기서도 받으면 같은 문장을
+    #   두 번 세어 개수가 부풀려진다. 이 1차 렌더는 보충(RUN_SUPPLEMENTS)이
+    #   돌면 출고되지 않고 보충 병합본이 대신 나간다 — 그래서 기록에 닫힌
+    #   «렌더» 칸(1차/보충)을 실어 소비자가 구별하게 한다.
     style_diagnostics: dict[str, int] = {}
     rendered = render_report(
         company_name,
@@ -2523,7 +2552,9 @@ def run_v2(
         style_diagnostics=style_diagnostics,
         **seal_render_kwargs,
     )
-    _record_style_diagnostics(style_diagnostics)
+    _record_style_diagnostics(
+        style_diagnostics, composition_diagnostics, render=STYLE_RENDER_PRIMARY,
+    )
     primary_block_sha256s: tuple[tuple[str, str], ...] = ()
     if public_structure_seal is not None:
         assert_report_matches_public_structure(rendered, public_structure_seal)
@@ -2802,7 +2833,8 @@ def run_v2(
                 program_registry_sources=prepared_evidence.program_sources,
                 name_table=name_table,
             )
-            # 본 경로와 같은 이유로 «출고되는» 렌더에서만 받는다.
+            # 본 경로와 같은 이유로 중간 렌더가 아닌 병합본의 «최종» 렌더에서만
+            # 받는다. 이 기록은 «보충» 렌더로 구별돼 위 1차 기록과 더해지지 않는다.
             supplement_style_diagnostics: dict[str, int] = {}
             rendered = render_report(
                 company_name,
@@ -2827,7 +2859,10 @@ def run_v2(
                 name_table=name_table,
                 style_diagnostics=supplement_style_diagnostics,
             )
-            _record_style_diagnostics(supplement_style_diagnostics)
+            _record_style_diagnostics(
+                supplement_style_diagnostics, composition_diagnostics,
+                render=STYLE_RENDER_SUPPLEMENT,
+            )
             assert_report_matches_public_structure(
                 rendered,
                 public_structure_seal,
