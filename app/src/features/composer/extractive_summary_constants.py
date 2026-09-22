@@ -6,6 +6,7 @@ from typing import Final
 SUMMARY_NUMERIC_SCORE: Final[int] = 3
 SUMMARY_NAMED_ENTITY_SCORE: Final[int] = 2
 SUMMARY_LOW_VALUE_SCORE: Final[int] = -3
+# 정렬 1순위는 등급이므로, 이 감점보다 큰 가점도 확인 우선을 뒤집지 못한다.
 SUMMARY_INTERPRETED_SCORE: Final[int] = -2
 SUMMARY_FORMAL_ENDING_SCORE: Final[int] = -2
 

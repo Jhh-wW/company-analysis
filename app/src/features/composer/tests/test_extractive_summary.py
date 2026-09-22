@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
+from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
 from src.features.composer.extractive_summary import select_extractive_summary
 from src.features.composer.port import (
     ComposedReport,
@@ -146,6 +149,38 @@ def test_세_장보다_적으면_한_장_문장으로_길이만_채우지_않는
 
     assert not selected.release_ready
     assert selected.sentences == (first, third)
+
+
+@pytest.mark.parametrize("grade", (GRADE_CONFIRMED, GRADE_INTERPRETED))
+@pytest.mark.parametrize("reverse", (False, True))
+def test_같은_등급의_동점은_본문_순서를_지키며_다음_바퀴에서_보충한다(
+    grade: str, reverse: bool,
+) -> None:
+    report, facts = _report(("business_model", "portfolio", "current_challenges"))
+    entries = tuple(
+        replace(_sentence("business_model", suffix), grade=grade)
+        for suffix in ("첫째", "둘째")
+    )
+    if reverse:
+        entries = tuple(reversed(entries))
+    report = replace(
+        report,
+        sections=(ComposedSection("business_model", entries), *report.sections[1:]),
+    )
+    facts = [_fact("business_model", sentence) for sentence in entries] + facts[1:]
+
+    selected = select_extractive_summary(report, facts)
+
+    assert selected.release_ready
+    assert selected.sentences == (
+        entries[0],
+        report.sections[1].sentences[0],
+        report.sections[2].sentences[0],
+        entries[1],
+    )
+    assert selected.section_ids == (
+        "business_model", "portfolio", "current_challenges", "business_model",
+    )
 
 
 def test_구조화_수치사실도_ID와_문장내용이_둘다_맞아야_재사용한다() -> None:

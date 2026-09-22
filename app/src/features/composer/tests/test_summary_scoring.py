@@ -58,14 +58,51 @@ def test_실제_메디라인과_뤼튼_문장을_점수순으로_고르고_장�
 
 
 @pytest.mark.parametrize("reverse", (False, True))
-def test_등급이_달라도_점수가_같으면_원래_문장_순서를_지킨다(reverse):
+def test_등급이_다르면_동점이어도_확인_문장을_먼저_고른다(reverse):
     entries = (("AI 중심 사업으로 읽힌다.", GRADE_INTERPRETED), (MEDILINE_BUSINESS, GRADE_CONFIRMED))
     if reverse:
         entries = tuple(reversed(entries))
-    _, summary = _select((("business_model", entries),))
-    assert summary.sentences[0].text == entries[0][0]
+    report, summary = _select((("business_model", entries),))
+    assert tuple(_summary_score(sentence) for sentence in report.sections[0].sentences) == (0, 0)
+    assert summary.sentences[0].text == MEDILINE_BUSINESS
     assert len(summary.items) == 1
     assert not summary.release_ready
+
+
+@pytest.mark.parametrize("reverse", (False, True))
+@pytest.mark.parametrize("interpreted_text, confirmed_text", (
+    (
+        "지급수수료와 광고선전비의 급증은 2024년 대비 4배로 콘텐츠 플랫폼 확대 전략을 시사한다.",
+        WRTN_PLATFORM,
+    ),
+    (
+        "지급수수료와 광고선전비의 급증은 2024년 대비 4배로 콘텐츠 플랫폼 확대 전략을 시사한다.",
+        MEDILINE_BUSINESS,
+    ),
+    (
+        "지급수수료와 광고선전비의 급증은 2024년 대비 4배로 콘텐츠 플랫폼 확대 전략을 시사한다.",
+        MEDILINE_ACCOUNTING,
+    ),
+    (
+        "AI 콘텐츠 플랫폼의 2024년 대비 4배 성장은 확대 전략을 시사한다.",
+        WRTN_PLATFORM,
+    ),
+))
+def test_숫자가_있는_해석도_숫자_없는_확인보다_먼저_뽑히지_않는다(
+    interpreted_text, confirmed_text, reverse,
+):
+    entries = ((interpreted_text, GRADE_INTERPRETED), (confirmed_text, GRADE_CONFIRMED))
+    if reverse:
+        entries = tuple(reversed(entries))
+
+    report, summary = _select((("portfolio", entries),))
+
+    confirmed = next(
+        sentence for sentence in report.sections[0].sentences
+        if sentence.grade == GRADE_CONFIRMED
+    )
+    assert summary.sentences == (confirmed,)
+    assert summary.sentences[0] is confirmed
 
 
 @pytest.mark.parametrize("text, expected", (
