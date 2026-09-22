@@ -2260,8 +2260,13 @@ def _ask_verdicts(
             requested_count=len(requested_numbers),
         )
 
-    raw = _safe_ask(reviewer, prompt)
-    observe = _observe_attempt(1, prompt, raw)
+    # 최초 본문 검수의 JSON 형식 재시도를 줄이되 원문과 캐시 경계는 보존한다.
+    # 후속 재검수는 기존처럼 일반 문자열로 시작한다.
+    initial_prompt = (
+        ReviewPrompt(prompt, FLAT_REVIEW_SCHEMA) if initial_ask is not None else prompt
+    )
+    raw = _safe_ask(reviewer, initial_prompt)
+    observe = _observe_attempt(1, initial_prompt, raw)
     verdicts = _parse_verdicts(
         raw, observe=observe, requested_numbers=requested_numbers,
     )

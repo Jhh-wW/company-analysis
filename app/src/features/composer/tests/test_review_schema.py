@@ -209,7 +209,10 @@ def test_flat_native_retry_preserves_initial_retry_callable(separate_retry):
         initial_retry_ask=retry if separate_retry else None,
     ) == {1: "참"}
     assert [name for name, _prompt in calls] == ["initial", "retry" if separate_retry else "initial"]
-    assert type(calls[0][1]) is str
+    # 2026-09-22: 최초 본문 검수(initial_ask)는 «첫 요청부터» 스키마를 싣는다 —
+    #   test_initial_review_schema.py 가 이 계약을 고정한다. 재요청 문구는 그대로다.
+    assert isinstance(calls[0][1], ReviewPrompt)
+    assert calls[0][1].response_schema is FLAT_REVIEW_SCHEMA
     assert calls[1][1] == calls[0][1] + RETRY_REMINDER
     assert calls[1][1].response_schema is FLAT_REVIEW_SCHEMA
 
