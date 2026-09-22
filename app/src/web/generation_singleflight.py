@@ -14,6 +14,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import InitVar, dataclass, field
 from typing import Any, Final
 
@@ -52,6 +53,9 @@ HEARTBEAT_INTERVAL_SEC: Final[float] = 30.0
 RESULT_FANOUT_TTL: Final[dt.timedelta] = dt.timedelta(minutes=2)
 FAILURE_FANOUT_TTL: Final[dt.timedelta] = dt.timedelta(minutes=2)
 WAITER_POLL_SEC: Final[float] = 0.2
+PREPARATION_NAMESPACE_PREFIX: Final[str] = "evidence-reclassification:"
+PREPARATION_FINISHED_CODE: Final[str] = "preparation_finished"
+PREPARATION_FAILED_CODE: Final[str] = "preparation_failed"
 
 # ``MAX_RESPONSE_SEC=300``은 진행 화면의 안내 기준이지 작업 강제 종료 시간이
 # 아니다. 실제 유료 경계의 근거 있는 상한은 다음 두 기존 계약이다.
@@ -350,6 +354,8 @@ class GenerationSession:
     _cache_namespace: GenerationCacheNamespace | None = field(default=None, init=False)
     _preflight_identity_digest: str = field(default="", init=False)
     _handle: singleflight.LeaseHandle | None = field(default=None, init=False)
+    _preparation_handle: singleflight.LeaseHandle | None = field(default=None, init=False)
+    _final_release_mode: ReleaseMode | None = field(default=None, init=False)
     _paid_phase: paid_runtime.PaidPhase | None = field(default=None, init=False)
     _provider_stack: contextlib.ExitStack | None = field(default=None, init=False)
     _cancel_wait: threading.Event = field(default_factory=threading.Event, init=False)
@@ -388,6 +394,8 @@ class GenerationSession:
             ensure_paid_phase=self.ensure_paid_phase,
             engine_build_identity=self._frozen_build_identity,
             check_active=self.check_active,
+            paid_preparation=self.paid_preparation,
+            bind_release_mode=self.bind_release_mode,
         )
 
     @property
@@ -437,12 +445,114 @@ class GenerationSession:
             self._key = key
             self._handle = handle
             self._state = "owner"
+        self._start_heartbeat()
+
+    def _start_heartbeat(self) -> None:
+        if self._heartbeat_thread is not None and self._heartbeat_thread.is_alive():
+            return
         self._heartbeat_thread = threading.Thread(
             target=self._heartbeat_loop,
             name=f"generation-lease:{self.run_id}",
             daemon=True,
         )
         self._heartbeat_thread.start()
+
+    @contextlib.contextmanager
+    def paid_preparation(
+        self,
+        corp_id: str,
+        cache_namespace: GenerationCacheNamespace | None,
+        input_digest: str,
+    ) -> Iterator[bool]:
+        """재판정만 별도 lease로 직렬화하고 최종 보고서 신원은 아직 정하지 않는다.
+
+        준비 종료는 보고서 COMPLETED가 아니다. 짧은 재시도 억제 표식을 남겨
+        waiter가 캐시를 다시 읽게 하며, 저장 실패 때도 같은 유료 호출을 반복하지
+        않는다. 비용 phase는 이 세션에 남아 이후 작성과 함께 한 번 정산된다.
+        """
+
+        self.check_active()
+        with self._lock:
+            if self._state != "new" or self._preparation_handle is not None:
+                raise GenerationSingleflightUnavailable("준비 소유권을 중복 요청할 수 없습니다")
+        frozen = self._frozen_build_identity
+        if (
+            not corp_id or not input_digest
+            or not isinstance(cache_namespace, GenerationCacheNamespace)
+            or cache_namespace.deployment_revision != frozen.deployment_revision
+            or cache_namespace.image_digest != f"generator-build:{frozen.build_id}"
+        ):
+            raise GenerationSingleflightUnavailable("재판정 준비의 생성기·입력 신원이 없습니다")
+        key = singleflight.LeaseKey(
+            billing_bucket_id=self.billing_bucket_id, corp_id=corp_id,
+            cache_namespace_id=PREPARATION_NAMESPACE_PREFIX + cache_namespace.namespace_id,
+            source_identity_digest=input_digest,
+            engine_epoch_digest=frozen.epoch_digest,
+        )
+        deadline = self._execution_started_monotonic + WAITER_MAX_AGE_SEC
+        while True:
+            self.check_active()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise generation_coordination.GenerationWaitTimedOut("재판정 준비 대기시간을 넘었습니다")
+            try:
+                with storage_db.connect() as conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    now = clock.now_kst()
+                    acquired = singleflight.acquire(
+                        conn, key=key, owner_id=self.run_id, now=now,
+                        lease_ttl=self._bounded_owner_ttl(now),
+                    )
+            except generation_coordination.GenerationCoordinationError:
+                raise
+            except Exception as error:
+                raise GenerationSingleflightUnavailable("재판정 준비 lease를 확인하지 못했습니다") from error
+            if acquired.disposition is singleflight.AcquireDisposition.FAILED:
+                # 성공·실패 어느 쪽도 보고서 완료본으로 가장하지 않는다.
+                yield False
+                return
+            if acquired.disposition in (
+                singleflight.AcquireDisposition.ACQUIRED,
+                singleflight.AcquireDisposition.TAKEOVER,
+            ):
+                if acquired.handle is None:
+                    raise GenerationSingleflightUnavailable("재판정 준비 lease 표식이 없습니다")
+                break
+            if acquired.disposition is not singleflight.AcquireDisposition.WAIT:
+                raise GenerationSingleflightUnavailable("재판정 준비 lease 상태가 올바르지 않습니다")
+            self._cancel_wait.wait(min(WAITER_POLL_SEC, remaining))
+        with self._lock:
+            self._preparation_handle = acquired.handle
+        self._start_heartbeat()
+        finish_code = PREPARATION_FAILED_CODE
+        primary_error: BaseException | None = None
+        try:
+            yield True
+            finish_code = PREPARATION_FINISHED_CODE
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            # heartbeat와 종료 UPDATE가 교차해 사라진 준비 owner를 되살리지 않는다.
+            with self._lock:
+                handle = self._preparation_handle
+                try:
+                    with storage_db.connect() as conn:
+                        finished = singleflight.fail(
+                            conn, handle=handle, failure_code=finish_code,
+                            now=clock.now_kst(), failure_fanout_ttl=FAILURE_FANOUT_TTL,
+                        )
+                    if not finished:
+                        raise GenerationSingleflightUnavailable("재판정 종료 직전 준비 lease를 잃었습니다")
+                except Exception as error:
+                    self._lease_error = error
+                    if primary_error is None:
+                        raise GenerationSingleflightUnavailable("재판정 준비 종료를 확인하지 못했습니다") from error
+                    # 취소·마감 등 최초 중단 사유를 종료 장애로 덮지 않는다.
+                    # 미확정 lease는 만료 장벽으로 남고 다음 호출도 거절된다.
+                    logger.warning("재판정 준비 종료 실패 kind=%s", type(error).__name__)
+                finally:
+                    self._preparation_handle = None
 
     def _owner_deadlines(
         self,
@@ -529,24 +639,23 @@ class GenerationSession:
         while not self._stop_heartbeat.wait(HEARTBEAT_INTERVAL_SEC):
             try:
                 with self._lock:
-                    handle = self._handle
-                    if self._state != "owner" or handle is None:
+                    handle = self._preparation_handle or self._handle
+                    if handle is None and self._state == "new":
+                        continue
+                    if handle is None:
                         return
-                heartbeat_at = clock.now_kst()
-                lease_ttl = self._bounded_heartbeat_ttl(handle, heartbeat_at)
-                with storage_db.connect() as conn:
-                    refreshed = singleflight.heartbeat(
-                        conn,
-                        handle=handle,
-                        now=heartbeat_at,
-                        lease_ttl=lease_ttl,
-                    )
-                if refreshed is None:
-                    raise GenerationSingleflightUnavailable(
-                        "보고서 생성 lease 소유권을 잃었습니다"
-                    )
-                with self._lock:
-                    self._handle = refreshed
+                    heartbeat_at = clock.now_kst()
+                    lease_ttl = self._bounded_heartbeat_ttl(handle, heartbeat_at)
+                    with storage_db.connect() as conn:
+                        refreshed = singleflight.heartbeat(
+                            conn, handle=handle, now=heartbeat_at, lease_ttl=lease_ttl,
+                        )
+                    if refreshed is None:
+                        raise GenerationSingleflightUnavailable("보고서 생성 lease 소유권을 잃었습니다")
+                    if self._preparation_handle is not None:
+                        self._preparation_handle = refreshed
+                    else:
+                        self._handle = refreshed
             except BaseException as exc:  # noqa: BLE001 - 다음 provider를 닫는다
                 with self._lock:
                     self._lease_error = exc
@@ -677,18 +786,15 @@ class GenerationSession:
         )
 
     def _requested_release_mode(self) -> ReleaseMode | None:
-        """지금 요청이 «어떤 릴리스 모드로» 만들려는지. 모르면 ``None``.
+        """최종 사전검사 모드를 쓰고, 전달하지 않는 옛 호출만 환경값을 읽는다.
 
-        ★ 왜 세션이 직접 읽나
-          이 값의 정본은 pipeline(`features/pipeline/real.py`)이 읽는 것과
-          같은 환경값 한 곳이다. 인자로 받으려면 `generation_coordination`의
-          callback 서명(shared)이나 세션 생성부(`web/job_runtime.py`)를 고쳐야
-          하는데 둘 다 이 변경의 소유가 아니다. 같은 환경값을 같은 파서로 읽으므로
-          두 곳이 갈릴 여지는 없다.
-        ★ 모르면 «예전 동작». 값이 없거나 계약 밖 문자열이면 `None`이고,
-          그때 아래 판정은 재사용을 그대로 허용한다. FULL 요청은 환경값이
-          반드시 있다(없거나 오타면 pipeline이 AI 호출 전에 막는다).
+        환경 FULL 요청도 부족한 근거 때문에 SHADOW namespace로 내려갈 수 있다.
+        재사용 검사가 처음의 환경값을 다시 읽으면 같은 부분보고서를 매번 버리고
+        유료 작성하므로 pipeline이 namespace와 함께 고정한 값을 우선한다.
         """
+        with self._lock:
+            if self._final_release_mode is not None:
+                return self._final_release_mode
         raw = os.environ.get(REPORT_RELEASE_MODE_ENV_NAME)
         if not raw:
             return None
@@ -696,6 +802,15 @@ class GenerationSession:
             return parse_release_mode(raw)
         except ValueError:
             return None
+
+    def bind_release_mode(self, release_mode: str) -> None:
+        """재판정·사전검사 뒤 pipeline이 namespace에 넣은 공개 모드를 고정한다."""
+
+        mode = parse_release_mode(release_mode)
+        with self._lock:
+            if self._state != "new" or self._preparation_handle is not None:
+                raise GenerationSingleflightUnavailable("생성 조정 뒤 공개 모드를 바꿀 수 없습니다")
+            self._final_release_mode = mode
 
     def _read_cached_release(
         self,
@@ -919,7 +1034,7 @@ class GenerationSession:
         )
 
         with self._lock:
-            if self._state != "new":
+            if self._state != "new" or self._preparation_handle is not None:
                 raise GenerationSingleflightUnavailable(
                     "한 조사에서 생성 조정을 두 번 시작할 수 없습니다"
                 )
@@ -1117,7 +1232,7 @@ class GenerationSession:
                 raise GenerationSingleflightUnavailable(
                     "lease heartbeat를 확인하지 못해 provider를 호출하지 않습니다"
                 ) from self._lease_error
-            handle = self._handle
+            handle = self._preparation_handle or self._handle
         if handle is None:
             return
         heartbeat_at = clock.now_kst()
@@ -1140,7 +1255,10 @@ class GenerationSession:
                 "provider 호출 전 보고서 생성 lease를 잃었습니다"
             )
         with self._lock:
-            self._handle = refreshed
+            if self._preparation_handle is not None:
+                self._preparation_handle = refreshed
+            else:
+                self._handle = refreshed
 
     def check_active(self) -> None:
         """본문 작업에서도 비용 예약 없이 취소·마감·관측된 임대 실패를 확인한다."""
@@ -1173,15 +1291,16 @@ class GenerationSession:
             )
         with self._lock:
             state = self._state
+            preparation_owner = self._preparation_handle is not None
             provider_context_is_open = self._provider_stack is not None
-        if state not in {"owner", "bypass"}:
+        if state not in {"owner", "bypass"} and not preparation_owner:
             raise GenerationSingleflightUnavailable(
                 "보고서 owner 확정 전에는 provider를 호출할 수 없습니다"
             )
         # context가 이미 열렸더라도 provider 호출마다 lease 오류와 fencing을
         # 다시 확인한다. 첫 호출 뒤 heartbeat가 죽었는데 여기서 곧장 return하면
         # takeover owner와 다음 provider 호출이 겹쳐 이중 과금될 수 있다.
-        if state == "owner":
+        if state == "owner" or preparation_owner:
             self._refresh_owner_lease()
         else:
             # 부분 지문으로 single-flight를 우회해도 같은 요청 전체 마감은
@@ -1226,6 +1345,10 @@ class GenerationSession:
         with self._lock:
             stack = self._provider_stack
             self._provider_stack = None
+            if self._handle is None:
+                # 준비 후 사전검사 중단·캐시 재사용은 최종 owner가 없으므로
+                # 요청이 끝난 뒤 빈 준비 heartbeat 스레드를 남기지 않는다.
+                self._stop_heartbeat.set()
         if stack is not None:
             stack.close()
 

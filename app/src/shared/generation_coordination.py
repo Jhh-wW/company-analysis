@@ -11,7 +11,7 @@ import contextlib
 import contextvars
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ContextManager
 
 from src.shared.engine_build_identity import (
     EngineBuildIdentity,
@@ -80,6 +80,11 @@ class GenerationCallbacks:
     ensure_paid_phase: Callable[[], None]
     engine_build_identity: EngineBuildIdentity
     check_active: Callable[[], None] | None = None
+    # 준비 lease는 보고서 완료본을 운반하지 않고 유료 재판정만 직렬화한다.
+    paid_preparation: Callable[
+        [str, GenerationCacheNamespace | None, str], ContextManager[bool]
+    ] | None = None
+    bind_release_mode: Callable[[str], None] | None = None
 
 
 _CURRENT: contextvars.ContextVar[GenerationCallbacks | None] = (
@@ -115,6 +120,7 @@ def coordinate(
     corp_id: str,
     cache_namespace: GenerationCacheNamespace | None,
     preflight_identity_digest: str,
+    release_mode: str = "",
 ) -> ReusedGeneration | None:
     """완전한 사전 신원이면 캐시를 읽거나 owner를 정한다.
 
@@ -125,6 +131,8 @@ def coordinate(
     callbacks = _CURRENT.get()
     if callbacks is None:
         return None
+    if release_mode and callbacks.bind_release_mode is not None:
+        callbacks.bind_release_mode(release_mode)
     return callbacks.coordinate(
         str(corp_id),
         cache_namespace,
@@ -145,6 +153,25 @@ def ensure_paid_phase() -> None:
     callbacks = _CURRENT.get()
     if callbacks is not None:
         callbacks.ensure_paid_phase()
+
+
+@contextlib.contextmanager
+def paid_preparation(
+    *,
+    corp_id: str,
+    cache_namespace: GenerationCacheNamespace | None,
+    input_digest: str,
+) -> Iterator[bool]:
+    """무료 캐시 미적중 뒤 준비 owner만 호출하고 대기자는 캐시를 다시 읽는다."""
+
+    callbacks = _CURRENT.get()
+    if callbacks is None:
+        yield True
+        return
+    if callbacks.paid_preparation is None:
+        raise GenerationCoordinationError("유료 준비 단계의 소유권 계약이 없습니다")
+    with callbacks.paid_preparation(corp_id, cache_namespace, input_digest) as owner:
+        yield owner
 
 
 def check_active() -> None:

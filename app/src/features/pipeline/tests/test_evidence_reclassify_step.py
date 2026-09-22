@@ -372,42 +372,28 @@ def test_AI호출예외는_사유만_남기고_원결과로_진행한다() -> No
     assert steps[0]["실패"] == "호출또는응답:RuntimeError"
 
 
-def test_소유권_확정전_조정오류는_재판정을_건너뛰고_기록만_남긴다() -> None:
-    """2026-09-17 운영 실측: EVIDENCE_RECLASSIFY=1 첫 실행이 여기서 통째로 죽었다.
-
-    계량 provider는 owner/bypass 확정 전에 `ensure_paid_phase()`가 조정 오류로 막는다.
-    재판정은 차선 단계라 그 오류를 전파하지 않고 건너뛰어야 보고서가 산다.
-    """
+def test_ownership_and_cancellation_errors_are_not_swallowed() -> None:
     from src.shared import generation_coordination
 
-    official = _reclassifiable_result()
-    steps: list[dict[str, object]] = []
     conn = sqlite3.connect(":memory:")
     try:
-        result = step.reclassify_official_evidence(
-            official,
-            client=SimpleNamespace(messages=FakeMessages(
-                error=generation_coordination.GenerationCoordinationError("owner 확정 전"),
-            )),
-            connect_db=_connection_factory(conn),
-            model=MODEL,
-            steps=steps,
-            generated_at="2026-09-06",
-        )
+        with pytest.raises(generation_coordination.GenerationCoordinationError):
+            step.reclassify_official_evidence(
+                _reclassifiable_result(),
+                client=SimpleNamespace(messages=FakeMessages(
+                    error=generation_coordination.GenerationWaitCancelled("요청 취소"),
+                )),
+                connect_db=_connection_factory(conn), model=MODEL,
+                steps=[], generated_at="2026-09-22",
+            )
     finally:
         conn.close()
-
-    # 2026-09-17: 건너뜀 경로도 «정확한 기본 타입»으로 돌려준다(하위 타입이면 새 객체).
-    assert type(result) is step.OfficialEvidenceCollectionResult
-    assert result.candidates == official.candidates and result.company_id == official.company_id
-    assert steps[0]["AI호출"] == 0
-    assert steps[0]["실패"] == "소유권미확정:GenerationCoordinationError"
 
 
 def test_재판정을_건너뛰어도_정확한_기본_타입으로_돌려준다() -> None:
     """2026-09-17 운영 실측: 스위치 ON이면 수집 결과가 하위 타입이라 최종검사가 거절했다.
 
-    빈 칸 없음·조정 오류 두 건너뜀 경로 모두 `type(x) is OfficialEvidenceCollectionResult`
+    빈 칸 없음·응답 오류 두 건너뜀 경로 모두 `type(x) is OfficialEvidenceCollectionResult`
     여야 뒤의 보완조사 최종검사를 통과한다.
     """
     from src.shared import generation_coordination
@@ -420,7 +406,7 @@ def test_재판정을_건너뛰어도_정확한_기본_타입으로_돌려준다
         skipped = step.reclassify_official_evidence(
             official,
             client=SimpleNamespace(messages=FakeMessages(
-                error=generation_coordination.GenerationCoordinationError("owner 확정 전"),
+                error=RuntimeError("재판정 응답 오류"),
             )),
             connect_db=_connection_factory(conn),
             model=MODEL,
@@ -473,7 +459,7 @@ def test_재판정조각은_문서hash에_결속되어_select를_통과한다() 
     }
 
 
-def test_저장된_캐시키는_접수번호_프롬프트버전_모델을_쓴다() -> None:
+def test_stored_cache_key_binds_receipt_prompt_model_and_input_identity() -> None:
     official = _reclassifiable_result()
     conn = sqlite3.connect(":memory:")
     try:
@@ -491,8 +477,8 @@ def test_저장된_캐시키는_접수번호_프롬프트버전_모델을_쓴다
             MODEL,
         )
         table = evidence_reclassify_cache.TABLE_EVIDENCE_RECLASSIFICATION_CACHE
-        stored = conn.execute(f"SELECT cache_key FROM {table}").fetchone()
+        stored = conn.execute(f"SELECT cache_key, input_paragraph_hash FROM {table}").fetchone()
     finally:
         conn.close()
 
-    assert stored == (expected,)
+    assert stored[0] == hashlib.sha256(f"{expected}:{stored[1]}".encode("utf-8")).hexdigest()

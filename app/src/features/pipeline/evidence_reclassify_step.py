@@ -7,9 +7,10 @@ import hashlib
 import json
 import re
 import sqlite3
+from contextlib import contextmanager
 
 from collections import Counter, defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, ContextManager, Final
 
@@ -25,6 +26,7 @@ from src.features.evidence_reclassify.logic import (
 from src.features.evidence_reclassify.models import ReclassifyAssignment, ReclassifyResult
 from src.features.pipeline.collection_recovery import raise_if_request_interrupted
 from src.shared import generation_coordination
+from src.shared.generation_cache_identity import GenerationCacheNamespace
 from src.features.pipeline.official_evidence_preflight import empty_collector_sections
 from src.features.storage import evidence_reclassify_cache
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
@@ -433,6 +435,43 @@ def _step(
     return record
 
 
+@contextmanager
+def _reclassification_connection(
+    *,
+    connect_db: Callable[[], ContextManager[sqlite3.Connection]],
+    cache_key: str,
+    paragraph_hash: str,
+    included: Sequence[Mapping[str, Any]],
+    company_id: str,
+    preparation_namespace: Callable[[], GenerationCacheNamespace | None] | None,
+    input_digest: str,
+) -> Iterator[tuple[sqlite3.Connection, bool, evidence_reclassify_cache.Cached | None]]:
+    """무료 캐시를 먼저 보고, 대기 중에는 DB 연결·거래를 잡지 않는다."""
+
+    with connect_db() as conn:
+        cached = evidence_reclassify_cache.load(conn, cache_key)
+        if cached is not None and cached.input_paragraph_hash == paragraph_hash:
+            try:
+                parse_and_verify(cached.validated_items, included)
+            except (KeyError, TypeError, ValueError):
+                pass
+            else:
+                yield conn, False, cached
+                return
+    with generation_coordination.paid_preparation(
+        corp_id=company_id,
+        cache_namespace=(
+            preparation_namespace()
+            if preparation_namespace is not None and generation_coordination.is_active()
+            else None
+        ),
+        input_digest=input_digest,
+    ) as owner:
+        # 먼저 끝난 owner가 저장했을 수 있으므로 같은 입력의 캐시를 다시 읽는다.
+        with connect_db() as conn:
+            yield conn, owner, evidence_reclassify_cache.load(conn, cache_key)
+
+
 def reclassify_official_evidence(
     official_evidence: OfficialEvidenceCollectionResult,
     *,
@@ -441,6 +480,7 @@ def reclassify_official_evidence(
     model: str,
     steps: list[dict[str, Any]],
     generated_at: str,
+    preparation_namespace: Callable[[], GenerationCacheNamespace | None] | None = None,
 ) -> OfficialEvidenceCollectionResult:
     """빈 수집 칸이 있을 때만 캐시 또는 계량 client로 한 번 재판정한다."""
 
@@ -475,13 +515,28 @@ def reclassify_official_evidence(
         candidates = _candidate_paragraphs(source)
         request = build_reclassify_request(empty_sections, candidates)
         included = _included_candidates(candidates, request.candidate_paragraph_ids)
-        paragraph_hash = _input_paragraph_hash(included)
+        # 같은 문단이라도 빈 칸·기존 배정·원문 결속이 바뀌면 재사용하지 않는다.
+        # 수집 시도/스캔 완료 상태는 AI 입력이 아니며 현재 envelope를 병합할 때
+        # 다시 적용한다. 그 상태만 달라졌다고 같은 분류를 유료로 반복하지 않는다.
+        paragraph_hash = hashlib.sha256(json.dumps(
+            [_input_paragraph_hash(included), request.prompt,
+             official_evidence.company_id, source.company_type,
+             {key: _mapping_rows(source.dart_envelope, key) for key in (
+                 "documents", "unclassified_documents", "fragments", "unclassified_fragments",
+             )}],
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
         receipts = _receipt_numbers(source, included)
-        cache_key = evidence_reclassify_cache.key_for(
+        receipt_model_key = evidence_reclassify_cache.key_for(
             receipts,
             RECLASSIFY_PROMPT_VERSION,
             model,
         )
+        # 같은 공시의 다른 빈 칸·배정 입력끼리 단일 캐시행을 덮어쓰지 않는다.
+        # 준비 lease가 아직 결과를 공유하는 동안에도 각 입력의 결과가 남아야 한다.
+        cache_key = hashlib.sha256(
+            f"{receipt_model_key}:{paragraph_hash}".encode("utf-8")
+        ).hexdigest()
     except (KeyError, TypeError, ValueError) as error:
         steps.append(
             _step(
@@ -503,9 +558,15 @@ def reclassify_official_evidence(
     ai_calls = 0
     cached_diagnostics: object = {}
     try:
-        connection_context = connect_db()
-        with connection_context as conn:
-            cached = evidence_reclassify_cache.load(conn, cache_key)
+        # 준비 owner와 캐시가 같은 입력 경계를 사용해야 원문 위치·문서 결속까지
+        # 다른 요청이 같은 lease 아래서 서로의 결과를 기다리는 일이 없다.
+        input_digest = cache_key
+        with _reclassification_connection(
+            connect_db=connect_db, cache_key=cache_key,
+            paragraph_hash=paragraph_hash, included=included,
+            company_id=official_evidence.company_id,
+            preparation_namespace=preparation_namespace, input_digest=input_digest,
+        ) as (conn, owner, cached):
             if cached is not None and cached.input_paragraph_hash == paragraph_hash:
                 try:
                     parsed = parse_and_verify(cached.validated_items, included)
@@ -516,6 +577,15 @@ def reclassify_official_evidence(
                     cached_diagnostics = cached.rejection_diagnostics
 
             if cache_state == "miss":
+                if not owner:
+                    steps.append(_step(
+                        empty_sections=empty_sections, candidate_count=len(included),
+                        prompt_chars=request.diagnostics.prompt_chars,
+                        cache_state=cache_state, adopted=0, rejected=0,
+                        rejected_by_reason={}, removals=0, ai_calls=0,
+                        failure="준비 결과 캐시 없음:중복 호출 방지",
+                    ))
+                    return plain_official_evidence(official_evidence)
                 ai_calls = 1
                 try:
                     response = client.messages.create(
@@ -531,30 +601,6 @@ def reclassify_official_evidence(
                         },
                     )
                     parsed = parse_and_verify(_response_json(response), included)
-                except generation_coordination.GenerationCoordinationError as error:
-                    # ★ 소유권(owner/bypass) 확정 «전»에는 계량 provider를 열 수 없다 —
-                    #   `_MeteredMessages.create`의 `ensure_paid_phase()`가 네트워크 전에 막는다.
-                    #   2026-09-17 운영 실측: EVIDENCE_RECLASSIFY=1을 켠 첫 두 실행이 이 자리에서
-                    #   `GenerationSingleflightUnavailable`로 통째로 죽었다(무과금이지만 보고서 0건).
-                    #   재판정은 차선 단계이므로 건너뛰고 기록만 남긴다. 취소·마감 같은 조정
-                    #   오류는 다음 provider 호출이 같은 검사를 다시 하므로 여기서 삼켜도
-                    #   늦게 전파될 뿐 사라지지 않는다. 재판정이 실제로 돌려면 호출 자리를
-                    #   소유권 확정 뒤로 옮겨야 한다(후속 과제, docs 근거_재판정.md §6).
-                    steps.append(
-                        _step(
-                            empty_sections=empty_sections,
-                            candidate_count=len(included),
-                            prompt_chars=request.diagnostics.prompt_chars,
-                            cache_state=cache_state,
-                            adopted=0,
-                            rejected=0,
-                            rejected_by_reason={},
-                            removals=0,
-                            ai_calls=0,
-                            failure=f"소유권미확정:{type(error).__name__}",
-                        )
-                    )
-                    return plain_official_evidence(official_evidence)
                 except Exception as error:  # noqa: BLE001 - 차선 실패는 보고서를 막지 않는다
                     raise_if_request_interrupted(error)
                     steps.append(
@@ -640,6 +686,23 @@ def reclassify_official_evidence(
                         conn.rollback()
                     except Exception:  # noqa: BLE001 - rollback 실패도 채택 결과를 막지 않는다
                         pass
+                    if generation_coordination.is_active():
+                        try:
+                            saved = evidence_reclassify_cache.load(conn, cache_key)
+                        except Exception as verification_error:
+                            raise generation_coordination.GenerationCoordinationError(
+                                "재판정 캐시 commit 결과를 확인하지 못했습니다"
+                            ) from verification_error
+                        # waiter가 복원할 수 없는 새 배정을 owner만 작성 입력에 넣으면
+                        # 서로 다른 최종 신원으로 유료 작성이 중복될 수 있다.
+                        # commit 성공 뒤 응답만 잃었으면 저장된 결과를 그대로 쓴다.
+                        if not (
+                            saved is not None
+                            and saved.input_paragraph_hash == paragraph_hash
+                            and saved.validated_items == _validated_payload(effective)
+                        ):
+                            merged = plain_official_evidence(official_evidence)
+                            effective = replace(effective, assignments=(), removals=())
     except Exception as error:  # noqa: BLE001 - DB 차선 실패는 보고서를 막지 않는다
         raise_if_request_interrupted(error)
         steps.append(

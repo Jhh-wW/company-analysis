@@ -338,6 +338,39 @@ CULTURE_EXTERNAL_AUDIT_RE: Final[re.Pattern[str]] = re.compile(
     r"회계법인|품질관리검토자|업무수행이사|지정감사|감사반"
 )
 
+# 법정 기관 구성과 거래 승인 규정은 조직 주체가 있어도 문화 근거가 아니다.
+# 감사위원회라는 이름만으로 제외하지 않는다. 내부 감사 업무·담당 조직과
+# 위원 자격·구성 요건을 구분해 기존의 실제 담당·감독 절차를 보존한다.
+CULTURE_AUDIT_COMMITTEE_RE: Final[re.Pattern[str]] = re.compile(r"감사위원회")
+CULTURE_AUDIT_COMPOSITION_RE: Final[re.Pattern[str]] = re.compile(
+    r"구성|선임|선출|위원(?:의|중)|자격요건"
+)
+CULTURE_AUDIT_QUALIFICATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"사외이사|(?:회계|재무)전문가|[0-9]+(?:인|명)(?:이상|이하|으로|의)"
+)
+
+# 금융·자산 거래 대상과 승인 기관이 같은 절에 있어야 제외한다.
+# 손실충당금 검토, 위험관리 담당 부서, 보상위원회 승인은 이 거래 목록과
+# 다르므로 기존 정상 예외를 유지한다. 회사명·금액·인용번호는 쓰지 않는다.
+CULTURE_GOVERNANCE_TRANSACTION_RE: Final[re.Pattern[str]] = re.compile(
+    r"채무보증|지급보증|자산(?:의)?(?:거래|양수도|양수|양도)|"
+    r"(?:특수관계인|특수관계자|계열회사|계열사)(?:와|과)의?거래"
+)
+CULTURE_TRANSACTION_APPROVAL_BODY_RE: Final[re.Pattern[str]] = re.compile(
+    r"이사회|주주총회|내부거래위원회"
+)
+CULTURE_TRANSACTION_APPROVAL_RE: Final[re.Pattern[str]] = re.compile(
+    r"승인|의결|결의|심의|규정"
+)
+# 직원이라는 단어만으로 금융거래를 면제하지 않는다. 직원 복지를 위한
+# 대출·지급보증처럼 사람 대상과 구체적 복지 목적이 함께 있는 경우만 남긴다.
+CULTURE_EMPLOYEE_BENEFICIARY_RE: Final[re.Pattern[str]] = re.compile(
+    r"임직원|직원|종업원|근로자|구성원"
+)
+CULTURE_EMPLOYEE_FINANCIAL_BENEFIT_RE: Final[re.Pattern[str]] = re.compile(
+    r"복리후생|복지제도|사내대출|주택자금|학자금|생활안정자금"
+)
+
 # ② «누가 맡는지»를 말한 절인가 — 조직 주체와 함께 요구하는 «조직 행위» 표지.
 #
 # ★ 왜 재무위험 «규정» 블록의 동사 목록을 그대로 쓰지 않나 (실측) — 그 목록은

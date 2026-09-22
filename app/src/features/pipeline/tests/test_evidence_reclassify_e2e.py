@@ -711,3 +711,122 @@ def test_문지기만으로_3장이_READY면_재판정을_호출하지_않는다
     assert step["빈장"] == ["competitive_position"]
     assert step["채택"] == 0
     assert engine.client.messages.reclassify_calls == 1
+
+
+def test_real_session_binds_final_partial_identity_and_waiter_reuses_without_ai(
+    monkeypatch, tmp_path,
+):
+    from src.core import clock
+    from src.features.budget import spend_store, state_machine
+    from src.features.budget.constants import SPEND_PHASE_PIPELINE
+    from src.features.report_delivery import artifact, store
+    from src.features.report_delivery.models import ContentSnapshot
+    from src.features.report_delivery.source_identity import SourceSnapshot
+    from src.features.storage import db, reports
+    from src.shared import generation_coordination
+    from src.web import generation_singleflight, job_runtime, paid_runtime
+
+    engine, observations = _wire_pipeline(monkeypatch, reclassify_enabled=True)
+    monkeypatch.setattr(real.news_intake_switch, "news_intake_enabled", lambda: False)
+    collector = _wire_audit_collector(monkeypatch, fixture_name=_INIZY_FIXTURE)
+    paid_runtime.prepare_budget_state_machine_cutover()
+    paid_runtime._seed_ledger()
+    # 가짜모델은 보수 단가를 쓰므로 기존 무과금 픽스처와 같은 시험 한도를 예약한다.
+    begin_phase = paid_runtime._begin_paid_phase
+    monkeypatch.setattr(
+        paid_runtime, "_begin_paid_phase",
+        lambda **kwargs: begin_phase(**kwargs, requested_cost_krw=100_000),
+    )
+    build = real.engine_build_identity.process_engine_build_identity()
+    installed = []
+
+    def session(run_id):
+        return generation_singleflight.GenerationSession(
+            run_id=run_id, share_key="test:reclassification-e2e",
+            billing_bucket_id=spend_store.bucket_id("test:reclassification-e2e"),
+            cap_krw=100_000, on_paid_phase=installed.append, build_identity=build,
+        )
+
+    owner, waiter = session("e2e-owner"), session("e2e-waiter")
+    composer_inputs = []
+    compose = real._run_v2_composer
+
+    def capture_compose(**kwargs):
+        composer_inputs.append(kwargs)
+        assert owner._preparation_handle is None
+        assert owner.owns_generation
+        return compose(**kwargs)
+
+    monkeypatch.setattr(real, "_run_v2_composer", capture_compose)
+    # 실제 웹의 링크 wrapper도 새 준비 callback을 보존해야 한다.
+    link_checks = []
+    monkeypatch.setattr(job_runtime, "_require_open_share_link", lambda job: link_checks.append(job))
+    job = SimpleNamespace(share_link_hash="test-link")
+    try:
+        with generation_coordination.activate(job_runtime._link_guarded_callbacks(job, owner.callbacks)):
+            first = _run(collector)
+        # 순수 SHADOW의 기존 DTO는 빈 모드를 쓴다. 공개 등급은 부분 완성을 유지한다.
+        assert first.report.release_mode in ("", ReleaseMode.SHADOW.value)
+        assert first.report.grade.name == "PARTIAL"
+        assert observations.reclassify[-1]["step"]["AI호출"] == 1
+        final_official, final_preflight = observations.preflights[-1]
+        assert final_preflight.dart_partial_fallback
+        assert "portfolio" in final_preflight.decision.ready_section_ids
+        assert composer_inputs[-1]["official_evidence_context"] is final_official
+        assert composer_inputs[-1]["source_identity_digest"] == owner.preflight_identity_digest
+        assert owner._requested_release_mode() is ReleaseMode.SHADOW
+        expected_namespace = real._generation_cache_namespace(
+            engine, build, real.engine_mode.EngineMode.V2, release_mode=ReleaseMode.SHADOW,
+        )
+        assert owner.cache_namespace == expected_namespace
+        assert installed == [owner.paid_phase]
+        assert link_checks
+        now = clock.now_kst()
+        source = SourceSnapshot.capture(
+            dart_receipt_nos=first.dart_receipt_numbers, financial_payload=None,
+            financial_payload_sha256=first.financial_payload_digest,
+            captured_at=now, source_as_of=now.date(), adapter_versions={"test": "v1"},
+            preflight_identity_digest=owner.preflight_identity_digest,
+        )
+        content = ContentSnapshot.create(
+            payload=reports.report_to_json(first.report).encode("utf-8"),
+            source_snapshot=source, cache_namespace=owner.cache_namespace,
+            content_generated_at=now, engine_epoch_digest=build.epoch_digest,
+            actual_models=(engine.MODEL,),
+        )
+        pdf = b"%PDF-1.4\n% test partial report\n"
+        with db.connect() as conn:
+            store.save_source_snapshot(conn, source)
+            store.save_cache_namespace(conn, owner.cache_namespace)
+            store.save_content_snapshot(conn, content)
+            backend = artifact.FilesystemArtifactBlobBackend(tmp_path / "partial-artifacts")
+            intent = artifact.create_blob_write_intent(conn, backend, pdf_bytes=pdf, created_at=now)
+            saved = artifact.store_approved_pdf(
+                conn, backend, blob_intent=intent, content_snapshot_id=content.content_id,
+                pdf_bytes=pdf, version=artifact.ArtifactVersion("test", "test", "test"),
+                created_at=now, retention=artifact.ArtifactRetention("test", None),
+            )
+        owner.complete(content.content_id, saved.artifact_id, cache_eligible=False)
+        owner.close_provider_context()
+        paid_runtime._settle_paid_phase(owner.paid_phase, amount_krw=first.cost_krw, billing_uncertain=False)
+        with generation_coordination.activate(waiter.callbacks):
+            second = _run(collector)
+        assert second.reused_content_snapshot_id == content.content_id
+        assert second.reused_artifact_id == saved.artifact_id
+        assert observations.reclassify[-1]["step"]["AI호출"] == 0
+        assert observations.metered[-1]._provider_call_count == 0
+        assert second.cost_krw == 0
+        assert waiter.paid_phase is None
+        assert waiter.preflight_identity_digest == owner.preflight_identity_digest
+        assert waiter.cache_namespace == owner.cache_namespace
+        assert len(composer_inputs) == 1
+        assert len(installed) == 1
+        with db.connect() as conn:
+            phase = state_machine.get_phase(conn, run_id=owner.run_id, phase=SPEND_PHASE_PIPELINE)
+            assert phase.state is not state_machine.PhaseState.ACTIVE
+            assert not state_machine.list_attempts(conn, run_id=waiter.run_id, phase=SPEND_PHASE_PIPELINE)
+    finally:
+        owner.close_provider_context()
+        owner.abandon()
+        waiter.close_provider_context()
+        waiter.abandon()

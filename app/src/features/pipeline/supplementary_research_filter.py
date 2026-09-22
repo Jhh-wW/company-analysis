@@ -21,12 +21,43 @@ from src.features.pipeline.supplementary_research_runtime_constants import (
 )
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
 from src.shared.report_evidence.source_verification import SourceVerifier
+from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
 from src.shared.report_quality.output_validation import _cited_numbers_in_body
 
 
 def _displayed_numbers(report: Report) -> set[str]:
     """출고 검증과 같은 본문·요약·표의 공개 인용 위치만 읽는다."""
     return {str(number) for number in _cited_numbers_in_body(report, citation_number)}
+
+
+def _paragraph_line_groups(section: ReportSection) -> list[range]:
+    """문장과 기존 문단을 순서대로 대응시킨다. 불분명한 경계는 합치지 않는다."""
+    if not section.prose_paragraphs:
+        return [range(len(section.prose_lines))] if section.prose_lines else []
+    groups = []
+    start = 0
+    for paragraph in section.prose_paragraphs:
+        for end in range(start + 1, len(section.prose_lines) + 1):
+            if " ".join(text for text, _cite in section.prose_lines[start:end]) == paragraph:
+                groups.append(range(start, end))
+                start = end
+                break
+        else:
+            return [range(index, index + 1) for index in range(len(section.prose_lines))]
+    if start != len(section.prose_lines):
+        return [range(index, index + 1) for index in range(len(section.prose_lines))]
+    return groups
+
+
+def _updated_paragraphs(
+    section: ReportSection, retained: dict[int, tuple[str, str]],
+) -> list[str]:
+    """남은 문장만 원래 문단 안에서 묶어 생략 인용의 범위를 유지한다."""
+    return [
+        " ".join(texts)
+        for group in _paragraph_line_groups(section)
+        if (texts := [retained[index][0] for index in group if index in retained])
+    ]
 
 
 def prune_unused_supplementary_citations(
@@ -50,7 +81,10 @@ def prune_unused_supplementary_citations(
     return replace(report, citations=citations, source_grades=source_grades)
 
 
-def reconcile_supplementary_citations(report: Report, *, source_verifier: SourceVerifier) -> Report:
+def reconcile_supplementary_citations(
+    report: Report, *, source_verifier: SourceVerifier,
+    restore_paragraph_citations: bool = False,
+) -> Report:
     """이미 걸러진 본문에 맞춰 인용 표시와 부록만 정리한다. 출처를 재서명하지 않는다."""
     if not report.citations:
         return replace(report, source_grades={}) if report.source_grades else report
@@ -63,7 +97,18 @@ def reconcile_supplementary_citations(report: Report, *, source_verifier: Source
     sections = []
     for section in report.sections:
         prose = []
-        for text, cite in section.prose_lines:
+        paragraph_numbers = {}
+        for group in _paragraph_line_groups(section):
+            visible = {
+                str(part.number) for index in group
+                for part in split_citation_markers(section.prose_lines[index][0])
+                if part.number > 0
+            }
+            visible.update(number for index in group
+                           if (number := citation_number(section.prose_lines[index][1])))
+            for index in group:
+                paragraph_numbers[index] = visible
+        for index, (text, cite) in enumerate(section.prose_lines):
             body, interpreted = split_interpretation_marker(text)
             parts = split_citation_markers(body)
             numbers = {str(part.number) for part in parts if part.number > 0}
@@ -79,13 +124,19 @@ def reconcile_supplementary_citations(report: Report, *, source_verifier: Source
                 bound_numbers = {str(source.number) for source in bindings}
                 # 앞 문장의 제거로 생략 인용만 남은 경우, 잠긴 사실과 기존
                 # 봉인 출처에 다시 결속되는 번호만 표시한다. 새 근거는 붙이지 않는다.
-                if bound_numbers - displayed:
+                # 다른 문단이나 표의 번호로 이 문단의 빠진 인용을 대신하지 않는다.
+                visible = (paragraph_numbers[index]
+                           if restore_paragraph_citations and not interpreted else displayed)
+                if bound_numbers - visible:
                     markers = " ".join(f"[{number}]" for number in sorted(bound_numbers, key=int))
                     text = body.rstrip() + " " + markers + (INTERPRETATION_SUFFIX if interpreted else "")
                     displayed.update(bound_numbers)
+                    paragraph_numbers[index].update(bound_numbers)
             prose.append((text, cite))
         sections.append(
-            replace(section, prose_lines=prose, prose_paragraphs=[text for text, _cite in prose])
+            replace(section, prose_lines=prose,
+                    prose_paragraphs=_updated_paragraphs(section, dict(enumerate(prose))),
+                    lines=list(prose) if report.schema_version == ENGINE_V2_SCHEMA_VERSION else section.lines)
             if prose != section.prose_lines else section
         )
     # 출처 DTO와 번호·봉인은 그대로 둔다. 숨은 회사 신원 증명도 보존한다.
@@ -233,11 +284,12 @@ def filter_supplementary_research_report(
 
     sections = []
     for section in report.sections:
-        prose = [
-            (text, cite) for index, (text, cite) in enumerate(section.prose_lines)
+        retained = {
+            index: (text, cite) for index, (text, cite) in enumerate(section.prose_lines)
             if (section.cell, index) not in rejected_lines
             and not prose_matches(section, text)[0].intersection(invalid_ids)
-        ]
+        }
+        prose = list(retained.values())
         tables = [
             filtered for table in section.tables
             if (filtered := filter_table(section, table)) is not None
@@ -247,9 +299,12 @@ def filter_supplementary_research_report(
             sections.append(section)
             continue
         sections.append(replace(
-            section, prose_lines=prose, prose_paragraphs=[text for text, _cite in prose],
+            section, prose_lines=prose, prose_paragraphs=_updated_paragraphs(section, retained),
             tables=tables, fact_ids=fact_ids,
-            lines=[(text, cite) for text, cite in section.lines
+            # composer의 lines는 공개 문장 복사본이다. 원장에 없는 거절 문장도
+            # 함께 지운다. canonical의 별도 감사 원문은 기존 방식으로 보존한다.
+            lines=list(prose) if report.schema_version == ENGINE_V2_SCHEMA_VERSION else [
+                   (text, cite) for text, cite in section.lines
                    if _normalized(text) not in invalid_claims
                    and not prose_matches(section, text)[0].intersection(invalid_ids)
                    and citation_number(cite) not in invalid_numbers],
@@ -264,7 +319,10 @@ def filter_supplementary_research_report(
                          citations=[source for source in report.citations
                                     if getattr(source, "source_id", "") not in invalid_sources])
                  if content_changed else report)
-    reconciled = reconcile_supplementary_citations(candidate, source_verifier=source_verifier)
+    reconciled = reconcile_supplementary_citations(
+        candidate, source_verifier=source_verifier,
+        restore_paragraph_citations=content_changed,
+    )
     if not content_changed and reconciled is report:
         return report
     # 원래 FULL 봉인은 내용 변경 뒤 재사용할 수 없다. 부분 보고서라는 사실과

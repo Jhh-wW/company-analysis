@@ -35,6 +35,8 @@ def test_removed_last_fact_drops_unused_valid_source_before_delivery():
     validate_v2(filtered)
     assert first.source_id not in {source.source_id for source in filtered.citations}
     assert "1" not in filtered.source_grades
+    identity = next(section for section in filtered.sections if section.cell == "identity")
+    assert identity.lines == identity.prose_lines == []
     validate_v2(_assert_storage_roundtrip(filtered))
     assert prune_unused_supplementary_citations(filtered) is filtered
 
@@ -63,6 +65,7 @@ def test_restores_implicit_citation_when_first_sentence_was_removed():
     identity = next(section for section in filtered.sections if section.cell == "identity")
     assert identity.prose_lines == [(normal.claim + " [1]", "")]
     assert identity.prose_paragraphs == [normal.claim + " [1]"]
+    assert identity.lines == identity.prose_lines
     assert identity.fact_ids == [normal.fact_id]
     assert filtered.fact_records[-1] == normal
     validate_v2(_assert_storage_roundtrip(filtered))
@@ -113,3 +116,125 @@ def test_restoring_implicit_citation_requires_unchanged_fact_binding():
     assert result is report
     with pytest.raises(V2ValidationError, match=r"\[1\]"):
         validate_v2(result)
+
+
+def test_filtered_unbound_sentence_is_removed_from_composer_lines():
+    """실측처럼 사실 원장에 없는 문장이 최종 검사에서 빠져도 저장 목록에 남지 않는다."""
+    report, evidence = _rendered_report()
+    unsupported = ("검증되지 않은 신규 선박을 도입한다. [1]", "")
+    report = replace(report, sections=[
+        replace(section,
+                lines=[*section.lines, unsupported],
+                prose_lines=[*section.prose_lines, unsupported],
+                prose_paragraphs=[*section.prose_paragraphs, unsupported[0]])
+        if section.cell == "identity" else section
+        for section in report.sections
+    ])
+
+    filtered = _enforce(report, evidence).report
+    assert filtered is not None
+    identity = next(section for section in filtered.sections if section.cell == "identity")
+    assert unsupported not in identity.prose_lines
+    assert identity.lines == identity.prose_lines
+    assert next(section for section in _assert_storage_roundtrip(filtered).sections
+                if section.cell == "identity").lines == identity.prose_lines
+
+
+def test_same_source_in_another_paragraph_does_not_hide_fact_citation():
+    """인용을 맡은 문장을 지운 뒤 다른 문단의 번호로 무출처 문단을 통과시키지 않는다."""
+    report, _evidence = _rendered_report()
+    first = next(fact for fact in report.fact_records if fact.section_owner == "identity")
+    normal = replace(first, fact_id=first.fact_id + "-normal", claim=first.claim.rstrip("."))
+    normal = replace(normal, evidence_binding=fact_evidence_binding(normal))
+    report = replace(report, fact_records=[*report.fact_records, normal], sections=[
+        replace(section,
+                lines=[*section.lines, (normal.claim, "")],
+                prose_lines=[*section.prose_lines, (normal.claim, "")],
+                prose_paragraphs=[*section.prose_paragraphs, normal.claim],
+                fact_ids=[*section.fact_ids, normal.fact_id])
+        if section.cell == "identity" else section
+        for section in report.sections
+    ])
+
+    result = reconcile_supplementary_citations(
+        report, source_verifier=supplementary_research_source_verifier(),
+        restore_paragraph_citations=True,
+    )
+    identity = next(section for section in result.sections if section.cell == "identity")
+    assert identity.prose_lines[-1] == (normal.claim + " [1]", "")
+    assert identity.lines == identity.prose_lines
+
+
+def test_filter_preserves_shared_citation_paragraph_after_unbound_line_removal():
+    """생략 인용 묶음을 문장마다 쪼개 무출처 문단으로 만들지 않는다."""
+    report, evidence = _rendered_report()
+    first = next(fact for fact in report.fact_records if fact.section_owner == "identity")
+    normal = replace(first, fact_id=first.fact_id + "-normal", claim=first.claim.rstrip("."))
+    normal = replace(normal, evidence_binding=fact_evidence_binding(normal))
+    grouped = [(normal.claim, ""), (first.claim + " [1]", "")]
+    unsupported = ("검증되지 않은 신규 선박을 도입한다. [1]", "")
+    paragraph = " ".join(text for text, _cite in grouped)
+    report = replace(report, fact_records=[*report.fact_records, normal], sections=[
+        replace(section, lines=[*grouped, unsupported],
+                prose_lines=[*grouped, unsupported],
+                prose_paragraphs=[paragraph, unsupported[0]],
+                fact_ids=[*section.fact_ids, normal.fact_id])
+        if section.cell == "identity" else section
+        for section in report.sections
+    ])
+
+    filtered = _enforce(report, evidence).report
+    assert filtered is not None
+    identity = next(section for section in filtered.sections if section.cell == "identity")
+    assert identity.prose_lines == grouped
+    assert identity.lines == grouped
+    assert identity.prose_paragraphs == [paragraph]
+
+
+def test_reconcile_keeps_canonical_audit_lines_separate_from_public_prose():
+    """별도 원문을 보관하는 canonical 보고서에는 composer 복사본 규칙을 적용하지 않는다."""
+    report, _evidence = _rendered_report()
+    first = next(fact for fact in report.fact_records if fact.section_owner == "identity")
+    audit = [("공시 원문 감사 기록", "[1]")]
+    report = replace(report, schema_version="company-report-v4-canonical", sections=[
+        replace(section, lines=audit, prose_lines=[(first.claim, "")],
+                prose_paragraphs=[first.claim])
+        if section.cell == "identity" else section
+        for section in report.sections
+    ])
+
+    result = reconcile_supplementary_citations(
+        report, source_verifier=supplementary_research_source_verifier(),
+    )
+    identity = next(section for section in result.sections if section.cell == "identity")
+    assert identity.prose_lines == [(first.claim + " [1]", "")]
+    assert identity.lines == audit
+
+
+def test_filter_preserves_valid_canonical_audit_text_and_removes_invalid_source_audit():
+    """감사 원문을 새 산문으로 덮어쓰지 않되 기존 무효 근거 제거 계약은 지킨다."""
+    from src.features.pipeline.supplementary_research_filter import filter_supplementary_research_report
+    from src.features.pipeline.tests.test_supplementary_research_filter import _hash_tampered_evidence
+
+    report, evidence = _rendered_report()
+    audit = [("공시 원문 감사 기록", "[1]")]
+    unsupported = ("검증되지 않은 신규 선박을 도입한다. [1]", "")
+    report = replace(report, schema_version="company-report-v4-canonical", sections=[
+        replace(section, lines=audit,
+                prose_lines=[*section.prose_lines, unsupported],
+                prose_paragraphs=[*section.prose_paragraphs, unsupported[0]])
+        if section.cell == "identity" else section
+        for section in report.sections
+    ])
+    verifier = supplementary_research_source_verifier()
+    valid = filter_supplementary_research_report(
+        report, official_evidence=evidence, source_verifier=verifier,
+    )
+    identity = next(section for section in valid.sections if section.cell == "identity")
+    assert unsupported not in identity.prose_lines
+    assert identity.lines == audit
+    invalid = filter_supplementary_research_report(
+        report, official_evidence=_hash_tampered_evidence(evidence), source_verifier=verifier,
+    )
+    identity = next(section for section in invalid.sections if section.cell == "identity")
+    assert identity.lines == identity.prose_lines == []

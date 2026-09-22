@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Final, Optional, TypedDict
+from typing import Final, Iterable, Optional, TypedDict
 
 from src.core.revenue_table_switch import revenue_table_v2_enabled
 from src.features.revenuemix.constants import (
@@ -25,6 +25,7 @@ from src.features.revenuemix.constants import (
     AMOUNT_ONLY_REVENUE_WORDS,
     AMOUNT_ONLY_ROW_LABEL_WORDS,
     AMOUNT_ONLY_ROW_SCAN_CHARS,
+    AMOUNT_ONLY_VERTICAL_HEADER_RE,
     FOOTNOTE_WITHOUT_RATIO,
     HEADERS,
     KNOWN_TABLE_HEADS,
@@ -32,6 +33,7 @@ from src.features.revenuemix.constants import (
     MULTI_YEAR_CAPTION_BY_AXIS,
     MULTI_YEAR_MAX_PERIODS,
     MULTI_YEAR_RATIO_HEADER_FORMAT,
+    NON_REVENUE_CONTEXT_WORDS,
     PRODUCT_CAPTION,
     PRODUCT_HEADS,
     RATIO_HEAD_RE,
@@ -680,16 +682,34 @@ def _parse_rows_multi_year(
     return _ParsedMultiYearRows(tuple(rows), total, overflow)
 
 
+def _mentions_non_revenue_context(header: str, names: Iterable[str]) -> bool:
+    """머리말·행 이름이 투자·설비투자(CAPEX) 표임을 «스스로» 말하는지 본다.
+
+    ★★ 왜 매출 관문과 따로 두나 — 「매출」이 있느냐만 물으면 투자계획 표의
+      기대효과 칸 「매출증대」가 관문을 통과한다(실측 2026-09-22). 그 표는
+      열 이름(기투자액·향후투자액·투자기대효과)으로 정체를 이미 밝히고 있다.
+      «있어야 할 말»과 «있으면 안 되는 말»을 둘 다 물어야 표를 가려낼 수 있다.
+    ★ 세 경로(비중 있는 v2·다개년·금액 전용)가 같은 함수를 쓴다 — 한 경로만
+      막으면 같은 표가 다른 모양으로 다시 올라온다.
+    """
+
+    haystack = re.sub(r"\s+", "", f"{header} {' '.join(names)}").casefold()
+    return any(word in haystack for word in NON_REVENUE_CONTEXT_WORDS)
+
+
 def _v2_mentions_revenue(header: str, parsed: _ParsedRows) -> bool:
     """이 표가 «매출»을 말하고 있는지 본다.
 
     ⚠️ 이 관문이 없으면 은행 보고서의 「자금조달실적」처럼 비중 열이 있고
       금액 합도 맞는 «매출이 아닌» 표가 매출표로 올라온다.
+    ⚠️ 투자·CAPEX 문맥 어휘가 있으면 「매출」이 있어도 매출표가 아니다.
     """
 
     tail = (parsed.total,) if parsed.total is not None else ()
-    names = " ".join(row.public[0] for row in (*parsed.rows, *tail))
-    haystack = re.sub(r"\s+", "", f"{header} {names}")
+    names = tuple(row.public[0] for row in (*parsed.rows, *tail))
+    if _mentions_non_revenue_context(header, names):
+        return False
+    haystack = re.sub(r"\s+", "", f"{header} {' '.join(names)}")
     return any(word in haystack for word in V2_REVENUE_WORDS)
 
 
@@ -697,8 +717,10 @@ def _multi_year_mentions_revenue(
     header: str, parsed: _ParsedMultiYearRows
 ) -> bool:
     tail = (parsed.total,) if parsed.total is not None else ()
-    names = " ".join(row.name for row in (*parsed.rows, *tail))
-    haystack = re.sub(r"\s+", "", f"{header} {names}")
+    names = tuple(row.name for row in (*parsed.rows, *tail))
+    if _mentions_non_revenue_context(header, names):
+        return False
+    haystack = re.sub(r"\s+", "", f"{header} {' '.join(names)}")
     return any(word in haystack for word in V2_REVENUE_WORDS)
 
 
@@ -1086,8 +1108,12 @@ def _vertical_amount_only_candidate(
     """금액만 있는 «세로형» 표 하나를 검산한다."""
 
     header_start = _amount_only_heading_start(filing_text, unit_start)
-    block = filing_text[unit_end:block_end]
-    rows, total, overflow, periods = _amount_only_rows(block, unit_end)
+    column_header = AMOUNT_ONLY_VERTICAL_HEADER_RE.match(
+        filing_text, unit_start, block_end
+    )
+    rows_start = column_header.end() if column_header is not None else unit_end
+    block = filing_text[rows_start:block_end]
+    rows, total, overflow, periods = _amount_only_rows(block, rows_start)
     if len(rows) < V2_MIN_ROWS:
         record.reject(REJECT_ROWS_BELOW_MIN)
         return None
@@ -1185,6 +1211,10 @@ def _horizontal_amount_only_candidate(
         return None
     header_end = unit_end + label.end()
     header = filing_text[header_start:header_end]
+    if _mentions_non_revenue_context(header, ()):
+        # 표제·열 이름이 투자표라고 말하면 이름표가 「매출액」이어도 싣지 않는다.
+        record.reject(REJECT_NOT_REVENUE)
+        return None
     cells = _amount_cells(zone, unit_end, run.group(0), label.end())  # type: ignore[union-attr]
     if len(cells) < AMOUNT_ONLY_MIN_COLUMNS + 1:
         record.reject(REJECT_ROWS_BELOW_MIN)
@@ -1262,8 +1292,14 @@ def _horizontal_amount_only_candidate(
 
 
 def _amount_only_mentions_revenue(header: str, names: tuple[str, ...]) -> bool:
-    """비중 없는 표가 「매출」을 말하고 있는지 «좁은» 목록으로 묻는다."""
+    """비중 없는 표가 「매출」을 말하고 있는지 «좁은» 목록으로 묻는다.
 
+    ★ 비중이라는 두 번째 검산이 없는 경로라 «있으면 안 되는 말»을 두 겹으로
+      본다 — 매출채권·매출원가 같은 2열 표제와, 투자계획 표의 투자·CAPEX 문맥.
+    """
+
+    if _mentions_non_revenue_context(header, names):
+        return False
     haystack = re.sub(r"\s+", "", f"{header} {' '.join(names)}")
     return not any(
         word in haystack for word in AMOUNT_ONLY_NON_REVENUE_WORDS

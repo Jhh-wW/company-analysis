@@ -328,6 +328,7 @@ REVENUE_REGION_LEAF_WORDS: Final[tuple[str, ...]] = (
     "아시아",
     "아프리카",
     "북미",
+    "중남미",
     "남미",
     "미주",
     "유럽",

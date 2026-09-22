@@ -4094,6 +4094,10 @@ class RealPipeline:
                     model=model,
                     steps=steps,
                     generated_at=business_date.isoformat(),
+                    preparation_namespace=lambda: _generation_cache_namespace(
+                        engine, build_identity, generation_mode,
+                        release_mode=requested_release_mode,
+                    ),
                 )
                 if not isinstance(reclassified_official_evidence, OfficialEvidenceCollectionResult) or reclassified_official_evidence.company_id != corp_code:
                     raise ValueError("재분류 결과의 회사 결속이 올바르지 않습니다")
@@ -4391,6 +4395,7 @@ class RealPipeline:
                 corp_id=corp_code,
                 cache_namespace=generation_namespace,
                 preflight_identity_digest=generation_source_identity_digest,
+                release_mode=requested_release_mode.value if requested_release_mode else "",
             )
         except generation_coordination.GenerationCoordinationError as error:
             owner_reason_code = (
