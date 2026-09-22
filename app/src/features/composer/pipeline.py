@@ -1157,6 +1157,29 @@ def _table_cite_is_bound(
     return int(raw_number) in numbers
 
 
+def _record_style_diagnostics(diagnostics: Mapping[str, int]) -> None:
+    """최종 렌더가 «지난 일정 미래형»으로 센 문장 수를 운영 기록에 남긴다.
+
+    ★ 왜 필요한가 (2026-09-22 독립 검토 실측) — `render_report`에
+      `style_diagnostics` 인자를 만들어 뒀는데 «어느 호출부도 넘기지 않았다».
+      시험은 인자를 직접 넘겨서 초록이었고, 그래서 배선 공백이 안 보였다.
+      개수를 여기서 받아 기록해야 운영이 실제로 이 값을 받았는지가 남는다.
+    ★ 왜 닫힌 진단 목록(`REVIEW_SCOPE_ITEMS`)에 넣지 않나 — 그 목록은 화면
+      안내문이 「…개를 뺐습니다」로 세는 «제외» 장부다. 시제 표기는 문장을
+      빼지 않고 표시만 고쳐 그대로 싣기 때문에, 거기에 넣으면 빠지지 않은
+      문장을 뺐다고 말하게 된다(도식 «파생 비율» 기록과 같은 이유).
+    ⚠️ 회사 원문 글자는 담지 않는다 — 사유 이름과 개수만 남긴다.
+    """
+
+    if not diagnostics:
+        return
+    logger.info(
+        "최종 렌더 문체 진단(운영): %s",
+        dict(sorted(diagnostics.items())),
+        extra={"pipeline_style_diagnostics": dict(diagnostics)},
+    )
+
+
 def _notice_only_sections(final: ComposedReport) -> dict[str, str]:
     """문장이 하나도 없고 안내만 남은 장 → 안내문. 파이프라인 빈 등록부 guard용."""
 
@@ -1295,6 +1318,7 @@ def _finish_evidence_available(
         body, fragments, diagnostics=review_diagnostics,
     )
     final, numeric_filtering = _rule_summary_stage(body, numeric_filtering)
+    style_diagnostics: dict[str, int] = {}
     rendered = render_report(
         company_name,
         final,
@@ -1315,7 +1339,9 @@ def _finish_evidence_available(
         verified_program_facts=verified_program_facts,
         program_registry_sources=program_registry_sources,
         name_table=name_table,
+        style_diagnostics=style_diagnostics,
     )
+    _record_style_diagnostics(style_diagnostics)
     quality_candidate = build_generation_quality_candidate(rendered, final)
     generation_assessment, quality_observation = assess_and_observe_generation(
         quality_candidate, contract_version="",
@@ -2462,6 +2488,10 @@ def run_v2(
         if public_structure_seal is None
         else {"public_structure_seal": public_structure_seal}
     )
+    # ★ 문체 진단은 «출고되는» 렌더에서만 받는다. 위 `body_rendered`는 요약
+    #   후보를 고르려고 버리는 중간 산출이라, 거기서도 받으면 같은 문장을 두
+    #   번 세어 개수가 부풀려진다.
+    style_diagnostics: dict[str, int] = {}
     rendered = render_report(
         company_name,
         final,
@@ -2490,8 +2520,10 @@ def run_v2(
             else ()
         ),
         name_table=name_table,
+        style_diagnostics=style_diagnostics,
         **seal_render_kwargs,
     )
+    _record_style_diagnostics(style_diagnostics)
     primary_block_sha256s: tuple[tuple[str, str], ...] = ()
     if public_structure_seal is not None:
         assert_report_matches_public_structure(rendered, public_structure_seal)
@@ -2770,6 +2802,8 @@ def run_v2(
                 program_registry_sources=prepared_evidence.program_sources,
                 name_table=name_table,
             )
+            # 본 경로와 같은 이유로 «출고되는» 렌더에서만 받는다.
+            supplement_style_diagnostics: dict[str, int] = {}
             rendered = render_report(
                 company_name,
                 final,
@@ -2791,7 +2825,9 @@ def run_v2(
                 verified_program_facts=prepared_evidence.program_facts,
                 program_registry_sources=prepared_evidence.program_sources,
                 name_table=name_table,
+                style_diagnostics=supplement_style_diagnostics,
             )
+            _record_style_diagnostics(supplement_style_diagnostics)
             assert_report_matches_public_structure(
                 rendered,
                 public_structure_seal,
