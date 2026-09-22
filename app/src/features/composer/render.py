@@ -402,12 +402,18 @@ def sentence_display_text(
     return text
 
 
-def _marker_visibility(
+def marker_visibility(
     sentences: Sequence[ComposedSentence],
     numbers: Mapping[str, int],
     style: str,
 ) -> tuple[bool, ...]:
     """문장마다 인용 번호를 «보일지» 정한다.
+
+    ★ 왜 공개 함수인가 — FULL 사전 봉인(`public_manifest`)이 렌더 «전»에 같은
+      글자를 미리 계산한다. 그 규칙을 두 벌로 적어 두면 한쪽만 고쳐졌을 때
+      봉인과 렌더가 갈라져 `PublicManifestError`로 보고서 생성이 통째로 죽는다
+      (2026-09-22 실측: 해석 문장 번호를 보이게 바꾼 쪽이 렌더뿐이었다).
+      그래서 이 함수 하나가 표기 규칙의 정본이고, 봉인 쪽이 이것을 부른다.
 
     ★ 왜 문장 하나가 아니라 묶음을 보나 — 절충안의 핵심이 「같은 출처를
       잇달아 인용하는 문장은 묶음의 마지막에만 번호를 단다」이기 때문이다.
@@ -450,6 +456,21 @@ def _marker_visibility(
         defer = following is not None and keys[following] == keys[index]
         visible.append(not defer)
     return tuple(visible)
+
+
+def summary_marker_visibility(
+    summary: Sequence[ComposedSentence],
+) -> tuple[bool, ...]:
+    """핵심 요약 항목은 «모두» 자기 인용 번호를 보인다.
+
+    ★ 왜 본문과 규칙이 다른가 — 요약 항목은 서로 독립된 줄이라 「앞 문장과
+      같은 출처면 뒤로 미룬다」는 본문의 묶음 규칙이 성립하지 않는다. 미루면
+      마지막 항목 하나만 번호를 달고 나머지는 근거 없이 읽힌다.
+    ★ 왜 함수인가 — `marker_visibility`와 같은 이유다. 봉인 쪽이 이 규칙을
+      따로 적으면 갈라진다(2026-09-22 실측: 같은 출처를 인용한 요약 두 항목만
+      있어도 FULL 봉인 대조가 깨졌다).
+    """
+    return tuple(True for _sentence in summary)
 
 
 # ══════════════════════════════════════════════════════════
@@ -1274,12 +1295,12 @@ def render_report(
     # 표기 방식을 적용한 가시성을 먼저 전부 계산한다 — 고아 번호를 되살리려면
     # 본문과 요약을 «함께» 봐야 한다.
     visibility_groups: list[tuple[Sequence[ComposedSentence], list[bool]]] = [
-        (section.sentences, list(_marker_visibility(section.sentences, numbers, citation_style)))
+        (section.sentences, list(marker_visibility(section.sentences, numbers, citation_style)))
         for section in report.sections
     ]
     visibility_groups.append(
         # 요약은 서로 독립된 항목이므로 본문의 번호 미루기 규칙을 적용하지 않는다.
-        (report.summary, [True for _ in report.summary])
+        (report.summary, list(summary_marker_visibility(report.summary)))
     )
     _ensure_no_orphan_markers(visibility_groups, numbers)
     section_shows = {

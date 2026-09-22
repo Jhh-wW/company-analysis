@@ -33,7 +33,6 @@ from src.features.composer.constants import (
     FLOW_PRESENTATION,
     FLOW_UNCONFIRMED_CELL,
     GRADE_INTERPRETED,
-    CITATION_STYLE_MERGED,
     PARAGRAPH_MAX_SENTENCES,
     PORTFOLIO_TABLE_SECTION_ID,
     SECTION_IDS,
@@ -1180,31 +1179,6 @@ def _sentence_numbers(
     return tuple(out)
 
 
-def _marker_visibility_expected(
-    sentences: Sequence[ComposedSentence],
-    numbers: Mapping[str, int],
-    citation_style: str,
-) -> list[bool]:
-    if citation_style != CITATION_STYLE_MERGED:
-        return [True for _sentence in sentences]
-    keys = [frozenset(_sentence_numbers(sentence, numbers)) for sentence in sentences]
-    visible: list[bool] = []
-    for index, sentence in enumerate(sentences):
-        if sentence.grade == GRADE_INTERPRETED or not keys[index]:
-            visible.append(False)
-            continue
-        following = next(
-            (
-                position
-                for position in range(index + 1, len(sentences))
-                if sentences[position].grade != GRADE_INTERPRETED
-            ),
-            None,
-        )
-        visible.append(not (following is not None and keys[following] == keys[index]))
-    return visible
-
-
 def _ensure_expected_visible_markers(
     groups: list[tuple[Sequence[ComposedSentence], list[bool]]],
     numbers: Mapping[str, int],
@@ -1554,22 +1528,29 @@ def _expected_public_content_projection(
     filing_meta: FilingMeta | None,
     program_registry_sources: Sequence[Source] = (),
 ) -> dict[str, object]:
+    # ★ 인용 번호 «표시 규칙»만은 렌더러 정본을 그대로 부른다. 나머지 기대
+    #   구조(글자 조립·문단 나눔·표·차례)는 여전히 이 파일이 독립으로 다시
+    #   만든다 — 봉인의 값은 거기에 있다. 표시 규칙까지 두 벌로 적었더니
+    #   한쪽만 고쳐져 FULL 보고서 생성이 통째로 죽었다(2026-09-22 실측).
+    # ★ 함수 «안»에서 import 하는 이유: render 쪽이 이 파일의
+    #   `PublicStructureSeal`을 모듈 수준에서 가져가므로, 여기서 모듈 수준으로
+    #   되가져오면 순환 import가 된다.
+    from src.features.composer.render import (  # noqa: PLC0415
+        marker_visibility,
+        summary_marker_visibility,
+    )
+
     numbers = _citation_numbers_for_fragments(fragments)
     style_normalizer = SentenceStyleNormalizer(report, fragments, as_of_date=as_of_date)
     groups = [
         (
             section.sentences,
-            _marker_visibility_expected(
-                section.sentences, numbers, citation_style
-            ),
+            list(marker_visibility(section.sentences, numbers, citation_style)),
         )
         for section in report.sections
     ]
     groups.append(
-        (
-            report.summary,
-            _marker_visibility_expected(report.summary, numbers, citation_style),
-        )
+        (report.summary, list(summary_marker_visibility(report.summary)))
     )
     _ensure_expected_visible_markers(groups, numbers)
     used_sections: dict[int, list[str]] = {}
