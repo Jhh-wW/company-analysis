@@ -11,6 +11,11 @@
   통째로 지우면 같은 항목에 실린 회사 고유 사실까지 함께 사라지기 때문이다.
   혼합 항목은 `accounting_policy_mixed` 로 관측만 한다(차단 아님).
 
+★ 절에 화폐 금액이나 회사에 일어난 사건(회계정책 «변경» 등)이 있으면 그 절은
+  아예 세지 않는다(`ACCOUNTING_POLICY_EXEMPTIONS`). 규칙이 «대상어 + 처리
+  표지»만 보다 보니 「…금융부채의 잔액은 1,234백만원이며…」처럼 회사 고유
+  금액이 든 문장까지 막았기 때문이다. 이 면제는 아래 재사용 규칙보다 앞선다.
+
 ★ 손실충당금·주식기준보상 «순수 회계 측정» 절은 규칙을 두 벌로 만들지 않고
   `culture_accounting_policy_problem` 을 «그대로 호출해» 쓴다. 같은 규칙을
   복사해 두면 한쪽만 고쳐져 두 잣대가 생긴다(쌍둥이 규칙은 대조 시험으로
@@ -26,6 +31,7 @@ import unicodedata
 
 from src.features.composer.accounting_policy_constants import (
     ACCOUNTING_POLICY_BOILERPLATE,
+    ACCOUNTING_POLICY_EXEMPTIONS,
     ACCOUNTING_POLICY_RULES,
 )
 from src.features.composer.culture_constants import SOURCE_CLAUSE_SPLIT_RE
@@ -42,11 +48,26 @@ def _surface(text: str) -> str:
     return "".join(unicodedata.normalize("NFKC", text).casefold().split())
 
 
-def _matched_rule(clause: str) -> str:
-    """그 절이 회계정책 상용구면 걸린 범주 이름, 아니면 빈 문자열.
+def _exemption(clause: str) -> str:
+    """그 절에 «회사 고유» 신호가 있으면 면제 이름, 없으면 빈 문자열.
 
-    범주 이름은 로그·시험에서 «어느 규칙이 걸렸는지»를 되짚는 데만 쓴다.
-    공개 사유 코드는 언제나 하나다.
+    화폐 금액이나 회사에 실제로 일어난 사건이 절 안에 있으면, 회사 이름을
+    바꿔도 그대로 말이 되는 문장이 아니다 — 상용구로 셀 수 없다.
+    """
+
+    surface_clause = _surface(clause)
+    for name, marker_pattern in ACCOUNTING_POLICY_EXEMPTIONS:
+        if marker_pattern.search(surface_clause):
+            return name
+    return ""
+
+
+def _rule_hit(clause: str) -> str:
+    """면제를 «무시하고» 그 절에 걸리는 규칙 범주 이름을 돌려준다.
+
+    면제 판단과 규칙 판단을 한 함수에 섞으면, 면제가 실제로 일하고 있는지를
+    시험이 확인할 길이 사라진다(규칙이 애초에 안 걸려서 통과한 것과 구분이
+    안 된다). 그래서 두 판단을 따로 두고 `_matched_rule` 이 합친다.
     """
 
     surface_clause = _surface(clause)
@@ -61,6 +82,23 @@ def _matched_rule(clause: str) -> str:
                 and treatment_pattern.search(surface_clause)):
             return name
     return ""
+
+
+def _matched_rule(clause: str) -> str:
+    """그 절이 회계정책 상용구면 걸린 범주 이름, 아니면 빈 문자열.
+
+    범주 이름은 로그·시험에서 «어느 규칙이 걸렸는지»를 되짚는 데만 쓴다.
+    공개 사유 코드는 언제나 하나다.
+
+    ★ 면제가 «먼저»다 — 재사용하는 `culture_accounting_policy_problem` 보다도
+      앞이다. 금액이 든 절은 그 규칙이 무엇이든 회사 고유 사실이기 때문이다.
+      그래서 8장 전용 가드와 이 가드의 답이 금액 절에서 갈릴 수 있다. 8장은
+      `verify` 가 전용 경로로 따로 맡으므로 8장의 기존 경계는 그대로다.
+    """
+
+    if _exemption(clause):
+        return ""
+    return _rule_hit(clause)
 
 
 def _clause_verdicts(text: str) -> tuple[bool, ...]:
@@ -116,6 +154,34 @@ def accounting_policy_matched_rules(text: str) -> tuple[str, ...]:
 
     return tuple(
         _matched_rule(clause)
+        for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
+        if _surface(clause)
+    )
+
+
+def accounting_policy_exemptions(text: str) -> tuple[str, ...]:
+    """절마다 걸린 면제 이름(면제 아닌 절은 빈 문자열) — 관측·시험용.
+
+    «통과»만 보면 규칙이 애초에 안 걸린 것인지, 걸렸는데 면제된 것인지
+    구분할 수 없다. 그 둘을 가르는 값이다.
+    """
+
+    return tuple(
+        _exemption(clause)
+        for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
+        if _surface(clause)
+    )
+
+
+def accounting_policy_rules_ignoring_exemptions(text: str) -> tuple[str, ...]:
+    """면제가 «없었다면» 절마다 걸렸을 규칙 이름 — 관측·시험용.
+
+    면제 시험이 지켜야 할 것은 「지금 통과한다」가 아니라 「막히던 것이
+    풀렸다」이다. 이 값이 있어야 면제가 실제로 일하고 있음을 단정할 수 있다.
+    """
+
+    return tuple(
+        _rule_hit(clause)
         for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
         if _surface(clause)
     )

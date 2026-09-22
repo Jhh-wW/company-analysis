@@ -7,11 +7,13 @@
 
 시험이 지키는 것:
   ① 실제 차단 대상 12문장이 전부 걸린다(각각 «의도한 규칙»으로).
-  ② 실제 정상 문장 12개가 전부 통과한다.
+  ② 실제 정상 문장 13개가 전부 통과한다.
   ③ 경계 사례(「… 이용하는 시점에 인식된다」)는 통과한다 — 수익원 설명이다.
   ④ 혼합 항목은 통과하되 혼합으로 관측된다.
   ⑤ 실제 `verify_report` 경로에서 9·5·1·2장 본문이 실제로 빠지고 사유가 남는다.
   ⑥ 8장(culture)은 기존 경로·기존 사유 코드를 그대로 쓴다.
+  ⑦ 화폐 금액·회사 사건이 든 «회사 고유» 문장 5개는 면제로 통과한다 —
+     면제가 없으면 막히던 문장이라는 것까지 함께 단정한다.
 """
 
 from __future__ import annotations
@@ -23,9 +25,11 @@ import re
 import pytest
 
 from src.features.composer.accounting_policy_guard import (
+    accounting_policy_exemptions,
     accounting_policy_matched_rules,
     accounting_policy_mixed,
     accounting_policy_problem,
+    accounting_policy_rules_ignoring_exemptions,
 )
 from src.features.composer.culture_guard import culture_accounting_policy_problem
 from src.features.composer.port import (
@@ -163,6 +167,57 @@ PASSING_TEXTS: tuple[str, ...] = (
     "승인한다.",
 )
 
+# ── 금액·사건이 든 «회사 고유» 문장 (면제 대상) ──────────────────────────
+# ⚠️ 출처를 정직하게 적는다 — 아래 5문장은 PDF에 인쇄된 글자 «그대로»가 아니라,
+#    독립 검토(2026-09-22 D2)가 실제 가드 함수에 직접 먹여 과차단을 실측한
+#    문장이다. 5장 「당면 과제」의 유동성위험 노출액 문장이 실제로 이 모양이다.
+#    형식은 (문장, 면제 이름, 면제가 «없었다면» 걸렸을 규칙)이다 — 마지막 값이
+#    있어야 「원래 막히던 것이 풀렸다」를 단정할 수 있다.
+EXEMPT_CASES: tuple[tuple[str, str, str], ...] = (
+    (
+        "당기말 현재 회사가 유동성위험에 노출된 금융부채의 잔액은 1,234백만원이며 "
+        "1년 이내 만기가 도래한다.",
+        "화폐금액",
+        "유동성관리",
+    ),
+    (
+        "회사는 당기말 이연법인세자산 3,059백만원을 인식하고 있다.",
+        "화폐금액",
+        "이연법인세",
+    ),
+    (
+        "회사는 정부보조금 15억원을 영업외수익으로 인식했다.",
+        "화폐금액",
+        "정부보조금",
+    ),
+    (
+        "당기말 현금및현금성자산은 3,120백만원으로 3개월 이내 만기 예금을 "
+        "포함한다.",
+        "화폐금액",
+        "현금성자산정의",
+    ),
+    # 금액이 없어도 «변경했다»는 그 회사에 실제로 일어난 일이다.
+    (
+        "회사는 2025년부터 재고자산 평가 회계정책을 총평균법에서 선입선출법으로 "
+        "변경했다.",
+        "회사사건",
+        "재고자산평가",
+    ),
+)
+
+# ── 숫자가 있어도 화폐가 아닌 절 (면제 사유가 아니다) ────────────────────
+NON_MONETARY_NUMBER_CLAUSES: tuple[str, ...] = (
+    "취득당시 만기일이 3개월 이내에 도래하는 것으로 분류하고 있다",
+    "일반기업회계기준 제31장에 따른 중소기업 회계처리 특례를 적용하고 있다",
+    "1년 내에 완료되는 용역에 대해 제공을 완료한 날에 수익으로 인식한다",
+    "2025년 1월 1일로 개시하는 회계기간부터 신규로 적용한 기준서는 없다",
+    # 「원」으로 시작하는 다른 낱말(원칙·원재료·원가)은 화폐 단위가 아니다.
+    # 특히 «원가»·«원재료»는 회계 주석에 흔해서 반드시 걸러져야 한다.
+    "제1원칙에 따라 5원재료를 3원가로 계상한다",
+    # 낱말만으로는 «사건»이 아니다 — 「전환이 용이하다」는 현금성자산 정의다.
+    "현금으로 전환이 용이하고 이자율 변동에 따른 가치변동이 중요하지 않다",
+)
+
 MIXED_TEXT = (
     "회사의 주된 영업수익은 인공지능 소프트웨어 개발과 관련된 용역 매출과 "
     "인공지능 콘텐츠 매출로 구성된다. 용역 매출은 중소기업 회계처리 특례에 따라 "
@@ -197,6 +252,47 @@ def test_실제_회계정책_문장은_사유코드로_차단된다(text: str, r
 def test_실제_사업_사실_문장은_통과한다(text: str):
     assert accounting_policy_problem(text) == ""
     assert accounting_policy_mixed(text) is False
+
+
+@pytest.mark.parametrize(
+    "text,exemption,blocked_rule", EXEMPT_CASES, ids=range(len(EXEMPT_CASES))
+)
+def test_회사_고유_금액이_든_문장은_면제로_통과한다(
+    text: str, exemption: str, blocked_rule: str
+):
+    """금액·사건이 있는 절은 상용구로 세지 않는다.
+
+    ★ 「통과한다」만 단정하면 규칙이 애초에 안 걸려서 통과한 것과 구분이
+      안 된다. 그래서 «면제가 없었다면 걸렸을 규칙»까지 함께 단정한다 —
+      이 값이 빈칸이 되는 날 면제는 아무것도 지켜 주지 않는 장식이 된다.
+    """
+
+    assert accounting_policy_rules_ignoring_exemptions(text) == (blocked_rule,)
+    assert accounting_policy_exemptions(text) == (exemption,)
+    assert accounting_policy_problem(text) == ""
+    # 모든 절이 면제라 «혼합»도 아니다 — 두 신호가 동시에 켜지면 안 된다.
+    assert accounting_policy_mixed(text) is False
+    assert accounting_policy_matched_rules(text) == ("",)
+
+
+@pytest.mark.parametrize("text", NON_MONETARY_NUMBER_CLAUSES)
+def test_비화폐_숫자는_면제_사유가_아니다(text: str):
+    """「3개월」·「제31장」·「1년 내」·「원가」는 화폐 금액이 아니다.
+
+    숫자만 보고 면제하면 실측 차단 12문장 중 여럿이 그대로 되살아난다.
+    """
+
+    assert accounting_policy_exemptions(text) == ("",)
+
+
+@pytest.mark.parametrize("text,rule", BLOCKED_CASES, ids=range(len(BLOCKED_CASES)))
+def test_기존_차단_문장에는_면제가_하나도_생기지_않는다(text: str, rule: str):
+    """면제를 들인 뒤에도 실측 차단 12문장의 어느 절도 면제되지 않는다."""
+
+    assert set(accounting_policy_exemptions(text)) == {""}, rule
+    # 면제가 안 생겼으니 판정도 그대로여야 한다 — 이 두 줄이 함께 있어야
+    # 「면제는 안 생겼는데 차단이 풀렸다」는 다른 회귀까지 잡는다.
+    assert accounting_policy_problem(text) == EXPECTED_REASON
 
 
 def test_혼합_항목은_통과하되_혼합으로_관측된다():
@@ -311,6 +407,25 @@ def test_verify_report가_모든_장_본문에서_회계정책_상용구를_뺀�
     assert diagnostics[0]["kind"] == "본문"
     assert diagnostics[0]["candidate_sha256"] == sha256(blocked.encode()).hexdigest()
     assert blocked not in repr(diagnostics)
+
+
+def test_금액이_든_회사_고유_문장은_실제_경로에서도_살아남는다():
+    """5장 「당면 과제」의 유동성위험 «노출액» 문장이 실제로 이 모양이다.
+
+    단위 판정만 초록이고 운영 경로에서 그대로 빠지면 아무것도 고쳐지지 않는다.
+    """
+
+    text = EXEMPT_CASES[0][0]
+    report = ComposedReport((ComposedSection("current_challenges", (
+        ComposedSentence(text, ("liquidity",), "확인"),
+    )),))
+    fragments = (CollectedFragment("liquidity", "재무위험관리", text),)
+    calls, diagnostics = [], []
+    checked = verify_report(
+        report, fragments, None, _approval(calls), diagnostics=diagnostics,
+    )
+    assert [s.text for s in checked.sections[0].sentences] == [text]
+    assert [d["reason_code"] for d in diagnostics] == []
 
 
 def test_8장은_기존_경로와_기존_사유코드를_그대로_쓴다():
