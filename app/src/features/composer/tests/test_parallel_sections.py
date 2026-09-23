@@ -154,7 +154,9 @@ def test_병렬_작성은_동일한_프롬프트와_결과를_아홉_번_호출�
     assert peak == WORKERS
     assert recorder.freeze().writer_calls == len(SECTION_IDS)
     assert tuple(record.section_id for record in recorder.freeze().records) == SECTION_IDS
-    assert next(item for item in diagnostics if item["step"] == "v2_작성_실행방식")["동시상한"] == WORKERS
+    execution = next(item for item in diagnostics if item["step"] == "v2_작성_실행방식")
+    assert execution["동시상한"] == WORKERS
+    assert set(execution) == {"step", "동시상한", "장수", "소요_ms"}
 
 
 def test_이전_장을_참고하는_기존_작성은_항상_순차로_유지한다():

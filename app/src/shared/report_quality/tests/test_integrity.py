@@ -85,6 +85,26 @@ def test_서로_맞는_완성_판정만_출고_재검산을_통과한다() -> No
     assert_complete_generation_assessment(_complete_assessment())
 
 
+def test_full_required_ninth_cannot_be_forged_as_optional_section():
+    from src.shared.report_quality.optional_sections import OPTIONAL_SECTIONS_VERSION, OptionalSectionObservation
+    assessment = _complete_assessment()
+    changed = replace(assessment, quality=replace(
+        assessment.quality, optional_sections_version=OPTIONAL_SECTIONS_VERSION,
+        optional_sections=(OptionalSectionObservation("competitive_position", 5, (), False, False),),
+    ))
+    with pytest.raises(AssessmentIntegrityError):
+        assert_complete_generation_assessment(changed)
+
+
+def test_full_new_empty_optional_observation_preserves_nine_required_counts():
+    from src.shared.report_quality.optional_sections import OPTIONAL_SECTIONS_VERSION
+    assessment = _complete_assessment()
+    changed = replace(assessment, quality=replace(assessment.quality, optional_sections_version=OPTIONAL_SECTIONS_VERSION))
+    assert_complete_generation_assessment(changed)
+    restored = generation_assessment_from_dict(generation_assessment_to_dict(changed))
+    assert_complete_generation_assessment(restored)
+
+
 def test_v3는_해석을뺀_검증사실수와_전체안전fact수를_분리해_재검산한다() -> None:
     assessment = _complete_assessment()
     separated = replace(

@@ -7,23 +7,53 @@ import json
 import re
 from collections import Counter
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 from src.features.news_intake import constants as c
+from src.features.news_intake.claim_role import plan_role_parts
 from src.features.news_intake.models import GroundedNewsExcerpt, NewsCandidate, NewsCompanyContext
 from src.features.news_intake.identity_names import company_query_names, mentions_target
 from src.features.news_intake.select import normalize_company_name
-from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS, collector_slots_for
+from src.shared.report_claim_policy import claim_slots_for
+from src.shared.report_evidence.policy import (
+    REQUIRED_EVIDENCE_SECTION_IDS,
+    collector_slots_for,
+    injected_slots_for,
+)
 from src.shared.report_evidence.source_kind_policy import supplementary_slots_for_source_kind
+from src.shared.report_quality.supplementary_prose import NEWS_PROTECTED_SECTIONS
 
 
 ELIGIBLE_SECTIONS = tuple(section for section in REQUIRED_EVIDENCE_SECTION_IDS if section not in c.NEWS_EXCLUDED_SECTIONS)
-ALLOWED_SLOTS = {
-    section: tuple(slot for slot in collector_slots_for(section)
-                   if slot in supplementary_slots_for_source_kind(c.SOURCE_KIND_NEWS))
-    for section in ELIGIBLE_SECTIONS
-}
+_NEWS_SLOTS = supplementary_slots_for_source_kind(c.SOURCE_KIND_NEWS)
+
+
+def _allowed_slots(section: str) -> tuple[str, ...]:
+    """뉴스가 이 장에서 지원할 수 있는 칸 — 정본 주장 범주 ∩ 뉴스 보조 허용 목록.
+
+    ★ 예전에는 수집기 필수 칸(``collector_slots_for``)과 교집합을 해서, shared가
+      이미 뉴스에 허용한 4장 보조 칸(change_context·cumulative_change·change_limit)과
+      다른 장의 보조 칸을 모델이 고를 수 없었다. 4장 선택지가 완료 실행 하나뿐이라
+      회사 전체 실적 보도가 2장 수익 모델 칸으로 들어갔다(4차 실측).
+    ★ 구조화 검증기 주입 칸(4장 historical_performance 등)은 뉴스 허용 목록에도
+      없지만 여기서 한 번 더 명시적으로 뺀다 — 뉴스가 공식 실적 칸을 채우지 않는다.
+    ★ 뉴스 산문이 공개되지 않는 장(법인 정체)은 기존 수집 칸만 둔다. 공개되지
+      않을 칸을 늘려 기사당 인용 몫을 그쪽에 쓰게 하지 않는다.
+    """
+
+    base = (collector_slots_for(section) if section in NEWS_PROTECTED_SECTIONS
+            else claim_slots_for(section))
+    injected = frozenset(injected_slots_for(section))
+    return tuple(slot for slot in base if slot in _NEWS_SLOTS and slot not in injected)
+
+
+ALLOWED_SLOTS = {section: _allowed_slots(section) for section in ELIGIBLE_SECTIONS}
+_SECTION_GUIDE = dict(c.GROUNDED_SECTION_GUIDE)
+if set(_SECTION_GUIDE) != set(ELIGIBLE_SECTIONS) or len(_SECTION_GUIDE) != len(c.GROUNDED_SECTION_GUIDE):
+    raise ValueError("뉴스 장별 의미 안내가 뉴스 대상 장과 일치하지 않습니다")
+if c.ROLE_PERFORMANCE_TARGET_SLOT not in ALLOWED_SLOTS.get(c.ROLE_PERFORMANCE_TARGET_SECTION, ()):
+    raise ValueError("기간 실적 재배치 칸이 뉴스 허용 칸에 없습니다")
 
 
 def _enum(values: tuple[str, ...] | list[str]) -> dict[str, object]:
@@ -76,6 +106,10 @@ def build_grounded_schema(articles: list[tuple[NewsCandidate, str]]) -> dict[str
     return schema
 
 
+def _section_guide_text() -> str:
+    return " ".join(f"{section}={_SECTION_GUIDE[section]}" for section in ELIGIBLE_SECTIONS)
+
+
 def build_grounded_prompt(company: NewsCompanyContext, articles: list[tuple[NewsCandidate, str]], as_of: dt.date) -> str:
     payload = {
         "company": asdict(company), "verified_company_names": company_query_names(company),
@@ -107,6 +141,10 @@ def build_grounded_prompt(company: NewsCompanyContext, articles: list[tuple[News
         "추천기사, 쿠키/회원 안내, 검색 요약은 본문 근거가 아닙니다. 떨어진 문장을 합치지 마세요. "
         "좋은 원문이 없으면 빈 배열을 반환하세요. 숫자·단위·날짜도 그대로 보존하세요.\n"
         "4. 각 범위는 가장 적합한 section_id 한 개와 그 장의 claim_slot 한 개만 지원합니다. "
+        "매출·숫자·%라는 단어가 아니라 주장의 역할로 장을 고르세요. 장별 의미: "
+        + _section_guide_text() + " "
+        "한 연속 원문에 서로 다른 장의 사실(예: 회사 전체의 지난해 실적과 특정 제품의 성과)이 "
+        "함께 있으면 각 사실을 별도 범위로 나누세요. "
         "reported_fact(기자가 확인한 외부사실), company_statement(회사/대표의 명시 발언), "
         "company_plan(아직 실현되지 않은 회사 계획)을 구별하세요. 미래 계획은 temporal_status=planned이며 "
         "실행완료로 바꾸지 마세요. 5·6·8장의 발언은 대상 회사에 명시 귀속된 원문만 사용하세요. "
@@ -299,9 +337,46 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
     )
 
 
+def _apply_claim_role(excerpt: GroundedNewsExcerpt, time_evidence: str,
+                      company: NewsCompanyContext, as_of: dt.date,
+                      role_diagnostics: Counter[str] | None) -> tuple[GroundedNewsExcerpt, ...]:
+    """명백히 다른 장의 역할인 기간 실적만 4장 보조 칸으로 옮기거나 나눈다.
+
+    원문 글자·출처·위치는 그대로 두고 칸과 (나눴을 때) 연속 부분 범위만 바꾼다.
+    나눈 부분의 사건일은 그 부분 안에 날짜 원문이 있을 때만 남긴다.
+    """
+
+    parts = plan_role_parts(
+        excerpt.text, section_id=excerpt.section_id, claim_slot=excerpt.claim_slot,
+        temporal_status=excerpt.temporal_status, company=company,
+    )
+    if parts is None:
+        return (excerpt,)
+    if len(parts) == 1:
+        if role_diagnostics is not None:
+            role_diagnostics[c.ROLE_DIAGNOSTIC_REROUTED] += 1
+        return (replace(excerpt, section_id=parts[0].section_id, claim_slot=parts[0].claim_slot),)
+    if role_diagnostics is not None:
+        role_diagnostics[c.ROLE_DIAGNOSTIC_SPLIT] += 1
+    adjusted = []
+    for part in parts:
+        text = excerpt.text[part.start:part.end]
+        keeps_date = bool(excerpt.event_on) and _exact_date(
+            excerpt.event_on, time_evidence, text, excerpt.temporal_status, as_of,
+        )
+        adjusted.append(replace(
+            excerpt, text=text, section_id=part.section_id, claim_slot=part.claim_slot,
+            event_on=excerpt.event_on if keeps_date else "",
+            span_start=excerpt.span_start + part.start, span_end=excerpt.span_start + part.end,
+            split_from=excerpt.span_start,
+        ))
+    return tuple(adjusted)
+
+
 def _article_excerpts(item: dict[str, Any], candidate: NewsCandidate, body: str,
                       company: NewsCompanyContext, as_of: dt.date,
-                      excluded: Counter[str]) -> list[GroundedNewsExcerpt]:
+                      excluded: Counter[str],
+                      role_diagnostics: Counter[str] | None = None) -> list[GroundedNewsExcerpt]:
     """신원 검증 경로와 무관하게 출처·응답 구조·모든 인용 조건을 적용한다."""
     source_type = item["source_type"]
     if not isinstance(source_type, str):
@@ -320,7 +395,9 @@ def _article_excerpts(item: dict[str, Any], candidate: NewsCandidate, body: str,
     for raw_excerpt in raw_excerpts:
         excerpt = _excerpt(raw_excerpt, candidate, body, company, as_of, excluded)
         if excerpt is not None:
-            excerpts.append(excerpt)
+            excerpts.extend(_apply_claim_role(
+                excerpt, raw_excerpt["time_evidence"], company, as_of, role_diagnostics,
+            ))
     if not raw_excerpts:
         excluded["grounded_no_substantive_excerpt"] += 1
     return excerpts
@@ -329,6 +406,7 @@ def _article_excerpts(item: dict[str, Any], candidate: NewsCandidate, body: str,
 def validate_grounded_response(raw: object, *, articles: list[tuple[NewsCandidate, str]],
                                company: NewsCompanyContext, as_of: dt.date,
                                identity_diagnostics: Counter[str] | None = None,
+                               role_diagnostics: Counter[str] | None = None,
                                ) -> tuple[tuple[GroundedNewsExcerpt, ...], dict[str, int]]:
     excluded: Counter[str] = Counter()
     items = parse_grounded_payload(raw)
@@ -360,7 +438,9 @@ def validate_grounded_response(raw: object, *, articles: list[tuple[NewsCandidat
             continue
         identity_failure = _identity_failure(item["entity_evidence"], body, company)
         article_excluded: Counter[str] = Counter()
-        article_excerpts = _article_excerpts(item, candidate, body, company, as_of, article_excluded)
+        article_roles: Counter[str] = Counter()
+        article_excerpts = _article_excerpts(item, candidate, body, company, as_of, article_excluded,
+                                             article_roles)
         if identity_failure is not None:
             # 같은 기사의 독립 검증된 인용만 신원 근거를 대신할 수 있다.
             recovered = any(_identity_supported(excerpt.text, company) for excerpt in article_excerpts)
@@ -371,6 +451,9 @@ def validate_grounded_response(raw: object, *, articles: list[tuple[NewsCandidat
                 excluded["grounded_identity_unverified"] += 1
                 continue
         excluded.update(article_excluded)
+        if role_diagnostics is not None:
+            # 신원 복구에 실패해 버린 기사의 조정은 세지 않는다 — 실제 운반된 것만.
+            role_diagnostics.update(article_roles)
         excerpts.extend(article_excerpts)
     excluded["grounded_missing_result"] += len(set(by_id) - seen)
     return tuple(excerpts), {key: count for key, count in excluded.items() if count}

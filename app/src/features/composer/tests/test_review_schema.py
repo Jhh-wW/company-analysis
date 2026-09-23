@@ -15,7 +15,7 @@ import pytest
 from anthropic import transform_schema
 from jsonschema import Draft202012Validator
 
-from src.features.composer import diagram_check, verify
+from src.features.composer import diagram_check, review_schema, verify
 from src.features.composer.constants import RETRY_REMINDER
 from src.features.composer.grounding import constrain_verdicts, grounding_problem
 from src.features.composer.port import AskFatalError, CollectedFragment, ComposedSentence, FlowRow
@@ -88,13 +88,53 @@ def test_prompt_is_string_and_concatenation_preserves_schema_and_exact_bytes():
         prompt + 1
 
 
-@pytest.mark.parametrize("schema,expected", (
-    (FLAT_REVIEW_SCHEMA, "ec40152ca2ad8aa43192180dd0583bff4a6c3f5e52042ac1f2b915bc7fd0b94d"),
-    (DIAGRAM_REVIEW_SCHEMA, "ba1d778829286673bd6cde6ebb5d559274c78f0202b92d6e4128891736dfc1c8"),
-))
-def test_retry_schema_hash_matches_provider_accepted_schema(schema, expected):
+def _schema_sha(schema):
     encoded = json.dumps(schema, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    assert hashlib.sha256(encoded).hexdigest() == expected
+    return hashlib.sha256(encoded).hexdigest()
+
+
+# ★ 2026-09-23 정성 인식기준 근거 배열(«인식기준»)을 더했고, 이어서 관계 항목에
+#   결합 유형의 두 칸(«범위»·«관계»)을 더했다. 제공자가 실제로 문법을 컴파일해
+#   받아들인 값은 두 추가 «전» 해시(accepted)다. 새 스키마는 그 값에서 선택 배열
+#   하나와 선택 문자열 칸 두 개만 더한 것임을 아래에서 증명한다 — 새 스키마의
+#   제공자 컴파일 성공은 유료 호출 없이는 확인되지 않았으므로 «accepted»로 부르지
+#   않는다(current). recognition은 인식기준만 더한 직전 값이다.
+@pytest.mark.parametrize("schema,accepted,recognition,current", (
+    (FLAT_REVIEW_SCHEMA,
+     "ec40152ca2ad8aa43192180dd0583bff4a6c3f5e52042ac1f2b915bc7fd0b94d",
+     "ff4e031accf5776e3f189483531e5c5270bea8c8d1ec8cd6da75008384f901ab",
+     "bb974f18bc5d33def32725d9d6a401a3eb0265f878af6ac624bcb7ff2af966cf"),
+    (DIAGRAM_REVIEW_SCHEMA,
+     "ba1d778829286673bd6cde6ebb5d559274c78f0202b92d6e4128891736dfc1c8",
+     "43db498656efc5545d712fcc1f0c9893fe69fbd1f2dcca8a42a470c03e4bcb8a",
+     "5e650e7f2d7b91af0d6a9d45f632f0880accfd835b8c3d801207880d02660201"),
+))
+def test_retry_schema_hash_matches_provider_accepted_schema(schema, accepted, recognition, current):
+    assert _schema_sha(schema) == current
+    relation = schema["$defs"]["grounding"]["properties"]["관계"]["items"]
+    assert relation["properties"]["범위"] == relation["properties"]["관계"] == {"type": "string"}
+    assert relation["required"] == ["근거", "원문", "유형"]
+    assert relation["additionalProperties"] is False
+    previous = deepcopy(schema)
+    for key in ("범위", "관계"):
+        del previous["$defs"]["grounding"]["properties"]["관계"]["items"]["properties"][key]
+    assert _schema_sha(previous) == recognition
+    schema = previous
+    grounding = schema["$defs"]["grounding"]
+    assert grounding["properties"]["인식기준"] == {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {"표현": {"type": "string"}, "근거": {"type": "string"},
+                           "원문": {"type": "string"}},
+            "required": ["표현", "근거", "원문"],
+            "additionalProperties": False,
+        },
+    }
+    assert "인식기준" not in grounding["required"]
+    previous = deepcopy(schema)
+    del previous["$defs"]["grounding"]["properties"]["인식기준"]
+    assert _schema_sha(previous) == accepted
 
 
 @pytest.mark.parametrize("kind", REVIEW_KINDS)
@@ -111,11 +151,14 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
     assert prompt
 
 
+# 2026-09-23 공용 GROUNDING_GUIDE 끝에 «인식기준» 근거 안내 177자 추가. 그 177자만
+#   되돌리면 네 해시·도식 두 해시가 모두 직전 값(a87c264a·c39e729c·73a6b9f9·
+#   c9a8489a / a370eb2b·f769528b)과 같음을 재생해 확인했다(tmp 무과금 재생 기록).
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "932bbb0c3766856a9a5ad72284be92d2be310799559a3e458443146216fbb7de"),
-    (_golden_case, True, "e514adce8e826170e6774c43c36300a66618ca8d12f54f9d3ba3f6ee934759eb"),
-    (_boundary_case, False, "a3d40640d5ee2139066dd43a5f6d691d0657349da0b6e13263ae1de74c11c9b1"),
-    (_boundary_case, True, "9266901272c8817372917081e848d82323d84add65573e2e1711feeb16c78510"),
+    (_golden_case, False, "43903829e61c77a71c4573caf71e56f1835686c0316804b5fee478e5e932b3ed"),
+    (_golden_case, True, "c4a28d93298c40d1d1cef5a86e22d54aa074fbed1ca1b7e98afa02d21135041b"),
+    (_boundary_case, False, "5272127506f6f2231bd7602712734e2c78e8e9e569e65d1bfceb29dc79104c62"),
+    (_boundary_case, True, "176a4d84585e524765c36ff3ca76199880366d1b6c0f3eef029620f72b2d2813"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
     # de0a68e1의 원래 builder로 재생한 전체 UTF-8 프롬프트 해시다.
@@ -125,13 +168,15 @@ def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected)
     # 2026-09-22 회사 계획 귀속 안내 126자 추가: 옛 안내문만 복원하면 옛 해시와 같다.
     # 2026-09-23 평면 경로 REVIEW_JSON_GUIDE 에 «모든 번호를 빠짐없이 판정» 안내 88자 추가
     #   (뤼튼 실측 요청 50·응답 20). 묶음(grouped) 안내문은 그대로라 그쪽 해시는 같다.
+    # 2026-09-23 원칙/특례·제품 귀속·제외 주석·발표/실행 시점 안내 추가.
+    # 추가 안내만 제거한 4개 해시는 변경 직전 프롬프트와 같음을 재생해 확인했다.
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
 
 
 @pytest.mark.parametrize("items,expected", (
-    ((), "a370eb2bc54ccf413f01805ba1cd5ef083b0b5a0ce6e0084c9a0615a99c1eff1"),
-    (FLOW_ITEMS, "f769528b88dffc065e7bcfabb7953ffec183c28260ed80e499f392d19392a40f"),
+    ((), "4d9a30dd4be59739ee487d661b9f388d0f50bc30df1d9aa725390a86972191cc"),
+    (FLOW_ITEMS, "7a0baa2a1ca065230e04d05b2d8e56381c55c8a6ce809df65fd8112872d9a7e1"),
 ))
 def test_diagram_prompt_bytes_match_pre_schema_baseline(items, expected):
     prompt = diagram_check._review_prompt(items, {"1": TEXT})
@@ -278,8 +323,35 @@ def test_semantic_proof_failure_does_not_enable_native_retry():
     assert len(calls) == 1 and type(calls[0]) is str
 
 
+#: packet 스키마 스위치의 «소비 지점»(verify 가 이름을 가져다 쓴다).
+PACKET_SCHEMA_SWITCH = "src.features.composer.verify.PACKET_REVIEW_SCHEMA_ENABLED"
+
+
+def test_packet_schema_switch_is_off_by_default():
+    """packet 검수의 네이티브 스키마는 기본 꺼짐이다(2026-09-23 총괄 결정).
+
+    보관된 실제 공급자 호출 24건 모두 스키마 없이 나갔다 — 스키마 요청은 실제
+    공급자로 검증된 적이 없고, 거절되면 AskFatalError 로 요청 전체가 멈춘다.
+    켜려면 유료 실측으로 먼저 확인하고 이 기대값을 «함께» 바꾼다.
+    """
+    assert review_schema.PACKET_REVIEW_SCHEMA_ENABLED is False
+    assert verify.PACKET_REVIEW_SCHEMA_ENABLED is False
+
+
+@pytest.mark.parametrize("schema_enabled", (False, True), ids=("schema-off", "schema-on"))
 @pytest.mark.parametrize("raw", ("invalid", '{"판정":[]}'))
-def test_grouped_does_not_add_retry_or_fallback(raw):
+def test_grouped_retries_once_and_then_fails_closed_without_fallback(
+    monkeypatch, raw, schema_enabled,
+):
+    """2026-09-23 — packet 도 평문과 같은 형식 재요청 1회. 그 뒤에는 숨은 3차 호출이 없다.
+
+    예전 «1회 고정»에서는 JSON 한 글자 오류로 판정 42행이 통째로 사라졌다
+    (`test_grouped_review_resilience.py`). 첫 요청은 initial_ask 가 없으므로
+    예전처럼 표식 없는 문자열이고, 재요청은 같은 글자 + 형식 상기문이다. 재요청의
+    스키마는 스위치(기본 꺼짐)를 따른다.
+    """
+    if schema_enabled:
+        monkeypatch.setattr(PACKET_SCHEMA_SWITCH, True)
     calls = []
 
     def ask(prompt):
@@ -287,9 +359,12 @@ def test_grouped_does_not_add_retry_or_fallback(raw):
         return raw
 
     assert verify._ask_grouped_verdicts(ask, GROUPED_ITEMS, FRAGMENTS, None) is None
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert type(calls[0]) is str
     assert getattr(calls[0], "response_schema", None) is None
+    assert calls[1] == calls[0] + RETRY_REMINDER
+    expected = FLAT_REVIEW_SCHEMA if schema_enabled else None
+    assert getattr(calls[1], "response_schema", None) is expected
 
 
 @pytest.mark.parametrize("rewrite", (False, True))
@@ -537,3 +612,120 @@ def test_malformed_numeric_proof_is_rejected_by_schema_and_semantics(schema_vali
     row = {"번호": 1, "결과": "참", "검증근거": {"수치": entries}}
     assert not schema_validator(FLAT_REVIEW_SCHEMA).is_valid(_native_response([row], FLAT_REVIEW_SCHEMA))
     assert grounding_problem(numeric_fixture._THREE_YEAR_TEXT, numeric_fixture._THREE_YEAR_SOURCE, row)
+
+
+# ══════════════════════════════════════════════════════════
+# 결합(수량 범위 결속) 항목 — 안내문대로 쓴 항목이 실제 공급자 스키마를 통과하고
+# 실제 파서·가드까지 가서 원문 결속으로만 승인되는가
+# ══════════════════════════════════════════════════════════
+
+_COMBINED_CLAIM = "당사는 32개 협력사로부터 부품을 납품받는다."
+_COMBINED_SOURCE = "당사는 32개 협력사로부터 부품을 납품받습니다."
+_COMBINED_ITEM = {"근거": "1", "범위": "32개", "관계": "납품",
+                  "원문": "당사는 32개 협력사로부터 부품을 납품받", "유형": "결합"}
+
+
+def _combined_payload(schema, *relations):
+    row = {"번호": 1, "장": "identity", "근거": ["1"], "결과": "참",
+           "검증근거": {"관계": list(relations)}}
+    return _native_response([row], schema)
+
+
+def _assert_fits(schema_validator, schema, payload):
+    schema_validator(schema).validate(payload)
+    schema_validator(transform_schema(schema)).validate(payload)
+
+
+@pytest.mark.parametrize("schema", SCHEMAS, ids=SCHEMA_NAMES)
+def test_combined_item_from_the_guide_fits_actual_provider_schemas(schema_validator, schema):
+    """안내문(combined_relation_constants)이 요구하는 다섯 칸 그대로 — 기존 원인·역할 항목과 함께."""
+    from src.features.composer.combined_relation_constants import (
+        COMBINED_RELATION_REVIEW_GUIDE_OBSERVED,
+    )
+
+    for key in _COMBINED_ITEM:
+        assert f'"{key}"' in COMBINED_RELATION_REVIEW_GUIDE_OBSERVED
+    cause = {"근거": "1", "원문": "공급 차질로 납기가 지연됐다.", "유형": "인과",
+             "원인": "공급 차질", "결과": "납기 지연"}
+    role = {"근거": "1", "원문": "가람 서비스는 수수료를 부과한다.", "유형": "과금",
+            "대상": "가람 서비스", "역할값": "수수료"}
+    _assert_fits(schema_validator, schema, _combined_payload(schema, _COMBINED_ITEM, cause, role))
+    assert transform_schema(schema) == schema  # SDK 정규화도 두 칸을 그대로 둔다
+
+
+@pytest.mark.parametrize("schema", SCHEMAS, ids=SCHEMA_NAMES)
+@pytest.mark.parametrize("defect", (
+    {"범휘": "32개"},            # 칸 이름 오타 — 알 수 없는 키
+    {"관계어": "납품"},          # 칸 이름 오타
+    {"비고": "추가 설명"},       # 알 수 없는 키
+    {"범위": 32},               # 문자열이 아님
+    {"관계": None},             # null 불허
+    {"유형": "결함"},           # 유형 enum 오타
+))
+def test_combined_item_typos_and_unknown_keys_stay_rejected(schema_validator, schema, defect):
+    item = {**_COMBINED_ITEM, **defect}
+    payload = _combined_payload(schema, item)
+    assert not schema_validator(schema).is_valid(payload)
+    assert not schema_validator(transform_schema(schema)).is_valid(payload)
+
+
+@pytest.mark.parametrize("schema", SCHEMAS, ids=SCHEMA_NAMES)
+@pytest.mark.parametrize("missing", ("근거", "원문", "유형"))
+def test_combined_item_keeps_relation_required_fields(schema_validator, schema, missing):
+    item = {key: value for key, value in _COMBINED_ITEM.items() if key != missing}
+    assert not schema_validator(schema).is_valid(_combined_payload(schema, item))
+
+
+def test_schema_valid_combined_item_reaches_parser_and_guard_with_source_binding(schema_validator):
+    """실제 파서(support_entries_by_number)가 항목을 그대로 가드에 넘기고, 가드는 원문과 대조한다."""
+    from src.features.composer.combined_relation_constants import (
+        COMBINED_SCOPE_QUOTE_NOT_IN_SOURCE, COMBINED_SCOPE_RANGE_NOT_IN_QUOTE,
+        COMBINED_SCOPE_SOURCE_NOT_CITED,
+    )
+    from src.features.composer.combined_relation_guard import combined_relation_report
+    from src.features.composer.direct_support import support_entries_by_number
+
+    sources = {"1": _COMBINED_SOURCE}
+    cases = (
+        (_COMBINED_ITEM, ""),
+        ({**_COMBINED_ITEM, "원문": "당사는 32개 협력사로부터 부품을 공급받"},
+         COMBINED_SCOPE_QUOTE_NOT_IN_SOURCE),
+        ({**_COMBINED_ITEM, "범위": "40개"}, COMBINED_SCOPE_RANGE_NOT_IN_QUOTE),
+        ({**_COMBINED_ITEM, "근거": "2"}, COMBINED_SCOPE_SOURCE_NOT_CITED),
+    )
+    for item, expected in cases:
+        payload = _combined_payload(FLAT_REVIEW_SCHEMA, item)
+        _assert_fits(schema_validator, FLAT_REVIEW_SCHEMA, payload)  # 모양은 모두 합법
+        entries = support_entries_by_number(json.dumps(payload, ensure_ascii=False))[1]
+        assert entries["관계"] == [item]
+        report = combined_relation_report(_COMBINED_CLAIM, sources, entries)
+        assert report.triggers and report.problem == expected
+
+
+def test_allowing_the_fields_does_not_approve_evidence_in_enforced_verdicts(schema_validator, monkeypatch):
+    """스위치를 임시로 켜 실제 판정 경로(constrain_verdicts)를 부른다. 칸을 허용했다고
+    승인되지 않는다 — 원문 결속이 맞는 결합 항목만 «참»을 지킨다."""
+    from src.features.composer.combined_relation_constants import (
+        COMBINED_SCOPE_EVIDENCE_MISSING, COMBINED_SCOPE_QUOTE_NOT_IN_SOURCE,
+    )
+    from src.features.composer.grounding_constants import REVIEW_GROUNDING_REJECTED
+
+    monkeypatch.setattr(
+        "src.features.composer.combined_relation_guard.COMBINED_RELATION_ENFORCED", True)
+    candidates = {1: (_COMBINED_CLAIM, {"1": _COMBINED_SOURCE})}
+    cases = (
+        (_COMBINED_ITEM, "참", None),
+        ({**_COMBINED_ITEM, "원문": "당사는 32개 협력사로부터 부품을 공급받"},
+         REVIEW_GROUNDING_REJECTED, COMBINED_SCOPE_QUOTE_NOT_IN_SOURCE),
+        # 결합 칸을 달았어도 유형이 결합이 아니면 결합 근거가 아니다.
+        ({**_COMBINED_ITEM, "유형": "역할"}, REVIEW_GROUNDING_REJECTED, COMBINED_SCOPE_EVIDENCE_MISSING),
+    )
+    for item, verdict, problem in cases:
+        payload = _combined_payload(FLAT_REVIEW_SCHEMA, item)
+        _assert_fits(schema_validator, FLAT_REVIEW_SCHEMA, payload)
+        constrained, problems = constrain_verdicts(
+            json.dumps(payload, ensure_ascii=False), {1: "참"}, candidates,
+            confirmed_prose_numbers=frozenset({1}),
+        )
+        assert constrained[1] == verdict
+        assert problems.get(1) == problem

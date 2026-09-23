@@ -43,6 +43,27 @@ def _point(period: str, metric: str, value: str) -> dict[str, str]:
     }
 
 
+def test_numeric_detail_identifies_exact_quote_failure_without_weakening_validation():
+    text = "매출액 10억원이다."
+    source = "매출액 10억원이다."
+    good = _numeric("매출액 10억원", "매출액", source, "10억원")
+    detail = {}
+    assert grounding_problem(text, {"공시": source}, {"검증근거": {NUMERIC_KEY: [good]}}, detail=detail) == ""
+    assert detail == {}
+    bad = {**good, "원문": "매출액 11억원이다."}
+    assert grounding_problem(text, {"공시": source}, {"검증근거": {NUMERIC_KEY: [bad]}}, detail=detail) == GROUNDING_INVALID
+    assert detail == {"version": "grounding-detail-v1", "check_kind": "수치", "stage": "quote_not_bound", "entry_index": 0}
+
+
+def test_numeric_detail_keeps_value_mismatch_rejected():
+    text = "매출액 10억원이다."
+    source = "매출액 12억원이다."
+    detail = {}
+    entry = _numeric("매출액 10억원", "매출액", source, "12억원")
+    assert grounding_problem(text, {"공시": source}, {"검증근거": {NUMERIC_KEY: [entry]}}, detail=detail) == GROUNDING_INVALID
+    assert detail["stage"] == "value_mismatch"
+
+
 def test_woori_fee_continuous_growth_is_rejected_by_all_observations() -> None:
     text = "2025년 수수료부문 수익 7,807억원은 지속적으로 확대되고 있다."
     source = (

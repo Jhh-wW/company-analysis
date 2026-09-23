@@ -3,10 +3,8 @@
 import hashlib
 import json
 from dataclasses import replace
-from pathlib import Path
 import re
 
-from jinja2 import Environment
 import pytest
 
 from src.features.composer.constants import DART_FINANCIAL_API_PREFIX
@@ -14,6 +12,12 @@ from src.features.composer.render import _build_source, _fragment_metas
 from src.features.provenance.sources import has_valid_provenance_seal, source_status_display
 from src.features.storage.reports import _citation_from_dict, _citation_to_dict
 from src.features.export_pdf.logic import _source_status
+from src.features.pipeline.port import Grade, Report, ReportSection
+from src.features.report_standard.constants import SECTION_SPECS
+from src.features.report_standard.public_projection import build_public_projection
+from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
+from src.web.tests.test_empty_section_display import render_result
+from src.web.tests._visible_text import visible_text
 
 
 @pytest.mark.parametrize("disclosed,collected,label", [
@@ -33,9 +37,21 @@ def test_stored_source_signature_and_both_displays_preserve_date_meaning(disclos
     assert restored.exact_evidence_hashes == [hashlib.sha256(text.encode()).hexdigest()]
     assert _source_status(restored).startswith(label)
     assert not has_valid_provenance_seal(replace(restored, disclosed_at="2026-03-19"))
-    # 2026-09-22: 웹 템플릿의 날짜 분기 두 곳이 세 채널 공용 도우미
-    # ``source_status_display(c)`` 호출로 바뀌었다. 템플릿이 그 도우미를 두 곳에서
-    # 쓰는지와, 도우미가 같은 날짜 뜻을 내는지를 나눠 확인한다. 네트워크나 앱 설정은 없다.
-    path = Path(__file__).resolve().parents[1] / "templates/result.html"
-    assert path.read_text(encoding="utf-8").count("source_status_display(c)") == 2
     assert source_status_display(restored).startswith(label)
+    report = Report(
+        company="시험법인", job="", corp_type="", grade=Grade.PARTIAL,
+        citations=[restored],
+        sections=[ReportSection(spec.section_id, spec.title, display_number=spec.display_number)
+                  for spec in SECTION_SPECS],
+    )
+    v2 = replace(report, schema_version=ENGINE_V2_SCHEMA_VERSION)
+    sealed = replace(v2, public_projection=build_public_projection(v2))
+    # 호출 횟수 대신 v1·v2·봉인 표시의 실제 부록 행에서 날짜와 그 뜻을 확인한다.
+    for variant in (report, v2, sealed):
+        html = render_result(variant)
+        row = re.search(r'<tr id="src7">(.*?)</tr>', html, flags=re.DOTALL)
+        assert row is not None
+        text = visible_text(row.group(0))
+        assert label in text
+        if disclosed:
+            assert collected not in text, "공시일 대신 수집일을 표시하면 안 됩니다"

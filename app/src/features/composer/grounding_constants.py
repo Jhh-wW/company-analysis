@@ -13,6 +13,10 @@ GROUNDING_SOURCE_FIELD = "근거"
 NUMERIC_KEY = "수치"
 TREND_KEY = "추세"
 TIME_KEY = "시점"
+#: 정성 «수익 인식 기준» 단정의 정확 인용 요구(4차 채택안). 완료·진행 기준을
+#: 단정한 절만 대상이다 — 일반 용어 정의·사업 서술·모든 정성 문장으로
+#: 넓히지 않는다(발동 범위는 grounding._recognition_basis_clauses 한 곳).
+RECOGNITION_KEY = "인식기준"
 GROUNDING_MISSING = "semantic_grounding_missing"
 GROUNDING_INVALID = "semantic_grounding_invalid"
 MIN_TREND_POINTS = 2
@@ -263,4 +267,8 @@ GROUNDING_GUIDE = (
     "원문: 활동기간을 포함한 정확 인용, 기간: 네 자리 활동연도 또는 원문에 "
     "명시된 현재}]. 과거 평가·성과·완료 사건을 현재 진행으로 바꾸지 않는다. "
     "원문이 현재 상태를 직접 말하거나 뒷받침한 계획·해석은 유지한다.\n"
+    "인식기준: [{표현: 후보에서 수익 인식 기준(완료·진행)을 단정한 정확 구절, "
+    "근거: 인용 조각 ID, 원문: 같은 수익원에 그 기준·조건이 그대로 있는 정확 "
+    "인용}]. 원문에 없는 기준, 다른 수익원의 기준, 빠지거나 바뀐 기간 조건은 "
+    "승인하지 않는다. 기준을 단정한 절마다 원문 인용이 그 기준을 담아야 한다.\n"
 )

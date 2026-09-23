@@ -20,7 +20,7 @@ def test_캡션과_표지_기간에_미감사_연도를_한_번만_붙인다():
     period = analysis_period_with_audit_status(
         "2024~2025 완료 회계연도", SimpleNamespace(unaudited_years=("2024",))
     )
-    assert period == "2024~2025 완료 회계연도 (2024년 미감사)"
+    assert period == "2024~2025 완료 회계연도 (2024년은 감사받지 않은 비교 재무제표)"
     assert analysis_period_with_audit_status(period, SimpleNamespace(unaudited_years=("2024",))) == period
     assert analysis_period_with_audit_status("그대로", SimpleNamespace()) == "그대로"
 

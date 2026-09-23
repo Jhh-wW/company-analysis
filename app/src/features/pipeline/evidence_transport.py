@@ -63,6 +63,7 @@ from src.shared.report_evidence.source_kind_policy import (
     formal_source_writer_ineligibility_reason,
     supplementary_slots_for_source_kind,
 )
+from src.shared.report_evidence.transport_kind import TYPED_TRANSPORT_KIND_PREFIX
 from src.shared.report_quality.source_identity import (
     bind_declared_document_identity_to_url,
     collected_document_identity,
@@ -103,8 +104,6 @@ RAW_EVIDENCE_DOMAIN_REDIRECT_FROM_HOST_KEY: Final[str] = (
 RAW_EVIDENCE_DOMAIN_REDIRECT_TO_HOST_KEY: Final[str] = (
     "_evidence_domain_redirect_to_host"
 )
-
-TYPED_TRANSPORT_KIND_PREFIX: Final[str] = "typed-evidence-v3:"
 
 _RCEPT_NO_RE: Final[re.Pattern[str]] = re.compile(r"[0-9]{14}")
 _COMPANY_ID_RE: Final[re.Pattern[str]] = re.compile(r"[0-9]{8}")

@@ -387,19 +387,21 @@ def _approval(calls: list):
 @pytest.mark.parametrize("section_id", tuple(SECTION_BLOCKED_TEXTS))
 def test_verify_report가_모든_장_본문에서_회계정책_상용구를_뺀다(section_id: str):
     blocked = SECTION_BLOCKED_TEXTS[section_id]
+    keep = ("회사는 모듈형 소프트웨어 설계를 자사 제품의 강점으로 설명한다."
+            if section_id == "competitive_position" else KEEP_TEXT)
     report = ComposedReport((ComposedSection(section_id, (
         ComposedSentence(blocked, ("policy",), "확인"),
-        ComposedSentence(KEEP_TEXT, ("fact",), "확인"),
+        ComposedSentence(keep, ("fact",), "확인"),
     )),))
     fragments = (
         CollectedFragment("policy", "회계정책 주석", blocked),
-        CollectedFragment("fact", "사업의 개요", KEEP_TEXT),
+        CollectedFragment("fact", "사업의 개요", keep),
     )
     calls, diagnostics = [], []
     checked = verify_report(
         report, fragments, None, _approval(calls), diagnostics=diagnostics,
     )
-    assert [s.text for s in checked.sections[0].sentences] == [KEEP_TEXT]
+    assert [s.text for s in checked.sections[0].sentences] == [keep]
     assert len(calls) == 1, "추가 AI 호출이 생기면 안 된다"
     # 사유가 남아야 «왜» 빠졌는지 되짚을 수 있다. 원문은 남지 않는다.
     assert [d["reason_code"] for d in diagnostics] == [EXPECTED_REASON]

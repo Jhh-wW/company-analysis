@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Final
 
@@ -39,11 +41,26 @@ def citation_number(cite: str | None) -> str:
     return str(number) if number > 0 else ""
 
 
+_SQUARE_MARKERS: ContextVar[bool] = ContextVar("square_citation_markers", default=False)
+
+
+@contextmanager
+def citation_display_style(*, square: bool):
+    """동시 렌더 요청을 섞지 않고 새 v2 인용 표기만 통일한다."""
+    token = _SQUARE_MARKERS.set(square)
+    try:
+        yield
+    finally:
+        _SQUARE_MARKERS.reset(token)
+
+
 def citation_marker(cite: str | None) -> str:
     """워드·노션 본문에 붙일 ``〔실제 번호〕``를 만든다."""
 
     number = citation_number(cite)
-    return f"〔{number}〕" if number else ""
+    if not number:
+        return ""
+    return f"[{number}]" if _SQUARE_MARKERS.get() else f"〔{number}〕"
 
 
 #: 본문 문자열에 박힌 인용 표기 `[12]`. render.py가 넣은 것과 같은 모양이다.
@@ -133,3 +150,10 @@ def location_display(location: str) -> str:
     if matched is None:
         return location
     return matched.group("prefix")
+
+
+def reader_location_display(location: str) -> str:
+    """새 표시 블록에서 내부 문자 범위를 독자용 위치로 바꾼다."""
+    if re.fullmatch(r"(?:본문|기사 본문)?\s*(?:·\s*)?(?:(?:평문\s*)?문자\s*)?\d+\s*[-~–:]\s*\d+", location.strip()):
+        return "본문 발췌"
+    return location_display(location)

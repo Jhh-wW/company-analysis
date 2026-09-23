@@ -5,7 +5,9 @@ from dataclasses import replace
 
 from src.features.composer.constants import GRADE_INTERPRETED
 from src.features.composer.port import ComposedReport, ComposedSection, ComposedSentence
-from src.features.composer.quality_projection import build_generation_quality_candidate
+from src.features.composer.quality_projection import (
+    build_generation_quality_candidate, select_bound_public_sentences,
+)
 from src.features.pipeline.port import (
     FactRecord,
     Grade,
@@ -138,6 +140,28 @@ def test_일반산문과_추출식요약을_같은_사실ID에_결속한다() ->
     assert candidate.facts[0].supporting_source_ids == ("v2-frag-1",)
     assert candidate.sources[0].exact_evidence_hashes
     assert candidate.sources[0].document_content_sha256 == "c" * 64
+
+
+def test_canonical_filter_preserves_bound_text_and_clears_stale_summary():
+    sentence, _source_value, fact, composed, rendered = _inputs()
+    changed = replace(sentence, text=sentence.text + " 추가 주장이 있다.")
+    composed = replace(composed, sections=(ComposedSection("business_model", (sentence, changed, sentence)),))
+    selected = select_bound_public_sentences(composed, rendered)
+    assert selected.report.sections[0].sentences == (sentence,)
+    assert selected.report.summary == ()
+    assert selected.fact_ids == (fact.fact_id,)
+    assert tuple(item.reason_code for item in selected.excluded) == (
+        "public_sentence_fact_unbound", "public_sentence_fact_duplicate",
+    )
+    assert all(len(item.candidate_sha256) == 64 for item in selected.excluded)
+
+
+def test_canonical_filter_requires_rendered_section_ownership():
+    _sentence_value, _source_value, _fact_value, composed, rendered = _inputs()
+    rendered.sections[0].fact_ids.clear()
+    selected = select_bound_public_sentences(composed, rendered)
+    assert selected.report.sections[0].sentences == ()
+    assert selected.excluded[0].reason_code == "public_sentence_fact_unbound"
 
 
 def test_비교프로그램의_구조필드는_최종품질DTO까지_손실없이_간다() -> None:

@@ -70,6 +70,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     failures = [code for code in snapshot.reason_codes if code not in c.SEARCH_BUDGET_REASON_CODES]
     warnings: Counter[str] = Counter()
     identity_diagnostics: Counter[str] = Counter()
+    role_diagnostics: Counter[str] = Counter()
     budget_codes: list[str] = [code for code in snapshot.reason_codes if code in c.SEARCH_BUDGET_REASON_CODES]
     stages: Counter[str] = Counter()
     body_articles = 0
@@ -82,7 +83,12 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     analysis_provider_unobserved = 0
     relevant_articles: set[str] = set()
     document_hashes: dict[str, str] = {}
-    seen_body_hashes: set[str] = set()
+    # 본문 중복의 신원은 (정규화 본문, 발행일)이다 — 같은 본문도 발행일이 다르면
+    # «지난해» 같은 상대 시점의 뜻이 달라질 수 있어 분석 전에 지우지 않는다.
+    seen_body_dates: dict[str, set[str]] = {}
+    # 먼저 읽은 기사와 본문이 같은 다른 발행일 재게시 — 조각은 보존하되 기존
+    # 충분성은 이 기사를 새 기사로 세지 않았으므로 충분성에서만 세지 않는다.
+    republished_urls: set[str] = set()
     seen_urls: set[str] = set()
     all_excerpts: list[GroundedNewsExcerpt] = []
     windows: list[int] = []
@@ -114,6 +120,10 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         company=company, policy=policy, as_of=as_of, fetch_text=fetch_text, budget=call_pool,
         deadline=deadline, clock=clock, stop_event=lane.stop_event, host_slots=lane.host_slots,
     )
+
+    def sufficient() -> bool:
+        """조기 중단과 최종 판정이 함께 쓰는 유일한 충분성 평가 — 입력 정의도 같다."""
+        return evidence_is_sufficient(all_excerpts, policy, frozenset(republished_urls))
 
     def analyze_batch(batch: list[tuple[NewsCandidate, str]]) -> None:
         nonlocal analysis_calls, prompt_chars, response_chars, stopped, analysis_cache_hits
@@ -174,6 +184,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                 response = None
         excerpts, rejected = validate_grounded_response(
             response, articles=batch, company=company, as_of=as_of, identity_diagnostics=identity_diagnostics,
+            role_diagnostics=role_diagnostics,
         )
         excluded.update(rejected)
         if any(code in rejected for code in ("grounded_invalid_response", "grounded_invalid_item", "grounded_missing_result")):
@@ -185,10 +196,13 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                    batch: list[tuple[NewsCandidate, str]]) -> None:
         nonlocal body_chars, stopped
         normalized_hash = exact_text_sha256("".join(full_body.split()).casefold())
-        if normalized_hash in seen_body_hashes:
+        published_dates = seen_body_dates.setdefault(normalized_hash, set())
+        if candidate.published_on in published_dates:
             excluded["duplicate_article_body"] += 1
             return
-        seen_body_hashes.add(normalized_hash)
+        if published_dates:
+            republished_urls.add(candidate.source_url)
+        published_dates.add(candidate.published_on)
         available = min(policy.max_body_chars, policy.max_total_body_chars - body_chars)
         body = full_body[:available]
         if len(body) < c.GROUNDED_MIN_EXCERPT_CHARS:
@@ -212,7 +226,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
 
     try:
         for months, reserved_window_budget in reserved_window_budgets.items():
-            if stopped or evidence_is_sufficient(all_excerpts, policy):
+            if stopped or sufficient():
                 break
             windows.append(months)
             candidates = candidates_by_window[months]
@@ -243,7 +257,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             def plan_more() -> None:
                 nonlocal plan_index, examined, body_articles, in_flight, pending_carried, planning_halted, stopped
                 while plan_index < len(ranked_candidates) and not planning_halted:
-                    if stopped or evidence_is_sufficient(all_excerpts, policy):
+                    if stopped or sufficient():
                         return
                     # 다음 분석 호출이 불가능하면 사용할 수 없는 본문도 요청하지 않는다.
                     # 마지막 묶음으로 모든 후보를 처리한 경우에는 이 분기에 들어오지 않는다.
@@ -307,7 +321,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                 if not planned:
                     break
                 item = planned.popleft()
-                if stopped or evidence_is_sufficient(all_excerpts, policy):
+                if stopped or sufficient():
                     planned.appendleft(item)
                     break
                 if item.kind == c.PLANNED_CARRIED:
@@ -421,7 +435,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         document_content_sha256=document_hashes[url],
         excerpts=tuple(item for item in chosen if item.candidate.source_url == url),
     ) for url in chosen_urls)
-    enough = evidence_is_sufficient(list(chosen), policy)
+    enough = sufficient()
     incomplete_codes = tuple(code for code in excluded if excluded[code] and (
         code.startswith("grounded_invalid_") or code in {
             "grounded_text_not_exact", "grounded_missing_result", "grounded_unknown_or_duplicate_id",
@@ -465,6 +479,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         },
         "검증된이름변형": derived_company_names(company),
         "법인검증상세": dict(identity_diagnostics),
+        # 2장에 배정된 기간 실적을 4장 보조 칸으로 옮기거나 나눈 수(관측값).
+        "주장역할조정": dict(role_diagnostics),
         "메타이름일치후보": sum(item.metadata_name_match for item in snapshot.candidates),
         "메타이름비일치후보": sum(not item.metadata_name_match for item in snapshot.candidates),
         "이름미확인후보": excluded.get("grounded_identity_unverified", 0),

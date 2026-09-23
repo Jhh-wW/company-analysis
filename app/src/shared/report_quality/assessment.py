@@ -44,6 +44,9 @@ from src.shared.report_quality.supplementary_prose import reviewed_news_prose_pr
 
 
 from src.shared.report_quality.numeric_detection import has_public_numeric_token
+from src.shared.report_quality.optional_sections import (
+    OPTIONAL_SECTIONS_VERSION, OptionalSectionObservation,
+)
 
 
 def _fact_registry(candidate: ReportCandidate) -> tuple[dict[str, ClaimFact], list[str]]:
@@ -383,6 +386,7 @@ def assess_quality(
     section_counts: list[tuple[str, int]] = []
     section_interpretation_counts: list[tuple[str, int]] = []
     public_sentence_counts: list[tuple[str, int]] = []
+    optional_sections: list[OptionalSectionObservation] = []
     public_fact_ids: list[str] = []
     notice_only: list[str] = []
     one_claim: list[str] = []
@@ -465,6 +469,19 @@ def assess_quality(
     for section in candidate.sections:
         if section.section_id in contract.required_section_ids:
             continue
+        optional_fact_ids = tuple(
+            fact_id for fact_id in dict.fromkeys(section.fact_ids) if fact_id in facts
+        )
+        optional_sections.append(OptionalSectionObservation(
+            section_id=section.section_id,
+            public_sentence_count=(
+                len(optional_fact_ids) if section.public_sentence_count is None
+                else max(0, int(section.public_sentence_count))
+            ),
+            bound_fact_ids=optional_fact_ids,
+            notice_only=section.notice_only,
+            has_unbound_public_content=section.has_unbound_public_content,
+        ))
         public_fact_ids.extend(
             fact_id
             for fact_id in dict.fromkeys(section.fact_ids)
@@ -674,6 +691,8 @@ def assess_quality(
             else ()
         ),
         problem_codes=tuple(dict.fromkeys(problem_codes)),
+        optional_sections_version=OPTIONAL_SECTIONS_VERSION,
+        optional_sections=tuple(optional_sections),
     )
 
 

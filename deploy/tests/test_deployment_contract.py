@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -567,22 +568,37 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
     assert "Render 기본 30초" in runbook
     assert "Uvicorn HTTP 요청 정리 최대 20초" in runbook
     normalized_runbook = " ".join(runbook.split())
-    # ★ 배포 수단은 서비스 화면의 Manual Deploy «하나»다. 이 서비스의 Blueprint 는
-    #   지금 저장소를 가리키지 않아 Sync 가 «실패»하고, 새로 만들면 기존 서비스를
-    #   넘겨받지 않고 접미사 붙은 복제 서비스가 생긴다. 런북이 다시 Sync 를 지시하면
-    #   출시 당일 배포가 막히므로 두 문장을 함께 못 박는다.
-    assert "Manual Deploy → Deploy latest commit" in normalized_runbook, (
-        "배포 수단이 서비스 화면의 Manual Deploy 라는 것이 적혀 있어야 한다"
+    # ★ 배포 수단은 main 머지다. 2026-09-06 부터 Auto-Deploy 가 `On Commit` 이라 main 에
+    #   머지된 커밋이 곧 배포된다. 문서가 이렇게 말하는 근거는 render.yaml 의
+    #   `autoDeployTrigger: commit` 이므로 값과 문장을 함께 못 박는다. 옛 수단(서비스
+    #   화면의 Manual Deploy)은 «과거» 기록으로만 남고, 그 기록은 아래
+    #   `test_과거_Manual_Deploy_기록을_지우면_실패한다` 가 지킨다.
+    assert web_service["autoDeployTrigger"] == "commit", (
+        "문서의 «main 머지 = 배포»는 이 값이 근거다 — 바꾸면 런북·안내서도 함께 고쳐라"
     )
+    for current_phrase in (
+        "main 머지로 새 커밋을 올린다",
+        "현재(2026-09-06 부터)는 main 머지가 곧 배포다",
+    ):
+        assert current_phrase in normalized_runbook, (
+            f"런북 §6 3번에 현재 배포 수단이 적혀 있어야 한다: {current_phrase}"
+        )
+    assert "이것이 유일한 배포 수단이다" not in normalized_runbook, (
+        "Manual Deploy 를 지금의 유일한 배포 수단으로 적던 옛 현재형 문장이 되살아났다"
+    )
+    # ★ 이 서비스의 Blueprint 는 지금 저장소를 가리키지 않아 Sync 가 «실패»하고, 새로
+    #   만들면 기존 서비스를 넘겨받지 않고 접미사 붙은 복제 서비스가 생긴다. 런북이
+    #   다시 Sync 를 지시하면 출시 당일 배포가 막힌다.
     assert (
         "Blueprint 의 Manual Sync / Deploy Blueprint 는 실행하지 않는다"
         in normalized_runbook
     ), "Blueprint Sync 는 실패하므로 런북이 누르지 말라고 해야 한다"
     # ★ 순서가 계약이다. 값을 먼저 올리면 «옛 코드»가 새 판정으로 도는 창이 생기고
     #   연습 모드에서 만든 캐시를 재사용할 수 있다. 문장이 있는지가 아니라
-    #   «어느 것이 먼저 나오는지»를 본다.
+    #   «어느 것이 먼저 나오는지»를 본다. 첫 단계는 현재 구절(main 머지)의 위치로
+    #   본다 — 과거 기록 문장이 순서 판정을 대신 채우지 않게 하기 위해서다.
     for 순서_문장 in (
-        "새 커밋을 올린다",
+        "main 머지로 새 커밋을 올린다",
         "commit 값이 방금 올린 커밋인지 확인한다",
         "Environment 탭",
     ):
@@ -590,10 +606,10 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
             f"배포 순서 문장이 런북에서 사라졌다: {순서_문장}"
         )
     assert (
-        normalized_runbook.index("새 커밋을 올린다")
+        normalized_runbook.index("main 머지로 새 커밋을 올린다")
         < normalized_runbook.index("commit 값이 방금 올린 커밋인지 확인한다")
         < normalized_runbook.index("Environment 탭")
-    ), "Manual Deploy → /healthz 확인 → Environment 탭 편집 순서를 지켜야 한다"
+    ), "main 머지 → /healthz 확인 → Environment 탭 편집 순서를 지켜야 한다"
     # 출시에서 «무엇을» 편집하는지도 런북에 있어야 한다 — 이름이 빠지면 배포자가
     # 대시보드에서 어느 값을 고쳐야 하는지 알 수 없다.
     assert "REPORT_RELEASE_MODE=FULL" in normalized_runbook
@@ -620,11 +636,23 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
     # 옛 지시(Blueprint 에서 Sync 를 실행하라)가 되살아나면 배포가 다시 막힌다.
     assert "Deploy Blueprint**를 실행한다" not in normalized_render_guide
     assert "Deploy Blueprint**를 한 번 실행한다" not in normalized_render_guide
+    # 안내서도 현재 배포 수단(main 머지)을 말해야 한다. 자동 배포가 꺼져 있다던 옛
+    # 현재형 서술이 되살아나면 배포자가 머지 뒤에도 버튼을 눌러야 한다고 믿는다.
+    assert "autoDeployTrigger: commit" in normalized_render_guide, (
+        "안내서 배포 원칙이 render.yaml 의 현재 값(commit)을 말해야 한다"
+    )
+    assert "자동 배포는 꺼져 있다" not in normalized_render_guide, (
+        "자동 배포가 꺼져 있다던 옛 현재형 서술이 되살아났다"
+    )
+    assert "현재(2026-09-06 부터)는 main 머지가 곧 배포다" in normalized_render_guide, (
+        "안내서 출시 순서 1번에 현재 배포 수단이 적혀 있어야 한다"
+    )
     # ★ ①②의 «순서»가 계약이다. 값을 먼저 FULL 로 올리면 «옛 코드»가 FULL 로 돌면서
     #   연습 모드에서 만든 캐시를 재사용할 수 있다. 문장이 있는지가 아니라
-    #   «어느 것이 먼저 나오는지»를 본다.
+    #   «어느 것이 먼저 나오는지»를 본다. 첫 단계는 현재 구절(main 머지)의 위치로
+    #   본다 — 과거 기록 문장(«Manual Deploy로 …»)의 위치로 판정하지 않는다.
     for 순서_문장 in (
-        "Manual Deploy로 새 커밋을 먼저 올린다",
+        "main 머지로 새 커밋을 먼저 올린다",
         "응답의 commit 값이 방금 올린 SHA인지 확인한다",
         "Environment 탭에서 위 두 값을 편집한다",
     ):
@@ -632,10 +660,10 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
             f"출시 순서 문장이 안내서에서 사라졌다: {순서_문장}"
         )
     assert (
-        normalized_render_guide.index("Manual Deploy로 새 커밋을 먼저 올린다")
+        normalized_render_guide.index("main 머지로 새 커밋을 먼저 올린다")
         < normalized_render_guide.index("응답의 commit 값이 방금 올린 SHA인지 확인한다")
         < normalized_render_guide.index("Environment 탭에서 위 두 값을 편집한다")
-    ), "Manual Deploy → /healthz 확인 → Environment 탭 편집 순서를 지켜야 한다"
+    ), "main 머지 → /healthz 확인 → Environment 탭 편집 순서를 지켜야 한다"
 
     # ★ 종료 유예가 «왜» 30초인지는 옛 안내 문서가 아니라 배포값이 정본이다
     #   (작업 메모 성격의 문서를 지우면서 옮겼다).
@@ -651,6 +679,41 @@ def test_render_shutdown_window_covers_serial_uvicorn_and_app_shutdown() -> None
     assert "종료 유예는 Render 기본값(30초)이다" in blueprint_text, (
         "배포자가 읽는 경고를 render.yaml 에서 지우지 마라"
     )
+
+
+#: 배포 수단이 main 머지로 바뀐 날짜 표기. 옛 Manual Deploy 절차 구절은 이 표기와
+#: «같은 문장» 안에서만 나와야 한다(런북 §6 3번, 안내서 출시 순서 1번).
+PAST_DEPLOY_PROCEDURE_LABEL = "과거(2026-09-06 이전)"
+
+
+def test_과거_Manual_Deploy_기록을_지우면_실패한다() -> None:
+    """옛 배포 수단(서비스 화면의 Manual Deploy)은 «과거» 표기와 함께 남아야 한다.
+
+    2026-09-06 부터 main 머지가 곧 배포다. 그 전에는 Manual Deploy 가 유일한 배포
+    수단이었다. 문서는 옛 절차를 지우지 않고 «과거(2026-09-06 이전)» 문장으로 남긴다.
+    배포 이력을 거슬러 읽는 사람이 절차가 언제 바뀌었는지 알아야 하기 때문이다.
+    2026-09-23 대조에서 과거 문장을 지우면 옛 단정이 실패했다 — 그 관찰을 이 시험이
+    이어받는다. 거꾸로 옛 구절이 «과거» 표기 없이 되살아나 현재 절차처럼 읽히는 것도
+    막는다. 옛 구절이 나오는 문장마다 과거 표기가 함께 있어야 한다.
+    """
+    documents = (
+        ("런북", REPOSITORY_ROOT / "ops" / "배포_운영_런북.md",
+         "Manual Deploy → Deploy latest commit"),
+        ("안내서", REPOSITORY_ROOT / "app" / "docs" / "Render_배포.md",
+         "Manual Deploy로 새 커밋을 먼저 올린다"),
+    )
+    for name, path, old_phrase in documents:
+        normalized = " ".join(path.read_text(encoding="utf-8").split())
+        sentences = [
+            sentence
+            for sentence in re.split(r"(?<=[.。])\s", normalized)
+            if old_phrase in sentence
+        ]
+        assert sentences, f"{name}에서 옛 배포 절차의 과거 기록이 사라졌다: {old_phrase}"
+        assert all(PAST_DEPLOY_PROCEDURE_LABEL in sentence for sentence in sentences), (
+            f"{name}에 «{PAST_DEPLOY_PROCEDURE_LABEL}» 표기 없는 옛 배포 절차 구절이 있다: "
+            f"{old_phrase}"
+        )
 
 
 def test_render_reserves_only_half_the_persistent_disk_for_immutable_pdf_artifacts() -> None:

@@ -43,6 +43,7 @@ from src.features.provenance.sources import (
 from src.features.report_standard.constants import SECTION_BY_ID
 from src.features.report_standard.cover_metrics import cover_metrics
 from src.features.report_standard.period_summary import period_summary_from_table
+from src.features.report_standard.reader_display import audit_notes, citation_groups, reader_notes, summary_notes
 from src.features.report_standard.section_content import (
     # ★ 밑줄로 시작하는 두 값을 «같은 feature 안에서» 그대로 가져다 쓴다.
     #   문장 끝 «— 해석» 표지와 그 등급 이름은 이미 composer → section_content로
@@ -208,6 +209,9 @@ def build_public_projection(report: Report) -> PublicReportProjection:
         citations_note=external_news_notice(report.citations),
         summary_source_grade_contribution=ledgers.summary_contribution,
         grade_notice=_grade_notice(report),
+        citation_groups=citation_groups(report),
+        reader_notes=reader_notes(report),
+        summary_notes=summary_notes(report),
     )
 
 
@@ -321,7 +325,7 @@ def _section_display(section: ReportSection) -> PublicSectionDisplay:
             (str(text), str(cite)) for text, cite in section.prose_lines
         ),
         empty_reason=str(section.empty_reason or ""),
-        guidance_lines=tuple(str(line) for line in section.guidance_lines),
+        guidance_lines=tuple(dict.fromkeys((*map(str, section.guidance_lines), *audit_notes(section)))),
         tables=tables,
         visuals=tuple(visuals),
         period_summary=period_summary,

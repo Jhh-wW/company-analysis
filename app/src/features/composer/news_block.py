@@ -38,22 +38,12 @@ from src.shared.report_evidence.constants import (
     SOURCE_KIND_NEWS,
 )
 
-# ★ 「어느 의미 칸이 어느 장의 것인가」의 정본도 shared 하나뿐이다
-#   (`report_claim_policy`). 여기서 목록을 베껴 적으면 정책이 칸을 하나
-#   옮길 때 이쪽만 옛 장에 붙인다.
-from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
-
-
-#: 의미 칸(claim slot) → 그 칸이 속한 장. 정본 표(장 → 칸들)를 뒤집은 것이다.
-#:
-#: ★ 칸 이름은 ``<장>:<칸>`` 모양이라 문자열을 잘라도 장이 나오지만, 자르지
-#:   않는다 — 이름 규칙이 바뀌면 조용히 틀린 장에 붙는다. 정본 표에서 뒤집으면
-#:   정책이 칸을 옮길 때 이 표도 같이 옮겨진다.
-_SECTION_OF_SLOT: Final[dict[str, str]] = {
-    slot_id: section_id
-    for section_id, slot_ids in CLAIM_SLOTS_BY_SECTION.items()
-    for slot_id in slot_ids
-}
+# ★ 「어느 의미 칸이 어느 장의 것인가」의 정본은 shared(`report_claim_policy`)
+#   하나뿐이고, 그 표를 뒤집은 판은 도메인 공용 모듈(`claim_slot_ownership`)
+#   한 벌만 둔다 — 중복 제거(`dedupe`)와 이 파일이 같은 판을 본다.
+from src.features.composer.claim_slot_ownership import (
+    SECTION_OF_SLOT as _SECTION_OF_SLOT,
+)
 
 
 # ── 표 모양 ──────────────────────────────────────────────────────────
@@ -102,8 +92,17 @@ BLOCKED_EXCLUDED_SECTION: Final[str] = "excluded_section"
 BLOCKED_ROW_LIMIT: Final[str] = "row_limit"
 #: 이 실행 모드는 공개 구조를 결속하지 못해, 표를 붙이면 보고서 전체가 막힌다.
 BLOCKED_UNBINDABLE_MODE: Final[str] = "release_mode_cannot_bind_structures"
+#: 같은 기사의 «같은 원문 사실»이 앞 장 표에 이미 실려 뺀 조각. 사유 문자열은
+#: 진단 호환을 위해 그대로 두지만, 판정 단위는 기사 전체가 아니라 기사+정확 원문이다
+#: — 같은 기사의 다른 사실은 뒤 장 표에 그대로 실린다.
 BLOCKED_DUPLICATE_ARTICLE: Final[str] = "article_listed_in_another_section"
 BLOCKED_ARTICLE_META: Final[str] = "inconsistent_article_metadata"
+#: 행의 보도 문장이 그 장의 산문에 이미 실려 있어 표에서 뺀 행.
+#: ★ 예전에는 이 판정이 렌더(`nonredundant_news_rows`) 시점에만 있어서,
+#:   진단은 「행을 만들었다」로 남는데 인쇄는 0행인 어긋남이 났다(저장 실측
+#:   P17). 지금은 같은 판정을 여기서 «먼저» 걸어 만든 행수와 인쇄 행수를
+#:   맞추고, 걸린 행은 이 사유로 센다.
+BLOCKED_REDUNDANT_WITH_PROSE: Final[str] = "redundant_with_prose"
 
 
 def news_block_caption(row_count: int, oldest_stale_year: Optional[int] = None) -> str:
@@ -158,12 +157,26 @@ def nonredundant_news_rows(section: ComposedSection) -> tuple[NewsRow, ...]:
     """렌더와 공개 봉인이 같은 생존 행을 소비하도록 한 곳에서 고른다."""
 
     prose = tuple(_news_comparison_text(sentence.text) for sentence in section.sentences)
+    exact_prose = tuple("".join(unicodedata.normalize("NFKC", sentence.text).split())
+                        for sentence in section.sentences)
+
+    def repeats_body(row: NewsRow) -> bool:
+        if row.evidence_texts:
+            # 새 기사 행은 여러 조각을 담는다. 일부 조각이 본문에 있다는 이유로
+            # 다른 사실까지 지우지 않으며, 숫자·조건을 지운 유사도는 쓰지 않는다.
+            originals = tuple("".join(unicodedata.normalize("NFKC", value).split())
+                              for value in row.evidence_texts)
+            return bool(originals) and all(
+                original and any(original in sentence for sentence in exact_prose)
+                for original in originals
+            )
+        # 원문 배열이 없는 옛 표시 행의 읽기 계약은 유지한다.
+        return any(_news_repeats_sentence(_news_comparison_text(row.cells[-1]), sentence)
+                   for sentence in prose)
+
     return tuple(
         row for row in section.news_rows
-        if not any(
-            _news_repeats_sentence(_news_comparison_text(row.cells[-1]), sentence)
-            for sentence in prose
-        )
+        if not repeats_body(row)
     )
 
 
@@ -410,6 +423,10 @@ class NewsBlockResult:
     row_counts_by_section: tuple[tuple[str, int], ...] = ()
     #: 뺀 행·못 붙인 장의 사유별 수.
     blocked_counts_by_reason: tuple[tuple[str, int], ...] = ()
+    #: 장별 «행 후보» 수 — 기사 메타까지 갖춰 행이 될 뻔한 기사 수.
+    #: 산문 중복·타 장 중복으로 빠진 뒤의 실제 행수(`row_counts_by_section`)와
+    #: 갈라 적어야 「만들었는데 인쇄가 0」이 진단에서 정직하게 보인다(P17).
+    candidate_row_counts_by_section: tuple[tuple[str, int], ...] = ()
 
     @property
     def added(self) -> bool:
@@ -476,8 +493,12 @@ def augment_news_blocks(
     ordered = _ordered_candidates(news_fragments)
     rebuilt: list[ComposedSection] = []
     row_counts: list[tuple[str, int]] = []
+    candidate_counts: list[tuple[str, int]] = []
     changed = False
-    listed_articles: set[str] = set()
+    # ★ 기사 «전체»가 아니라 (기사, 정확 원문) 단위로 한 번만 싣는다. 기사 단위로
+    #   막으면 앞 장 표가 기사를 선점해 같은 기사의 «다른» 사실(뒤 장 소유)이
+    #   본문에도 표에도 없이 사라진다(4차 후속 — 한 기사의 전사 실적과 제품 성과).
+    listed_claims: set[tuple[str, str]] = set()
     for section in report.sections:
         allowed = allowed_fragment_ids_by_section.get(section.section_id)
         owned = [
@@ -506,15 +527,39 @@ def augment_news_blocks(
                 continue
             key = fragment.document_identity or fragment.source_url or fragment.fragment_id
             grouped.setdefault(key, []).append(fragment)
+        # ── ① 행 후보 확정 — 기사 메타가 갖춰진 기사만 행 후보가 된다 ──
+        body_text = "\n".join(sentence.text for sentence in section.sentences)
+        candidates: list[tuple[str, NewsRow, tuple[CollectedFragment, ...]]] = []
+        candidate_count = 0
         for key, article in grouped.items():
-            if key in listed_articles:
-                blocked[BLOCKED_DUPLICATE_ARTICLE] += len(article)
-                continue
             if len({(f.document_date, f.source_publisher, f.document_title) for f in article}) != 1:
                 blocked[BLOCKED_ARTICLE_META] += len(article)
                 continue
-            rows.append(article_row(article, "\n".join(sentence.text for sentence in section.sentences)))
-            listed_articles.add(key)
+            candidate_count += 1
+            unlisted = tuple(f for f in article if (key, _normalized(f.text)) not in listed_claims)
+            if len(unlisted) != len(article):
+                blocked[BLOCKED_DUPLICATE_ARTICLE] += len(article) - len(unlisted)
+            if not unlisted:
+                continue
+            candidates.append((key, article_row(unlisted, body_text), unlisted))
+        if candidate_count:
+            candidate_counts.append((section.section_id, candidate_count))
+        # ── ② 산문 중복 생존을 «먼저» 가른 뒤에야 기사 중복을 예약한다 ──
+        #   판정은 렌더·공개 봉인이 쓰는 같은 함수(`nonredundant_news_rows`)다.
+        #   나중에 어차피 걸러질 행이 listed_articles를 선점해 다른 장의 유효
+        #   행을 막던 어긋남을 없앤다(2026-09-23 총괄 결정, P17). 뒤 단계가
+        #   같은 함수를 다시 걸어도 생존 행은 그대로라 재적용은 멱등이다.
+        probe = replace(
+            section,
+            news_rows=tuple(row for _key, row, _article in candidates),
+        )
+        survivor_ids = {id(row) for row in nonredundant_news_rows(probe)}
+        for key, row, article in candidates:
+            if id(row) not in survivor_ids:
+                blocked[BLOCKED_REDUNDANT_WITH_PROSE] += len(article)
+                continue
+            rows.append(row)
+            listed_claims.update((key, _normalized(f.text)) for f in article)
         if not rows:
             rebuilt.append(section)
             continue
@@ -528,11 +573,13 @@ def augment_news_blocks(
         return NewsBlockResult(
             report=report,
             blocked_counts_by_reason=_counts(blocked),
+            candidate_row_counts_by_section=tuple(candidate_counts),
         )
     return NewsBlockResult(
         report=replace(report, sections=tuple(rebuilt)),
         row_counts_by_section=tuple(row_counts),
         blocked_counts_by_reason=_counts(blocked),
+        candidate_row_counts_by_section=tuple(candidate_counts),
     )
 
 
@@ -559,14 +606,21 @@ def news_block_steps(output: object) -> list[dict[str, object]]:
 
     steps: list[dict[str, object]] = []
     by_section = _pairs(getattr(output, "news_block_row_counts_by_section", ()))
-    if by_section:
-        steps.append(
-            {
-                "step": NEWS_BLOCK_STEP,
-                "행수": sum(by_section.values()),
-                "장별행수": by_section,
-            }
-        )
+    candidates = _pairs(
+        getattr(output, "news_block_candidate_row_counts_by_section", ())
+    )
+    # 후보가 있었으면 최종 0행도 «0»으로 정직하게 남긴다(P17). 후보 칸을
+    # 모르는 옛 결과는 종전처럼 행이 있을 때만 기록한다.
+    if by_section or candidates:
+        step: dict[str, object] = {
+            "step": NEWS_BLOCK_STEP,
+            "행수": sum(by_section.values()),
+            "장별행수": by_section,
+        }
+        if candidates:
+            step["후보행수"] = sum(candidates.values())
+            step["장별후보행수"] = candidates
+        steps.append(step)
     blocked = _pairs(getattr(output, "news_block_blocked_counts_by_reason", ()))
     if blocked:
         steps.append(
@@ -598,6 +652,9 @@ __all__ = [
     "BLOCKED_ROW_LIMIT",
     "BLOCKED_UNBINDABLE_MODE",
     "BLOCKED_TEXT_MISMATCH",
+    "BLOCKED_DUPLICATE_ARTICLE",
+    "BLOCKED_ARTICLE_META",
+    "BLOCKED_REDUNDANT_WITH_PROSE",
     "NEWS_BLOCK_BLOCKED_STEP",
     "NEWS_BLOCK_CAPTION_TEMPLATE",
     "NEWS_BLOCK_CAPTION_TEMPLATE_WITH_YEAR",

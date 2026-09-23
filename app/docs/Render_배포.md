@@ -6,8 +6,14 @@
 
 ## 배포 원칙
 
-- 자동 배포는 꺼져 있다(`render.yaml`의 `autoDeployTrigger: off`). 커밋이나 CI 통과만으로는
-  배포되지 않으며, 사람이 Dashboard에서 **Manual Deploy**를 눌러야 한다.
+- 자동 배포가 켜져 있다(`render.yaml`의 `autoDeployTrigger: commit`, 2026-09-06 부터). main에
+  머지된 커밋이 곧 배포되므로, main 머지는 회귀 묶음 4개가 통과해 배포해도 되는 상태일 때만
+  한다([`deploy/README.md`](../../deploy/README.md)). Blueprint Sync를 쓰지 않으므로 Dashboard의
+  Auto-Deploy 값은 이 파일을 따라가지 않는다. 어긋나면 Dashboard → Settings → Build & Deploy →
+  Auto-Deploy를 `On Commit`으로 맞추고, 머지 뒤 `/healthz`의 commit이 main과 같은지로 배포를
+  확인한다.
+- 과거(2026-09-06 이전)에는 자동 배포가 꺼져 있었다(`autoDeployTrigger: off`). 커밋이나 CI
+  통과만으로는 배포되지 않았고, 사람이 Dashboard에서 **Manual Deploy**를 눌러야 했다.
 - Uvicorn worker와 Render instance는 각각 `1`이다. SQLite와 인메모리 작업 상태 때문에
   이 값이 계약이다.
 - `standard` web plan과 `/var/data` 1GB 영속 디스크를 쓴다. 실제 DART 후보 색인이
@@ -50,7 +56,9 @@ DART 문서로 검증된 적이 없어 이번 출시에서는 켜지 않는다. 
 
 ### 순서 (①과 ②를 바꾸지 않는다)
 
-1. **Manual Deploy로 새 커밋을 먼저 올린다.** 이 시점의 환경변수는 아직 `SHADOW`다.
+1. **main 머지로 새 커밋을 먼저 올린다.** 현재(2026-09-06 부터)는 main 머지가 곧 배포다
+   (Auto-Deploy). 이 시점의 환경변수는 아직 `SHADOW`다. 과거(2026-09-06 이전)의 이 단계는
+   «Manual Deploy로 새 커밋을 먼저 올린다»였다.
 2. `/healthz` 응답의 commit 값이 방금 올린 SHA인지 확인한다.
 3. **그 다음에** Environment 탭에서 위 두 값을 편집한다. 저장하면 서비스가 재시작한다.
 4. `/healthz`·`/readyz`를 다시 확인하고, 초대 링크를 하나 발급해 주소·QR 흐름을 눈으로 본다.
@@ -190,7 +198,7 @@ report_standard 통과
 - [ ] `PIPELINE=real`, `BETA_ADMIN_ONLY=1`, instance/worker 각각 1개
 - [ ] `PUBLIC_ORIGIN`·Google 승인 URI·`GOOGLE_REDIRECT_URI`가 같은 host의 `/auth/callback`
 - [ ] `PROVENANCE_SEAL_SECRET`이 32바이트 이상이며 기존 값 그대로 보존
-- [ ] Manual Deploy → `/healthz`의 commit 확인 → Environment 탭에서 값 두 개 편집 → 재확인
+- [ ] main 머지(Auto-Deploy) → `/healthz`의 commit 확인 → Environment 탭에서 값 두 개 편집 → 재확인
 - [ ] 관리자 로그인, 명단 밖 구글 로그인 차단, 명단 회원 통과 확인
 - [ ] 초대 링크 1개 발급해 주소·QR과 한도 표시 확인
 - [ ] 작은 회사 1건의 실제 조사·출고 게이트·PDF·비용 기록 통과

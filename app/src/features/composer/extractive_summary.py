@@ -23,6 +23,10 @@ from src.features.composer.extractive_summary_constants import (
     SUMMARY_NUMERIC_PATTERN,
     SUMMARY_NUMERIC_SCORE,
     SUMMARY_REVENUE_COMPOSITION_PATTERN,
+    SUMMARY_REVENUE_ROUTE_SUFFIX,
+    SUMMARY_REVENUE_ROUTE_COUNTS,
+    SUMMARY_REVENUE_STREAM_SEPARATOR,
+    SUMMARY_REVENUE_MIN_STREAMS,
 )
 from src.features.composer.logic import SummaryCandidate
 from src.features.composer.port import ComposedReport, ComposedSentence
@@ -99,8 +103,8 @@ def _normalized_text(value: object) -> str:
     return " ".join(str(value or "").split())
 
 
-def _revenue_composition_key(text: str, company_name: str) -> tuple[str, str] | None:
-    """실측된 수익 구성 표현만 비교하고 공개 문장은 절대로 고치지 않는다."""
+def _revenue_composition_key(text: str, company_name: str) -> tuple[str, ...] | None:
+    """열거만 하는 수익 구성의 항목을 비교하며 추가 절·시점·수치는 지우지 않는다."""
 
     match = re.fullmatch(SUMMARY_REVENUE_COMPOSITION_PATTERN, _normalized_text(text))
     company = _normalized_text(company_name)
@@ -109,8 +113,25 @@ def _revenue_composition_key(text: str, company_name: str) -> tuple[str, str] | 
     aliases = {"회사", company, company.removeprefix("주식회사 ")}
     if match["subject"] not in aliases:
         return None
-    service = match["service"].removesuffix("과 관련된")
-    return service, match["content"]
+    route_count = re.search(SUMMARY_REVENUE_ROUTE_SUFFIX, match["streams"])
+    streams_text = re.sub(SUMMARY_REVENUE_ROUTE_SUFFIX, "", match["streams"]).strip()
+    streams_text = re.sub(r"과 관련된(?=\s+용역(?:\s|과|와|및|$))", "", streams_text)
+    if any(marker in streams_text for marker in (",", ";", "이며", "하고", "하지만")):
+        return None
+    streams = re.split(SUMMARY_REVENUE_STREAM_SEPARATOR, streams_text)
+    if len(streams) < SUMMARY_REVENUE_MIN_STREAMS:
+        return None
+    if route_count is not None and len(streams) != SUMMARY_REVENUE_ROUTE_COUNTS[route_count["count"]]:
+        return None
+    keys = []
+    for stream in streams:
+        value = re.sub(r"\s*(?:매출|수익)$", "", stream).strip()
+        value = re.sub(r"과 관련된(?=\s+용역$)", "", value)
+        value = _normalized_text(value)
+        if not value:
+            return None
+        keys.append(value)
+    return tuple(sorted(keys))
 
 
 def distinct_summary_candidates(

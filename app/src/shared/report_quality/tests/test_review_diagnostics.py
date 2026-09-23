@@ -11,7 +11,8 @@ def test_transport_contract_matches_the_actual_producer():
     from src.features.composer.direct_support_constants import DIRECT_SUPPORT_REASON_TEXTS
     from src.features.composer.constants import SECTION_IDS
     from src.features.composer.grounding_constants import (
-        GROUNDING_INVALID, GROUNDING_MISSING, NUMERIC_KEY, TIME_KEY, TREND_KEY,
+        GROUNDING_INVALID, GROUNDING_MISSING, NUMERIC_KEY, RECOGNITION_KEY,
+        TIME_KEY, TREND_KEY,
     )
     from src.shared.report_quality.review_diagnostic_constants import (
         REVIEW_ITEMS, REVIEW_REASONS, REVIEW_SECTION_IDS, REVIEW_SCOPE_ITEMS,
@@ -49,7 +50,14 @@ def test_transport_contract_matches_the_actual_producer():
         STRAY_CITATION_MARKER_REASON_CODES,
     )
 
+    from src.features.composer.flow_review_constants import (
+        FLOW_REVIEW_BINDING_INVALID, FLOW_REVIEW_BINDING_MISSING,
+    )
+    from src.features.composer.competitive_scope_constants import COMPETITIVE_SECTION_EVIDENCE_OFFCONTRACT
     assert set(REVIEW_SCOPE_ITEMS) == {
+        "public_sentence_fact_unbound", "public_sentence_fact_duplicate",
+        COMPETITIVE_SECTION_EVIDENCE_OFFCONTRACT,
+        FLOW_REVIEW_BINDING_INVALID, FLOW_REVIEW_BINDING_MISSING,
         MODALITY_PLAN_ASSERTED, SCOPE_CONDITION_UNBOUND, CULTURE_EVIDENCE_SCOPE_MISMATCH,
         QUANTIFIED_DIVIDEND_UNBOUND,
         CULTURE_ACCOUNTING_POLICY_MISPLACED, *DIRECT_SUPPORT_REASON_TEXTS,
@@ -74,7 +82,11 @@ def test_transport_contract_matches_the_actual_producer():
         # 인용 아닌 대괄호 숫자를 정리하며 «뺀» 축자 문장의 사유 코드.
         *STRAY_CITATION_MARKER_REASON_CODES,
     }
-    assert set(REVIEW_ITEMS) == {NUMERIC_KEY, TIME_KEY, TREND_KEY, *REVIEW_SCOPE_ITEMS.values()}
+    # 생산자(grounding_requirements)가 내는 근거 배열 이름이 전부 들어 있어야
+    # 그 요구로 탈락한 진단이 검증항목 검사에서 버려지지 않는다.
+    assert set(REVIEW_ITEMS) == {
+        NUMERIC_KEY, TIME_KEY, TREND_KEY, RECOGNITION_KEY, *REVIEW_SCOPE_ITEMS.values(),
+    }
     assert set(REVIEW_REASONS) == {GROUNDING_INVALID, GROUNDING_MISSING, *REVIEW_SCOPE_ITEMS}
     assert REVIEW_SECTION_IDS == set(SECTION_IDS) | {"summary"}
 

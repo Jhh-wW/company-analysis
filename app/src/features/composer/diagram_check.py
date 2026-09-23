@@ -79,6 +79,10 @@ from src.features.composer.constants import (
     STRATEGY_TABLE_SECTION_ID,
 )
 from src.features.composer.logic import extract_json_payload
+from src.features.composer.flow_generic_cells import is_generic_flow_cell
+from src.features.composer.flow_review_binding import bind_reviewed_flow_row
+from src.features.composer.flow_review_constants import FLOW_REVIEW_BINDING_INVALID
+from src.shared.report_generation.models import exact_text_sha256
 from src.features.composer.verdict_number import coerce_verdict_number
 from src.features.composer.challenge_guard import challenge_response_problem
 from src.features.composer.challenge_response_evidence import (
@@ -98,15 +102,19 @@ from src.features.composer.diagram_review_constants import (
     FLOW_REVENUE_STREAM_MISSING_CODE,
     OPERATIONS_FLOW_ORIGIN_HEADER,
     OPERATIONS_FLOW_TARGET_HEADER,
-    OPERATIONS_GENERIC_LABELS,
     FLOW_UNINFORMATIVE_OPERATIONS_CODE,
     PRODUCT_GOODS_OPPOSITE,
     PRODUCT_GOODS_PRIMACY_RE,
+    REVENUE_BLOCK_BREAK_RE,
     REVENUE_COMPOSITION_MARKERS,
-    REVENUE_SENTENCE_SPLIT_RE,
+    REVENUE_DEDUCTION_CLAUSE_RE,
+    REVENUE_LINE_AMOUNT_RE,
+    REVENUE_OPERATING_HEADER,
+    REVENUE_SENTENCE_SEGMENT_RE,
     REVENUE_STREAM_AGGREGATE_NAMES,
     REVENUE_STREAM_RE,
     REVENUE_STREAM_TRAILING_PARTICLES,
+    REVENUE_STREAM_UNMARKED_SUFFIXES,
     REVENUE_STREAM_YEAR_NAME_RE,
 )
 from src.features.composer.grounding import constrain_verdicts, grounding_hint
@@ -614,6 +622,10 @@ def _drop_invented_numbers(
                 + "»: 인용 원문에 없는 수 — "
                 + ", ".join(invented)
                 + ("" if not blocked_codes else f" ({', '.join(blocked_codes)})")
+                + " — 검사 범위: 인용 조각만 ["
+                + ", ".join(f"{fid}:{exact_text_sha256(texts[fid])}"
+                            for fid in row.citations if fid in texts)
+                + "]"
             )
             continue
         kept.append(row)
@@ -649,7 +661,7 @@ def _drop_uninformative_operations_rows(
     for row in rows:
         cells = tuple(_compact_surface(cell) for cell in row.cells)
         if (index < len(cells) and cells[index] in {"", "미확인"}
-                and all(cell in OPERATIONS_GENERIC_LABELS for cell in cells)):
+                and all(not cell or is_generic_flow_cell(cell) for cell in cells)):
             problems.append(
                 f"{FLOW_UNINFORMATIVE_OPERATIONS_CODE}: 대상이 미확인이고 일반 설명뿐인 운영 경로 제외"
             )
@@ -729,12 +741,35 @@ def revenue_stream_names(source_texts: Sequence[str]) -> tuple[str, ...]:
 
     names: list[str] = []
     for text in source_texts:
-        for sentence in REVENUE_SENTENCE_SPLIT_RE.split(str(text or "")):
+        raw = str(text or "")
+        # 구획 머리 앵커 — 표지 없는 「…수익」의 행 귀속은 문장이 아니라
+        # «원문 전체»의 위치로 정한다. 금융·서비스업 손익계산서는 머리와
+        # 항목이 줄바꿈으로 갈라져 같은 문장에 함께 있지 않다(조기 독립
+        # 검증 반례: 「영업수익\n이자수익 100\n수수료수익 20」).
+        # ★ 블록 종료 앵커는 「영업외수익」만이 아니라 영업비용·영업이익·
+        #   재무상태표 구획 머리까지 포함한다(최종 경계 반례:
+        #   「영업수익\n이자수익100\n유동부채\n선수수익20」).
+        operating_anchors = [
+            found.start() for found in re.finditer(REVENUE_OPERATING_HEADER, raw)
+        ]
+        block_break_anchors = [
+            found.start() for found in REVENUE_BLOCK_BREAK_RE.finditer(raw)
+        ]
+        for segment in REVENUE_SENTENCE_SEGMENT_RE.finditer(raw):
+            sentence = segment.group(0)
             composition = any(
                 marker in sentence for marker in REVENUE_COMPOSITION_MARKERS
             )
             for match in REVENUE_STREAM_RE.finditer(sentence):
-                name, gap, trailing = match.group(1), match.group(2), match.group(3)
+                name, gap, suffix, trailing = (
+                    match.group(1), match.group(2), match.group(3), match.group(4),
+                )
+                if REVENUE_DEDUCTION_CLAUSE_RE.search(sentence, match.start()):
+                    # 조사 붙은 주어 뒤의 차감 절은 매출원 명사구가 아니다.
+                    # 다른 매출원까지 삼키지 않도록 현재 match 범위와 대조한다.
+                    deduction = REVENUE_DEDUCTION_CLAUSE_RE.search(sentence, match.start())
+                    if deduction is not None and deduction.start() < match.end():
+                        continue
                 if trailing not in REVENUE_STREAM_TRAILING_PARTICLES:
                     # 「매출액」·「매출원가」·「수익률」 — 이름이 아니라 합계·지표다.
                     continue
@@ -747,6 +782,31 @@ def revenue_stream_names(source_texts: Sequence[str]) -> tuple[str, ...]:
                 if not composition and gap:
                     # 붙여 쓰지 않은 「… 매출」은 구성 절 안에서만 이름으로 본다.
                     continue
+                if not composition and suffix not in REVENUE_STREAM_UNMARKED_SUFFIXES:
+                    # 표지 없는 붙여 쓴 「…수익」은 회계 항목이 흔하다(선수수익·
+                    # 영업외수익·이자수익·보조금수익 — 2026-09-23 4차 실측 P13).
+                    # 다만 금융·서비스업의 정상 수익원도 이 접미를 쓰므로 통째로
+                    # 빼지 않고 두 조건으로 가른다(조기 독립 검증 반영):
+                    #   ① 행 귀속 — 앞쪽 가장 가까운 구획 머리가 「영업수익」이다
+                    #      (「영업외수익」 구획에 속하면 영업외 항목이다).
+                    #   ② 금액 행 — 항목 바로 뒤에 숫자가 온다. 「선수수익으로
+                    #      계상」 같은 회계 처리 서술은 금액 행이 아니다.
+                    position = segment.start() + match.start()
+                    last_operating = max(
+                        (a for a in operating_anchors if a < position), default=None
+                    )
+                    last_break = max(
+                        (a for a in block_break_anchors if a < position), default=None
+                    )
+                    in_operating_block = last_operating is not None and (
+                        last_break is None or last_operating > last_break
+                    )
+                    amount_follows = (
+                        REVENUE_LINE_AMOUNT_RE.match(raw, segment.start() + match.end())
+                        is not None
+                    )
+                    if not (in_operating_block and amount_follows):
+                        continue
                 if name not in names:
                     names.append(name)
     return tuple(names)
@@ -1019,6 +1079,7 @@ def _review_rows(
     *,
     diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
+    fragments_by_id: Optional[Mapping[str, CollectedFragment]] = None,
 ) -> tuple[dict[str, tuple[FlowRow, ...]], list[str]]:
     """모든 장의 경로를 «한 묶음»으로 검수한다 (AI 1회).
     """
@@ -1159,7 +1220,24 @@ def _review_rows(
             )
             continue
         if result == VERDICT_TRUE:
-            kept[section_id].append(row)
+            # 별도·묶음 검수 모두 같은 입력 결속을 공개까지 운반한다.
+            review_fragments = fragments_by_id if fragments_by_id is not None else {
+                fid: CollectedFragment(fid, "", text) for fid, text in texts.items()
+            }
+            try:
+                reviewed_row = bind_reviewed_flow_row(
+                    row, section_id=section_id, fragments=review_fragments,
+                    review_path="legacy", baseline_date=baseline_date or "",
+                )
+            except ValueError:
+                _append_grounding_diagnostic(
+                    diagnostics, section_id=section_id, kind="도식",
+                    reason_code=FLOW_REVIEW_BINDING_INVALID,
+                    candidate_text=" ".join(row.cells), sources=candidates[number][1],
+                )
+                dropped.append(f"[{section_id}] {number}번 경로: {FLOW_REVIEW_BINDING_INVALID}")
+                continue
+            kept[section_id].append(reviewed_row)
             continue
         # 번호 누락·계약 밖 판정은 «애매»가 아니라 그 줄의 검수 미완료다.
         dropped.append(
@@ -1295,6 +1373,7 @@ def check_diagrams(
         reviewed, dropped = _review_rows(
             after_numbers, texts, ask, diagnostics=diagnostics,
             baseline_date=baseline_date,
+            fragments_by_id={fragment.fragment_id: fragment for fragment in fragments},
         )
         problems.extend(dropped)
     else:
@@ -1304,9 +1383,6 @@ def check_diagrams(
                 f"[{section_id}] {number}번 경로: 의미 검수기가 없어 공개 제외"
                 for number, _row in enumerate(rows, start=1)
             )
-
-    if not problems:
-        return number_checked, ()
 
     rebuilt = tuple(
         replace(

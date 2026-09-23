@@ -1,8 +1,12 @@
 """한 장에 넣을 근거 조각을 고르고 문자·토큰 예산 안으로 자른다.
 
-우선순위는 두 단계다.
+우선순위는 세 단계다.
 1) 슬롯 커버리지 — 정책이 정한 순서로 각 수집 슬롯의 최고점 조각을 먼저 담는다.
    슬롯 하나가 예산 때문에 통째로 비지 않도록 하기 위함이다.
+1.5) 선택 사실 다양성 — 필수 대표가 아직 덮지 않은 선택 후보 칸(policy의
+   OPTIONAL_CANDIDATE_SLOTS_BY_SECTION)의 대표를 같은 예산 안에서 담는다. 고득점
+   반복 근거가 2단계에서 원문이 뒷받침하는 선택 사실을 밀어내지 않게 한다. 선택
+   칸은 필수 커버리지로 세지 않으며 예산을 늘리지도 않는다.
 2) 남는 예산 — 아직 못 담은 조각을 점수(score_millis) 내림차순으로 채운다.
 
 ⚠️ 설계상 한계 — 슬롯 대표 조각들의 합이 그 자체로 예산을 넘을 만큼 크면
@@ -19,6 +23,9 @@
 한다 — 1층 company_id 결속(generation=8), 2층 exact_evidence_hashes
 결속(generation=7). 한쪽 방어가 뚫려도(예: company_id는 맞는데 문서
 충돌) 다른 쪽이 혼자 잡을 수 있도록 층을 분리해 순서대로 확인한다.
+
+결속을 통과한 조각이라도 감사보고서 «감사인 표준 문구»뿐이면 사업 칸의 근거로
+담지 않는다(auditor_boilerplate.py). 건수는 전용 사유 코드로 남긴다.
 """
 
 from __future__ import annotations
@@ -28,7 +35,11 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
+from src.features.chapter_evidence.auditor_boilerplate import is_auditor_boilerplate
 from src.features.chapter_evidence.constants import (
+    AUDITOR_BOILERPLATE_FRAGMENT_IGNORED,
+    AUDITOR_JUDGED_SOURCE_KINDS,
+    AUDITOR_STRUCTURE_GATED_SOURCE_KINDS,
     CHARS_PER_ESTIMATED_TOKEN,
     DEFAULT_MAX_CHARS_PER_SECTION,
     DEFAULT_MAX_ESTIMATED_TOKENS_PER_SECTION,
@@ -40,7 +51,10 @@ from src.shared.report_evidence.constants import (
     SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
     SOURCE_KIND_OFFICIAL_IR_PDF,
 )
-from src.shared.report_evidence.policy import collector_slots_for
+from src.shared.report_evidence.policy import (
+    collector_slots_for,
+    optional_candidate_slots_for,
+)
 from src.shared.report_evidence.source_kind_policy import (
     formal_document_writer_ineligibility_reason,
 )
@@ -115,6 +129,20 @@ def _dedupe_by_evidence_range(
     return kept, duplicate_count
 
 
+def _auditor_judgment_scope(source_kind: str) -> bool | None:
+    """감사인 문구 판정의 문서 종류 관문(2026-09-23 독립 검토 F1).
+
+    감사보고서면 참(판정), DART 정기보고서나 종류를 모르면 None(구조 표지로 판정),
+    그 밖(홈페이지·IR·뉴스)이면 거짓(판정 안 함)이다.
+    """
+
+    if source_kind in AUDITOR_JUDGED_SOURCE_KINDS:
+        return True
+    if not source_kind or source_kind in AUDITOR_STRUCTURE_GATED_SOURCE_KINDS:
+        return None
+    return False
+
+
 def select_section_fragments(
     *,
     section_id: str,
@@ -133,11 +161,17 @@ def select_section_fragments(
     }
     collector_slot_order = collector_slots_for(section_id)
     collector_slot_set = set(collector_slot_order)
+    optional_slot_order = optional_candidate_slots_for(section_id)
+    # 조각이 실제 원문 신호로 받은 칸 중 이 장이 운반할 수 있는 칸. 선택 후보
+    # 칸을 여기서 잘라내면 원문이 뒷받침하는 소재지 같은 사실이 작가 입력의
+    # 지원 칸에서 사라져 정확한 문장도 검수 전에 탈락한다(4차 실측).
+    carried_slot_set = collector_slot_set | set(optional_slot_order)
 
     eligible: list[EvidenceFragment] = []
     company_mismatch_count = 0
     missing_document_count = 0
     unbound_count = 0
+    auditor_boilerplate_count = 0
     # 「무시했다」만 남기면 다음 실행 진단에서 원인을 찾을 수 없다. 어느 닫힌
     # 사유로 Writer 자격을 잃었는지 사유별로 따로 센다(2026-09-16 운영 실측:
     # 사유 이름이 없어 연차 공시 문제를 홈페이지 문제로 읽었다).
@@ -149,7 +183,7 @@ def select_section_fragments(
         eligible_slot_ids = tuple(
             slot_id
             for slot_id in fragment.covered_slot_ids
-            if slot_id in collector_slot_set
+            if slot_id in carried_slot_set
         )
         if not eligible_slot_ids:
             continue
@@ -184,6 +218,16 @@ def select_section_fragments(
         if fragment.text_sha256 not in document.exact_evidence_hashes:
             unbound_count += 1
             continue
+        # 감사인 표준 문구뿐인 조각은 어느 사업 칸의 근거도 아니다(2026-09-23
+        # 5차 실측 — 「감사인의 책임」 단락이 5장 과제·대응 칸을 받았다).
+        # 결속 방어 «뒤»에 둬서 내부 결속 오류 건수는 종전 그대로 센다.
+        # 판정 범위는 문서 종류가 정한다 — 감사 서비스 회사의 홈페이지 사업 문장이
+        # 「재무제표감사」「감사증거」 낱말만으로 빠지지 않게 한다(F1).
+        if is_auditor_boilerplate(
+            fragment.text, audit_report=_auditor_judgment_scope(document.source_kind),
+        ):
+            auditor_boilerplate_count += 1
+            continue
         eligible.append(
             replace(
                 fragment,
@@ -201,7 +245,7 @@ def select_section_fragments(
     by_slot: dict[str, list[EvidenceFragment]] = defaultdict(list)
     for fragment in deduped:
         for slot_id in fragment.covered_slot_ids:
-            if slot_id in collector_slot_set:
+            if slot_id in carried_slot_set:
                 by_slot[slot_id].append(fragment)
     for items in by_slot.values():
         # 최근 문맥은 추가 몫에서 보존하며, 슬롯 대표는 변경 근거만 우선한다.
@@ -248,6 +292,28 @@ def select_section_fragments(
         char_total += cost_chars
         token_total += cost_tokens
 
+    # 1.5단계: 필수 대표가 덮지 않은 선택 후보 칸마다 대표 하나를 같은 예산
+    # 안에서 담는다. 최고점 후보가 예산에 안 맞으면 들어갈 후보를 찾을 때까지
+    # 점수 내림차순으로 시도한다. 정말 맞는 후보가 없을 때만 포기한다.
+    for slot_id in optional_slot_order:
+        if any(slot_id in fragment.covered_slot_ids for fragment in included):
+            continue
+        for candidate in by_slot.get(slot_id, []):
+            if candidate.fragment_id in included_ids or candidate.fragment_id in excluded_ids:
+                continue
+            cost_chars = len(candidate.text)
+            cost_tokens = _estimated_tokens(cost_chars)
+            if (
+                char_total + cost_chars > max_chars
+                or token_total + cost_tokens > max_estimated_tokens
+            ):
+                continue
+            included.append(candidate)
+            included_ids.add(candidate.fragment_id)
+            char_total += cost_chars
+            token_total += cost_tokens
+            break
+
     # 2단계: 남는 예산을 점수 내림차순으로 채운다.
     remaining = sorted(
         (
@@ -287,6 +353,10 @@ def select_section_fragments(
         reason_codes.append(f"fragment_document_missing:{missing_document_count}")
     if unbound_count:
         reason_codes.append(f"fragment_not_bound_to_document:{unbound_count}")
+    if auditor_boilerplate_count:
+        reason_codes.append(
+            f"{AUDITOR_BOILERPLATE_FRAGMENT_IGNORED}:{auditor_boilerplate_count}"
+        )
     # 사유 이름은 개수 «뒤»에 붙인다 — 기존 진단 읽기가 쓰는 앞부분과 개수
     # 자리를 그대로 두기 위함이다.
     for reason, count in sorted(low_trust_ir_counts.items()):

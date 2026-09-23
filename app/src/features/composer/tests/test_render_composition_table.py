@@ -35,6 +35,7 @@ from src.features.composer.port import (
     PerformanceTable,
     composition_tables_from_raw,
 )
+from src.features.composer.tests.flow_fixtures import reviewed_flow_fixture
 from src.features.composer.render import (
     COMPOSITION_PRESENTATION,
     render_report,
@@ -71,14 +72,14 @@ def _composed(
                 section_id=section_id, sentences=sentences, flow_rows=section_flow_rows
             )
         )
-    return ComposedReport(
+    return reviewed_flow_fixture(ComposedReport(
         sections=tuple(sections),
         summary=(
             ComposedSentence(
                 text="두 부문 구조다.", citations=("1",), grade=GRADE_CONFIRMED
             ),
         ),
-    )
+    ), _raw_fragments())
 
 
 def _composition() -> PerformanceTable:

@@ -23,5 +23,5 @@ def analysis_period_with_audit_status(period: str, table: object) -> str:
     years = tuple(getattr(table, "unaudited_years", ()) or ())
     if not years:
         return period
-    suffix = f"({'·'.join(years)}년 미감사)"
+    suffix = f"({'·'.join(years)}년은 감사받지 않은 비교 재무제표)"
     return period if suffix in period else f"{period} {suffix}"

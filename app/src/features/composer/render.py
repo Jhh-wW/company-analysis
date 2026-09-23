@@ -26,9 +26,7 @@ from src.core.citations import citation_number
 from src.features.composer.constants import (
     CITATION_STYLE_MERGED,
     PARAGRAPH_MAX_SENTENCES,
-    FLOW_ARROW_SECTION_IDS,
     FLOW_PRESENTATION,
-    FLOW_UNCONFIRMED_CELL,
     OPERATIONS_FLOW_CAPTION,
     FLOW_CAPTION_BY_SECTION,
     FLOW_HEADERS_BY_SECTION,
@@ -47,7 +45,8 @@ from src.features.composer.constants import (
     SECTION_IDS,
     SECTION_TITLES,
 )
-from src.features.composer.logic import FragmentsInput
+from src.features.composer.logic import FragmentsInput, _normalize_fragments
+from src.features.composer.flow_review_binding import flow_review_problem
 from src.features.composer.news_block import (
     NEWS_BLOCK_HEADERS,
     NEWS_BLOCK_PRESENTATION,
@@ -620,7 +619,7 @@ def _source_label(meta: _FragmentMeta, filing_meta: Optional[FilingMeta]) -> str
 
 
 def _flow_report_table(
-    section: ComposedSection, numbers: Mapping[str, int]
+    section: ComposedSection, numbers: Mapping[str, int], *, fragments: Mapping[str, object], as_of_date: str
 ) -> Optional[ReportTable]:
     """7장 경로표를 흐름도용 ReportTable로 바꾼다. 실을 줄이 없으면 None.
 
@@ -638,11 +637,10 @@ def _flow_report_table(
     rows: list[list[str]] = []
     cited: list[int] = []
     row_cites: list[list[str]] = []
-    # ★ 「미확인」 채우기는 «화살표로 그려지는 장»(2·5·7장)에만 건다.
-    #   카드로 그려지는 장(1·3·6·8장)은 빈 칸을 그대로 둔다 — 이유는
-    #   constants.FLOW_ARROW_SECTION_IDS 주석(카드는 빈 칸을 «빼는» 렌더러다).
-    fills_unconfirmed = section.section_id in FLOW_ARROW_SECTION_IDS
     for row in section.flow_rows:
+        problem = flow_review_problem(row, section_id=section.section_id, fragments=fragments, baseline_date=as_of_date)
+        if problem:
+            raise ValueError(f"공개 도식 검수 결속이 유효하지 않습니다: {problem}")
         row_numbers = [
             numbers[str(citation).strip()]
             for citation in row.citations
@@ -650,24 +648,13 @@ def _flow_report_table(
         ]
         if not row_numbers:
             continue
-        # ★ 화살표 장에서는 회사가 안 밝힌 칸을 «빈 칸»이 아니라 「미확인」으로
-        #   채운다. 빈 문자열이면 흐름도에 «라벨만 있고 속이 빈 76px 상자»가
-        #   화살표와 함께 그려져 고장처럼 보인다
-        #   (constants.FLOW_UNCONFIRMED_CELL 주석에 실측 근거).
-        #   ★ 여기(데이터 층)에서 채우는 이유 — 웹(result.html)과 PDF(_FlowGraphic)가
-        #     각자 채우면 한쪽만 고쳐져 갈린다. 문단 번호에서 같은
-        #     사고가 있었다. 두 렌더러가 같은 값을 받게 한 곳에서 정한다.
-        #   ★ 카드 장에서는 채우지 않는다 — 카드 렌더러가 빈 칸을 «빼도록»
-        #     설계돼 있어서, 채우면 「확인된 사례: 미확인」·제목이 「미확인」인
-        #     카드가 인쇄된다(FLOW_ARROW_SECTION_IDS 주석의 실측 2건).
-        rows.append(
-            [
-                (str(cell).strip() or FLOW_UNCONFIRMED_CELL)
-                if fills_unconfirmed
-                else str(cell).strip()
-                for cell in row.cells
-            ]
-        )
+        # ★ 빈 칸을 「미확인」으로 채우지 않는다 (2026-09-23 4차 실측 정정) —
+        #   작가가 비운 끝 칸은 묶음 검수가 «본 적 없는» 칸이다(검수 프롬프트는
+        #   값이 있는 칸만 싣는다). 여기서 채우면 검수받지 않은 노드가 승인된
+        #   도식처럼 공개된다. 검수된 원행과 영수증(review_binding)은 폭 그대로
+        #   보존하고, «표시» 축소는 report_standard/visualization._flow 한 곳이
+        #   한다 — 웹·PDF·봉인이 그 한 결과를 소비하므로 갈릴 자리가 없다.
+        rows.append([str(cell).strip() for cell in row.cells])
         cited.extend(row_numbers)
         row_cites.append([f"[{number}]" for number in sorted(set(row_numbers))])
     if not rows:
@@ -1312,12 +1299,8 @@ def render_report(
 
     for section in report.sections:
         prose_lines: list[tuple[str, str]] = []
-        notice_paragraph = ""
         # 자료 부족·생성 실패의 정직한 안내문을 본문 «앞»에 둔다
         # (기준문서 3절: 안내 1~2문장 + 찾은 만큼의 내용).
-        if section.notice:
-            prose_lines.append((section.notice, ""))
-            notice_paragraph = section.notice
         shows = section_shows[section.section_id]
         breaks = set(_paragraph_breaks(section.sentences, numbers))
         prose_paragraphs: list[str] = []
@@ -1380,7 +1363,7 @@ def render_report(
         # 먼저 넣고 프로그램표를 뒤에 붙인다(목업이 요구하는 「흐름 → 구성」
         # 순서와도 맞는다).
         if section.section_id in FLOW_HEADERS_BY_SECTION:
-            flow_table = _flow_report_table(section, numbers)
+            flow_table = _flow_report_table(section, numbers, fragments={item.fragment_id: item for item in _normalize_fragments(fragments)}, as_of_date=as_of_date)
             if flow_table is not None:
                 for raw_cite in flow_table.source_cites:
                     flow_cite = citation_number(raw_cite)
@@ -1515,9 +1498,8 @@ def render_report(
                 prose_lines=prose_lines,
                 # 화면·PDF가 문단을 만드는 단위. 비면 소비하는 쪽이 예전처럼
                 # prose_lines를 이어 붙인다 (뒤로 호환).
-                prose_paragraphs=(
-                    ([notice_paragraph] if notice_paragraph else []) + prose_paragraphs
-                ),
+                prose_paragraphs=prose_paragraphs,
+                guidance_lines=[section.notice] if section.notice else [],
                 display_number=SECTION_DISPLAY_NUMBERS.get(
                     section.section_id, ""
                 ),

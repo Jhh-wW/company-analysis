@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""원문 그대로인 단일 행사 조건 보도가 «실제 진입점»을 지나 본문·목록에 이어지는지.
+"""원문 그대로인 단일 행사 조건 보도가 본문에 남고 중복 목록은 생략되는지.
 
 부르는 것은 가드 함수가 아니라 verify_report(평문·묶음) → retain_verified_news →
 _augment_news_blocks 다. 검수 응답은 전부 시험용 합성값이며 운영 원응답이 아니다.
@@ -89,11 +89,19 @@ def _run(report, fragments, raw, *, grouped, table=None, allowed=None):
     return {
         "body": [s.text for section in kept.sections for s in section.sentences],
         "rows": block.row_count,
+        "candidates": sum(count for _section_id, count in block.candidate_row_counts_by_section),
         "blocked": dict(block.blocked_counts_by_reason),
         "diagnostics": diagnostics,
         "rejections": rejections,
         "calls": calls,
     }
+
+
+def _assert_body_without_repeated_list(result, text):
+    """정상 검수 본문은 보존하고 동일 기사의 반복 목록만 제외한다."""
+    assert result["body"] == [text]
+    assert result["candidates"] == 1 and result["rows"] == 0
+    assert result["blocked"] == {"redundant_with_prose": 1}
 
 
 def _exact_case(fragment=None):
@@ -109,14 +117,13 @@ def _exact_case(fragment=None):
 
 # ── 살려야 하는 것: 정확한 원문 + 불필요한 관계 항목 없음 ────────────────────
 @pytest.mark.parametrize("grouped", (False, True))
-def test_exact_article_without_a_relation_entry_reaches_body_and_list(grouped):
+def test_exact_article_without_a_relation_entry_reaches_body_without_repeated_list(grouped):
     """변경 전에는 「재가입」 결속 항목이 없다는 이유(role_binding_evidence_missing)로
-    본문 0·목록 0 이었다. 요구 제외 뒤에는 본문 1·목록 1 이다."""
+    본문 0·목록 0 이었다. 요구 제외 뒤에는 본문 1·목록 후보 1이며 반복 목록은 뺀다."""
 
     report, fragments = _exact_case()
     result = _run(report, fragments, _response(), grouped=grouped)
-    assert result["body"] == [CANDIDATE]
-    assert result["rows"] == 1 and result["blocked"] == {}
+    _assert_body_without_repeated_list(result, CANDIDATE)
     assert result["diagnostics"] == [] and result["rejections"] == []
     assert len(result["calls"]) == 1
     prompt = result["calls"][0]
@@ -139,7 +146,7 @@ def test_single_and_grouped_prompts_carry_the_same_waiver_line():
 def test_exact_article_with_a_correct_entry_still_publishes(grouped, target):
     report, fragments = _exact_case()
     result = _run(report, fragments, _response({"관계": [relation(target=target)]}), grouped=grouped)
-    assert result["body"] == [CANDIDATE] and result["rows"] == 1
+    _assert_body_without_repeated_list(result, CANDIDATE)
 
 
 def test_auto_added_performance_table_does_not_break_the_single_news_waiver():
@@ -152,7 +159,7 @@ def test_auto_added_performance_table_does_not_break_the_single_news_waiver():
     )
     report, fragments = _exact_case()
     result = _run(report, fragments, _response(), grouped=False, table=table)
-    assert result["body"] == [CANDIDATE] and result["rows"] == 1
+    _assert_body_without_repeated_list(result, CANDIDATE)
     assert ROLE_BINDING_HINT_WAIVED_HEAD in result["calls"][0]
 
 
@@ -220,7 +227,7 @@ def test_a_news_sentence_stating_the_actual_action_still_needs_and_accepts_a_bin
     without = _run(report, (fragment,), _response(), grouped=grouped)
     assert without["body"] == [] and without["diagnostics"][0]["reason_code"] == ROLE_BINDING_MISSING
     with_binding = _run(report, (fragment,), _response({"관계": [relation(quote=action)]}), grouped=grouped)
-    assert with_binding["body"] == [PREFIX + action] and with_binding["rows"] == 1
+    _assert_body_without_repeated_list(with_binding, PREFIX + action)
 
 
 # ── 막아야 하는 것: 숫자 없는 반례 — 숫자 검사가 빈틈을 가리지 않게 ─────────
@@ -272,13 +279,13 @@ def test_a_false_clause_appended_to_the_exact_clause_gets_no_waiver(grouped):
 
 @pytest.mark.parametrize("grouped", (False, True))
 def test_the_number_free_exact_article_itself_is_kept(grouped):
-    """위 반례의 짝 — 같은 원문을 그대로 옮기면(숫자 없이도) 본문·목록에 실린다."""
+    """위 반례의 짝 — 같은 원문을 그대로 옮기면 숫자 없이도 본문에 남는다."""
 
     fragment = news_fragment(text=NUMBER_FREE)
     empty = ComposedReport((ComposedSection(SECTION, ()),))
     report, _ = supplement_news_candidates(empty, (fragment,))
     result = _run(report, (fragment,), _response(), grouped=grouped)
-    assert result["body"] == [PREFIX + NUMBER_FREE] and result["rows"] == 1
+    _assert_body_without_repeated_list(result, PREFIX + NUMBER_FREE)
 
 
 @pytest.mark.parametrize("candidate", (
@@ -389,4 +396,4 @@ def test_waived_candidate_with_a_causal_entry_is_left_to_the_causal_guard(groupe
     report, fragments = _exact_case()
     causal = {"유형": "인과", "원인": "행사", "결과": "가입", "근거": FID, "원문": KIWOOM}
     result = _run(report, fragments, _response({"관계": [causal]}), grouped=grouped)
-    assert result["body"] == [CANDIDATE] and result["rows"] == 1
+    _assert_body_without_repeated_list(result, CANDIDATE)

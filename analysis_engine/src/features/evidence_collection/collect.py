@@ -317,7 +317,9 @@ def collect_dart_evidence(
             continue
 
         progress = segment.ScanProgress()
-        allowed_slot_ids = frozenset(c.SOURCE_KIND_SLOT_SCOPE[filing.source_kind])
+        # 조각 채점은 필수 칸과 선택 후보 칸을 함께 본다. 조회 기록(attempt)의
+        # 커버리지 주장은 아래·위 _document_attempt가 계속 필수 칸만 쓴다.
+        allowed_slot_ids = frozenset(c.SOURCE_KIND_CANDIDATE_SLOT_SCOPE[filing.source_kind])
         retention = CandidateRetention(allowed_slot_ids)
         for candidate_index, candidate in enumerate(segment.iter_document_candidates(
             fetch_result.text, progress=progress, deadline_at=deadline_at,

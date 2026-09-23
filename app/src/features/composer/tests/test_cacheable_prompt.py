@@ -7,7 +7,7 @@
   프롬프트 캐시는 앞부분이 바이트 단위로 완전히 같을 때만 맞는다.
 
 ★ 이 시험이 지키는 것
-  ① 기본값(False)은 예전 문자열을 «바이트 그대로» 돌려준다 — 기존 호출자 보호.
+  ① 명시 근거 범위 지침 한 벌 외에는 기본값의 예전 문자열·조립 순서를 보존한다.
   ② True면 아홉 장의 앞부분이 서로 바이트 동일하다 — 캐시가 맞는 유일한 조건.
   ③ 순서만 바뀌고 글자는 한 자도 바뀌지 않는다.
   ④ flat 모드에서만 켜진다 — packet 모드는 장마다 조각이 달라 공유분이 없다.
@@ -50,6 +50,7 @@ from src.features.composer.port import (
     SectionEvidencePacketSet,
 )
 from src.shared.report_generation.models import exact_text_sha256
+from src.features.composer.partial_evidence_constants import EXACT_EVIDENCE_SCOPE_GUIDE
 
 
 _COMPANY = "가나다전자(주)"
@@ -163,7 +164,8 @@ def test_기본값은_기존_프롬프트와_바이트가_같다(section_id: str
         _ALREADY_WRITTEN,
     )
 
-    assert prompt == _legacy_prompt(
+    assert prompt.count(EXACT_EVIDENCE_SCOPE_GUIDE) == 1
+    assert prompt.replace(EXACT_EVIDENCE_SCOPE_GUIDE, "", 1) == _legacy_prompt(
         _COMPANY, section_id, _fragments(), table, _ALREADY_WRITTEN
     )
     # 기본 경로는 캐시 표식을 달지 않는다 — 켜지 않았는데 켜지면 안 된다.
@@ -174,7 +176,10 @@ def test_기본값은_기존_프롬프트와_바이트가_같다(section_id: str
 def test_기본값은_앞_장_문장이_없어도_예전과_같다():
     prompt = build_section_prompt(_COMPANY, _SECTION, _fragments(), None, ())
 
-    assert prompt == _legacy_prompt(_COMPANY, _SECTION, _fragments(), None, ())
+    assert prompt.count(EXACT_EVIDENCE_SCOPE_GUIDE) == 1
+    assert prompt.replace(EXACT_EVIDENCE_SCOPE_GUIDE, "", 1) == _legacy_prompt(
+        _COMPANY, _SECTION, _fragments(), None, (),
+    )
 
 
 # ══════════════════════════════════════════════════════════

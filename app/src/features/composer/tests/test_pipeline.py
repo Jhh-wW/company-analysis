@@ -47,6 +47,7 @@ from src.features.composer.pipeline import V2RunOutput, run_v2
 from src.features.composer.port import FilingMeta, PerformanceTable
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.composer.validate import V2ValidationError
+from src.features.composer.tests.review_evidence_fixture import review_items
 from src.features.pipeline.port import Grade, Report
 from src.features.provenance.sources import Source, SourceKind
 from src.shared.final_gate_diagnostics import (
@@ -68,13 +69,59 @@ _REVIEW_NUMBER_RE = re.compile(
     r"\[(\d+)\] \(등급: [^,\n]+, 인용:"
 )
 
+# 장별로 다른 원자 사실을 실제 합성 원문에 싣는다. 일반어 해석 filler로
+# 요약 하한을 채우면 미결속 문장을 공개하는 회귀를 가릴 수 있다.
+_SECTION_CLAIMS = {
+    "identity": (
+        ("identity:corporate_identity", "가나다전자는 반도체 검사 장비 전문기업이다."),
+        ("identity:official_location", "본사는 수원에 있다."),
+    ),
+    "business_model": (
+        ("business_model:revenue_model", "검사 장비 판매에서 수익이 발생한다."),
+        ("business_model:customer_type", "주요 고객은 반도체 제조사다."),
+    ),
+    "portfolio": (
+        ("portfolio:product_role", "웨이퍼 검사기는 생산라인의 결함을 점검하는 장비다."),
+        ("portfolio:customer_fit", "광학 측정기는 고객 공정의 치수 편차를 측정한다."),
+    ),
+    "past_changes": (
+        ("past_changes:completed_execution", "회사는 장비 조립 공장 증설을 완료했다."),
+        ("past_changes:cumulative_change", "납품 후 유지보수 사업을 시작했다."),
+    ),
+    "current_challenges": (
+        ("current_challenges:issue", "검사 부품 조달 기간 지연이 현안이다."),
+        ("current_challenges:response", "회사는 대체 공급사를 확보하고 있다."),
+    ),
+    "future_strategy": (
+        ("future_strategy:stated_plan", "회사는 차세대 검사 장비 개발을 추진할 계획이다."),
+        ("future_strategy:plan_condition", "회사는 고객사 성능 인증을 조건으로 신규 장비를 출시할 계획이다."),
+    ),
+    "operations_partners": (
+        ("operations_partners:value_chain", "부품 조달 뒤 사내 공장에서 검사 장비를 조립한다."),
+        ("operations_partners:distribution_relation", "완성 장비는 반도체 제조사의 생산라인에 납품한다."),
+    ),
+    "culture": (
+        ("culture:work_principle", "고객 존중을 핵심 가치로 삼는다."),
+        ("culture:decision_process", "현장 문제는 담당 부서가 함께 검토한다."),
+    ),
+    "competitive_position": (
+        ("competitive_position:stated_differentiator", "가나다전자는 정밀 광학 검사 기술을 차별점으로 제시한다."),
+        ("competitive_position:self_context", "회사는 고객 공정에 맞춘 검사 소프트웨어 제공을 경쟁력으로 설명한다."),
+    ),
+}
+
 
 def _raw_fragments() -> dict[int, dict[str, str]]:
     return {
-        1: {"종류": "사업내용", "원문": "가나다전자는 반도체 검사 장비 전문기업이다."},
+        1: {
+            "종류": "사업내용",
+            "원문": " ".join(claims[0][1] for claims in _SECTION_CLAIMS.values()),
+            "출처": "https://www.ganada.example/business",
+            "문서일": "2026-08-01",
+        },
         2: {
             "종류": "홈페이지",
-            "원문": "고객 존중을 핵심 가치로 삼는다.",
+            "원문": " ".join(claims[1][1] for claims in _SECTION_CLAIMS.values()),
             "출처": "https://www.ganada.example/about",
             "문서일": "2026-08-01",
         },
@@ -158,34 +205,18 @@ _CULTURE_MARK = _SECTION_MARKS[SECTION_IDS.index("culture")]
 
 
 def _section_json(mark: str) -> str:
-    """장 하나 응답 — «확인» 1문장(조각 1) + «해석» 1문장(조각 2).
-
-    ★ 8장 해석 문장만 조각 2의 낱말(고객 존중·핵심 가치)을 그대로 쓴다. 8장
-      원문 절 계약이 «후보가 기댄 절»을 판정 재료로 쓰기 때문에, 인용한 원문과
-      낱말이 하나도 겹치지 않는 문장은 어느 절에 기댔는지 가릴 수 없어 그 장에서
-      빠진다. 실물 작가는 인용한 원문의 명사를 그대로 옮겨 적는다.
-    ★ 아홉 장 «전부»를 그렇게 바꾸지 않는 이유도 실측이다 — 같은 긴 구절을 아홉
-      장이 공유하면 장 간 중복 제거가 여덟 장을 지운다(생존 13 → 5). 이 장만
-      바꾼다.
-    """
-    문화장 = mark == _CULTURE_MARK
+    """해당 장의 원문 두 절과 명시된 주장 슬롯을 그대로 돌려준다."""
+    section_id = SECTION_IDS[_SECTION_MARKS.index(mark)]
     return json.dumps(
         {
             "문장들": [
                 {
-                    "글": f"{mark} 장: 가나다전자는 반도체 검사 장비 전문기업이다.",
-                    "인용": ["1"],
+                    "글": text,
+                    "인용": [str(index)],
                     "등급": GRADE_CONFIRMED,
-                },
-                {
-                    "글": (
-                        f"{mark} 장: 고객 존중을 핵심 가치로 삼는다는 설명이다."
-                        if 문화장
-                        else f"{mark} 장의 해석 서술이다."
-                    ),
-                    "인용": ["2"],
-                    "등급": GRADE_INTERPRETED,
-                },
+                    "주장슬롯": slot,
+                }
+                for index, (slot, text) in enumerate(_SECTION_CLAIMS[section_id], start=1)
             ]
         },
         ensure_ascii=False,
@@ -227,29 +258,24 @@ def section_id_in_prompt(prompt: str) -> str:
 
 
 def summary_candidate_filler(prompt: str) -> dict[str, object] | None:
-    """장마다 «다른» 해석 문장 하나 — 요약 후보를 3개 이상 만드는 재료.
+    """이름 표 시험의 원문에 실제 있는 장별 절만 요약 재료로 쓴다.
 
-    ★ 왜 필요한가 (2026-09-11) — 여러 시험의 가짜 작가가 아홉 장에 «같은»
-      확인 문장을 써 왔다. 같은 사실은 소유 장 하나로 모이므로 본문에 결국
-      1문장만 남는데, 예전에는 그래도 요약이 3문장이었다 — AI가 본문에 없는
-      문장을 «새로 썼기» 때문이다. 요약이 「검증된 본문 문장 중 고르기」로
-      바뀐 뒤로는 후보 1개로 3문장을 만들 수 없고, 그러면 출고 검증
-      (요약 3~5문장)이 그 시험의 주제와 무관한 이유로 실행을 막는다.
-      그래서 «장마다 다른» 문장을 하나씩 더해 후보를 만든다.
-    ★ 인용은 조각 1 그대로다 — 부록 번호 계약을 건드리지 않기 위해서다.
-
-    Returns:
-        장을 못 가리면 None (부르는 쪽이 아무것도 더하지 않는다).
+    해당 절이 프롬프트에 없으면 보충하지 않는다. 근거 없는 장 이름 filler는
+    공개 경계의 결함을 숨기므로 만들지 않는다.
     """
-
     section_id = section_id_in_prompt(prompt)
-    if not section_id:
-        return None
-    return {
-        "글": f"{section_id} 장의 해석 서술이다.",
-        "인용": ["1"],
-        "등급": GRADE_INTERPRETED,
+    claims = {
+        "identity": ("가나다회사는 사업부문 하나를 운영한다.", "1", "identity:business_definition"),
+        "business_model": ("회사는 고객에게 사업부문 운영 서비스를 제공한다.", "1", "business_model:value_exchange"),
+        "culture": ("고객 존중을 핵심 가치로 삼는다.", "2", "culture:work_principle"),
     }
+    if section_id not in claims:
+        return None
+    text, citation, slot = claims[section_id]
+    if text not in prompt:
+        return None
+    return {"글": text, "인용": [citation], "등급": GRADE_CONFIRMED, "주장슬롯": slot}
+
 
 
 class _FakeWriter:
@@ -280,6 +306,28 @@ class _FakeReviewer:
 
     def __call__(self, prompt: str) -> str:
         self.prompts.append(prompt)
+        # 정상 계획 fixture에만 원문 절과 대상·활동을 정확히 묶는다.
+        # 근거가 없는 다른 계획을 «참»만으로 살리지 않는다.
+        items = review_items(re.sub(r"(?m)^  등급: [^\n]+\n", "", prompt))
+        if items:
+            verdicts = []
+            for item in items:
+                verdict = {"번호": item.number, "결과": "참"}
+                if item.section:
+                    verdict.update({"장": item.section, "근거": [
+                        value.split()[-1] for value in item.citations
+                    ]})
+                for index, (target, activity) in enumerate((
+                    ("차세대 검사 장비 개발", "추진"), ("신규 장비", "출시"),
+                )):
+                    quote = _SECTION_CLAIMS["future_strategy"][index][1]
+                    if item.text == quote:
+                        verdict["검증근거"] = {"미래근거": [{
+                            "근거": str(index + 1), "대상": target,
+                            "활동": activity, "원문": quote, "양태": "계획",
+                        }]}
+                verdicts.append(verdict)
+            return json.dumps({"판정": verdicts}, ensure_ascii=False)
         grouped = re.findall(
             r"\[(\d+)\] \(장: ([^,]+), 종류: ([^,]+), 인용: ([^)]+)\)",
             prompt,
@@ -312,109 +360,126 @@ class _FakeReviewer:
 
 
 def test_정상_흐름이면_검증된_v2_Report가_나온다():
-    writer = _FakeWriter()
-    reviewer = _FakeReviewer()
-
+    writer, reviewer = _FakeWriter(), _FakeReviewer()
     output = run_v2(
-        "가나다전자",
-        _raw_fragments(),
-        None,
-        writer_ask=writer,
-        reviewer_ask=reviewer,
-        corp_type="상장사",
-        as_of_date="2026-08-24",
+        "가나다전자", _raw_fragments(), None,
+        writer_ask=writer, reviewer_ask=reviewer,
+        corp_type="상장사", as_of_date="2026-08-24",
     )
-
     assert isinstance(output, V2RunOutput)
     report = output.report
-    # v2 스키마 + 9장 전부 (장 삭제 없음, v3 정본 순서)
     assert report.schema_version == ENGINE_V2_SCHEMA_VERSION
     assert [section.cell for section in report.sections] == list(SECTION_IDS)
-    assert all(section.prose_lines for section in report.sections)
-    # 핵심 요약 3~5문장 — validate_v2를 통과했다는 뜻이다 (예외 없음)
-    assert len(report.summary_items) == 3
+    assert all(len(section.prose_lines) == 2 for section in report.sections)
+    assert len(report.summary_items) == 5
     assert report.corp_type == "상장사"
     assert report.grade is Grade.PARTIAL
-    # v2에는 아직 원자 claim 장부가 없다. shadow assessor는 이를 가짜 fact로
-    # 통과시키지 않고 공개 차단/미완성으로 정직하게 측정한다.
-    assert report.fact_records == []
+    # 합성 원문의 장별 절과 claim slot이 실제 FactRecord로 결속돼야 한다.
+    assert len(report.fact_records) == 18
+    assert all(fact.evidence_binding for fact in report.fact_records)
     assert output.quality_observation.mode == "generation-shadow"
-    assert output.quality_observation.safety_decision == "공개 차단"
-    assert output.quality_observation.publication_grade == "미완성"
-    assert output.quality_observation.release_allowed is False
+    assert output.quality_observation.safety_decision == "공개 가능"
+    assert output.quality_observation.publication_grade == "부분 완성"
+    assert output.quality_observation.release_allowed is True
     assert report.quality_contract_version == output.quality_observation.contract_version
-    assert report.safety_decision == "공개 차단"
-    assert report.publication_policy == "legacy-shadow-exception-v1"
-    # ★ 여기서 지키는 것은 «내부 사유가 그대로 저장되는가»다.
-    #   2026-09-05 사용자 결정으로 이 문장들은 웹·PDF·노션 «독자 화면»에서
-    #   빠졌지만, 생산은 그대로 유지한다 — 저장본·관리자 화면·진단이 읽는
-    #   자료이기 때문이다. 독자 채널에 안 나오는지는
-    #   `web/tests/test_three_channels_share_sealed_blocks.py`와
-    #   `web/tests/test_three_forms_match.py`가 같은 금지어 목록
-    #   (`web/tests/_reader_notice_ban.py`)으로 따로 지킨다.
-    #   ⚠️ 여기서 지키는 것은 «문구»가 아니라 «사유 기록이 사라지지 않았는가»다.
-    assert any(
-        "아직 하나씩 확인하지 못했습니다" in reason
-        for reason in report.shortfall_reasons
-    ), "★ 「아직 다 확인하지 못했다」는 내부 사유 기록이 사라졌다"
-    assert any(
-        "원문을 함께 확인해 주세요" in reason
-        for reason in report.shortfall_reasons
-    ), "★ 무엇을 하면 되는지를 적은 내부 사유 기록이 사라졌다"
-    assert any(
-        "fact_id와 결속되지 않은 공개 내용" in problem
-        for problem in output.quality_observation.safety_problems
-    )
-    # 부록은 인용된 조각(1·2)만, 번호는 조각 번호 그대로
+    assert report.safety_decision == "공개 가능"
+    assert report.publication_policy == "structured-safety-v1"
+    assert "too_few_substantive_claims" in output.quality_observation.quality_problem_codes
+    assert "too_few_document_sources" in output.quality_observation.quality_problem_codes
+    assert not output.quality_observation.safety_problems
     assert sorted(source.number for source in report.citations) == [1, 2]
 
 
-def test_SHADOW에서_release_allowed_False여도_Outcome·차감·화면은_불변이다():
-    """`report.quality_observation`을 채워도 실제 판정 결과는 그대로다.
-
-    이 시험이 쓰는 fixture는 위 `test_정상_흐름이면_검증된_v2_Report가_나온다`와
-    같은 입력으로 `release_allowed=False`를 낸다. `pipeline/real.py`의
-    Outcome·차감(`charged`) 결정은 이 시험의 소유 밖이지만, 그 두 결정을
-    감시하는 검사(`real.py:2021-2026`·`:2102-2109`)가 둘 다
-    `release_mode in {ENFORCE_NO_PARTIAL, FULL}`로만 게이트돼 있어 SHADOW는
-    애초에 `quality_observation` 유무를 보지 않는다(정적 확인, 이 변경의 소유 밖이라
-    real.py에는 새 시험을 만들지 않았다). 이 시험은 composer 경계에서
-    증명 가능한 것만 본다 — `quality_observation`이 채워져도 v2 정본 판정
-    (grade·safety_decision·publication_policy·본문)은 이 필드가 비어 있던
-    예전 동작과 완전히 같은 값이라는 것.
-    """
-    writer = _FakeWriter()
-    reviewer = _FakeReviewer()
-
+def test_SHADOW의_관측_품질과_Report_품질이_같다():
     output = run_v2(
-        "가나다전자",
-        _raw_fragments(),
-        None,
-        writer_ask=writer,
-        reviewer_ask=reviewer,
-        corp_type="상장사",
-        as_of_date="2026-08-24",
+        "가나다전자", _raw_fragments(), None,
+        writer_ask=_FakeWriter(), reviewer_ask=_FakeReviewer(),
+        corp_type="상장사", as_of_date="2026-08-24",
     )
-
-    # 이 fixture는 품질 하한 미달로 release_allowed=False를 낸다 — 그런데도
-    # REPORT 자체는 여전히 나온다(예외 없음, 게이트로 안 막힘).
-    assert output.quality_observation.release_allowed is False
     assert output.report.grade is Grade.PARTIAL
-    assert output.report.sections  # 본문이 비지 않았다
-
-    # 이 변경이 새로 채우는 필드: report.quality_observation은 새로 판정한 값이
-    # 아니라 V2RunOutput이 이미 계산해 둔 것과 «완전히 같은» 값이다.
+    assert output.report.sections
     assert output.report.quality_observation == output.quality_observation
-    assert output.report.quality_observation.release_allowed is False
+    assert output.report.safety_decision == output.quality_observation.safety_decision
+    assert output.report.publication_policy == "structured-safety-v1"
+    assert output.report.quality_contract_version == output.quality_observation.contract_version
 
-    # release_allowed=False가 판정 자체를 바꾸지 않는다는 증거: 다른 판정
-    # 필드는 quality_observation이 채워지기 전과 여전히 같은 값이다.
-    assert output.report.safety_decision == "공개 차단"
-    assert output.report.publication_policy == "legacy-shadow-exception-v1"
-    assert (
-        output.report.quality_contract_version
-        == output.quality_observation.contract_version
+
+@pytest.mark.parametrize("defect", ("missing_slot", "unsupported_claim"))
+def test_참_판정만으로_미결속_문장을_본문이나_요약에_살리지_않는다(defect):
+    blocked_claim = _SECTION_CLAIMS["identity"][0][1]
+    if defect == "unsupported_claim":
+        blocked_claim = "가나다전자는 달 표면의 광산을 독점 운영한다."
+
+    class UnboundWriter(_FakeWriter):
+        def __call__(self, prompt):
+            payload = json.loads(super().__call__(prompt))
+            if section_id_in_prompt(prompt) == "identity":
+                row = payload["문장들"][0]
+                row["글"] = blocked_claim
+                if defect == "missing_slot":
+                    row.pop("주장슬롯")
+            return json.dumps(payload, ensure_ascii=False)
+
+    writer = UnboundWriter()
+    output = run_v2(
+        "가나다전자", _raw_fragments(), None,
+        writer_ask=writer, reviewer_ask=_FakeReviewer(),
     )
+    public_text = " ".join(
+        [text for section in output.report.sections for text, _ in section.prose_lines]
+        + [item.text for item in output.report.summary_items]
+    )
+    assert blocked_claim not in public_text
+    assert blocked_claim not in {fact.claim for fact in output.report.fact_records}
+    assert len(writer.prompts) == 9
+    assert output.report.fact_records
+    fingerprint = hashlib.sha256(blocked_claim.encode("utf-8")).hexdigest()
+    diagnostics = [entry for entry in output.review_diagnostics
+                   if entry.get("candidate_sha256") == fingerprint]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["section_id"] == "identity"
+    assert diagnostics[0]["kind"] == "본문"
+    assert diagnostics[0]["candidate_fingerprint_version"] == "candidate-raw-utf8-v1"
+    expected_reason = (
+        "public_sentence_fact_unbound" if defect == "missing_slot"
+        else "prose_own_source_unsupported"
+    )
+    assert diagnostics[0]["reason_code"] == expected_reason
+    assert blocked_claim not in json.dumps(diagnostics, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("partial", (False, True))
+def test_최종_결속선택에서_본문을_모두_잃은_장에도_독자_안내가_남는다(partial):
+    from src.features.composer.evidence_availability import EvidenceAvailability
+
+    class UnboundSectionWriter(_FakeWriter):
+        def __call__(self, prompt):
+            payload = json.loads(super().__call__(prompt))
+            if section_id_in_prompt(prompt) == "identity":
+                for sentence in payload["문장들"]:
+                    sentence.pop("주장슬롯")
+            return json.dumps(payload, ensure_ascii=False)
+
+    writer = UnboundSectionWriter()
+    output = run_v2(
+        "가나다전자", _raw_fragments(), None,
+        writer_ask=writer, reviewer_ask=_FakeReviewer(),
+        evidence_availability=EvidenceAvailability("partial") if partial else None,
+    )
+    section = next(section for section in output.report.sections if section.cell == "identity")
+    assert not section.prose_lines and not section.fact_ids
+    assert section.guidance_lines
+    assert any(entry.get("section_id") == "identity"
+               and entry.get("reason_code") == "public_sentence_fact_unbound"
+               for entry in output.review_diagnostics)
+    # 이 legacy fixture의 문화 자료는 공식 문서 신원 조건이 없어 부분 작성에서 생략한다.
+    expected_sections = set(SECTION_IDS) - ({"culture"} if partial else set())
+    written_sections = [section_id_in_prompt(prompt) for prompt in writer.prompts]
+    assert set(written_sections) == expected_sections
+    assert len(written_sections) == len(expected_sections)
+    assert output.report.fact_records and output.report.summary_items
+    if partial:
+        assert section.empty_reason
 
 
 def _structured_financial_table() -> PerformanceTable:
@@ -495,8 +560,9 @@ def test_작가와_검수는_서로_다른_프롬프트만_받는다():
         reviewer_ask=reviewer,
     )
 
-    # 작가: 장 9회 + 요약 고르기 1회. 판정 프롬프트는 한 번도 받지 않는다.
-    assert len(writer.prompts) == 10
+    # 작가: 장 작성 9회. 요약은 결속된 본문에서 결정적으로 고른다.
+    assert len(writer.prompts) == 9
+    assert not any("핵심 요약" in prompt for prompt in writer.prompts)
     assert not any("판정" in prompt for prompt in writer.prompts)
     # 검수: 본문 1회뿐이다. 요약 재검증은 없어졌다 (2026-09-11) — 요약이
     # 검증된 본문 문장을 글자 그대로 싣게 되면서 다시 검수할 «새 글자»가
@@ -670,56 +736,22 @@ def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
 
 
 def test_인라인_대괄호_인용_흉내는_출고검증을_막지_않는다():
-    """작가가 «글» 안에 [2]처럼 대괄호 인용을 흉내내도(critical 결함) 파싱
-    단계에서 걷어내, 가짜 인용-부록 불일치로 GATE_STOPPED에 빠지지 않는다."""
-
-    def writer(prompt: str) -> str:
-        if "핵심 요약" in prompt:
-            return _summary_selection_json(prompt)
-        mark = _SECTION_MARKS[writer.calls % len(_SECTION_MARKS)]
-        writer.calls += 1
-        return json.dumps(
-            {
-                "문장들": [
-                    {
-                        "글": f"{mark} 장: 가나다전자는 반도체 [2] 검사 장비 전문기업이다.",
-                        "인용": ["1"],
-                        "등급": GRADE_CONFIRMED,
-                    },
-                    # ★ 장마다 다른 «해석» 한 문장을 더 둔다 (2026-09-11). 위
-                    #   확인 문장은 장마다 같은 사실이라 소유 장 하나로 모여
-                    #   본문에 1문장만 남는다. 요약이 「검증된 본문 문장 중에서
-                    #   고르기」로 바뀐 뒤로는 후보가 1개면 3문장을 못 채워
-                    #   출고 검증에서 막힌다 — 이 시험의 주제(대괄호 흉내 제거)
-                    #   와 무관한 이유로 죽지 않게 재료만 늘린다.
-                    #   인용은 조각 1 그대로라 부록 번호 계약은 바뀌지 않는다.
-                    {
-                        "글": f"{mark} 장의 해석 서술이다.",
-                        "인용": ["1"],
-                        "등급": GRADE_INTERPRETED,
-                    },
-                ]
-            },
-            ensure_ascii=False,
-        )
-
-    writer.calls = 0
-    reviewer = _FakeReviewer()
+    """본문 글의 가짜 번호는 제거하고 명시적 인용만 부록에 남긴다."""
+    class InlineCitationWriter(_FakeWriter):
+        def __call__(self, prompt):
+            payload = json.loads(super().__call__(prompt))
+            for row in payload["문장들"]:
+                row["글"] = "[999] " + row["글"]
+            return json.dumps(payload, ensure_ascii=False)
 
     output = run_v2(
-        "가나다전자",
-        _raw_fragments(),
-        None,
-        writer_ask=writer,
-        reviewer_ask=reviewer,
-    )  # V2ValidationError 없이 끝나야 한다
-
-    report = output.report
-    for section in report.sections:
-        for text, _cite in section.prose_lines:
-            assert "[2]" not in text  # 흉내낸 번호가 텍스트에 남지 않는다
-    # 실제로 인용된 조각(1)만 부록에 실린다 — 흉내낸 [2]로 가짜 인용이 붙지 않는다
-    assert sorted(source.number for source in report.citations) == [1]
+        "가나다전자", _raw_fragments(), None,
+        writer_ask=InlineCitationWriter(), reviewer_ask=_FakeReviewer(),
+    )
+    assert all("[999]" not in text for section in output.report.sections
+               for text, _cite in section.prose_lines)
+    assert len(output.report.fact_records) == 18
+    assert sorted(source.number for source in output.report.citations) == [1, 2]
 
 
 def test_초안과_생존_문장_수를_그대로_센다():
@@ -734,13 +766,11 @@ def test_초안과_생존_문장_수를_그대로_센다():
         reviewer_ask=reviewer,
     )
 
-    # 초안: 9장 × 2문장 + 요약 3문장 = 21.
-    # 같은 전문기업 사실을 반복한 확인 문장은 소유 장 하나로 모이므로
-    # 확인 본문 1 + 해석 본문 9 + 요약 3 = 13문장이 남는다.
-    assert output.composed_sentences == 21
-    assert output.verified_sentences == 13
-    assert sum(len(section.prose_lines) for section in output.report.sections) == 10
-    assert len(output.report.summary_items) == 3
+    # 장별 서로 다른 사실 18개와 결정적 요약 5개를 같은 방식으로 센다.
+    assert output.composed_sentences == 23
+    assert output.verified_sentences == 23
+    assert sum(len(section.prose_lines) for section in output.report.sections) == 18
+    assert len(output.report.summary_items) == 5
 
 
 # ══════════════════════════════════════════════════════════
@@ -748,52 +778,31 @@ def test_초안과_생존_문장_수를_그대로_센다():
 # ══════════════════════════════════════════════════════════
 
 
-def test_요약이_호출상한이면_본문을_버리지_않고_보고서를_낸다():
-    """★ 실측 — 요약 호출 하나가 완성된 9개 장을 통째로 버렸다.
+@pytest.mark.parametrize("call_limit", (False, True))
+def test_요약은_추가_AI호출이나_예산을_쓰지_않는다(call_limit):
+    class SummaryCallForbidden(_FakeWriter):
+        def __init__(self):
+            super().__init__()
+            self.summary_calls = 0
 
-    요약은 «이미 검증된» 본문 확인 문장으로 채울 길이 있고 그 길은 AI 를
-    한 번도 부르지 않는다. 그러니 본문을 버릴 이유가 없다.
-    """
-
-    class _요약에서_한도(_FakeWriter):
-        def __call__(self, prompt: str) -> str:
+        def __call__(self, prompt):
             if "핵심 요약" in prompt:
-                raise AskFatalError(RuntimeError("한도"), call_limit=True)
+                self.summary_calls += 1
+                raise AskFatalError(RuntimeError("추가 요약 호출 금지"), call_limit=call_limit)
             return super().__call__(prompt)
 
+    writer = SummaryCallForbidden()
     output = run_v2(
-        "가나다전자",
-        _raw_fragments(),
-        None,
-        writer_ask=_요약에서_한도(),
-        reviewer_ask=_FakeReviewer(),
+        "가나다전자", _raw_fragments(), None,
+        writer_ask=writer, reviewer_ask=_FakeReviewer(),
     )
-
-    report = output.report
-    assert [section.cell for section in report.sections] == list(SECTION_IDS)
-    assert all(section.prose_lines for section in report.sections), (
-        "★ 본문이 사라지면 안 된다"
-    )
-    assert report.summary_items, "★ 요약은 본문 확인 문장으로 채워져야 한다"
-
-
-def test_요약이_돈문제면_여전히_요청_전체가_멈춘다():
-    """★ 안전선 — 예산 소진을 「요약만 대체」로 숨기지 않는다."""
-
-    class _요약에서_예산소진(_FakeWriter):
-        def __call__(self, prompt: str) -> str:
-            if "핵심 요약" in prompt:
-                raise AskFatalError(RuntimeError("예산"))
-            return super().__call__(prompt)
-
-    with pytest.raises(AskFatalError):
-        run_v2(
-            "가나다전자",
-            _raw_fragments(),
-            None,
-            writer_ask=_요약에서_예산소진(),
-            reviewer_ask=_FakeReviewer(),
-        )
+    assert writer.summary_calls == 0
+    assert len(writer.prompts) == 9
+    assert all(section.prose_lines for section in output.report.sections)
+    assert len(output.report.summary_items) == 5
+    body_claims = {fact.claim for fact in output.report.fact_records}
+    assert all(re.sub(r"\s*\[\d+\]", "", item.text).strip() in body_claims
+               for item in output.report.summary_items)
 
 
 def test_본문이_통째로_비면_V2ValidationError로_끝난다():
@@ -837,19 +846,15 @@ def test_요약_후보가_세_문장_미만이면_보고서_전체가_막히고_
     """
 
     # 아홉 장이 «같은» 사실을 쓰면 소유 장 하나로 모여 본문에 1문장만 남는다.
-    한문장 = json.dumps(
-        {
-            "문장들": [
-                {
-                    "글": "가나다전자는 반도체 검사 장비 전문기업이다.",
-                    "인용": ["1"],
-                    "등급": GRADE_CONFIRMED,
-                }
-            ]
-        },
-        ensure_ascii=False,
-    )
-    writer = _FakeWriter(section_response=한문장)
+    class OnlyIdentityWriter(_FakeWriter):
+        def __call__(self, prompt):
+            payload = json.loads(super().__call__(prompt))
+            payload["문장들"] = (
+                payload["문장들"][:1] if section_id_in_prompt(prompt) == "identity" else []
+            )
+            return json.dumps(payload, ensure_ascii=False)
+
+    writer = OnlyIdentityWriter()
     reviewer = _FakeReviewer()
 
     with pytest.raises(V2ValidationError) as caught:
@@ -887,22 +892,7 @@ def test_후보가_두_장에만_있으면_많아도_막히고_AI도_안_부른�
             section_id = section_id_in_prompt(prompt)
             if section_id not in SECTION_IDS[:2]:
                 return json.dumps({"문장들": []}, ensure_ascii=False)
-            # ⚠️ 문장에 숫자를 넣지 않는다 — 구조화 결속 없는 숫자 문장은
-            #   수치 안전 검사가 본문에서 빼 버려, 이 시험이 재려는 「두 장에
-            #   후보 4개」가 아니라 「후보 0개」가 된다(실측으로 확인).
-            return json.dumps(
-                {
-                    "문장들": [
-                        {
-                            "글": f"{section_id} 장의 {차례} 해석 서술이다.",
-                            "인용": ["1"],
-                            "등급": GRADE_INTERPRETED,
-                        }
-                        for 차례 in ("첫", "둘째")
-                    ]
-                },
-                ensure_ascii=False,
-            )
+            return _section_json(_SECTION_MARKS[SECTION_IDS.index(section_id)])
 
     writer = _두_장만_쓰는_작가()
 
@@ -1020,61 +1010,21 @@ def test_중복이_없으면_경고를_남기지_않는다(caplog):
 
 
 def test_잘못된_연평균_AI문장은_최종_Report에서_빠지고_누적claim만_남는다():
-    fragments = {
-        9: {
-            "종류": "재무",
-            "원문": "주요계정(DART API): 매출액 1,242,800,000,000",
-        }
+    fragments = _raw_fragments()
+    fragments[9] = {
+        "종류": "재무", "원문": "주요계정(DART API): 매출액 1,242,800,000,000",
     }
 
-    class Writer:
-        def __init__(self) -> None:
-            self.section_calls = 0
-
+    class Writer(_FakeWriter):
         def __call__(self, prompt: str) -> str:
-            if "핵심 요약" in prompt:
-                return json.dumps(
-                    {
-                        "문장들": [
-                            {
-                                "글": "연평균 성장률은 25% 이상이다.",
-                                "인용": ["9"],
-                                "등급": GRADE_INTERPRETED,
-                            },
-                            {
-                                "글": "공식 자료에서 사업 변화가 확인된다.",
-                                "인용": ["9"],
-                                "등급": GRADE_CONFIRMED,
-                            },
-                            {
-                                "글": "변화의 배경은 추가 확인이 필요하다.",
-                                "인용": ["9"],
-                                "등급": GRADE_CONFIRMED,
-                            },
-                        ]
-                    },
-                    ensure_ascii=False,
-                )
-            mark = _SECTION_MARKS[self.section_calls]
-            is_past = self.section_calls == 3
-            self.section_calls += 1
-            sentences = [
-                {
-                    "글": f"{mark} 장에서 확인한 회사 사실이다.",
-                    "인용": ["9"],
-                    "등급": GRADE_CONFIRMED,
-                },
-                {
-                    "글": (
-                        "2년 누적 24.28%를 연평균 25% 이상으로 해석할 수 있다."
-                        if is_past
-                        else f"{mark} 장의 자료가 보여 주는 의미다."
-                    ),
-                    "인용": ["9"],
-                    "등급": GRADE_INTERPRETED,
-                },
-            ]
-            return json.dumps({"문장들": sentences}, ensure_ascii=False)
+            payload = json.loads(super().__call__(prompt))
+            if section_id_in_prompt(prompt) == "past_changes":
+                payload["문장들"].append({
+                    "글": "2년 누적 24.28%를 연평균 25% 이상으로 해석할 수 있다.",
+                    "인용": ["9"], "등급": GRADE_INTERPRETED,
+                    "주장슬롯": "past_changes:historical_performance",
+                })
+            return json.dumps(payload, ensure_ascii=False)
 
     output = run_v2(
         "가나다전자",
@@ -1101,8 +1051,9 @@ def test_잘못된_연평균_AI문장은_최종_Report에서_빠지고_누적cla
     )
     assert "연평균 25%" not in public_text
     assert "누적 증감률은 24.28%" in public_text
-    assert len(output.report.fact_records) == 2
-    assert all(fact.formula == "rate" for fact in output.report.fact_records)
+    rates = [fact for fact in output.report.fact_records if fact.formula == "rate"]
+    assert len(rates) == 2
+    assert all("연평균" not in fact.claim for fact in output.report.fact_records)
     assert output.report.grade is Grade.PARTIAL
     assert any(
         "숫자·날짜 문장" in reason
@@ -1111,37 +1062,12 @@ def test_잘못된_연평균_AI문장은_최종_Report에서_빠지고_누적cla
 
 
 def test_한문장_장이_있으면_COMPLETE가_아니라_PARTIAL과_이유가_나온다():
-    class OneSentenceWriter:
-        def __init__(self) -> None:
-            self.section_calls = 0
+    class OneSentenceWriter(_FakeWriter):
+        def __call__(self, prompt):
+            payload = json.loads(super().__call__(prompt))
+            payload["문장들"] = payload["문장들"][:1]
+            return json.dumps(payload, ensure_ascii=False)
 
-        def __call__(self, prompt: str) -> str:
-            if "핵심 요약" in prompt:
-                return _summary_selection_json(prompt)
-            mark = _SECTION_MARKS[self.section_calls]
-            # ★ 첫 장만 «확인» 문장을 쓰고 나머지는 장마다 다른 «해석» 한
-            #   문장을 쓴다 (2026-09-11). 예전에는 아홉 장이 모두 같은 확인
-            #   문장이라 소유 장 하나로 모여 본문에 1문장만 남았고, 그래도
-            #   요약은 AI가 3문장을 «지어내» 채웠다. 요약이 「검증된 본문
-            #   문장 중에서 고르기」로 바뀐 뒤로는 후보 1개로 3문장을 만들 수
-            #   없다 — 지어내지 않는다는 것이 이 설계의 요점이다. 장마다
-            #   «한 문장»이라는 이 시험의 주제는 그대로다.
-            첫_장 = self.section_calls == 0
-            self.section_calls += 1
-            문장 = (
-                {
-                    "글": f"{mark} 장: 가나다전자는 반도체 검사 장비 전문기업이다.",
-                    "인용": ["1"],
-                    "등급": GRADE_CONFIRMED,
-                }
-                if 첫_장
-                else {
-                    "글": f"{mark} 장의 해석 서술이다.",
-                    "인용": ["1"],
-                    "등급": GRADE_INTERPRETED,
-                }
-            )
-            return json.dumps({"문장들": [문장]}, ensure_ascii=False)
 
     output = run_v2(
         "가나다전자",
@@ -1157,15 +1083,13 @@ def test_한문장_장이_있으면_COMPLETE가_아니라_PARTIAL과_이유가_�
     assert "low_public_sentence_coverage" in (
         output.quality_observation.quality_problem_codes
     )
-    # 작가는 한 문장을 만들었지만 이 SHADOW fixture에는 원자 FactRecord와
-    # 원문 결속이 없다. 이를 «확인된 1문장»으로 세는 것이 기존 결함이므로,
-    # 공개 문장 하한은 0건으로 정직하게 표시한다. 임계값을 낮춘 변경이 아니다.
+    # 원문 결속된 사실이 한 문장뿐인 장은 실제로 1건으로 측정한다.
     identity = next(
         section for section in output.report.sections if section.cell == "identity"
     )
     assert len(identity.prose_lines) == 1
     assert any(
-        "확인된 문장이 0개뿐이라 내용이 얇습니다" in reason
+        "확인된 문장이 1개뿐이라 내용이 얇습니다" in reason
         for reason in output.report.shortfall_reasons
     )
 

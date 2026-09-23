@@ -20,6 +20,10 @@ from src.shared.report_quality.contract import resolve_contract
 from src.shared.report_quality.dto import ReportCandidate, ReportSectionCandidate
 from src.shared.report_quality.models import ContractUse, GenerationAssessment
 from src.shared.report_quality.models import PublicationPolicy
+from src.shared.report_quality.optional_sections import (
+    OPTIONAL_SECTION_WIRE_KEYS, OptionalSectionObservation,
+    optional_sections_from_wire, optional_sections_to_wire,
+)
 
 
 SHADOW_ASSESSMENT_MODE = "generation-shadow"
@@ -79,6 +83,8 @@ class GenerationQualityObservation:
     semantic_underfilled_sections: tuple[str, ...] = ()
     # 사람이 읽는 문구와 행동 계약을 분리한 닫힌 품질 코드.
     quality_problem_codes: tuple[str, ...] = ()
+    optional_sections_version: str = ""
+    optional_sections: tuple[OptionalSectionObservation, ...] = ()
 
 
 _OBSERVATION_WIRE_KEYS = frozenset(
@@ -133,6 +139,7 @@ def generation_quality_observation_to_dict(
         ),
         "notice_only_sections": list(value.notice_only_sections),
         "quality_problem_codes": list(value.quality_problem_codes),
+        **optional_sections_to_wire(value.optional_sections_version, value.optional_sections),
     }
 
 
@@ -150,7 +157,9 @@ def generation_quality_observation_from_dict(
 ) -> GenerationQualityObservation:
     """unknown/missing key와 bool→int 변환을 거절하고 관측 원본을 복원한다."""
 
-    if type(data) is not dict or set(data) != _OBSERVATION_WIRE_KEYS:
+    if type(data) is not dict or set(data) not in (
+        _OBSERVATION_WIRE_KEYS, _OBSERVATION_WIRE_KEYS | OPTIONAL_SECTION_WIRE_KEYS,
+    ):
         raise ValueError("GenerationQualityObservation key 또는 객체 형식이 다릅니다")
     for key in (
         "mode",
@@ -184,6 +193,7 @@ def generation_quality_observation_from_dict(
         for item in raw_counts
     ):
         raise ValueError("GenerationQualityObservation 장별 공개 문장 수가 손상됐습니다")
+    optional_version, optional_sections = optional_sections_from_wire(data)
     value = GenerationQualityObservation(
         mode=data["mode"],
         contract_version=data["contract_version"],
@@ -216,6 +226,8 @@ def generation_quality_observation_from_dict(
         quality_problem_codes=_observation_strings(
             data["quality_problem_codes"], label="품질 문제 코드"
         ),
+        optional_sections_version=optional_version,
+        optional_sections=optional_sections,
     )
     if generation_quality_observation_to_dict(value) != data:
         raise ValueError("GenerationQualityObservation canonical 왕복이 다릅니다")
@@ -255,6 +267,8 @@ def assert_observation_matches_assessment(
         "quality_problem_codes": tuple(
             code.value for code in assessment.quality.problem_codes
         ),
+        "optional_sections_version": assessment.quality.optional_sections_version,
+        "optional_sections": assessment.quality.optional_sections,
     }
     actual = {
         key: getattr(observation, key)
@@ -355,6 +369,8 @@ def assess_and_observe_generation(
         quality_problem_codes=tuple(
             code.value for code in assessment.quality.problem_codes
         ),
+        optional_sections_version=assessment.quality.optional_sections_version,
+        optional_sections=assessment.quality.optional_sections,
     )
     return assessment, observation
 

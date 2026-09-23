@@ -16,6 +16,7 @@ import pytest
 
 from src.features.composer.constants import GRADE_CONFIRMED, RETRY_REMINDER
 from src.features.composer.port import ComposedSentence
+from src.features.composer.review_schema import FLAT_REVIEW_SCHEMA
 from src.features.composer.tests.test_initial_reviewer_call_separation import (
     BAD,
     FRAGMENT,
@@ -57,14 +58,30 @@ def _breaks_once(reply):
     return 답한다
 
 
-def test_the_first_review_parse_retry_uses_the_retry_callable():
-    """1차 검수의 재요청은 재요청 전용 호출자로 나간다 (첫 호출자는 1회로 끝)."""
+@pytest.mark.parametrize("grouped,packet_schema", (
+    (False, False), (True, False), (True, True),
+), ids=("flat", "grouped-schema-off", "grouped-schema-on"))
+def test_the_first_review_parse_retry_uses_the_retry_callable(
+    monkeypatch, grouped, packet_schema,
+):
+    """1차 검수의 재요청은 재요청 전용 호출자로 나간다 (첫 호출자는 1회로 끝).
 
+    2026-09-23 — packet(grouped) 경로도 같은 계약이다. 예전에는 «검수 1회
+    고정»이라 이 재요청 자체가 없었다. packet 의 네이티브 스키마는 스위치
+    ``PACKET_REVIEW_SCHEMA_ENABLED``(기본 꺼짐)를 따르고, 평문은 예전 그대로 싣는다.
+    """
+
+    if packet_schema:
+        monkeypatch.setattr(
+            "src.features.composer.verify.PACKET_REVIEW_SCHEMA_ENABLED", True,
+        )
     initial = _Recorder("initial", reply=_breaks_once(_verdict_rows))
     retry = _Recorder("retry", reply=_verdict_rows)
     followup = _Recorder("followup", reply=_followup)
+    allowed = {SECTION: frozenset((FRAGMENT,))} if grouped else None
     checked = verify_report(
         _report(_good_sentence()), _fragments(), None, followup,
+        allowed_fragment_ids_by_section=allowed,
         diagnostics=[], initial_ask=initial, initial_retry_ask=retry,
     )
     assert initial.count == 1, initial.count
@@ -73,6 +90,9 @@ def test_the_first_review_parse_retry_uses_the_retry_callable():
     # 재요청 프롬프트는 첫 프롬프트 + 형식 상기문이다 (내용 요구는 그대로).
     assert RETRY_REMINDER in retry.prompts[0]
     assert retry.prompts[0].startswith(initial.prompts[0])
+    expected_schema = FLAT_REVIEW_SCHEMA if (not grouped or packet_schema) else None
+    assert getattr(initial.prompts[0], "response_schema", None) is expected_schema
+    assert getattr(retry.prompts[0], "response_schema", None) is expected_schema
     assert [s.text for s in checked.sections[0].sentences] == [GOOD]
 
 
@@ -90,13 +110,16 @@ def test_the_retry_callable_is_untouched_when_the_first_answer_parses():
     assert [s.text for s in checked.sections[0].sentences] == [GOOD]
 
 
-def test_without_the_retry_callable_the_retry_stays_on_the_initial_callable():
+@pytest.mark.parametrize("grouped", (False, True))
+def test_without_the_retry_callable_the_retry_stays_on_the_initial_callable(grouped):
     """재요청 호출자를 안 넘기면 예전 그대로 1차 호출자가 두 번 나간다."""
 
     initial = _Recorder("initial", reply=_breaks_once(_verdict_rows))
     followup = _Recorder("followup", reply=_followup)
+    allowed = {SECTION: frozenset((FRAGMENT,))} if grouped else None
     checked = verify_report(
         _report(_good_sentence()), _fragments(), None, followup,
+        allowed_fragment_ids_by_section=allowed,
         diagnostics=[], initial_ask=initial,
     )
     assert initial.count == 2, initial.count
@@ -141,6 +164,8 @@ def test_the_retry_callable_does_not_change_the_first_review_itself(grouped):
         diagnostics=[], initial_ask=initial, initial_retry_ask=retry,
     )
     assert initial.count == 1 and followup.count == 0
-    # packet 경로는 «검수 1회 고정»이라 파싱 재요청 자체가 없다.
+    # 첫 답이 온전하면 두 경로 모두 재요청도 누락 후속도 없다. (2026-09-23부터
+    # packet 경로도 못 읽힐 때·번호가 빠질 때는 이 호출자로 1회 더 묻는다 —
+    # 위 test_the_first_review_parse_retry_uses_the_retry_callable[True].)
     assert retry.count == 0, retry.prompts
     assert [s.text for s in checked.sections[0].sentences] == [GOOD]

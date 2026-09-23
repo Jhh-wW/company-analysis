@@ -48,14 +48,15 @@ def _block_text(block: dict) -> str:
 def _captioned(title: str, cite: str) -> str:
     """설명 줄 한 줄 — 봉인된 제목 뒤에 봉인된 인용 번호를 붙인 모양."""
 
-    marker = citation_marker(cite)
+    from src.core.citations import citation_number
+    marker = f"[{citation_number(cite)}]" if citation_number(cite) else ""
     return f"{title} {marker}" if marker else title
 
 
 def _expected_paragraphs(display: PublicSectionDisplay) -> list[str]:
     """이 장 구역에 «나와도 되는» 문단 글자를 배치 순서대로 적는다."""
 
-    expected = [text for _ordinal, text in display.paragraphs]
+    expected = [*display.guidance_lines, *(text for _ordinal, text in display.paragraphs)]
     band = display.period_summary
     if band is not None and band.items:
         caption = _captioned(band.title, band.cite)

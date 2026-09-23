@@ -152,6 +152,9 @@ def _copy_fake_app(tmp_path: Path) -> Path:
     app_copy.mkdir(parents=True)
     shutil.copy2(LAUNCHER, app_copy / LAUNCHER.name)
     shutil.copy2(APP_ROOT.parent / "render.yaml", app_copy.parent / "render.yaml")
+    replay_contract = Path("src/features/pipeline/private_replay_constants.py")
+    (app_copy / replay_contract).parent.mkdir(parents=True)
+    shutil.copy2(APP_ROOT / replay_contract, app_copy / replay_contract)
     (app_copy / "uvicorn.py").write_text(
         """
 import json
@@ -176,6 +179,8 @@ payload = {
     "app_git_commit": os.environ.get("APP_GIT_COMMIT"),
     "render_git_commit_absent": "RENDER_GIT_COMMIT" not in os.environ,
     "release_mode": os.environ.get("REPORT_RELEASE_MODE"),
+    "local_replay_enabled": os.environ.get("REPORT_LOCAL_REPLAY_ENABLED"),
+    "local_replay_run": os.environ.get("REPORT_LOCAL_REPLAY_RUN"),
     "feature_settings": {name: os.environ.get(name) for name in (
         "NEWS_INTAKE", "REVENUE_TABLE_V2", "TYPED_DART_COLLECTOR",
         "EVIDENCE_RECLASSIFY", "NEWSROOM_DATE_AI",
@@ -555,7 +560,7 @@ def test_paid_launch_requires_committed_execution_source(tmp_path: Path, change:
         with (app_copy / LAUNCHER.name).open("a", encoding="utf-8") as stream:
             stream.write("\n# 실행 소스 미커밋 변경\n")
     else:
-        (app_copy / "src").mkdir()
+        (app_copy / "src").mkdir(exist_ok=True)
         (app_copy / "src" / "untracked.py").write_text("VALUE = 1\n", encoding="utf-8")
     result, records = _run_fake(app_copy, _environment(tmp_path), paid=True)
     assert result.returncode != 0
@@ -686,6 +691,90 @@ def test_launcher_is_utf8_with_bom_so_powershell_5_1_shows_korean() -> None:
     깨진 안내는 틀린 안내보다 나쁘다 — 사람이 무엇을 잘못했는지조차 알 수 없다.
     """
     assert LAUNCHER.read_bytes().startswith(codecs.BOM_UTF8)
+
+
+@pytest.mark.skipif(WINDOWS_POWERSHELL is None, reason="Windows PowerShell 5.1 가짜 자식 보관 설정 시험")
+@pytest.mark.parametrize("explicit", (False, True))
+def test_local_replay_requires_explicit_switch_and_does_not_inherit_credentials(tmp_path: Path, explicit: bool) -> None:
+    """부모와 provider 파일이 모두 켜도 명시 옵션 없이는 보관 키가 자식에 없다."""
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+    environment["REPORT_LOCAL_REPLAY_ENABLED"] = "1"
+    environment["REPORT_LOCAL_REPLAY_RUN"] = "parent-must-not-win"
+    credentials = tmp_path / "replay credential inputs.env"
+    credentials.write_text(
+        "REPORT_LOCAL_REPLAY_ENABLED=1\nREPORT_LOCAL_REPLAY_RUN=file-must-not-win\n",
+        encoding="utf-8",
+    )
+    arguments = " -EnableLocalReplay -LocalReplayRun replay-20260923_a1" if explicit else ""
+    result, records = _run_fake(
+        app_copy, environment, paid=True, provider_env_file=credentials,
+        feature_arguments=arguments,
+    )
+    assert result.returncode == 0 and len(records) == 1
+    payload = json.loads(records[0].read_bytes())
+    assert payload["local_replay_enabled"] == ("1" if explicit else None)
+    assert payload["local_replay_run"] == ("replay-20260923_a1" if explicit else None)
+    settings_path = records[0].parent / "evaluation-settings.json"
+    snapshot = json.loads(settings_path.read_bytes())
+    assert snapshot["local_replay_enabled"] is explicit
+    assert snapshot["code_identity_verified"] is True
+    assert snapshot["execution_source_clean"] is True
+    assert payload["paths_inside_run_root"] is True and payload["dotenv_disabled"] == "1"
+    for marker in (b"parent-must-not-win", b"file-must-not-win", b"secret-sentinel", b"replay-20260923_a1"):
+        assert marker not in result.stdout + result.stderr + settings_path.read_bytes()
+
+
+@pytest.mark.skipif(WINDOWS_POWERSHELL is None, reason="Windows PowerShell 5.1 가짜 자식 보관 표지 시험")
+@pytest.mark.parametrize("entry_mode", ("command", "file"))
+@pytest.mark.parametrize("run_id", ("", "../escape", "Upper", "has space", "a/b", "x" * 65, "safe\n"))
+def test_invalid_local_replay_run_is_refused_before_child(tmp_path: Path, entry_mode: str, run_id: str) -> None:
+    from src.features.pipeline.private_replay_constants import REPLAY_RUN_PATTERN
+    import re
+
+    assert re.fullmatch(REPLAY_RUN_PATTERN, run_id) is None
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+    if entry_mode == "command":
+        result, records = _run_fake(
+            app_copy, environment, paid=False,
+            feature_arguments=f" -EnableLocalReplay -LocalReplayRun {_ps_literal(run_id)}",
+        )
+    else:
+        result = subprocess.run(
+            [WINDOWS_POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-File", str(app_copy / LAUNCHER.name),
+             "-EnableLocalReplay", "-LocalReplayRun", run_id],
+            cwd=app_copy, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+        )
+        records = list(app_copy.rglob("child-environment.json"))
+    assert result.returncode != 0
+    assert not records and not (app_copy / ".local_evaluation_runs").exists()
+    assert b"LocalReplayRun" in result.stdout
+
+
+@pytest.mark.skipif(WINDOWS_POWERSHELL is None, reason="Windows PowerShell 5.1 가짜 자식 보관 표지 시험")
+def test_local_replay_run_without_switch_is_refused(tmp_path: Path) -> None:
+    app_copy = _copy_fake_app(tmp_path)
+    result, records = _run_fake(
+        app_copy, _environment(tmp_path), paid=False,
+        feature_arguments=" -LocalReplayRun replay-20260923_a1",
+    )
+    assert result.returncode != 0 and not records
+    assert not (app_copy / ".local_evaluation_runs").exists()
+
+
+@pytest.mark.skipif(WINDOWS_POWERSHELL is None, reason="Windows PowerShell 5.1 생산 정본 패턴 연결 시험")
+def test_local_replay_run_validation_reads_the_production_pattern(tmp_path: Path) -> None:
+    app_copy = _copy_fake_app(tmp_path)
+    contract = app_copy / "src/features/pipeline/private_replay_constants.py"
+    contract.write_text('REPLAY_RUN_PATTERN = r"only-this-run"\n', encoding="utf-8")
+    result, records = _run_fake(
+        app_copy, _environment(tmp_path), paid=False,
+        feature_arguments=" -EnableLocalReplay -LocalReplayRun ordinarily-valid",
+    )
+    assert result.returncode != 0 and not records
+    assert not (app_copy / ".local_evaluation_runs").exists()
 
 
 @pytest.mark.skipif(

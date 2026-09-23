@@ -597,6 +597,10 @@ class GroundedNewsExcerpt:
     event_on: str
     span_start: int
     span_end: int
+    #: 모델이 고른 한 범위를 주장 역할별 연속 부분으로 나눈 경우, 원래 범위의
+    #: 시작 위치. 나눈 부분들은 기사당·전체 조각 예산에서 원래 한 범위로 센다
+    #: (나눴다고 같은 기사의 다른 사실이 예산에서 밀려나지 않게). 안 나눴으면 None.
+    split_from: int | None = None
 
 
 @dataclass(frozen=True)

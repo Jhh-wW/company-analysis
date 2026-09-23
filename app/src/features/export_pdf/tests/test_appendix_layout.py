@@ -208,7 +208,7 @@ def test_원문_위치는_URL만_링크로_만들고_표시_글자는_유지한�
     projection = None
     if sealed:
         projection = _v2_full_report().public_projection
-        projection = replace(projection, citations=(replace(
+        projection = replace(projection, citation_groups=(), citations=(replace(
             projection.citations[0], url=source_url, location=location,
         ),))
     data = _appendix_pdf(report, projection=projection)

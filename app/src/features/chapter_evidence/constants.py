@@ -14,6 +14,7 @@ from src.shared.report_evidence.constants import (
     OFFICIAL_WEB_SOURCE_KINDS,
     SOURCE_KIND_DART_AUDIT_REPORT,
     SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT,
     SOURCE_KIND_DART_QUARTERLY_REPORT,
     SOURCE_KIND_DART_SEMIANNUAL_REPORT,
 )
@@ -23,6 +24,137 @@ from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 CHAPTER_EVIDENCE_PRODUCER_VERSION: Final[str] = "chapter-evidence-producer-v1"
 SELECTION_CHANGE_CONTEXT: Final[str] = "selection_change_context"
 SELECTION_RECENT_CONTEXT: Final[str] = "selection_recent_context"
+
+# ── 감사인 표준 문구 조각 — 근거 선별에서 사업 칸을 주지 않는다 ─────────────
+# ★ 왜 필요한가(2026-09-23 5차 유료 실행, 독립 검수 상-3) — 감사보고서 「감사인의
+#   책임」 단락(주어는 감사인 「우리」)이 5장 과제·대응 칸을 받아 작가가 감사인의
+#   감사절차·감사증거 입수를 회사의 대응으로 옮겨 적었다. 수집 엔진이 근원에서
+#   막지만(analysis_engine …/auditor_boilerplate.py), AI 재판정·저장된 수집 결과·
+#   다른 수집기로 들어온 조각도 이 선별 한 곳을 지나므로 여기서 한 번 더 거른다.
+# ★ 값은 엔진 사본과 «같은 글자»다 — 엔진은 app을 import할 수 없고, composer
+#   사본(audit_boilerplate_constants.py)과도 서로 import하지 않는다. 세 벌은
+#   tests/test_auditor_boilerplate_parity.py가 ast로 대조한다. 값의 근거는 엔진
+#   constants.py 주석에 있다.
+AUDITOR_BOILERPLATE_MARKERS: Final[tuple[str, ...]] = (
+    # 감사보고서 머리말·수신인·서명 문형
+    "독립된감사인",
+    "이사회귀중",
+    "감사보고서의근거가된감사",
+    # 「감사보고서일」 단독은 회사 주석의 기준일(「감사보고서일 현재 소송 결과를 예측할 수
+    # 없습니다」)에도 쓰인다 — 감사인 문형 세 가지만 남긴다(2026-09-23 B 수정 재검토 R2).
+    "감사보고서일까지입수",
+    "감사보고서일현재로유효",
+    "감사보고서일후",
+    "감사보고서를발행",
+    # 감사의견·감사의견근거 단락
+    "감사인의책임",
+    "우리의의견으로는",
+    "재무제표를감사하였",
+    "내부회계관리제도를감사하였",
+    "유의적인회계정책의요약을포함한",
+    "재무제표감사",
+    "감사기준",
+    "독립성관련윤리적요구사항",
+    "감사받지아니한",
+    # 감사인 책임 단락의 감사 행위
+    "감사증거",
+    "감사절차를설계",
+    "감사와관련된내부통제",
+    "효과성에대한의견을표명",
+    "의견을변형",
+    "의견형성",
+    # 사업보고서에 옮겨 실린 핵심감사사항 머리 문단의 감사인 문형 — 구조 표지로도 쓴다(R6).
+    "우리의의견형성",
+    "수행한주요감사절차",
+    "전문가적회의주의",
+    # 「전문가적 회의주의」의 실제 번역 변형 — 5차 감사보고서 원문이 이 꼴이었다(R7).
+    "전문가적의구심",
+    "감사범위와감사시기",
+    "발견하지못할위험",
+    "왜곡표시는중요하다고간주",
+    "계속기업전제의적절성",
+    "전반적인표시와구조",
+    "회계추정치와관련공시의합리성",
+    # 경영진·지배기구 책임 단락(감사보고서 안의 표준 문형)
+    "경영진과지배기구의책임",
+    "공정하게표시할책임",
+    "계속기업전제의사용",
+    "계속기업관련사항을공시할책임",
+    "재무보고절차의감시",
+)
+AUDITOR_BOILERPLATE_EXCLUDED_COMPOUNDS: Final[dict[str, tuple[str, ...]]] = {
+    "감사기준": ("내부감사기준",),
+    # 회사 내부·자체·품질 감사 조직의 절차 설계는 감사인 행위가 아니다 — composer
+    # 후보 쪽 행위 표지와 같은 면제(2026-09-23 독립 검토 F4).
+    "감사절차를설계": ("내부감사절차를설계", "자체감사절차를설계", "품질감사절차를설계"),
+}
+#: 감사보고서에만 나오는 «구조 표지» — 문서 종류를 모르는 자리에서는 글에 이 표지가
+#: 있을 때만 감사인 문구 판정을 건다(AUDITOR_BOILERPLATE_MARKERS 의 부분집합).
+#: ★ 왜 필요한가(2026-09-23 독립 검토 F1) — 「감사증거」「감사기준」「재무제표감사」
+#:   「감사보고서를 발행」 같은 짧은 표지는 감사 소프트웨어·감사 서비스 회사의 사업
+#:   문장에도 나온다. 그 낱말만으로 판정하면 그 업종의 사업 문단이 통째로 버려진다.
+#:   여기에는 감사인 보고서 문형에만 나오는 긴 표현만 둔다.
+#: ★ 머리말 표지(「독립된감사인」 등)만으로는 부족하다 — 5차 실측 조각 12(감사인 책임
+#:   단락)에는 머리말이 없었다. 구조 표지는 긴 감사인 문형 5개였다(감사보고서일까지 입수·
+#:   발견하지 못할 위험·계속기업전제의 적절성·전반적인 표시와 구조·회계추정치와 관련 공시의 합리성).
+#: ★ 「감사보고서일」 단독은 넣지 않는다(2026-09-23 B 수정 재검토 R2) — 실제 사업보고서의 회사
+#:   주석(「감사보고서일 현재 … 영향을 예측할 수 없습니다」)이 이 낱말만으로 관문을 열고 문단째
+#:   버려졌다. 감사인만 쓰는 세 문형(까지 입수·현재로 유효·후)으로 좁혔다.
+#: ★ 「우리의 의견형성」(사업보고서의 핵심감사사항 머리 문단, R6)과 「전문가적 의구심」(R7)을 더했다.
+#:   실제 공시 22건에서 두 문형은 감사인 문단에만 나왔다.
+AUDITOR_STRUCTURAL_MARKERS: Final[tuple[str, ...]] = (
+    "독립된감사인",
+    "이사회귀중",
+    "감사보고서의근거가된감사",
+    "감사보고서일까지입수",
+    "감사보고서일현재로유효",
+    "감사보고서일후",
+    "감사인의책임",
+    "우리의의견으로는",
+    "재무제표를감사하였",
+    "내부회계관리제도를감사하였",
+    "유의적인회계정책의요약을포함한",
+    "독립성관련윤리적요구사항",
+    "우리의의견형성",
+    "수행한주요감사절차",
+    "전문가적회의주의",
+    "전문가적의구심",
+    "감사범위와감사시기",
+    "발견하지못할위험",
+    "왜곡표시는중요하다고간주",
+    "계속기업전제의적절성",
+    "전반적인표시와구조",
+    "회계추정치와관련공시의합리성",
+    "경영진과지배기구의책임",
+    "계속기업전제의사용",
+    "계속기업관련사항을공시할책임",
+    "재무보고절차의감시",
+)
+AUDITOR_BOILERPLATE_EXEMPTION_PATTERN: Final[str] = (
+    r"\d[\d,.]*(?:조|억|만|천|백만|십억)?원|위반|과징금|제재|재작성|오류수정"
+)
+AUDITOR_CLAUSE_SPLIT_PATTERN: Final[str] = r"(?<=다)\.|[.。!?](?=\s|$)|[\r\n]+"
+AUDITOR_CONTENT_CHAR_PATTERN: Final[str] = r"[0-9A-Za-z가-힣]"
+AUDITOR_TRIVIAL_CLAUSE_MAX_CONTENT_CHARS: Final[int] = 9
+#: 감사인 표준 문구뿐인 조각을 선별에서 뺀 건수 사유(「…:<건수>」 꼴로 남긴다).
+#: 자료 부족이 아니라 «알아본 비사업 문구»이므로 내부 결속 오류 접두와 섞지 않는다.
+AUDITOR_BOILERPLATE_FRAGMENT_IGNORED: Final[str] = "auditor_boilerplate_fragment_ignored"
+#: 문서 종류에 따른 감사인 문구 판정 범위(2026-09-23 독립 검토 F1).
+#: · 감사보고서: 구조 표지가 없어도 판정한다 — 감사인 책임 단락 조각은 머리말 없이
+#:   잘려 오기도 한다.
+#: · DART 정기보고서(사업·반기·분기): 감사인 의견 절이 섞일 수 있어, 조각에 구조 표지가
+#:   있을 때만 판정한다.
+#: · 그 밖(홈페이지·IR·뉴스 등): 회사나 언론이 쓴 글이라 판정하지 않는다 — 감사 서비스·
+#:   감사 소프트웨어 회사의 사업 문장을 지킨다.
+AUDITOR_JUDGED_SOURCE_KINDS: Final[frozenset[str]] = frozenset({
+    SOURCE_KIND_DART_AUDIT_REPORT,
+    SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT,
+})
+AUDITOR_STRUCTURE_GATED_SOURCE_KINDS: Final[frozenset[str]] = frozenset({
+    SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_DART_SEMIANNUAL_REPORT,
+    SOURCE_KIND_DART_QUARTERLY_REPORT,
+})
 
 # 근거 원문 문자 수 → 예상 토큰 추정 비율.
 # 한국어 위주 원문은 토크나이저별로 평균 1토큰≈2~2.6자 범위를 보인다. 예산을

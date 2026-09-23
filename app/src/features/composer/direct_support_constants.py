@@ -174,6 +174,70 @@ SOURCE_CAUSAL_RE: Final[re.Pattern[str]] = re.compile(
 SOURCE_CONCESSIVE_RE: Final[re.Pattern[str]] = re.compile(r"에도\s*불구하고|그럼에도")
 
 # ══════════════════════════════════════════════════════════
+# ③ 확인된 사실 절에 덧붙인 목적·의미 해석
+# ══════════════════════════════════════════════════════════
+#
+# ★ 실측 사례(4차) — 원문 주석은 「이사회 결의에 따라 … 설립을 결정 … 납입
+#   예정 자본금은 1 USD」뿐인데, «확인» 후보가 「…설립을 결정하였으며, 이는
+#   북미 시장 진출을 위한 사업 운영 구조의 확장을 의미한다」로 목적 해석을
+#   확인 사실에 붙였고 검수도 참으로 승인했다. 사실 절의 인용 결속은 맞지만
+#   뒷절 해석은 어느 원문에도 없었다.
+# ★ 닫힌 문법 표지만 본다 — 지시어(이는·이것은)로 앞 사실을 받아 «의미한다·
+#   뜻한다»로 단정한 절만 검사한다. 표지 없는 서술과 부정(「의미하지 않는다」)은
+#   이 검사가 아무 판정도 하지 않는다. «등급과 무관하게» 건다 — 확인에만 걸면
+#   같은 무근거 꼬리가 해석 라벨로 공개되는 우회가 된다(독립 검토 확정).
+#   원문이 같은 사실에 그 목적·의미를 실제로(부정 없이) 적었으면 그대로 통과한다.
+#: 지시어로 받은 «의미 단정» 절과 그 해석 내용(span)을 잡는 표지.
+CLAIM_PURPOSE_INTERPRETATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:^|[.;。\n,，]\s*)(?:이는|이것은|이러한\s*[가-힣A-Za-z0-9]+(?:은|는))\s*"
+    r"(?P<span>[^.;。\n]{2,}?)\s*(?:을|를)\s*(?:의미|뜻)(?:한다|하며|하고|합니다|하는)"
+)
+#: 해석 내용 안의 목적 표지 — span에 이 표지가 있으면 원문 문장에도 목적
+#: 표지가 있어야 한다(낱말 우연 일치만으로 목적 서술로 치지 않는다).
+PURPOSE_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"위한|위해|목적|겨냥")
+#: 해석 내용을 낱말로 나눌 때 «한 번» 떼는 꼬리 조사 — 형태소 분석이 아니라
+#: 닫힌 목록이다. 떼고 두 글자 이상 남는 낱말만 대조한다.
+PURPOSE_TOKEN_PARTICLE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:의|을|를|은|는|이|가|과|와|으로|로|에|에서)$"
+)
+#: 목적 표지 뒤에서 명시 부정을 찾는 창의 경계. 원문 문장은 이미 종결 어미로
+#: 나뉘어 있으므로, 같은 목적 서술 절 안(다음 쉼표·세미콜론 전)만 본다 —
+#: 「…확장이 아니라고 밝혔다」는 잡고, 쉼표 뒤 다른 절의 무관한 부정
+#: (「…를 위해 설립했으며, 차입은 없다고 밝혔다」)으로 정상 목적을 지우지 않는다.
+PURPOSE_NEGATION_BOUNDARY_RE: Final[re.Pattern[str]] = re.compile(r"[,，;]")
+#: 지시어(이는)가 받는 «사실 절»을 후보에서 떼는 경계 — 종결 어미 뒤 마침표와
+#: 세미콜론·줄바꿈. 「Inc.」 같은 약어의 마침표에서는 자르지 않는다.
+FACT_CLAUSE_SPLIT_RE: Final[re.Pattern[str]] = re.compile(r"(?<=[다요])[.!?]\s*|[;。\n]")
+#: 사실 절의 서술어에서 «행동 어간»을 떼는 닫힌 꼴 — 「결정하였으며」→결정,
+#: 「매각했다」→매각, 「설립이 결정되었으며」→결정. 이 꼴 밖의 서술어는 행동을
+#: 특정하지 못한 것으로 보고 목적 해석을 승인하지 않는다(재작성으로 사실 절 회복).
+PURPOSE_ACTION_VERB_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?P<stem>[가-힣A-Za-z0-9]{2,}?)"
+    r"(?:하였|했|하여|하며|하고|한다|하는|해|되었|됐|되어|되며|되고|된다|되는|된|시켰|시키)"
+)
+#: 절의 주체 낱말 — 주제·주격 조사로 끝나는 첫 낱말.
+PURPOSE_SUBJECT_WORD_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?P<subject>[가-힣A-Za-z0-9._-]{2,}?)(?:은|는|이|가)$"
+)
+#: 원문 문장 안의 «절» 경계 — 쉼표·세미콜론과, 연결 어미(-며·-고·-으나·-지만)
+#: 뒤 띄어쓰기. 목적·행동·주체를 문장 전체에서 모으면 한 문장의 다른 절에서
+#: 목적을 빌린다(독립 검증 확정 반례: 「설비를 매각했으며, 신규법인 설립은 …을
+#: 목적으로 추진했다」). 그래서 셋을 «한 절» 안에서 함께 찾는다.
+#: ⚠️ 경계를 더 잘게 자르는 쪽의 오류는 정상 목적을 놓치는 보수적 실패다(탈락 →
+#:   제한 재작성이 사실 절을 회복). 경계를 놓치는 쪽이 목적 차용이라 더 위험하다.
+PURPOSE_SOURCE_CLAUSE_SPLIT_RE: Final[re.Pattern[str]] = re.compile(
+    r"[,，;]\s*|(?<=[며고])\s+|(?<=으나)\s+|(?<=지만)\s+"
+)
+#: 원문 절이 지시어로 시작하면 바로 앞 절의 행동을 받는다 — 원문 스스로 「…를
+#: 매각했으며, 이는 …을 목적으로 한다」로 적은 정상 목적을 놓치지 않게 한다.
+SOURCE_ANAPHOR_START_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*(?:이는|이것은|이러한\s*\S+(?:은|는))"
+)
+#: 공시 원문이 회사 자신을 가리키는 낱말 — 후보가 회사 이름을 써도 같은 주체로
+#: 본다. 반대로 원문 주체가 이 목록 밖의 다른 이름이면 다른 주체의 목적이다.
+SELF_REFERENCE_SUBJECTS: Final[frozenset[str]] = frozenset({"회사", "당사", "동사", "자사"})
+
+# ══════════════════════════════════════════════════════════
 # 사유 코드 — 기존 scope/culture 가드와 같이 «안정된 영문 코드»
 # ══════════════════════════════════════════════════════════
 #
@@ -196,6 +260,11 @@ CAUSE_SLOT_DIRECTION_ONLY: Final[str] = "causal_relation_slot_direction_only"
 CAUSE_CLAIM_UNCOVERED: Final[str] = "causal_relation_claim_not_covered"
 CAUSE_SOURCE_ID_EMPTY: Final[str] = "causal_relation_source_id_empty"
 CAUSE_HEDGED_IN_SOURCE: Final[str] = "causal_relation_hedged_in_source"
+#: ⚠️ 이 코드는 shared 진단 등록 목록(`report_quality.review_diagnostic_constants
+#:   .REVIEW_SCOPE_ITEMS`)에도 같은 글자로 등록되어야 닫힌 진단 전송에 남는다.
+#:   그 파일은 다른 소유라 여기서 고치지 않는다 — 등록 전에도 차단·재작성은
+#:   그대로 동작하고, 닫힌 진단 항목에서만 빠진다.
+PURPOSE_INTERPRETATION_UNSUPPORTED: Final[str] = "purpose_interpretation_unsupported"
 
 #: 사유 코드 → 한국어 설명. 공개 문구·문서·진단 표시는 이 표를 쓴다.
 DIRECT_SUPPORT_REASON_TEXTS: Final[dict[str, str]] = {
@@ -233,6 +302,9 @@ DIRECT_SUPPORT_REASON_TEXTS: Final[dict[str, str]] = {
         "인과 근거로 어느 인용을 본 것인지 근거 id를 비워 두었습니다",
     CAUSE_HEDGED_IN_SOURCE:
         "원문이 그 인과를 단정하지 않고 «원인이라고 보기 어렵다»처럼 물렸습니다",
+    PURPOSE_INTERPRETATION_UNSUPPORTED:
+        "확인된 사실 절 뒤에 인용 원문에 없는 목적·의미 해석을 덧붙였습니다. "
+        "원문에 실제로 있는 사실 절만 남기십시오",
 }
 
 # ══════════════════════════════════════════════════════════

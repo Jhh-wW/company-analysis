@@ -408,18 +408,96 @@ def test_flow_keeps_rows_with_a_blank_cell() -> None:
 
     8장 「확인된 사례」처럼 «없을 수 있는» 칸 때문에 표 전체가 사라졌다.
     비었다는 것도 정보다 — 지어낸 값보다 훨씬 낫다.
+
+    (4차 수정) 내부 빈 칸 행은 화살표로 잇지 않고 라벨:값 카드로 낸다 —
+    빈 칸을 건너뛰어 「입력 → 결과」로 이으면 원문에 없던 새 관계가 생기고,
+    빈 쉐브론을 그리면 고장처럼 보이며, 「미확인」을 채우면 검수 AI가 본 적
+    없는 노드가 승인된 도식처럼 공개된다. 카드는 원래 머리말 라벨과 함께
+    값이 있는 칸만 내므로 칸 위치의 뜻이 옮겨지지 않는다.
     """
     visualization = table_visualization(
         ReportTable(
             caption="사업 흐름",
             headers=["입력", "실행", "결과"],
-            rows=[["입력", "", "결과"]],
+            rows=[["입력값", "", "결과물"]],
             presentation="flow",
         )
     )
 
     assert visualization is not None
-    assert visualization.flows == (("입력", "", "결과"),)
+    assert visualization.kind == "card"
+    (card,) = visualization.cards
+    assert [(field.label, field.value) for field in card.fields] == [
+        ("입력", "입력값"), ("결과", "결과물"),
+    ]
+
+
+def test_flow_trailing_blank_cells_are_hidden_from_the_display() -> None:
+    """★ 4차 실측 — 끝 빈 칸은 검수가 본 적 없는 칸이다. 표(원행)는 그대로
+    두고 «표시»만 값이 있는 앞 칸으로 줄인다. 머리말 대응은 원래 앞 열이다."""
+    visualization = table_visualization(
+        ReportTable(
+            caption="사업 흐름",
+            headers=["입력", "실행", "결과"],
+            rows=[["원재료", "생산", ""]],
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.kind == "flow"
+    assert visualization.flows == (("원재료", "생산"),)
+    # 읽는 법도 실제 마지막 표시 칸 기준이다 — 잘린 「결과」 머리말을 붙이지 않는다.
+    assert "결과" not in visualization.reading
+
+
+def test_flow_mixed_display_lengths_become_cards() -> None:
+    """끝 빈 행과 완전 행이 섞이면 표 전체를 카드로 낸다 — 웹·PDF는 머리말을
+    열 위치(첫 화살표 행)로 그리므로 길이가 섞이면 표시가 어긋난다."""
+    visualization = table_visualization(
+        ReportTable(
+            caption="사업 흐름",
+            headers=["입력", "실행", "결과"],
+            rows=[["원재료", "생산", ""], ["고객 요청", "맞춤 가공", "납품"]],
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.kind == "card"
+    assert len(visualization.cards) == 2
+
+
+def test_flow_single_visible_cell_rows_become_cards() -> None:
+    """한 칸짜리 «흐름»은 흐름이 아니다 — 화살표 없이 카드로 낸다."""
+    visualization = table_visualization(
+        ReportTable(
+            caption="사업 흐름",
+            headers=["입력", "실행", "결과"],
+            rows=[["원재료", "", ""]],
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.kind == "card"
+
+
+def test_flow_reviewed_unconfirmed_text_is_not_treated_as_blank() -> None:
+    """이미 봉인된 값은 재해석하지 않는다 — 「미확인」 같은 실제 텍스트를
+    빈 값으로 추정해 자르면 과거 봉인의 표시가 새 코드에서 달라진다."""
+    visualization = table_visualization(
+        ReportTable(
+            caption="사업 흐름",
+            headers=["입력", "실행", "결과"],
+            rows=[["원재료", "생산", "미확인"]],
+            presentation="flow",
+        )
+    )
+
+    assert visualization is not None
+    assert visualization.kind == "flow"
+    assert visualization.flows == (("원재료", "생산", "미확인"),)
 
 
 def test_flow_drops_a_row_where_every_cell_is_blank() -> None:
@@ -1038,12 +1116,14 @@ def test_화살표_장_집합이_카드_판정과_어긋나지_않는다() -> No
     """★ composer의 `FLOW_ARROW_SECTION_IDS`와 여기 카드 판정은 «서로 다른
     파일의 다른 기준»(장 id vs 칸 이름)이다 — 어긋나면 조용히 망가진다.
 
-    어긋나면 무슨 일이 나나:
-      · 카드 장이 화살표 집합에 «들어가면» → 빈 칸이 「미확인」으로 채워져
-        「확인된 사례: 미확인」·제목이 「미확인」인 카드가 인쇄된다.
-      · 화살표 장이 «빠지면» → 빈 칸이 그대로 나가 화면에 «라벨만 있고 속이
-        빈 76px 상자»가 화살표와 함께 그려진다.
+    어긋나면 무슨 일이 나나 (4차 수정 후):
+      · 카드 장이 화살표 집합에 «들어가면» → 도식 검수 프롬프트가 카드 줄을
+        「경로」라 부르며 없는 이동을 요구해 정상 카드가 «거짓» 판정을 받는다.
+      · 화살표 장이 «빠지면» → 검수 프롬프트가 경로 줄을 「카드」로 물어
+        관계 판정 기준이 약해진다.
     두 실패 모두 예외를 내지 않으므로, 이 시험이 유일한 그물이다.
+    (빈 칸 표시는 이제 장 구분 없이 `_flow`가 처리한다 — 「미확인」 채움은
+    4차 실측에서 걷어 냈다.)
     """
     from src.features.composer import constants as composer_constants
 

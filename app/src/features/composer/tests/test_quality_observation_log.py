@@ -239,25 +239,28 @@ def test_출고가_허용되면_아무_기록도_남기지_않는다(
 # ══════════════════════════════════════════════════════════
 
 
-def test_SHADOW_실행은_품질_경고_대신_관측_한_줄을_남긴다(
+def test_SHADOW가_미결속_본문을_제외한_최종_관측을_로거에_전달한다(
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pipeline_logger_name = pipeline_module.logger.name
+    observed = []
 
-    # ★ 재료가 바뀐 근거 (2026-09-11) — 예전에는 이 실행이 «저절로» 출고
-    #   불가였다. AI가 새로 쓴 요약 문장이 어느 fact에도 결속되지 않았기
-    #   때문이다. 이제 요약은 이미 결속된 본문 문장을 그대로 고르므로 그
-    #   문제가 사라졌다(같은 fixture로 실측: safety_problems 0건, 출고 가능).
-    #   이 시험이 재는 것은 «출고 불가일 때의 로그 수위»이므로, 결속 없는
-    #   공개 내용을 본문 한 장에 «명시적으로» 넣어 그 상황을 만든다.
+    def record_observation(observation, release_mode, *, logger):
+        observed.append((observation, release_mode, logger))
+        log_generation_quality_observation(observation, release_mode, logger=logger)
+
+    monkeypatch.setattr(pipeline_module, "log_generation_quality_observation", record_observation)
+    # 미결속 산문은 공개 전에 빠지므로 최종 안전 관측에는 남지 않는다.
+    # 제외한 원문이 최종 내용으로 간주되지 않고 실제 관측 객체가 로거에 전달되는지 잰다.
     with caplog.at_level(logging.DEBUG, logger=pipeline_logger_name):
         output = _run_shadow(unbound_section_id="competitive_position")
-
-    # 이 실행이 실제로 «출고 불가» 관측을 만들었는지부터 못 박는다.
-    # 그렇지 않으면 아래 단정은 아무 일도 안 일어난 것을 통과시킨다.
     assert output.quality_observation is not None
-    assert output.quality_observation.release_allowed is False
-    assert output.quality_observation.safety_problems
+    assert output.quality_observation.release_allowed is True
+    assert not output.quality_observation.safety_problems
+    assert observed == [(output.quality_observation, ReleaseMode.SHADOW, pipeline_module.logger)]
+    section = next(section for section in output.report.sections if section.cell == "competitive_position")
+    assert not section.prose_lines
 
     records = [
         record
@@ -268,18 +271,10 @@ def test_SHADOW_실행은_품질_경고_대신_관측_한_줄을_남긴다(
         record.levelno
         for record in records
         if "v2 생성 품질" in record.getMessage()
-    ] == [logging.INFO, logging.DEBUG]
+    ] == []
     assert not [
         record.getMessage()
         for record in records
         if record.levelno >= logging.WARNING
         and record.getMessage().startswith("v2 생성 품질 판정")
     ]
-    summary_message = next(
-        record.getMessage()
-        for record in records
-        if record.levelno == logging.INFO
-        and record.getMessage().startswith(_SHADOW_PREFIX)
-    )
-    assert "문제=" in summary_message
-    assert "유형=" in summary_message

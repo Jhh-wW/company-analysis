@@ -117,7 +117,15 @@ REVENUE_RECOGNITION_ACT_RE: Final[re.Pattern[str]] = re.compile(
 )
 REVENUE_RECOGNITION_CRITERION_RE: Final[re.Pattern[str]] = re.compile(
     r"위험과보상|신뢰성있게측정|수행의무|선수수익|진행기준|인도기준|완성기준|"
-    r"거래가격|변동대가|개별판매가격|대체용도|지급청구권"
+    r"거래가격|변동대가|개별판매가격|대체용도|지급청구권|"
+    r"\d+년(?:이내|내)(?:에)?완료|중소기업특례|회계처리특례"
+)
+
+# 자산의 인식·측정 방법과 실제 취득·손상 사건을 분리한다. 회사 고유 금액과
+# 이미 일어난 정책 변경은 기존 절별 면제로 보존한다.
+FIXED_ASSET_SUBJECT_RE: Final[re.Pattern[str]] = re.compile(r"(?:유형|무형)자산")
+FIXED_ASSET_MEASUREMENT_RE: Final[re.Pattern[str]] = re.compile(
+    r"취득원가|감가상각누계액|손상차손누계액|내용연수|상각(?:하고있|한다|방법)"
 )
 
 # ── ⑩ 회계처리 방법·특례 서술 ────────────────────────────────────────
@@ -148,6 +156,7 @@ LIQUIDITY_BOILERPLATE_RE: Final[re.Pattern[str]] = re.compile(
 #: 그 절은 회계정책 상용구다. 범주 이름은 로그·시험에서 어느 규칙이 걸렸는지
 #: 되짚는 데만 쓴다 — 사유 코드는 언제나 하나다.
 ACCOUNTING_POLICY_RULES: Final[tuple[tuple[str, re.Pattern[str], re.Pattern[str]], ...]] = (
+    ("자산인식측정", FIXED_ASSET_SUBJECT_RE, FIXED_ASSET_MEASUREMENT_RE),
     ("금융상품측정", FINANCIAL_INSTRUMENT_SUBJECT_RE, FINANCIAL_INSTRUMENT_MEASURE_RE),
     ("대손충당금", BAD_DEBT_SUBJECT_RE, BAD_DEBT_TREATMENT_RE),
     ("현금성자산정의", CASH_EQUIVALENT_SUBJECT_RE, CASH_EQUIVALENT_MATURITY_RE),
@@ -156,8 +165,8 @@ ACCOUNTING_POLICY_RULES: Final[tuple[tuple[str, re.Pattern[str], re.Pattern[str]
     ("이연법인세", DEFERRED_TAX_SUBJECT_RE, DEFERRED_TAX_TREATMENT_RE),
     ("회계기준적용", ACCOUNTING_STANDARD_SUBJECT_RE, ACCOUNTING_STANDARD_CONTEXT_RE),
     ("재무제표표시", FINANCIAL_STATEMENT_SUBJECT_RE, FINANCIAL_STATEMENT_PRESENTATION_RE),
-    ("수익인식기준", REVENUE_RECOGNITION_ACT_RE, REVENUE_RECOGNITION_CRITERION_RE),
     ("회계처리방법", ACCOUNTING_TREATMENT_SUBJECT_RE, ACCOUNTING_TREATMENT_CONTEXT_RE),
+    ("수익인식기준", REVENUE_RECOGNITION_ACT_RE, REVENUE_RECOGNITION_CRITERION_RE),
     ("유동성관리", LIQUIDITY_SUBJECT_RE, LIQUIDITY_BOILERPLATE_RE),
 )
 
@@ -225,3 +234,41 @@ ACCOUNTING_POLICY_EXEMPTIONS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
     ("화폐금액", MONETARY_FOREIGN_AMOUNT_RE),
     ("회사사건", COMPANY_EVENT_RE),
 )
+
+# ── 면제 ③ 자기 인용에 결속된 실제 수익원의 제공·인식 조건 ──────────────
+# 실측 배경(4차) — 2장 「용역 매출은 … 진행기준에 따라 인식하며, … 1년 내의
+# 기간에 완료되는 용역 매출에 대하여는 완료한 날에 수익으로 인식한다」가
+# 상용구로 통째로 제외됐다. 같은 자기 인용의 수익 구성 서술이 그 수익원을
+# 실제로 나열하고, 같은 인용의 인식 서술이 그 기준·조건을 그대로 담고 있는
+# 문장이었다 — 회사 이름을 바꾸면 거짓이 되는 회사 고유 설명이다.
+# ★ 이 면제는 «자기 인용 원문»이 함께 주어졌을 때만 작동한다(호출자가 2장
+#   본문에만 원문을 넘긴다). 「회사는」·「용역」 같은 낱말만으로는 절대
+#   면제하지 않는다 — 수익 구성 나열과 기준·조건의 술어 대조가 모두 필요하다.
+# ⚠️ 순수 회계기준 적용·이연법인세·측정 상용구는 이 면제의 대상 규칙이
+#   아니므로 그대로 차단된다(아래 닫힌 규칙 목록).
+
+#: 이 면제를 검토할 수 있는 규칙 범주의 닫힌 목록. 수익인식 서술은 문장에
+#: 「회계처리 특례」가 함께 실리면 «회계처리방법» 규칙에 먼저 걸리므로 두
+#: 범주를 함께 둔다. 다른 범주(회계기준적용·이연법인세 등)는 검토하지 않는다.
+REVENUE_RECOGNITION_EXEMPTIBLE_RULES: Final[frozenset[str]] = frozenset({
+    "수익인식기준", "회계처리방법",
+})
+
+#: 면제 이름 — 로그·시험 관측용. 사유 코드가 아니다.
+REVENUE_STREAM_EXEMPTION_NAME: Final[str] = "수익원결속"
+
+#: 후보·원문에서 「<이름> 매출」 꼴의 수익원 이름을 뽑는 표지. 공백 유지 원문에
+#: 적용해 바로 앞 낱말만 이름으로 잡는다(표면형에 걸면 앞 낱말이 통째로 붙는다).
+REVENUE_STREAM_NAME_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?P<stream>[가-힣A-Za-z0-9]+)\s*매출"
+)
+
+#: 수익 구성 나열 서술의 표지 — 표면형의 같은 절 안에 «수익»과 «구성»이 함께
+#: 있어야 한다. 「…영업수익의 형태는 A 매출, B 매출 등으로 구성됩니다」 꼴.
+REVENUE_COMPOSITION_SUBJECT_RE: Final[re.Pattern[str]] = re.compile(r"(?:영업)?수익")
+REVENUE_COMPOSITION_VERB_RE: Final[re.Pattern[str]] = re.compile(r"구성")
+
+#: 이 면제를 켤 장 — 사업 모델(2장)의 계약은 회사의 수익 구조 설명을 포함하므로
+#: 실제 수익원의 제공·인식 조건은 그 장의 작성 범위 안이다. 다른 장은 종전
+#: 그대로 차단한다(9장 차별점 계약 등 장별 계약은 별도 경로가 그대로 판정한다).
+REVENUE_RECOGNITION_EXEMPT_SECTION_ID: Final[str] = "business_model"

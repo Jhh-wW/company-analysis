@@ -56,6 +56,7 @@ from src.features.composer.port import (
     ComposedSentence,
     FlowRow,
 )
+from src.features.composer.tests.flow_fixtures import reviewed_flow_fixture
 from src.features.composer.render import render_report
 
 _원문 = (
@@ -74,7 +75,7 @@ def _fragment_objs() -> tuple[CollectedFragment, ...]:
 
 
 def _report(section_id: str, rows: tuple[FlowRow, ...]) -> ComposedReport:
-    return ComposedReport(
+    return reviewed_flow_fixture(ComposedReport(
         sections=tuple(
             ComposedSection(
                 section_id=sid,
@@ -94,7 +95,7 @@ def _report(section_id: str, rows: tuple[FlowRow, ...]) -> ComposedReport:
             ComposedSentence(text="해외를 넓힌다.", citations=("1",), grade="확인"),
             ComposedSentence(text="함께 성장을 내건다.", citations=("1",), grade="확인"),
         ),
-    )
+    ), _fragments())
 
 
 def _section_of(report, cell: str):

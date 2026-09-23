@@ -14,7 +14,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from src.core.citations import citation_marker, citation_number
+from src.core.citations import citation_marker, citation_display_style, citation_number
+from src.core.report_display import reader_citation_groups, reader_scope_notes, reader_section_content, reader_summary_notes
 from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
 from src.shared.report_quality.output_validation import allows_unsealed_v2_output, validate_v2
 from src.core.constants import section_display_heading
@@ -269,7 +270,7 @@ def _summary_blocks(report: Report) -> list[NotionBlock]:
             [
                 f"{index:02d}",
                 summary_topic(item.section_id),
-                item.text.strip(),
+                "\n".join(filter(None, (item.text.strip(), reader_summary_notes(report).get(f"{index:02d}", "")))),
                 f"{spec.display_number}장" if spec is not None else "",
             ]
         )
@@ -308,6 +309,8 @@ def _source_list_blocks(report: Report) -> list[NotionBlock]:
         for source in sources
     ]
     notice = external_news_notice(sources)
+    if report.schema_version == ENGINE_V2_SCHEMA_VERSION:
+        rows = _v2_citation_rows(reader_citation_groups(report))
     return ([_paragraph(notice)] if notice else []) + [_table_block(list(constants.CITATION_TABLE_HEADERS), rows)]
 
 
@@ -457,6 +460,7 @@ def _v2_section_blocks(display: PublicSectionDisplay) -> list[NotionBlock]:
             )
         )
     ]
+    blocks.extend(_paragraph(text) for text in display.guidance_lines)
     for _ordinal, text in display.paragraphs:
         blocks.append(_paragraph(text))
     if display.period_summary is not None:
@@ -476,7 +480,7 @@ def _v2_summary_blocks(projection: PublicReportProjection) -> list[NotionBlock]:
     if not projection.summary:
         return []
     rows = [
-        [row.ordinal, row.topic, row.text, row.section_display_number]
+        [row.ordinal, row.topic, "\n".join(filter(None, (row.text, dict(projection.summary_notes).get(row.ordinal, "")))), row.section_display_number]
         for row in projection.summary
     ]
     return [
@@ -488,7 +492,7 @@ def _v2_summary_blocks(projection: PublicReportProjection) -> list[NotionBlock]:
 def _v2_citation_rows(rows: tuple[PublicCitationRow, ...]) -> list[list[NotionCell]]:
     return [
         [
-            str(row.number),
+            " ".join(f"[{number}]" for number in row.numbers) if hasattr(row, "numbers") else str(row.number),
             _rich_text(row.label_display, href=row.url),
             row.status_display,
             row.verification_label,
@@ -511,7 +515,7 @@ def _v2_source_list_blocks(
         _paragraph(" ".join(filter(None, (constants.SOURCES_SUBTITLE, projection.citations_note)))),
         _table_block(
             list(constants.CITATION_TABLE_HEADERS),
-            _v2_citation_rows(projection.citations),
+            _v2_citation_rows(projection.citation_groups or projection.citations),
         ),
     ]
 
@@ -523,19 +527,9 @@ def _v2_header_text(header: Mapping[str, object], key: str) -> str:
 def _v2_grade_notice_blocks(
     projection: PublicReportProjection,
 ) -> list[NotionBlock]:
-    """부분 보고서 고지는 노션에도 그리지 않는다 — 항상 빈 목록이다.
+    """새 봉인의 독자용 자료 범위만 배치한다. 옛 내부 판정 문구는 읽지 않는다."""
 
-    ★ 왜 비웠나 (사용자 결정, 2026-09-05): 출시된 서비스의 보고서에 「안전 확인
-      중」·「아직 끝나지 않았습니다」·「…문장 N개를 뺐습니다」 같은 만드는 과정
-      이야기를 싣지 않는다. 웹·PDF와 «같이» 빠져야 채널 동등성이 유지되므로
-      세 채널을 한 결정으로 함께 비운다.
-    ★ 봉인(``projection.grade_notice``)과 ``header['shortfall_reasons']``는
-      그대로 둔다. 이미 발행된 저장본의 봉인에는 옛 고지 글자가 남아 있는데,
-      여기서 «읽지 않는» 것이 그 보고서에서도 안 보이게 하는 방법이다.
-    """
-
-    del projection  # 봉인 값은 저장·진단용으로 남고, 독자 채널은 읽지 않는다.
-    return []
+    return [_paragraph(note) for note in projection.reader_notes]
 
 
 def _v2_blocks(report: Report, projection: PublicReportProjection) -> list[NotionBlock]:
@@ -589,6 +583,14 @@ def build_page_title(report: Report) -> str:
 
 
 def build_blocks(report: Report, *, grade_note: str = "") -> list[NotionBlock]:
+    """새 v2 표기만 통일하고 구형 봉인의 표시 관례를 보존한다."""
+    projection = report.public_projection
+    square = report.schema_version == ENGINE_V2_SCHEMA_VERSION and (projection is None or bool(projection.citation_groups))
+    with citation_display_style(square=square):
+        return _build_blocks(report, grade_note=grade_note)
+
+
+def _build_blocks(report: Report, *, grade_note: str = "") -> list[NotionBlock]:
     """`Report` 하나를 노션 페이지에 넣을 블록 목록으로 바꾼다.
 
     배치 순서는 화면과 같다:
@@ -655,15 +657,16 @@ def _unsealed_v2_blocks(report: Report) -> list[NotionBlock]:
     """웹·PDF가 검증한 SHADOW 객체의 문단·표를 그대로 배치한다. 봉인을 만들지 않는다."""
     company, meta = masthead_lines(report)
     blocks = [_heading_2(company), _paragraph(meta), _heading_1(report.company), _heading_1("분석 보고서")]
+    blocks.extend(_paragraph(note) for note in reader_scope_notes(report))
     lede = _report_lede_text(report)
     if lede:
         blocks.append(_paragraph(lede))
     blocks.extend(_summary_blocks(report))
     for section in report.sections:
         blocks.append(_heading_2(_section_heading(section)))
-        paragraphs = section.prose_paragraphs or [text for text, _cite in section.prose_lines]
+        paragraphs, guidance = reader_section_content(section)
+        blocks.extend(_paragraph(text) for text in guidance)
         blocks.extend(_paragraph(text) for text in paragraphs)
-        blocks.extend(_paragraph(text) for text in section.guidance_lines)
         if not paragraphs and section.empty_reason:
             blocks.append(_paragraph(section.empty_reason))
         for table in section.tables:

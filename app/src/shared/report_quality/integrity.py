@@ -15,6 +15,7 @@ from src.shared.report_evidence.policy import (
     required_slots_for,
 )
 from src.shared.report_quality.contract import contract_for_stored_assessment
+from src.shared.report_quality.optional_sections import validate_optional_sections
 from src.shared.report_quality.models import (
     GenerationAssessment,
     QualityAssessment,
@@ -85,6 +86,17 @@ def assert_complete_generation_assessment(
     ):
         raise AssessmentIntegrityError("품질·안전 계약 버전 형식이 손상됐습니다")
     contract = contract_for_stored_assessment(assessment.contract_version)
+    try:
+        validate_optional_sections(
+            quality.optional_sections_version, quality.optional_sections,
+            required_section_ids=contract.required_section_ids,
+        )
+    except ValueError as exc:
+        raise AssessmentIntegrityError(str(exc)) from exc
+    for section in quality.optional_sections:
+        if (section.has_unbound_public_content
+            or not set(section.bound_fact_ids).issubset(safety.verified_fact_ids)):
+            raise AssessmentIntegrityError("선택 장의 공개 내용이 안전 판정과 다릅니다")
     versions = {
         assessment.contract_version,
         quality.contract_version,

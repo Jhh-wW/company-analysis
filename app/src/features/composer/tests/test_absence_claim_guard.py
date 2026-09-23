@@ -522,10 +522,9 @@ def test_cited_confirmed_absence_claim_is_rejected_even_when_reviewer_says_true(
     from src.features.composer.verify import DIAGNOSTIC_KIND_BODY, verify_report
 
     absence_sentence = LIVE_27E9F03_SENTENCES["9장_2번_특허선언없다"]
-    normal_sentence = "회사는 인공지능 소프트웨어와 인공지능 콘텐츠 개발 및 공급을 주요 사업으로 영위한다."
+    normal_sentence = "회사는 독자 기술을 보유한 것을 인공지능 서비스의 강점으로 밝혔다."
     fragments = {1: {"종류": "사업내용", "원문": (
-        "회사는 인공지능 소프트웨어와 인공지능 콘텐츠 개발 및 공급을 주요 사업으로 "
-        "영위하고 있다. 산업재산권 기말 잔액은 123,558천원이다."
+        normal_sentence + " 산업재산권 기말 잔액은 123,558천원이다."
     )}}
     diagnostics: list[dict] = []
     result = verify_report(

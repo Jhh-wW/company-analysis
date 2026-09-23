@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 
+from src.shared.report_quality.optional_sections import OptionalSectionObservation
+
 class ReleaseDecision(str, Enum):
     """검증 결과의 공개 가능 여부."""
 
@@ -132,6 +134,8 @@ class QualityAssessment:
     # 회복·출고 상태기계는 사람이 읽는 ``shortfall_reasons`` 문자열을 해석하지
     # 않고 이 닫힌 코드만 읽는다. 문구가 바뀌어도 행동이 달라지지 않는다.
     problem_codes: tuple[QualityProblemCode, ...] = ()
+    optional_sections_version: str = ""
+    optional_sections: tuple[OptionalSectionObservation, ...] = ()
 
 
 @dataclass(frozen=True)

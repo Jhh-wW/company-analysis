@@ -369,13 +369,16 @@ def _report_with_flow_only_source() -> ComposedReport:
 
 
 def _rendered_with_flow_only_source():
+    from src.features.composer.tests.flow_fixtures import reviewed_flow_fixture
+
     fragments = _fragments()
     fragments[2] = {
         "종류": "사업내용",
         "원문": "회사는 원자재를 매입해 시트를 가공한 뒤 가구 제조사에 공급한다.",
     }
     return render_report(
-        "가나다전자", _report_with_flow_only_source(), fragments, None
+        "가나다전자", reviewed_flow_fixture(_report_with_flow_only_source(), fragments),
+        fragments, None
     )
 
 

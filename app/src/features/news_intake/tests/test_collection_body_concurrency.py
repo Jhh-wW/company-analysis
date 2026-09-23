@@ -396,7 +396,9 @@ def test_포털폴백_날짜보정_이월_중복본문이_섞여도_동시모드
             return NewsBodyFetchResult(text=unique_body(url), stage=c.BODY_STAGE_ARTICLE_TAG,
                                        published_on="2024-01-01")
         if number % 11 == 0:
-            return unique_body(url.replace(str(number), str(number - 1)))
+            # 같은 날짜 기사(다음 번호)의 본문을 그대로 싣는다. 이전 번호(22→21)는 21의
+            # 발행일이 2024-01-01로 보정돼 «다른 날짜 재게시»라 본문 중복 정리 대상이 아니다.
+            return unique_body(url.replace(str(number), str(number + 1)))
         return unique_body(url)
 
     sequential_analysis: list[dict] = []

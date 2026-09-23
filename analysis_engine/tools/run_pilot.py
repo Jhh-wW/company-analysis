@@ -68,6 +68,12 @@ from features.cell_check.logic import (  # noqa: E402
     count_amounts, establishment, has_corp_name, news_ok)
 from features.draft_check.logic import DraftItem, check_draft  # noqa: E402
 from survey_audit_reports import read_filing_text  # noqa: E402  (공시 원문 텍스트화 재사용)
+# 관계법인 표의 회계범위 각주를 같은 문서의 정확한 원문 구간으로 보충한다.
+# make_fragments는 절 표제 첫 출현만 떠서 특수관계자 주석의 법인에 붙은 제외·
+# 지분법 미적용 각주(다른 주석)를 놓친다. 앱 수집기가 발췌를 마친 뒤 부른다.
+from features.evidence_collection.entity_scope_footnote import (  # noqa: E402,F401
+    add_entity_scope_footnotes,
+)
 
 DATA = runtime_data_dir()
 PILOT_DIR = DATA / "pilot"

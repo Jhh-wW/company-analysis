@@ -60,6 +60,10 @@ def _approver(calls, verdict="참"):
 def test_approved_wrong_scope_is_removed_with_one_call(
     section, slot, reason, source, bad, good, grouped, diagnostics_enabled, verdict,
 ):
+    if section == "competitive_position":
+        # 선도하겠다는 계획의 현재 사실화는 계속 거절한다. 긍정 대조는
+        # 같은 장에 맞는, 별도 원문이 실제 선언한 현재 강점을 사용한다.
+        good = "회사는 독자 기술을 보유한 것을 공급망금융 서비스의 강점으로 밝혔다."
     if section == "culture":
         # 긍정 대조는 다른 출처의 실제 조직 절차를 사용한다. 사업 출시 자체를
         # 문화 장에 승인해 이 검사의 범위를 넓혀 해석하지 않는다.

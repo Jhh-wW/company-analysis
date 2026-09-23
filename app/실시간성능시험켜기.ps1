@@ -30,6 +30,11 @@ param(
     [string]$NewsBodyFetchConcurrency = "2",
     [switch]$EnableReviewPromptCache,
 
+    # 원문 보관은 부모 환경·provider 환경 파일과 무관하게 명시적으로만 켠다.
+    # 실행 표지는 회사·개인 이름을 넣지 않은 불투명한 식별자를 사용한다.
+    [switch]$EnableLocalReplay,
+    [string]$LocalReplayRun = "",
+
     # 엔진을 명시적으로 덮어쓴다. 생략하면 선택한 profile의 값을 사용한다.
     [switch]$EngineV2,
 
@@ -60,6 +65,26 @@ if ($allowedReleaseModes -cnotcontains $ReleaseMode) {
     Write-Host "-ReleaseMode 값을 쓸 수 없습니다: $ReleaseMode" -ForegroundColor Red
     Write-Host ("쓸 수 있는 값은 {0} 입니다. 대문자 그대로 적습니다." -f ($allowedReleaseModes -join " · "))
     Write-Host ""
+    exit 2
+}
+
+if ($EnableLocalReplay) {
+    try {
+        # Python을 별도로 실행하거나 환경을 상속하지 않고 생산 정본 패턴만 읽는다.
+        $replayContractPath = Join-Path $PSScriptRoot "src\features\pipeline\private_replay_constants.py"
+        $replayContract = [System.IO.File]::ReadAllText($replayContractPath, [System.Text.Encoding]::UTF8)
+        $replayPatternMatches = [regex]::Matches($replayContract, '(?m)^REPLAY_RUN_PATTERN\s*=\s*r"([^"\r\n]+)"\s*$')
+        if ($replayPatternMatches.Count -ne 1) { throw "로컬 보관 실행 표지 계약을 확인하지 못했습니다." }
+        $replayRunPattern = '\A(?:' + $replayPatternMatches[0].Groups[1].Value + ')\z'
+        if ($LocalReplayRun -cnotmatch $replayRunPattern) { throw "로컬 보관 실행 표지가 계약과 다릅니다." }
+    }
+    catch {
+        Write-Host "-EnableLocalReplay에는 생산 보관 계약에 맞는 -LocalReplayRun이 필요합니다. 회사·개인 이름 없이 소문자·숫자·밑줄·하이픈의 실행 표지를 지정하세요." -ForegroundColor Red
+        exit 2
+    }
+}
+elseif (-not [string]::IsNullOrEmpty($LocalReplayRun)) {
+    Write-Host "-LocalReplayRun은 -EnableLocalReplay와 함께 지정해야 합니다." -ForegroundColor Red
     exit 2
 }
 
@@ -510,6 +535,10 @@ $childEnvironment = Reset-ChildEnvironmentToAllowlist `
 if ($codeReceipt.Verified) {
     $childEnvironment["APP_GIT_COMMIT"] = $codeReceipt.Commit
 }
+if ($EnableLocalReplay) {
+    $childEnvironment["REPORT_LOCAL_REPLAY_ENABLED"] = "1"
+    $childEnvironment["REPORT_LOCAL_REPLAY_RUN"] = $LocalReplayRun
+}
 
 $evaluationRunsRoot = Join-Path $appRoot ".local_evaluation_runs"
 New-Item -ItemType Directory -Force -Path $evaluationRunsRoot | Out-Null
@@ -615,6 +644,7 @@ $snapshot = [ordered]@{
     settings = $featureProfile.Settings
     performance_settings = $performanceSettings
     paid_providers_enabled = [bool]$EnablePaidProviders
+    local_replay_enabled = [bool]$EnableLocalReplay
     per_run_expected_cost_cap_krw = $PerRunExpectedCostCapKrw
     daily_expected_cost_cap_krw = $DailyExpectedCostCapKrw
 }
@@ -645,6 +675,9 @@ $allowedChildEnvironmentNames = $allowedParentNames + @(
     "REPORT_WRITER_MAX_PARALLEL_CALLS", "PROVIDER_MAX_CONCURRENT_CALLS",
     "NEWS_BODY_FETCH_CONCURRENCY", "COMPOSER_REVIEW_PROMPT_CACHE_ENABLED"
 )
+if ($EnableLocalReplay) {
+    $allowedChildEnvironmentNames += @("REPORT_LOCAL_REPLAY_ENABLED", "REPORT_LOCAL_REPLAY_RUN")
+}
 foreach ($name in @($childEnvironment.Keys)) {
     if ($allowedChildEnvironmentNames -notcontains [string]$name) {
         throw "허용하지 않은 환경 '$name'이 감지되어 시작하지 않습니다."

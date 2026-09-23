@@ -4,7 +4,9 @@ from dataclasses import replace
 
 from src.features.composer.constants import GRADE_CONFIRMED
 from src.features.composer.port import ComposedReport, ComposedSection, ComposedSentence
-from src.features.composer.prose_facts import ProseEvidence, build_verified_prose_fact
+from src.features.composer.prose_facts import (
+    ProseEvidence, build_verified_prose_fact, evaluate_verified_prose_fact,
+)
 from src.features.composer.render import render_report
 from src.features.storage.reports import report_from_json, report_to_json
 from src.features.provenance.sources import (
@@ -78,6 +80,54 @@ def test_검증된_일반문장은_모든_인용의_신원과_원문해시에_�
         exact_evidence_text_hash(item.exact_text) for item in _evidence()
     ]
     assert fact.evidence_binding == fact_evidence_binding(fact)
+
+
+def test_prose_builder_reports_missing_slot_without_inventing_one():
+    result = evaluate_verified_prose_fact(
+        replace(_sentence(), planned_claim_slot=""), section_id="business_model",
+        company_name="예시회사", as_of_date="2026-08-31", evidence=_evidence(),
+    )
+    assert result.fact is None
+    assert result.reason_code == "prose_claim_slot_missing"
+
+
+def test_future_plan_in_past_section_is_not_sealed_as_completed_execution():
+    from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+    text = "예시회사는 보호 정책을 강화할 계획을 밝혔다."
+    sentence = replace(_sentence(), text=text, citations=("1",),
+                       planned_claim_slot=CLAIM_SLOTS_BY_SECTION["past_changes"][0])
+    fact = build_verified_prose_fact(
+        sentence, section_id="past_changes", company_name="예시회사", as_of_date="2026-08-31",
+        evidence=(ProseEvidence("1", _source(1, text), text),),
+    )
+    assert fact is not None
+    assert fact.time_state == "future"
+    assert fact.fact_status == "provisional"
+    assert fact.evidence_binding == fact_evidence_binding(fact)
+
+
+def test_completed_planning_activity_remains_actual():
+    from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+    text = "예시회사는 보호 정책 계획을 수립했다."
+    fact = build_verified_prose_fact(
+        replace(_sentence(), text=text, citations=("1",),
+                planned_claim_slot=CLAIM_SLOTS_BY_SECTION["past_changes"][0]),
+        section_id="past_changes", company_name="예시회사", as_of_date="2026-08-31",
+        evidence=(ProseEvidence("1", _source(1, text), text),),
+    )
+    assert fact is not None and fact.time_state == "past" and fact.fact_status == "actual"
+
+
+def test_optional_section_observation_survives_report_storage():
+    from src.shared.report_quality.generation import assess_and_observe_generation
+    report = render_report("예시회사", ComposedReport((ComposedSection("competitive_position", ()),)), {}, None)
+    _, observation = assess_and_observe_generation(ReportCandidate(
+        sections=(ReportSectionCandidate("competitive_position", (), public_sentence_count=0, notice_only=True),),
+        facts=(), sources=(),
+    ))
+    report = replace(report, quality_observation=observation)
+    restored = report_from_json(report_to_json(report))
+    assert restored.quality_observation == observation
 
 
 def test_인용순서나_원문바이트가_바뀌면_같은_사실로_가장할수없다() -> None:

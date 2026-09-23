@@ -45,6 +45,7 @@ from src.features.composer.port import (
     FlowRow,
 )
 from src.features.composer.render import render_report
+from src.features.composer.tests.flow_fixtures import reviewed_flow_fixture
 
 
 def _fragments() -> dict[int, dict[str, Any]]:
@@ -95,7 +96,9 @@ def _section_of(report, cell: str):
 
 
 def _render(flow_rows):
-    return render_report("진영(주)", _composed(flow_rows), _fragments(), None)
+    fragments = _fragments()
+    composed = reviewed_flow_fixture(_composed(flow_rows), fragments)
+    return render_report("진영(주)", composed, fragments, None)
 
 
 _두_경로 = (

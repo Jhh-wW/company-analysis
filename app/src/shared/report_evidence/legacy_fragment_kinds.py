@@ -34,6 +34,10 @@ LEGACY_KIND_AUDIT_FINANCIAL: Final[str] = "감사보고서 재무"
 LEGACY_KIND_MDA: Final[str] = "MD&A"
 LEGACY_KIND_RESEARCH_AND_DEVELOPMENT: Final[str] = "연구개발"
 LEGACY_KIND_RELATED_PARTY: Final[str] = "특수관계자"
+#: 특수관계자 조각에 나온 같은 법인의 회계 적용 범위 각주(종속기업 제외·지분법
+#: 미적용 등)를 같은 문서의 연속 원문 구간 그대로 담는다. 생산자는 pipeline
+#: real.py가 엔진 ``add_entity_scope_footnotes``로 만든다.
+LEGACY_KIND_ENTITY_SCOPE_FOOTNOTE: Final[str] = "관계법인 회계범위 주석"
 LEGACY_KIND_SG_AND_A: Final[str] = "판관비"
 LEGACY_KIND_REVENUE_AND_ORDERS: Final[str] = "매출수주"
 LEGACY_KIND_NEW_BUSINESS_OUTLOOK: Final[str] = "신규사업전망"
@@ -164,6 +168,9 @@ _LEGACY_SECTIONS_BY_FRAGMENT_KIND = {
         }
     ),
     LEGACY_KIND_RELATED_PARTY: frozenset({"operations_partners"}),
+    # 제한 각주는 특수관계자 거래의 회계 범위를 보충하는 문맥이다. 그 거래를
+    # 쓰는 장(7장)에만 가며 다른 장의 독립 근거로 넓히지 않는다.
+    LEGACY_KIND_ENTITY_SCOPE_FOOTNOTE: frozenset({"operations_partners"}),
     LEGACY_KIND_SG_AND_A: frozenset({"past_changes"}),
     LEGACY_KIND_REVENUE_AND_ORDERS: frozenset(
         {

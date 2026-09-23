@@ -39,7 +39,7 @@ def test_손익계산서_미감사_비교연도와_캡션_표지_문구(marked, 
     report_table = ReportTable(**table.to_report_table_payload())
     assert performance_table_from_report_table(report_table).unaudited_years == expected
     period = "2024~2025 완료 회계연도"
-    assert analysis_period_with_audit_status(period, report_table) == period + (" (2024년 미감사)" if marked else "")
+    assert analysis_period_with_audit_status(period, report_table) == period + (" (2024년은 감사받지 않은 비교 재무제표)" if marked else "")
     assert (" · 2024년은 감사받지 않은 비교 재무제표" in table.caption) is marked
 
 

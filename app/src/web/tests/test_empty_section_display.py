@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from jinja2 import ChoiceLoader, DictLoader, Environment, FileSystemLoader
 
 from src.core.citations import citation_number, location_display, split_citation_markers, split_interpretation_marker
-from src.core.report_display import empty_section_notice
+from src.core.report_display import empty_section_notice, reader_citation_groups, reader_scope_notes, reader_section_content, reader_summary_notes
 from src.features.pipeline.port import Grade, Report, ReportSection
 from src.features.report_standard.cover_metrics import cover_metrics
 from src.features.report_standard.empty_section_constants import EMPTY_SECTION_NOTICE
@@ -38,6 +38,8 @@ def render_result(report, *, template_source=None, notice_fn=empty_section_notic
         report=report, job=SimpleNamespace(job_id="offline-empty-section"),
         engine_v2_schema_version=ENGINE_V2_SCHEMA_VERSION, legacy_readonly=True,
         public_citations=report.citations, empty_section_notice=notice_fn,
+        reader_citation_groups=reader_citation_groups, reader_scope_notes=reader_scope_notes,
+        reader_section_content=reader_section_content, reader_summary_notes=reader_summary_notes,
         # 운영 request_helpers가 등록하는 부록 언론 0건 안내 전역을 같은 이름으로 넘긴다.
         external_news_notice=external_news_notice,
         source_label_display=source_label_display, source_status_display=source_status_display,
@@ -107,9 +109,9 @@ def test_numeric_filter_render_storage_web_preserves_notice_without_increasing_f
     section = restored.sections[0]
     assert filtering.removed_section_counts == (("future_strategy", 1),)
     assert safe.sections[0].sentences == ()
-    assert section.prose_paragraphs == [NOTICE_NUMERIC_BODY_WITHHELD]
-    assert section.prose_lines == [(NOTICE_NUMERIC_BODY_WITHHELD, "")]
-    assert section.is_filled
+    assert section.prose_paragraphs == []
+    assert section.prose_lines == []
+    assert section.guidance_lines == [NOTICE_NUMERIC_BODY_WITHHELD]
     assert not section.fact_ids and not restored.fact_records
     candidate = build_generation_quality_candidate(rendered, safe)
     assert candidate.sections[0].public_sentence_count == 0

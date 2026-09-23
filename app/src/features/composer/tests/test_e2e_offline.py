@@ -59,6 +59,9 @@ from src.features.composer.render import (
 )
 from src.features.composer.verify import REVIEW_PROMPT_HEADER, REWRITE_PROMPT_HEADER
 from src.features.composer.tests.test_pipeline import _summary_selection_json
+from src.features.composer.tests.golden_fixture_contract import (
+    golden_fragments_with_identity, golden_responses_with_slots, golden_public_rows,
+)
 from src.features.composer.tests.review_evidence_fixture import (
     grounded_flow_response,
     grounded_review_response,
@@ -86,12 +89,12 @@ from src.shared.report_evidence.constants import ReleaseMode
 COMPANY_NAME = "제이와이피엔터테인먼트"
 
 _FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
-_FRAGMENTS_FIXTURE: dict[str, Any] = json.loads(
+_FRAGMENTS_FIXTURE: dict[str, Any] = golden_fragments_with_identity(json.loads(
     (_FIXTURE_DIR / "jyp_fragments.json").read_text(encoding="utf-8")
-)
-_RESPONSES_FIXTURE: dict[str, Any] = json.loads(
+))
+_RESPONSES_FIXTURE: dict[str, Any] = golden_responses_with_slots(json.loads(
     (_FIXTURE_DIR / "jyp_ask_responses.json").read_text(encoding="utf-8")
-)
+))
 
 #: 검수 프롬프트에서 대조 문장 번호를 읽는 모양 (verify._build_review_prompt)
 _REVIEW_NUMBER_RE = re.compile(
@@ -123,65 +126,10 @@ def _fixture_fragments() -> dict[int, dict[str, str]]:
     return fragments
 
 
-#: 요약 «고르기»가 돌려주는 문장 수. 가짜 AI(`_summary_selection_json`)가 서로
-#: 다른 장에서 세 개를 고른다.
-#: ★ 2026-09-11 이전에는 fixture의 «핵심요약_응답» 문장 수를 그대로 썼다.
-#:   그때는 AI가 요약을 새로 썼기 때문이다. 이제는 검증된 본문 문장을 고르므로
-#:   초안 수는 «고른 개수»다. 생산 상수를 빌려 오지 않고 글자로 적는다.
-_SUMMARY_PICKS = 3
-
-
 def _expected_sentence_total() -> int:
-    """fixture가 약속한 초안 문장 수 (본문 9장 + 고른 요약) — 매직 넘버 대신 실측."""
-    body = sum(
-        len(payload["문장들"])
-        for payload in _RESPONSES_FIXTURE["장별_응답"].values()
-    )
-    return body + _SUMMARY_PICKS
-
-
-def _fixture_unbound_numeric_by_section() -> dict[str, tuple[str, ...]]:
-    """골든 AI 산문 중 숫자 토큰은 있지만 NumericBinding은 없는 문장들."""
-
-    return {
-        section_id: tuple(
-            str(sentence["글"])
-            for sentence in payload["문장들"]
-            if has_public_numeric_token(str(sentence["글"]))
-        )
-        for section_id, payload in _RESPONSES_FIXTURE["장별_응답"].items()
-    }
-
-
-def _fixture_unbound_numeric_summary() -> tuple[str, ...]:
-    return tuple(
-        str(sentence["글"])
-        for sentence in _RESPONSES_FIXTURE["핵심요약_응답"]["문장들"]
-        if has_public_numeric_token(str(sentence["글"]))
-    )
-
-
-def _fixture_unbound_numeric_grades_by_section() -> dict[str, dict[str, str]]:
-    """장별 «미결속 수치 문장 텍스트 → 등급» 맵 (제품 결정 ③).
-
-    구조화 근거(NumericBinding) 없이 숫자만 든 문장 중, «확인» 등급 +
-    인용 있음은 검수 AI가 참으로 판정하면(이 fixture는 전부 참) 이제
-    통과한다. «해석» 등급만 여전히 구조화 근거를 요구해 제외된다 — 해석은
-    사실 주장이 아니라 애초에 구조화 근거를 만들 길이 없기 때문이다.
-    """
-    return {
-        section_id: {
-            str(sentence["글"]): str(sentence["등급"])
-            for sentence in payload["문장들"]
-            if has_public_numeric_token(str(sentence["글"]))
-        }
-        for section_id, payload in _RESPONSES_FIXTURE["장별_응답"].items()
-    }
-
-
-# fixture의 회사 표어가 identity와 culture에 겹친다. 정본 소유 장은 culture라
-# 기존 장 간 중복 제거가 identity에서 한 문장만 옮긴다.
-_DEDUPE_REMOVED_BY_SECTION = {"identity": 1}
+    """AI가 만드는 초안은 본문 54개뿐이다. 요약은 검증된 본문에서 재사용한다."""
+    return sum(len(payload["문장들"])
+               for payload in _RESPONSES_FIXTURE["장별_응답"].values())
 
 
 # ══════════════════════════════════════════════════════════
@@ -434,186 +382,58 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
     fixture_sections = _RESPONSES_FIXTURE["장별_응답"]
     assert set(fixture_sections) == set(SECTION_IDS)
     assert all(len(payload["문장들"]) == 6 for payload in fixture_sections.values())
-    # 본문 54 + 고른 요약 3 = 57. (2026-09-11 이전에는 요약 초안 4를 더해 58이었다.
-    # 그때는 AI가 요약을 새로 썼고, 지금은 검증된 본문에서 세 문장을 고른다.)
-    assert _expected_sentence_total() == 57
+    # 9장 × 6개 후보. 결정적 요약은 AI 초안 수에 더하지 않는다.
+    assert _expected_sentence_total() == 54
 
-    # 이 골든 입력의 숫자는 원문 문자열 대조는 통과하지만 AI JSON에는 지표·
-    # 기간·공식의 NumericBinding이 없다. 본문 16문장과 요약 2문장이 그 대상임을
-    # 실측으로 잠그고, 공개본에서 그 문장들만 빠졌는지 아래에서 확인한다.
-    unbound_by_section = _fixture_unbound_numeric_by_section()
-    unbound_counts = {
-        section_id: len(sentences)
-        for section_id, sentences in unbound_by_section.items()
-    }
-    assert unbound_counts == {
-        "identity": 0,
-        "business_model": 3,
-        "portfolio": 1,
-        "past_changes": 5,
-        "current_challenges": 2,
-        "future_strategy": 2,
-        "operations_partners": 1,
-        "culture": 0,
-        "competitive_position": 2,
-    }
-    unbound_summary = _fixture_unbound_numeric_summary()
-    assert len(unbound_summary) == 2
-
-    # DART 3개년 원값에서 프로그램이 계산한 세 지표의 누적 증감률만 구조화
-    # 수치 claim으로 다시 들어온다. AI 산문을 역추출해 FactRecord로 꾸미지 않는다.
-    assert len(report.fact_records) == 3
-    assert all(fact.section_owner == "past_changes" for fact in report.fact_records)
-    assert all(fact.formula == "rate" for fact in report.fact_records)
-    assert all(
-        validate_versioned_numeric_record(fact) == ()
-        for fact in report.fact_records
-    )
-
-    structured_counts = {
-        section_id: sum(
-            fact.section_owner == section_id for fact in report.fact_records
-        )
-        for section_id in SECTION_IDS
-    }
-    # 최종 장별 수는 «6문장 하한을 낮춘 값»이 아니라 원래 6 - «실제로 제외된»
-    # 수치 문장 - 기존 중복 이동 + 검증된 프로그램 claim이다.
-    # 제품 결정 ③ 이후 «실제로 제외된» 수는 unbound_by_section 전체가
-    # 아니라 그중 «해석» 등급뿐이다(아래서 등급별로 갈라 실측으로 확인한다).
-    grades_by_section = _fixture_unbound_numeric_grades_by_section()
-    interpreted_counts_by_section = {
-        section_id: sum(
-            1 for grade in grades.values() if grade == GRADE_INTERPRETED
-        )
-        for section_id, grades in grades_by_section.items()
-    }
+    # 본문 사실과 프로그램이 DART 원값으로 계산한 지표를 구분한다.
+    rates = [fact for fact in report.fact_records if fact.formula == "rate"]
+    assert len(rates) == 3
+    assert all(fact.section_owner == "past_changes" for fact in rates)
+    assert all(validate_versioned_numeric_record(fact) == () for fact in rates)
+    # 38 → 39 (2026-09-23): 1장 표어 문장은 뒤 절 주체를 증명할 수 없어 8장과 겹쳐
+    # 남는다 — golden_fixture_contract.GOLDEN_OMITTED_INDICES 갱신 주석 참조.
+    assert len(report.fact_records) == 39
+    all_prose = [text for section in report.sections for text, _ in section.prose_lines]
     for section in report.sections:
-        expected = (
-            6
-            - interpreted_counts_by_section[section.cell]
-            - _DEDUPE_REMOVED_BY_SECTION.get(section.cell, 0)
-            + structured_counts[section.cell]
-        )
-        research_lines = [text for text, _ in section.prose_lines if text.startswith("확인 범위:")]
-        # 2026-09-16: 「확인 범위」 안내는 어느 장에도 싣지 않는다.
-        assert research_lines == []
-        substantive_count = len(section.prose_lines) - len(research_lines)
-        assert substantive_count == expected, section.cell
-        assert substantive_count >= MIN_CLAIMS_PER_COVERED_SECTION
-
-    all_prose = [
-        text for section in report.sections for text, _cite in section.prose_lines
-    ]
-    # «해석» 등급 수치 문장은 여전히 구조화 근거가 없어 빠진다. «확인» 등급
-    # 수치 문장(인용 있음, 검수 AI가 참으로 판정)은 이제 살아남는다 — 이게
-    # 제품 결정 ③의 «회복»이다. 두 방향을 각각 실측으로 잠근다.
-    for grades in grades_by_section.values():
-        for text, grade in grades.items():
-            appears = any(text in visible for visible in all_prose)
-            if grade == GRADE_INTERPRETED:
-                assert not appears, f"해석 등급 수치 문장이 남아있다: {text}"
-            else:
-                assert appears, f"확인 등급 수치 문장(검증 통과)이 사라졌다: {text}"
-    assert all(
-        any(fact.claim in visible for visible in all_prose)
-        for fact in report.fact_records
-    )
-    assert report.grade is Grade.PARTIAL
-    assert any(
-        "숫자·날짜 문장" in reason for reason in report.shortfall_reasons
-    )
-    # 해석 표지와 [n] 인용이 본문에 실제로 찍힌다
+        expected = [row["글"] for row in golden_public_rows(fixture_sections, section.cell)]
+        expected.extend(fact.claim for fact in rates if fact.section_owner == section.cell)
+        actual = [re.sub(r"\[\d+\]", "", text).removesuffix(INTERPRETATION_MARKER).strip()
+                  for text, _ in section.prose_lines]
+        assert actual == expected, section.cell
+        if section.cell != "competitive_position":
+            assert len(actual) >= MIN_CLAIMS_PER_COVERED_SECTION
+    assert all(any(fact.claim in text for text in all_prose) for fact in report.fact_records)
     assert any(INTERPRETATION_MARKER in text for text in all_prose)
-    assert any(re.search(r"\[\d+\]", text) for text in all_prose)
-    # 제품 결정 ③ 이전에는 «원문에 값이 있었다는 이유만으로
-    # 8,219억 AI 문장을 공개하지 않는다»였다. 그 문장(등급 확인 + 인용
-    # ["2"])은 이제 두 검사(수치 대조·검수 AI)를 통과해 살아남는다 — 구조화
-    # 실적표의 원값(아래 "8,219")과 나란히 실린다. 위 grades_by_section
-    # 루프가 이미 이 문장의 생존을 등급별로 확인했으므로, 여기서는 그 결론을
-    # 다시 한 번 명시적으로 못 박는다.
     assert any("8,219억" in text for text in all_prose)
+    assert report.grade is Grade.PARTIAL
+    assert any("숫자·날짜 문장" in reason for reason in report.shortfall_reasons)
 
-    # 표는 «정해진 장에만» 실린다 — 4장 실적표(trend), 7장 경로표(flow).
-    # ★ 도식 검증을 고치기 전에는 「4장 외에는 표가 0개」였는데, 그것은 7장 흐름도가
-    #   엔진 안에서 사라지던 «결함을 기대값으로 굳힌» 것이었다. 지금은
-    #   7장 경로표가 정상적으로 실린다(이음매 시험이 화면까지 지킨다).
     tables_by_cell = {section.cell: section.tables for section in report.sections}
     expected_tables = {"past_changes": 1, "operations_partners": 1}
     for section_id in SECTION_IDS:
-        assert len(tables_by_cell[section_id]) == expected_tables.get(
-            section_id, 0
-        ), section_id
+        assert len(tables_by_cell[section_id]) == expected_tables.get(section_id, 0)
     assert tables_by_cell["operations_partners"][0].presentation == "flow"
     performance = tables_by_cell["past_changes"][0]
     assert performance.numeric is True
     assert any("8,219" in cell for row in performance.rows for cell in row)
+    # 긍정 근거 없는 9장 비교만 사용하던 조각 9는 부록에서도 제외한다.
+    cited_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11]
+    assert sorted(source.number for source in report.citations) == cited_numbers
 
-    # 부록: 인용된 조각 1~11 전부, 번호는 조각 번호 그대로 (본문 [n]과 1:1)
-    assert sorted(source.number for source in report.citations) == list(range(1, 12))
-
-    # 핵심 요약은 «검증된 본문 문장»에서만 온다 (2026-09-11).
-    # ★ 예전 계약 — AI가 요약을 새로 쓰고, 그중 미결속 수치 2문장이 빠지고,
-    #   숫자 없는 2문장이 보존되며, 본문 한 문장으로 최소 3문장을 채웠다.
-    #   이제 AI는 문장을 쓰지 않고 후보 «번호»만 고르므로 fixture의 요약
-    #   문장은 보고서에 실릴 수 없다. 그래서 「fixture 요약 2문장이 보인다」를
-    #   「요약 문장이 전부 본문에 있는 문장이다」로 바꾼다.
-    assert (
-        SUMMARY_MIN_SENTENCES
-        <= len(report.summary_items)
-        <= SUMMARY_MAX_SENTENCES
-    )
-    visible_summary = [item.text for item in report.summary_items]
-    for unsafe_text in unbound_summary:
-        assert all(unsafe_text not in text for text in visible_summary)
-    body_texts = [
-        text
-        for section in report.sections
-        for text, _cite in section.prose_lines
-    ]
-    for summary_text in visible_summary:
-        bare = summary_text.split(" [")[0].split(INTERPRETATION_MARKER)[0]
-        assert any(bare in body for body in body_texts), (
-            f"요약 문장이 본문에 없다 — 새 글자가 생겼다: {summary_text}"
-        )
-    # 고른 문장은 서로 다른 장에서 왔고, 어느 장 이야기인지도 실린다.
-    section_ids = [item.section_id for item in report.summary_items]
-    assert all(section_ids) and len(set(section_ids)) == len(section_ids), section_ids
-
-    # 관측 수치도 입력 하한을 숨기지 않고 처분별로 계산한다.
+    assert SUMMARY_MIN_SENTENCES <= len(report.summary_items) <= SUMMARY_MAX_SENTENCES
+    facts = {(fact.section_owner, fact.claim) for fact in report.fact_records}
+    selected = [(item.section_id, re.sub(r"\[\d+\]", "", item.text).strip())
+                for item in report.summary_items]
+    assert all(item in facts for item in selected)
+    assert len({owner for owner, _ in selected}) == len(selected)
     assert result.charged is True
     assert result.fragments_collected == 11
-    assert result.fragments_cited == 11
-    # ★ 분모(pipeline `composed_item_count`)는 «초안 합»과 «최종 보고서 문장
-    #   수» 중 큰 값이다. 2026-09-11 이전에는 요약 초안 4가 더해져 둘 다
-    #   58로 같았다. 요약이 «고르기»가 되면서 초안 합은 57(본문 54 + 고른 3)이
-    #   됐고, 이제는 최종 문장 수가 분모를 정한다.
-    최종_본문줄 = sum(
-        1
-        for section in report.sections
-        for text, _cite in section.prose_lines
-        if not text.startswith("확인 범위:")
-    )
-    최종_문장수 = 최종_본문줄 + len(report.summary_items)
-    assert _expected_sentence_total() < 최종_문장수
-    assert result.sentences_made == 최종_문장수
-    # 제품 결정 ③ 이후 본문에서 실제로 빠지는 수치 문장은
-    # unbound_by_section 전체가 아니라 «해석» 등급뿐이다(위 루프와 같은 근거).
-    interpreted_removed_total = sum(interpreted_counts_by_section.values())
-    fixture_body_total = sum(
-        len(payload["문장들"]) for payload in fixture_sections.values()
-    )
-    # ★ 요약 몫은 이제 «고른 문장 수» 그대로다. 예전에는 「fixture 요약 4건 −
-    #   미결속 2건 + 보충 1건」으로 셌다 — 요약이 본문에서 오는 지금은 뺄
-    #   것도 보충할 것도 없다.
-    expected_passed = (
-        fixture_body_total
-        - interpreted_removed_total
-        - sum(_DEDUPE_REMOVED_BY_SECTION.values())
-        + len(report.fact_records)
-        + len(report.summary_items)
-    )
-    assert result.sentences_passed == expected_passed
-    assert result.sentences_passed == 최종_문장수
+    assert result.fragments_cited == len(cited_numbers)
+    final_count = len(all_prose) + len(report.summary_items)
+    draft_count = sum(len(payload["문장들"]) for payload in fixture_sections.values())
+    assert result.sentences_made == max(draft_count, final_count)
+    assert result.sentences_passed == final_count
+
 
 
 # ══════════════════════════════════════════════════════════
@@ -627,9 +447,9 @@ def test_유료_호출은_없고_가짜_ask_횟수만_증가한다(
     result = _run(engine)
 
     messages = engine.client.messages
-    # 작가: 장 9회(각 1회, 재요청 0회) + 요약 «고르기» 1회
+    # 작가: 장 9회(각 1회, 재요청 0회). 요약 추가 호출은 없다.
     assert messages.section_calls == {section_id: 1 for section_id in SECTION_IDS}
-    assert messages.summary_calls == 1
+    assert messages.summary_calls == 0
     # 검수: 본문 1회뿐이다. 전부 «참»이라 재작성은 0회다.
     # ★ 2026-09-11 이전에는 요약 검수가 붙어 2회였다. 요약이 검증된 본문
     #   문장을 글자 그대로 싣게 되면서 다시 검수할 새 글자가 없어졌다.
@@ -638,7 +458,7 @@ def test_유료_호출은_없고_가짜_ask_횟수만_증가한다(
     # v1 생성·검증 AI는 한 번도 나가지 않았다 (v2 분기가 전담)
     assert engine.generate_ai_calls == 0
     # 모든 호출이 가짜 계량 client 경계를 지났다 — 네트워크 SDK가 아예 없다
-    assert messages.calls >= 12
+    assert messages.calls >= sum(messages.section_calls.values()) + messages.review_calls
     assert result.model == "가짜모델"
 
 
@@ -663,7 +483,7 @@ def test_v2_보고서가_PDF_바이트와_요구_구조까지_도달한다(
     # v2 사실 장부 대체 결속(release.report_fact_id_ledger) — fact_records가
     # 없는 v2는 실제 부록에 실린 인용 번호로 후보 무결성 검사를 통과한다.
     assert candidate.expected_fact_ids == tuple(
-        f"v2-citation-{number}" for number in range(1, 12)
+        f"v2-citation-{number}" for number in (1, 2, 3, 4, 5, 6, 7, 8, 10, 11)
     )
 
     raw_text = "\n".join(

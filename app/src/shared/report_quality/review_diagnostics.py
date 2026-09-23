@@ -6,6 +6,8 @@ from collections.abc import Mapping
 
 from src.shared.report_quality.review_diagnostic_constants import (
     CANDIDATE_FINGERPRINT_RE,
+    CANDIDATE_FINGERPRINT_VERSION,
+    GROUNDING_DETAIL_CHECK_KINDS, GROUNDING_DETAIL_STAGES, GROUNDING_DETAIL_VERSION,
     REVIEW_ITEMS,
     REVIEW_KINDS,
     REVIEW_REASONS,
@@ -31,6 +33,9 @@ def observed_review_outcomes(
             "section_id", "kind", "reason_code", "candidate_sha256",
         ))
         items = diagnostic.get("verification_items")
+        if ("candidate_fingerprint_version" in diagnostic
+            and diagnostic["candidate_fingerprint_version"] != CANDIDATE_FINGERPRINT_VERSION):
+            continue
         if (not isinstance(section, str) or section not in REVIEW_SECTION_IDS
             or kind not in REVIEW_KINDS
             or (section == "summary") != (kind == "요약")
@@ -46,4 +51,16 @@ def observed_review_outcomes(
             "candidate_sha256": fingerprint,
             "verification_items": tuple(dict.fromkeys(items)),
         }
+        if diagnostic.get("candidate_fingerprint_version") == CANDIDATE_FINGERPRINT_VERSION:
+            results[key]["candidate_fingerprint_version"] = CANDIDATE_FINGERPRINT_VERSION
+        detail = diagnostic.get("grounding_detail")
+        if (isinstance(detail, Mapping)
+            and detail.get("version") == GROUNDING_DETAIL_VERSION
+            and detail.get("stage") in GROUNDING_DETAIL_STAGES
+            and detail.get("check_kind") in GROUNDING_DETAIL_CHECK_KINDS):
+            safe_detail = {name: detail[name] for name in ("version", "stage", "check_kind")}
+            index = detail.get("entry_index")
+            if type(index) is int and index >= 0:
+                safe_detail["entry_index"] = index
+            results[key]["grounding_detail"] = safe_detail
     return tuple(results.values())

@@ -132,7 +132,15 @@ def test_대체후보표식이_있어도_검수실패나_판정누락을_승인�
     assert candidate.sections[0].sentences[-1].news_source_alternative is True
     assert all(s.verification_state == "unverified" for s in candidate.sections[0].sentences)
     assert report.sections[0].sentences == ()
-    assert len(reviewer.prompts) == 1
+    # 2026-09-23 — packet 도 평문처럼 계약 밖 판정(«불명확»)·판정 누락은 «그 번호만»
+    #   누락 후속으로 1회 다시 묻는다. 후속도 같은 답이면 여전히 승인하지 않는다.
+    if source_verdict == "거짓":
+        assert len(reviewer.prompts) == 1
+    else:
+        assert len(reviewer.prompts) == 2
+        # 후속은 대체 후보 한 문장만 싣는다 — 이미 «거짓»인 초안은 다시 묻지 않는다.
+        (followup_text,) = reviewer.seen[1].values()
+        assert SOURCE_TEXT in followup_text and FALSE_TEXT not in followup_text
     assert any(row["원문대체후보"] for row in diagnostics)
     assert SOURCE_TEXT not in json.dumps(diagnostics, ensure_ascii=False)
 

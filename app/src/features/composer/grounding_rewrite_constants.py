@@ -38,6 +38,7 @@ from src.features.composer.prose_own_source_constants import (
     PROSE_OWN_SOURCE_UNSUPPORTED,
 )
 from src.features.composer.role_binding_constants import ROLE_BINDING_REASON_TEXTS
+from src.features.composer.scope_constants import SCOPE_CONDITION_UNBOUND
 
 #: 한 번의 검수에서 묶어 고쳐 쓸 수 있는 문장의 최대 수.
 #:
@@ -50,10 +51,17 @@ from src.features.composer.role_binding_constants import ROLE_BINDING_REASON_TEX
 #:   실패한 글이라 못 살리면 빼는 쪽이 안전하다.
 GROUNDING_REWRITE_MAX_SENTENCES: Final[int] = 12
 
-#: 묶음 재작성 프롬프트 전체의 글자 상한. 넘으면 «뒤쪽 대상부터» 뺀다.
+# 모든 절이 순수 회계정책인 원문을 장 고유 사실로 바꿀 근거는 없다.
+# 혼합 문장과 자기 인용 불일치는 이 집합에 넣지 않아 기존 회복 기회를 지킨다.
+GROUNDING_REWRITE_EXCLUDED_REASONS: Final[frozenset[str]] = frozenset({
+    "accounting_policy_boilerplate", "culture_accounting_policy_misplaced",
+    "competitive_section_evidence_offcontract",
+})
+
+#: 묶음 재작성 프롬프트 전체의 글자 상한. 완전한 자기 인용이 들어갈 후보만 담는다.
 #:
-#: ★ 왜 뒤쪽부터인가 — 대상은 장 순서·번호 순으로 정렬돼 있어, 뒤쪽을 빼면
-#:   앞 장이 먼저 보장된다. 임의로 고르면 같은 입력에 같은 결과가 안 나온다.
+#: 장별 순환 우선순서는 고정한다. 긴 후보가 상한을 넘으면 그 후보만 건너뛰고,
+#: 뒤의 짧은 후보를 검토한다. 원문을 잘라 새로운 근거 범위를 만들지 않는다.
 #: ★ 왜 24,000인가 — 같은 요청 안에서 «작가 한 번에 실어도 되는» 크기로 이미
 #:   운영에서 쓰이는 값에 맞춘다. 빈 장 복구는 한 번의 작가 호출에 장마다
 #:   12,000자(`MAX_EMPTY_RECOVERY_EVIDENCE_CHARS`)씩 최대 2장
@@ -116,6 +124,13 @@ _OWN_REASON_TEXTS: Final[dict[str, str]] = {
         "조직문화 장의 문장인데 기댄 인용 원문 절이 조직·인사 이야기가 아닙니다",
     PROSE_OWN_SOURCE_UNSUPPORTED:
         "그 문장이 스스로 단 인용 원문이 문장 내용을 뒷받침할 만큼 겹치지 않습니다",
+    # ★ 같은 공시의 제외 각주(인용 밖 제약)로 걸린 현재 종속·연결 단정도 이 코드다.
+    #   그 경우의 구체 안내는 세부 단계(entity_scope_exclusion)의 안내
+    #   (`grounding_detail_constants.GROUNDING_DETAIL_GUIDES`)로 «세부 검사» 줄에 붙는다 —
+    #   이 문구를 바꾸면 다른 범위 탈락의 재작성 프롬프트까지 바뀐다.
+    SCOPE_CONDITION_UNBOUND:
+        "인용 원문의 한정 조건이 문장에서 사라졌거나, 인용 원문에 없는 인식 "
+        "기준·적용 범위를 단정했습니다. 원문이 실제로 적은 기준·조건 그대로만 남기십시오",
 }
 
 #: 사유 코드 → 사람 문구. 기존 지도들을 «그대로» 합치고, 없던 코드만 위에서 채운다.

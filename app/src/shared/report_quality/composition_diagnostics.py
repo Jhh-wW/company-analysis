@@ -28,8 +28,11 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     SUMMARY_COUNT_FIELDS,
     SUMMARY_STAGES,
     SUMMARY_STEP,
+    SUMMARY_PATHS, SUMMARY_PATH_FACT_REUSE,
+    PUBLIC_BINDING_STEP, PUBLIC_BINDING_COUNT_FIELDS,
     SECTION_EXECUTION_STEP,
     SECTION_EXECUTION_COUNT_FIELDS,
+    SECTION_EXECUTION_PARTIAL_COUNT_FIELDS,
     EMPTY_RECOVERY_RESPONSE_SHAPES, EMPTY_RECOVERY_STAGE_COUNT_KEYS,
     STYLE_COUNTS_FIELD,
     STYLE_REASONS,
@@ -48,9 +51,16 @@ def _section_execution(record: Mapping) -> dict[str, object] | None:
         return None
     if record["동시상한"] < 1:
         return None
-    return {"step": SECTION_EXECUTION_STEP, **{
+    result = {"step": SECTION_EXECUTION_STEP, **{
         field: record[field] for field in SECTION_EXECUTION_COUNT_FIELDS
     }}
+    if any(field in record for field in SECTION_EXECUTION_PARTIAL_COUNT_FIELDS):
+        if any(not _count(record.get(field)) for field in SECTION_EXECUTION_PARTIAL_COUNT_FIELDS):
+            return None
+        if sum(record[field] for field in SECTION_EXECUTION_PARTIAL_COUNT_FIELDS) != record["장수"]:
+            return None
+        result.update({field: record[field] for field in SECTION_EXECUTION_PARTIAL_COUNT_FIELDS})
+    return result
 
 
 def _protocol(record: Mapping) -> dict[str, object] | None:
@@ -82,11 +92,12 @@ def _protocol(record: Mapping) -> dict[str, object] | None:
 
 def _summary(record: Mapping) -> dict[str, object] | None:
     stage = record.get("도달단계")
-    if (record.get("경로") != "legacy" or not isinstance(stage, str)
+    path = record.get("경로")
+    if (not isinstance(path, str) or path not in SUMMARY_PATHS or not isinstance(stage, str)
         or stage not in SUMMARY_STAGES):
         return None
     result: dict[str, object] = {
-        "step": SUMMARY_STEP, "경로": "legacy", "도달단계": stage,
+        "step": SUMMARY_STEP, "경로": path, "도달단계": stage,
     }
     for field in SUMMARY_COUNT_FIELDS:
         if field not in record:
@@ -101,7 +112,23 @@ def _summary(record: Mapping) -> dict[str, object] | None:
         if type(value) is not bool:
             return None
         result[field] = value
+    if path == SUMMARY_PATH_FACT_REUSE:
+        if record.get("추가AI호출") != 0 or type(record.get("추가AI호출")) is not int:
+            return None
+        if not _count(record.get("사실결속수")) or record["사실결속수"] != result["최종수"]:
+            return None
+        result.update({"추가AI호출": 0, "사실결속수": record["사실결속수"]})
     return result
+
+
+def _public_binding(record: Mapping) -> dict[str, object] | None:
+    if any(not _count(record.get(field)) for field in PUBLIC_BINDING_COUNT_FIELDS):
+        return None
+    if record["본문후보수"] != record["결속문장수"] + record["미결속제외수"]:
+        return None
+    return {"step": PUBLIC_BINDING_STEP, **{
+        field: record[field] for field in PUBLIC_BINDING_COUNT_FIELDS
+    }}
 
 
 def _diagram_rows(record: Mapping) -> dict[str, object] | None:
@@ -209,6 +236,7 @@ def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], 
             _section_execution(record) if step == SECTION_EXECUTION_STEP else
             _protocol(record) if step == PROTOCOL_STEP else
             _summary(record) if step == SUMMARY_STEP else
+            _public_binding(record) if step == PUBLIC_BINDING_STEP else
             _diagram_rows(record) if step == DIAGRAM_ROW_COUNT_STEP else
             _derived_ratio(record) if step == DERIVED_RATIO_STEP else
             _body_machine(record) if step == BODY_MACHINE_STEP else
@@ -373,12 +401,27 @@ def _grounding_rewrite(record: Mapping) -> dict[str, object] | None:
         "step": GROUNDING_REWRITE_STEP, "상태": state, "대상장": targets,
         "대상": target_count,
     }
+    from src.shared.report_quality.composition_diagnostic_constants import GROUNDING_REWRITE_OPTIONAL_COUNT_KEYS
+    for key in GROUNDING_REWRITE_OPTIONAL_COUNT_KEYS:
+        if key in record:
+            if not _count(record[key]):
+                return None
+            result[key] = record[key]
     if state == GROUNDING_REWRITE_STATE_DONE:
         for key in GROUNDING_REWRITE_COUNT_KEYS:
             value = record.get(key)
             if not _count(value):
                 return None
             result[key] = value
+        for total_key, part_keys in (
+            ("대상", ("선택", "상한미전송")),
+            ("선택", ("실제전송", "길이미전송")),
+            ("실제전송", ("재작성수신", "포기", "응답누락")),
+            ("재작성수신", ("기계검사통과", "기계검사탈락")),
+        ):
+            if total_key in result and all(key in result for key in part_keys):
+                if result[total_key] != sum(result[key] for key in part_keys):
+                    return None
         if "응답꼴" in record:
             shape = record.get("응답꼴")
             if (not isinstance(shape, str)

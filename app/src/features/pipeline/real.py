@@ -250,6 +250,8 @@ from src.shared.report_evidence.runtime_port import (
 )
 from src.shared.report_evidence.legacy_fragment_kinds import (
     LEGACY_KIND_AUDIT_FINANCIAL,
+    LEGACY_KIND_ENTITY_SCOPE_FOOTNOTE,
+    LEGACY_KIND_RELATED_PARTY,
     LEGACY_KIND_REVENUE_AND_ORDERS,
 )
 from src.shared.revenue_table_provenance import (
@@ -448,6 +450,10 @@ from src.shared.report_quality.source_identity import document_identity_from_par
 # 이 이름은 shared 정본이 소유한다. 여기에 문자열을 다시 적으면 정본 등록표와
 # 조용히 갈라져 이 조각만 「등록되지 않은 종류」로 거절된다(실측된 결함).
 _AUDIT_FINANCIALS_FRAGMENT_KIND = LEGACY_KIND_AUDIT_FINANCIAL
+# 관계법인 회계범위 각주 조각 이름도 같은 이유로 정본 상수를 쓴다.
+_ENTITY_SCOPE_FOOTNOTE_FRAGMENT_KIND = LEGACY_KIND_ENTITY_SCOPE_FOOTNOTE
+#: 각주의 법인 이름을 대조할 이미 운반된 조각 종류(같은 문서의 특수관계자 주석).
+_ENTITY_SCOPE_FOOTNOTE_ANCHOR_KINDS: Final[tuple[str, ...]] = (LEGACY_KIND_RELATED_PARTY,)
 _AUDIT_FINANCIALS_SUCCESS = "성공"
 _AUDIT_FINANCIALS_DOCUMENT_MISSING = "접수번호 미확인"
 _AUDIT_FINANCIALS_EVIDENCE_MISMATCH = "원문지문 불일치"
@@ -5862,6 +5868,7 @@ def _v2_ask_via_provider(
     from src.features.composer.port import AskFatalError  # noqa: PLC0415
 
     def ask(prompt: str) -> str:
+        replay_started = time.monotonic()
         # 출력 상한은 «보내기 직전»에 확정한다 — 1차 검수 재요청의 상한은 첫
         # 답의 실제 출력에 달려 있어 이 클로저를 만들 때는 아직 모른다.
         cap = max_tokens() if callable(max_tokens) else max_tokens
@@ -5989,7 +5996,35 @@ def _v2_ask_via_provider(
         except Exception:  # noqa: BLE001 — 진단 오류는 본 기능에 전파하지 않는다
             pass
         blocks = getattr(response, "content", None) or []
-        return "".join(str(getattr(block, "text", "") or "") for block in blocks)
+        response_text = "".join(str(getattr(block, "text", "") or "") for block in blocks)
+        # 명시적으로 켠 로컬 평가에서만 보관한다. 실패해도 응답·정산은 그대로다.
+        from src.features.pipeline.private_replay import (
+            local_provider_replay_enabled, record_local_provider_replay,
+        )
+        from src.features.pipeline.private_replay_constants import (
+            MILLISECONDS_PER_SECOND, REPLAY_DIAGNOSTIC_STEP,
+        )
+        if local_provider_replay_enabled():
+            stored = False
+            try:
+                stored = record_local_provider_replay(
+                    prompt=text, response=response_text, stage=stage,
+                    model=str(getattr(response, "model", "") or getattr(engine, "MODEL", "") or GENERATION_MODEL),
+                    response_schema=dict(response_schema) if response_schema is not None else None,
+                    output_limit=cap, stop_reason=str(getattr(response, "stop_reason", "") or ""),
+                    elapsed_ms=max(0, int((time.monotonic() - replay_started) * MILLISECONDS_PER_SECOND)),
+                ) is True
+            except Exception:  # noqa: BLE001 — 선택 보관 장애는 이미 끝난 응답·정산을 바꾸지 않는다
+                pass
+            try:
+                run_diagnostics.current_steps().append({
+                    "step": REPLAY_DIAGNOSTIC_STEP,
+                    "단계": stage if type(stage) is str and stage in V2_RESPONSE_STAGES else V2_RESPONSE_UNKNOWN,
+                    "시도수": 1, "저장수": int(stored), "미보관수": int(not stored),
+                })
+            except Exception:  # noqa: BLE001 — 진단 장애도 정상 응답에 전파하지 않는다
+                pass
+        return response_text
 
     def refresh_parallel_capability() -> None:
         # 부모가 연 예산·정산 문맥과 검증된 계량 client만 병렬 실행할 수 있다.
@@ -9086,6 +9121,37 @@ def _attach_financial_api_disclosure_date(
     }
 
 
+def _add_entity_scope_footnotes(
+    engine: Any, frags: dict[int, dict[str, str]], filing_text: str
+) -> tuple[dict[int, dict[str, str]], int]:
+    """엔진의 관계법인 회계범위 각주 보충을 부르되 계약이 다르면 원래 조각을 둔다.
+
+    ★ `getattr`로 받는다 — 시험용 가짜 엔진이나 이 함수가 없는 엔진에서 조사
+      전체가 멈추면 안 된다. 돌려준 값의 모양이 계약과 다르면 «고치지 않고»
+      원래 조각을 그대로 쓴다(SECTION_HEADS 보정과 같은 방침).
+    """
+
+    add_footnotes = getattr(engine, "add_entity_scope_footnotes", None)
+    if not callable(add_footnotes) or not filing_text:
+        return frags, 0
+    result = add_footnotes(
+        frags,
+        filing_text,
+        kind=_ENTITY_SCOPE_FOOTNOTE_FRAGMENT_KIND,
+        anchor_kinds=_ENTITY_SCOPE_FOOTNOTE_ANCHOR_KINDS,
+        max_chars=getattr(engine, "FRAG_CHARS", filing_extra.DEFAULT_FRAG_CHARS),
+    )
+    if not (
+        isinstance(result, tuple)
+        and len(result) == 2
+        and isinstance(result[0], dict)
+        and type(result[1]) is int
+        and result[1] >= 0
+    ):
+        return frags, 0
+    return result[0], result[1]
+
+
 def _collect(
     engine: Any,
     client: Any,
@@ -9171,6 +9237,17 @@ def _collect(
     if relationship_added:
         steps.append(
             {"step": "6_수집_파트너관계", "더한조각": relationship_added}
+        )
+
+    # 특수관계자 주석의 법인에 붙은 회계범위 각주(다른 주석의 종속기업 제외·
+    # 지분법 미적용 등)를 같은 문서의 정확한 원문 구간으로 보충한다. 목차 보정이
+    # 끝난 최종 특수관계자 조각과 법인 이름을 대조해야 하므로 발췌 보충의 맨 뒤다.
+    frags, scope_footnote_added = _add_entity_scope_footnotes(
+        engine, frags, filing_text
+    )
+    if scope_footnote_added:
+        steps.append(
+            {"step": "6_수집_관계법인각주", "더한조각": scope_footnote_added}
         )
 
     # ── typed 공식 근거 수집 (FULL + kill switch 둘 다 켜졌을 때만) ──

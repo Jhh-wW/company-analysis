@@ -61,11 +61,15 @@ _크랙_문장 = (
     "회사는 홈페이지에서 AI 엔터테인먼트 콘텐츠 플랫폼 '크랙(Crack)'을 "
     "운영하고 있으며, 청소년 보호 정책 강화를 추진하고 있다."
 )
-#: 같은 사실을 어투만 바꿔 다른 장에 옮겨 적은 모양 (중복 제거가 잡는 짝).
+#: 같은 사실을 어투만 바꿔 다른 장에 옮겨 적은 모양. 짝(비교 후보)은 되지만
+#: 「운영하고 있으며」↔「운영한다고 밝히며」로 주장절이 어절 그대로 대응하지 않아
+#: 이제 지우지 않는다(2026-09-23 총괄 확정). 보존 기대 음성으로 남긴다.
 _크랙_문장_변형 = (
     "회사는 홈페이지에서 AI 엔터테인먼트 콘텐츠 플랫폼 '크랙(Crack)'을 "
     "운영한다고 밝히며, 청소년 보호 정책의 강화를 추진하고 있다."
 )
+#: 증명되는 참 중복 — 같은 주장 문장이 두 장에 실린 꼴. 안내문 대조 기계는 이것으로 잰다.
+_크랙_문장_반복 = _크랙_문장
 #: 실측 — 뤼튼 보고서 3쪽 5.2에 인쇄된 문장.
 _상장_문장 = (
     "회사는 상장 준비에 본격 착수했다고 밝혔으며, 국내 주요 증권사에 "
@@ -107,11 +111,29 @@ def _emptied_by_dedupe() -> ComposedReport:
             _IDENTITY,
             (_sentence(_크랙_문장), _sentence(_상장_문장)),
         ),
-        _CULTURE: ComposedSection(_CULTURE, (_sentence(_크랙_문장_변형),)),
+        _CULTURE: ComposedSection(_CULTURE, (_sentence(_크랙_문장_반복),)),
     })
     deduped, dropped = drop_cross_section_duplicates(report)
     assert dropped == 1, "이 픽스처가 중복을 못 잡으면 아무것도 증명하지 못합니다"
     return deduped
+
+
+def test_어투만_바꾼_원래_짝은_지우지_않아_이동_안내문이_생기지_않는다():
+    """기대 변경 (2026-09-23 총괄 확정) — 종전 재현 경로는 이 짝으로 8장을 비웠다."""
+    report = _report({
+        _IDENTITY: ComposedSection(
+            _IDENTITY,
+            (_sentence(_크랙_문장), _sentence(_상장_문장)),
+        ),
+        _CULTURE: ComposedSection(_CULTURE, (_sentence(_크랙_문장_변형),)),
+    })
+    deduped, dropped = drop_cross_section_duplicates(report)
+
+    assert dropped == 0
+    assert [sentence.text for sentence in _section(deduped, _CULTURE).sentences] == [
+        _크랙_문장_변형
+    ]
+    assert _section(deduped, _CULTURE).notice == ""
 
 
 # ══════════════════════════════════════════════════════════
@@ -558,18 +580,15 @@ def test_보충_경로는_승인_장만_대조한다(monkeypatch):
 
     _run_recovering_full((_IDENTITY,))
 
-    assert len(받은_인자) == 2, (
-        "보충 경로가 안내문 대조를 부르지 않았습니다 — 1회차만 불렸습니다"
-    )
-    assert 받은_인자[0] == {}, "본 경로는 모든 장을 대조한다"
-    assert 받은_인자[1] == {"section_ids": frozenset({_IDENTITY})}
+    # 본문 검수와 공개 전 도식 필터 뒤 대조를 거친다. 보충도 같은 두 경계를 거치되 승인 장만 대조한다.
+    assert [value.get("section_ids") for value in 받은_인자] == [
+        None, None, frozenset({_IDENTITY}), frozenset({_IDENTITY}),
+    ]
+    assert all(isinstance(value["moved_facts"], list) and value["fragments"] for value in 받은_인자)
 
 
 def test_대조한_안내문이_공개_투영까지_그대로_간다():
-    """★ 화면까지 확인 — 안내문은 렌더가 장 «첫 문단»으로 싣고, 봉인 경로의
-    공개 투영이 그 문단을 그대로 복사한다. 투영이 별도로 안내문을 다시
-    만들지 않으므로, 대조를 렌더 «앞»에 두면 PDF에도 그 글자가 나간다.
-    """
+    """대조한 안내문은 번호 없는 안내로 봉인되며 사실 문단에 섞이지 않는다."""
     from src.features.composer.render import render_report
     from src.features.report_standard.public_projection import (
         build_public_projection,
@@ -591,10 +610,9 @@ def test_대조한_안내문이_공개_투영까지_그대로_간다():
         for block in projection.sections
         if block.display.cell == _PAST_CHANGES
     )
-    assert [text for _번호, text in 화면.paragraphs] == [
-        NOTICE_INSUFFICIENT_EVIDENCE_TABLE_KEPT
-    ]
-    assert 화면.sentences[0][0] == NOTICE_INSUFFICIENT_EVIDENCE_TABLE_KEPT
+    assert 화면.guidance_lines == (NOTICE_INSUFFICIENT_EVIDENCE_TABLE_KEPT,)
+    assert 화면.paragraphs == ()
+    assert 화면.sentences == ()
 
 
 def test_모든_호출부가_같은_표_자리를_넘긴다():

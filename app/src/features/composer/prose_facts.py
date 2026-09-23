@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from typing import Final, Optional, Sequence
 
 from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
+from src.features.composer.future_plan_constants import FUTURE_SECTION_FORWARD_RE
 from src.features.composer.port import ComposedSentence
 from src.features.composer.prose_own_source import own_source_support_terms
 from src.features.pipeline.port import FactRecord
@@ -44,6 +45,14 @@ class ProseEvidence:
     fragment_id: str
     source: Source
     exact_text: str
+
+
+@dataclass(frozen=True)
+class ProseFactBuildResult:
+    """미결속 원인을 원문 없이 전달한다. 성공은 의미 정확성의 추가 증명이 아니다."""
+
+    fact: Optional[FactRecord]
+    reason_code: str = ""
 
 
 def _normalized_text(value: object) -> str:
@@ -89,29 +98,32 @@ def _fact_id(
     return PROSE_FACT_ID_PREFIX + hashlib.sha256(encoded).hexdigest()[:32]
 
 
-def build_verified_prose_fact(
+def evaluate_verified_prose_fact(
     sentence: ComposedSentence,
     *,
     section_id: str,
     company_name: str,
     as_of_date: str,
     evidence: Sequence[ProseEvidence],
-) -> Optional[FactRecord]:
+) -> ProseFactBuildResult:
     """검증 문장과 모든 인용이 정확히 맞을 때만 FactRecord를 만든다."""
 
     claim = _normalized_text(sentence.text)
     claim_slot = sentence.planned_claim_slot.strip()
     citations = _ordered_unique(sentence.citations)
-    if (
-        sentence.structured_claim is not None
-        or sentence.verification_state != "verified"
-        or sentence.grade not in (GRADE_CONFIRMED, GRADE_INTERPRETED)
-        or not claim
-        or claim_slot not in CLAIM_SLOTS_BY_SECTION.get(section_id, ())
-        or not citations
-        or tuple(item.fragment_id.strip() for item in evidence) != citations
-    ):
-        return None
+    checks = (
+        (sentence.structured_claim is not None, "prose_not_applicable"),
+        (sentence.verification_state != "verified", "prose_not_verified"),
+        (sentence.grade not in (GRADE_CONFIRMED, GRADE_INTERPRETED), "prose_invalid_grade"),
+        (not claim, "prose_claim_missing"),
+        (not claim_slot, "prose_claim_slot_missing"),
+        (claim_slot not in CLAIM_SLOTS_BY_SECTION.get(section_id, ()), "prose_claim_slot_off_section"),
+        (not citations, "prose_citation_missing"),
+        (tuple(item.fragment_id.strip() for item in evidence) != citations, "prose_evidence_order_mismatch"),
+    )
+    for failed, reason in checks:
+        if failed:
+            return ProseFactBuildResult(None, reason)
 
     manifest: list[dict[str, str]] = []
     source_ids: list[str] = []
@@ -122,14 +134,12 @@ def build_verified_prose_fact(
         source_id = source.source_id.strip()
         identity = document_identity(source)
         evidence_hash = exact_evidence_text_hash(item.exact_text)
-        if (
-            not source_id
-            or not identity
-            or not evidence_hash
-            or evidence_hash not in source.exact_evidence_hashes
-            or source_id in source_ids
-        ):
-            return None
+        if not source_id or not identity:
+            return ProseFactBuildResult(None, "prose_source_identity_missing")
+        if not evidence_hash or evidence_hash not in source.exact_evidence_hashes:
+            return ProseFactBuildResult(None, "prose_evidence_hash_mismatch")
+        if source_id in source_ids:
+            return ProseFactBuildResult(None, "prose_duplicate_source")
         source_ids.append(source_id)
         source_identities.append(identity)
         evidence_hashes.append(evidence_hash)
@@ -155,9 +165,12 @@ def build_verified_prose_fact(
         ),
         support_terms,
     ):
-        return None
+        return ProseFactBuildResult(None, "prose_support_terms_insufficient")
 
     primary = evidence[0].source
+    # 발표가 과거여도 본문이 아직 할 계획·전망이면 실행 완료 사실로 봉인하지
+    # 않는다. 이 표지는 시점 metadata만 보수화하며 인용 검수의 승인을 대신하지 않는다.
+    forward_claim = bool(FUTURE_SECTION_FORWARD_RE.search(claim))
     fact = FactRecord(
         fact_id=_fact_id(
             company_name=company_name,
@@ -176,7 +189,7 @@ def build_verified_prose_fact(
             else INTERPRETATION_CLAIM_TYPE
         ),
         section_owner=section_id,
-        time_state=_TIME_STATE_BY_SECTION.get(section_id, "present"),
+        time_state="future" if forward_claim else _TIME_STATE_BY_SECTION.get(section_id, "present"),
         as_of=str(as_of_date or "").strip(),
         source_id=source_ids[0],
         source_type=primary.source_type or primary.kind.value,
@@ -188,7 +201,7 @@ def build_verified_prose_fact(
         location=primary.location,
         status="verified",
         fact_status=(
-            "actual" if sentence.grade == GRADE_CONFIRMED else "provisional"
+            "actual" if sentence.grade == GRADE_CONFIRMED and not forward_claim else "provisional"
         ),
         verification_status="verified",
         # 원문 전체를 문장마다 중복 저장하지 않는다. 정확한 조각 바이트는
@@ -208,4 +221,15 @@ def build_verified_prose_fact(
         supporting_source_identities=source_identities,
         supporting_evidence_hashes=evidence_hashes,
     )
-    return replace(fact, evidence_binding=fact_evidence_binding(fact))
+    return ProseFactBuildResult(replace(fact, evidence_binding=fact_evidence_binding(fact)))
+
+
+def build_verified_prose_fact(
+    sentence: ComposedSentence, *, section_id: str, company_name: str,
+    as_of_date: str, evidence: Sequence[ProseEvidence],
+) -> Optional[FactRecord]:
+    """기존 호출부의 Optional 반환 계약을 유지한다."""
+    return evaluate_verified_prose_fact(
+        sentence, section_id=section_id, company_name=company_name,
+        as_of_date=as_of_date, evidence=evidence,
+    ).fact

@@ -45,7 +45,9 @@ def test_explicit_opt_in_only_attaches_metadata(monkeypatch, configured):
 
 
 # 2026-09-23: 평면 경로 고정 접두부 10706 → 10794 (REVIEW_JSON_GUIDE «모든 번호 빠짐없이» 안내 88자).
-@pytest.mark.parametrize("grouped,prefix_chars", ((False, 10794), (True, 11848)))
+# 2026-09-23: 공용 GROUNDING_GUIDE «인식기준» 안내 177자 → 11142→11319, 12196→12373.
+#   그 177자만 되돌리면 옛 값이 그대로 재현되고, 아래 분할 표식 단정은 값과 무관하다.
+@pytest.mark.parametrize("grouped,prefix_chars", ((False, 11319), (True, 12373)))
 @pytest.mark.parametrize("factory", (_golden_case, _large_case, _boundary_case))
 def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
     monkeypatch, grouped, prefix_chars, factory,
@@ -69,10 +71,10 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "932bbb0c3766856a9a5ad72284be92d2be310799559a3e458443146216fbb7de"),
-    (_golden_case, True, "e514adce8e826170e6774c43c36300a66618ca8d12f54f9d3ba3f6ee934759eb"),
-    (_boundary_case, False, "a3d40640d5ee2139066dd43a5f6d691d0657349da0b6e13263ae1de74c11c9b1"),
-    (_boundary_case, True, "9266901272c8817372917081e848d82323d84add65573e2e1711feeb16c78510"),
+    (_golden_case, False, "43903829e61c77a71c4573caf71e56f1835686c0316804b5fee478e5e932b3ed"),
+    (_golden_case, True, "c4a28d93298c40d1d1cef5a86e22d54aa074fbed1ca1b7e98afa02d21135041b"),
+    (_boundary_case, False, "5272127506f6f2231bd7602712734e2c78e8e9e569e65d1bfceb29dc79104c62"),
+    (_boundary_case, True, "176a4d84585e524765c36ff3ca76199880366d1b6c0f3eef029620f72b2d2813"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
@@ -130,17 +132,24 @@ def test_diagram_cache_excludes_card_switch_sources_and_rows(monkeypatch, items)
     cached = diagram_check._review_prompt(items, texts)
     reference = diagram_check._review_prompt((), {})
     assert cached.encode("utf-8") == plain.encode("utf-8")
-    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 8326
+    # 2026-09-23 공용 «인식기준» 안내 177자: 8326 → 8503 (되돌리면 8326 재현).
+    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 8503
     assert cached[:cached.cache_prefix_chars] == reference[:reference.cache_prefix_chars]
     assert texts["2"] not in cached[:cached.cache_prefix_chars]
     assert getattr(cached, "response_schema", None) is None
 
 
-@pytest.mark.parametrize("kind", ("flat", "grouped", "diagram"))
+@pytest.mark.parametrize("kind,packet_schema", (
+    ("flat", False), ("grouped", False), ("grouped", True), ("diagram", False),
+), ids=("flat", "grouped-schema-off", "grouped-schema-on", "diagram"))
 @pytest.mark.parametrize("initial_valid", (False, True))
 def test_actual_review_preserves_call_count_retry_text_cache_and_schema(
-    monkeypatch, kind, initial_valid,
+    monkeypatch, kind, packet_schema, initial_valid,
 ):
+    # packet 스키마 스위치(기본 꺼짐)는 grouped 에만 뜻이 있다 — 켠 갈래만 바꾼다.
+    if packet_schema:
+        monkeypatch.setattr(verify, "PACKET_REVIEW_SCHEMA_ENABLED", True)
+
     def run(enabled):
         monkeypatch.setenv(REVIEW_PROMPT_CACHE_ENV, "1" if enabled else "0")
         calls = []
@@ -156,7 +165,8 @@ def test_actual_review_preserves_call_count_retry_text_cache_and_schema(
 
     plain_calls, plain_result = run(False)
     cached_calls, cached_result = run(True)
-    expected_count = 1 if initial_valid or kind == "grouped" else 2
+    # 2026-09-23 — packet(grouped)도 평문과 같은 형식 재요청 1회를 보낸다.
+    expected_count = 1 if initial_valid else 2
     assert len(plain_calls) == len(cached_calls) == expected_count
     assert plain_result == cached_result
     assert getattr(cached_calls[0], "response_schema", None) is None
@@ -165,7 +175,11 @@ def test_actual_review_preserves_call_count_retry_text_cache_and_schema(
         assert cached.cache_prefix_chars == cached_calls[0].cache_prefix_chars > 0
         assert getattr(plain, "response_schema", None) is getattr(cached, "response_schema", None)
     if len(cached_calls) == 2:
-        assert isinstance(cached_calls[1], ReviewPrompt)
+        # 평문·도식의 재요청과 스키마를 켠 packet 재요청은 스키마를 싣는다. 스키마를 끈
+        # packet 재요청(기본)은 캐시 표식만 가진 문자열이다 — 경계는 어느 쪽이든 같다.
+        retry_has_schema = kind != "grouped" or packet_schema
+        assert isinstance(cached_calls[1], ReviewPrompt) is retry_has_schema
+        assert (getattr(cached_calls[1], "response_schema", None) is not None) is retry_has_schema
         assert cached_calls[1] == str(cached_calls[0]) + RETRY_REMINDER
 
 

@@ -79,7 +79,7 @@ from src.features.sharelink.constants import (
     VISITOR_COOKIE_NAME,
 )
 from src.features.report_standard.constants import CANONICAL_SCHEMA_VERSION
-from src.core.report_display import empty_section_notice
+from src.core.report_display import empty_section_notice, reader_citation_groups, reader_scope_notes, reader_section_content, reader_summary_notes
 from src.features.report_standard.cover_metrics import cover_metrics
 from src.features.report_standard.visualization import table_visualization
 from src.features.report_standard.section_content import (
@@ -99,6 +99,7 @@ from src.web.security import (
 logger = logging.getLogger(__name__)
 templates = Jinja2Templates(directory=str(paths.TEMPLATES_DIR))
 templates.env.globals["empty_section_notice"] = empty_section_notice
+templates.env.globals.update(reader_citation_groups=reader_citation_groups, reader_scope_notes=reader_scope_notes, reader_section_content=reader_section_content, reader_summary_notes=reader_summary_notes)
 _READONLY_EXISTING_REQUEST_STATE = "public_get_readonly_existing"
 
 

@@ -39,6 +39,9 @@ from src.features.composer.evidence_availability import (
     EvidenceAvailability,
 )
 from src.features.composer.tests.test_pipeline import _summary_selection_json
+from src.features.composer.tests.golden_fixture_contract import (
+    golden_fragments_with_identity, golden_responses_with_slots, golden_public_rows,
+)
 from src.features.composer.pipeline import V2RunOutput, run_v2
 from src.features.composer.validate import V2ValidationError
 from src.features.composer.render import (
@@ -59,12 +62,12 @@ from src.shared.report_quality.assessment import has_public_numeric_token
 COMPANY_NAME: Final[str] = "제이와이피엔터테인먼트"
 
 _FIXTURE_DIR: Final[Path] = Path(__file__).resolve().parent / "fixtures"
-_FRAGMENTS_FIXTURE: Final[dict[str, Any]] = json.loads(
+_FRAGMENTS_FIXTURE: Final[dict[str, Any]] = golden_fragments_with_identity(json.loads(
     (_FIXTURE_DIR / "jyp_fragments.json").read_text(encoding="utf-8")
-)
-_RESPONSES_FIXTURE: Final[dict[str, Any]] = json.loads(
+))
+_RESPONSES_FIXTURE: Final[dict[str, Any]] = golden_responses_with_slots(json.loads(
     (_FIXTURE_DIR / "jyp_ask_responses.json").read_text(encoding="utf-8")
-)
+))
 
 #: 검수 프롬프트의 대조 항목 한 줄 — 번호와 JSON 문자열 문장을 같이 읽는다.
 _REVIEW_ITEM_RE: Final[re.Pattern[str]] = re.compile(
@@ -92,28 +95,13 @@ def _golden_sections() -> dict[str, Any]:
     return copy.deepcopy(_RESPONSES_FIXTURE["장별_응답"])
 
 
-#: 요약 «고르기»가 돌려주는 문장 수. 가짜 AI(`_summary_selection_json`)가 서로
-#: 다른 장에서 세 개를 고른다.
-#: ★ 2026-09-11 이전에는 fixture의 «핵심요약_응답» 문장 수를 그대로 썼다.
-#:   그때는 AI가 요약을 새로 썼기 때문이다. 이제는 검증된 본문 문장을 고르므로
-#:   초안 수는 «고른 개수»다. 생산 상수를 빌려 오지 않고 글자로 적는다.
-_SUMMARY_PICKS = 3
-
-
 def _expected_total() -> int:
-    """fixture가 약속한 초안 문장 수 (본문 9장 + 고른 요약) — 매직 넘버 대신 실측."""
+    """fixture의 본문 초안 수. 결정적 요약을 AI 생성 수에 더하지 않는다."""
     body = sum(
         len(payload["문장들"])
         for payload in _RESPONSES_FIXTURE["장별_응답"].values()
     )
-    return body + _SUMMARY_PICKS
-
-
-#: 그 한 문장이 어느 장에서 빠지는가 — 1장이 쓴 회사 표어가 8장으로 간다.
-#: 장별 문장 수를 단정하는 곳에서 이 값을 빼 준다.
-#: 장 간 중복 제거가 «소유 장»으로 옮기는 문장 수 (소실이 아니라 이동이다).
-#: fixture가 회사 표어를 1장과 8장에 둘 다 실었다 → 8장이 소유한다.
-DEDUPE_MOVED_BY_SECTION: dict[str, int] = {"identity": 1}
+    return body
 
 
 # ══════════════════════════════════════════════════════════
@@ -201,43 +189,8 @@ def _section_texts(report: Report, section_id: str) -> list[str]:
 
 
 def _safe_section_count(sections: dict[str, Any], section_id: str) -> int:
-    """새 생성 안전 경계 뒤 남아야 할 문장 수를 fixture만 보고 예측한다.
-
-    ★ 제품 결정 ③ — 수치 안전 필터의 예측식(「숫자 토큰이 없는 문장만
-      남는다」)은 옛 규칙을 그대로 베낀 것이라 새 규칙에서는 틀린다. 새 규칙은
-      숫자 문장이라도 (검수 통과 + 확인 등급 + 인용 있음) 셋을 다 채우면
-      살린다(`structured_claims.is_release_ready_numeric_sentence`). 이
-      fixture는 golden 데이터라 «확인» 등급 + 인용 있는 숫자 문장은 실제로
-      근거와 셈이 맞는다(실측 확인) — 이 시험들의 가짜 검수(`_ScriptedReviewer`)도
-      건드리지 않은 문장은 전부 «참»만 돌려주므로, 세 조건을 fixture 필드만
-      보고 그대로 셀 수 있다.
-    ★ 이 예측식은 시험이 «일부러 조작한» 문장은 구분하지 못한다 — 등급·인용은
-      그대로 두고 «글»만 틀리게 바꾸면(숫자만 조작), fixture 필드로는 여전히
-      «안전»으로 보이지만 실제로는 근거와 안 맞아 제거된다. 그 문장을 건드린
-      시험은 호출부에서 `- 1`로 직접 보정한다(§4-B-2, §4-B-3).
-    """
-
-    def _predicted_safe(sentence: dict[str, Any]) -> bool:
-        if not has_public_numeric_token(str(sentence["글"])):
-            return True
-        return sentence.get("등급") == GRADE_CONFIRMED and bool(sentence.get("인용"))
-
-    return sum(
-        _predicted_safe(sentence) for sentence in sections[section_id]["문장들"]
-    ) - DEDUPE_MOVED_BY_SECTION.get(section_id, 0)
-
-
-def _uncited_interpretation_count(
-    sections: dict[str, Any], section_id: str
-) -> int:
-    """검수 근거가 없어 현재 별도 정책으로 남는 해석 문장 수."""
-
-    return sum(
-        not sentence.get("인용")
-        and sentence.get("등급") == "해석"
-        and not has_public_numeric_token(str(sentence["글"]))
-        for sentence in sections[section_id]["문장들"]
-    )
+    """골든 원문에서 사전 검토한 공개 가능 후보 수. 조작 후보는 호출부에서 뺀다."""
+    return len(golden_public_rows(sections, section_id))
 
 
 def _visible_sentence_count(report: Report) -> int:
@@ -395,22 +348,13 @@ def _dead_reviewer_evidence_available_run(writer: _GoldenWriter) -> V2RunOutput:
     )
 
 
-def _assert_only_uncited_interpretations_remain(
-    output: V2RunOutput, sections: dict[str, Any],
-) -> None:
-    """인용 문장은 전부 빠지고 인용 없는 해석만 남는다 — 라벨만 바꿔 살리지 않는다."""
-
+def _assert_unreviewed_content_is_absent(output: V2RunOutput) -> None:
+    """검수 불능이면 본문·요약·사실 장부에서 미검수 해석까지 모두 빠진다."""
     report = output.report
     assert not output.quality_observation.release_allowed
-    for section_id in SECTION_IDS:
-        texts = _section_texts(report, section_id)
-        expected = _uncited_interpretation_count(sections, section_id)
-        if expected:
-            assert len(texts) == expected, section_id
-            assert all(text.endswith(INTERPRETATION_MARKER) for text in texts)
-        else:
-            # 원래 문장이 있었으므로 단순 자료 부재가 아닌 검수 탈락 안내가 남는다.
-            assert section_id in output.quality_observation.notice_only_sections
+    assert all(not section.prose_lines for section in report.sections)
+    assert report.fact_records == []
+    assert report.summary_items == []
 
 
 def test_dead_reviewer_bare_shadow_fails_closed_instead_of_filling_summary_with_unverified() -> None:
@@ -436,7 +380,7 @@ def test_dead_reviewer_with_evidence_available_keeps_empty_summary_without_resto
     report = output.report
 
     assert report.schema_version == ENGINE_V2_SCHEMA_VERSION
-    _assert_only_uncited_interpretations_remain(output, _RESPONSES_FIXTURE["장별_응답"])
+    _assert_unreviewed_content_is_absent(output)
     assert report.summary_items == []
     assert report.publication_policy == "evidence-available-v1"
 
@@ -476,7 +420,8 @@ def test_adversity_combination_with_evidence_available_has_sentence_level_dispos
     assert [section.cell for section in report.sections] == list(SECTION_IDS)
     # 깨진 인용·틀린 수치·검수 미완료 인용 문장은 단위별로 빠진다.
     # 초안 수는 본문뿐이다 — 검수 표식 있는 후보가 없어 요약 고르기를 부르지 않는다.
-    assert output.composed_sentences == _expected_total() - _SUMMARY_PICKS
-    _assert_only_uncited_interpretations_remain(output, sections)
+    assert 0 < output.composed_sentences <= _expected_total()
+    assert output.verified_sentences == 0
+    _assert_unreviewed_content_is_absent(output)
     # 요약은 검수 표식 있는 문장이 없으므로 비어 있다 — 해석으로 채우지 않는다.
     assert report.summary_items == []

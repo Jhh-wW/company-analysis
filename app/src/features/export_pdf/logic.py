@@ -56,9 +56,12 @@ from reportlab.platypus import (
 )
 
 from src.core import clock
-from src.core.citations import citation_marker, location_display
+from src.core.citations import citation_marker, citation_display_style, location_display
 from src.core.constants import section_display_heading
-from src.core.report_display import empty_section_notice
+from src.core.report_display import (
+    empty_section_notice, reader_citation_groups, reader_scope_notes,
+    reader_section_content, reader_summary_notes,
+)
 from src.features.composer.constants import FLOW_UNCONFIRMED_CELL
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
 from src.features.composer.validate import validate_v2
@@ -2406,6 +2409,19 @@ def _paragraphs_with_heading(
     return [CondPageBreak(required_height), KeepTogether(first_group), *paragraphs[1:]]
 
 
+def _bounded_intro_with_table(heading: Sequence[Flowable], paragraphs: Sequence[Flowable], content: Sequence[Flowable], width: float) -> list[Flowable]:
+    """짧은 소개와 첫 도식이 한 묶음으로 들어갈 때만 제목부터 같이 넘긴다."""
+    if len(paragraphs) != 1:
+        return []
+    flattened: list[Flowable] = []
+    for item in [*heading, *paragraphs, *content]:
+        flattened.extend(_keep_together_items(item) if isinstance(item, KeepTogether) else [item])
+    height = sum(item.wrap(width, A4[1])[1] + item.getSpaceBefore() + item.getSpaceAfter() for item in flattened)
+    if height > constants.SECTION_INTRO_WITH_TABLE_MAX_HEIGHT_PT:
+        return []
+    return [CondPageBreak(height), KeepTogether(flattened)]
+
+
 def _add_section(
     story: list[Flowable],
     report: Report,
@@ -2436,8 +2452,30 @@ def _add_section(
     )
     if empty_notice:
         story.extend(_lead_with_heading(
-            heading_flowables, [_numbered_paragraph(1, empty_notice, styles, width)]
+            heading_flowables, [Paragraph(_escape(empty_notice), styles["small"])]
         ))
+        return
+    if report.schema_version == ENGINE_V2_SCHEMA_VERSION:
+        paragraphs, guidance = reader_section_content(section)
+        heading_flowables.extend(Paragraph(_escape(text), styles["small"]) for text in guidance)
+        if paragraphs:
+            paragraph_items = [_numbered_paragraph(index, text, styles, width) for index, text in enumerate(paragraphs, 1)]
+            first_table: list[Flowable] = []
+            if section.tables:
+                _add_report_table(first_table, section.tables[0], styles, width)
+            intro = _bounded_intro_with_table(heading_flowables, paragraph_items, first_table, width) if first_table else []
+            story.extend(intro or _paragraphs_with_heading(heading_flowables, paragraph_items, width, text_only=not section.tables))
+            table_start = 1 if intro else 0
+        elif section.tables:
+            first_content: list[Flowable] = []
+            _add_report_table(first_content, section.tables[0], styles, width)
+            story.extend(_lead_with_heading(heading_flowables, first_content))
+            table_start = 1
+        else:
+            story.extend(_lead_with_heading(heading_flowables, []))
+            table_start = 0
+        for table in section.tables[table_start:]:
+            _add_report_table(story, table, styles, width)
         return
     if not section.is_filled:
         story.extend(heading_flowables)
@@ -2757,8 +2795,9 @@ def _add_projection_section(
         _HorizontalRule(width),
         Spacer(1, 10),
     ]
+    heading_flowables.extend(Paragraph(_escape(text), styles["small"]) for text in display.guidance_lines)
     if not (display.paragraphs or display.tables):
-        story.extend(heading_flowables)
+        story.extend(_lead_with_heading(heading_flowables, []))
         return
 
     visuals_by_index = {visual.table_index: visual for visual in display.visuals}
@@ -2771,12 +2810,16 @@ def _add_projection_section(
             _numbered_paragraph(position, text, styles, width, number_text=ordinal)
             for position, (ordinal, text) in enumerate(display.paragraphs, start=1)
         ]
-        story.extend(_paragraphs_with_heading(
-            heading_flowables, paragraphs, width,
-            text_only=not display.tables and not band,
+        first_table: list[Flowable] = list(band)
+        if display.tables:
+            _add_projection_table(first_table, display.tables[0], visuals_by_index.get(0), styles, width)
+        intro = _bounded_intro_with_table(heading_flowables, paragraphs, first_table, width) if display.tables else []
+        story.extend(intro or _paragraphs_with_heading(
+            heading_flowables, paragraphs, width, text_only=not display.tables and not band,
         ))
-        story.extend(band)
-        table_start = 0
+        if not intro:
+            story.extend(band)
+        table_start = 1 if intro else 0
     else:
         first_content: list[Flowable] = list(band)
         table_start = 0
@@ -2893,7 +2936,14 @@ def _add_citations(
 
     #: (번호, 자료 마크업, 기준일·상태, 사실 검증, 원문 위치, 본문 사용 장)
     entries: list[tuple[str, str, str, str, str, str]]
-    if projection is not None:
+    groups = reader_citation_groups(report) if report.schema_version == ENGINE_V2_SCHEMA_VERSION else ()
+    if groups:
+        entries = [
+            (" ".join(f"[{number}]" for number in row.numbers), _link_markup(row.label_display, row.url),
+             row.status_display, row.verification_label, row.location, row.used_in_display)
+            for row in groups
+        ]
+    elif projection is not None:
         entries = [
             (
                 str(row.number),
@@ -2955,15 +3005,11 @@ def _add_citations(
                 Paragraph(_escape(used_in), styles["table"]),
             ]
         )
-    column_widths = [
-        width * 0.06,
-        width * 0.27,
-        width * 0.20,
-        width * 0.15,
-        width * 0.18,
-        width * 0.14,
-    ]
-    padding = constants.APPENDIX_CELL_PADDING_PT
+    column_widths = [width * ratio for ratio in (
+        (0.08, 0.27, 0.20, 0.15, 0.18, 0.12) if groups
+        else (0.06, 0.27, 0.20, 0.15, 0.18, 0.14)
+    )]
+    padding = constants.READER_APPENDIX_CELL_PADDING_PT if groups else constants.APPENDIX_CELL_PADDING_PT
     table_style = TableStyle(
         [
             ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor(constants.COLOR_LINE)),
@@ -3129,8 +3175,11 @@ def _summary_table(
     if not entries:
         return None
     rows: list[list[Paragraph]] = []
+    notes = reader_summary_notes(report) if report.schema_version == ENGINE_V2_SCHEMA_VERSION else {}
     for ordinal, topic, display_number, text in entries:
         sentence = _escape(text)
+        if ordinal in notes:
+            sentence += f'<br/><font size="{constants.SMALL_FONT_SIZE_PT}">{_escape(notes[ordinal])}</font>'
         if display_number:
             sentence += (
                 f'&nbsp;&nbsp;<font name="{constants.FONT_REGULAR}" '
@@ -3213,11 +3262,8 @@ def _document_header(
         _OutlineAnchor("report-body", "분석 본문", level=0),
         *_masthead_flowables(report, styles, width),
     ]
-    # ★ 본문 첫머리의 「부분 보고서 안내」 블록(제목·설명·미제공 사유 글머리표)을
-    #   지웠다 (사용자 결정, 2026-09-05). 「…문장 N개를 뺐습니다」·「자료가 적으니
-    #   다른 자료와 함께 보시길 권합니다」는 만드는 과정 이야기라 출시된 보고서에
-    #   싣지 않는다. 사유 자료(``report.shortfall_reasons``·봉인 header)는 그대로
-    #   저장되어 관리자 화면·진단에서 읽힌다 — 여기서는 «그리지 않을» 뿐이다.
+    if report.schema_version == ENGINE_V2_SCHEMA_VERSION:
+        items.extend(Paragraph(_escape(note), styles["small"]) for note in reader_scope_notes(report))
     return items
 
 
@@ -3537,7 +3583,10 @@ def build_pdf(report: Report) -> bytes:
     """``Report``를 PDF bytes로 만들고 내부 경로·내용이 담긴 오류를 숨긴다."""
 
     try:
-        return _build_pdf(report)
+        projection = report.public_projection
+        square = report.schema_version == ENGINE_V2_SCHEMA_VERSION and (projection is None or bool(projection.citation_groups))
+        with citation_display_style(square=square):
+            return _build_pdf(report)
     except PDFGenerationError:
         raise
     except Exception as exc:

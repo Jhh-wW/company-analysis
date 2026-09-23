@@ -98,11 +98,14 @@ def _audit_plain_text(name: str) -> str:
     return "\n\n".join(blocks)
 
 
-def _fragment_id_containing(prompt: str, sentence: str) -> str:
+def _fragment_id_containing(prompt: str, sentence: str, *, claim_slot: str) -> str:
+    """같은 원문이 다른 장에 배정돼도 현재 주장 슬롯의 조각만 인용한다."""
     for matched in _FRAGMENT_BLOCK_RE.finditer(prompt):
-        if sentence in matched.group(0):
+        header = matched.group(0).split("\n", 1)[0]
+        if sentence in matched.group(0) and claim_slot in header:
             return matched.group(1)
-    raise AssertionError(f"작가 프롬프트에서 고정 원문을 찾지 못했습니다: {sentence}")
+    # 재판정 OFF이면 원문은 있어도 3장 사용 승인이 없다. 그 경우 작성하지 않는다.
+    return ""
 
 
 def _candidate_id_containing(prompt: str, sentence: str) -> str:
@@ -125,23 +128,29 @@ class _FixtureMessages(_JypFakeMessages):
             groups = (
                 (
                     _PRODUCT_SENTENCES,
-                    _fragment_id_containing(prompt, _PRODUCT_SENTENCES[0]),
+                    _fragment_id_containing(prompt, _PRODUCT_SENTENCES[0], claim_slot="portfolio:product_role"),
+                    "portfolio:product_role",
                 ),
                 (
                     _REVENUE_SENTENCES,
-                    _fragment_id_containing(prompt, _REVENUE_SENTENCES[0]),
+                    _fragment_id_containing(prompt, _REVENUE_SENTENCES[0], claim_slot="portfolio:revenue_link"),
+                    "portfolio:revenue_link",
                 ),
             )
         elif _HIVE_PORTFOLIO_SENTENCES[0] in prompt:
             fragment_id = _fragment_id_containing(
-                prompt, _HIVE_PORTFOLIO_SENTENCES[0]
+                prompt, _HIVE_PORTFOLIO_SENTENCES[0], claim_slot="portfolio:product_role"
             )
-            groups = ((_HIVE_PORTFOLIO_SENTENCES, fragment_id),)
+            groups = (
+                (_HIVE_PORTFOLIO_SENTENCES[:3], fragment_id, "portfolio:product_role"),
+                (_HIVE_PORTFOLIO_SENTENCES[3:], fragment_id, "portfolio:revenue_link"),
+            )
         else:
             return json.dumps({"문장들": []}, ensure_ascii=False)
         sentences = [
-            {"글": sentence, "인용": [fragment_id], "등급": "확인"}
-            for group, fragment_id in groups
+            {"글": sentence, "인용": [fragment_id], "등급": "확인", "주장슬롯": slot}
+            for group, fragment_id, slot in groups
+            if fragment_id
             for sentence in group
         ]
         return json.dumps({"문장들": sentences}, ensure_ascii=False)
@@ -569,6 +578,25 @@ def test_스위치ON이면_재판정뒤_3장이_READY이고_SHADOW로_끝까지_
     )
     assert _PRODUCT_SENTENCES[0] in portfolio_text
     assert _REVENUE_SENTENCES[0] in portfolio_text
+    # 같은 원문을 가진 2장 조각 대신 재판정으로 승인된 3장 의미 칸에 결속된다.
+    for sentence, slot in (
+        (_PRODUCT_SENTENCES[0], "portfolio:product_role"),
+        (_REVENUE_SENTENCES[0], "portfolio:revenue_link"),
+    ):
+        expected_hashes = {
+            fragment.text_sha256 for fragment in portfolio.fragments
+            if sentence in fragment.text
+            and slot in (fragment.covered_slot_ids or (fragment.slot_id,))
+        }
+        assert expected_hashes
+        assert any(
+            fact.section_owner == "portfolio"
+            and fact.claim == sentence
+            and fact.claim_slot == slot
+            and fact.verification_status == "verified"
+            and expected_hashes.intersection(fact.supporting_evidence_hashes)
+            for fact in result.report.fact_records
+        )
 
 
 def test_스위치OFF면_3장_부족_바이트골든을_유지한다(
@@ -596,6 +624,41 @@ def test_스위치OFF면_3장_부족_바이트골든을_유지한다(
     measured = observations.reclassify[-1]
     assert measured["after"] == measured["before"]
     assert measured["step"] is None
+    assert result.report is not None
+    portfolio_section = next(section for section in result.report.sections
+                             if section.cell == "portfolio")
+    assert not portfolio_section.prose_lines
+    assert not any(fact.section_owner == "portfolio"
+                   for fact in result.report.fact_records)
+    # 검수 fixture의 판독 누락을 골든 갱신으로 숨기지 않는다. 정체성·수익
+    # 본문과 원값에서 계산한 세 지표, 원래의 아홉 재무 셀은 계속 공개돼야 한다.
+    for section_id in ("identity", "business_model"):
+        section = next(section for section in result.report.sections
+                       if section.cell == section_id)
+        assert section.prose_lines
+        assert any(fact.section_owner == section_id
+                   and fact.verification_status == "verified"
+                   for fact in result.report.fact_records)
+    financial = next(section for section in result.report.sections
+                     if section.cell == "past_changes")
+    assert financial.tables[0].rows == [
+        ["2025", "8,219", "1,389", "1,236"],
+        ["2024", "5,665", "957", "702"],
+        ["2023", "3,459", "445", "331"],
+    ]
+    for metric, display in (("매출액", "137.61"), ("영업이익", "212.13"), ("당기순이익", "273.41")):
+        assert any(fact.metric == metric and fact.display_value == display
+                   and fact.verification_status == "verified"
+                   for fact in result.report.fact_records)
+    # 인용이 둘인 정상 해석 문장도 공개돼야 한다 — 가짜 검수 응답의 인용 판독 결함이
+    # 이 문장을 빼던 상태를 골든으로 다시 굳히지 않게 의미로 먼저 못 박는다.
+    business = next(section for section in result.report.sections
+                    if section.cell == "business_model")
+    assert any(
+        line[0] == "음악이 팬덤을 만들고 공연이 수요를 모으며 MD·라이선싱·팬 플랫폼이 "
+                   "구매 접점을 늘리는 구조다. [2][3] — 해석"
+        for line in business.prose_lines
+    )
     # 2026-09-08: 회사 사실은 그대로 두고 뉴스 미조사 안내 한 줄만 골든에 추가했다.
     # 2026-09-11(3): 골든 바이트는 «원래대로»다. 8장 두 문장이 잠시 바뀌어
     #   골든을 다시 만들었다가, 조각 원문 쪽에서 근거를 맞추는 것으로 방식을
@@ -627,6 +690,16 @@ def test_스위치OFF면_3장_부족_바이트골든을_유지한다(
     #      근거 번호를 보이기로 한 결정(render `_marker_visibility` 규칙 ① 제거).
     #   ② 4장 누적 증감률 문장 3개의 어미가 「%입니다」에서 「%이다」로 바뀌었다(한다체 통일).
     #   회사 사실·조각 수·본문 문장 수·표·요약·안내문은 그대로다.
+    # 2026-09-23: 미승인 3장 인용 6문장과 미결속 해석·9장 비교를 공개하지
+    # 않는다. 8장은 정식 typed 문화 근거만 허용하는 확보자료 경계를 따른다.
+    # 검수 파서가 등급 줄 뒤의 본문도 읽게 보강한 뒤 정체성·수익 본문과
+    # 위 재무 원값·계산값 보존을 확인했다. 요약은 검증된 사실 5개를 재사용한다.
+    # 2026-09-23(2): 생산 코드 변화가 아니다. 공유 검수 fixture 도우미
+    #   (`review_evidence_fixture._citation_ids`)가 두 번째 인용의 「조각 」 접두어를
+    #   남겨 가짜 응답 근거가 프롬프트 인용과 어긋나던 것을 고쳤다. 그 결과 인용이 둘인
+    #   2장 해석 문장 1개가 공개된다. 필드별 대조로 확인한 변화는 그 한 줄과 메타
+    #   (문장 통과 수 34→35, 부족 안내의 확인 사실 29→30건)뿐이다. 도우미만 옛 판으로
+    #   되돌리면 옛 골든과 바이트가 같다(7999바이트).
     actual = _stable_result_bytes(result)
     golden = json.loads(_GOLDEN_FIXTURE.read_text(encoding="utf-8"))
     assert golden["byte_count"] == len(actual)

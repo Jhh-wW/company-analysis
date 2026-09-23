@@ -300,9 +300,11 @@ def test_확보_근거_보고서_경로도_진단_인자를_받는다(monkeypatc
         composition_diagnostics_sink=sink,
     )
 
-    assert 받은_인자 and all(isinstance(값, dict) for 값 in 받은_인자)
+    # 사실 결속을 확인하는 중간 렌더는 집계하지 않고 최종 렌더만 집계한다.
+    assert len(받은_인자) == 2
+    assert 받은_인자[0] is None and isinstance(받은_인자[1], dict)
     # 산문이 없는 보고서라 셀 문장이 없다 — 0건이면 빈 이벤트를 만들지 않는다.
-    assert all(값 == {} for 값 in 받은_인자)
+    assert 받은_인자[1] == {}
     assert _style_records(sink) == []
 
 
@@ -325,7 +327,8 @@ def test_확보_근거_보고서_경로는_확보근거_렌더로_싱크에_실�
         composition_diagnostics_sink=sink,
     )
 
-    assert len(받은_인자) == 1, f"확보 근거 경로의 렌더 호출 수가 바뀌었습니다: {len(받은_인자)}"
+    assert len(받은_인자) == 2, f"확보 근거 경로의 렌더 호출 수가 바뀌었습니다: {len(받은_인자)}"
+    assert 받은_인자[0] is None
     expected = [_expected(STYLE_RENDER_EVIDENCE_AVAILABLE)]
     assert _style_records(sink) == expected
     assert _observed_style_records(sink) == expected, (

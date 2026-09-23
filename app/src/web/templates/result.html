@@ -408,6 +408,9 @@
   </div>
 {% endif %}
 
+{% if report.schema_version == engine_v2_schema_version -%}
+  {% for note in reader_scope_notes(report) %}<p class="muted section-note">{{ note }}</p>{% endfor %}
+{% endif -%}
 {% if not legacy_readonly and report.grade.value != '완성' %}
   <div class="grade ui-only {% if report.grade.value == '부분 완성' %}partial{% else %}incomplete{% endif %}">
     <div>
@@ -495,7 +498,7 @@
         <li>
           <span class="summary-number">{{ row.ordinal }}</span>
           <span class="summary-topic">{{ row.topic }}</span>
-          <span class="summary-text">{{ row.text }}</span>
+          <span class="summary-text">{{ row.text }}</span>{% if reader_summary_notes(report).get(row.ordinal) %}<span class="muted section-note">{{ reader_summary_notes(report).get(row.ordinal) }}</span>{% endif %}
           <span class="summary-section">
             {% if row.section_display_number %}{{ row.section_display_number }}장{% endif %}
           </span>
@@ -527,7 +530,7 @@
         <li>
           <span class="summary-number">{{ "%02d"|format(loop.index) }}</span>
           <span class="summary-topic">{{ summary_topic(item.section_id) }}</span>
-          <span class="summary-text">{{ item.text }}</span>
+          <span class="summary-text">{{ item.text }}</span>{% if reader_summary_notes(report).get('%02d'|format(loop.index)) %}<span class="muted section-note">{{ reader_summary_notes(report).get('%02d'|format(loop.index)) }}</span>{% endif %}
           <span class="summary-section">
             {% for section in report.sections %}{% if section.cell == item.section_id %}{{ section.display_number }}장{% endif %}{% endfor %}
           </span>
@@ -578,6 +581,7 @@
     {% set sec = block.display %}
     <section class="report-section" data-report-cell="{{ sec.cell }}">
       <h2><span class="no">{{ sec.display_number or loop.index }}</span><span class="txt">{{ sec.title }}</span><span class="section-badge" aria-hidden="true"></span>{% if sec.tag %}<span class="section-tag">{{ sec.tag }}</span>{% endif %}</h2>
+      {% for note in sec.guidance_lines %}<p class="muted section-note">{{ inline_refs(note) }}</p>{% endfor %}
       {% for ordinal, paragraph in sec.paragraphs %}
       <p class="prose"><span class="pno" aria-hidden="true">{{ ordinal }}</span><span class="prose-text">{{ inline_refs(paragraph) }}</span></p>
       {% endfor %}
@@ -595,16 +599,16 @@
   <section class="report-support" aria-labelledby="report-citations-title">
     <h2 id="report-citations-title"><span class="no">부록</span><span class="txt">출처와 검증 상태</span><span class="section-badge" aria-hidden="true"></span></h2>
     <p class="muted section-note">
-      본문 문장 끝의 번호가 아래 원문을 가리킵니다. 표시된 문장은 모두 인용 원문 대조와 수치 검증을 거쳤습니다.
+      본문 문장 끝의 번호가 아래 원문을 가리킵니다. 같은 기사의 여러 발췌는 번호를 함께 표시합니다.
       {{ projection.citations_note }}
     </p>
     <div class="scroll report-scroll" tabindex="0" role="region" aria-labelledby="report-citations-title">
       <table class="texts" aria-labelledby="report-citations-title">
         <thead class="report-table-head"><tr><th scope="col" style="width:56px">#</th><th scope="col">자료</th><th scope="col">기준일·자료 상태</th><th scope="col">사실 검증</th><th scope="col">원문 위치</th><th scope="col">본문 사용 장</th></tr></thead>
         <tbody>
-          {% for c in projection.citations %}
-          <tr id="src{{ c.number }}">
-            <td>[{{ c.number }}]</td>
+          {% for c in projection.citation_groups or projection.citations %}
+          <tr id="src{{ c.numbers[0] if c.numbers else c.number }}">
+            <td>{% if c.numbers %}{% for number in c.numbers %}<span{% if not loop.first %} id="src{{ number }}"{% endif %}>[{{ number }}]</span> {% endfor %}{% else %}[{{ c.number }}]{% endif %}</td>
             <td>
               {%- if c.url and (c.url.startswith('https://') or c.url.startswith('http://')) -%}
                 <a class="source-link" href="{{ c.url }}" target="_blank" rel="noopener noreferrer">{{ c.label_display }}</a>
@@ -651,18 +655,14 @@
             장 번호를 문단마다 되풀이할 이유가 없다. PDF도 같은 커밋에서 함께 바꿨다
             (export_pdf/logic.py::_paragraph_number_markup) — 한쪽만 고치면
             「3-2 문단 보세요」가 다시 어긋난다. #}
+      {% set paragraphs, guidance = reader_section_content(s) %}
       {% set empty_notice = empty_section_notice(report, s) if report.release_mode != 'FULL' else '' %}{% if empty_notice %}
       <p class="muted section-note">{{ empty_notice }}</p>
-      {% elif s.prose_paragraphs %}
-        {% for paragraph in s.prose_paragraphs %}
+      {% else %}
+        {% for note in guidance %}<p class="muted section-note">{{ inline_refs(note) }}</p>{% endfor %}
+        {% for paragraph in paragraphs %}
         <p class="prose"><span class="pno" aria-hidden="true">{{ loop.index }}.</span><span class="prose-text">{{ inline_refs(paragraph) }}</span></p>
         {% endfor %}
-      {% elif s.prose_lines %}
-      <p class="prose">
-        {%- for text, _cite in s.prose_lines -%}
-          {{ inline_refs(text) }}{% if not loop.last %} {% endif %}
-        {%- endfor -%}
-      </p>
       {% endif %}
       {# 표는 v1과 «같은» 매크로로 낸다 — 도식으로 그릴 수 있으면 도식이
          나간다. 예전에는 v2가 표를 그냥 찍어서 presentation을 붙여도
@@ -681,41 +681,21 @@
        저장 당시 본문을 그대로 보여 줄 뿐 오늘의 검사를 다시 돌리지 않으므로,
        같은 화면의 읽기 전용 고지와 서로 어긋나는 단언이 된다. #}
     <p class="muted section-note">
-      본문 문장 끝의 번호가 아래 원문을 가리킵니다. {% if legacy_readonly %}당시 검증 상태는 확인할 수 없습니다.{% else %}표시된 문장은 모두 인용 원문 대조와 수치 검증을 거쳤습니다.{% endif %}
+      본문 문장 끝의 번호가 아래 원문을 가리킵니다. 같은 기사의 여러 발췌는 번호를 함께 표시합니다. {% if legacy_readonly %}당시 검증 상태는 확인할 수 없습니다.{% endif %}
       {{ external_news_notice(public_citations) }}
     </p>
     <div class="scroll report-scroll" tabindex="0" role="region" aria-labelledby="report-citations-title">
       <table class="texts" aria-labelledby="report-citations-title">
         <thead class="report-table-head"><tr><th scope="col" style="width:56px">#</th><th scope="col">자료</th><th scope="col">기준일·자료 상태</th><th scope="col">원문 위치</th><th scope="col">본문 사용 장</th></tr></thead>
         <tbody>
-          {% set v2_seen = namespace(numbers=[]) %}
-          {% for c in public_citations %}
-          {% if c.number not in v2_seen.numbers %}
-          <tr id="src{{ c.number }}">
-            <td>[{{ c.number }}]</td>
-            <td>
-              {%- set source_label = source_label_display(c) -%}
-              {%- if c.url and (c.url.startswith('https://') or c.url.startswith('http://')) -%}
-                <a class="source-link" href="{{ c.url }}" target="_blank" rel="noopener noreferrer">{{ source_label }}</a>
-              {%- else -%}
-                {{ source_label }}
-              {%- endif -%}
-            </td>
-            <td>{{ source_status_display(c) }}</td>
-            <td>{{ location_display(c.location) or '—' }}</td>
-            <td>
-              {%- set usage = namespace(first=true) -%}
-              {%- for section in report.sections -%}
-                {%- if section.cell in c.used_in -%}
-                  {%- if not usage.first %} · {% endif -%}{{ section.display_number }}장
-                  {%- set usage.first = false -%}
-                {%- endif -%}
-              {%- endfor -%}
-              {%- if usage.first %}—{% endif -%}
-            </td>
+          {% for c in reader_citation_groups(report) %}
+          <tr id="src{{ c.numbers[0] }}">
+            <td>{% for number in c.numbers %}<span{% if not loop.first %} id="src{{ number }}"{% endif %}>[{{ number }}]</span> {% endfor %}</td>
+            <td>{% if c.url and (c.url.startswith('https://') or c.url.startswith('http://')) %}<a class="source-link" href="{{ c.url }}" target="_blank" rel="noopener noreferrer">{{ c.label_display }}</a>{% else %}{{ c.label_display }}{% endif %}</td>
+            <td>{{ c.status_display }}</td>
+            <td>{{ c.location }}</td>
+            <td>{{ c.used_in_display }}</td>
           </tr>
-          {% set v2_seen.numbers = v2_seen.numbers + [c.number] %}
-          {% endif %}
           {% endfor %}
         </tbody>
       </table>

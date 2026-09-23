@@ -28,7 +28,7 @@ def test_adds_neutral_notice_only_to_empty_section_and_preserves_body_tables_cit
     notice = empty_section_notice(report, empty)
     result = _text(pdf_logic.build_pdf(report))
     assert result.count("".join(notice.split())) == 1
-    assert f"1.{''.join(notice.split())}" in result
+    assert f"1.{''.join(notice.split())}" not in result
     assert "공식자료로확인한공개본문문장이다." in result
     assert all("".join(table.caption.split()) in result for table in tables)
     assert report.sections[-1].tables == tables

@@ -46,6 +46,7 @@ from src.features.composer.port import (
     FlowRow,
 )
 from src.features.composer.render import render_report
+from src.features.composer.tests.flow_fixtures import reviewed_flow_fixture
 from src.features.export_pdf import logic as pdf_logic
 
 # ★ 재료의 «표·조각·감사 장부» 부분은 봉인 PDF 시험이 이미 지어 두었다. 같은
@@ -144,7 +145,10 @@ def sealed_two_paragraph_report() -> Report:
     rendered = _sealed(
         render_report(
             "가나다전자",
-            _composed_with_two_paragraphs(),
+            reviewed_flow_fixture(
+                _composed_with_two_paragraphs(), _fragments(),
+                baseline_date="2026-09-01",
+            ),
             _fragments(),
             _performance_table(),
             table_presentation="trend",

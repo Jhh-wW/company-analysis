@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from hashlib import sha256
 
-from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
+from src.features.composer.constants import (
+    GRADE_CONFIRMED, GRADE_INTERPRETED, NOTICE_INSUFFICIENT_EVIDENCE,
+)
 from src.features.composer.port import ComposedReport, ComposedSentence
 from src.features.composer.news_block import (
     NEWS_BLOCK_HEADERS,
@@ -226,6 +229,74 @@ def _sentence_fact_id(
         if citations != bound_citations:
             return ""
     return fact.fact_id
+
+
+@dataclass(frozen=True)
+class PublicSentenceExclusion:
+    """공개 전 결속 실패. 원문 대신 위치·사유·원래 후보 지문만 운반한다."""
+
+    section_id: str
+    sentence_index: int
+    candidate_sha256: str
+    reason_code: str
+
+
+@dataclass(frozen=True)
+class BoundPublicSentenceSelection:
+    """요약·봉인·품질 평가가 함께 소비할 정리된 본문."""
+
+    report: ComposedReport
+    excluded: tuple[PublicSentenceExclusion, ...]
+    fact_ids: tuple[str, ...]
+
+
+def select_bound_public_sentences(
+    composed: ComposedReport, rendered: Report,
+) -> BoundPublicSentenceSelection:
+    """원래 문장과 미리 만든 사실의 정확 결속만 남긴다. 의미 검수는 대체하지 않는다.
+
+    표시용 인용·해석 꼬리·문체를 역파싱하지 않는다. 품질 투영과 같은 판정으로
+    본문을 먼저 정리해야 요약·렌더·봉인이 서로 다른 공개 문장을 보지 않는다.
+    도식과 안내문은 각자의 계약이 검사하며, 요약은 정리된 본문에서 다시 고른다.
+    """
+    by_id, by_key = _valid_fact_registries(rendered.fact_records)
+    rendered_sections = {section.cell: section for section in rendered.sections}
+    seen: set[str] = set()
+    fact_ids: list[str] = []
+    excluded: list[PublicSentenceExclusion] = []
+    sections = []
+    for section in composed.sections:
+        output_section = rendered_sections.get(section.section_id)
+        owned = set(output_section.fact_ids) if output_section is not None else set()
+        kept = []
+        for index, sentence in enumerate(section.sentences):
+            fact_id = _sentence_fact_id(
+                section.section_id, sentence, by_id=by_id, by_key=by_key,
+            )
+            reason = ""
+            if not fact_id or fact_id not in owned:
+                reason = "public_sentence_fact_unbound"
+            elif fact_id in seen:
+                reason = "public_sentence_fact_duplicate"
+            if reason:
+                excluded.append(PublicSentenceExclusion(
+                    section.section_id, index,
+                    sha256(sentence.text.encode("utf-8")).hexdigest(), reason,
+                ))
+                continue
+            kept.append(sentence)
+            seen.add(fact_id)
+            fact_ids.append(fact_id)
+        # 마지막 결속 단계가 본문을 전부 제외한 경우에도 빈 장의 이유를 남긴다.
+        # 뒤의 안내 조정이 실제 남은 표·도식·이동 사실에 맞춰 문구를 확정한다.
+        notice = section.notice
+        if section.sentences and not kept and not notice:
+            notice = NOTICE_INSUFFICIENT_EVIDENCE
+        sections.append(replace(section, sentences=tuple(kept), notice=notice))
+    return BoundPublicSentenceSelection(
+        replace(composed, sections=tuple(sections), summary=()),
+        tuple(excluded), tuple(fact_ids),
+    )
 
 
 def _claim_fact(fact: FactRecord) -> ClaimFact:

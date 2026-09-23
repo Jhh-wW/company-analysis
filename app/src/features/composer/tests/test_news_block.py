@@ -191,10 +191,14 @@ def test_수집한_기사에_추가_출력상한을_적용하지_않는다() -> 
 
 
 def test_작가가_이미_인용한_조각도_표에_실린다() -> None:
-    """작가 인용 여부로 표를 켜고 끄면 실행마다 결과가 갈린다.
+    """작가 «인용 여부»로 표를 켜고 끄면 실행마다 결과가 갈린다.
 
     ★ 「이미 썼으니 안 붙인다」로 만들면, 같은 회사를 두 번 돌렸을 때 한 번은
       표가 있고 한 번은 없다. 예측 가능성을 우선해 언제나 붙인다.
+    ★ 단, 산문이 보도 «글자»까지 그대로 담고 있으면 그 행은 뺀다 — 그 판정은
+      렌더(`nonredundant_news_rows`)와 같은 함수로 augment가 먼저 건다(P17,
+      `test_news_block_prose_reservation.py`). 여기 문장은 조각을 인용만 하고
+      글자는 다르므로 표가 실려야 한다.
     """
 
     from src.features.composer.port import ComposedSentence
@@ -206,7 +210,9 @@ def test_작가가_이미_인용한_조각도_표에_실린다() -> None:
                 sentences=(
                     (
                         ComposedSentence(
-                            text=_SENTENCE, citations=("40",), grade="확인"
+                            text="가나다전자는 물류 현장 계약을 새로 맺었다고 알렸다.",
+                            citations=("40",),
+                            grade="확인",
                         ),
                     )
                     if section_id == "identity"

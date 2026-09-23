@@ -43,6 +43,7 @@ from src.shared.report_evidence.constants import (
 from src.shared.report_evidence.policy import (
     REQUIRED_EVIDENCE_SECTION_IDS,
     collector_slots_for,
+    optional_candidate_slots_for,
 )
 from src.shared.report_evidence.identity_verified_web import (
     canonical_identity_verified_web_url,
@@ -201,6 +202,18 @@ _ALL_COLLECTOR_SLOT_IDS = frozenset(
 _RECENT_FILING_SLOT_IDS = frozenset(
     (*collector_slots_for("past_changes"), *collector_slots_for("current_challenges"))
 )
+# 전문(全文) 연차 공시 조각이 «원문이 직접 뒷받침할 때» 추가로 실을 수 있는 선택
+# 후보 칸. 필수 커버리지(조회 기록 attempt)에는 넣지 않는다 — 아래 조회 표는
+# 이 값을 섞지 않은 필수 칸 표에서 따로 만든다. 엔진 SOURCE_KIND_OPTIONAL_SLOT_SCOPE와
+# 같은 범위다(반기·분기·웹·IR은 열지 않는다).
+_ALL_OPTIONAL_CANDIDATE_SLOT_IDS = frozenset(
+    slot_id
+    for section_id in REQUIRED_EVIDENCE_SECTION_IDS
+    for slot_id in optional_candidate_slots_for(section_id)
+)
+_DART_FULL_TEXT_DOCUMENT_SLOT_IDS = (
+    _ALL_COLLECTOR_SLOT_IDS | _ALL_OPTIONAL_CANDIDATE_SLOT_IDS
+)
 
 # 언론 보도는 장별 산문만 보조한다. 수치 전용 칸, 1장 법인 정체성,
 # 9장의 모든 칸은 이 목록에 넣지 않아 transport 단계에서 닫는다.
@@ -263,7 +276,9 @@ SUPPLEMENTARY_WRITER_TRUST: Final = MappingProxyType(
     }
 )
 
-FORMAL_DOCUMENT_SLOT_IDS_BY_SOURCE_KIND: Final = MappingProxyType(
+# 조회 기록(attempt)이 «이 경로로 확인했다»고 주장할 수 있는 필수 칸 상한.
+# 선택 후보 칸은 커버리지 주장이 아니므로 이 표에 절대 넣지 않는다.
+_FORMAL_COVERAGE_SLOT_IDS_BY_SOURCE_KIND: Final = MappingProxyType(
     {
         SOURCE_KIND_DART_BUSINESS_REPORT: _ALL_COLLECTOR_SLOT_IDS,
         SOURCE_KIND_DART_AUDIT_REPORT: _ALL_COLLECTOR_SLOT_IDS,
@@ -279,9 +294,21 @@ FORMAL_DOCUMENT_SLOT_IDS_BY_SOURCE_KIND: Final = MappingProxyType(
     }
 )
 
+# 문서 조각이 지원 칸으로 실을 수 있는 상한 = 커버리지 칸 + (전문 공시만) 선택
+# 후보 칸. 조각 슬롯은 원문 직접 신호로만 붙으므로 상한이 넓어져도 실제 문단에
+# 없는 칸이 생기지 않는다. typed 정확 슬롯 검사(transport·장 후보 계약)는 그대로다.
+FORMAL_DOCUMENT_SLOT_IDS_BY_SOURCE_KIND: Final = MappingProxyType(
+    {
+        **_FORMAL_COVERAGE_SLOT_IDS_BY_SOURCE_KIND,
+        SOURCE_KIND_DART_BUSINESS_REPORT: _DART_FULL_TEXT_DOCUMENT_SLOT_IDS,
+        SOURCE_KIND_DART_AUDIT_REPORT: _DART_FULL_TEXT_DOCUMENT_SLOT_IDS,
+        SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT: _DART_FULL_TEXT_DOCUMENT_SLOT_IDS,
+    }
+)
+
 FORMAL_ATTEMPT_SLOT_IDS_BY_SOURCE_KIND: Final = MappingProxyType(
     {
-        **FORMAL_DOCUMENT_SLOT_IDS_BY_SOURCE_KIND,
+        **_FORMAL_COVERAGE_SLOT_IDS_BY_SOURCE_KIND,
         # robots.txt는 한 페이지 종류가 아니라 호스트 전체의 진입 게이트다.
         SOURCE_KIND_ROBOTS_TXT: _ALL_COLLECTOR_SLOT_IDS,
     }

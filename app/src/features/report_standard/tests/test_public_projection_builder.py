@@ -40,6 +40,7 @@ from src.features.composer.port import (
     PerformanceTable,
 )
 from src.features.composer.render import render_report
+from src.features.composer.tests.flow_fixtures import reviewed_flow_fixture
 from src.features.pipeline.port import FactRecord, Grade, Report
 from src.features.provenance.sources import visible_citations
 from src.features.report_standard.constants import SECTION_BY_ID
@@ -213,7 +214,10 @@ def _sealed(report: Report) -> Report:
 def _report(*, uncited_summary: bool = False) -> Report:
     rendered = render_report(
         "가나다전자",
-        _composed(uncited_summary=uncited_summary),
+        reviewed_flow_fixture(
+            _composed(uncited_summary=uncited_summary), _fragments(),
+            baseline_date="2026-09-01",
+        ),
         _fragments(),
         _performance_table(),
         table_presentation="trend",

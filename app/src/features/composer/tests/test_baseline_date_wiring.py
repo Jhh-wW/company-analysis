@@ -269,47 +269,24 @@ def test_run_v2_summary_comes_from_verified_body_without_a_recheck(monkeypatch):
 _CANDIDATE_LINE_RE = re.compile(r"^(\d+)\. \[([^\]]+)\] (.+)$", re.MULTILINE)
 
 
-def test_run_v2_summary_carries_the_exact_sentence_each_number_points_at():
-    """④-b 고른 «번호»가 가리키는 그 문장이 요약에 실린다.
-
-    ★ 이 시험이 대신하는 것 (2026-09-11) — 예전 ④-b는 `verify_sentences`
-      진입 함수가 받은 기준일이 임원 가드까지 가는지 보았다. 그 경로는 요약에서
-      사라졌다(본문 경로 ②는 바로 위 시험이 그대로 지킨다).
-      요약이 축자 재사용이 된 뒤로 「본문 첫 문장과 유사도 1.0」은 결함이 아니라
-      설계다. 대신 새로 생긴 위험이 «번호↔문장 대응»이다 — 후보 목록을 1부터
-      세는데 코드가 0부터 세면, 요약은 여전히 «본문 문장»이라 어떤 검사도
-      안 걸리면서 엉뚱한 문장이 실린다. 그 자리를 여기서 못 박는다.
-    ⚠️ 시험 안에서 기대값을 따로 만들지 않는다 — AI가 «실제로 본» 프롬프트의
-      후보 줄에서 번호를 되짚어 기대 문장을 만든다.
-    """
-
+def test_run_v2_summary_reuses_exact_bound_body_claims_without_ai_selection():
+    """결정적 요약도 문장 글자·장 소유·FactRecord 결속을 그대로 재사용한다."""
     writer = _FakeWriter()
     output = pipeline.run_v2(
-        "가나다전자",
-        _raw_fragments(),
-        None,
-        writer_ask=writer,
-        reviewer_ask=_FakeReviewer(),
-        corp_type="상장사",
-        as_of_date=BASELINE,
+        "가나다전자", _raw_fragments(), None,
+        writer_ask=writer, reviewer_ask=_FakeReviewer(),
+        corp_type="상장사", as_of_date=BASELINE,
     )
-
-    고르기_프롬프트 = [p for p in writer.prompts if "핵심 요약" in p]
-    assert len(고르기_프롬프트) == 1, "요약 고르기 호출은 정확히 1회다"
-    후보 = {
-        int(number): (title, text)
-        for number, title, text in _CANDIDATE_LINE_RE.findall(고르기_프롬프트[0])
-    }
-    assert len(후보) >= 3, f"후보가 너무 적다 — 이 시험이 아무것도 못 잰다: {후보}"
-
-    고른번호 = json.loads(_summary_selection_json(고르기_프롬프트[0]))
-    assert len(고른번호) == 3, 고른번호
-    기대문장 = [후보[number][1] for number in 고른번호]
-
-    assert [_bare(item.text) for item in output.report.summary_items] == 기대문장
-    # 후보 줄은 «어느 장의 문장인지»를 함께 실어 준다 — AI가 장을 섞어 고를 수
-    # 있게 하는 재료다. 가짜 AI는 그 재료를 써서 장마다 하나씩 골랐다.
-    assert len({후보[number][0] for number in 고른번호}) == len(고른번호)
+    assert len(writer.prompts) == 9
+    assert not any("핵심 요약" in prompt for prompt in writer.prompts)
+    facts = {(fact.section_owner, fact.claim) for fact in output.report.fact_records}
+    body = {(section.cell, _bare(text)) for section in output.report.sections
+            for text, _cite in section.prose_lines}
+    chosen = {(item.section_id, _bare(item.text)) for item in output.report.summary_items}
+    assert len(chosen) == 5
+    assert chosen <= body
+    assert chosen <= facts
+    assert len({section_id for section_id, _ in chosen}) == len(chosen)
 
 
 def test_run_v2_without_an_as_of_date_keeps_none(monkeypatch):

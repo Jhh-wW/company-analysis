@@ -183,12 +183,12 @@ def test_아홉_장이_정본_순서와_번호로_전부_나온다():
         assert section.title == SECTION_TITLES[section.cell]
 
 
-def test_자료부족_장은_안내문이_본문으로_남고_is_filled다():
+def test_자료부족_장은_사실본문과_분리된_안내문으로_남는다():
     report = _rendered()
     culture = next(s for s in report.sections if s.cell == "culture")
-    assert culture.prose_lines == [(NOTICE_INSUFFICIENT_EVIDENCE, "")]
-    # PDF·웹 렌더는 is_filled가 아니면 제목만 찍는다 — 안내문이 사라지면 안 된다
-    assert culture.is_filled
+    assert culture.prose_lines == []
+    assert culture.prose_paragraphs == []
+    assert culture.guidance_lines == [NOTICE_INSUFFICIENT_EVIDENCE]
 
 
 def test_요약도_같은_인용_표기로_실린다():
