@@ -17,7 +17,7 @@ from src.core.pricing import usage_cost_krw
 from src.core.provider_gateway import attempt_context
 from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.features.composer import verify
-from src.features.composer.constants import RETRY_REMINDER
+from src.features.composer.constants import MISSING_VERDICTS_REMINDER, RETRY_REMINDER
 from src.features.composer.port import CollectedFragment, ComposedSentence
 from src.features.composer.review_schema import FLAT_REVIEW_SCHEMA
 from src.features.pipeline import real
@@ -169,15 +169,71 @@ def test_followup_parse_retry_keeps_regular_caller_with_native_schema(review_cal
     )
 
 
-@pytest.mark.parametrize("raw,expected", (
-    (GOOD, {1: "참"}), (BROKEN, None), ('{"판정": []}', None),
-), ids=("valid", "malformed", "missing-row"))
-def test_grouped_review_stays_plain_and_sends_exactly_once(review_calls, raw, expected):
+# ★ 2026-09-23 — packet(묶음) 검수도 평문과 같은 재요청 계약이다. 예전에는 «1회
+#   고정»이라 JSON 한 글자 오류로 판정 42행이 통째로 사라졌다. 이제 못 읽으면 형식
+#   재요청을, 일부 번호가 빠지면 빠진 항목만 누락 후속을 «재요청 전용 상한» 호출자로
+#   1회 보낸다. 같은 계량 경계(예약·정산·출력상한 기록)를 지나는지를 여기서 본다.
+# ⚠️ 네이티브 스키마(output_config)는 스위치 PACKET_REVIEW_SCHEMA_ENABLED(기본 꺼짐)를
+#   따른다 — 실제 공급자로 검증된 적이 없어 꺼 두었다(review_schema.py 주석). 기본
+#   갈래는 세 호출 모두 output_config 가 없고, 켠 갈래는 모두 FLAT_REVIEW_SCHEMA 다.
+PACKET_SCHEMA_SWITCH = "src.features.composer.verify.PACKET_REVIEW_SCHEMA_ENABLED"
+SECOND_TEXT = "회사는 고객에게 서비스를 제공한다."
+TWO_FRAGMENTS = {**FRAGMENTS, "2": CollectedFragment("2", "공시", SECOND_TEXT)}
+TWO_GROUPED_ITEMS = GROUPED_ITEMS + (verify._GroupedReviewItem(
+    2, "identity", "문장", ("2",), sentence=ComposedSentence(SECOND_TEXT, ("2",), "확인"),
+),)
+SECOND_GOOD = json.dumps({"판정": [{
+    "번호": 2, "장": "identity", "근거": ["2"],
+    "근거대조": "공시 원문과 서비스 제공이 일치한다.", "결과": "참",
+}]}, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("schema_enabled", (False, True), ids=("schema-off", "schema-on"))
+@pytest.mark.parametrize("first_raw,retry_raw,caps,expected", (
+    (GOOD, GOOD, [24000], {1: "참"}),
+    (BROKEN, GOOD, [24000, 12000], {1: "참"}),
+    ('{"판정": []}', GOOD, [24000, 12000], {1: "참"}),
+    (BROKEN, BROKEN, [24000, 12000], None),
+), ids=("valid", "malformed", "empty-rows", "retry-exhausted"))
+def test_grouped_review_parse_retry_uses_the_separate_cap_with_schema_per_switch(
+    review_calls, monkeypatch, first_raw, retry_raw, caps, expected, schema_enabled,
+):
+    if schema_enabled:
+        monkeypatch.setattr(PACKET_SCHEMA_SWITCH, True)
     calls = review_calls
-    calls.messages.replies = [(raw, 7000), (GOOD, REPLY_OUTPUT)]
+    calls.messages.replies = [(first_raw, 7000), (retry_raw, REPLY_OUTPUT)]
     prompt = verify._build_grouped_review_prompt(GROUPED_ITEMS, FRAGMENTS, None)
     assert type(prompt) is str
     assert verify._ask_grouped_verdicts(
-        calls.regular, GROUPED_ITEMS, FRAGMENTS, None, initial_ask=calls.initial,
+        calls.regular, GROUPED_ITEMS, FRAGMENTS, None,
+        initial_ask=calls.initial, initial_retry_ask=calls.retry,
     ) == expected
-    _assert_payloads(calls, [24000], [prompt], [None])
+    prompts = [prompt] if len(caps) == 1 else [prompt, str(prompt) + RETRY_REMINDER]
+    schema = FLAT_REVIEW_SCHEMA if schema_enabled else None
+    _assert_payloads(calls, caps, prompts, [schema] * len(caps))
+    assert calls.engine.usages[0]["out"] == 7000
+
+
+@pytest.mark.parametrize("schema_enabled", (False, True), ids=("schema-off", "schema-on"))
+def test_grouped_missing_followup_asks_only_the_missing_item_through_the_retry_cap(
+    review_calls, monkeypatch, schema_enabled,
+):
+    if schema_enabled:
+        monkeypatch.setattr(PACKET_SCHEMA_SWITCH, True)
+    calls = review_calls
+    # 첫 답은 1번만 온전히 답하고 2번을 빠뜨린다 — 형식은 정상이다.
+    calls.messages.replies = [(GOOD, 7000), (SECOND_GOOD, REPLY_OUTPUT)]
+    first_prompt = verify._build_grouped_review_prompt(
+        TWO_GROUPED_ITEMS, TWO_FRAGMENTS, None,
+    )
+    followup_prompt = verify._build_grouped_review_prompt(
+        TWO_GROUPED_ITEMS[1:], TWO_FRAGMENTS, None,
+    ) + MISSING_VERDICTS_REMINDER
+    assert verify._ask_grouped_verdicts(
+        calls.regular, TWO_GROUPED_ITEMS, TWO_FRAGMENTS, None,
+        initial_ask=calls.initial, initial_retry_ask=calls.retry,
+    ) == {1: "참", 2: "참"}
+    schema = FLAT_REVIEW_SCHEMA if schema_enabled else None
+    _assert_payloads(
+        calls, [24000, 12000], [first_prompt, followup_prompt], [schema, schema],
+    )

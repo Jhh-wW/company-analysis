@@ -115,7 +115,7 @@ def _parse_event(**changes: object) -> dict:
         "json시작offset": -1, "json끝offset": -1,
         "입력문자": 400, "응답문자": 12, "요청번호수": 3,
         "응답행수": 0, "유효행수": 0, "미응답번호수": 3,
-        "요청밖번호수": 0, "행탈락": {},
+        "요청밖번호수": 0, "구문탈락행수": 0, "행탈락": {},
         **changes,
     }
 
@@ -154,9 +154,49 @@ def test_preserves_attempt_order_and_unreached_stages_without_raw_text() -> None
     {"시도": True}, {"응답행수": -1}, {"json시작offset": -2},
     {"판독": "임의 응답"}, {"경로": ["flat"]}, {"추출방식": {}},
     {"미응답번호수": "0"}, {"행탈락": "본문"},
+    {"구문탈락행수": -1}, {"구문탈락행수": True}, {"구문탈락행수": "1"},
+    {"추출방식": "row_salvage_guess"},
 ])
 def test_rejects_invalid_protocol_fields(changes: dict) -> None:
     assert observed_composition_steps([_parse_event(**changes)]) == ()
+
+
+def test_row_salvage_observation_passes_with_dropped_row_count() -> None:
+    """행 단위 구제 관측(2026-09-23)이 닫힌 목록을 통과하고 두 칸이 그대로 남는다.
+
+    ★ 정화기는 닫힌 목록 밖 값을 만나면 기록을 «통째로» 버린다. 새 추출방식과
+      새 개수 칸을 목록에 넣지 않으면 구제가 일어난 바로 그 실행의 판독 기록이
+      실행 기록에서 사라진다.
+    """
+    event = _parse_event(
+        판독="ok", 추출방식="row_salvage", 응답행수=41, 유효행수=41,
+        요청번호수=42, 미응답번호수=1, 구문탈락행수=1,
+        json시작offset=8, json끝offset=6558, 응답="비공개 응답 원문",
+    )
+    (observed,) = observed_composition_steps([event])
+    assert observed["추출방식"] == "row_salvage"
+    assert observed["구문탈락행수"] == 1
+    assert (observed["응답행수"], observed["미응답번호수"]) == (41, 1)
+    assert "응답" not in observed
+
+
+@pytest.mark.parametrize("read_code", ["call_limit_reached", "request_budget_exhausted"])
+def test_optional_call_abort_read_codes_pass_the_sanitizer(read_code: str) -> None:
+    """두 번째 검수 호출을 요청 AI 몫 소진으로 포기한 시도의 판독 코드(2026-09-23).
+
+    닫힌 목록에 없으면 정화기가 그 시도 기록을 통째로 버려, 「왜 후속이 안 됐나」가
+    실행 기록에서 사라진다.
+    """
+    event = _parse_event(시도=2, 판독=read_code, 응답문자=0, 요청번호수=1, 미응답번호수=1)
+    (observed,) = observed_composition_steps([event])
+    assert observed["판독"] == read_code
+
+
+def test_protocol_record_without_dropped_row_count_is_rejected() -> None:
+    """구문탈락행수는 필수 칸이다 — 생산자(new_protocol_observation)는 늘 0 이상을 채운다."""
+    event = _parse_event()
+    del event["구문탈락행수"]
+    assert observed_composition_steps([event]) == ()
 
 
 @pytest.mark.parametrize("changes", [

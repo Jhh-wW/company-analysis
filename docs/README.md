@@ -15,8 +15,9 @@
 | 5 | [기능별 책임 지도](architecture/feature-map.md) | "무엇을 고칠 때 어느 폴더를 여는가" |
 | 6 | [배포 교체 계약](architecture/deployment-contract.md) | 새 버전으로 갈아끼울 때 지켜야 하는 조건 |
 | 7 | [ADR 0001](adr/0001-feature-oriented-structure.md) | 기능 중심 구조를 고른 이유 |
-| 8 | [검수 안내](REVIEW_GUIDE.md) | 환경·실행·시험·운영 한계 체크리스트 |
-| 9 | [참고 보고서 50개 분석 요약](evidence/reference-reports-50-analysis-summary.md) | 목차를 그렇게 정한 조사 근거 |
+| 8 | [ADR 0002](adr/0002-review-parse-durability-and-empty-recovery-keys.md) | 검수 응답 판독·빈 장 복구 키 해석·감사 상용구·소속 단정 차단을 정한 이유 |
+| 9 | [검수 안내](REVIEW_GUIDE.md) | 환경·실행·시험·운영 한계 체크리스트 |
+| 10 | [참고 보고서 50개 분석 요약](evidence/reference-reports-50-analysis-summary.md) | 목차를 그렇게 정한 조사 근거 |
 
 실행·배포는 [`app/README.md`](../app/README.md)와 [`deploy/README.md`](../deploy/README.md)를,
 분석 엔진 진입점과 동적 import 계약은 [`analysis_engine/README.md`](../analysis_engine/README.md)를 본다.

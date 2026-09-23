@@ -6,16 +6,20 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pytest
 
+from src.features.composer import verify
 from src.features.composer.entity_scope_constraints import (
     EntityScopeContext,
     build_entity_scope_contexts,
     is_canonical_dart_identity,
 )
-from src.features.composer.port import CollectedFragment
+from src.features.composer.grounding_constants import REVIEW_GROUNDING_REJECTED
+from src.features.composer.port import CollectedFragment, ComposedSentence
+from src.features.composer.scope_constants import SCOPE_CONDITION_UNBOUND
 from src.shared.report_evidence.legacy_fragment_kinds import (
     LEGACY_KIND_ENTITY_SCOPE_FOOTNOTE,
     LEGACY_KIND_RELATED_PARTY,
@@ -184,3 +188,84 @@ def test_conflicting_document_drops_only_its_own_context(field, first, second):
     assert context.document_identity == OTHER_DOCUMENT
     assert dict(context.cited_sources) == {"4": other_related}
     assert dict(context.constraint_sources) == {"5": other_footnote}
+
+
+# ══ 5차 실측 P11(2026-09-23) — 검수 «참» 뒤 기계 가드가 실제로 거절하는가 ════════
+# 실측 실행에서는 검수 판독이 실패해 이 가드가 돌지 않아 차단 여부를 확인하지 못했다.
+# 가짜 «참» 검수자로 실제 검수 결속 경로를 태워 두 모양 — 각주가 인용 조각 «안»(실측
+# 모양), 같은 공시의 인용 «밖»(제약 context) — 을 모두 확인한다. 법인 이름은 익명이다.
+P11_FOOTNOTE = (
+    "5. 매도가능증권 당기말 현재 매도가능증권의 내역은 다음과 같습니다. (단위 : 천원) "
+    "구분 지분률 취득원가 장부금액 가람 Holdings(*) 100% 40,000 40,000 "
+    "(*) 일반기업회계기준 경과규정에 따라 종속기업에서 제외 되었습니다."
+)
+P11_RELATED = "특수관계자 내역 구분 특수관계자명 종속기업 가람 Holdings"
+P11_ROUTES = pytest.mark.parametrize(
+    "citations", [("2",), ("1",)], ids=["인용_조각_안_각주", "인용_밖_같은_공시_각주"],
+)
+
+
+def _p11_review(text, citations):
+    frags = _by_id(_fragment("1", LEGACY_KIND_RELATED_PARTY, P11_RELATED),
+                   _fragment("2", LEGACY_KIND_ENTITY_SCOPE_FOOTNOTE, P11_FOOTNOTE))
+
+    def ask(prompt):
+        row = {"번호": 1, "근거대조": "원문 대조", "결과": "참"}
+        return json.dumps({"판정": [row]}, ensure_ascii=False)
+
+    problems: dict[int, str] = {}
+    item = verify._ReviewItem(1, ComposedSentence(text, citations, "확인"), "operations_partners")
+    verdicts = verify._ask_verdicts(ask, (item,), frags, "", grounding_problems=problems)
+    return verdicts, problems
+
+
+#: 숫자가 없는 변형 — 인용 밖 경로에서도 수치 결속이 먼저 걸리지 않아 범위 방어만 본다.
+P11_BLOCKED_WITHOUT_DIGITS = pytest.mark.parametrize("text", [
+    "회사는 종속기업 가람 Holdings를 보유하고 있다.",
+    "회사는 종속기업 가람 Holdings를 소유하고 있다.",
+    "가람 Holdings는 회사의 종속기업입니다.",
+    "회사는 가람 Holdings 지분 전부를 보유하고 있다.",
+    "회사는 자회사 가람 Holdings를 두고 있다.",
+], ids=["종속기업_보유", "종속기업_소유", "회사의_종속기업입니다", "지분_전부_보유", "자회사_두고"])
+
+
+@P11_ROUTES
+@P11_BLOCKED_WITHOUT_DIGITS
+def test_P11_검수가_참이어도_제외_각주를_지운_보유_단정은_거절된다(citations, text):
+    verdicts, problems = _p11_review(text, citations)
+    assert verdicts == {1: REVIEW_GROUNDING_REJECTED}
+    assert problems == {1: SCOPE_CONDITION_UNBOUND}
+
+
+@pytest.mark.parametrize("text", [
+    "회사는 종속기업 가람 Holdings를 보유하고 있으며, 가람 Holdings는 100% 지분으로 소유되고 있다.",
+    "가람 Holdings는 100% 지분으로 소유되고 있다.",
+], ids=["실측_모양", "100지분으로_소유되고"])
+def test_P11_수치가_든_단정도_범위_방어가_수치_결속보다_먼저_거절한다(text):
+    """C 재현에서 [30]은 수치 결속에 «우연히» 걸렸다 — 범위 사유로 먼저 걸리는지 본다."""
+    verdicts, problems = _p11_review(text, ("2",))
+    assert verdicts == {1: REVIEW_GROUNDING_REJECTED}
+    assert problems == {1: SCOPE_CONDITION_UNBOUND}
+
+
+@P11_ROUTES
+@pytest.mark.parametrize("text", [
+    "가람 Holdings는 경과규정에 따라 종속기업에서 제외되었으며, 회사는 가람 Holdings 지분 전부를 보유하고 있다.",
+    "회사는 종속기업 가람 Holdings에 운영자금을 대여하였다.",
+    "회사는 자회사 가람 Holdings에 운영자금을 대여하였다.",
+], ids=["제외와_지분_함께", "종속기업_대여만", "자회사_대여만"])
+def test_P11_제외_사실을_함께_적은_지분_문장과_현재_거래_서술은_검수를_통과한다(citations, text):
+    verdicts, problems = _p11_review(text, citations)
+    assert verdicts == {1: "참"} and problems == {}
+
+
+@P11_ROUTES
+@pytest.mark.parametrize("text", [
+    "회사는 종속기업 가람 Holdings를 보유했었으나, 경과규정에 따라 종속기업에서 제외되었다.",
+    "회사는 종속기업 가람 Holdings를 보유하고 있지 않다.",
+], ids=["정답_과거_서술", "보유하고_있지_않다"])
+def test_P11_각주_조건을_지킨_과거_서술과_부정은_검수를_통과한다(citations, text):
+    """2026-09-23 독립 검토 F7 — 2판에서 새로 막히던 꼴이 검수 경로 끝까지 남는지 본다."""
+
+    verdicts, problems = _p11_review(text, citations)
+    assert verdicts == {1: "참"} and problems == {}

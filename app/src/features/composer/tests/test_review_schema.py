@@ -15,7 +15,7 @@ import pytest
 from anthropic import transform_schema
 from jsonschema import Draft202012Validator
 
-from src.features.composer import diagram_check, verify
+from src.features.composer import diagram_check, review_schema, verify
 from src.features.composer.constants import RETRY_REMINDER
 from src.features.composer.grounding import constrain_verdicts, grounding_problem
 from src.features.composer.port import AskFatalError, CollectedFragment, ComposedSentence, FlowRow
@@ -323,8 +323,35 @@ def test_semantic_proof_failure_does_not_enable_native_retry():
     assert len(calls) == 1 and type(calls[0]) is str
 
 
+#: packet 스키마 스위치의 «소비 지점»(verify 가 이름을 가져다 쓴다).
+PACKET_SCHEMA_SWITCH = "src.features.composer.verify.PACKET_REVIEW_SCHEMA_ENABLED"
+
+
+def test_packet_schema_switch_is_off_by_default():
+    """packet 검수의 네이티브 스키마는 기본 꺼짐이다(2026-09-23 총괄 결정).
+
+    보관된 실제 공급자 호출 24건 모두 스키마 없이 나갔다 — 스키마 요청은 실제
+    공급자로 검증된 적이 없고, 거절되면 AskFatalError 로 요청 전체가 멈춘다.
+    켜려면 유료 실측으로 먼저 확인하고 이 기대값을 «함께» 바꾼다.
+    """
+    assert review_schema.PACKET_REVIEW_SCHEMA_ENABLED is False
+    assert verify.PACKET_REVIEW_SCHEMA_ENABLED is False
+
+
+@pytest.mark.parametrize("schema_enabled", (False, True), ids=("schema-off", "schema-on"))
 @pytest.mark.parametrize("raw", ("invalid", '{"판정":[]}'))
-def test_grouped_does_not_add_retry_or_fallback(raw):
+def test_grouped_retries_once_and_then_fails_closed_without_fallback(
+    monkeypatch, raw, schema_enabled,
+):
+    """2026-09-23 — packet 도 평문과 같은 형식 재요청 1회. 그 뒤에는 숨은 3차 호출이 없다.
+
+    예전 «1회 고정»에서는 JSON 한 글자 오류로 판정 42행이 통째로 사라졌다
+    (`test_grouped_review_resilience.py`). 첫 요청은 initial_ask 가 없으므로
+    예전처럼 표식 없는 문자열이고, 재요청은 같은 글자 + 형식 상기문이다. 재요청의
+    스키마는 스위치(기본 꺼짐)를 따른다.
+    """
+    if schema_enabled:
+        monkeypatch.setattr(PACKET_SCHEMA_SWITCH, True)
     calls = []
 
     def ask(prompt):
@@ -332,9 +359,12 @@ def test_grouped_does_not_add_retry_or_fallback(raw):
         return raw
 
     assert verify._ask_grouped_verdicts(ask, GROUPED_ITEMS, FRAGMENTS, None) is None
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert type(calls[0]) is str
     assert getattr(calls[0], "response_schema", None) is None
+    assert calls[1] == calls[0] + RETRY_REMINDER
+    expected = FLAT_REVIEW_SCHEMA if schema_enabled else None
+    assert getattr(calls[1], "response_schema", None) is expected
 
 
 @pytest.mark.parametrize("rewrite", (False, True))

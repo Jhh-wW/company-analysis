@@ -2,6 +2,9 @@
 
 빈 문자열은 이 좁은 구조 검사에서 반례를 찾지 못했다는 뜻이다. 의미 검수,
 수치·기간·서명·뉴스 검사를 대체하지 않으며 상품명이 누락되면 추측하지 않는다.
+
+진입점 ``scope_problem``은 범위 검사보다 먼저 감사보고서 «감사인 표준 문구»
+가드(audit_boilerplate_guard)를 부른다 — 모든 검수 후보가 지나는 자리라서다.
 """
 
 from __future__ import annotations
@@ -28,18 +31,27 @@ from src.features.composer.scope_constants import (
     REVENUE_STREAM_SUBJECT_RE, REVENUE_SUBJECT_RE, RECOGNITION_RE,
     COMPLETION_RE, PROGRESS_RE, DURATION_LIMIT_RE,
     EXPLICIT_EXCLUSION_RE, ENTITY_SUBJECT_RE, CURRENT_SUBSIDIARY_RE,
-    HISTORICAL_MEMBERSHIP_RE,
+    EXCLUSION_ACTIVE_VOICE_RE, EXCLUDED_OBJECT_RE, EXCLUDED_OBJECT_GENERIC_NOUNS,
+    HISTORICAL_MEMBERSHIP_RE, PREFIXED_SUBSIDIARY_HOLDING_RE,
+    COPULA_CLAIM_END_RE, STAKE_NOUN_HOLDING_RE, STAKE_OWNER_BRIDGE_RE,
+    STAKE_PERCENT_HOLDING_RE, STATED_EXCLUSION_RE,
     ADNOMINAL_FORM_RE, CURRENT_CONSOLIDATION_RE, CURRENT_PERIOD_RE,
     ENTITY_INCLUSION_EVENT_RE,
     FOOTNOTE_MARK_RE, FOOTNOTE_REINCLUSION_RE, FOOTNOTE_TABLE_HEAD_RE,
     FOOTNOTE_TABLE_WORDS, HOLDING_APPOSITIVE_BRIDGE_RE, OBJECT_ARGUMENT_RE,
+    AUXILIARY_CONTINUATION_RE, NONCURRENT_PREDICATE_RE, PAST_AUXILIARY_RE, PLANNED_PREDICATE_RE,
+    HOLDING_LIST_TAIL_RE, HOLDING_LIST_SPLIT_RE, HOLDING_NAME_DECORATION_RE, HOLDING_NON_NAME_RE,
     PERIOD_MARKER_RE, PREDICATE_BOUNDARY_RE, PRIOR_PERIOD_RE, STATUS_NEGATION_RE,
     SUBJECT_ARGUMENT_RE, TOPIC_ARGUMENT_RE,
 )
 # 공시가 회사 자신을 가리키는 낱말 — 목적 해석 가드와 «같은» 목록을 쓴다.
 from src.features.composer.direct_support_constants import SELF_REFERENCE_SUBJECTS
+# 감사인 표준 문구의 둔갑 — 검수 후보 전부가 지나는 이 진입점에서 먼저 본다.
+from src.features.composer.audit_boilerplate_guard import audit_boilerplate_problem
 
 _NAME_CHAR_RE = re.compile(r"[A-Za-z가-힣]")
+#: 지분 보유 단정 — 소속(종속기업·자회사) 단정과 달리 후보가 제외를 함께 적으면 막지 않는다.
+_STAKE_CLAIM_RES = (STAKE_PERCENT_HOLDING_RE, STAKE_NOUN_HOLDING_RE)
 _TOKEN_EDGE_PUNCTUATION = "()[]{}<>,:;·"
 
 
@@ -162,20 +174,42 @@ def _predicate_unit(clause: str, claim: re.Match[str]) -> tuple[int, int]:
     return start, end
 
 
+def _claim_tail(clause: str, claim: re.Match[str]) -> str:
+    """단정 뒤 같은 술어의 꼬리 — 「-고 있」 보조용언은 연결 어미 경계를 넘어 한 술어로 본다.
+
+    「보유하고 있지 않다」의 부정과 「보유하고 있었다」의 과거가 「-고」 경계에서 잘려
+    단정만 남던 결함(2026-09-23 독립 검토 F7)을 막는다.
+    """
+
+    _start, end = _predicate_unit(clause, claim)
+    while end < len(clause) and AUXILIARY_CONTINUATION_RE.match(clause, end):
+        boundary = PREDICATE_BOUNDARY_RE.search(clause, end + 1)
+        end = boundary.start() if boundary else len(clause)
+    return clause[claim.end():end]
+
+
 def _status_claims(clause: str) -> list[re.Match[str]]:
     """절이 단정한 «현재 종속기업·연결 대상» 서술 — 그 술어에 붙은 부정은 뺀다.
 
     부정은 단정과 같은 술어 단위 안에서만 본다. 「…연결 대상으로 관리하며 영업
     비용은 부담하지 않는다」의 뒤 부정은 다른 술어라 단정을 지우지 않는다.
+    「-고 있」 보조용언은 같은 술어로 이어 보고(`_claim_tail`), 과거 회상·대과거·양보
+    (「보유했던」·「보유했었다」·「두었으나」)·과거 진행·계획 꼬리도 현재 단정이 아니다(F7).
     """
 
     claims = [*CURRENT_SUBSIDIARY_RE.finditer(clause),
-              *CURRENT_CONSOLIDATION_RE.finditer(clause)]
+              *CURRENT_CONSOLIDATION_RE.finditer(clause),
+              *PREFIXED_SUBSIDIARY_HOLDING_RE.finditer(clause),
+              *STAKE_PERCENT_HOLDING_RE.finditer(clause),
+              *STAKE_NOUN_HOLDING_RE.finditer(clause)]
     kept = []
     for claim in claims:
-        _start, end = _predicate_unit(clause, claim)
-        if not STATUS_NEGATION_RE.search(clause, claim.end(), end):
-            kept.append(claim)
+        # 단정 뒤 같은 술어의 꼬리로 부정·과거·계획을 가린다(2026-09-23 독립 검토 F7).
+        tail = _claim_tail(clause, claim)
+        if (STATUS_NEGATION_RE.search(tail) or NONCURRENT_PREDICATE_RE.match(tail)
+                or PAST_AUXILIARY_RE.search(tail) or PLANNED_PREDICATE_RE.search(tail)):
+            continue
+        kept.append(claim)
     return kept
 
 
@@ -296,7 +330,8 @@ def _claim_argument_end(clause: str, claim: re.Match[str]) -> int | None:
       가장 가까운 목적격(을/를)이 대상이다. 목적격이 없으면 주제·주격으로 넘어간다.
     · 「…이다」·목적격 없는 경우: 같은 술어 단위의 «국소» 주제(은/는), 없으면 국소
       주격(이/가). 「…이다」 앞의 목적격은 관형절 안의 것이라(「회사가 지분을 보유한
-      종속기업이다」) 대상으로 쓰지 않는다.
+      종속기업이다」) 대상으로 쓰지 않는다. 서술격은 「…이다」만이 아니다 —
+      「…입니다·…이며·…이고·자회사다」도 같다(`COPULA_CLAIM_END_RE`).
     · 국소 주격(이/가)은 조사 끝에서 단정 시작까지 «공백만» 있을 때(「B가 연결 대상이다」)
       만 주체로 쓴다. 사이에 다른 내용이 있으면(「가람이 지분을 보유한 종속기업이다」 —
       관형절 주격일 수 있다) 판정을 보류해 None 을 돌려준다. 앞 주제로 되돌아가
@@ -306,7 +341,7 @@ def _claim_argument_end(clause: str, claim: re.Match[str]) -> int | None:
     """
 
     unit_start, _unit_end = _predicate_unit(clause, claim)
-    if not claim.group().endswith("이다"):
+    if not COPULA_CLAIM_END_RE.search(claim.group()):
         object_end = _nearest_argument(OBJECT_ARGUMENT_RE, clause, unit_start, claim.start())
         if object_end is not None:
             return object_end
@@ -326,6 +361,22 @@ def _claim_argument_end(clause: str, claim: re.Match[str]) -> int | None:
     return None
 
 
+def _holding_target_items(target: str) -> tuple[str, ...]:
+    """분류 이름 뒤 보유 대상 자리를 법인 이름 항목으로 나눈다(2026-09-23 독립 검토 F8).
+
+    끝의 「등·등 N개사·외 N개사」를 떼고 나열 연결어(와·과·및·쉼표·가운뎃점)로 나눈 뒤
+    「(주)·㈜·주식회사·(지분율)」 장식을 벗긴다. 항목 하나라도 조사·술어가 끼면
+    (「A와 B에 대한 채권」) 이름 나열이 아니라 거래 서술이므로 빈 튜플을 돌려준다.
+    """
+
+    body = HOLDING_LIST_TAIL_RE.sub("", target.strip())
+    items = [HOLDING_NAME_DECORATION_RE.sub("", item).strip()
+             for item in HOLDING_LIST_SPLIT_RE.split(body)]
+    if not items or any(not item or HOLDING_NON_NAME_RE.search(item) for item in items):
+        return ()
+    return tuple(items)
+
+
 def _claim_binds_label(clause: str, label: str, claim: re.Match[str]) -> bool:
     """현재 관계 단정이 «그 법인»에 대한 것인가 — 주체·대상과 술어를 같은 자리로 묶는다.
 
@@ -335,9 +386,41 @@ def _claim_binds_label(clause: str, label: str, claim: re.Match[str]) -> bool:
       다른 법인의 술어(「A를 지원하고 B를 연결 대상으로 관리한다」의 B)를 빌려
       A에 붙이지 않는다.
     관계자 표의 분류 이름을 붙인 「종속기업 <법인>에 대여」는 단정이 아니다.
+    · 분류 이름(종속기업·자회사)을 앞에 둔 보유 「종속기업 <법인> (등)을 보유·소유·
+      두다·가지다」: 분류 이름 바로 뒤 대상 자리가 그 이름으로 시작하고, 이름 뒤에는
+      「등」 같은 연결 낱말만 올 때(`HOLDING_APPOSITIVE_BRIDGE_RE`). 대상 자리에 다른
+      술어가 끼면(「<법인>에 대여하고 지분을 보유」) 그 법인의 보유 단정이 아니다.
+    · 지분 보유 「<법인>의 지분 100%를 보유」·「<법인>을 100% 지분으로 소유」: 같은
+      술어 단위에서 이름 바로 뒤에 「(의) 지분」이 오거나(`STAKE_OWNER_BRIDGE_RE`),
+      일반 주체·대상 결속이 그 이름일 때.
     """
 
     mentions = list(re.finditer(_label_pattern(label), clause, re.IGNORECASE))
+    if claim.re in _STAKE_CLAIM_RES:
+        # 「<법인>의 지분 100%를 보유」·「<법인> 지분을 100% 소유」 — 같은 술어 단위 안에서
+        # 이름 바로 뒤에 「(의) 지분」이 오면 그 법인의 지분이다. 아니면 일반 주체·대상 결속.
+        unit_start, _unit_end = _predicate_unit(clause, claim)
+        if any(unit_start <= mention.start() and mention.end() <= claim.start()
+               and STAKE_OWNER_BRIDGE_RE.match(clause, mention.end(), claim.start())
+               for mention in mentions):
+            return True
+        argument_end = _claim_argument_end(clause, claim)
+        return argument_end is not None and any(
+            mention.end() == argument_end for mention in mentions)
+    if claim.re is PREFIXED_SUBSIDIARY_HOLDING_RE:
+        target_start = claim.start("holding_target")
+        target_end = claim.end("holding_target")
+        if any(
+            mention.start() == target_start
+            and mention.end() <= target_end
+            and HOLDING_APPOSITIVE_BRIDGE_RE.fullmatch(clause[mention.end():target_end])
+            for mention in mentions
+        ):
+            return True
+        # 나열·장식(「A와 B 등 2개사」·「(주)A」·「A(100%)」)은 항목으로 나눠 이름과 맞댄다(F8).
+        label_re = re.compile(_label_pattern(label), re.IGNORECASE)
+        return any(label_re.fullmatch(item)
+                   for item in _holding_target_items(clause[target_start:target_end]))
     if claim.group().endswith("인"):
         return any(claim.end() <= mention.start()
                    and not clause[claim.end():mention.start()].strip()
@@ -366,13 +449,57 @@ def _inclusion_recorded(label: str, sources: Mapping[str, str]) -> bool:
     return False
 
 
-def _claims_bound_to(text: str, label: str) -> bool:
-    """후보의 어느 절이든 그 법인에 결속된 현재 관계 단정이 있는가(과거 서술 제외)."""
+def _exclusion_stated(text: str, label: str) -> bool:
+    """후보 스스로 그 법인의 «종속·연결 범위 제외»를 같은 문장에 적었는가."""
 
+    pattern = re.compile(_label_pattern(label), re.IGNORECASE)
+    return any(
+        pattern.search(sentence) and STATED_EXCLUSION_RE.search(sentence)
+        for sentence in re.split(r"[.;。\n]", unicodedata.normalize("NFKC", text))
+    )
+
+
+def _excluded_entity(clause: str) -> str:
+    """제외 서술 절에서 «제외된 법인» 이름 — 능동이면 목적어, 수동이면 주어(모르면 빈 문자열).
+
+    · 수동 「X는 … 종속기업에서 제외되었습니다」: 문두 주어 X.
+    · 능동 「회사는 … X의 지분을 처분하여 연결범위에서 제외하였습니다」: 주어는 제외한
+      쪽이다. 제외 술어 앞의 마지막 목적어 X를 쓴다. 목적어가 일반 낱말(「주식을」)뿐이면
+      모른다고 본다. 목적어가 아예 없으면(「X는 … 제외하였습니다」) 주어를 쓴다.
+    · 자기 지칭 주어(회사·당사…)는 어느 경우에도 제외 법인이 아니다.
+    ★ 2026-09-23 B 수정 재검토 R3 — 자기 지칭 주어만 건너뛰면(F12) 제외된 목적어 X의
+      현재 단정이 통과하고, 목록 밖 주어(「연결회사·지배기업·회사 이름」)는 다시 제외
+      법인이 되어 회사의 다른 지분 문장까지 막는다.
+    """
+
+    subject = ENTITY_SUBJECT_RE.search(clause)
+    subject_name = subject["owner"] if subject else ""
+    active = EXCLUSION_ACTIVE_VOICE_RE.search(clause)
+    if active:
+        objects = [match["owner"]
+                   for match in EXCLUDED_OBJECT_RE.finditer(clause, 0, active.start())
+                   if match["owner"] not in SELF_REFERENCE_SUBJECTS]
+        if objects:
+            named = [name for name in objects if name not in EXCLUDED_OBJECT_GENERIC_NOUNS]
+            return named[-1] if named else ""
+    return "" if subject_name in SELF_REFERENCE_SUBJECTS else subject_name
+
+
+def _claims_bound_to(text: str, label: str, stated_in: str | None = None) -> bool:
+    """후보의 어느 절이든 그 법인에 결속된 현재 관계 단정이 있는가(과거 서술 제외).
+
+    지분 보유 단정(「지분 100%를 보유」 등)은 후보가 같은 법인의 제외 사실을 함께
+    적었으면 세지 않는다 — 각주의 제외 조건이 문장에 살아 있기 때문이다. 소속 단정
+    (종속기업·자회사)은 제외를 함께 적어도 그대로 센다(현재 소속과 제외는 모순이다).
+    ``stated_in``은 절 하나만 넘기는 호출자가 후보 전체 글을 줄 때 쓴다.
+    """
+
+    exclusion_stated = _exclusion_stated(text if stated_in is None else stated_in, label)
     for clause in re.split(r"[.;。\n,，]", text):
         if HISTORICAL_MEMBERSHIP_RE.search(clause):
             continue
-        if any(_claim_binds_label(clause, label, claim) for claim in _status_claims(clause)):
+        if any(_claim_binds_label(clause, label, claim) for claim in _status_claims(clause)
+               if not (exclusion_stated and claim.re in _STAKE_CLAIM_RES)):
             return True
     return False
 
@@ -451,13 +578,16 @@ def _narrative_scope_problem(text: str, sources: Mapping[str, str]) -> str:
             for clause in re.split(r"[.;。\n]", source):
                 if not EXPLICIT_EXCLUSION_RE.search(clause):
                     continue
-                owner_match = ENTITY_SUBJECT_RE.search(clause)
+                excluded = _excluded_entity(clause)
                 # 제외된 법인이 «그 단정의 주체·대상»일 때만 막는다(같은 절에 이름만
                 # 있는 것으로는 부족하다). 인용한 다른 원문에 같은 법인의 편입·재편입
                 # 사건이 있으면 선후를 알 수 없어 막지 않는다.
-                if (owner_match
-                        and not _inclusion_recorded(owner_match["owner"], sources)
-                        and _claims_bound_to(candidate_clause, owner_match["owner"])):
+                # 제외된 법인은 태로 고른다 — 능동이면 목적어, 수동이면 주어(F12·R3,
+                # `_excluded_entity`). 회사 주어를 제외 법인으로 읽으면 회사의 모든 지분
+                # 문장이 막히고, 주어만 건너뛰면 정작 제외된 목적어 법인을 놓친다.
+                if (excluded
+                        and not _inclusion_recorded(excluded, sources)
+                        and _claims_bound_to(candidate_clause, excluded, stated_in=text)):
                     return SCOPE_CONDITION_UNBOUND
     # 표 행 표식(「법인(*)」)과 같은 표식 각주로 결속된 제외 — 공시 주석의 실제 꼴.
     return _footnote_exclusion_problem(text, sources)
@@ -516,8 +646,17 @@ def scope_problem(candidate_text: str, sources_mapping: Mapping[str, str]) -> st
     실제 조건이 있는 좁은 원문 행을 찾은 다음에만 범위 확대를 판정한다.
     조건이나 채널 키워드만으로 문장을 제거하지 않는다. 원문 자체가 같은
     넓은 주어에 조건을 직접 붙이거나 정확한 상품 예시를 유지하면 통과한다.
+
+    ★ 맨 먼저 감사보고서 «감사인 표준 문구»의 둔갑을 본다(audit_boilerplate_guard).
+      이 함수는 검수 결속(grounding_problem: 본문·요약·도식)과 도식 칸 검사
+      (flow_scope_problem)가 모두 부르는 자리라, 한 곳에 걸면 모든 검수 후보에
+      같은 잣대가 걸린다. 그 경우만 고정 코드가 ``accounting_policy_boilerplate``다
+      (공유 닫힌 목록의 «장별 작성범위» 코드 — 새 코드를 만들지 않았다).
     """
     text = unicodedata.normalize("NFKC", candidate_text)
+    audit_problem = audit_boilerplate_problem(text, sources_mapping)
+    if audit_problem:
+        return audit_problem
     narrative_problem = _narrative_scope_problem(text, sources_mapping)
     if narrative_problem:
         return narrative_problem

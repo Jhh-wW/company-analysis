@@ -7,6 +7,18 @@ PATH_PACKET = "packet"
 EXTRACT_DIRECT = "direct"
 EXTRACT_SLICED = "braces_sliced"
 EXTRACT_FAILED = "failed"
+#: 응답 전체는 JSON으로 못 읽었지만 «판정» 배열의 행을 하나씩 구제해 읽은 경우
+#: (composer/review_row_salvage.py). 2026-09-23 실측: 42행 중 14번 행 하나의 괄호
+#: 오류로 문서 전체가 못 읽혀 42행이 통째로 사라졌다.
+EXTRACT_ROW_SALVAGE = "row_salvage"
+#: 행 단위 구제에서 버린 행 수의 칸 — (가) «행 시작(``{``)으로 보였지만 온전한 행으로
+#: 못 읽은» 행과 (나) 온전히 읽혔지만 «깨진 행과 같은 번호»라 뺀 행(그 번호는 누락
+#: 후속이 다시 묻는다). 구제하지 않은 시도는 0이다. 구제한 시도의 ``응답행수`` 는
+#: «건진» 행 수이므로, 응답에 적힌 행 수는 «적어도» ``응답행수 + 이 값`` 이다 —
+#: 하한이다. 행 사이 찌꺼기는 세지 않고, 재동기화가 건너뛴 행(여는 ``{`` 가 빠진 행,
+#: 쉼표 없이 깨진 행 뒤에 붙은 행)도 세지 않는다. 뒤 행의 ``{`` 가 빠지면 온전한 앞
+#: 행까지 버리고 이 값은 1만 늘어난다(review_row_salvage 모듈 머리말의 알려진 한계).
+PROTOCOL_SYNTAX_DROPPED_ROWS_FIELD = "구문탈락행수"
 READ_OK = "ok"
 READ_EMPTY = "empty_response"
 READ_JSON_SYNTAX = "json_syntax"
@@ -14,6 +26,12 @@ READ_NOT_OBJECT = "not_object"
 READ_VERDICTS_KEY_MISSING = "verdicts_key_missing"
 READ_VERDICTS_NOT_LIST = "verdicts_not_list"
 READ_ALL_ROWS_INVALID = "all_rows_invalid"
+#: 검수의 «두 번째 호출»(형식 재요청·누락 후속)을 요청 AI 몫 소진으로 포기한 시도.
+#: 응답이 없다는 점은 empty_response 와 같지만 원인이 다르다 — 호출이 공급자에 닿기
+#: 전에 요청의 AI 호출 «횟수» 상한(call_limit)이나 요청 로컬 «예약액»(request_budget)에
+#: 걸렸다. 첫 응답의 판정은 그대로 쓴다(composer/verify.py `_safe_optional_ask`).
+READ_CALL_LIMIT = "call_limit_reached"
+READ_REQUEST_BUDGET = "request_budget_exhausted"
 ROW_NOT_MAPPING = "not_mapping"
 ROW_NUMBER_NOT_INT = "number_not_int"
 ROW_RESULT_INVALID = "result_not_allowed"
@@ -100,15 +118,18 @@ GROUNDING_REWRITE_OPTIONAL_COUNT_KEYS = (
 PROTOCOL_READ_CODES = frozenset((
     READ_OK, READ_EMPTY, READ_JSON_SYNTAX, READ_NOT_OBJECT,
     READ_VERDICTS_KEY_MISSING, READ_VERDICTS_NOT_LIST, READ_ALL_ROWS_INVALID,
+    READ_CALL_LIMIT, READ_REQUEST_BUDGET,
 ))
 PROTOCOL_ENUM_FIELDS = {
     "경로": frozenset((PATH_FLAT, PATH_PACKET)),
     "판독": PROTOCOL_READ_CODES,
-    "추출방식": frozenset((EXTRACT_DIRECT, EXTRACT_SLICED, EXTRACT_FAILED)),
+    "추출방식": frozenset((
+        EXTRACT_DIRECT, EXTRACT_SLICED, EXTRACT_FAILED, EXTRACT_ROW_SALVAGE,
+    )),
 }
 PROTOCOL_COUNT_FIELDS = (
     "시도", "입력문자", "응답문자", "요청번호수", "응답행수",
-    "유효행수", "미응답번호수", "요청밖번호수",
+    "유효행수", "미응답번호수", "요청밖번호수", PROTOCOL_SYNTAX_DROPPED_ROWS_FIELD,
 )
 PROTOCOL_OFFSET_FIELDS = ("json시작offset", "json끝offset")
 PROTOCOL_ROW_REASONS = frozenset((

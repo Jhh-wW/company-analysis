@@ -13,11 +13,11 @@
   (d) 검수 진입점(``verify_report`` → ``_ask_verdicts``)이 문자열 번호
       응답에서 재시도 없이 1회 호출로 끝난다.
   (e) 묶음(packet) 검수 파서(``verify._parse_grouped_verdicts``)도 (b)와
-      같다. 단, 이 경로는 ``PARSE_RETRY_LIMIT`` 재시도가 **아예 없다**
-      (호출 계약이 «1회 고정, 실패 시 즉시 None» — ``_ask_grouped_verdicts``
-      docstring 및 ``test_body_review_comparison.py``의 기존
-      ``assert len(calls) == 1`` 로 이미 확인된 사실). 그래서 이 경로의
-      수정 전/후 차이는 «호출 2회」가 아니라 「판정이 사는지」다.
+      같다. 이 보정을 넣을 때(2026-09 초) packet 경로는 «1회 고정, 실패 시
+      즉시 None»이라 재시도가 아예 없었고, 그래서 수정 전/후 차이는 「판정이
+      사는지」였다. 2026-09-23부터 packet 경로도 평문처럼 형식 재요청 «또는»
+      누락 후속을 1회 보낸다(``_ask_grouped_verdicts`` 머리말). 문자열 번호
+      응답이 첫 응답에서 읽히면 여전히 1회로 끝난다 — 아래 시험이 그것을 본다.
   (f) 근거 결속(``grounding.constrain_verdicts``)이 파서와 별도로 raw를
       다시 읽어 번호를 찾는 자리도 같은 규칙을 쓴다 — 파서를 고쳐도 이
       자리는 저절로 안 따라온다(별도 재현으로 확인).
@@ -274,10 +274,11 @@ def test_도식_검수_진입점도_문자열_번호_응답에서_재시도_없�
 # (e) 묶음(packet) 검수 파서 — 문자열 번호와 정수 번호가 같은 판정을 낸다
 #
 # ``_parse_grouped_verdicts``는 verify.py의 «다른» 검수 파서다(``_parse_
-# verdicts``와 별개 복사본). ``_ask_grouped_verdicts``는 PARSE_RETRY_LIMIT을
-# 전혀 쓰지 않는다 — 실패하면 재시도 없이 즉시 None이다(그 docstring:
-# "엄격 packet의 호출 계약은 reviewer 1회 고정이다"). 그래서 이 구역은
-# 「호출 2회」가 아니라 「판정이 사는지」로 대조한다.
+# verdicts``와 별개 복사본). 이 구역을 쓸 때 ``_ask_grouped_verdicts``는
+# PARSE_RETRY_LIMIT을 전혀 쓰지 않았다(«reviewer 1회 고정»). 2026-09-23부터는
+# 평문과 같이 형식 재요청 «또는» 누락 후속 1회가 있다. 그래도 이 구역의 대조는
+# 그대로 「판정이 사는지」다 — 번호 보정이 없으면 첫 응답이 통째로 버려져
+# 재요청 한 번을 헛되이 쓰게 된다(평문 경로 (d)와 같은 낭비).
 # ══════════════════════════════════════════════════════════
 
 
@@ -341,10 +342,11 @@ def test_묶음_파서는_여전히_bool과_비숫자_문자열_번호를_버린
 
 
 def test_묶음_검수_진입점은_문자열_번호_응답에서_판정을_잃지_않는다():
-    """수정 전에는 «재시도 2회»가 아니라 «1회 만에 판정 전체가 None」이었다.
+    """번호 보정 수정 전에는 «1회 만에 판정 전체가 None»이었다.
 
-    (e) 절의 설명대로 이 경로는 재시도가 없으므로 호출 수는 고치기 전후로
-    똑같이 1회다 — 달라지는 것은 판정이 살아남는지뿐이다.
+    (e) 절의 설명대로 지금은 이 경로에도 형식 재요청이 있으므로, 보정이 없으면
+    판정을 잃는 대신 재요청 1회를 헛되이 쓴다. 보정이 있으면 첫 응답에서
+    판정이 살아 호출은 1회로 끝난다.
     """
     report = _report(
         (_sentence("가나다전자는 반도체 검사 장비 전문기업이다.", ("1",)),)
@@ -359,7 +361,7 @@ def test_묶음_검수_진입점은_문자열_번호_응답에서_판정을_잃�
         allowed_fragment_ids_by_section={"identity": frozenset({"1"})},
     )
 
-    assert len(ask.review_prompts) == 1  # 이 경로는 원래도 항상 1회다
+    assert len(ask.review_prompts) == 1  # 첫 응답이 읽혀 재요청·누락 후속이 없다
     assert verified.sections[0].sentences[0].verification_state == "verified"
 
 

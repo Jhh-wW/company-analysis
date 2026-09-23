@@ -3,14 +3,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import re
 from dataclasses import replace
 
 import pytest
 
 from src.features.composer.constants import (
-    GRADE_CONFIRMED, GRADE_INTERPRETED, SECTION_IDS as _ALL_SECTION_IDS,
+    GRADE_CONFIRMED, GRADE_INTERPRETED, SECTION_GUIDES, SECTION_IDS as _ALL_SECTION_IDS,
 )
-from src.features.composer.empty_section_recovery import recover_empty_sections, recovery_evidence, rejected_sentence_fingerprint
+from src.features.composer.empty_section_recovery import (
+    recover_empty_sections, recovery_evidence, rejected_sentence_fingerprint,
+    requested_sections_from_response,
+)
 from src.features.composer.port import (
     AskFatalError, CollectedFragment, ComposedReport, ComposedSection, ComposedSentence,
     SectionEvidencePacket, SectionEvidencePacketSet,
@@ -580,3 +585,688 @@ def test_requested_sections_from_response_shapes():
     assert requested_sections_from_response(body, ("a", "b")) == ({}, 0, "요청장없음")
     assert requested_sections_from_response([body], ("a",)) == ({}, 0, "읽기실패")
     assert requested_sections_from_response(None, ("a",)) == ({}, 0, "읽기실패")
+
+
+# ══════════════════════════════════════════════════════════
+# 응답 장 키 해석 — 장 ID 대신 표시명을 키로 쓴 정답도 받는다
+#
+# 실측(2026-09-23): 1차 답은 키가 «1장 <제목>»·«2장 <제목>», 재요청 답은 «1장»·
+# «2장»에 주장슬롯까지 장 ID를 뗀 이름이었다. 내용은 맞았는데 둘 다
+# «요청장없음»으로 버려져 두 장이 빈 채로 나갔다. 아래 시험은 그 두 꼴을 익명
+# 픽스처로 재현하고, 해석이 넓어진 만큼 «받지 않을 것»도 함께 못 박는다.
+# ══════════════════════════════════════════════════════════
+
+IDENTITY_TEXT = "가나다전자는 산업용 검사 장비를 설계하고 판매하는 회사다."
+BUSINESS_TEXT = "가나다전자는 검사 장비 판매와 유지보수 계약으로 수익을 얻는다."
+_TWO_TARGETS = ("identity", "business_model")
+_RECOVERY_LOGGER = "src.features.composer.empty_section_recovery"
+
+
+def _two_section_evidence():
+    return recovery_evidence((_fragment("identity", IDENTITY_TEXT, "1"),
+                              _fragment("business_model", BUSINESS_TEXT, "2")))
+
+
+def _keyed_response(sections):
+    """키(장 ID·표시명 등)와 문장별 주장슬롯을 그대로 담은 «장들» 응답."""
+    return json.dumps({"장들": {
+        key: {"문장들": [{"글": text, "인용": [fragment_id], "등급": GRADE_CONFIRMED,
+                        "주장슬롯": claim_slot}
+                       for text, fragment_id, claim_slot in sentences]}
+        for key, sentences in sections.items()
+    }}, ensure_ascii=False)
+
+
+def _recover_two(writer, diagnostics):
+    """두 장(identity·business_model)을 운영(FULL)과 같은 의미 칸 조건으로 복구한다."""
+    return recover_empty_sections("가나다전자", _report(*_TWO_TARGETS), targets=_TWO_TARGETS,
+        evidence=_two_section_evidence(), writer=writer, reviewer=_FakeReviewer(),
+        protocol_diagnostics=diagnostics, require_claim_slot=True)
+
+
+def _recovery_states(diagnostics):
+    return [item["상태"] for item in _recovery_steps(diagnostics)]
+
+
+def test_표시명_키와_정식_주장슬롯_답을_재요청_없이_받는다():
+    """실측 1차 답 꼴 — «N장 제목» 키 + 정식 주장슬롯이면 두 장 모두 채운다."""
+    calls, diagnostics = [], []
+    def writer(prompt):
+        calls.append(prompt)
+        return _keyed_response({
+            "1장 기업 정체성": [(IDENTITY_TEXT, "1", "identity:corporate_identity")],
+            "2장 사업 구조와 수익 모델": [(BUSINESS_TEXT, "2", "business_model:revenue_model")],
+        })
+    result = _recover_two(writer, diagnostics)
+    assert len(calls) == 1, "표시명 키를 읽었으면 재요청하지 않는다"
+    assert [section.sentences[0].text for section in result.sections] == [IDENTITY_TEXT, BUSINESS_TEXT]
+    written = next(item for item in diagnostics if item.get("상태") == "작성완료")
+    assert (written["응답꼴"], written["요청밖장수"], written["작성문장수"]) == ("계약", 0, 2)
+    assert _recovery_states(diagnostics) == ["작성완료", "검수완료"]
+    done = next(item for item in diagnostics if item.get("상태") == "검수완료")
+    assert done["복구장"] == ["identity", "business_model"]
+
+
+def test_장번호_키와_장ID를_뗀_주장슬롯도_정식_이름으로_받는다():
+    """실측 재요청 답 꼴 — «1장»·«2장» 키 + 장 ID를 뗀 주장슬롯.
+
+    ★ 운영(FULL)처럼 require_claim_slot=True 로 돈다. 주장슬롯 복원이 없으면 두
+      문장 모두 빈 칸이 되어 걸러지고 «확인후보없음»으로 끝난다.
+    """
+    calls, diagnostics = [], []
+    def writer(prompt):
+        calls.append(prompt)
+        return _keyed_response({
+            "1장": [(IDENTITY_TEXT, "1", "corporate_identity")],
+            "2장": [(BUSINESS_TEXT, "2", "revenue_model")],
+        })
+    result = _recover_two(writer, diagnostics)
+    assert len(calls) == 1
+    assert _recovery_states(diagnostics) == ["작성완료", "검수완료"]
+    assert [(section.sentences[0].text, section.sentences[0].planned_claim_slot)
+            for section in result.sections] == [
+        (IDENTITY_TEXT, "identity:corporate_identity"),
+        (BUSINESS_TEXT, "business_model:revenue_model"),
+    ]
+
+
+def test_두_요청_장을_한_키에_묶은_답은_버리고_요청밖으로_센다():
+    """어느 장인지 가를 수 없는 키는 받지 않는다 — 제 키로 온 장만 살린다.
+
+    ★ 묶은 키가 identity 장의 «유일한» 공급원이다. 묶은 키를 앞 장으로 풀어 주는
+      해석(포함 검사에 첫 장 채택 등)이 들어오면 identity 장이 채워져 빨개진다.
+    """
+    calls, diagnostics = [], []
+    def writer(prompt):
+        calls.append(prompt)
+        return _keyed_response({
+            "1장 기업 정체성·2장 사업 구조와 수익 모델": [
+                (IDENTITY_TEXT, "1", "identity:corporate_identity")],
+            "business_model": [(BUSINESS_TEXT, "2", "business_model:revenue_model")],
+        })
+    result = _recover_two(writer, diagnostics)
+    assert len(calls) == 1
+    assert not result.sections[0].sentences, "묶은 키의 문장이 어느 장에도 실리면 안 된다"
+    assert result.sections[1].sentences[0].text == BUSINESS_TEXT
+    written = next(item for item in diagnostics if item.get("상태") == "작성완료")
+    assert written["요청밖장수"] == 1
+
+
+def test_한_해석_단계에서_두_요청_장에_걸리는_키는_모호해서_받지_않는다():
+    """정규화하면 같아지는 두 요청 장이 있으면 그 키는 어느 쪽에도 주지 않는다.
+
+    실제 장 ID끼리는 정규화 값이 겹치지 않는다. 이 시험은 «모호하면 버린다»는
+    규칙 자체를 지킨다 — 규칙을 빼면 첫 번째 장이 남의 본문을 가져간다.
+    """
+    body = {"문장들": []}
+    assert requested_sections_from_response({"장들": {"A B": body}}, ("a-b", "a_b")) == (
+        {}, 1, "요청장없음")
+    assert requested_sections_from_response({"장들": {"A B": body, "a_b": body}}, ("a-b", "a_b")) == (
+        {"a_b": body}, 1, "계약")
+
+
+def test_요청과_무관한_키뿐이면_두_번_모두_요청장없음으로_끝난다():
+    """«z»나 요청하지 않은 장의 표시명(«3장»)만 있으면 지금처럼 재요청 1회 뒤 포기한다."""
+    calls, diagnostics = [], []
+    def writer(prompt):
+        calls.append(prompt)
+        return _keyed_response({
+            "z": [(IDENTITY_TEXT, "1", "identity:corporate_identity")],
+            "3장": [(BUSINESS_TEXT, "2", "business_model:revenue_model")],
+        })
+    result = _recover_two(writer, diagnostics)
+    assert result == _report(*_TWO_TARGETS)
+    assert len(calls) == 2, "파싱 재요청 상한은 1회다"
+    assert diagnostics == [{"step": "8_빈장_복구", "상태": "작성형식실패",
+                            "대상장": ["identity", "business_model"], "시도": 2,
+                            "응답꼴": ["요청장없음", "요청장없음"]}]
+
+
+def test_프롬프트는_요청_장_ID를_키로_명시하고_재요청은_키와_주장슬롯_모양을_다시_요구한다():
+    """첫 요청부터 «장들»의 키로 쓸 장 ID 문자열을 그대로 보여 준다.
+
+    ★ 지침 원문은 끊기지 않고 그대로 들어가야 한다 — 다른 시험의 가짜 작가가
+      «지침이 들어 있는가»로 복구 요청을 알아본다.
+    """
+    from src.features.composer.empty_section_recovery_constants import EMPTY_RECOVERY_GUIDE
+
+    calls = []
+    def writer(prompt):
+        calls.append(prompt)
+        return "형식을 따르지 못했습니다"
+    _recover_two(writer, [])
+    id_line = '요청 장 ID(이 문자열을 그대로 "장들"의 키로 쓴다): identity, business_model\n'
+    key_rule = '"장들"의 키는 위 «요청 장 ID» 줄의 문자열을 그대로 쓰고 장 번호나 장 제목으로 바꾸지 않는다'
+    slot_rule = "주장슬롯에는 «의미칸» 목록의 값을 콜론 앞 장 ID까지 그대로 적는다"
+    assert len(calls) == 2
+    assert all(EMPTY_RECOVERY_GUIDE + id_line in prompt for prompt in calls)
+    assert key_rule not in calls[0] and key_rule in calls[1]
+    assert slot_rule not in calls[0] and slot_rule in calls[1]
+
+
+@pytest.mark.parametrize("key", [
+    "identity", "IDENTITY", " Identity ", "1장", "제1장", "제 1 장", "1장 기업 정체성",
+    "1장 «기업 정체성»", "제1장: 기업 정체성", "기업 정체성", "기업정체성", "1. 기업 정체성",
+    "[1장] 기업 정체성",
+])
+def test_장_키의_정확_정규화_표시형_변형을_요청_장으로_해석한다(key):
+    body = {"문장들": []}
+    assert requested_sections_from_response({"장들": {key: body}}, _TWO_TARGETS) == (
+        {"identity": body}, 0, "계약")
+
+
+@pytest.mark.parametrize("key", ["Business-Model", "business model", "BUSINESS_MODEL", "business-model"])
+def test_대소문자_공백_하이픈_밑줄만_다른_장_ID를_받는다(key):
+    body = {"문장들": []}
+    assert requested_sections_from_response({"장들": {key: body}}, _TWO_TARGETS) == (
+        {"business_model": body}, 0, "계약")
+
+
+def test_포장_없는_답의_표시명_키도_해석한다():
+    """«장들» 포장을 뺀 꼴도 같은 해석을 쓰고, 문장 목록 키는 장으로 세지 않는다."""
+    body = {"문장들": []}
+    assert requested_sections_from_response({"2장": body, "문장들": []}, _TWO_TARGETS) == (
+        {"business_model": body}, 0, "포장없음")
+
+
+def test_같은_장에_걸린_키가_둘이면_앞_단계_키를_쓰고_하나는_요청밖으로_센다():
+    """정확 일치가 표시형보다 앞선다. 같은 단계끼리는 먼저 나온 키를 쓴다."""
+    body, other = {"문장들": []}, {"문장들": [{"글": "다른 답"}]}
+    assert requested_sections_from_response({"장들": {"1장": other, "identity": body}}, _TWO_TARGETS) == (
+        {"identity": body}, 1, "계약")
+    assert requested_sections_from_response({"장들": {"1장": body, "기업 정체성": other}}, _TWO_TARGETS) == (
+        {"identity": body}, 1, "계약")
+
+
+def test_요청하지_않은_장의_표시명은_받지_않는다():
+    body = {"문장들": []}
+    assert requested_sections_from_response({"장들": {"3장": body}}, _TWO_TARGETS) == (
+        {}, 1, "요청장없음")
+    assert requested_sections_from_response({"장들": {"1장": body}}, ("business_model",)) == (
+        {}, 1, "요청장없음")
+
+
+@pytest.mark.parametrize("section_id", _ALL_SECTION_IDS)
+def test_작성범위_문구의_장_번호와_제목은_그_장으로만_풀린다(section_id):
+    """작가가 보는 작성범위 머리(«N장 «제목»»)와 파서의 번호·제목이 같은지 대조한다.
+
+    ★ 장 순서나 제목이 한쪽만 바뀌면 «2장»이 다른 장으로 풀려 문장이 엉뚱한 장에
+      실린다. 아홉 장을 모두 요청해도 정확히 그 장 하나로만 풀려야 한다.
+    """
+    head = re.match(r"(\d+)장 «([^»]+)»", SECTION_GUIDES[section_id])
+    assert head, "작성범위 문구가 «N장 «제목»» 으로 시작하지 않습니다"
+    number, title = head.groups()
+    body = {"문장들": []}
+    for key in (head.group(0), f"{number}장", f"제{number}장", f"{number}장 {title}", title,
+                f"{number}. {title}"):
+        assert requested_sections_from_response({"장들": {key: body}}, _ALL_SECTION_IDS) == (
+            {section_id: body}, 0, "계약"), key
+
+
+def test_키_해석은_개수만_로그에_남긴다(caplog):
+    """표시명·정규화로 받은 개수만 남기고 응답 문장·장 제목은 싣지 않는다."""
+    body = {"문장들": [{"글": IDENTITY_TEXT, "인용": ["1"], "등급": GRADE_CONFIRMED}]}
+    with caplog.at_level(logging.INFO, logger=_RECOVERY_LOGGER):
+        requested_sections_from_response(
+            {"장들": {"1장 기업 정체성": body, "Business-Model": body}}, _TWO_TARGETS)
+        requested_sections_from_response({"장들": {"identity": body}}, _TWO_TARGETS)
+    messages = [record.getMessage() for record in caplog.records if record.name == _RECOVERY_LOGGER]
+    assert messages == ["빈 장 복구 응답 장 키 해석: 정규화 1개, 표시명 1개, 모호 0개"]
+
+
+# ══════════════════════════════════════════════════════════
+# 번호만 있는 키(«N장»·«제N장»)와 요청 순번의 충돌
+#
+# 작가가 장을 «요청한 순서»대로 «1장»·«2장»이라 부르면, 정본 번호로 푼 «2장»이
+# 작가가 뜻한 장과 다를 수 있다. 독립 검토(2026-09-23)가 재현한 꼴: 요청 장이
+# business_model·operations_partners 일 때 «2장»(작가 뜻은 두 번째 요청 장)이
+# 정본 2장으로 풀려, 7장 사실이 2장에 실렸다(의미 칸 필수가 아닌 경로).
+# 번호만 있는 키는 요청 순번으로 읽을 수 없거나(번호 > 요청 장 수) 두 읽기가 같은
+# 장일 때만 받는다. 제목이 붙은 키는 번호와 제목이 서로 맞아야만 걸리므로 그대로다.
+# ══════════════════════════════════════════════════════════
+
+_LATER_TARGETS = ("past_changes", "culture")
+_CONFLICT_TARGETS = ("business_model", "operations_partners")
+_SHARED_BUSINESS_FACT = "가나다전자의 매출은 검사 장비 판매로 구성된다."
+_SHARED_OPERATIONS_FACT = "가나다전자는 안성에 생산 공장을 두고 있다."
+_BUSINESS_SLOT = "business_model:revenue_model"
+_OPERATIONS_SLOT = "operations_partners:operating_role"
+
+
+def _two_bodies():
+    return {"문장들": [{"글": "첫째 장 본문"}]}, {"문장들": [{"글": "둘째 장 본문"}]}
+
+
+def test_요청_순번_번호가_정본_번호와_다른_장을_가리키면_둘_다_받지_않는다():
+    """과거·문화 두 장 요청에 «1장»·«2장» — 정본 1·2장은 요청 밖이고 순번 읽기와도 어긋난다."""
+    first, second = _two_bodies()
+    assert requested_sections_from_response(
+        {"장들": {"1장": first, "2장": second}}, _LATER_TARGETS) == ({}, 2, "요청장없음")
+
+
+@pytest.mark.parametrize("keys", [("1장", "2장"), ("제1장", "제2장"), ("1 장", "제 2 장")])
+def test_정본_번호가_요청_장이어도_요청_순번이_다른_장이면_받지_않는다(keys):
+    """독립 검토 재현 꼴 — «2장»은 정본으로 business_model, 순번으로 operations_partners 다.
+
+    ★ 음성 대조 — 순번 충돌 검사를 빼면 «2장» 블록이 business_model 로 풀려
+      ({business_model: 둘째}, 1, 계약) 이 되어 빨개진다.
+    """
+    first, second = _two_bodies()
+    assert requested_sections_from_response(
+        {"장들": {keys[0]: first, keys[1]: second}}, _CONFLICT_TARGETS,
+    ) == ({}, 2, "요청장없음")
+
+
+@pytest.mark.parametrize(("targets", "keys", "expected_ids"), [
+    (_LATER_TARGETS, ("4장", "8장"), ("past_changes", "culture")),
+    (_LATER_TARGETS, ("제4장", "제 8 장"), ("past_changes", "culture")),
+    (_CONFLICT_TARGETS, ("7장",), ("operations_partners",)),
+])
+def test_번호가_요청_장_수보다_크면_정본_번호대로_받는다(targets, keys, expected_ids):
+    """요청 순번으로 읽을 수 없는 번호는 모호하지 않다 — 예전처럼 정본 장으로 푼다."""
+    bodies = {key: {"문장들": [{"글": key}]} for key in keys}
+    expected = {section_id: bodies[key] for section_id, key in zip(expected_ids, keys)}
+    assert requested_sections_from_response({"장들": bodies}, targets) == (
+        expected, 0, "계약")
+
+
+@pytest.mark.parametrize("keys", [
+    ("1장 기업 정체성", "2장 사업 구조와 수익 모델"),
+    ("1장", "2장"),
+])
+def test_실측_5차_두_꼴은_번호_순번_규칙_뒤에도_그대로_받는다(keys):
+    """5차 1차 답(«N장 제목»)과 재요청 답(«N장»). 요청 1·2장이라 두 읽기가 같은 장이다."""
+    first, second = _two_bodies()
+    assert requested_sections_from_response(
+        {"장들": {keys[0]: first, keys[1]: second}}, _TWO_TARGETS) == (
+        {"identity": first, "business_model": second}, 0, "계약")
+
+
+@pytest.mark.parametrize("keys", [
+    ("2장 사업 구조와 수익 모델", "7장 사업 운영과 파트너 구조"),
+    ("사업 구조와 수익 모델", "사업 운영과 파트너 구조"),
+    ("2. 사업 구조와 수익 모델", "제7장: 사업 운영과 파트너 구조"),
+])
+def test_제목이_붙은_키는_요청_순번과_무관하게_정본대로_받는다(keys):
+    """순번 충돌이 생기는 요청(2장·7장)이어도 제목이 붙은 키는 그 장으로 풀린다."""
+    first, second = _two_bodies()
+    assert requested_sections_from_response(
+        {"장들": {keys[0]: first, keys[1]: second}}, _CONFLICT_TARGETS) == (
+        {"business_model": first, "operations_partners": second}, 0, "계약")
+
+
+def test_번호와_제목이_어긋난_키는_지금처럼_받지_않는다():
+    """«1장 사업 구조와 수익 모델»은 번호(1장)와 제목(2장)이 달라 어느 표시형에도 없다."""
+    first, _ = _two_bodies()
+    assert requested_sections_from_response(
+        {"장들": {"1장 사업 구조와 수익 모델": first}}, _CONFLICT_TARGETS) == ({}, 1, "요청장없음")
+
+
+def test_순번_충돌로_버린_키는_개수만_모호로_로그에_남긴다(caplog):
+    """충돌 키는 요청 밖으로 세고, 로그에는 개수만 남긴다 — 본문·장 제목은 싣지 않는다."""
+    body = {"문장들": [{"글": BUSINESS_TEXT, "인용": ["2"], "등급": GRADE_CONFIRMED}]}
+    with caplog.at_level(logging.INFO, logger=_RECOVERY_LOGGER):
+        assert requested_sections_from_response(
+            {"장들": {"2장": body}}, _CONFLICT_TARGETS) == ({}, 1, "요청장없음")
+    messages = [record.getMessage() for record in caplog.records if record.name == _RECOVERY_LOGGER]
+    assert messages == ["빈 장 복구 응답 장 키 해석: 정규화 0개, 표시명 0개, 모호 1개"]
+
+
+def test_순번_번호_답은_의미칸_필수가_아니어도_다른_장에_실리지_않는다():
+    """끝까지 — 두 장 의미 칸을 모두 지원하는 조각 하나를 인용한 순번 번호 답.
+
+    ★ 음성 대조 — 순번 충돌 검사를 빼면 «2장» 블록(작가 뜻은 7장 사실)이 2장에
+      실려 빨개진다. require_claim_slot 은 함수 기본값(False) 그대로다 — packet·
+      부분근거 보기가 없는 경로가 이 값을 쓴다.
+    """
+    shared_text = f"{_SHARED_BUSINESS_FACT} {_SHARED_OPERATIONS_FACT}"
+    shared = replace(_fragment("business_model", shared_text, "1"),
+                     supported_claim_slots=(_BUSINESS_SLOT, _OPERATIONS_SLOT))
+    calls, diagnostics = [], []
+    def writer(prompt):
+        calls.append(prompt)
+        return _keyed_response({
+            "1장": [(_SHARED_BUSINESS_FACT, "1", _BUSINESS_SLOT)],
+            "2장": [(_SHARED_OPERATIONS_FACT, "1", _OPERATIONS_SLOT)],
+        })
+    result = recover_empty_sections(
+        "가나다전자", _report(*_CONFLICT_TARGETS), targets=_CONFLICT_TARGETS,
+        evidence=recovery_evidence((shared,)), writer=writer, reviewer=_FakeReviewer(),
+        protocol_diagnostics=diagnostics)
+    assert not any(section.sentences for section in result.sections)
+    assert len(calls) == 2, "순번 충돌 키만 있으면 요청장없음으로 한 번 재요청한다"
+    assert _recovery_states(diagnostics) == ["작성형식실패"]
+
+
+# ══════════════════════════════════════════════════════════
+# 정본 모드 — 순번으로 못 읽는 번호 키가 정본으로 요청 장에 걸리면
+#
+# 2026-09-23 무료 탐침: 요청 2·7장에 정본 번호 키 «2장»·«7장»을 준 답에서 «2장»이
+# 순번 충돌로 버려졌고, «7장»이 풀려 쓸 장이 생겼으므로 재요청도 없이 2장이 빈
+# 채로 끝났다. «7장»은 요청 두 개의 순번으로는 나올 수 없는 번호이고 요청 장이라
+# 작가가 정본 번호를 쓴다는 증거다. 그런 키가 있으면 그 응답의 번호만 있는 키는
+# 모두 정본대로 읽는다(총괄 규칙, 좁힌 판별). 요청 밖 장의 번호(덤 «3장»)는 근거가
+# 아니다. 근거가 없으면 위 규칙 그대로다 — 요청 2·7장에 «1장»·«2장»은 여전히 받지
+# 않고 재요청한다.
+# ══════════════════════════════════════════════════════════
+
+OPERATIONS_TEXT = "가나다전자는 안성 공장에서 검사 장비를 조립해 고객사에 납품한다."
+
+
+def _conflict_section_evidence():
+    """요청 2·7장(business_model·operations_partners)에 장마다 조각 하나."""
+    return recovery_evidence((
+        _fragment("business_model", BUSINESS_TEXT, "2"),
+        replace(_fragment("operations_partners", OPERATIONS_TEXT, "7"),
+                supported_claim_slots=(_OPERATIONS_SLOT,)),
+    ))
+
+
+@pytest.mark.parametrize(("keys", "expected_ids"), [
+    (("2장", "7장"), ("business_model", "operations_partners")),
+    (("7장", "2장"), ("operations_partners", "business_model")),
+    (("제2장", "7장"), ("business_model", "operations_partners")),
+    (("2 장", "제 7 장"), ("business_model", "operations_partners")),
+    (("2장 사업 구조와 수익 모델", "7장"), ("business_model", "operations_partners")),
+])
+def test_순번으로_못_읽는_요청_장_번호_키가_있으면_번호_키를_모두_정본으로_받는다(
+        keys, expected_ids):
+    """«7장»은 요청 두 개의 순번으로 못 읽는 요청 장 번호다 — 같은 응답의 «2장»도 정본이다.
+
+    ★ 음성 대조 — 정본 모드 판별을 빼면 «2장»이 순번 충돌로 버려져
+      ({operations_partners: …}, 1, 계약) 이 되어 빨개진다. 키 순서를 뒤집은 꼴은
+      판별이 키 해석 «전에» 응답 전체로 한 번 정해지는지를 지킨다. 제목이 붙은
+      키(마지막 꼴)는 정본 모드와 무관하게 예전처럼 풀린다.
+    """
+    bodies = {key: {"문장들": [{"글": key}]} for key in keys}
+    expected = {section_id: bodies[key] for key, section_id in zip(keys, expected_ids)}
+    assert requested_sections_from_response({"장들": bodies}, _CONFLICT_TARGETS) == (
+        expected, 0, "계약")
+
+
+def test_정본_모드는_포장_없는_꼴에도_같다():
+    """«장들» 포장을 뺀 답도 같은 판별을 쓴다 — 응답 꼴 코드는 «포장없음» 그대로다."""
+    first, second = _two_bodies()
+    response = {"2장": first, "7장": second}
+    assert requested_sections_from_response(response, _CONFLICT_TARGETS) == (
+        {"business_model": first, "operations_partners": second}, 0, "포장없음")
+
+
+def test_요청_밖_장의_큰_번호는_정본_모드_근거가_아니다():
+    """«5장»은 순번으로 못 읽지만 요청 밖 장이라 근거가 아니다 — «2장»은 순번 충돌이다.
+
+    ★ 음성 대조 — 근거를 요청 장으로 좁히지 않으면(넓은 판별) «5장»이 정본 모드를
+      켜서 ({business_model: …}, 1, 계약) 이 되어 빨개진다.
+    """
+    first, second = _two_bodies()
+    assert requested_sections_from_response(
+        {"장들": {"2장": first, "5장": second}}, _CONFLICT_TARGETS) == (
+        {}, 2, "요청장없음")
+
+
+def test_정본_번호_답_2장_7장은_두_장을_모두_채우고_재요청하지_않는다():
+    """탐침으로 찾은 부작용 고정 — 운영(FULL)처럼 의미 칸 필수로 끝까지 돈다.
+
+    ★ 음성 대조 — 정본 모드 판별을 빼면 2장 블록이 순번 충돌로 버려지고 7장만
+      채워진다. 7장이 풀렸으므로 재요청도 나가지 않아(작가 1회) 2장이 빈 채로 끝난다.
+    """
+    calls, diagnostics = [], []
+    def writer(prompt):
+        calls.append(prompt)
+        return _keyed_response({
+            "2장": [(BUSINESS_TEXT, "2", _BUSINESS_SLOT)],
+            "7장": [(OPERATIONS_TEXT, "7", _OPERATIONS_SLOT)],
+        })
+    result = recover_empty_sections(
+        "가나다전자", _report(*_CONFLICT_TARGETS), targets=_CONFLICT_TARGETS,
+        evidence=_conflict_section_evidence(), writer=writer, reviewer=_FakeReviewer(),
+        protocol_diagnostics=diagnostics, require_claim_slot=True)
+    assert len(calls) == 1, "정본 번호 답을 읽었으면 재요청하지 않는다"
+    assert [[sentence.text for sentence in section.sentences]
+            for section in result.sections] == [[BUSINESS_TEXT], [OPERATIONS_TEXT]]
+    written = next(item for item in diagnostics if item.get("상태") == "작성완료")
+    assert (written["응답꼴"], written["요청밖장수"], written["작성문장수"]) == ("계약", 0, 2)
+    assert _recovery_states(diagnostics) == ["작성완료", "검수완료"]
+
+
+@pytest.mark.parametrize("require_claim_slot", [True, False])
+def test_덤_장_번호는_정본_모드를_켜지_않아_다른_장_사실을_싣지_않고_재요청한다(
+        require_claim_slot):
+    """요청 순번으로 «1장»·«2장»을 쓴 답에 덤 장 «3장»이 얹힌 꼴 — «3장»은 요청 밖이다.
+
+    조각은 두 장 칸을 모두 지원하는 공유 조각이라 인용 검사로는 막히지 않는다.
+    판별이 켜지지 않으므로 «2장»은 순번 충돌로 버려지고, 쓸 장이 없어 재요청한다.
+
+    ★ 음성 대조 — 근거를 요청 장으로 좁히지 않으면(넓은 판별) «3장»이 정본 모드를
+      켜서 «2장»(작가 뜻은 둘째 요청 장의 7장 사실)이 정본 2장으로 풀린다. 의미 칸
+      필수가 아니면 7장 사실이 2장에 실리고, 필수여도 쓸 장이 생겨 재요청이
+      사라진다(작가 1회). 두 매개변수 모두 빨개진다.
+    """
+    shared_text = f"{_SHARED_BUSINESS_FACT} {_SHARED_OPERATIONS_FACT}"
+    shared = replace(_fragment("business_model", shared_text, "1"),
+                     supported_claim_slots=(_BUSINESS_SLOT, _OPERATIONS_SLOT))
+    calls, diagnostics = [], []
+    def writer(prompt):
+        calls.append(prompt)
+        return _keyed_response({
+            "1장": [(_SHARED_BUSINESS_FACT, "1", _BUSINESS_SLOT)],
+            "2장": [(_SHARED_OPERATIONS_FACT, "1", _OPERATIONS_SLOT)],
+            "3장": [(_SHARED_BUSINESS_FACT, "1", _BUSINESS_SLOT)],
+        })
+    result = recover_empty_sections(
+        "가나다전자", _report(*_CONFLICT_TARGETS), targets=_CONFLICT_TARGETS,
+        evidence=recovery_evidence((shared,)), writer=writer, reviewer=_FakeReviewer(),
+        protocol_diagnostics=diagnostics, require_claim_slot=require_claim_slot)
+    assert not any(section.sentences for section in result.sections), "다른 장 사실이 실렸다"
+    assert len(calls) == 2, "쓸 장이 없으면 요청장없음으로 한 번 재요청한다"
+    assert _recovery_states(diagnostics) == ["작성형식실패"]
+
+
+# ══════════════════════════════════════════════════════════
+# 섞인 번호 — 정본 모드로 푼 순번 범위 번호 키의 본문이 다른 요청 장 칸이면
+#
+# 2026-09-23 독립 검토(worker-a): 순번 «1장»(2장 글)·«2장»(7장 글)에 정본 «7장»이
+# 얹히면 «7장»이 정본 모드를 켜서 «2장»의 7장 글이 2장으로 풀렸다. 의미 칸 필수가
+# 아니면 7장 사실이 2장에 공개되고, 필수면 2장이 재요청 없이 빈다. 두 겹으로 막는다.
+#   ① 정본 모드로 푼 번호만 있는 키라도 번호가 요청 장 수 이하(순번으로도 읽힘)이면,
+#      본문 주장슬롯이 다른 요청 장을 가리킬 때 받지 않고 모호로 센다.
+#   ② 포장 없는 꼴에서는 본문이 객체인 키만 정본 모드 근거로 센다.
+# ══════════════════════════════════════════════════════════
+
+_OPERATIONS_TAIL = _OPERATIONS_SLOT.partition(":")[2]
+_OPERATIONS_TITLE = "사업 운영과 파트너 구조"
+
+
+def _slot_body(text, slot=""):
+    """공유 조각 1을 인용한 한 문장 장 본문. slot 이 비면 주장슬롯 칸을 두지 않는다."""
+    sentence = {"글": text, "인용": ["1"], "등급": GRADE_CONFIRMED}
+    if slot:
+        sentence["주장슬롯"] = slot
+    return {"문장들": [sentence]}
+
+
+def _shared_two_section_evidence():
+    """2·7장 칸을 함께 지원하는 공유 조각 하나 — 인용 검사로는 오배정을 못 막는 조건."""
+    shared_text = f"{_SHARED_BUSINESS_FACT} {_SHARED_OPERATIONS_FACT}"
+    shared = replace(_fragment("business_model", shared_text, "1"),
+                     supported_claim_slots=(_BUSINESS_SLOT, _OPERATIONS_SLOT))
+    return recovery_evidence((shared,))
+
+
+def _mixed_response(case, operations_slot=_OPERATIONS_SLOT):
+    """독립 검토의 섞인 번호 꼴 — 작가 뜻은 «1장»=2장 글, «2장»=7장 글이다."""
+    business = _slot_body(_SHARED_BUSINESS_FACT, _BUSINESS_SLOT)
+    operations = _slot_body(_SHARED_OPERATIONS_FACT, operations_slot)
+    seventh = _slot_body(_SHARED_OPERATIONS_FACT, _OPERATIONS_SLOT)
+    if case == "F8":
+        return {"장들": {"1장": business, "2장": operations, "7장": seventh}}
+    if case == "F10":
+        return {"장들": {"2장": operations, "제7장": seventh}}
+    # F9 — 포장 없는 꼴, «7장» 값은 장 제목 문자열이다. 본문 칸을 빼서 ①이 아니라
+    # ②만 이 꼴을 막게 한다.
+    return {"1장": _slot_body(_SHARED_BUSINESS_FACT),
+            "2장": _slot_body(_SHARED_OPERATIONS_FACT), "7장": _OPERATIONS_TITLE}
+
+
+@pytest.mark.parametrize(("case", "unused"), [("F8", 2), ("F10", 1)])
+@pytest.mark.parametrize("operations_slot", [_OPERATIONS_SLOT, _OPERATIONS_TAIL],
+                         ids=["정식칸", "꼬리칸"])
+def test_섞인_번호_답의_순번_2장은_다른_요청_장_칸이면_2장으로_풀리지_않는다(
+        case, unused, operations_slot):
+    """F8·F10 꼴 — «2장»(7장 글)은 모호로 버리고, 7장은 정본 7장 키로 제자리에 받는다.
+
+    ★ 음성 대조 — ①(본문 칸 교차 확인)을 빼면 «2장»이 business_model 로 풀려
+      빨개진다. 꼬리칸 매개변수는 장 ID를 뗀 칸 이름도 장을 가리키는지 지킨다.
+    """
+    response = _mixed_response(case, operations_slot)
+    seventh = response["장들"]["7장" if case == "F8" else "제7장"]
+    assert requested_sections_from_response(response, _CONFLICT_TARGETS) == (
+        {"operations_partners": seventh}, unused, "계약")
+
+
+def test_포장_없는_꼴의_문자열_값_번호_키는_정본_모드_근거가_아니다():
+    """F9 꼴 — «"7장": "<장 제목>"»은 장 본문이 아니다. 판별이 켜지지 않아 «2장»은
+    순번 충돌로 버려지고, 쓸 장이 없어 재요청 대상이 된다.
+
+    ★ 음성 대조 — ②를 빼면(문자열 값도 근거로 세면) 칸 없는 «2장»(7장 글)이
+      business_model 로 풀려 빨개진다.
+    """
+    response = _mixed_response("F9")
+    assert requested_sections_from_response(response, _CONFLICT_TARGETS) == (
+        {}, 0, "요청장없음")
+
+
+@pytest.mark.parametrize("require_claim_slot", [True, False])
+@pytest.mark.parametrize("case", ["F8", "F9", "F10"], ids=["E2_F8", "E3_F9", "E4_F10"])
+def test_섞인_번호_답은_끝까지_가도_7장_사실을_2장에_싣지_않는다(case, require_claim_slot):
+    """독립 검토 E2·E3·E4 — 모두 «참»인 시험용 검수기, 두 장 칸을 함께 지원하는 공유 조각.
+
+    F8·F10 은 7장만 제자리로 복구하고 2장은 빈 채로 둔다(재요청 없음). F9 는 쓸 장이
+    없어 한 번 재요청하고, 같은 답이 다시 와서 작성형식실패로 끝난다.
+
+    ★ 음성 대조 — 두 겹을 빼면(v2.1) 의미 칸 필수가 아닐 때 7장 사실이 2장에 실리고,
+      필수일 때는 F9 가 재요청 없이 확인후보없음으로 끝나 빨개진다. 의미 칸 필수인
+      F8·F10 은 v2.1 에서도 손실만 나므로 이 매개변수는 회귀 방지용이다.
+    """
+    calls, diagnostics = [], []
+    def writer(prompt):
+        calls.append(prompt)
+        return json.dumps(_mixed_response(case), ensure_ascii=False)
+    result = recover_empty_sections(
+        "가나다전자", _report(*_CONFLICT_TARGETS), targets=_CONFLICT_TARGETS,
+        evidence=_shared_two_section_evidence(), writer=writer,
+        reviewer=_FakeReviewer(), protocol_diagnostics=diagnostics,
+        require_claim_slot=require_claim_slot)
+    placed = {section.section_id: [sentence.text for sentence in section.sentences]
+              for section in result.sections}
+    assert placed["business_model"] == [], "7장 사실이 2장에 실렸다"
+    if case == "F9":
+        assert (len(calls), _recovery_states(diagnostics)) == (2, ["작성형식실패"])
+        assert placed["operations_partners"] == []
+    else:
+        assert len(calls) == 1
+        assert placed["operations_partners"] == [_SHARED_OPERATIONS_FACT]
+        assert _recovery_states(diagnostics) == ["작성완료", "검수완료"]
+
+
+def test_주장슬롯_꼬리_이름은_장끼리_겹치지_않는다():
+    """정본 표(CLAIM_SLOTS_BY_SECTION)의 불변식 — 칸은 «장 ID:꼬리» 꼴이고 꼬리는 한 장에만 있다.
+
+    주장슬롯 앞부분 복원과 섞인 번호 답의 본문 칸 교차 확인이 이 전제에 기댄다. 두 장이
+    같은 꼬리를 가지면 꼬리만 적은 다른 장 문장이 이 장의 정식 칸으로 복원되고, 교차
+    확인도 그 문장의 장을 가리지 못한다.
+    """
+    malformed = [slot for section_id, slots in CLAIM_SLOTS_BY_SECTION.items()
+                 for slot in slots
+                 if slot.count(":") != 1 or slot.partition(":")[0] != section_id]
+    tails = [slot.partition(":")[2]
+             for slots in CLAIM_SLOTS_BY_SECTION.values() for slot in slots]
+    assert malformed == []
+    assert sorted({tail for tail in tails if tails.count(tail) > 1}) == []
+
+
+def test_한_장만_풀리면_다른_장은_재요청_없이_빈다():
+    """현재 동작 고정(2026-09-23 독립 검토 낮음 (가)) — 요청 1·8장에 «1장»·«2장»(순번).
+
+    «1장»은 두 읽기가 같은 장이라 받고, «2장»은 정본 2장이 요청 밖이라 해석하지 못한다.
+    쓸 장이 하나라도 있으면 재요청하지 않으므로(2026-09-14 규칙) culture 는 이번
+    복구에서 빈 채로 남는다. 이 동작을 바꿀 때는 이 시험을 의도적으로 고친다.
+    """
+    targets = ("identity", "culture")
+    identity_slot = CLAIM_SLOTS_BY_SECTION["identity"][0]
+    culture_slot = CLAIM_SLOTS_BY_SECTION["culture"][0]
+    calls, diagnostics = [], []
+    def writer(prompt):
+        calls.append(prompt)
+        return _keyed_response({"1장": [(IDENTITY_TEXT, "1", identity_slot)],
+                                "2장": [(CULTURE_TEXT, "8", culture_slot)]})
+    result = recover_empty_sections(
+        "가나다전자", _report(*targets), targets=targets,
+        evidence=recovery_evidence((_fragment("identity", IDENTITY_TEXT, "1"),
+                                    _fragment("culture", CULTURE_TEXT, "8"))),
+        writer=writer, reviewer=_FakeReviewer(), protocol_diagnostics=diagnostics,
+        require_claim_slot=True)
+    assert len(calls) == 1, "쓸 장이 하나라도 있으면 재요청하지 않는다"
+    assert [[sentence.text for sentence in section.sentences]
+            for section in result.sections] == [[IDENTITY_TEXT], []]
+    written = next(item for item in diagnostics if item.get("상태") == "작성완료")
+    assert (written["요청밖장수"], written["작성문장수"]) == (1, 1)
+    assert _recovery_states(diagnostics) == ["작성완료", "검수완료"]
+
+
+# ══════════════════════════════════════════════════════════
+# 포장 안에서도 문자열 값 번호 키는 정본 모드 근거가 아니다
+#
+# «장들» 포장 안의 «"7장": "<장 제목>"»도 장 본문이 아니다. 이전 규칙은 포장 없는
+# 꼴에서만 객체 값 키를 근거로 셌고, 포장 안에서는 문자열 값도 셌다. 그래서 칸 없는
+# «2장»(7장 글)과 함께 오면 정본 모드가 켜져 «2장»이 2장으로 풀렸다. 문자열 본문은
+# 포장 안에서도 그 장 본문으로 고르지 않는다 — 쓸 장이 없으면 재요청한다.
+# ══════════════════════════════════════════════════════════
+
+
+def test_포장_안에서도_본문이_객체인_번호_키만_정본_모드_근거다():
+    """같은 «2장»(2장 글)이 «7장» 값이 객체면 정본 모드로 2장에 풀리고, 문자열이면
+    판별이 켜지지 않아 순번 충돌로 버려진다.
+
+    문자열 값 자체도 7장 본문으로 고르지 않으므로 쓸 장이 없어 요청장없음(재요청
+    대상)이 된다.
+
+    ★ 음성 대조 — 포장 안 문자열 값도 근거로 세면 문자열 쪽에서 «2장»이 2장으로 풀려
+      빨개진다. 문자열 본문을 고르면 요청장없음 대신 7장에 문자열이 골라져 빨개진다.
+      객체 쪽 단정은 정본 모드가 포장 안에서 그대로 켜지는지 지킨다.
+    """
+    business = _slot_body(_SHARED_BUSINESS_FACT, _BUSINESS_SLOT)
+    seventh = _slot_body(_SHARED_OPERATIONS_FACT, _OPERATIONS_SLOT)
+    assert requested_sections_from_response(
+        {"장들": {"2장": business, "7장": seventh}}, _CONFLICT_TARGETS) == (
+        {"business_model": business, "operations_partners": seventh}, 0, "계약")
+    assert requested_sections_from_response(
+        {"장들": {"2장": business, "7장": _OPERATIONS_TITLE}}, _CONFLICT_TARGETS) == (
+        {}, 1, "요청장없음")
+
+
+def test_포장_안_문자열_근거와_칸_없는_2장은_끝까지_가도_2장에_싣지_않는다():
+    """«장들» 안에 순번 «1장»(2장 글)·«2장»(7장 글, 칸 없음)과 문자열 «7장».
+
+    판별이 켜지지 않아 «2장»은 순번 충돌로, «1장»은 정본 1장이 요청 밖이라 버려진다.
+    문자열 «7장»도 7장 본문으로 고르지 않으므로 쓸 장이 없어 한 번 재요청한다. 같은
+    답이 다시 와서 작성형식실패로 끝나고, 두 장 모두 빈 채로 남는다.
+
+    ★ 음성 대조 — 포장 안 문자열 값도 근거로 세면 칸 없는 «2장»이 business_model 로
+      풀려, 의미 칸 필수가 아닌 경로에서 7장 사실이 2장에 실린다. 문자열 본문을 고르면
+      재요청 없이 확인후보없음으로 끝나 빨개진다.
+    """
+    response = {"장들": {"1장": _slot_body(_SHARED_BUSINESS_FACT),
+                         "2장": _slot_body(_SHARED_OPERATIONS_FACT),
+                         "7장": _OPERATIONS_TITLE}}
+    calls, diagnostics = [], []
+    def writer(prompt):
+        calls.append(prompt)
+        return json.dumps(response, ensure_ascii=False)
+    result = recover_empty_sections(
+        "가나다전자", _report(*_CONFLICT_TARGETS), targets=_CONFLICT_TARGETS,
+        evidence=_shared_two_section_evidence(), writer=writer,
+        reviewer=_FakeReviewer(), protocol_diagnostics=diagnostics,
+        require_claim_slot=False)
+    assert not any(section.sentences for section in result.sections), "다른 장 사실이 실렸다"
+    assert (len(calls), _recovery_states(diagnostics)) == (2, ["작성형식실패"])

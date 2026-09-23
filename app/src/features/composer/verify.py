@@ -90,10 +90,17 @@ from src.features.composer.grounding_rewrite_constants import (
 )
 from src.features.composer.review_protocol_observation import (
     envelope_code_for_payload,
+    extraction_failed,
     finish_protocol_observation,
     new_protocol_observation,
     note_envelope,
+    note_optional_call_aborted,
     note_row_failure,
+    note_row_salvage,
+)
+from src.features.composer.review_row_salvage import (
+    SalvagedVerdicts,
+    salvage_verdict_rows,
 )
 from src.features.composer.entity_scope_constraints import (
     EntityScopeContext,
@@ -133,6 +140,7 @@ from src.features.composer.body_review_constants import (
 )
 from src.features.composer.review_schema import (
     FLAT_REVIEW_SCHEMA,
+    PACKET_REVIEW_SCHEMA_ENABLED,
     ReviewPrompt,
 )
 from src.features.composer.prompt_metadata import with_review_prompt_cache
@@ -652,6 +660,65 @@ def _safe_ask(ask: AskFn, prompt: str) -> Optional[str]:
     except Exception:  # noqa: BLE001 - 검수 호출 실패는 «검수 불능»으로 처리한다
         logger.warning("검수 AI 호출이 실패했다 — 해당 판정은 «불능»으로 처리한다")
         return None
+
+
+#: 두 번째 호출의 단계 이름 — 포기 로그에만 쓴다.
+_PURPOSE_FORMAT_RETRY: Final[str] = "형식 재요청"
+_PURPOSE_MISSING_FOLLOWUP: Final[str] = "누락 후속"
+
+
+def _safe_optional_ask(
+    ask: AskFn, prompt: str, *, purpose: str,
+) -> tuple[Optional[str], Optional[AskFatalError]]:
+    """검수의 «두 번째 호출»(형식 재요청·누락 후속)을 부른다 — (응답, 포기 사유 예외).
+
+    ★ 두 번째 호출은 이미 받은 첫 응답을 «다듬는» 선택적 단계다. 요청의 AI 호출
+      «횟수» 상한이나 요청 로컬 «예약액» 소진(``AskFatalError.degradable``)에
+      닿으면 그 호출만 포기하고 첫 응답으로 얻은 판정으로 진행한다. 예전에는 이
+      한 번이 재전파돼 ``verify_report`` 전체가 실패하고, 이미 확보한 판정(예:
+      행 단위로 구제한 41행)까지 본문이 통째로 안내문이 됐다. «거짓» 재작성·
+      근거 결속 재작성의 저하 갈래(`_semantic_review`)와 같은 처분이다.
+    ⚠️ 첫 호출은 이 함수를 쓰지 않는다 — 본문 1차 검수는 우아한 저하 대상이
+      아니다(`MAX_REWRITE_CALLS_PER_VERIFY` 머리말). 그 밖의 AskFatalError(돈·
+      계정·billing-uncertain·전역 취소)는 예전처럼 재전파한다.
+    ``purpose``: 로그에만 쓰는 단계 이름(«형식 재요청»·«누락 후속»). 응답·문장은
+    로그에 넣지 않는다.
+    """
+    try:
+        return _safe_ask(ask, prompt), None
+    except AskFatalError as error:
+        if not getattr(error, "degradable", False):
+            raise
+        logger.warning(
+            "요청 AI 한도(%s)에 닿아 검수 %s 호출을 포기한다 — 첫 응답의 판정으로 진행한다",
+            _grounding_abort_reason(error), purpose,
+        )
+        return None, error
+
+
+def _second_review_call_allowed(
+    available: Optional[Callable[[], bool]], purpose: str,
+) -> bool:
+    """두 번째 검수 호출(형식 재요청·누락 후속)을 보내도 되는지 부르는 쪽에 묻는다.
+
+    ``available`` 이 없으면(기본) 언제나 보낸다 — 예전 동작 그대로다. 거짓이면
+    호출도 관측도 만들지 않는다 — 관측은 실제로 보낸 호출에만 만든다.
+    ★ 왜 묻는가 (2026-09-23 적대 검토 D3) — FULL 의 호출 장부는 검수자 호출을
+      1회로 묶어 두 번째 호출을 공급자 «전»에 RuntimeError 로 막는다. 그 예외를
+      `_safe_ask` 가 일반 호출 실패로 삼키면, 보내지도 않은 호출이 «빈 응답»
+      관측과 «검수 AI 호출이 실패했다» 경고로 남아 공급자 장애처럼 보인다.
+      장부 예외를 타입 이름·문구로 알아보지 않는다 — 장부를 가진 부르는 쪽이
+      호출 «전»에 답한다.
+    ``purpose``: 로그에만 쓰는 단계 이름. 응답·문장은 로그에 넣지 않는다.
+    """
+    if available is None or available():
+        return True
+    logger.info(
+        "부르는 쪽이 이 검수의 두 번째 호출을 허락하지 않아 검수 %s 호출을 보내지 않는다"
+        " — 첫 응답의 판정으로 진행한다",
+        purpose,
+    )
+    return False
 
 
 # ══════════════════════════════════════════════════════════
@@ -1251,6 +1318,72 @@ def _build_grouped_review_prompt(
     return with_review_prompt_cache("".join(parts), fixed_prefix_chars=fixed_prefix_chars)
 
 
+def _salvaged_review(raw: Optional[str]) -> Optional[SalvagedVerdicts]:
+    """응답 «전체»가 구문 오류로 못 읽힐 때만 판정 행을 하나씩 구제한다.
+
+    적법하게 읽히는 응답(객체가 아닌 JSON·«판정» 키 없음 같은 봉투 계약 위반
+    포함)과 빈 응답은 구제 대상이 아니다 — None 이다. 같은 원문이면 언제나 같은
+    결과를 내는 순수 함수라, 파서(`_review_entries`)와 근거 결속
+    (`_review_binding_text`)이 따로 불러도 같은 행을 본다.
+    """
+    if raw is None or not raw.strip():
+        return None
+    probe: dict[str, object] = {}
+    extract_json_payload(raw, observe=probe)
+    if not extraction_failed(probe):
+        return None
+    return salvage_verdict_rows(raw)
+
+
+def _review_binding_text(raw: Optional[str]) -> Optional[str]:
+    """근거 결속 단계가 다시 읽을 응답 문자열 — 구제됐으면 파서가 읽은 구제 문자열.
+
+    ★ 결속 파서(constrain_verdicts·support_entries_by_number·
+      future_plan_entries_by_number)는 판정 파서와 «따로» 원문을 다시 읽는다.
+      파서가 구제한 행을 받아들였는데 결속 단계가 깨진 원문을 그대로 읽으면
+      행이 하나도 보이지 않아, 수치·추세 결속 검사가 그 판정들을 «건너뛴다»
+      (constrain_verdicts 는 응답에 있는 행만 검사한다) — 근거 검사가 조용히
+      꺼지는 fail-open 이다. 그래서 구제된 경우에는 파서가 읽은 «같은» 구제
+      문자열을 돌려준다. 읽히는 응답은 원문을 한 글자도 바꾸지 않고 돌려준다.
+    """
+    salvaged = _salvaged_review(raw)
+    return raw if salvaged is None else salvaged.text
+
+
+def _review_entries(raw: str, observe: Optional[dict]) -> Optional[list]:
+    """검수 응답에서 «판정» 배열을 꺼낸다. 봉투 단계에서 끝나면 None.
+
+    평문(`_parse_verdicts`)·묶음(`_parse_grouped_verdicts`) 두 파서가 같은 봉투
+    규칙을 쓰도록 한 곳에 둔다. 응답 전체가 구문 오류면 행 단위 구제를 시도하고,
+    구제된 문자열을 «다시 읽어» 그 배열을 돌려준다 — 근거 결속이 읽는 문자열
+    (`_review_binding_text`)과 같은 문자열이므로 두 단계가 보는 행이 같다.
+    구제한 행도 아래 행 검사(판정값·번호·장 소유권·근거 id)를 똑같이 받는다.
+    """
+    payload = extract_json_payload(raw, observe=observe)
+    if not isinstance(payload, Mapping):
+        salvaged = _salvaged_review(raw)
+        if salvaged is None:
+            note_envelope(observe, envelope_code_for_payload(observe, raw))
+            return None
+        note_row_salvage(observe, salvaged.dropped_rows)
+        # ⚠️ 응답 본문은 로그에도 넣지 않는다 — 개수만.
+        logger.warning(
+            "검수 응답 JSON 구문 오류 — 판정 %d행을 행 단위로 구제했다(구문 탈락 %d행)",
+            salvaged.kept_rows, salvaged.dropped_rows,
+        )
+        payload = extract_json_payload(salvaged.text)
+    if observe is not None and REVIEW_VERDICTS_KEY not in payload:
+        note_envelope(observe, READ_VERDICTS_KEY_MISSING)
+        return None
+    entries = payload.get(REVIEW_VERDICTS_KEY)
+    if not isinstance(entries, list):
+        note_envelope(observe, READ_VERDICTS_NOT_LIST)
+        return None
+    if observe is not None:
+        observe["응답행수"] = len(entries)
+    return entries
+
+
 def _grouped_row_reason(
     result: str,
     section_id: str,
@@ -1279,14 +1412,19 @@ def _parse_grouped_verdicts(
     evidence_ids_by_number: Mapping[int, frozenset[str]],
     *,
     observe: Optional[dict] = None,
+    requested_numbers: Optional[Sequence[int]] = None,
 ) -> Optional[dict[int, str]]:
     """번호뿐 아니라 입력 장과 같은 판정만 받아 장 경계를 잠근다.
 
     ``observe``: 주면 지나간 분기의 «개수와 닫힌 코드»만 적는다. 반환값과
     판정 규칙은 그대로이며 응답 본문은 담지 않는다.
+    ``requested_numbers``: 관측의 «미응답/요청밖» 계산에만 쓴다(생략하면
+    ``owners`` 전체). 누락 후속처럼 일부 번호만 다시 물었을 때 넘긴다 — 행의
+    장 소유권 검사는 언제나 ``owners`` 전체로 한다.
     번호가 순수 숫자 문자열("3")로 와도 정수로 보정해 받는다(표현형만
     확장, composer.verdict_number 공용 — verify._parse_verdicts·
     diagram_check.py와 같은 규칙).
+    응답 전체가 구문 오류면 판정 행을 하나씩 구제해 읽는다(`_review_entries`).
     """
     # verify.py 안 다른 검수 파서(_parse_verdicts)와 같은 번호 보정 규칙을
     # 쓰게 공용 모듈에서 가져온다(지역 import — grounding.py가 이미 쓰는
@@ -1294,19 +1432,9 @@ def _parse_grouped_verdicts(
     from src.features.composer.verdict_number import coerce_verdict_number
     if raw is None:
         return None
-    payload = extract_json_payload(raw, observe=observe)
-    if not isinstance(payload, Mapping):
-        note_envelope(observe, envelope_code_for_payload(observe, raw))
+    entries = _review_entries(raw, observe)
+    if entries is None:
         return None
-    if observe is not None and REVIEW_VERDICTS_KEY not in payload:
-        note_envelope(observe, READ_VERDICTS_KEY_MISSING)
-        return None
-    entries = payload.get(REVIEW_VERDICTS_KEY)
-    if not isinstance(entries, list):
-        note_envelope(observe, READ_VERDICTS_NOT_LIST)
-        return None
-    if observe is not None:
-        observe["응답행수"] = len(entries)
     out: dict[int, str] = {}
     invalid_numbers: set[int] = set()
     for entry in entries:
@@ -1349,8 +1477,24 @@ def _parse_grouped_verdicts(
             continue
         if number not in invalid_numbers:
             out[number] = result
-    finish_protocol_observation(observe, out, owners)
+    finish_protocol_observation(
+        observe, out, owners if requested_numbers is None else requested_numbers,
+    )
     return out or None
+
+
+def _packet_review_prompt(text: str) -> str:
+    """packet 검수 요청 글자 — 스키마 스위치가 켜졌을 때만 FLAT_REVIEW_SCHEMA 를 싣는다.
+
+    스위치 ``PACKET_REVIEW_SCHEMA_ENABLED``(review_schema.py)는 기본 꺼짐이다 — 실제
+    공급자가 이 스키마 요청을 받아들이는지 한 번도 검증되지 않았고, 거절되면
+    AskFatalError 로 요청 전체가 멈추기 때문이다(그 상수의 주석). 꺼져 있으면 받은
+    객체를 «그대로» 돌려준다 — 캐시 경계 메타데이터(``cache_prefix_chars``)가 붙은
+    프롬프트면 그 표식도 그대로 간다. 켜져 있어도 문자열 바이트는 바뀌지 않는다.
+    """
+    if PACKET_REVIEW_SCHEMA_ENABLED:
+        return ReviewPrompt(text, FLAT_REVIEW_SCHEMA)
+    return text
 
 
 def _ask_grouped_verdicts(
@@ -1361,21 +1505,54 @@ def _ask_grouped_verdicts(
     *,
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
+    initial_retry_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
     allowed_fragment_ids_by_section: Optional[Mapping[str, frozenset[str]]] = None,
     section_moves: Optional[list[_SectionMove]] = None,
     grounding_problems: Optional[dict[int, str]] = None,
+    second_review_call_available: Optional[Callable[[], bool]] = None,
 ) -> Optional[dict[int, str]]:
-    """packet 본문·도식을 정확히 한 번에 검수한다.
+    """packet 본문·도식을 장별 블록 한 요청으로 검수한다(+재요청 «또는» 누락 후속 1회).
 
-    엄격 packet의 호출 계약은 reviewer 1회 고정이다. 형식 오류·누락을 두 번째
-    호출로 복구하지 않고 ``None``으로 돌려 공개 후보를 fail-closed 처리한다.
+    호출 계약 — 평문 경로(`_ask_verdicts`)와 같다 (2026-09-23 개정):
+      · 첫 요청 1회. 네이티브 스키마(FLAT_REVIEW_SCHEMA)는 스위치
+        ``PACKET_REVIEW_SCHEMA_ENABLED``(review_schema.py, 기본 꺼짐)가 켜졌을 때만
+        세 호출(첫 요청 — ``initial_ask`` 가 있을 때, 형식 재요청, 누락 후속)에 싣는다
+        (`_packet_review_prompt`). 꺼져 있으면 스키마 없는 문자열이다. 어느 쪽이든
+        프롬프트 바이트·캐시 경계(``cache_prefix_chars``)는 그대로다.
+      · 응답을 통째로 못 읽으면(행 단위 구제로도 유효 행이 없으면) RETRY_REMINDER
+        파싱 재요청을 PARSE_RETRY_LIMIT회 보낸다.
+      · 읽혔는데 요청 번호 일부의 판정이 빠졌으면(구제에서 버린 행 포함) 빠진
+        항목만 다시 묶어 MISSING_VERDICTS_REMINDER 후속을 1회 보낸다. 첫 응답의
+        행은 한 글자도 바꾸지 않고, 후속 판정은 빠진 번호에만 적용한다
+        (`_merge_review_payloads`). 후속도 못 읽히거나 또 빠진 번호는 예전처럼
+        판정 없이 제거된다 — 빠진 번호를 참으로 간주하지 않는다.
+      · 재요청과 후속은 같은 예산(PARSE_RETRY_LIMIT)을 쓴다 — 호출은 최대 2회다.
+      · 재요청·후속 호출자는 ``initial_retry_ask`` → ``initial_ask`` → ``ask`` 순.
+      · 첫 요청의 ``AskFatalError`` 는 재전파한다. 두 번째 호출(재요청·후속)은
+        요청 AI 몫 소진(호출 횟수 상한·요청 로컬 예약액, ``degradable``)이면 그
+        호출만 포기하고 첫 응답 결과로 진행한다(`_safe_optional_ask`). 관측 판독은
+        ``call_limit_reached``/``request_budget_exhausted``다. 그 밖의 AskFatalError
+        는 재전파한다. 일반 호출 실패는 None 으로 삼키고 첫 응답 결과를 그대로 쓴다.
+      · 빈 묶음(``items`` 없음)은 영수증 계약상 1회만 보낸다 — 판정할 번호가 없다.
+    ⚠️ FULL 실행의 호출 장부(composer/pipeline.py `_CallLedgerRecorder`)는 이
+      검수의 검수자 호출을 1회로 묶는다(2026-09-23 현재). 그 장부 아래에서는 두
+      번째 호출이 공급자에 닿기 전에 장부가 RuntimeError 로 막고 `_safe_ask` 가
+      None 으로 삼킨다 — FULL 에서는 행 단위 구제만 효과가 있고 재요청·후속은
+      «호출 실패»와 같게 닫힌다(추가 과금·영수증 변화 없음, fail-closed).
+      ``second_review_call_available`` 를 넘기면 그 «보내지 않은» 호출을 관측·
+      경고 없이 건너뛴다(2026-09-23 현재 pipeline 은 넘기지 않는다).
 
+    ``second_review_call_available``: 두 번째 호출(형식 재요청·누락 후속) 직전에
+    부르는 질문(선택). 거짓이면 그 호출을 보내지 않고 관측도 만들지 않는다
+    (`_second_review_call_allowed`). 생략하면 예전과 같다.
     ``allowed_fragment_ids_by_section``: 장별 허용 조각. «원문 그대로인 보도» 문맥의
     장 소유권 대조에만 쓴다(항목 자체의 허용 검사는 부르는 쪽이 이미 했다).
     ``grounding_problems``: 근거 결속 탈락의 «사유 코드»를 번호별로 담아 돌려주는
     자리. 평문 경로의 `_ask_verdicts` 와 같은 뜻·같은 값이다.
+    ``initial_retry_ask``: 재요청·누락 후속 전용 호출자(선택). 첫 답에 맞춘 작은
+    출력 상한을 가진 호출자를 넣으면 그 한 번의 예약액만 줄어든다.
     """
 
     # ★ 후보별 보도 원문 문맥은 «한 번» 계산해 안내와 판정에 같은 값을 준다.
@@ -1394,27 +1571,112 @@ def _ask_grouped_verdicts(
     evidence_ids_by_number = {
         item.number: frozenset(item.citations) for item in items
     }
-    # 최초 본문 검수 전용 호출자가 있으면 이 «한 번»에만 쓴다.
-    raw = _safe_ask(initial_ask or ask, prompt)
-    # 관측은 «실제로 보낸» 이 한 번에 대해서만 만든다.
-    observe = (
-        new_protocol_observation(
+    # 최초 본문 검수 전용 호출자가 있으면 첫 요청에 쓴다. 재요청·후속은 전용
+    # 재요청 호출자가 있으면 그것, 없으면 첫 요청과 같은 호출자다.
+    reviewer = initial_ask or ask
+    retry_reviewer = initial_retry_ask or reviewer
+
+    def _observe_attempt(
+        attempt: int, sent: str, answer: Optional[str],
+        *, requested_count: Optional[int] = None,
+    ) -> Optional[dict]:
+        # 관측은 «실제로 보낸» 호출에만 만든다 — 도달하지 않은 시도는 적지 않는다.
+        # ``requested_count``: 누락 후속은 «빠진 번호 수»만 묻는다. 안 주면 전체.
+        if protocol_diagnostics is None:
+            return None
+        return new_protocol_observation(
             PATH_PACKET,
-            1,
-            prompt_chars=len(prompt),
-            response_chars=len(raw or ""),
-            requested_count=len(owners),
+            attempt,
+            prompt_chars=len(sent),
+            response_chars=len(answer or ""),
+            requested_count=(
+                len(owners) if requested_count is None else requested_count
+            ),
         )
-        if protocol_diagnostics is not None
-        else None
+
+    # 스키마 스위치가 켜졌을 때도 평문 경로와 같은 조건 — 최초 본문 검수(initial_ask)만
+    # 첫 요청부터 스키마를 싣는다. 스위치가 꺼져 있으면(기본) ``prompt`` 객체를 그대로
+    # 보내 캐시 경계 메타데이터까지 예전과 같다.
+    first_prompt = (
+        _packet_review_prompt(prompt) if initial_ask is not None else prompt
     )
+    raw = _safe_ask(reviewer, first_prompt)
+    observe = _observe_attempt(1, first_prompt, raw)
     verdicts = _parse_grouped_verdicts(
         raw, owners, evidence_ids_by_number, observe=observe,
     )
     if observe is not None:
         protocol_diagnostics.append(observe)
+    retries = 0
+    # ⚠️ 빈 묶음(items 없음)은 판정할 번호가 없어 언제나 None 이다 — 재요청하지
+    #   않는다(영수증 계약의 검수 1회 그대로).
+    while verdicts is None and items and retries < PARSE_RETRY_LIMIT:
+        if not _second_review_call_allowed(
+            second_review_call_available, _PURPOSE_FORMAT_RETRY,
+        ):
+            break
+        retries += 1
+        retry_prompt = _packet_review_prompt(prompt + RETRY_REMINDER)
+        raw, aborted = _safe_optional_ask(
+            retry_reviewer, retry_prompt, purpose=_PURPOSE_FORMAT_RETRY,
+        )
+        observe = _observe_attempt(retries + 1, retry_prompt, raw)
+        verdicts = _parse_grouped_verdicts(
+            raw, owners, evidence_ids_by_number, observe=observe,
+        )
+        if aborted is not None:
+            note_optional_call_aborted(observe, call_limit=aborted.call_limit)
+        if observe is not None:
+            protocol_diagnostics.append(observe)
     if verdicts is None:
         return None
+    # ★ 부분 응답은 «완전성 실패»다. 2026-09-23 유료 실행: 42행 중 한 행의 괄호
+    #   오류로 문서 전체가 못 읽혔다. 행 단위 구제로 41행을 살려도 깨진 한 행은
+    #   판정이 없으므로, 같은 재요청 예산 안에서 «빠진 항목만» 다시 묻는다.
+    #   파싱 재요청을 이미 썼으면(retries == 상한) 후속 없이 예전처럼 제거된다.
+    if retries < PARSE_RETRY_LIMIT:
+        missing_items = [item for item in items if item.number not in verdicts]
+        if missing_items and _second_review_call_allowed(
+            second_review_call_available, _PURPOSE_MISSING_FOLLOWUP,
+        ):
+            retries += 1
+            missing_numbers = frozenset(item.number for item in missing_items)
+            followup_prompt = _packet_review_prompt(
+                _build_grouped_review_prompt(
+                    missing_items, frag_by_id, table,
+                    verbatim_by_number=verbatim_by_number,
+                ) + MISSING_VERDICTS_REMINDER
+            )
+            followup_raw, aborted = _safe_optional_ask(
+                retry_reviewer, followup_prompt, purpose=_PURPOSE_MISSING_FOLLOWUP,
+            )
+            observe = _observe_attempt(
+                retries + 1, followup_prompt, followup_raw,
+                requested_count=len(missing_numbers),
+            )
+            # 장 소유권·근거 id 검사는 원래 번호표 전체로 하고, 관측의 요청 수만
+            # 빠진 번호로 좁힌다(요청 밖 행은 아래 recovered 에서 버린다).
+            followup_verdicts = _parse_grouped_verdicts(
+                followup_raw, owners, evidence_ids_by_number, observe=observe,
+                requested_numbers=sorted(missing_numbers),
+            )
+            if aborted is not None:
+                note_optional_call_aborted(observe, call_limit=aborted.call_limit)
+            if observe is not None:
+                protocol_diagnostics.append(observe)
+            recovered = {
+                number: verdict
+                for number, verdict in (followup_verdicts or {}).items()
+                if number in missing_numbers
+            }
+            # ⚠️ 문장 본문은 넣지 않는다 — 개수만.
+            logger.info(
+                "packet 검수 부분 응답 후속: 요청 %d · 첫 응답 미응답 %d · 후속 판정 회복 %d",
+                len(owners), len(missing_numbers), len(recovered),
+            )
+            if recovered:
+                raw = _merge_review_payloads(raw, verdicts, followup_raw, recovered)
+                verdicts = {**verdicts, **recovered}
     table_source = _table_grounding_source(table)
     candidates = {
         item.number: _grouped_grounding_candidate(
@@ -1444,6 +1706,8 @@ def _ask_grouped_verdicts(
         )
         for item in items
     }
+    # 응답이 행 단위로 구제됐다면 결속 단계도 파서와 «같은» 구제 문자열을 읽는다
+    # (`_apply_grounding` 이 첫 줄에서 `_review_binding_text` 로 맞춘다).
     return _apply_grounding(
         raw,
         verdicts,
@@ -1746,6 +2010,12 @@ def _apply_grounding(
     #     생기는 자리마다 판정도 함께 그 값으로 바뀌기 때문이다(아래 본문·
     #     `constrain_verdicts` 양쪽 모두). 장 이동으로 넘어간 문장은 사유를
     #     남기지 않으므로 여기에도 없다.
+    # ★ ``raw`` 는 아래 세 결속 파서가 판정 파서와 «따로» 다시 읽는다. 판정 파서가
+    #   구문 오류 응답을 행 단위로 구제했다면 여기서도 «같은» 구제 문자열을 읽어야
+    #   두 단계가 같은 행을 본다 — 깨진 원문을 그대로 읽으면 결속 검사가 구제된
+    #   판정들을 건너뛴다(fail-open). 읽히는 응답은 원문 그대로다. 부르는 쪽이
+    #   원문을 넘기든 구제 문자열을 넘기든 결과가 같도록 이 한 곳에서 맞춘다.
+    raw = _review_binding_text(raw)
     grounding_details: dict[int, dict[str, object]] = {}
     constrained, problems = constrain_verdicts(
         raw, verdicts, candidates, cells_by_number=flow_cells_by_number,
@@ -2243,25 +2513,16 @@ def _parse_verdicts(
     판정 규칙은 그대로이며 응답 본문은 담지 않는다.
     ``requested_numbers``: 관측의 «미응답/요청밖» 계산에만 쓴다. 요청에
     없던 번호도 계약 그대로 반환 dict 에 남긴다.
+    응답 전체가 구문 오류면 판정 행을 하나씩 구제해 읽는다(`_review_entries`).
     """
     # verify.py·diagram_check.py가 같은 번호 보정 규칙을 쓰게 공용 모듈에서
     # 가져온다(지역 import — 이 함수 밖 다른 줄은 건드리지 않는다).
     from src.features.composer.verdict_number import coerce_verdict_number
     if raw is None:
         return None
-    payload = extract_json_payload(raw, observe=observe)
-    if not isinstance(payload, Mapping):
-        note_envelope(observe, envelope_code_for_payload(observe, raw))
+    entries = _review_entries(raw, observe)
+    if entries is None:
         return None
-    if observe is not None and REVIEW_VERDICTS_KEY not in payload:
-        note_envelope(observe, READ_VERDICTS_KEY_MISSING)
-        return None
-    entries = payload.get(REVIEW_VERDICTS_KEY)
-    if not isinstance(entries, list):
-        note_envelope(observe, READ_VERDICTS_NOT_LIST)
-        return None
-    if observe is not None:
-        observe["응답행수"] = len(entries)
     out: dict[int, str] = {}
     invalid_numbers: set[int] = set()
     for entry in entries:
@@ -2309,11 +2570,14 @@ def _merge_review_payloads(
     ★ 후속 응답에서 «대상 번호가 아닌 행»은 버린다 — 첫 응답이 이미 판정한 번호를
       후속 응답이 참으로 덮어쓰거나, 후속에서 새로 나온 요청 밖 번호가 끼어들지
       못하게 한다.
+    ★ 어느 응답이든 통째로 못 읽혀 파서가 행 단위로 구제했다면, 여기서도 «같은»
+      구제 문자열의 행을 쓴다(`_review_binding_text`). 깨진 원문을 그대로 읽으면
+      첫 응답의 행이 합친 응답에서 사라져, 근거 결속이 그 판정들을 검사하지 못한다.
     """
     from src.features.composer.verdict_number import coerce_verdict_number
 
     def _rows(raw: Optional[str], numbers: frozenset[int]) -> list[Mapping]:
-        payload = extract_json_payload(raw or "")
+        payload = extract_json_payload(_review_binding_text(raw) or "")
         entries = (
             payload.get(REVIEW_VERDICTS_KEY) if isinstance(payload, Mapping) else None
         )
@@ -2345,6 +2609,7 @@ def _ask_verdicts(
     baseline_date: Optional[str] = None,
     section_moves: Optional[list[_SectionMove]] = None,
     grounding_problems: Optional[dict[int, str]] = None,
+    second_review_call_available: Optional[Callable[[], bool]] = None,
 ) -> Optional[dict[int, str]]:
     """검수 AI 1회 호출(+파싱 실패 시 1회 재요청). 그래도 실패면 None.
 
@@ -2354,6 +2619,12 @@ def _ask_verdicts(
       부분 응답은 파싱 실패와 같은 «완전성 실패»다. 빠진 번호를 참으로 간주하지
       않으며, 후속 응답도 빠지거나 못 읽으면 예전처럼 그 번호는 제거된다.
       호출은 최대 2회(첫 요청 + 파싱 재요청 «또는» 누락 후속) 그대로다.
+    ★ 최초 본문 검수(``initial_ask``)의 두 번째 호출(파싱 재요청·누락 후속)이 요청
+      AI 몫 소진(``AskFatalError.degradable`` — 호출 횟수 상한·요청 로컬 예약액)에
+      닿으면 그 호출만 포기하고 첫 응답 결과로 진행한다(`_safe_optional_ask`,
+      2026-09-23). 첫 응답이 통째로 못 읽힌 상태였다면 예전처럼 None(fail-closed)이다.
+      첫 호출과 돈·계정 장애는 예전처럼 재전파한다. ``initial_ask`` 없이 부르는
+      재검수·빈 장 복구 검수는 예전처럼 재전파한다 — 바깥 단계가 저하를 맡는다.
 
     ``initial_ask``: 최초 본문 검수 전용 호출자. 주어지면 이 호출과 그 파싱
     재요청에만 쓴다 — 재작성·재검수는 언제나 ``ask`` 를 그대로 쓴다.
@@ -2368,6 +2639,11 @@ def _ask_verdicts(
     ``ask``). 재요청은 같은 질문을 형식만 고쳐 다시 받는 것이라 답 길이가 첫
     답과 비슷한데 부르는 쪽의 예약액은 «출력 상한»으로 잡히므로, 첫 답에 맞춘
     작은 상한을 가진 호출자를 넣으면 그 한 번의 예약액만 줄어든다.
+
+    ``second_review_call_available``: 두 번째 호출(파싱 재요청·누락 후속) 직전에
+    부르는 질문(선택). 거짓이면 그 호출을 보내지 않고 관측도 만들지 않는다
+    (`_second_review_call_allowed`) — 첫 응답을 통째로 못 읽었으면 예전처럼 None
+    이다. 생략하면 예전과 같다.
     """
     reviewer = initial_ask or ask
     retry_reviewer = (
@@ -2423,15 +2699,37 @@ def _ask_verdicts(
     )
     if observe is not None:
         protocol_diagnostics.append(observe)
+
+    def _second_call(
+        sent: str, purpose: str,
+    ) -> tuple[Optional[str], Optional[AskFatalError]]:
+        # ★ 최초 본문 검수(initial_ask)의 두 번째 호출만 요청 AI 몫 소진을 저하로
+        #   받는다. 그 검수에는 바깥에 저하 갈래가 없어, 여기서 재전파되면 보고서
+        #   본문이 통째로 사라진다.
+        # ⚠️ initial_ask 없이 부르는 평문 검수(재검수·빈 장 복구 검수)는 예전처럼
+        #   재전파한다 — 바깥 단계가 이미 degradable 을 받아 보고서를 지키고
+        #   («거짓»·근거 결속 재작성의 저하 갈래, pipeline 의 빈 장 복구 «호출중단»),
+        #   그 기록이 중단 사유를 남긴다. 빈 장 복구의 «검수 1회» 장치(두 번째 호출에서
+        #   AskFatalError)도 그 재전파에 기대고 있다.
+        if initial_ask is None:
+            return _safe_ask(retry_reviewer, sent), None
+        return _safe_optional_ask(retry_reviewer, sent, purpose=purpose)
+
     retries = 0
     while verdicts is None and retries < PARSE_RETRY_LIMIT:
+        if not _second_review_call_allowed(
+            second_review_call_available, _PURPOSE_FORMAT_RETRY,
+        ):
+            break
         retries += 1
         retry_prompt = ReviewPrompt(prompt + RETRY_REMINDER, FLAT_REVIEW_SCHEMA)
-        raw = _safe_ask(retry_reviewer, retry_prompt)
+        raw, aborted = _second_call(retry_prompt, _PURPOSE_FORMAT_RETRY)
         observe = _observe_attempt(retries + 1, retry_prompt, raw)
         verdicts = _parse_verdicts(
             raw, observe=observe, requested_numbers=requested_numbers,
         )
+        if aborted is not None:
+            note_optional_call_aborted(observe, call_limit=aborted.call_limit)
         if observe is not None:
             protocol_diagnostics.append(observe)
     if verdicts is None:
@@ -2449,7 +2747,9 @@ def _ask_verdicts(
     #   «검수 미완료»로 제거된다(부르는 쪽의 번호없음 처분).
     if initial_ask is not None and retries < PARSE_RETRY_LIMIT:
         missing_items = [item for item in items if item.number not in verdicts]
-        if missing_items:
+        if missing_items and _second_review_call_allowed(
+            second_review_call_available, _PURPOSE_MISSING_FOLLOWUP,
+        ):
             retries += 1
             missing_numbers = frozenset(item.number for item in missing_items)
             followup_prompt = ReviewPrompt(
@@ -2459,7 +2759,7 @@ def _ask_verdicts(
                 ) + MISSING_VERDICTS_REMINDER,
                 FLAT_REVIEW_SCHEMA,
             )
-            followup_raw = _safe_ask(retry_reviewer, followup_prompt)
+            followup_raw, aborted = _second_call(followup_prompt, _PURPOSE_MISSING_FOLLOWUP)
             observe = _observe_attempt(
                 retries + 1, followup_prompt, followup_raw,
                 requested_count=len(missing_numbers),
@@ -2468,6 +2768,8 @@ def _ask_verdicts(
                 followup_raw, observe=observe,
                 requested_numbers=sorted(missing_numbers),
             )
+            if aborted is not None:
+                note_optional_call_aborted(observe, call_limit=aborted.call_limit)
             if observe is not None:
                 protocol_diagnostics.append(observe)
             recovered = {
@@ -2486,6 +2788,8 @@ def _ask_verdicts(
     candidates = {item.number: _grounding_candidate(
         item.sentence.text, item.sentence.citations, frag_by_id, table_source,
     ) for item in items}
+    # 응답이 행 단위로 구제됐다면 결속 단계도 파서와 «같은» 구제 문자열을 읽는다
+    # (`_apply_grounding` 이 첫 줄에서 `_review_binding_text` 로 맞춘다).
     return _apply_grounding(
         raw,
         verdicts,
@@ -3032,11 +3336,14 @@ def _semantic_review(
     allow_sentence_rewrite: bool = True,
     sentence_rewrite_gate: Optional[Callable[[tuple[str, ...]], bool]] = None,
     grounding_rewrite_enabled: bool = False,
+    second_review_call_available: Optional[Callable[[], bool]] = None,
 ) -> list[list[ComposedSentence]]:
     """인용 있는 «확인»·«해석» 문장을 같은 1회 검수 호출로 대조한다.
 
     ``initial_ask``: 최초 본문 검수 전용 호출자. 재작성·재검수는 ``ask`` 그대로다.
     ``initial_retry_ask``: 그 최초 검수의 «파싱 재요청» 전용 호출자(선택).
+    ``second_review_call_available``: 그 최초 검수의 두 번째 호출(파싱 재요청·누락
+        후속) 직전에 부르는 질문(선택, `_ask_verdicts`). 재검수에는 넘기지 않는다.
     ``grounding_rewrite_enabled``: 근거 결속 탈락 «확인» 본문 문장을 한 번 묶어
         고쳐 쓰고 다시 검수할지. 거짓이면 예전과 완전히 같다(호출 수·결과 동일).
 
@@ -3116,6 +3423,7 @@ def _semantic_review(
         baseline_date=baseline_date,
         section_moves=section_moves,
         grounding_problems=grounding_problems,
+        second_review_call_available=second_review_call_available,
     )
     moved_positions: dict[tuple[int, int], int] = {}
     move_blocked: dict[str, int] = {}
@@ -3336,18 +3644,25 @@ def _semantic_review_grouped(
     *,
     diagnostics: Optional[list[dict]] = None,
     initial_ask: Optional[AskFn] = None,
+    initial_retry_ask: Optional[AskFn] = None,
     protocol_diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
     rewrite_ask: Optional[AskFn] = None,
     recheck_ask: Optional[AskFn] = None,
     grounding_rewrite_enabled: bool = False,
     skip_empty_grouped_review: bool = False,
+    second_review_call_available: Optional[Callable[[], bool]] = None,
 ) -> tuple[list[list[ComposedSentence]], dict[str, tuple[FlowRow, ...]]]:
-    """packet 문장과 도식을 장별 근거 블록으로 묶어 AI 1회 검수한다.
+    """packet 문장과 도식을 장별 근거 블록으로 묶어 한 요청으로 검수한다.
 
     legacy의 거짓 문장 재작성은 문장마다 호출을 늘린다. 엄격 경로는 비용 계약
-    (본문+도식 bundled reviewer 1회)을 지키며, 거짓·장 불일치·판정 누락은
-    되살리지 않고 그 항목만 제거한다.
+    (본문+도식 bundled reviewer 1회 + 형식 재요청 «또는» 누락 후속 최대 1회 —
+    `_ask_grouped_verdicts`)을 지키며, 거짓·장 불일치는 되살리지 않고 그 항목만
+    제거한다. 판정 누락은 누락 후속 1회로만 다시 묻고, 그래도 판정이 없으면 제거한다.
+
+    ``initial_retry_ask``: 최초 검수의 파싱 재요청·누락 후속 전용 호출자(선택).
+    ``second_review_call_available``: 그 두 번째 호출 직전에 부르는 질문(선택,
+    `_ask_grouped_verdicts`). 거짓이면 보내지 않고 관측도 만들지 않는다.
 
     ``grounding_rewrite_enabled``: 근거 결속 탈락 «확인» 본문 문장만 한 번 묶어
     고쳐 쓰고 다시 검수할지. 거짓이면 이 함수의 동작·호출 수는 예전과 같다.
@@ -3425,10 +3740,13 @@ def _semantic_review_grouped(
     # 도식 검수를 건너뛰지 않는다. 어느 경로도 빈 응답으로 후보를 되살리지 않는다.
     if not items:
         if not skip_empty_grouped_review:
+            # 빈 묶음은 판정할 번호가 없어 재요청·후속이 없다(검수 1회 그대로).
             _ask_grouped_verdicts(
                 ask, (), frag_by_id, table, diagnostics=diagnostics,
                 initial_ask=initial_ask,
+                initial_retry_ask=initial_retry_ask,
                 protocol_diagnostics=protocol_diagnostics,
+                second_review_call_available=second_review_call_available,
             )
         return (
             _groups_without_positions(groups, rejected_sentence_positions),
@@ -3440,11 +3758,13 @@ def _semantic_review_grouped(
     verdicts = _ask_grouped_verdicts(
         ask, items, frag_by_id, table, diagnostics=diagnostics,
         initial_ask=initial_ask,
+        initial_retry_ask=initial_retry_ask,
         protocol_diagnostics=protocol_diagnostics,
         baseline_date=baseline_date,
         allowed_fragment_ids_by_section=allowed_fragment_ids_by_section,
         section_moves=section_moves,
         grounding_problems=grounding_problems,
+        second_review_call_available=second_review_call_available,
     )
     sentence_by_number: dict[int, Optional[ComposedSentence]] = {}
     flow_kept_numbers: set[int] = set()
@@ -3646,6 +3966,7 @@ def _verify_report_inner(
     sentence_rewrite_gate: Optional[Callable[[tuple[str, ...]], bool]] = None,
     grounding_rewrite_enabled: bool = False,
     skip_empty_grouped_review: bool = False,
+    second_review_call_available: Optional[Callable[[], bool]] = None,
 ) -> ComposedReport:
     frag_by_id = {
         fragment.fragment_id: fragment
@@ -3698,6 +4019,7 @@ def _verify_report_inner(
             allow_sentence_rewrite=allow_sentence_rewrite,
             sentence_rewrite_gate=sentence_rewrite_gate,
             grounding_rewrite_enabled=grounding_rewrite_enabled,
+            second_review_call_available=second_review_call_available,
         )
     else:
         allowed_for_review = dict(allowed_fragment_ids_by_section)
@@ -3708,10 +4030,14 @@ def _verify_report_inner(
         )
         group_ids = [section.section_id for section in report.sections]
         group_ids.append(REVIEW_SUMMARY_GROUP)
-        # ★ packet 경로에는 ``initial_retry_ask`` 를 넘기지 않는다 — 이 경로의
-        #   검수는 «reviewer 1회 고정»이라 파싱 재요청 자체가 없다
-        #   (_ask_grouped_verdicts 는 형식 오류를 None 으로 닫는다). 쓰이지 않을
-        #   인자를 달아 두면 «재요청이 있다»는 거짓 신호가 된다.
+        # ★ packet 경로도 평문과 같은 계약으로 ``initial_retry_ask`` 를 넘긴다
+        #   (2026-09-23) — 응답을 못 읽으면 형식 재요청, 일부 번호가 빠지면 빠진
+        #   항목만 누락 후속을 이 호출자로 1회 보낸다(`_ask_grouped_verdicts`).
+        #   예전 «reviewer 1회 고정»에서는 JSON 한 글자 오류로 판정 42행이 통째로
+        #   사라져 9장 중 8장이 빈 보고서가 됐다.
+        # ⚠️ FULL 의 호출 장부는 검수자 호출을 1회로 묶어 이 두 번째 호출을 공급자
+        #   «전»에 막는다. FULL 에서 그 42행 소실을 막는 것은 파서의 행 단위 구제
+        #   (`_review_entries`)이고, 깨진 한 행은 여전히 판정 없이 제거된다.
         reviewed_groups, reviewed_flow_rows = _semantic_review_grouped(
             checked_groups,
             group_ids,
@@ -3726,12 +4052,14 @@ def _verify_report_inner(
             ask,
             diagnostics=diagnostics,
             initial_ask=initial_ask,
+            initial_retry_ask=initial_retry_ask,
             protocol_diagnostics=protocol_diagnostics,
             baseline_date=baseline_date,
             rewrite_ask=rewrite_ask,
             recheck_ask=recheck_ask,
             grounding_rewrite_enabled=grounding_rewrite_enabled,
             skip_empty_grouped_review=skip_empty_grouped_review,
+            second_review_call_available=second_review_call_available,
         )
     reviewed_summary = reviewed_groups.pop()
 
@@ -3783,6 +4111,7 @@ def verify_report(
     sentence_rewrite_gate: Optional[Callable[[tuple[str, ...]], bool]] = None,
     grounding_rewrite_enabled: bool = False,
     skip_empty_grouped_review: bool = False,
+    second_review_call_available: Optional[Callable[[], bool]] = None,
 ) -> ComposedReport:
     """진입 함수 — 규칙 ①~④를 보고서 전체에 문장 단위로 적용한다.
 
@@ -3801,8 +4130,11 @@ def verify_report(
               첫 답에 맞춘 작은 상한을 가진 호출자를 넣으면 그 한 번의 예약액만
               줄어든다(2026-09-13 실측: 24000 상한이 그대로 실린 재요청이 남은
               예약액을 넘겨 1차 검수가 통째로 실패했다).
-            ⚠️ packet 엄격 경로(``allowed_fragment_ids_by_section`` 지정)는
-              검수 «1회 고정»이라 파싱 재요청이 없다 — 이 인자는 쓰이지 않는다.
+            ★ packet 엄격 경로(``allowed_fragment_ids_by_section`` 지정)도 같은
+              계약이다(2026-09-23) — 형식 재요청과 누락 후속(둘 중 최대 1회)이
+              이 호출자로 나간다. 단, FULL 의 호출 장부는 검수자 호출을 1회로
+              묶어 두어 그 아래에서는 두 번째 호출이 공급자에 닿지 않는다
+              (`_ask_grouped_verdicts` 머리말).
         rewrite_ask: «거짓» 판정 문장 재작성 전용 호출자. 생략하면 ``ask``.
         recheck_ask: 재작성문 재검수 전용 호출자. 생략하면 ``ask``.
             ★ 이 둘은 «선택적 다듬기»라, 부르는 쪽이 도식 검수·요약 작성·
@@ -3823,8 +4155,10 @@ def verify_report(
               묶음 재작성 1회뿐이다.
               ⚠️ 응답 형식 재요청까지 세면 «최대 4회»다 — 묶음 재작성이
                 `PARSE_RETRY_LIMIT` 만큼(1회) 다시 묻고, 합친 재검수도 평문
-                경로에서는 같은 만큼 다시 묻기 때문이다(packet 경로의 첫 검수만
-                재요청이 없다). 호출이 죽은 경우에는 재요청하지 않는다.
+                경로에서는 같은 만큼 다시 묻기 때문이다. 첫 검수 자신의 형식
+                재요청·누락 후속(최대 1회)은 이 기능과 무관하게 평문·packet
+                모두에 있으므로 이 셈에 넣지 않는다. 호출이 죽은 경우에는
+                재요청하지 않는다.
             ★ 이 단계는 빈 장 복구 «양보» 게이트(``sentence_rewrite_gate``)를
               일부러 지나지 않는다. 그 게이트는 선택적 다듬기가 복구 몫을 먼저
               쓰지 않게 막는 장치인데, 운영 실측에서 두 단계가 건지는 문장 수의
@@ -3841,6 +4175,15 @@ def verify_report(
         skip_empty_grouped_review: 부분보고서에서 본문·요약·도식 검수 후보가 모두
             없으면 묶음 검수 호출을 생략한다. 기본값은 FULL 영수증의 검수 1회를
             유지하며, 후보가 하나라도 있으면 이 값과 관계없이 검수한다.
+        second_review_call_available: 최초 본문 검수의 두 번째 호출(형식 재요청·
+            누락 후속)을 보내기 직전에 부르는 질문(선택). 거짓을 돌려주면 그 호출을
+            보내지 않고 관측도 만들지 않는다 — 첫 응답의 판정으로 진행하고, 첫
+            응답을 통째로 못 읽었으면 예전처럼 대상 문장을 뺀다(fail-closed).
+            생략하면 언제나 보낸다(예전 동작). ★ 호출 장부처럼 «이 요청의 검수
+            호출은 1회뿐»임을 아는 부르는 쪽이 쓴다 — 넘기지 않으면 장부가 공급자
+            전에 막은 호출이 «빈 응답» 관측과 «호출 실패» 경고로 남는다(2026-09-23
+            적대 검토 D3, `_second_review_call_allowed`). 재작성·재검수에는 쓰지
+            않는다.
 
     Returns:
         검증된 ComposedReport. 어떤 입력에서도 예외를 던지지 않으며,
@@ -3853,7 +4196,8 @@ def verify_report(
                 and baseline_date is None and rewrite_ask is None
                 and recheck_ask is None and allow_sentence_rewrite
                 and sentence_rewrite_gate is None
-                and not grounding_rewrite_enabled and not skip_empty_grouped_review):
+                and not grounding_rewrite_enabled and not skip_empty_grouped_review
+                and second_review_call_available is None):
             # legacy 호출 모양과 monkeypatch 경계를 그대로 보존한다.
             return _verify_report_inner(
                 report, fragments, performance_table, ask
@@ -3875,6 +4219,7 @@ def verify_report(
             sentence_rewrite_gate=sentence_rewrite_gate,
             grounding_rewrite_enabled=grounding_rewrite_enabled,
             skip_empty_grouped_review=skip_empty_grouped_review,
+            second_review_call_available=second_review_call_available,
         )
     except AskFatalError:
         # 요청 전역 장애 — «검증기 내부 오류»로 위장하지 않고 그대로 재전파한다.

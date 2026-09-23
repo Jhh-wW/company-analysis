@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from features.evidence_collection import constants as c
+from features.evidence_collection import auditor_boilerplate, constants as c
 
 #: 슬롯별 키워드 신호. 값은 예시 표현이며 전수 검증되지 않았다(알려진 한계).
 SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -313,7 +313,23 @@ def score_fragment_slots_with_signal(
     반기·분기처럼 자료 종류가 소유한 슬롯이 좁을 때도 모든 키워드는 한 번만
     훑는다. 소유 범위 밖 신호만 있는 문단은 Writer 근거가 아니지만, 분류기가
     뜻을 전혀 못 알아본 문단도 아니므로 두 번째 반환값은 ``True``다.
+
+    감사보고서 «감사인 표준 문구» 절(auditor_boilerplate)은 채점 입력에서 뺀다.
+    문단 전부가 그 문구면 칸 없이 ``True``를 돌려준다 — 무분류 보관으로 보내면
+    AI 재판정이 감사인의 감사 행위 문장에 사업 칸을 다시 붙일 수 있기 때문이다
+    (2026-09-23 5차 실측: 「감사인의 책임」 단락이 「위험」·「대응」으로 5장
+    과제·대응 칸을 받았다). 회사 서술이 섞인 문단은 그 절만으로 채점한다.
     """
+
+    # 절 제목도 구조 표지를 볼 자리로 넘긴다 — 머리말 없이 잘린 감사인 책임 문단이
+    # 「…감사인의 책임」 제목 아래에 있으면 그 제목으로 감사보고서임을 안다(F1 관문).
+    auditor_split = auditor_boilerplate.split_auditor_clauses(
+        text, structure_context=section_heading,
+    )
+    if auditor_split.only_auditor:
+        return (), True
+    if auditor_split.auditor_clause_count:
+        text = auditor_split.business_text
 
     scored: list[tuple[int, int, bool, SlotScore]] = []
     has_any_direct_signal = False

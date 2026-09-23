@@ -139,11 +139,17 @@ def test_diagram_cache_excludes_card_switch_sources_and_rows(monkeypatch, items)
     assert getattr(cached, "response_schema", None) is None
 
 
-@pytest.mark.parametrize("kind", ("flat", "grouped", "diagram"))
+@pytest.mark.parametrize("kind,packet_schema", (
+    ("flat", False), ("grouped", False), ("grouped", True), ("diagram", False),
+), ids=("flat", "grouped-schema-off", "grouped-schema-on", "diagram"))
 @pytest.mark.parametrize("initial_valid", (False, True))
 def test_actual_review_preserves_call_count_retry_text_cache_and_schema(
-    monkeypatch, kind, initial_valid,
+    monkeypatch, kind, packet_schema, initial_valid,
 ):
+    # packet 스키마 스위치(기본 꺼짐)는 grouped 에만 뜻이 있다 — 켠 갈래만 바꾼다.
+    if packet_schema:
+        monkeypatch.setattr(verify, "PACKET_REVIEW_SCHEMA_ENABLED", True)
+
     def run(enabled):
         monkeypatch.setenv(REVIEW_PROMPT_CACHE_ENV, "1" if enabled else "0")
         calls = []
@@ -159,7 +165,8 @@ def test_actual_review_preserves_call_count_retry_text_cache_and_schema(
 
     plain_calls, plain_result = run(False)
     cached_calls, cached_result = run(True)
-    expected_count = 1 if initial_valid or kind == "grouped" else 2
+    # 2026-09-23 — packet(grouped)도 평문과 같은 형식 재요청 1회를 보낸다.
+    expected_count = 1 if initial_valid else 2
     assert len(plain_calls) == len(cached_calls) == expected_count
     assert plain_result == cached_result
     assert getattr(cached_calls[0], "response_schema", None) is None
@@ -168,7 +175,11 @@ def test_actual_review_preserves_call_count_retry_text_cache_and_schema(
         assert cached.cache_prefix_chars == cached_calls[0].cache_prefix_chars > 0
         assert getattr(plain, "response_schema", None) is getattr(cached, "response_schema", None)
     if len(cached_calls) == 2:
-        assert isinstance(cached_calls[1], ReviewPrompt)
+        # 평문·도식의 재요청과 스키마를 켠 packet 재요청은 스키마를 싣는다. 스키마를 끈
+        # packet 재요청(기본)은 캐시 표식만 가진 문자열이다 — 경계는 어느 쪽이든 같다.
+        retry_has_schema = kind != "grouped" or packet_schema
+        assert isinstance(cached_calls[1], ReviewPrompt) is retry_has_schema
+        assert (getattr(cached_calls[1], "response_schema", None) is not None) is retry_has_schema
         assert cached_calls[1] == str(cached_calls[0]) + RETRY_REMINDER
 
 

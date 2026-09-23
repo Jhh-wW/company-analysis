@@ -212,13 +212,28 @@ def test_fenced_json_records_slice_offsets():
 # ── packet 경로 ────────────────────────────────────────────────────────
 
 
-def test_packet_review_does_not_retry():
+def test_packet_review_retries_once_like_flat_and_records_both_attempts():
+    """2026-09-23 — packet 도 형식 재요청 1회. 두 시도가 각각 관측된다."""
     protocol: list[dict] = []
     _, ask = _run_packet("설명만", protocol=protocol)
-    assert ask.calls == 1
-    assert len(protocol) == 1
-    assert protocol[0]["경로"] == PATH_PACKET
-    assert protocol[0]["판독"] == READ_JSON_SYNTAX
+    assert ask.calls == 2
+    assert [record["시도"] for record in protocol] == [1, 2]
+    assert all(record["경로"] == PATH_PACKET for record in protocol)
+    assert [record["판독"] for record in protocol] == [
+        READ_JSON_SYNTAX, READ_JSON_SYNTAX,
+    ]
+    assert protocol[1]["입력문자"] > protocol[0]["입력문자"]
+
+
+def test_packet_retry_that_parses_keeps_the_sentence():
+    protocol: list[dict] = []
+    result, ask = _run_packet(
+        "설명만", _body([_row(section="identity", evidence=["f1"])]),
+        protocol=protocol,
+    )
+    assert ask.calls == 2
+    assert [record["판독"] for record in protocol] == [READ_JSON_SYNTAX, READ_OK]
+    assert [sentence.text for sentence in result.sections[0].sentences] == [SOURCE_TEXT]
 
 
 @pytest.mark.parametrize(

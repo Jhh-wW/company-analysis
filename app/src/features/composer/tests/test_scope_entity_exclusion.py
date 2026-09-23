@@ -312,3 +312,277 @@ def test_non_adjacent_local_subject_withholds_judgement(candidate):
     assert scope_problem(candidate, {"fn": FLAT_NOTE}) == ""
     assert document_entity_scope_problem(
         candidate, (_context({"related": RELATED}, {"fn": FLAT_NOTE}),)) == ""
+
+
+# ══ 5차 실측 P11(2026-09-23) — 분류 이름을 앞에 둔 보유 단정 ══════════════════
+# 「회사는 종속기업 <법인>을 보유하고 있으며 … 100% 지분으로 소유」가, 인용한 조각
+# 안에 같은 법인의 「종속기업에서 제외」 각주가 있는데도 단정 목록 밖의 꼴이라 통과했다.
+# C 재현(무료)으로 소유·가지다·「회사의 종속기업」·「100% 지분으로 소유」·「자회사」 꼴도
+# 같은 구멍임을 확인했다. 지분 단정은 표 행의 제외 조건을 떼어 낸 것이라 막되(총괄 결정),
+# 후보가 같은 법인의 제외 사실을 함께 적으면 조건이 살아 있으므로 통과시킨다.
+
+HOLDING_CLAIMS = pytest.mark.parametrize("candidate", [
+    # 실측 [30] 모양.
+    "회사는 종속기업 가람 Holdings를 보유하고 있으며, 가람 Holdings는 100% 지분으로 소유되고 있다.",
+    # ① 분류 이름 + 보유 동사(보유·소유·두다·가지다) — C 재현에서 통과하던 꼴.
+    "회사는 종속기업 가람 Holdings를 보유하고 있다.",
+    "회사는 종속기업 가람 Holdings를 소유하고 있다.",
+    "회사는 종속기업 가람 Holdings를 두고 있다.",
+    "회사는 종속기업 가람 Holdings를 가지고 있다.",
+    "회사는 종속기업 가람 Holdings 등을 보유하고 있다.",
+    # ② 「<법인>은 회사의 종속기업」 서술형.
+    "가람 Holdings는 회사의 종속기업입니다.",
+    "가람 Holdings는 회사의 종속기업이며 일본 사업을 맡고 있다.",
+    "가람 Holdings는 회사가 해외 운영을 맡긴 종속기업입니다.",
+    # ③ 지분 보유 단정(각주 제외 조건 없이).
+    "가람 Holdings는 100% 지분으로 소유되고 있다.",
+    "회사는 가람 Holdings를 100% 지분으로 소유하고 있다.",
+    "회사는 가람 Holdings의 지분 100%를 보유하고 있다.",
+    "회사는 가람 Holdings 지분을 100% 소유하고 있다.",
+    # ④ 「자회사」 — 같은 소속 단정의 일상어.
+    "회사는 자회사 가람 Holdings를 두고 있다.",
+    "가람 Holdings는 회사의 100% 자회사다.",
+    "회사는 가람 Holdings를 자회사로 두고 있다.",
+    "자회사인 가람 Holdings는 일본 사업을 맡는다.",
+], ids=["실측_보유_100지분", "종속기업_보유", "종속기업_소유", "종속기업_두고", "종속기업_가지고",
+        "종속기업_등", "회사의_종속기업입니다", "회사의_종속기업이며", "관형절_종속기업입니다",
+        "100지분으로_소유되고", "100지분으로_소유", "지분_100_보유", "지분을_100_소유",
+        "자회사_두고", "100_자회사다", "자회사로_두고", "자회사인"])
+KEPT_HOLDING = pytest.mark.parametrize("candidate", [
+    # 과거 관계와 제외 사실을 함께 정확히 적은 문장 — 지분 단정은 제외 조건과 함께면 통과.
+    "가람 Holdings는 경과규정에 따라 종속기업에서 제외되었으며, 회사는 가람 Holdings 지분 100%를 보유하고 있다.",
+    "가람 Holdings는 과거 회사의 종속기업이었으나 경과규정에 따라 종속기업에서 제외되었고, "
+    "회사는 현재 가람 Holdings를 100% 지분으로 소유하고 있다.",
+    "회사는 종속기업에서 제외된 가람 Holdings의 지분 100%를 보유하고 있다.",
+    # 현재 대여·거래만 적은 문장(분류 이름만 붙은 거래 서술 포함).
+    "회사는 종속기업 가람 Holdings에 운영자금을 대여하였다.",
+    "회사는 자회사 가람 Holdings에 운영자금을 대여하였다.",
+    "회사는 자회사로부터 배당금을 받았다.",
+    # 제외 법인 자신이 주어인 배당 수취 — 「자회사로부터」는 소속 단정이 아니다.
+    "가람 Holdings는 자회사로부터 배당금을 받았다.",
+    # 대상 자리에 다른 술어가 낀 거래 서술.
+    "회사는 종속기업 가람 Holdings에 운영자금을 대여하고 지분을 보유하고 있다.",
+    # 같은 술어의 부정·과거 서술.
+    "회사는 종속기업 가람 Holdings를 보유하지 않는다.",
+    "회사는 과거 종속기업 가람 Holdings를 보유했다.",
+    "가람 Holdings는 회사의 종속기업이었다.",
+    # 표식이 없는 다른 법인.
+    "회사는 종속기업 나래 Studio를 보유하고 있다.",
+    "회사는 나래 Studio 지분 30%를 보유하고 있다.",
+], ids=["제외와_지분_정확", "과거와_제외와_현재지분", "제외된_법인의_지분", "종속기업_대여만",
+        "자회사_대여만", "자회사로부터_배당", "제외법인의_자회사로부터_배당", "대여_거래", "부정",
+        "과거", "과거_서술형",
+        "다른_법인", "다른_법인_지분"])
+
+
+@NOTES
+@HOLDING_CLAIMS
+def test_P11_인용_조각_안의_제외_각주가_보유_단정을_막는다(note, candidate):
+    assert scope_problem(candidate, {"6": note}) == UNBOUND
+    assert grounding_problem(candidate, {"6": note}, {"결과": "참"}) == UNBOUND
+
+
+@NOTES
+@HOLDING_CLAIMS
+def test_P11_같은_공시의_인용_밖_제외_각주도_보유_단정을_막는다(note, candidate):
+    context = _context({"related": RELATED}, {"fn": note})
+    assert document_entity_scope_problem(candidate, (context,)) == UNBOUND
+
+
+@NOTES
+@KEPT_HOLDING
+def test_P11_제외_사실과_지분을_정확히_적은_문장과_거래_서술은_남는다(note, candidate):
+    assert scope_problem(candidate, {"6": note}) == ""
+    context = _context({"related": RELATED}, {"fn": note})
+    assert document_entity_scope_problem(candidate, (context,)) == ""
+
+
+# ══ 2026-09-23 독립 검토 반영 — P11 부정·과거·계획(F7), 나열·장식(F8), 회사 주어 제외(F12) ══
+# 2판은 보유·소속·지분 단정 꼴을 넓히면서, 같은 술어의 부정(「보유하고 있지 않다」)·과거
+# (「보유했던」·「보유했었다」·「두었으나」)·계획(「편입할 계획」)까지 현재 단정으로 읽었다.
+# 각주 조건을 정확히 지킨 과거 서술도 막혔다. 단정 뒤 «같은 술어의 꼬리»로 가린다.
+
+FOUND_KEPT = pytest.mark.parametrize("candidate", [
+    "회사는 종속기업 가람 Holdings를 보유하고 있지 않다.",
+    "회사는 종속기업 가람 Holdings를 두었으나, 2025년에 매각했다.",
+    "종속기업 가람 Holdings를 보유했던 회사는 지분을 정리했다.",
+    "회사는 종속기업 가람 Holdings를 보유했었다.",
+    # 정답 과거 서술 — 과거 보유와 제외 사실을 쉼표로 이어 적었다.
+    "회사는 종속기업 가람 Holdings를 보유했었으나, 경과규정에 따라 종속기업에서 제외되었다.",
+    "회사는 종속기업 가람 Holdings를 보유하고 있었다.",
+    "회사는 가람 Holdings 지분 100%를 보유하고 있지 않다.",
+    "회사는 가람 Holdings 지분 100%를 보유했었다.",
+    "회사는 가람 Holdings를 자회사로 두었으나, 2025년 매각했다.",
+    "회사는 가람 Holdings를 자회사로 편입할 계획이다.",
+    # 변경 전부터 막히던 기존 약점 — 같은 꼬리 규칙으로 함께 풀린다.
+    "회사는 가람 Holdings를 종속기업으로 두고 있지 않다.",
+    "회사는 가람 Holdings를 종속기업으로 두었으나, 경과규정에 따라 종속기업에서 제외되었다.",
+], ids=["보유하고_있지_않다", "두었으나_쉼표_매각", "보유했던", "보유했었다", "정답_과거_서술",
+        "보유하고_있었다", "지분_보유하고_있지_않다", "지분_보유했었다", "자회사로_두었으나_매각",
+        "자회사로_편입_계획", "종속기업으로_두고_있지_않다", "종속기업으로_두었으나_제외"])
+
+
+@NOTES
+@FOUND_KEPT
+def test_P11_같은_술어의_부정_과거_계획은_현재_단정이_아니다(note, candidate):
+    assert scope_problem(candidate, {"6": note}) == ""
+    context = _context({"related": RELATED}, {"fn": note})
+    assert document_entity_scope_problem(candidate, (context,)) == ""
+
+
+@NOTES
+def test_P11_단순_과거_보유했다는_현재일_수_있어_계속_막는다(note):
+    """경계 — 「과거」 같은 표지 없는 「보유했다」는 지금도 보유 중일 수 있다."""
+
+    candidate = "회사는 종속기업 가람 Holdings를 보유했다."
+    assert scope_problem(candidate, {"6": note}) == UNBOUND
+
+
+LISTED_CLAIMS = pytest.mark.parametrize("candidate", [
+    "회사는 종속기업 가람 Holdings와 나래 Studio 등 2개사를 보유하고 있다.",
+    "회사는 종속기업 나래 Studio와 가람 Holdings를 보유하고 있다.",
+    "회사는 종속기업 나래 Studio 및 가람 Holdings를 보유하고 있다.",
+    "회사는 종속기업 (주)가람 Holdings를 보유하고 있다.",
+    "회사는 종속기업 가람 Holdings(100%)를 보유하고 있다.",
+], ids=["나열_앞_등_2개사", "나열_뒤", "및_나열", "주_앞붙음", "지분율_덧붙음"])
+# 알려진 한계 — 쉼표 나열(「종속기업 A, B 및 C를 보유」)은 후보를 쉼표에서 절로 먼저
+# 자르는 구조(`_claims_bound_to`) 때문에 분류 이름과 술어가 다른 절로 갈려 잡히지 않는다.
+
+
+@NOTES
+@LISTED_CLAIMS
+def test_P11_나열하거나_장식을_붙인_보유_단정도_막는다(note, candidate):
+    assert scope_problem(candidate, {"6": note}) == UNBOUND
+    context = _context({"related": RELATED}, {"fn": note})
+    assert document_entity_scope_problem(candidate, (context,)) == UNBOUND
+
+
+@NOTES
+@pytest.mark.parametrize("candidate", [
+    "회사는 종속기업 가람 Holdings와 나래 Studio에 대한 채권을 보유하고 있다.",
+    "회사는 종속기업 나래 Studio와 다온 Tech 등 2개사를 보유하고 있다.",
+], ids=["나열_거래_서술", "제외_법인_없는_나열"])
+def test_P11_나열이_거래_서술이거나_제외_법인이_없으면_막지_않는다(note, candidate):
+    assert scope_problem(candidate, {"6": note}) == ""
+
+
+COMPANY_SUBJECT_EXCLUSION = "회사는 당기 중 나래 Studio의 지분을 전량 처분하여 연결범위에서 제외하였습니다."
+OWN_SUBJECT_EXCLUSION = "당사는 당기 중 나래 Studio를 청산하여 종속기업에서 제외하였습니다."
+
+
+@pytest.mark.parametrize(("candidate", "source"), [
+    ("회사는 가람 Holdings의 지분 100%를 보유하고 있다.", COMPANY_SUBJECT_EXCLUSION),
+    ("회사는 가람 Holdings 지분 전부를 소유한다.", COMPANY_SUBJECT_EXCLUSION),
+    ("회사는 다온 Tech의 지분 30%를 보유하고 있다.", COMPANY_SUBJECT_EXCLUSION),
+    ("당사는 가람 Holdings 지분 100%를 보유하고 있습니다.", OWN_SUBJECT_EXCLUSION),
+], ids=["회사_지분_100", "회사_지분_전부", "회사_다른법인_30", "당사_지분_100"])
+def test_P11_회사가_주어인_제외_문장은_회사를_제외_법인으로_만들지_않는다(candidate, source):
+    """F12 — 문두 주어가 회사 자신이면 제외된 법인은 목적어다."""
+
+    assert scope_problem(candidate, {"6": source}) == ""
+
+
+def test_P11_법인이_주어인_제외_문장은_그_법인의_지분_단정을_계속_막는다():
+    source = "나래 Studio는 당기 중 청산되어 연결범위에서 제외되었습니다."
+    assert scope_problem("회사는 나래 Studio의 지분 100%를 보유하고 있다.", {"6": source}) == UNBOUND
+
+
+#: 제외 법인 자신이 주어인 서술 경로의 제외 문장.
+ENTITY_SUBJECT_EXCLUSION = "가람 Holdings는 경과규정에 따라 종속기업에서 제외되었습니다."
+F12_STILL_BLOCKED = pytest.mark.parametrize(("candidate", "exclusion_source"), [
+    ("회사는 종속기업 가람 Holdings를 보유하고 있으며, 가람 Holdings는 100% 지분으로 소유되고 있다.",
+     FLAT_NOTE),
+    ("회사는 종속기업 가람 Holdings를 두고 있다.", FLAT_NOTE),
+    ("회사는 종속기업 가람 Holdings 등을 보유하고 있다.", FLAT_NOTE),
+    ("가람 Holdings는 회사의 연결재무제표 작성 대상 종속기업이다.", FLAT_NOTE),
+    ("회사는 가람 Holdings를 종속기업으로 두고 있다.", FLAT_NOTE),
+    ("회사는 가람 Holdings의 지분 100%를 보유하고 있다.", FLAT_NOTE),
+    ("가람 Holdings는 회사의 종속기업입니다.", FLAT_NOTE),
+    ("가람 Holdings는 회사의 종속기업이다.", ENTITY_SUBJECT_EXCLUSION),
+    ("회사는 가람 Holdings를 100% 지분으로 소유하고 있다.", ENTITY_SUBJECT_EXCLUSION),
+], ids=["각주_실측_모양", "각주_두고", "각주_등", "각주_연결대상_종속기업이다", "각주_종속기업으로_두고",
+        "각주_지분_100", "각주_종속기업입니다", "서술_종속기업이다", "서술_100지분으로_소유"])
+
+
+@F12_STILL_BLOCKED
+def test_P11_회사_주어_제외_문장이_함께_있어도_제외_법인_단정은_막는다(candidate, exclusion_source):
+    """F12 수정은 자기 지칭 주어만 건너뛴다 — 진짜 제외 법인(각주 표식·법인 주어 서술)의
+    현재 소속·지분 단정은 회사 주어 제외 문장을 함께 인용해도 그대로 막힌다.
+
+    회사 주어 문장을 «먼저» 둔다. 원문은 넣은 순서대로 대조되므로, 그 문장을 만나자마자
+    판정을 끝내는 과잉 수정(자기 지칭 주어면 곧바로 통과)도 이 순서여야 드러난다."""
+
+    sources = {"5": COMPANY_SUBJECT_EXCLUSION, "6": exclusion_source}
+    assert scope_problem(candidate, sources) == UNBOUND
+
+
+# ══ 2026-09-23 B 수정 재검토 반영 — 과거 판정 되돌이(R1)·제외 서술의 태(R3) ══
+# R1: 과거 판정 정규식의 가운데 과거 어미 묶음이 선택이라, 되돌이가 마지막 「었」 하나로
+#     「종속기업으로 두었다」·「편입되었다」·「두었고」까지 대과거로 읽었다(HEAD는 막던 꼴).
+#     분류 이름을 앞에 둔 경계 시험(「종속기업 X를 보유했다」)은 꼬리가 「다」만 남아 이 결함을 못 봤다.
+
+SIMPLE_PAST_AFTER_CLASS = pytest.mark.parametrize("candidate", [
+    "회사는 가람 Holdings를 종속기업으로 두었다.",
+    "회사는 가람 Holdings를 자회사로 두었다.",
+    "가람 Holdings는 회사의 종속기업으로 편입되었다.",
+    "회사는 가람 Holdings를 종속기업으로 두었고 지금도 지배한다.",
+], ids=["종속기업으로_두었다", "자회사로_두었다", "종속기업으로_편입되었다", "두었고_지금도"])
+
+
+@NOTES
+@SIMPLE_PAST_AFTER_CLASS
+def test_P11_분류가_뒤에_오는_단순_과거_완료도_현재일_수_있어_막는다(note, candidate):
+    assert scope_problem(candidate, {"6": note}) == UNBOUND
+    context = _context({"related": RELATED}, {"fn": note})
+    assert document_entity_scope_problem(candidate, (context,)) == UNBOUND
+
+
+@NOTES
+@pytest.mark.parametrize("candidate", [
+    "종속기업 가람 Holdings를 보유하던 회사는 지분을 정리했다.",
+    "회사는 종속기업 가람 Holdings를 두었었다.",
+    "회사는 가람 Holdings를 종속기업으로 두었지만 지금은 지분이 없다.",
+    "회사는 가람 Holdings를 종속기업으로 두었는데 지금은 지분이 없다.",
+], ids=["보유하던", "분류앞_두었었다", "두었지만", "두었는데"])
+def test_P11_과거_어미를_거친_회상_대과거_양보는_계속_통과한다(note, candidate):
+    assert scope_problem(candidate, {"6": note}) == ""
+    context = _context({"related": RELATED}, {"fn": note})
+    assert document_entity_scope_problem(candidate, (context,)) == ""
+
+
+# R3: 능동 제외 서술(「회사는 X를 … 제외하였습니다」)의 주어는 제외한 쪽이다. 자기 지칭 주어만
+#     건너뛰면(F12) 정작 제외된 목적어 X의 현재 단정이 통과하고, 목록 밖 주어(연결회사·지배기업·
+#     회사 이름)는 다시 제외 법인이 되어 회사의 다른 지분 문장을 막는다. 태로 가른다.
+
+@pytest.mark.parametrize(("candidate", "source"), [
+    ("회사는 나래 Studio의 지분 100%를 보유하고 있다.", COMPANY_SUBJECT_EXCLUSION),
+    ("회사는 종속기업 나래 Studio를 보유하고 있다.", COMPANY_SUBJECT_EXCLUSION),
+    ("나래 Studio는 회사의 종속기업이다.", COMPANY_SUBJECT_EXCLUSION),
+    ("나래 Studio는 현재 연결 대상이다.", OWN_SUBJECT_EXCLUSION),
+    ("회사는 나래 Studio 지분 30%를 보유하고 있다.",
+     "회사는 당기 중 나래 Studio 지분을 전량 처분하여 연결범위에서 제외하였습니다."),
+], ids=["회사주어_목적어_지분", "회사주어_목적어_종속기업보유", "회사주어_목적어_종속기업이다",
+        "당사주어_목적어_연결대상", "의_없는_지분_목적어"])
+def test_P11_능동_제외_문장은_목적어_법인의_현재_단정을_막는다(candidate, source):
+    assert scope_problem(candidate, {"6": source}) == UNBOUND
+
+
+@pytest.mark.parametrize(("candidate", "source"), [
+    ("연결회사는 다온 Tech의 지분 30%를 보유하고 있다.",
+     "연결회사는 당기 중 나래 Studio의 지분을 전량 처분하여 연결범위에서 제외하였습니다."),
+    ("지배기업은 다온 Tech의 지분 30%를 보유하고 있다.",
+     "지배기업은 당기 중 나래 Studio의 지분을 전량 처분하여 연결범위에서 제외하였습니다."),
+    ("다온전자는 다온 Tech의 지분 30%를 보유하고 있다.",
+     "다온전자는 당기 중 나래 Studio의 지분을 전량 처분하여 연결범위에서 제외하였습니다."),
+    ("연결회사는 다온 Tech의 지분 30%를 보유하고 있다.",
+     "연결회사는 당기 중 보유 주식을 처분하여 연결범위에서 제외하였습니다."),
+], ids=["연결회사_주어", "지배기업_주어", "회사이름_주어", "일반_목적어뿐"])
+def test_P11_능동_제외_문장의_주어는_어떤_낱말이든_제외_법인이_아니다(candidate, source):
+    assert scope_problem(candidate, {"6": source}) == ""
+
+
+def test_P11_목적어_없는_능동_제외는_주어를_제외_법인으로_본다():
+    """문법이 흐트러진 공시(「X는 … 제외하였습니다」)도 수동처럼 주어를 제외 법인으로 읽는다."""
+
+    source = "나래 Studio는 당기 중 종속기업에서 제외하였습니다."
+    assert scope_problem("회사는 나래 Studio의 지분 100%를 보유하고 있다.", {"6": source}) == UNBOUND

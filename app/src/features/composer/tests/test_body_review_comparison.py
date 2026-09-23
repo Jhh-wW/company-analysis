@@ -6,6 +6,7 @@ import re
 import pytest
 
 from src.features.composer.body_review_constants import BODY_REVIEW_COMPARISON_GUIDE
+from src.features.composer.constants import RETRY_REMINDER
 from src.features.composer.grounding_constants import GROUNDING_GUIDE
 from src.features.composer.port import (
     CollectedFragment, ComposedReport, ComposedSection, ComposedSentence,
@@ -229,7 +230,10 @@ def test_grouped_comparison_cannot_rescue_wrong_owner_sources_or_missing_verdict
     result = _run("identity", (ComposedSentence("회사는 제품을 판매한다.", ("1",), "확인"),),
                   (CollectedFragment("1", "사업내용", "회사는 제품을 판매한다."),), ask, True)
     assert result.sections[0].sentences == ()
-    assert len(calls) == 1
+    # 2026-09-23 — packet 도 평문처럼 «유효 행 0»이면 형식 재요청을 1회 보낸다.
+    #   같은 결함이 되풀이되면 여전히 되살리지 않고, 세 번째 호출은 없다.
+    assert len(calls) == 2
+    assert calls[1] == str(calls[0]) + RETRY_REMINDER
 
 
 def test_summary_rewrite_is_reviewed_again_with_the_same_comparison_contract():

@@ -764,6 +764,18 @@ def _sentence_from_item(
     )
     raw_claim_slot = str(item.get(RESPONSE_CLAIM_SLOT_KEY) or "").strip()
     allowed_claim_slots = CLAIM_SLOTS_BY_SECTION.get(section_id, ())
+    # 작가가 «장 ID:» 앞부분을 떼고 칸 이름만 적는 일이 있다(2026-09-23 실측:
+    # 빈 장 복구 재요청 답의 주장슬롯이 전부 앞부분 없는 이름이었다). 이 장의
+    # 허용 목록에 있는 정식 이름으로 복원될 때만 받는다. 다른 장의 칸 이름은
+    # 이 장 ID를 붙여도 목록에 없으므로 그대로 빈 칸이다.
+    prefixed_claim_slot = f"{section_id}:{raw_claim_slot}"
+    if (
+        section_id
+        and raw_claim_slot
+        and raw_claim_slot not in allowed_claim_slots
+        and prefixed_claim_slot in allowed_claim_slots
+    ):
+        raw_claim_slot = prefixed_claim_slot
     planned_claim_slot = (
         raw_claim_slot if raw_claim_slot in allowed_claim_slots else ""
     )
