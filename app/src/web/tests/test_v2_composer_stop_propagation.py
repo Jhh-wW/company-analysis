@@ -57,6 +57,15 @@ from src.shared import engine_build_identity as build_identity_contract
 from src.shared import generation_coordination
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_quality.composition_diagnostic_constants import (
+    RELEASE_MODE_APPLIED_FIELD,
+    RELEASE_MODE_DOWNGRADED_FROM_FIELD,
+    RELEASE_MODE_LEDGER_USED_FIELD,
+    RELEASE_MODE_REQUESTED_FIELD,
+    RELEASE_MODE_REVIEW_CALLS_FIELD,
+    RELEASE_MODE_REVIEW_SLOTS,
+    RELEASE_MODE_STEP,
+)
 from src.web import generation_singleflight, job_runtime, main, runtime
 
 _LINK = "b7c8d9e0f1a23456b7c8d9e0f1a23456"
@@ -316,7 +325,18 @@ def test_v2_작성은_두번째_호출의_중단에서_즉시_멈춘다(
     assert type(잡힘.value).__name__ == 사유이름
     # 첫 장만 실제로 나갔고, 멈춘 뒤 새 provider 호출은 없다.
     assert 응답기.보낸_횟수 == 1
-    assert [항목.get("step") for 항목 in 단계] == []
+    # 멈춘 뒤 남는 작성 진단은 «출고 모드» 한 줄뿐이다. 그 줄은 첫 AI 호출 «전»에
+    # 열려 즉시 중단에도 남는다(ADR 0003 7절). 출고 모드가 정해지기 전에 멈췄으므로
+    # 적용모드는 빈 값이고, FULL 장부는 쓰였지만 본문 검수 전이라 검수 호출은 0이다.
+    assert [항목 for 항목 in 단계 if 항목.get("step") != RELEASE_MODE_STEP] == []
+    assert [항목 for 항목 in 단계 if 항목.get("step") == RELEASE_MODE_STEP] == [{
+        "step": RELEASE_MODE_STEP,
+        RELEASE_MODE_REQUESTED_FIELD: ReleaseMode.FULL.value,
+        RELEASE_MODE_APPLIED_FIELD: "",
+        RELEASE_MODE_DOWNGRADED_FROM_FIELD: "",
+        RELEASE_MODE_REVIEW_CALLS_FIELD: {slot: 0 for slot in RELEASE_MODE_REVIEW_SLOTS},
+        RELEASE_MODE_LEDGER_USED_FIELD: True,
+    }]
 
 
 def test_v2_조립예외는_원문없이_assembly경계로_기록된다(
