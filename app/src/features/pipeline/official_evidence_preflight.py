@@ -23,6 +23,7 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_DETAIL_PREFLIGHT_PACKET_INVALID,
 )
 from src.shared.report_evidence.constants import (
+    COLLECTION_CAP_TRUNCATION_REASON_CODES,
     CollectionState,
     GenerationGateStatus,
     SOURCE_KIND_DART_AUDIT_REPORT,
@@ -32,7 +33,7 @@ from src.shared.report_evidence.constants import (
     SourceRequirement,
 )
 from src.shared.report_evidence.logic import assess_generation_gate, build_section_bundle
-from src.shared.report_evidence.models import GenerationGateDecision
+from src.shared.report_evidence.models import CollectionAttempt, GenerationGateDecision
 from src.features.composer.port import SectionEvidencePacketSet
 from src.shared.report_evidence.policy import (
     REQUIRED_EVIDENCE_SECTION_IDS,
@@ -129,6 +130,43 @@ def _is_stable_legacy_document_identity(identity: str) -> bool:
     ) or identity == _DART_FINANCIAL_IDENTITY
 
 
+def _blocks_release(attempt: CollectionAttempt) -> bool:
+    """이 미완료 수집이 FULL 출고를 막아야 하는지 판정한다.
+
+    «수집 미완료»(관측)와 «출고 차단»은 다른 질문이다. 선택(OPTIONAL) 경로는
+    그 의미 칸의 유일한 확인 길이 아니므로 상태와 무관하게 출고를 막지 않는다
+    — 장 준비도 판정(``shared/report_evidence/logic.py``)이 OPTIONAL 실패를
+    강등해 읽는 것과 같은 정책이다. 필수(REQUIRED) 경로의 실패·잘림은 막는다.
+    단 DART 문서가 아닌 필수 경로가 설계 상한(쪽 수·바이트·시간)에 닿아 멈춘
+    잘림은 «정한 만큼 읽었다»는 뜻이라 막지 않는다. DART 필수 문서는 어떤
+    사유로 잘려도 막는다.
+    """
+
+    if attempt.state not in _INCOMPLETE_COLLECTION_STATES:
+        return False
+    if attempt.requirement is not SourceRequirement.REQUIRED:
+        return False
+    return not (
+        attempt.source_kind not in _DART_DOCUMENT_SOURCE_KINDS
+        and attempt.state is CollectionState.TRUNCATED
+        and attempt.reason_code in COLLECTION_CAP_TRUNCATION_REASON_CODES
+    )
+
+
+@dataclass(frozen=True)
+class NonblockingIncompleteAttempt:
+    """출고를 막지 않은 미완료 수집 한 건의 원문 없는 관측.
+
+    선택 경로 미완료와, 설계 상한 예외로 출고를 막지 않은 필수 경로 잘림에
+    같은 모양으로 쓴다. URL·원문·회사 식별자·시도 식별자는 싣지 않는다.
+    종류·상태·닫힌 사유 코드만 남겨 진단 단계가 개수로 줄일 수 있게 한다.
+    """
+
+    source_kind: str
+    state: CollectionState
+    reason_code: str
+
+
 @dataclass(frozen=True)
 class OfficialEvidencePreflight:
     """AI 호출 가능 여부와 원문 없는 닫힌 사유 코드."""
@@ -143,7 +181,20 @@ class OfficialEvidencePreflight:
     # 공식 근거의 장 분류가 적어도 확인된 DART 원문은 있을 수 있다. 이것은
     # 보완 조사만 허용하는 관측이며, can_call_ai나 최종 출고 허가가 아니다.
     supplementary_research_allowed: bool = False
+    # 관측: 끝까지 못 읽은 경로(FAILED·TRUNCATED)가 하나라도 있으면 참이다.
+    # 요구 수준을 가리지 않는다. 캐시 적격과 «자료 확인 완료» 표시가 이 값을
+    # 쓴다 — 불완전한 수집을 캐시로 굳히거나 «완료»로 보이지 않게 한다.
     collection_incomplete: bool = False
+    # 출고 차단: ``_blocks_release``가 참인 미완료만 센다. FULL을 부분
+    # 보고서로 내리는 판단은 이 값을 쓴다. 참이면 collection_incomplete도 참이다.
+    release_blocking_incomplete: bool = False
+    # 출고를 막지 않은 선택 경로 미완료. 같은 시도가 여러 장에 복제돼 있어도
+    # 한 번만 싣는다(시도 식별자로 중복 제거하되 식별자 자체는 싣지 않는다).
+    optional_incomplete_attempts: tuple[NonblockingIncompleteAttempt, ...] = ()
+    # 설계 상한 예외(``_blocks_release``)로 출고를 막지 않은 필수 경로 잘림.
+    # 지금은 만드는 생산자가 없지만(광역 수집기의 잘림은 전부 OPTIONAL), 생기면
+    # 진단 단계에서 선택 경로 미완료와 구분해 사후에 읽을 수 있게 따로 싣는다.
+    design_cap_exempt_attempts: tuple[NonblockingIncompleteAttempt, ...] = ()
 
     @property
     def can_call_ai(self) -> bool:
@@ -201,6 +252,9 @@ def assess_official_evidence(
 
     실패·잘림·의미 칸 부족은 원래 decision과 진단에 남긴다. 부분 작성은
     완료 증명이 아니며 각 문장의 회사·원문·인용 검증은 그대로 적용한다.
+    부분 보고서 전환(출고 차단)은 ``_blocks_release``가 고른 필수 경로 미완료만
+    센다. 선택 경로 미완료는 관측(``collection_incomplete``)과 진단
+    (``optional_incomplete_attempts``)에만 남는다.
     """
     candidates_by_id = {
         candidate.section_id: candidate for candidate in result.candidates
@@ -228,17 +282,23 @@ def assess_official_evidence(
         for attempt in candidate.attempts
         if attempt.state in _INCOMPLETE_COLLECTION_STATES
     )
+    # 관측(incomplete_attempts)과 출고 차단(blocking_attempts)을 나눈다. 선택
+    # 경로의 상한 잘림·실패까지 차단으로 세면 필수 근거가 충분해도 FULL에 못
+    # 간다(2026-09-22 상장사 평가 3회는 선택 경로의 쪽 수 상한 잘림 2건과 IR
+    # 실패 1건만으로 전부 «웹 일시 장애» 전환으로 기록됐다).
+    blocking_attempts = tuple(
+        attempt for attempt in incomplete_attempts if _blocks_release(attempt)
+    )
     required_dart_collection_incomplete = any(
         attempt.source_kind in _DART_DOCUMENT_SOURCE_KINDS
-        and attempt.requirement is SourceRequirement.REQUIRED
-        for attempt in incomplete_attempts
+        for attempt in blocking_attempts
     )
     full_document_floor_unreachable = (
         result.independent_document_count + LATE_PACKET_DOCUMENT_SOURCES
         < MIN_DOCUMENT_SOURCES
     )
     partial_required = (
-        bool(incomplete_attempts)
+        bool(blocking_attempts)
         or not decision.can_call_ai
         or full_document_floor_unreachable
     )
@@ -249,7 +309,7 @@ def assess_official_evidence(
     elif required_dart_collection_incomplete:
         partial_reason = DART_PARTIAL_REASON_REQUIRED_COLLECTION_INCOMPLETE
         detail_code = FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE
-    elif incomplete_attempts:
+    elif blocking_attempts:
         partial_reason = DART_PARTIAL_REASON_TRANSIENT_WEB_FAILURE
         detail_code = FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE
     elif not decision.can_call_ai:
@@ -276,7 +336,45 @@ def assess_official_evidence(
             and _has_usable_dart_evidence(result)
         ),
         collection_incomplete=bool(incomplete_attempts),
+        release_blocking_incomplete=bool(blocking_attempts),
+        optional_incomplete_attempts=_nonblocking_observations(
+            incomplete_attempts, requirement=SourceRequirement.OPTIONAL
+        ),
+        design_cap_exempt_attempts=_nonblocking_observations(
+            incomplete_attempts, requirement=SourceRequirement.REQUIRED
+        ),
     )
+
+
+def _nonblocking_observations(
+    incomplete_attempts: tuple[CollectionAttempt, ...],
+    *,
+    requirement: SourceRequirement,
+) -> tuple[NonblockingIncompleteAttempt, ...]:
+    """출고를 막지 않은 미완료를 요구 수준별로, 실제 시도 하나당 한 번만 남긴다.
+
+    수집 생산부는 한 시도를 의미 칸이 겹치는 모든 장에 같은 식별자로 복제한다.
+    그대로 세면 광역 잘림 한 건이 아홉 건으로 부풀어 진단이 거짓말을 한다.
+    비차단 판단은 ``_blocks_release`` 하나만 본다 — OPTIONAL은 늘 비차단이고,
+    REQUIRED는 설계 상한 예외에 든 잘림만 여기 남는다.
+    """
+
+    seen_attempt_ids: set[str] = set()
+    observations: list[NonblockingIncompleteAttempt] = []
+    for attempt in incomplete_attempts:
+        if attempt.requirement is not requirement or _blocks_release(attempt):
+            continue
+        if attempt.attempt_id in seen_attempt_ids:
+            continue
+        seen_attempt_ids.add(attempt.attempt_id)
+        observations.append(
+            NonblockingIncompleteAttempt(
+                source_kind=attempt.source_kind,
+                state=attempt.state,
+                reason_code=attempt.reason_code,
+            )
+        )
+    return tuple(observations)
 
 
 def assess_packet_document_sources(

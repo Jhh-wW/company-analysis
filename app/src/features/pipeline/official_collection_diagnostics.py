@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterable
 
 from src.features.pipeline.official_collection_diagnostic_constants import (
     ALLOWED_OFFICIAL_COLLECTION_REASON_CODES,
     ALLOWED_OFFICIAL_COLLECTION_REQUIREMENTS,
     ALLOWED_OFFICIAL_COLLECTION_SOURCE_KINDS,
     ALLOWED_OFFICIAL_COLLECTION_STATES,
+    NONBLOCKING_REASON_OPTIONAL_PATH,
+    NONBLOCKING_REASON_REQUIRED_DESIGN_CAP,
     OFFICIAL_COLLECTION_DIAGNOSTICS_STEP,
+    OPTIONAL_INCOMPLETE_DIAGNOSTICS_STEP,
     UNKNOWN_OFFICIAL_COLLECTION_VALUE,
+)
+from src.features.pipeline.official_evidence_preflight import (
+    NonblockingIncompleteAttempt,
 )
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
 
@@ -80,5 +87,55 @@ def official_collection_attempt_step(
             }
             for (source_kind, state, reason_code, requirement), count
             in sorted(histogram.items())
+        ],
+    }
+
+
+def optional_incomplete_attempt_step(
+    attempts: Iterable[NonblockingIncompleteAttempt],
+    *,
+    design_cap_exempt: Iterable[NonblockingIncompleteAttempt] = (),
+) -> dict[str, object]:
+    """출고를 막지 않은 미완료를 비차단 근거·종류·상태·사유별 개수로 줄인다.
+
+    선택 경로 미완료(``attempts``)와, 설계 상한 예외로 막지 않은 필수 경로
+    잘림(``design_cap_exempt``)을 한 단계에 싣고 행마다 비차단 근거를 적는다.
+    사전검사가 이미 시도 식별자로 중복을 걸러 실제 시도 하나당 한 원소만
+    넘긴다. 값은 공식 수집 진단과 같은 닫힌 어휘로만 싣고, 목록 밖 값은
+    unknown으로 닫는다 — URL·원문·회사 식별자는 들어올 자리가 없다.
+    """
+
+    histogram: Counter[tuple[str, str, str, str]] = Counter()
+    for nonblocking_reason, group in (
+        (NONBLOCKING_REASON_OPTIONAL_PATH, attempts),
+        (NONBLOCKING_REASON_REQUIRED_DESIGN_CAP, design_cap_exempt),
+    ):
+        for attempt in group:
+            histogram[
+                (
+                    nonblocking_reason,
+                    _allowed(
+                        attempt.source_kind, ALLOWED_OFFICIAL_COLLECTION_SOURCE_KINDS
+                    ),
+                    _allowed(attempt.state.value, ALLOWED_OFFICIAL_COLLECTION_STATES),
+                    _allowed(
+                        attempt.reason_code, ALLOWED_OFFICIAL_COLLECTION_REASON_CODES
+                    ),
+                )
+            ] += 1
+    return {
+        "step": OPTIONAL_INCOMPLETE_DIAGNOSTICS_STEP,
+        "attempt_count": sum(histogram.values()),
+        "histogram": [
+            {
+                "nonblocking_reason": nonblocking_reason,
+                "source_kind": source_kind,
+                "state": state,
+                "reason_code": reason_code,
+                "count": count,
+            }
+            for (nonblocking_reason, source_kind, state, reason_code), count in sorted(
+                histogram.items()
+            )
         ],
     }

@@ -13,6 +13,14 @@ from src.shared.report_evidence.constants import (
 
 
 OFFICIAL_COLLECTION_DIAGNOSTICS_STEP: Final[str] = "6_수집_공식자료원진단"
+# FULL 출고를 막지 않은 미완료를 비차단 근거·종류·상태·사유별 개수로 남기는
+# 단계. «수집미완료»가 참인데 부분 보고서로 안 내려간 실행에서 무엇이 덜
+# 읽혔는지를 이 단계로 읽는다(ADR 0004).
+OPTIONAL_INCOMPLETE_DIAGNOSTICS_STEP: Final[str] = "6_수집_선택경로미완료"
+# 위 단계의 행마다 «왜 출고를 막지 않았나»를 적는 닫힌 코드. 선택(OPTIONAL)
+# 경로라서인지, 필수 경로지만 설계 상한 예외라서인지를 가른다.
+NONBLOCKING_REASON_OPTIONAL_PATH: Final[str] = "optional_path"
+NONBLOCKING_REASON_REQUIRED_DESIGN_CAP: Final[str] = "required_design_cap"
 UNKNOWN_OFFICIAL_COLLECTION_VALUE: Final[str] = "unknown"
 
 # CollectionAttempt의 실제 formal source_kind만 관측한다. URL·발행사·문서 ID는
