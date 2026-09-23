@@ -15,10 +15,13 @@ from src.core.provider_gateway import gateway
 from src.core.provider_gateway.anthropic_adapter import AnthropicAdapter
 from src.core.provider_gateway.types import BillingDisposition, ProviderObservation, TransportState
 from src.features.news_intake.collection import collect_from_snapshot, collect_search_snapshot
+from src.features.news_intake.grounded import build_grounded_prompt
 from src.features.news_intake.models import NewsCollectionPolicy, NewsCompanyContext
 
 
 AS_OF = dt.date(2026, 9, 8)
+#: 기존 시험 상한 4,000자 − 당시 기본 지시문 2,780자. 기사 두 건 몫의 여유다.
+_TWO_ARTICLE_PROMPT_ROOM = 1_220
 COMPANY = NewsCompanyContext(
     "주식회사 가나다전자",
     aliases=("가나다전자", "Ganada Electronics"),
@@ -147,7 +150,10 @@ def test_provider_fatal_preserves_wrapper_observation_and_stops_following_batche
 def test_large_prompt_splits_real_collection_batches_before_analysis() -> None:
     """큰 prompt는 collection의 실제 분할 분기를 거쳐 두 배치로 분석한다."""
 
-    policy = replace(POLICY, batch_size=4, max_prompt_chars=4_000)
+    # 상한은 «기사 없는 기본 지시문 + 기사 두 건만 들어갈 여유»로 잡는다. 지시문이
+    # 바뀌어도 «두 건은 들어가고 네 건은 넘친다»는 분할 조건을 그대로 시험한다.
+    base = len(build_grounded_prompt(COMPANY, [], AS_OF))
+    policy = replace(POLICY, batch_size=4, max_prompt_chars=base + _TWO_ARTICLE_PROMPT_ROOM)
     snapshot = _snapshot(4, policy=policy)
     analyzed_batches: list[tuple[str, ...]] = []
 

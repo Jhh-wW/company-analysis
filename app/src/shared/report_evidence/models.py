@@ -7,6 +7,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 
+from src.shared.report_evidence.policy import OPTIONAL_CANDIDATE_SLOTS_BY_SECTION
 from src.shared.report_evidence.constants import (
     CollectionState,
     EvidenceReadiness,
@@ -384,12 +385,17 @@ class SectionEvidenceBundle:
             raise ValueError("다른 회사의 근거 조각을 최종 근거 묶음에 섞을 수 없습니다")
         if any(fragment.section_id != self.section_id for fragment in self.fragments):
             raise ValueError("다른 장의 근거 조각을 최종 근거 묶음에 섞을 수 없습니다")
+        # 선택 후보 칸은 원문이 직접 뒷받침할 때 조각에 실려 오지만 필수 커버리지가
+        # 아니다. 조각에는 허용하되 위 채운/빈 칸 분할(필수 칸 전체)에는 넣지 않는다.
+        allowed_fragment_slots = set(required) | set(
+            OPTIONAL_CANDIDATE_SLOTS_BY_SECTION.get(self.section_id, ())
+        )
         unknown_fragment_slots = sorted(
             {
                 slot_id
                 for fragment in self.fragments
                 for slot_id in fragment.covered_slot_ids
-                if slot_id not in set(required)
+                if slot_id not in allowed_fragment_slots
             }
         )
         if unknown_fragment_slots:

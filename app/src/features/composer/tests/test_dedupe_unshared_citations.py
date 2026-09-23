@@ -18,6 +18,7 @@ from src.features.composer.constants import SECTION_IDS
 from src.features.composer.dedupe import (
     _SAME_DOCUMENT_OVERLAP_THRESHOLD,
     _overlap,
+    _same_fact,
     _signature,
     drop_cross_section_duplicates,
 )
@@ -88,6 +89,11 @@ OPERATIONS_ORDER_TEXT = (
     "K-Digital Training(KDT) 프로그램에서 21,699백만원의 수주를 기록했으며, "
     "이는 정부 정책 기반 교육사업이 회사의 주요 수익원임을 보여준다."
 )
+#: 증명되는 반복 — 같은 주장 문장을 7장이 같은 문서의 «다른 조각»으로 인용한 꼴.
+#: ★ 위 실측 짝(0.8889)은 「당사는」↔「기준」, 「교육서비스 포트폴리오의 중요한」↔
+#:   「회사의 주요」로 주장절이 어절 그대로 대응하지 않아 이제 지우지 않는다
+#:   (2026-09-23 총괄 확정 — 아래 보존 시험). 문서 열쇠 규칙은 이 반복으로 잰다.
+OPERATIONS_ORDER_REPEAT = PORTFOLIO_ORDER_TEXT
 # 3장이 이 조각을 한 문장 더 인용했다 — 소유 장 결정(깊이)의 실제 재료다.
 PORTFOLIO_SEGMENT_TEXT = (
     "교육서비스 부문은 2024년 289,115백만원에서 2025년 253,902백만원으로 "
@@ -127,7 +133,7 @@ def _texts(report: ComposedReport, section_id: str) -> list[str]:
 # ══════════════════════════════════════════════════════════
 
 
-def _order_report() -> ComposedReport:
+def _order_report(operations_text: str = OPERATIONS_ORDER_REPEAT) -> ComposedReport:
     return _report(
         portfolio=(
             ComposedSentence(PORTFOLIO_SEGMENT_TEXT, ("v2-frag-8", "v2-frag-153"), "확인"),
@@ -135,10 +141,28 @@ def _order_report() -> ComposedReport:
         ),
         operations_partners=(
             ComposedSentence(
-                OPERATIONS_ORDER_TEXT, ("v2-frag-26", "v2-frag-28"), "확인"
+                operations_text, ("v2-frag-26", "v2-frag-28"), "확인"
             ),
         ),
     )
+
+
+def test_실측_의역_짝은_같은_문서로_짝이_되어도_삭제_증명이_없어_남긴다():
+    """기대 변경 (2026-09-23 총괄 확정) — 종전에는 이 실측 짝의 7장 문장을 지웠다.
+
+    두 문장은 수주 수치가 같지만 「당사는」↔「기준」, 「교육서비스 포트폴리오의 중요한
+    수익원」↔「회사의 주요 수익원」으로 해석 절이 다르다. 겹침은 짝(비교 후보)을
+    고르는 데만 쓰고, 주장절이 어절 그대로 대응하지 않으면 두 장에 남긴다.
+    """
+    cleaned, dropped = drop_cross_section_duplicates(
+        _order_report(OPERATIONS_ORDER_TEXT),
+        fragments=_filing_fragments(
+            "v2-frag-8", "v2-frag-26", "v2-frag-28", "v2-frag-153"
+        ),
+    )
+
+    assert dropped == 0
+    assert _texts(cleaned, "operations_partners") == [OPERATIONS_ORDER_TEXT]
 
 
 def test_조각은_달라도_같은_문서면_거의_같은_문장을_한_장만_남긴다():
@@ -212,7 +236,7 @@ def test_legacy와_typed가_서로_다른_문서면_닮아도_지우지_않는�
     cleaned, dropped = drop_cross_section_duplicates(_order_report(), fragments=mixed)
 
     assert dropped == 0
-    assert _texts(cleaned, "operations_partners") == [OPERATIONS_ORDER_TEXT]
+    assert _texts(cleaned, "operations_partners") == [OPERATIONS_ORDER_REPEAT]
 
 
 def test_흔한_문서명은_다른_문서를_묶는_다리가_되지_않는다():
@@ -278,7 +302,7 @@ def test_문서까지_다르면_닮아도_지우지_않는다():
     cleaned, dropped = drop_cross_section_duplicates(_order_report(), fragments=other)
 
     assert dropped == 0
-    assert _texts(cleaned, "operations_partners") == [OPERATIONS_ORDER_TEXT]
+    assert _texts(cleaned, "operations_partners") == [OPERATIONS_ORDER_REPEAT]
 
 
 def test_조각을_넘기지_않으면_문서_판정이_꺼진다():
@@ -423,8 +447,13 @@ def test_문턱이_두_실측값_사이에_있다():
 # ══════════════════════════════════════════════════════════
 
 
-def test_인용을_공유하면_더_낮은_겹침에서도_그대로_잡는다():
-    """넓힌 규칙이 기존 규칙을 대체하지 않는다."""
+def test_인용을_공유하면_더_낮은_겹침에서도_짝으로_잡되_의역은_지우지_않는다():
+    """넓힌 규칙이 기존 규칙을 대체하지 않는다 — 인용 공유 짝은 낮은 문턱으로 잡는다.
+
+    기대 변경 (2026-09-23 총괄 확정) — 종전에는 이 짝의 8장 문장을 지웠다. 짝(비교
+    후보)은 그대로 잡히지만 「협력해」↔「협력하여」, 「공동으로 개발해 운영하고」↔
+    「공동 개발해 제공하고」가 달라 삭제 증명이 없다 → 두 장에 남는다.
+    """
     left = (
         "회사는 국내 주요 대학과 협력해 재직자 대상 인공지능 교육 과정을 "
         "공동으로 개발해 운영하고 있다."
@@ -438,6 +467,12 @@ def test_인용을_공유하면_더_낮은_겹침에서도_그대로_잡는다()
         "이 픽스처는 넓힌 규칙이 아니라 기존(인용 공유) 규칙으로 잡혀야 합니다"
     )
     assert round(overlap, 4) == 0.7297
+    citations = frozenset({"12"})
+    assert _same_fact(
+        _signature(left), _signature(right), citations, citations,
+        frozenset(), frozenset(), documents_known=False,
+        left_text=left, right_text=right,
+    ), "인용 공유 짝은 낮은 문턱으로 여전히 비교 후보가 된다"
 
     report = _report(
         identity=(ComposedSentence(left, ("12",), "확인"),),
@@ -445,6 +480,6 @@ def test_인용을_공유하면_더_낮은_겹침에서도_그대로_잡는다()
     )
     cleaned, dropped = drop_cross_section_duplicates(report)
 
-    assert dropped == 1
+    assert dropped == 0
     assert _texts(cleaned, "identity") == [left]
-    assert _texts(cleaned, "culture") == []
+    assert _texts(cleaned, "culture") == [right]

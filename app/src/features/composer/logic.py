@@ -1620,9 +1620,17 @@ def compose_sections(
             # 근거가 없는 장은 AI를 호출하지 않는다. 작업 결과는 마지막에 목차순으로 합친다.
             sections.append(ComposedSection(section_id, (), notice=NOTICE_INSUFFICIENT_EVIDENCE))
             continue
-        section_fragments = (
-            normalized if prepared is None else prepared.packets[section_id]
-        )
+        # ★ 확보자료(partial) 경로도 «장별 packet»만 작가에게 보여 준다
+        #   (2026-09-23 4차 실측 B1) — 전체 조각을 캐시용 공통 앞부분으로
+        #   실었더니 작가가 허용 밖 조각의 내용을 옮겨 쓰고 허용된 번호를
+        #   인용으로 붙였고, 묶음 검수는 그 원문 대조를 잡지 못했다.
+        #   허용 ID 목록·슬롯 검사·검수/복구용 전체 근거는 그대로다.
+        if prepared is not None:
+            section_fragments = prepared.packets[section_id]
+        elif partial_evidence is not None:
+            section_fragments = partial_evidence.packets[section_id]
+        else:
+            section_fragments = normalized
         section_table = (
             performance_table
             if not independent or section_id == "past_changes"
@@ -1645,11 +1653,15 @@ def compose_sections(
                     prepared is not None
                     and prepared.enforce_claim_slot_support
                 ),
-                # flat 모드만 아홉 장이 «같은» 조각 전체를 본다 — 조각 블록을
-                # 앞으로 옮기면 앞부분이 장마다 같아져 캐시가 맞는다.
-                # packet 모드는 장마다 조각이 달라 공유 앞부분이 아예 없다.
-                # 켜 봐야 캐시 «쓰기» 할증만 물고 읽기가 없어 손해다.
-                shared_evidence_prefix=prepared is None,
+                # legacy flat 모드만 아홉 장이 «같은» 조각 전체를 본다 — 조각
+                # 블록을 앞으로 옮기면 앞부분이 장마다 같아져 캐시가 맞는다.
+                # packet·확보자료(partial) 모드는 장마다 조각이 달라 공유
+                # 앞부분이 아예 없다. 켜 봐야 캐시 «쓰기» 할증만 물고 읽기가
+                # 없어 손해고, 장별로 다른 근거에 공통 캐시 표식을 남기면
+                # 공급자 호출부가 틀린 경계로 캐시 블록을 자른다.
+                shared_evidence_prefix=(
+                    prepared is None and partial_evidence is None
+                ),
                 allowed_fragment_ids=(
                     partial_evidence.allowed_fragment_ids_by_section[section_id]
                     if partial_evidence is not None else None

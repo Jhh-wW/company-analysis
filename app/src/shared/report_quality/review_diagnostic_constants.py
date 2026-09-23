@@ -47,6 +47,9 @@ REVIEW_SCOPE_ITEMS = {
     "causal_relation_claim_not_covered": "인과 관계",
     "causal_relation_source_id_empty": "인과 관계",
     "causal_relation_hedged_in_source": "인과 관계",
+    # ★ 사실 절에 덧붙인 무근거 목적·의미 해석(composer.direct_support_constants).
+    #   코드 문자열은 그 모듈의 상수와 «반드시 같은 값»이어야 한다.
+    "purpose_interpretation_unsupported": "목적·의미 해석",
     # 역할·과금 결속(composer.role_binding). 코드 문자열은 그 모듈의
     # ROLE_BINDING_* 상수와 «반드시 같은 값»이어야 진단이 표에서 새지 않는다.
     "role_binding_evidence_missing": "역할·과금 결속",
@@ -126,7 +129,10 @@ REVIEW_SCOPE_ITEMS = {
 REVIEW_REASONS = (
     "semantic_grounding_missing", "semantic_grounding_invalid", *REVIEW_SCOPE_ITEMS,
 )
-REVIEW_ITEMS = ("수치", "추세", "시점", *REVIEW_SCOPE_ITEMS.values())
+# ★ «인식기준»은 composer.grounding_constants.RECOGNITION_KEY 와 같은 글자다 —
+#   정성 수익 인식 기준 단정의 정확 인용 요구(4차 채택안). 여기서 빠지면 그
+#   요구로 탈락한 진단이 검증항목 검사에서 통째로 버려진다.
+REVIEW_ITEMS = ("수치", "추세", "시점", "인식기준", *REVIEW_SCOPE_ITEMS.values())
 CANDIDATE_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 # 문장 원문 UTF-8 그대로의 지문이다. empty recovery의 정규화 지문과 구분한다.
 CANDIDATE_FINGERPRINT_VERSION = "candidate-raw-utf8-v1"
@@ -136,5 +142,10 @@ GROUNDING_DETAIL_STAGES = frozenset({
     "quote_not_bound", "metric_mismatch", "candidate_value_missing", "candidate_value_scope",
     "source_value_scope", "value_mismatch", "dimension_mismatch", "period_mismatch",
     "parenthetical_scope", "numeric_coverage", "grounding_missing", "grounding_shape",
-    "trend_invalid", "time_invalid",
+    "trend_invalid", "time_invalid", "recognition_invalid",
+    # 같은 공시의 인용 밖 관계법인 회계범위 각주가 막은 현재 종속·연결 단정 —
+    # composer.entity_scope_constraint_constants.ENTITY_SCOPE_EXCLUSION_STAGE 와 같은 글자.
+    "entity_scope_exclusion",
 })
+#: 세부 진단의 검사 종류 허용 목록 — 근거 배열 이름과 «근거»(배열 밖 모양 실패).
+GROUNDING_DETAIL_CHECK_KINDS = frozenset({"수치", "추세", "시점", "인식기준", "근거"})

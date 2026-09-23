@@ -36,6 +36,9 @@ from src.shared.report_quality.review_diagnostic_constants import CANDIDATE_FING
 from src.features.composer.accounting_policy_constants import (
     ACCOUNTING_POLICY_MIXED,
 )
+from src.features.composer.accounting_policy_constants import (
+    REVENUE_RECOGNITION_EXEMPT_SECTION_ID,
+)
 from src.features.composer.accounting_policy_guard import (
     accounting_policy_mixed, accounting_policy_problem,
 )
@@ -92,6 +95,10 @@ from src.features.composer.review_protocol_observation import (
     note_envelope,
     note_row_failure,
 )
+from src.features.composer.entity_scope_constraints import (
+    EntityScopeContext,
+    build_entity_scope_contexts,
+)
 from src.features.composer.scope_guard import flow_scope_problem
 from src.features.composer.challenge_guard import challenge_response_problem
 from src.features.composer.challenge_response_evidence import (
@@ -109,7 +116,7 @@ from src.features.composer.future_plan_guard import (
     future_plan_prose_problem,
 )
 from src.features.composer.direct_support_constants import (
-    FLOW_CELL_JOIN, RELATION_REVIEW_GUIDE,
+    FLOW_CELL_JOIN, PURPOSE_INTERPRETATION_UNSUPPORTED, RELATION_REVIEW_GUIDE,
 )
 from src.features.composer.direct_support import support_entries_by_number
 from src.features.composer.role_binding import role_binding_report, role_binding_requirements
@@ -134,7 +141,7 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal, DivisionByZero, InvalidOperation, Overflow, ROUND_HALF_UP
 from typing import Any, Callable, Final, Optional
@@ -1441,6 +1448,10 @@ def _ask_grouped_verdicts(
         raw,
         verdicts,
         candidates,
+        entity_scope_by_number=_entity_scope_by_number(
+            ((item.number, item.citations) for item in items if item.sentence is not None),
+            frag_by_id,
+        ),
         diagnostics=diagnostics,
         diagnostic_contexts=contexts,
         culture_candidate_numbers=frozenset(
@@ -1486,6 +1497,23 @@ def _grounding_candidate(
                 text = text[len(prefix):]
                 break
     return text, sources
+
+
+def _entity_scope_by_number(
+    citations_by_number: Iterable[tuple[int, Sequence[str]]],
+    frag_by_id: Mapping[str, CollectedFragment],
+) -> dict[int, tuple[EntityScopeContext, ...]]:
+    """후보별로 같은 공시의 인용 밖 관계법인 회계범위 각주(제약 전용)를 모은다.
+
+    최초 검수(평문·묶음)와 제한 재작성 뒤 재검수(`_recheck_rewritten` → `_ask_verdicts`)가
+    같은 함수를 쓴다. 후보의 자기 인용 sources는 `_grounding_candidate` 그대로다.
+    """
+    by_number: dict[int, tuple[EntityScopeContext, ...]] = {}
+    for number, citations in citations_by_number:
+        contexts = build_entity_scope_contexts(citations, frag_by_id)
+        if contexts:
+            by_number[number] = contexts
+    return by_number
 
 
 def _grouped_grounding_candidate(
@@ -1699,6 +1727,7 @@ def _apply_grounding(
     ] = None,
     section_moves: Optional[list[_SectionMove]] = None,
     grounding_problems: Optional[dict[int, str]] = None,
+    entity_scope_by_number: Optional[Mapping[int, Sequence[EntityScopeContext]]] = None,
 ) -> dict[int, str]:
     # ★ 보고서 기준일을 그대로 넘긴다. 안 넘기면 executive_status_guard 가 날짜
     #   문턱 없이 이탈 «표지» 존재만으로 판정해, 「기준일 이후에 물러날 예정」인
@@ -1723,6 +1752,7 @@ def _apply_grounding(
         baseline_date=baseline_date, verbatim_by_number=verbatim_by_number,
         confirmed_prose_numbers=confirmed_prose_numbers,
         details_by_number=grounding_details,
+        entity_scope_by_number=entity_scope_by_number,
     )
     # ★ 결속 요구를 «제외»한 자리는 진단 목록에 남지 않는다(제외는 탈락이 아니다).
     #   그래서 개수·규칙 버전·후보지문만 로그로 남겨 «어느 표지의 요구가 빠졌는지»를
@@ -1804,12 +1834,20 @@ def _apply_grounding(
         #   본문에서 걸리면 충분하고, 도식 칸은 자기 계약이 따로 있다.
         if (context and context[1] == DIAGNOSTIC_KIND_BODY
                 and context[0] != "culture"):
-            problem = accounting_policy_problem(text)
+            # ★ 2장(사업 모델) 본문에만 자기 인용 원문을 넘긴다 — 실제 수익원과
+            #   같은 인용에 결속된 제공·인식 조건을 보존하는 좁은 면제가 그 장의
+            #   작성 범위이기 때문이다(4차 실측: 정확한 진행 원칙·1년 특례가
+            #   상용구로 오제거). 다른 장·실적표 원문은 종전 그대로 차단한다.
+            policy_sources = {
+                source_id: value for source_id, value in sources.items()
+                if source_id != TABLE_SOURCE_ID
+            } if context[0] == REVENUE_RECOGNITION_EXEMPT_SECTION_ID else None
+            problem = accounting_policy_problem(text, policy_sources)
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
                 continue
-            if accounting_policy_mixed(text):
+            if accounting_policy_mixed(text, policy_sources):
                 # 차단하지 않는다 — 회사 고유 사실이 같은 항목에 섞여 있어서
                 # 통째로 지우면 그 사실까지 함께 사라진다. 관측만 남긴다.
                 logger.info(
@@ -2452,6 +2490,9 @@ def _ask_verdicts(
         raw,
         verdicts,
         candidates,
+        entity_scope_by_number=_entity_scope_by_number(
+            ((item.number, item.sentence.citations) for item in items), frag_by_id,
+        ),
         diagnostics=diagnostics,
         diagnostic_contexts={
             item.number: (item.section_id, item.kind, item.sentence.text)
@@ -2690,6 +2731,11 @@ def _is_grounding_rewrite_target(
     고르는 조건:
       ① 도식 행이 아니라 «문장»이어야 한다 — 표의 칸은 고쳐 쓰지 않는다.
       ② «확인» 등급이어야 한다 — 해석을 고쳐 써서 확인으로 올리지 않는다.
+         단 하나의 예외: 무근거 목적·의미 해석 꼬리(`purpose_interpretation_
+         unsupported`)는 «해석» 등급도 고쳐 쓴다. 그 검사는 등급과 무관하게
+         걸리므로(라벨 우회 금지), 여기서 해석만 빼면 근거 있는 사실 절까지
+         통째로 사라진다. 고쳐 쓴 글은 원래 등급(해석)을 그대로 가져 확인으로
+         오르지 않고, 재검수의 같은 결속 검사를 다시 지난다.
       ③ 자기 인용이 있어야 한다 — 기댈 원문이 없으면 부를 이유가 없다.
       ④ 본문이어야 한다. 요약은 «본문에서 고른» 문장을 글자 그대로 싣는 자리라,
          여기서 새 글자를 만들면 본문과 요약이 다른 문장이 된다.
@@ -2698,7 +2744,9 @@ def _is_grounding_rewrite_target(
 
     return bool(
         sentence is not None
-        and sentence.grade == GRADE_CONFIRMED
+        and (sentence.grade == GRADE_CONFIRMED
+             or (sentence.grade == GRADE_INTERPRETED
+                 and reason_code == PURPOSE_INTERPRETATION_UNSUPPORTED))
         and sentence.citations
         and section_id != REVIEW_SUMMARY_GROUP
         and reason_code

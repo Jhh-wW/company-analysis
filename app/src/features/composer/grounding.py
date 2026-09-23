@@ -6,7 +6,10 @@
 
 from __future__ import annotations
 
-from src.features.composer.direct_support import claims_cause, direct_support_problem, support_entries_by_number
+from src.features.composer.direct_support import (
+    claims_cause, direct_support_problem, purpose_interpretation_problem,
+    support_entries_by_number,
+)
 from src.features.composer.direct_support_constants import RELATION_KEY
 from src.features.composer.combined_relation_guard import (
     combined_relation_hint, combined_relation_problem, combined_relation_triggers,
@@ -29,7 +32,16 @@ from src.features.composer.role_binding import (
     role_binding_hint_lines, role_binding_problem, role_binding_requirements,
 )
 from src.features.composer.numeric_quote_refs import resolve_numeric_quote_refs
-from src.features.composer.scope_guard import scope_problem
+from src.features.composer.entity_scope_constraint_constants import ENTITY_SCOPE_EXCLUSION_STAGE
+from src.features.composer.entity_scope_constraints import EntityScopeContext
+from src.features.composer.scope_guard import document_entity_scope_problem, scope_problem
+# 정성 인식 주장의 발동·결속 문법은 scope 가드와 «같은 상수»를 쓴다 — 두 벌로
+# 적으면 한쪽만 고쳐져 요구와 판정이 어긋난다.
+from src.features.composer.scope_constants import (
+    COMPLETION_RE, DURATION_LIMIT_RE, GENERIC_STREAM_WORDS, PROGRESS_RE,
+    RECOGNITION_CLAUSE_RE, RECOGNITION_RE, REVENUE_STREAM_SUBJECT_RE,
+    REVENUE_SUBJECT_RE,
+)
 from src.features.composer.quantified_relation_guard import quantified_dividend_problem
 from src.features.composer.verbatim_news import VerbatimNewsSource
 
@@ -44,6 +56,7 @@ from src.features.composer.grounding_constants import (
     DIMENSION_AMOUNT, DIMENSION_COUNT, DIMENSION_FOREIGN,
     DIMENSION_MULTIPLE, DIMENSION_RATIO,
     MIN_CONTINUOUS_POINTS, MIN_TREND_POINTS, NUMERIC_KEY, PARENTHETICAL_RE,
+    RECOGNITION_KEY,
     PARTICLE_RE, PLANNED_END_RE, RETROSPECTIVE_RE, SENTENCE_SPLIT_RE, TIME_KEY,
     TREND_DIRECTIONS, TREND_KEY, YEAR_RE, PAIR_SEPARATOR_RE, PRESENT_PERIOD,
     PRESENT_RE, REVIEW_ENTRIES_KEY, REVIEW_NUMBER_KEY, REVIEW_REJECTED,
@@ -150,12 +163,31 @@ def _retrospective_years(text: str, sources: Sequence[str]) -> frozenset[str]:
     return frozenset(years)
 
 
+def _recognition_basis_clauses(text: str) -> tuple[str, ...]:
+    """수익 인식 기준(완료·진행)을 단정한 절 — 정성 인식 주장의 닫힌 발동 범위.
+
+    scope 가드의 술어 대조와 같은 상수를 쓴다. 기준 표지가 없는 사업 서술·
+    용어 정의·「시점에 인식」류 문장은 여기 들어오지 않는다 — 4차 채택안이
+    금지한 «모든 정성 문장으로의 무분별 확대»를 발동 범위로 막는다.
+    """
+
+    return tuple(
+        clause for clause in RECOGNITION_CLAUSE_RE.split(text)
+        if REVENUE_SUBJECT_RE.search(clause) and RECOGNITION_RE.search(clause)
+        and (COMPLETION_RE.search(clause) or PROGRESS_RE.search(clause))
+    )
+
+
 def grounding_requirements(text: str, sources: Sequence[str]) -> tuple[str, ...]:
     """검증 필요를 식별하며, 어휘 등장만으로 후보를 거절하지 않는다."""
     required: list[str] = []
     direct = _direct_text(text, sources)
     if _amounts(text) and not direct:
         required.append(NUMERIC_KEY)
+    # 정성 수익 인식 기준 단정도 정확 인용 검증근거를 요구한다(4차 채택안).
+    # 원문을 통째로 옮긴 문장(direct)은 기존 계약대로 추가 근거가 필요 없다.
+    if _recognition_basis_clauses(text) and not direct:
+        required.append(RECOGNITION_KEY)
     # 수치와 함께 쓴 연속·전년 대비 방향만 재계산한다. 정성 설명과 계획은
     # 기존 의미 검수에 남겨 두어 추론을 일괄 삭제하지 않는다.
     if (_amounts(text) and _trend_spans(text) and not direct
@@ -737,6 +769,88 @@ def _time_valid(text: str, entries: object, sources: Mapping[str, str]) -> bool:
     return covered == set(required_spans)
 
 
+def _recognition_quote(entry: Mapping, sources: Mapping[str, str]) -> str | None:
+    """인식기준 근거의 정확 인용 — 결속 판정에 쓸 «온전한 낱말» 부분만 돌려준다.
+
+    ★ 인용은 인용 조각에 글자 그대로 있어야 한다(`_quote` 와 같은 exact 계약).
+    ★ 다른 점 하나: 인용이 원문 낱말 «중간»에서 시작하면 통째로 거절하지 않고,
+      잘린 첫 낱말을 뺀 나머지만 결속에 쓴다. 실제 공시 원문은 소제목과 본문이
+      붙어(「1) 용역 매출용역 제공으로 인한 수익은 …」) 자연스러운 인용 시작이
+      낱말 중간이 된다(4차 저장 replay 조각 2). 잘린 첫 낱말은 결속 근거에서
+      빠지므로 「비용역 매출」을 잘라 「용역 매출」 근거로 쓰는 바꿔치기는 여전히
+      수익원 대조에서 떨어진다. 끝자리 숫자 이어짐 규칙은 `_quote` 그대로다.
+    """
+
+    fragment_id, quote = entry.get(GROUNDING_SOURCE_FIELD), entry.get("원문")
+    if not isinstance(fragment_id, str) or not isinstance(quote, str) or not quote.strip():
+        return None
+    source = sources.get(fragment_id)
+    if source is None:
+        return None
+    for match in re.finditer(re.escape(quote), source):
+        if (match.end() < len(source) and quote[-1].isdigit()
+                and VALUE_CONTINUATION_RE.fullmatch(source[match.end()])):
+            continue
+        if (match.start() and WORD_CHARACTER_RE.fullmatch(quote[0])
+                and WORD_CHARACTER_RE.fullmatch(source[match.start() - 1])):
+            parts = quote.split(maxsplit=1)
+            if len(parts) < 2:
+                continue
+            return parts[1]
+        return quote
+    return None
+
+
+def _recognition_valid(text: str, entries: object, sources: Mapping[str, str]) -> bool:
+    """인식 기준 단정 절마다 같은 수익원·기준·조건을 담은 정확 인용을 요구한다.
+
+    ★ 제시 원문은 인용 조각에 글자 그대로 있어야 한다(`_recognition_quote`) —
+      낱말 중간에서 시작하면 잘린 첫 낱말은 결속 근거로 쓰지 않는다.
+    ★ 절이 이름 붙인 수익원(「<이름> 매출/수익」 주어)은 그 인용 안에 함께
+      있어야 하고, 절의 기준(완료·진행)과 기간 한정도 인용이 담아야 한다 —
+      다른 수익원의 기준을 빌리거나 조건을 바꾼 인용은 결속되지 않는다.
+    """
+
+    if not isinstance(entries, list) or not entries:
+        return False
+    surface_text = _surface(text)
+    quote_keys: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            return False
+        quote, expression = _recognition_quote(entry, sources), entry.get("표현")
+        if (quote is None or not isinstance(expression, str)
+                or _surface(expression) not in surface_text):
+            return False
+        quote_keys.append(_surface(quote))
+    for clause in _recognition_basis_clauses(text):
+        clause_key = _surface(clause)
+        streams = {
+            stream for match in REVENUE_STREAM_SUBJECT_RE.finditer(clause)
+            if (stream := _surface(match["stream"]))
+            and stream not in GENERIC_STREAM_WORDS
+        }
+        limits = {(m["value"], m["unit"]) for m in DURATION_LIMIT_RE.finditer(clause_key)}
+        supported = False
+        for quote_key in quote_keys:
+            if not RECOGNITION_RE.search(quote_key):
+                continue
+            if any(basis_re.search(clause_key) and not basis_re.search(quote_key)
+                   for basis_re in (COMPLETION_RE, PROGRESS_RE)):
+                continue
+            if any(stream not in quote_key for stream in streams):
+                continue
+            quote_limits = {(m["value"], m["unit"])
+                            for m in DURATION_LIMIT_RE.finditer(quote_key)}
+            if not limits <= quote_limits:
+                continue
+            supported = True
+            break
+        if not supported:
+            return False
+    return True
+
+
 def _reported_comparison_valid(text: str, entries: object, sources: Mapping[str, str]) -> bool:
     """원문이 직접 보도한 비교율을 같은 항목의 결속된 위치에서만 재사용한다."""
     if not isinstance(entries, list):
@@ -825,7 +939,8 @@ def grounding_problem(
         and numeric_valid
         and _reported_comparison_valid(text, numeric_entries, sources)):
         required = tuple(kind for kind in required if kind != TREND_KEY)
-    validators = {NUMERIC_KEY: _numeric_valid, TREND_KEY: _trend_valid, TIME_KEY: _time_valid}
+    validators = {NUMERIC_KEY: _numeric_valid, TREND_KEY: _trend_valid,
+                  TIME_KEY: _time_valid, RECOGNITION_KEY: _recognition_valid}
     for kind in required:
         if kind not in evidence:
             if detail is not None:
@@ -856,8 +971,13 @@ def grounding_problem(
             if detail is not None and kind == NUMERIC_KEY:
                 detail.update(numeric_detail)
             if detail is not None and not detail:
+                # 인식기준 실패는 전용 단계로 남긴다 — shared 진단 단계 목록과
+                # 재작성 안내(GROUNDING_DETAIL_GUIDES)에 같은 이름이 등록돼 있다.
+                stage = ("trend_invalid" if kind == TREND_KEY
+                         else "time_invalid" if kind == TIME_KEY
+                         else "recognition_invalid")
                 detail.update(version=GROUNDING_DETAIL_VERSION, check_kind=kind,
-                              stage="trend_invalid" if kind == TREND_KEY else "time_invalid")
+                              stage=stage)
             return GROUNDING_INVALID
     return ""
 
@@ -903,8 +1023,13 @@ def constrain_verdicts(
     verbatim_by_number: Mapping[int, VerbatimNewsSource] | None = None,
     confirmed_prose_numbers: frozenset[int] = frozenset(),
     details_by_number: dict[int, dict[str, object]] | None = None,
+    entity_scope_by_number: Mapping[int, Sequence[EntityScopeContext]] | None = None,
 ) -> tuple[dict[int, str], dict[int, str]]:
     """같은 검수 응답의 근거를 실제 입력에 결속한다. 추가 AI 호출은 없다.
+
+    ``entity_scope_by_number``는 후보가 인용한 공시와 «같은 문서»의 인용 밖 관계법인
+    회계범위 각주(제약 전용, ``entity_scope_constraints``)다. 판정에만 쓰고 후보의
+    긍정 근거 ``sources``에는 합치지 않는다 — 다른 근거를 빌려 승인하지 않게.
 
     거짓 판정의 기존 재작성 기회는 유지한다. 참·애매의 결속 실패는 별도
     처분으로 반환해 해석 강등이나 형식 재시도로 우회하지 못하게 한다.
@@ -915,9 +1040,9 @@ def constrain_verdicts(
     ``verbatim_by_number`` 는 검수 단계가 수집 객체로 증명한 «원문 그대로인 보도»
     문맥이다. 역할·과금 결속에만 쓰이며, 안내 생성과 같은 값을 받아야 한다.
     ``confirmed_prose_numbers``는 수량 범위 결속(«결합» 유형)만 거른다 — 「해석」
-    등급·구조화 주장·인용 없는 후보에는 이 검사를 걸지 않는다(설계안 §4). 인과·역할·
-    과금 검사는 이 목록과 무관하게 그대로 전체 후보에 돈다 — 그쪽은 이 설계안이
-    손대는 범위가 아니다.
+    등급·구조화 주장·인용 없는 후보에는 이 검사를 걸지 않는다(설계안 §4). 인과·
+    역할·과금 검사와 목적·의미 해석 검사는 이 목록과 무관하게 전체 후보에 돈다 —
+    목적 해석을 확인에만 걸면 같은 무근거 꼬리가 해석 라벨로 공개된다(독립 검토).
     """
     from src.features.composer.logic import extract_json_payload
     # verify.py의 검수 파서와 같은 번호 보정 규칙을 쓴다 — 이 함수는 raw를
@@ -951,12 +1076,30 @@ def constrain_verdicts(
         # 도식 후보만 칸 경계를 함께 준다. 본문·요약은 None 이므로 한 문장
         # 안에서 절을 넘는 연결이 새로 허용되지 않는다.
         cells = (cells_by_number or {}).get(number)
+        # 같은 공시의 인용 밖 제외 각주가 부정한 현재 종속·연결 단정(제약만 소비, 등급 무관).
+        # 공개 사유 코드는 기존 그대로이고, 어느 단계였는지는 세부 진단에만 남긴다(원문 없음).
+        entity_scope = (entity_scope_by_number or {}).get(number)
+        entity_problem = document_entity_scope_problem(text, entity_scope) if entity_scope else ""
+        if entity_problem and details_by_number is not None:
+            details_by_number[number] = {
+                "version": GROUNDING_DETAIL_VERSION, "check_kind": "근거",
+                "stage": ENTITY_SCOPE_EXCLUSION_STAGE,
+            }
         # 인과 결속과 역할·과금 결속은 같은 «관계» 배열을 읽는다. 어느 쪽이든 첫
         # 사유를 그대로 돌려 참·애매가 근거 없이 공개로 새지 않게 한다.
         problem = (
-            direct_support_problem(
+            entity_problem
+            or direct_support_problem(
                 text, sources, relation_evidence.get(number), cells,
             )
+            # 사실 절에 덧붙인 무근거 목적·의미 해석은 «등급과 무관하게» 건다
+            # (4차 실측 L2 + 독립 검토 확정). 확인 산문에만 걸면 같은 무근거
+            # 꼬리가 해석 라벨로 그대로 공개된다 — 통합안이 금지한 «라벨만
+            # 해석으로 낮추는 우회»다. 원문이 목적을 실제로 적은 해석은 검사
+            # 안에서 그대로 보존되고, 탈락분은 등급과 무관하게 제한 재작성·재검수로
+            # 사실 절만 회복한다(해석은 해석 등급 그대로 — 확인으로 올리지 않는다,
+            # verify._is_grounding_rewrite_target).
+            or purpose_interpretation_problem(text, sources)
             or role_binding_problem(
                 text, sources, relation_evidence.get(number), cells,
                 (verbatim_by_number or {}).get(number),

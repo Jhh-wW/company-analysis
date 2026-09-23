@@ -9,7 +9,8 @@
   ② 인용이 5장 허용 밖이면 예전대로 제외하고 사유를 남긴다.
   ③ 6장 근거 결속에도 걸린 문장은 옮기지 않는다 — 결속 요구를 장 바꾸기로
      피해 갈 수 없다.
-  ④ 5장에 이미 같은 사실이 있으면 옮기지 않는다.
+  ④ 5장에 이미 같은 사실이 있으면 옮기지 않는다 — «같은 사실»은 장 간 삭제와 같은
+     주장절 대응 증명으로 가린다. 어투만 다른 짝은 증명이 없어 옮긴다.
   ⑤ 미래 표지가 있는 문장은 그대로 6장에 남는다.
   ⑥ 부록의 «본문 사용 장»이 5장으로 기록된다.
 """
@@ -282,11 +283,12 @@ def test_근거_결속에도_걸린_문장은_옮기지_않고_제외한다(grou
 
 @pytest.mark.parametrize("grouped", (False, True), ids=("평문", "묶음"))
 def test_5장에_같은_사실이_이미_있으면_옮기지_않는다(grouped):
+    # 5장에 이미 «같은 주장 문장»이 있다 — 삭제 증명이 되는 참 중복이다.
     checked, diagnostics, protocol = _run(
-        [PRESENT_TEXT], grouped=grouped, challenge_texts=(CHALLENGE_TWIN,),
+        [PRESENT_TEXT], grouped=grouped, challenge_texts=(PRESENT_TEXT,),
     )
     sections = _by_section(checked)
-    assert sections[CHALLENGE_FLOW_SECTION_ID] == [CHALLENGE_TWIN], (
+    assert sections[CHALLENGE_FLOW_SECTION_ID] == [PRESENT_TEXT], (
         "장 «간» 중복 제거는 한 장 안의 반복을 보지 않는다 — "
         "여기서 막지 않으면 5장에 같은 말이 두 번 실린다"
     )
@@ -294,6 +296,26 @@ def test_5장에_같은_사실이_이미_있으면_옮기지_않는다(grouped):
     step = _move_step(protocol)
     assert step["이동"] == 0
     assert step["이동불가"] == {SECTION_MOVE_BLOCKED_DUPLICATE: 1}
+
+
+@pytest.mark.parametrize("grouped", (False, True), ids=("평문", "묶음"))
+def test_5장의_어투만_다른_짝은_증명이_없어_옮겨_온_문장을_버리지_않는다(grouped):
+    """기대 변경 (2026-09-23 dedupe 엄밀 증명, 총괄 확정) — 종전에는 이 원래 짝을
+    중복으로 막아 6장 문장을 버렸다.
+
+    「설립하여 … 박차를 가하고 있다」↔「설립해 … 힘을 쏟고 있다」는 짝(비교 후보)은
+    되지만 주장절이 어절 그대로 대응하지 않는다. 재배치는 «중복»이면 옮겨 오는
+    문장을 버리므로, 증명 없는 의역은 버리지 않고 옮긴다 — 5장에 두 번 보일 수 있다.
+    """
+    checked, _diagnostics, protocol = _run(
+        [PRESENT_TEXT], grouped=grouped, challenge_texts=(CHALLENGE_TWIN,),
+    )
+    sections = _by_section(checked)
+    assert sections[CHALLENGE_FLOW_SECTION_ID] == [CHALLENGE_TWIN, PRESENT_TEXT]
+    assert sections[STRATEGY_TABLE_SECTION_ID] == []
+    step = _move_step(protocol)
+    assert step["이동"] == 1
+    assert step["이동불가"] == {}
 
 
 # ══════════════════════════════════════════════════════════════════════

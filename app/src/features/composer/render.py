@@ -26,9 +26,7 @@ from src.core.citations import citation_number
 from src.features.composer.constants import (
     CITATION_STYLE_MERGED,
     PARAGRAPH_MAX_SENTENCES,
-    FLOW_ARROW_SECTION_IDS,
     FLOW_PRESENTATION,
-    FLOW_UNCONFIRMED_CELL,
     OPERATIONS_FLOW_CAPTION,
     FLOW_CAPTION_BY_SECTION,
     FLOW_HEADERS_BY_SECTION,
@@ -639,10 +637,6 @@ def _flow_report_table(
     rows: list[list[str]] = []
     cited: list[int] = []
     row_cites: list[list[str]] = []
-    # ★ 「미확인」 채우기는 «화살표로 그려지는 장»(2·5·7장)에만 건다.
-    #   카드로 그려지는 장(1·3·6·8장)은 빈 칸을 그대로 둔다 — 이유는
-    #   constants.FLOW_ARROW_SECTION_IDS 주석(카드는 빈 칸을 «빼는» 렌더러다).
-    fills_unconfirmed = section.section_id in FLOW_ARROW_SECTION_IDS
     for row in section.flow_rows:
         problem = flow_review_problem(row, section_id=section.section_id, fragments=fragments, baseline_date=as_of_date)
         if problem:
@@ -654,24 +648,13 @@ def _flow_report_table(
         ]
         if not row_numbers:
             continue
-        # ★ 화살표 장에서는 회사가 안 밝힌 칸을 «빈 칸»이 아니라 「미확인」으로
-        #   채운다. 빈 문자열이면 흐름도에 «라벨만 있고 속이 빈 76px 상자»가
-        #   화살표와 함께 그려져 고장처럼 보인다
-        #   (constants.FLOW_UNCONFIRMED_CELL 주석에 실측 근거).
-        #   ★ 여기(데이터 층)에서 채우는 이유 — 웹(result.html)과 PDF(_FlowGraphic)가
-        #     각자 채우면 한쪽만 고쳐져 갈린다. 문단 번호에서 같은
-        #     사고가 있었다. 두 렌더러가 같은 값을 받게 한 곳에서 정한다.
-        #   ★ 카드 장에서는 채우지 않는다 — 카드 렌더러가 빈 칸을 «빼도록»
-        #     설계돼 있어서, 채우면 「확인된 사례: 미확인」·제목이 「미확인」인
-        #     카드가 인쇄된다(FLOW_ARROW_SECTION_IDS 주석의 실측 2건).
-        rows.append(
-            [
-                (str(cell).strip() or FLOW_UNCONFIRMED_CELL)
-                if fills_unconfirmed
-                else str(cell).strip()
-                for cell in row.cells
-            ]
-        )
+        # ★ 빈 칸을 「미확인」으로 채우지 않는다 (2026-09-23 4차 실측 정정) —
+        #   작가가 비운 끝 칸은 묶음 검수가 «본 적 없는» 칸이다(검수 프롬프트는
+        #   값이 있는 칸만 싣는다). 여기서 채우면 검수받지 않은 노드가 승인된
+        #   도식처럼 공개된다. 검수된 원행과 영수증(review_binding)은 폭 그대로
+        #   보존하고, «표시» 축소는 report_standard/visualization._flow 한 곳이
+        #   한다 — 웹·PDF·봉인이 그 한 결과를 소비하므로 갈릴 자리가 없다.
+        rows.append([str(cell).strip() for cell in row.cells])
         cited.extend(row_numbers)
         row_cites.append([f"[{number}]" for number in sorted(set(row_numbers))])
     if not rows:

@@ -16,8 +16,21 @@ GROUNDING_DETAIL_GUIDES = {
     "period_mismatch": "후보 숫자의 기간과 원문 숫자의 기간이 다릅니다.",
     "parenthetical_scope": "괄호 안 숫자가 괄호 밖 다른 항목으로 옮겨졌습니다.",
     "numeric_coverage": "문장에 있는 모든 숫자가 각각 근거에 결속되지 않았습니다.",
-    "grounding_missing": "요구한 수치·추세·시점 근거가 응답에 없습니다.",
+    "grounding_missing": "요구한 수치·추세·시점·인식기준 근거가 응답에 없습니다.",
     "grounding_shape": "근거 항목의 이름 또는 자료형이 계약과 다릅니다.",
     "trend_invalid": "추세의 방향·기간·연속 관측이 원문과 결속되지 않았습니다.",
     "time_invalid": "시점 표현이 원문의 같은 활동에 결속되지 않았습니다.",
+    # 정성 수익 인식 기준 단정(4차 채택안). shared 진단 단계 목록에도 같은 이름이 있다.
+    "recognition_invalid": (
+        "인식 기준을 단정한 절이 같은 수익원·기준·기간 조건을 담은 인용 원문 "
+        "구절에 결속되지 않았습니다."
+    ),
+    # 같은 공시의 인용 밖 관계법인 회계범위 각주가 막은 현재 종속·연결 단정
+    # (composer.entity_scope_constraint_constants.ENTITY_SCOPE_EXCLUSION_STAGE).
+    # 재작성은 자기 인용 원문만 보므로 제외 설명을 새로 지어내지 않게 한다.
+    "entity_scope_exclusion": (
+        "같은 공시의 각주가 그 법인을 종속기업·연결 대상에서 제외했습니다. 현재 "
+        "종속기업·연결 대상이라는 단정을 빼고, 자기 인용 원문의 대여·비용 같은 거래 "
+        "사실만 남기십시오. 종속기업 제외 설명은 인용 원문에도 그 설명이 있을 때만 쓰십시오."
+    ),
 }

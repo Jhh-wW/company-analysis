@@ -18,6 +18,7 @@ from src.shared.report_evidence.legacy_fragment_kinds import (
     LEGACY_KIND_AUDITOR_FINDING,
     LEGACY_KIND_AUDIT_FINANCIAL,
     LEGACY_KIND_BUSINESS_CONTENT,
+    LEGACY_KIND_ENTITY_SCOPE_FOOTNOTE,
     LEGACY_KIND_FINANCIAL,
     LEGACY_KIND_GOODS_CONTENT,
     LEGACY_KIND_HOMEPAGE,
@@ -139,6 +140,12 @@ def test_실제_생산자가_만드는_모든_종류가_정본에_정확히_등�
         _assigned_name(_REAL_PIPELINE, "_AUDIT_FINANCIALS_FRAGMENT_KIND")
         == "LEGACY_KIND_AUDIT_FINANCIAL"
     )
+    # 관계법인 회계범위 각주도 파이프라인이 엔진 보충 함수에 정본 이름을 넘겨
+    # 만든다. 문자열을 다시 적으면 이 시험이 먼저 깨진다.
+    assert (
+        _assigned_name(_REAL_PIPELINE, "_ENTITY_SCOPE_FOOTNOTE_FRAGMENT_KIND")
+        == "LEGACY_KIND_ENTITY_SCOPE_FOOTNOTE"
+    )
     produced = (
         frozenset(section_heads)
         | frozenset(EXTRA_SECTION_HEADS)
@@ -148,12 +155,13 @@ def test_실제_생산자가_만드는_모든_종류가_정본에_정확히_등�
                 OFFICIAL_IR_FRAGMENT_KIND,
                 NEWS_FRAGMENT_KIND,
                 LEGACY_KIND_AUDIT_FINANCIAL,
+                LEGACY_KIND_ENTITY_SCOPE_FOOTNOTE,
             }
         )
     )
 
     assert produced == LEGACY_FRAGMENT_KINDS
-    assert len(produced) == 21
+    assert len(produced) == 22
 
 
 def test_실제_CELL_SOURCES가_보내는_DART종류의_semantic장을_정본이_누락하지않는다() -> None:
@@ -229,6 +237,7 @@ def test_정확한_종류별_장_소유행렬을_고정한다() -> None:
             "operations_partners",
         },
         "특수관계자": {"operations_partners"},
+        "관계법인 회계범위 주석": {"operations_partners"},
         "판관비": {"past_changes"},
         "매출수주": revenue_sections,
         "신규사업전망": {"future_strategy"},

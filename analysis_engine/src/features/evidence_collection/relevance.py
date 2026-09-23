@@ -18,7 +18,11 @@ SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
     # 사실이 아니다. 이 약한 한 단어가 사업모델·고객·가치 문단을 identity로
     # 납치한 실측 결함 때문에 직접 정체성 표현만 남긴다.
     "identity:corporate_identity": ("주식회사", "법인", "설립"),
-    "identity:business_definition": ("영위하는", "사업을 영위", "업종"),
+    # 「사업을 영위」만 있으면 「…을 주요 사업으로 영위하고 있습니다」라는 감사보고서
+    # 「회사의 개요」 표준 문형을 놓친다(2026-09-23 4차 실측: 사업정의가 있는
+    # 문단이 corporate_identity만 받아 작가의 정확한 사업정의 문장이 검수 전에
+    # 탈락했다). 「사업으로 영위」는 주요·주된·목적 사업 문형을 함께 덮는다.
+    "identity:business_definition": ("영위하는", "사업을 영위", "사업으로 영위", "업종"),
     "identity:legal_scope": ("정관", "인가", "허가", "등록"),
     "identity:official_location": ("본점", "소재지", "주소"),
     "identity:self_positioning": ("선도", "대표하는", "자리매김"),
@@ -28,7 +32,16 @@ SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
     #   표적 우선순위(아래 score_fragment_text) 때문에 실제로는 더 적합한
     #   보조 슬롯을 가리는 부작용이 있었다(실측). 「어떻게 돈을
     #   버는가」를 설명하는 구체적 표현만 남긴다.
-    "business_model:revenue_model": ("판매에서 발생", "수익원", "과금", "수수료", "매출 구조"),
+    # 수익인식 주석의 「주된 영업수익의 형태는 … 용역 매출, … 콘텐츠 매출 등으로
+    # 구성됩니다」는 수익 구성 그 자체다. 이 문형이 없어 같은 문단이 「대가」 한
+    # 낱말로 value_exchange만 받았고, 작가의 정확한 수익 구성 문장이 검수 전에
+    # 탈락했다(4차 실측). 금액·증감(「매출액은 …억원으로 증가」)에는 걸리지 않는
+    # 구성 문형만 넣는다. 「수익의 형태」는 「영업수익의 형태」를 함께 덮으므로
+    # 둘을 따로 넣지 않는다(겹쳐 선언하면 한 문구가 신호 2개로 부풀어 오른다).
+    "business_model:revenue_model": (
+        "판매에서 발생", "수익원", "과금", "수수료", "매출 구조",
+        "수익의 형태", "매출로 구성", "매출 등으로 구성",
+    ),
     "business_model:customer_type": ("고객사", "거래처", "수요처"),
     "business_model:sales_channel": ("유통", "채널", "직판", "대리점"),
     "business_model:regional_mix": ("내수", "수출", "해외", "지역별"),
@@ -142,6 +155,29 @@ SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+#: 키워드가 이 복합어 «안에서만» 나타나면 그 키워드의 직접 신호로 세지 않는다.
+#: 「가치」는 고객이 받는 가치(value_exchange)를 찾는 낱말인데 회계 주석의 측정
+#: 용어 안에서도 똑같이 나온다. 4차 실측 감사보고서에서 금융상품(공정가치)·현금성
+#: 자산(가치변동)·부가가치 산정 주석이 이 우연 일치만으로 2장 value_exchange
+#: 근거가 됐다. 「가치사슬」은 7장 value_chain의 고유 신호인데 「가치」까지 함께
+#: 걸려 2장과 동점을 만들었다. 복합어 밖에 「가치」가 따로 있으면 그대로 센다
+#: (낱말 자체를 금지하지 않는다).
+KEYWORD_EXCLUDED_COMPOUNDS: dict[str, tuple[str, ...]] = {
+    "가치": (
+        "공정가치", "현재가치", "명목가치", "장부가치", "순실현가능가치",
+        "사용가치", "잔존가치", "내재가치", "부가가치", "가치변동", "가치사슬",
+        # 일반기업회계기준 유형자산 정책의 표준 문형 「내용연수를 연장시키거나
+        # 가치를 실질적으로 증가시키는 지출」 — 자산 가치이지 고객 가치가 아니다.
+        "가치를 실질적으로",
+    ),
+    # identity:official_location은 본점·소재지를 찾는 칸이다. 웹·전자우편 주소만
+    # 적힌 문단을 법인 소재지 근거로 받지 않는다.
+    "주소": (
+        "홈페이지 주소", "홈페이지주소", "인터넷 주소", "인터넷주소",
+        "전자우편 주소", "전자우편주소", "이메일 주소", "이메일주소", "웹 주소",
+    ),
+}
+
 #: 장별 구조 신호(제목 줄에 등장하면 가산점). SLOT_KEYWORDS와 같은 v1 한계.
 SECTION_HEADING_HINTS: dict[str, tuple[str, ...]] = {
     "identity": ("회사의 개요",),
@@ -161,6 +197,44 @@ SECTION_HEADING_HINTS: dict[str, tuple[str, ...]] = {
     "culture": ("임원 및 직원",),
     "competitive_position": ("시장 현황",),
 }
+
+
+def keyword_has_direct_hit(keyword: str, text: str) -> bool:
+    """키워드가 제외 복합어 밖에서 한 번이라도 직접 나타나는지 본다.
+
+    제외 복합어가 없는 키워드는 기존과 같은 부분 문자열 검사다. 제외 복합어가
+    있으면 키워드 출현 위치마다 그 위치를 완전히 덮는 복합어가 있는지 확인해,
+    덮이지 않은 출현이 하나라도 있을 때만 신호로 센다.
+    """
+
+    if keyword not in text:
+        return False
+    compounds = KEYWORD_EXCLUDED_COMPOUNDS.get(keyword)
+    if not compounds:
+        return True
+    covered_spans = [
+        (start, start + len(compound))
+        for compound in compounds
+        for start in _occurrence_starts(compound, text)
+    ]
+    return any(
+        not any(
+            span_start <= start and start + len(keyword) <= span_end
+            for span_start, span_end in covered_spans
+        )
+        for start in _occurrence_starts(keyword, text)
+    )
+
+
+def _occurrence_starts(needle: str, text: str) -> list[int]:
+    """겹침을 허용한 모든 출현 시작 위치."""
+
+    starts: list[int] = []
+    position = text.find(needle)
+    while position != -1:
+        starts.append(position)
+        position = text.find(needle, position + 1)
+    return starts
 
 
 @dataclass(frozen=True)
@@ -244,7 +318,7 @@ def score_fragment_slots_with_signal(
     scored: list[tuple[int, int, bool, SlotScore]] = []
     has_any_direct_signal = False
     for declaration_index, (slot_id, keywords) in enumerate(SLOT_KEYWORDS.items()):
-        hits = [keyword for keyword in keywords if keyword in text]
+        hits = [keyword for keyword in keywords if keyword_has_direct_hit(keyword, text)]
         if not hits:
             continue
         has_any_direct_signal = True

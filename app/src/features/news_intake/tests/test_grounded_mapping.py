@@ -19,7 +19,16 @@ cross-feature import 금지 — 이 파일은 news_intake 안의 모듈만 쓴�
 
 from __future__ import annotations
 
-from src.features.news_intake.grounded_mapping import same_event, select_diverse_excerpts
+from dataclasses import replace
+
+import pytest
+
+from src.features.news_intake.grounded_mapping import (
+    evidence_is_sufficient,
+    may_be_same_event,
+    same_event,
+    select_diverse_excerpts,
+)
 from src.features.news_intake.models import GroundedNewsExcerpt, NewsCandidate, NewsCollectionPolicy
 
 # ══════════════════════════════════════════════════════════
@@ -279,3 +288,219 @@ def test_comma_separated_number_before_the_unit_still_normalizes_the_ending() ->
     short_excerpt = _excerpt(_candidate("comma-short", "https://example.com/comma/short"), short_text)
 
     assert same_event(long_excerpt, short_excerpt)
+
+
+# ══════════════════════════════════════════════════════════
+# ⑦ 삭제(same_event)는 «같은 사실»일 때만 — 숫자·유사도·접두사는 증명이 아니다
+#
+# 유사도 휴리스틱은 지우지 않고 may_be_same_event(충분성·선택 순서)에만 쓴다.
+# ══════════════════════════════════════════════════════════
+
+_RELATIVE_YEAR = "가나다전자는 지난해 매출 100억원을 달성했다."
+_ABSOLUTE_YEAR = "가나다전자는 2024년 매출 100억원을 달성했다."
+_PRODUCT_A = "가나다전자의 제품 갑은 2025년 매출 100억원과 영업이익 10억원을 기록했다."
+_PRODUCT_B = "가나다전자의 제품 을은 2025년 매출 100억원과 영업이익 10억원을 기록했다."
+#: 제품명이 첫 수치(연도) «뒤»에 오는 반례 — 첫 수치 앞 접두사는 둘 다 «가나다전자는».
+_AFTER_YEAR_A = "가나다전자는 2025년 제품 갑에서 매출 100억원과 영업이익 10억원을 기록했다."
+_AFTER_YEAR_B = "가나다전자는 2025년 제품 을에서 매출 100억원과 영업이익 10억원을 기록했다."
+_REGION_A = "가나다전자의 북미 매출은 2025년 100억원을 기록했다."
+_REGION_B = "가나다전자의 유럽 매출은 2025년 100억원을 기록했다."
+_OTHER_FACT = "가나다전자는 부산에 두 번째 설비 조립 공장을 세웠다."
+_NEW_PUBLISHER = "other-press.com"
+
+
+def _dated(article_id: str, text: str, published_on: str = _PUBLISHED_ON, *,
+           publisher: str = _PUBLISHER_HANKYUNG, event_on: str = "",
+           temporal_status: str = _TEMPORAL_COMPLETED) -> GroundedNewsExcerpt:
+    """사건일을 따로 주는 조각 — 발행일 규칙만 따로 보려고 기본 사건일은 비운다."""
+    candidate = _candidate(article_id, f"https://ex.com/{article_id}", published_on, publisher)
+    return replace(_excerpt(candidate, text, temporal_status=temporal_status), event_on=event_on)
+
+
+def _select(*excerpts: GroundedNewsExcerpt, policy: NewsCollectionPolicy | None = None):
+    return select_diverse_excerpts(list(excerpts), policy or NewsCollectionPolicy())
+
+
+def test_발행일이_다른_같은_상대연도_문장은_둘_다_남는다() -> None:
+    """2025년 기사의 «지난해»(2024)와 2026년 기사의 «지난해»(2025)는 다른 사실이다."""
+    earlier = _dated("rel-2025", _RELATIVE_YEAR, "2025-06-01")
+    later = _dated("rel-2026", _RELATIVE_YEAR, "2026-06-01")
+    assert not same_event(earlier, later) and not same_event(later, earlier)
+
+    chosen, excluded = _select(earlier, later)
+    assert {id(item) for item in chosen} == {id(earlier), id(later)}
+    assert {item.candidate.published_on for item in chosen} == {"2025-06-01", "2026-06-01"}
+    assert "duplicate_event" not in excluded
+
+
+def test_같은_날_다른_매체의_같은_상대연도_문장은_하나만_남긴다() -> None:
+    first = _dated("rel-a", _RELATIVE_YEAR)
+    second = _dated("rel-b", _RELATIVE_YEAR, publisher=_NEW_PUBLISHER)
+    assert same_event(first, second) and same_event(second, first)
+
+    chosen, excluded = _select(second, first)
+    assert list(chosen) == [first]  # 같은 날짜면 주소 정렬상 먼저인 원문 객체 그대로
+    assert chosen[0] is first
+    assert excluded == {"duplicate_event": 1}
+
+
+@pytest.mark.parametrize(("text", "event_on"), [
+    # ★ 의도적 보존(정책 변경): 명시 연도·같은 사건일 문장도 이전엔 날짜가 달라도 합쳤다.
+    #   지금은 주장 절의 기간 결속을 증명할 수 없어 다른 발행일이면 보존한다.
+    (_ABSOLUTE_YEAR, ""),
+    ("가나다전자는 2026년 9월 1일 부산 공장을 준공했다.", "2026-09-01"),
+    # 문장 안 연도가 다른 절의 기간을 뜻하지 않는 반례(독립 검증 확정).
+    ("가나다전자는 2010년에 설립됐다. 가나다전자의 매출은 전년 대비 20% 증가했다.", ""),
+    ("2010년에 설립된 가나다전자의 당기 매출은 100억원이다.", ""),
+    ("가나다전자는 기업용 산업설비 제조 사업을 운영한다.", ""),
+])
+def test_다른_발행일의_같은_문장은_지우지_않고_같은_날이면_합친다(text: str, event_on: str) -> None:
+    earlier = _dated("date-a", text, "2025-06-01", event_on=event_on)
+    later = _dated("date-b", text, "2026-06-01", event_on=event_on)
+    assert not same_event(earlier, later) and not same_event(later, earlier)
+    chosen, excluded = _select(earlier, later)
+    assert {id(item) for item in chosen} == {id(earlier), id(later)} and excluded == {}
+
+    same_day = _dated("date-c", text, "2025-06-01", publisher=_NEW_PUBLISHER, event_on=event_on)
+    assert same_event(earlier, same_day)  # 같은 날 확정 동일 사실은 정리한다
+    chosen, excluded = _select(earlier, same_day)
+    assert len(chosen) == 1 and excluded == {"duplicate_event": 1}
+
+
+def test_같은_문장도_시제나_사건일이_다르면_지우지_않는다() -> None:
+    completed = _dated("ctx-a", _OTHER_FACT)
+    planned = _dated("ctx-b", _OTHER_FACT, temporal_status="planned")
+    assert not same_event(completed, planned)
+    first_day = _dated("ctx-c", _OTHER_FACT, event_on="2026-09-01")
+    other_day = _dated("ctx-d", _OTHER_FACT, event_on="2026-09-05")
+    assert not same_event(first_day, other_day)
+    assert same_event(first_day, _dated("ctx-e", _OTHER_FACT))  # 한쪽만 사건일을 뽑은 같은 문장
+
+
+@pytest.mark.parametrize(("left", "right"), [
+    (_PRODUCT_A, _PRODUCT_B),
+    (_AFTER_YEAR_A, _AFTER_YEAR_B),
+    (_REGION_A, _REGION_B),
+])
+def test_다른_제품_지역의_같은_수치는_둘_다_원문_그대로_남는다(left: str, right: str) -> None:
+    excerpt_a = _dated("fact-a", left)
+    excerpt_b = _dated("fact-b", right)
+    assert not same_event(excerpt_a, excerpt_b) and not same_event(excerpt_b, excerpt_a)
+    # 기존 유사 보도 휴리스틱은 같은 사건일 «수도» 있다고 본다 — 지우지 않고 표시만 한다.
+    assert may_be_same_event(excerpt_a, excerpt_b)
+
+    chosen, excluded = _select(excerpt_a, excerpt_b)
+    assert {item.text for item in chosen} == {left, right}
+    assert {id(item) for item in chosen} == {id(excerpt_a), id(excerpt_b)}
+    assert excluded == {}
+
+
+def test_허용목록에_없는_종결형은_같은_사실로_지우지_않는다() -> None:
+    """허용 종결형은 «대였다.»↔«대로 집계됐다.» 한 쌍뿐이다. «기록했다»↔«이었다»는
+    다른 술어라 유사도로 합치지 않는다 — 둘 다 남기고 가능 중복으로만 표시한다."""
+    recorded = _dated("end-a", "가나다전자의 설비 매출은 2025년 100억원을 기록했다.")
+    was = _dated("end-b", "가나다전자의 설비 매출은 2025년 100억원이었다.")
+    assert not same_event(recorded, was)
+    assert may_be_same_event(recorded, was)
+    chosen, excluded = _select(recorded, was)
+    assert {id(item) for item in chosen} == {id(recorded), id(was)} and excluded == {}
+
+
+def test_숫자가_같은_순수_부분_인용은_긴_원문을_대표로_남긴다() -> None:
+    """긴 쪽에만 있는 수치 없는 문장(부산 공장)을 잃지 않는다 — 입력·주소 순서와 무관."""
+    first = "가나다전자는 2025년 설비 수주 20건을 기록했다."
+    longer = _dated("b-long", f"{first} 가나다전자는 같은 해 부산 공장을 새로 가동했다.")
+    shorter = _dated("a-short", first)  # 주소 정렬상 먼저 온다
+    assert same_event(shorter, longer)
+    for ordering in ((shorter, longer), (longer, shorter)):
+        chosen, excluded = _select(*ordering)
+        assert list(chosen) == [longer] and chosen[0] is longer
+        assert excluded == {"duplicate_event": 1}
+
+
+def test_충분성은_가능_중복을_한_사건으로_센다() -> None:
+    policy = NewsCollectionPolicy(sufficient_events=2, sufficient_topics=1)
+    possible = (_dated("suf-a", _AFTER_YEAR_A), _dated("suf-b", _AFTER_YEAR_B))
+    relative = (_dated("suf-c", _RELATIVE_YEAR, "2025-06-01"), _dated("suf-d", _RELATIVE_YEAR, "2026-06-01"))
+    distinct = (_dated("suf-e", _AFTER_YEAR_A), _dated("suf-f", _OTHER_FACT))
+    for pair in (possible, relative):
+        chosen, _excluded = _select(*pair, policy=policy)
+        assert len(chosen) == 2  # 원문은 둘 다 보존한다
+        assert not evidence_is_sufficient(list(pair), policy)  # 그래도 새 사건 두 개로 세지 않는다
+    assert evidence_is_sufficient(list(distinct), policy)
+
+
+#: 두 번째 독립 검증 반례 — 같은 날짜·발행처, 주소 a→b→c→d, event_key는 모두 다르다.
+#: HEAD 판정: A-B 거짓, B-C·B-D 참(유사도 0.91), C-D 거짓 → 대표 A·B 두 묶음.
+_HUB_A = "가나다전자는 부산에 공장을 세웠다."
+_HUB_B = f"{_HUB_A} 회사는 핵심 장비 생산과 고객 지원을 담당하는 통합 거점을 운영한다."
+_HUB_C = _HUB_B.replace("부산", "서울").replace("핵심", "정밀")
+_HUB_D = _HUB_B.replace("부산", "대전").replace("고객", "수출")
+
+
+def _hub_excerpts() -> list[GroundedNewsExcerpt]:
+    return [_excerpt(_candidate(f"hub-{key}", f"https://ex.com/{key}"), text, event_key=f"사건-{key}")
+            for key, text in zip("abcd", (_HUB_A, _HUB_B, _HUB_C, _HUB_D))]
+
+
+def _independent(count: int) -> list[GroundedNewsExcerpt]:
+    facts = ("가나다전자는 물류 제품군을 현장에 적용한다.", "가나다전자는 상담 제품군을 함께 공급한다.",
+             "가나다전자는 설비 제품군도 운영한다.", "가나다전자는 해외 법인 두 곳을 세웠다.",
+             "가나다전자는 신규 연구소를 열었다.", "가나다전자는 사내 교육 체계를 바꿨다.")
+    topics = (_TOPIC_BUSINESS, "products", "strategy")
+    return [_excerpt(_candidate(f"ind-{number}", f"https://ex.com/ind-{number}"), facts[number],
+                     topic=topics[number % len(topics)], event_key=f"독립-{number}")
+            for number in range(count)]
+
+
+def test_삭제를_좁혀도_충분성은_기존_판정보다_느슨해지지_않는다() -> None:
+    hub = _hub_excerpts()
+    # 출력은 A를 B(긴 원문)로 합치고 C·D를 보존한다 — 정보는 모두 남는다.
+    chosen, excluded = _select(*hub)
+    assert [item.text for item in chosen] == [_HUB_B, _HUB_C, _HUB_D]
+    assert excluded == {"duplicate_event": 1}
+    # 충분성은 기존 판정(대표 A·B 두 묶음)으로 센다 — 출력 조각 수 3으로 세지 않는다.
+    assert not evidence_is_sufficient(hub, NewsCollectionPolicy(sufficient_events=3, sufficient_topics=1))
+    # 기본 정책 6/3: 반례 네 개 + 독립 사실 세 개(주제 추가) → 기존 5묶음이라 부족.
+    assert not evidence_is_sufficient(hub + _independent(3), NewsCollectionPolicy())
+    # 진짜 양성: 서로 다른 사실 여섯 개·주제 셋이면 충분하다.
+    assert evidence_is_sufficient(_independent(6), NewsCollectionPolicy())
+    assert evidence_is_sufficient(hub + _independent(4), NewsCollectionPolicy())  # 기존 2 + 4 = 6
+
+
+_PLANT_A = "가나다전자는 부산 지역에 산업설비를 생산하는 새로운 공장을 세웠다."
+_PLANT_B = f"{_PLANT_A} 회사는 핵심 장비 생산과 고객 지원을 담당하는 통합 거점을 운영한다."
+_SENSOR_C = "가나다전자는 기업용 자동화 설비에 탑재하는 신형 센서 120개를 출시했다."
+
+
+def test_충분성은_실제_출력_선택의_기사_수도_만족해야_한다() -> None:
+    """기존 선택은 A+C(글자 예산 안)라 두 기사지만, 실제 출력은 A를 흡수한 B만 남고
+    C는 글자 예산에서 탈락한다 — 출력 한 기사로 «충분»이라 하지 않는다."""
+    plant_a = _dated("gate-a", _PLANT_A)
+    plant_b = _dated("gate-b", _PLANT_B)
+    sensor_c = _dated("gate-c", _SENSOR_C)
+    excerpts = [plant_a, plant_b, sensor_c]
+    tight = NewsCollectionPolicy(sufficient_events=2, sufficient_topics=1,
+                                 max_fragment_chars=len(_PLANT_A) + len(_SENSOR_C))
+    chosen, excluded = _select(*excerpts, policy=tight)
+    assert list(chosen) == [plant_b]
+    assert excluded == {"duplicate_event": 1, "fragment_budget": 1}
+    assert not evidence_is_sufficient(excerpts, tight)
+
+    roomy = replace(tight, max_fragment_chars=len(_PLANT_B) + len(_SENSOR_C))
+    chosen, _excluded = _select(*excerpts, policy=roomy)
+    assert list(chosen) == [plant_b, sensor_c]
+    assert evidence_is_sufficient(excerpts, roomy)
+
+
+def test_예산이_모자라면_가능_중복보다_분명히_다른_사실을_먼저_고른다() -> None:
+    newest = _dated("bud-a", _AFTER_YEAR_A, "2026-09-09")
+    echo = _dated("bud-b", _AFTER_YEAR_B, "2026-09-08")
+    distinct = _dated("bud-c", _OTHER_FACT, "2026-09-01")
+    tight = NewsCollectionPolicy(max_fragments=2)
+    chosen, excluded = _select(echo, distinct, newest, policy=tight)
+    assert list(chosen) == [newest, distinct]  # 더 최신인 가능 중복(echo)을 뒤로 미뤘다
+    assert excluded == {"fragment_budget": 1}
+
+    chosen, excluded = _select(echo, distinct, newest)
+    assert list(chosen) == [newest, distinct, echo] and excluded == {}  # 예산이 있으면 모두 보존

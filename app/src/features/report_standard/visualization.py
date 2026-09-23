@@ -515,6 +515,20 @@ def _relation_pairs(table: ReportTable) -> TableVisualization | None:
     )
 
 
+def _trim_trailing_blank_cells(values: "tuple[str, ...]") -> "tuple[str, ...]":
+    """끝쪽의 «빈» 칸만 잘라 낸다.
+
+    ★ 빈 칸은 공백뿐인 칸이다 — 「미확인」·「-」 같은 실제 글자를 빈 값으로
+      «추정»하지 않는다. 이미 봉인된 값은 재해석하지 않고, 원행에 실제로
+      있는 텍스트도 공백으로 추정하지 않는다.
+    """
+
+    end = len(values)
+    while end > 0 and not values[end - 1]:
+        end -= 1
+    return values[:end]
+
+
 def _flow(table: ReportTable) -> TableVisualization | None:
     # ★ 열 하한이 2다 — 5장 «과제 → 대응»은 두 칸짜리 흐름이다.
     #   렌더러(웹 .flow-row / PDF _FlowGraphic)는 열 수에 무관하게 그린다.
@@ -547,11 +561,34 @@ def _flow(table: ReportTable) -> TableVisualization | None:
             cards=_flow_cards(tuple(flows), list(table.headers)),
             row_cites=tuple(kept_cites),
         )
+    # ★ 끝 빈 칸은 «검수받지 않은 칸»이다 (2026-09-23 4차 실측) — 작가가 끝
+    #   칸을 비우면 묶음 검수는 값이 있는 앞 칸만 보고 승인한다. 예전에는
+    #   데이터 층이 그 자리를 「미확인」으로 채워, 검수 AI가 본 적 없는 노드가
+    #   승인된 도식처럼 공개됐다. 표(원행)는 전체 폭 그대로 두고 «표시»만
+    #   값이 있는 앞 칸으로 줄인다 — 머리말 대응은 원래 앞 열 순서 그대로다.
+    trimmed = tuple(_trim_trailing_blank_cells(row) for row in flows)
+    display_lengths = {len(row) for row in trimmed}
+    has_inner_blank = any(not value for row in trimmed for value in row)
+    if len(display_lengths) == 1 and not has_inner_blank and min(display_lengths) >= 2:
+        length = next(iter(display_lengths))
+        return TableVisualization(
+            kind="flow",
+            caption=table.caption,
+            # 읽는 법의 「끝 칸」은 실제 마지막 «표시» 칸이다 — 잘려 나간
+            # 머리말(headers[-1])의 의미를 앞 칸에 붙이면 안 된다.
+            reading=_flow_reading(trimmed, list(table.headers)[:length]),
+            flows=trimmed,
+            row_cites=tuple(kept_cites),
+        )
+    # ★ 내부·앞쪽 빈 칸이 있는 행, 표시 길이가 서로 다른 행, 한 칸만 남는
+    #   행은 화살표로 잇지 않는다 — 빈 칸을 건너뛰어 이으면 원문에 없던
+    #   «새 관계»가 생기고, 길이가 섞이면 웹·PDF의 머리말 표시가 어긋난다.
+    #   카드는 각 칸을 원래 머리말 라벨과 함께 내고 빈 칸만 빼므로,
+    #   칸 위치의 뜻을 옮기지 않는 최소 안전 표시다.
     return TableVisualization(
-        kind="flow",
+        kind="card",
         caption=table.caption,
-        reading=_flow_reading(tuple(flows), list(table.headers)),
-        flows=tuple(flows),
+        cards=_flow_cards(tuple(flows), list(table.headers)),
         row_cites=tuple(kept_cites),
     )
 

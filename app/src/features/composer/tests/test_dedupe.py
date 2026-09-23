@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 from src.features.composer.constants import (
     NOTICE_DUPLICATE_MOVED,
     NOTICE_DUPLICATE_MOVED_TABLE_KEPT,
@@ -45,10 +47,16 @@ _파트너_문장 = (
     "회사는 Sony Music, TME, Republic Records 등 글로벌 유수의 음반·음원 "
     "유통 전문사와 파트너십을 체결하여 글로벌 유통 범위를 확대하고 있다."
 )
+#: 실측 의역 짝 — 「유수의」가 빠지고 「체결하여」가 「통해」로 바뀌었다. 짝(비교
+#: 후보)은 되지만 주장절이 어절 그대로 대응하지 않아 «삭제 증명이 없다»(2026-09-23
+#: 총괄 확정). 이 원래 사례는 보존 기대 음성으로 남긴다.
 _파트너_문장_변형 = (
     "회사는 Sony Music, TME, Republic Records 등 글로벌 유통 전문사와의 "
     "파트너십을 통해 음반·음원의 글로벌 유통 범위를 확대하고 있다."
 )
+#: 증명되는 참 중복 — 같은 주장 문장이 다른 장에 되풀이된 꼴. 소유·안내문·표·로그
+#: 같은 «삭제 뒤 기계»를 시험할 때 쓴다(의역 짝은 이제 지워지지 않으므로).
+_파트너_문장_반복 = _파트너_문장
 _공연_문장 = (
     "공연 부문의 글로벌 확장을 위해 회사는 2023년 Live Nation과 전략적 "
     "파트너십을 체결하여 투어 협력 체계를 구축했다."
@@ -88,7 +96,12 @@ def _texts(report: ComposedReport, section_id: str) -> list[str]:
 
 
 def test_여러_장에_반복된_사실은_한_장만_남는다():
-    """7장이 같은 근거를 두 문장으로 다루므로 7장이 소유한다."""
+    """7장이 같은 근거를 두 문장으로 다루므로 7장이 소유한다.
+
+    기대 변경 (2026-09-23 총괄 확정) — 종전에는 3장 의역 문장까지 지웠다(뺀 수 2).
+    3장 문장은 「유수의」가 없고 「체결하여」를 「통해」로 바꿔 주장절이 어절 그대로
+    대응하지 않으므로 삭제 증명이 없다 → 남는다. 같은 문장인 1장만 빠진다.
+    """
     report = _report(
         identity=(_sentence(_파트너_문장, ("12",)),),
         portfolio=(_sentence(_파트너_문장_변형, ("12",)),),
@@ -100,23 +113,30 @@ def test_여러_장에_반복된_사실은_한_장만_남는다():
 
     새보고서, 뺀수 = drop_cross_section_duplicates(report)
 
-    assert 뺀수 == 2
+    assert 뺀수 == 1
     assert _texts(새보고서, "identity") == []
-    assert _texts(새보고서, "portfolio") == []
+    assert _texts(새보고서, "portfolio") == [_파트너_문장_변형]
     assert len(_texts(새보고서, "operations_partners")) == 2
 
 
 # ══════════════════════════════════════════════════════════
 # ② 소유 장 = 그 근거를 가장 깊이 쓴 장 (순서가 아니다)
 # ══════════════════════════════════════════════════════════
+# 원래 사례(의역 짝)는 «삭제 증명 없음 → 둘 다 남김»으로, 증명되는 같은 문장은
+# «소유 장 규칙대로 한 장만 남김»으로 함께 잰다.
 
 
-def test_소유_장은_먼저_나온_장이_아니라_깊이_다룬_장이다():
+@pytest.mark.parametrize(
+    ("owner_text", "dropped"),
+    ((_파트너_문장_반복, 1), (_파트너_문장_변형, 0)),
+    ids=("증명된_같은_문장", "원래_의역_짝_보존"),
+)
+def test_소유_장은_먼저_나온_장이_아니라_깊이_다룬_장이다(owner_text, dropped):
     """1장이 스쳐 지나가고 7장이 세 문장으로 다루면 7장이 소유한다."""
     report = _report(
         identity=(_sentence(_파트너_문장, ("12",)),),
         operations_partners=(
-            _sentence(_파트너_문장_변형, ("12",)),
+            _sentence(owner_text, ("12",)),
             _sentence(_공연_문장, ("13",)),
             _sentence("회사는 일본·홍콩·미국에 현지 법인을 두고 있다.", ("12",)),
         ),
@@ -124,22 +144,27 @@ def test_소유_장은_먼저_나온_장이_아니라_깊이_다룬_장이다():
 
     새보고서, 뺀수 = drop_cross_section_duplicates(report)
 
-    assert 뺀수 == 1
-    assert _texts(새보고서, "identity") == []
-    assert _파트너_문장_변형 in _texts(새보고서, "operations_partners")
+    assert 뺀수 == dropped
+    assert _texts(새보고서, "identity") == ([] if dropped else [_파트너_문장])
+    assert owner_text in _texts(새보고서, "operations_partners")
 
 
-def test_깊이가_같으면_정본_목차에서_앞선_장이_소유한다():
+@pytest.mark.parametrize(
+    ("later_text", "dropped"),
+    ((_파트너_문장_반복, 1), (_파트너_문장_변형, 0)),
+    ids=("증명된_같은_문장", "원래_의역_짝_보존"),
+)
+def test_깊이가_같으면_정본_목차에서_앞선_장이_소유한다(later_text, dropped):
     report = _report(
         identity=(_sentence(_파트너_문장, ("12",)),),
-        culture=(_sentence(_파트너_문장_변형, ("12",)),),
+        culture=(_sentence(later_text, ("12",)),),
     )
 
     새보고서, 뺀수 = drop_cross_section_duplicates(report)
 
-    assert 뺀수 == 1
+    assert 뺀수 == dropped
     assert _texts(새보고서, "identity") == [_파트너_문장]
-    assert _texts(새보고서, "culture") == []
+    assert _texts(새보고서, "culture") == ([] if dropped else [later_text])
 
 
 # ══════════════════════════════════════════════════════════
@@ -151,21 +176,21 @@ def test_근거_조각이_다르면_글이_닮아도_지우지_않는다():
     """다른 자료에서 온 말은 다른 사실이다 — 겹쳐 보여도 남긴다."""
     report = _report(
         identity=(_sentence(_파트너_문장, ("12",)),),
-        portfolio=(_sentence(_파트너_문장_변형, ("99",)),),
+        portfolio=(_sentence(_파트너_문장_반복, ("99",)),),
     )
 
     새보고서, 뺀수 = drop_cross_section_duplicates(report)
 
     assert 뺀수 == 0
     assert _texts(새보고서, "identity") == [_파트너_문장]
-    assert _texts(새보고서, "portfolio") == [_파트너_문장_변형]
+    assert _texts(새보고서, "portfolio") == [_파트너_문장_반복]
 
 
 def test_인용이_없는_문장은_건드리지_않는다():
     """순수 해석 문장은 결속할 근거가 없어 판단하지 않는다(오탐 방지)."""
     report = _report(
         identity=(_sentence(_파트너_문장, ()),),
-        portfolio=(_sentence(_파트너_문장_변형, ()),),
+        portfolio=(_sentence(_파트너_문장_반복, ()),),
     )
 
     _, 뺀수 = drop_cross_section_duplicates(report)
@@ -213,7 +238,7 @@ def test_장이_비면_자료부족이_아니라_이동했다고_알린다():
     report = _report(
         identity=(_sentence(_파트너_문장, ("12",)),),
         operations_partners=(
-            _sentence(_파트너_문장_변형, ("12",)),
+            _sentence(_파트너_문장_반복, ("12",)),
             _sentence(_공연_문장, ("12",)),
         ),
     )
@@ -230,7 +255,7 @@ def test_장은_하나도_사라지지_않는다():
     report = _report(
         identity=(_sentence(_파트너_문장, ("12",)),),
         operations_partners=(
-            _sentence(_파트너_문장_변형, ("12",)),
+            _sentence(_파트너_문장_반복, ("12",)),
             _sentence(_공연_문장, ("12",)),
         ),
     )
@@ -258,7 +283,7 @@ def test_같은_장_안의_반복은_이_단계가_다루지_않는다():
     report = _report(
         identity=(
             _sentence(_파트너_문장, ("12",)),
-            _sentence(_파트너_문장_변형, ("12",)),
+            _sentence(_파트너_문장_반복, ("12",)),
         )
     )
 
@@ -304,7 +329,7 @@ def test_문장을_빼도_경로표는_남는다():
                     (_sentence(_파트너_문장, ("12",)),)
                     if section_id == "identity"
                     else (
-                        _sentence(_파트너_문장_변형, ("12",)),
+                        _sentence(_파트너_문장_반복, ("12",)),
                         _sentence(_공연_문장, ("12", "13")),
                     )
                     if section_id == "operations_partners"
@@ -336,7 +361,7 @@ def test_문장이_다_빠져도_경로표는_남는다():
                     (_sentence(_파트너_문장, ("12",)),)
                     if section_id == "operations_partners"
                     else (
-                        _sentence(_파트너_문장_변형, ("12",)),
+                        _sentence(_파트너_문장_반복, ("12",)),
                         _sentence(_공연_문장, ("12",)),
                     )
                     if section_id == "identity"
@@ -365,7 +390,7 @@ def test_장별_문장_수가_로그로_남는다(caplog):
     """문장이 빠진 장·그대로인 장 모두 «정리 전→후» 개수가 한 줄로 남는다."""
     report = _report(
         identity=(_sentence(_파트너_문장, ("12",)),),
-        portfolio=(_sentence(_파트너_문장_변형, ("12",)),),
+        portfolio=(_sentence(_파트너_문장_반복, ("12",)),),
         operations_partners=(
             _sentence(_파트너_문장, ("12",)),
             _sentence(_공연_문장, ("12", "13")),
@@ -456,80 +481,158 @@ _6장_진행어투 = (
 )
 
 
+_다른_문장_153 = (
+    "회사는 국내 경기위축에 따른 공공기관 및 교육예산 축소로 교육서비스 "
+    "부문의 매출이 감소했다고 밝혔다."
+)
+
+
+@pytest.mark.parametrize(
+    "sections",
+    (
+        {"current_challenges": (_실측_5장_진행어투,),
+         "future_strategy": (_재구성_6장_계획어투,)},
+        {"current_challenges": (_실측_5장_진행어투,),
+         "future_strategy": (_6장_진행어투,)},
+        {"current_challenges": (_5장_계획어투,),
+         "future_strategy": (_재구성_6장_계획어투,)},
+        {"identity": (_실측_5장_진행어투,),
+         "future_strategy": (_재구성_6장_계획어투,)},
+        {"current_challenges": (_실측_5장_진행어투, _다른_문장_153),
+         "future_strategy": (_재구성_6장_계획어투,)},
+    ),
+    ids=("6장_계획형", "6장_진행형", "둘_다_계획형", "1장과_6장", "5장_깊이_우위"),
+)
+def test_원래_시제_실측_짝은_삭제_증명이_없어_두_장에_남는다(sections):
+    """기대 변경 (2026-09-23 총괄 확정) — 종전 다섯 시험은 각각 한 문장을 지웠다.
+
+    실측 5장 문장은 6장 문장에 없는 절(「이러한 교육서비스 부문의 매출 감소에
+    대응하여」·「AI 교육 체계를 고도화하고」)을 가졌고, 6장 문장들도 5장이 담지
+    않은 어미·절(「확보해 나가겠다고 밝혔다」)이 있다. 시제 소유는 «어느 장이 남길지»
+    만 정하고 삭제 증명을 우회하지 않는다 — 증명 없는 쌍은 두 장에 모두 남는다.
+    """
+    report = _report(**{
+        section_id: tuple(_sentence(text, ("153",)) for text in texts)
+        for section_id, texts in sections.items()
+    })
+
+    새보고서, 뺀수 = drop_cross_section_duplicates(report)
+
+    assert 뺀수 == 0
+    for section_id, texts in sections.items():
+        assert _texts(새보고서, section_id) == list(texts)
+
+
+# 증명되는 시제 픽스처 — 소유 방향은 시제·깊이·순서 규칙이 정하고, 실제로 빠지는
+# 것은 소유가 아닌 장의 «같은 주장 문장»(_진행_단문)뿐이다. 소유 장의 계획 문장
+# (_계획_확장)은 같은 무리에 들어 미래 표지를 대 줄 뿐, 앞 절만 같은 다른 장 문장을
+# 지우는 근거가 되지 않는다(소유 문장 전체 대응만 삭제 증명 — 2026-09-23 확정).
+_진행_단문 = "회사는 진단 기반 리더십 교육 강화를 추진 중이다."
+_계획_확장 = (
+    "회사는 진단 기반 리더십 교육 강화를 추진 중이며 안정적인 매출 기반을 "
+    "확보할 계획이다."
+)
+_계획_단문 = "회사는 진단 기반 리더십 교육 강화를 추진할 계획이다."
+_보조_문장_153 = "회사는 교육 고객사의 만족도를 해마다 조사해 결과를 공개한다."
+
+
 def test_5장6장_동점이면_미래를_말한_6장이_소유한다():
-    """실측 회귀 — 같은 근거를 5장은 진행형, 6장은 계획형으로 썼다."""
+    """깊이 동점(2:2)이고 6장만 미래를 말한다 — 6장이 소유해 5장의 같은 문장이 빠진다."""
     report = _report(
-        current_challenges=(_sentence(_실측_5장_진행어투, ("153",)),),
-        future_strategy=(_sentence(_재구성_6장_계획어투, ("153",)),),
+        current_challenges=(
+            _sentence(_진행_단문, ("153",)),
+            _sentence(_다른_문장_153, ("153",)),
+        ),
+        future_strategy=(
+            _sentence(_진행_단문, ("153",)),
+            _sentence(_계획_확장, ("153",)),
+        ),
     )
 
     새보고서, 뺀수 = drop_cross_section_duplicates(report)
 
     assert 뺀수 == 1
-    assert _texts(새보고서, "future_strategy") == [_재구성_6장_계획어투]
-    assert _texts(새보고서, "current_challenges") == []
+    assert _texts(새보고서, "current_challenges") == [_다른_문장_153]
+    assert _texts(새보고서, "future_strategy") == [_진행_단문, _계획_확장]
 
 
 def test_6장이_진행형이면_기존대로_앞선_5장이_소유한다():
     """미래 표지가 6장 쪽에 없으면 가를 근거가 없다 — 순서 규칙 그대로."""
     report = _report(
-        current_challenges=(_sentence(_실측_5장_진행어투, ("153",)),),
-        future_strategy=(_sentence(_6장_진행어투, ("153",)),),
+        current_challenges=(_sentence(_진행_단문, ("153",)),),
+        future_strategy=(_sentence(_진행_단문, ("153",)),),
     )
 
     새보고서, 뺀수 = drop_cross_section_duplicates(report)
 
     assert 뺀수 == 1
-    assert _texts(새보고서, "current_challenges") == [_실측_5장_진행어투]
+    assert _texts(새보고서, "current_challenges") == [_진행_단문]
     assert _texts(새보고서, "future_strategy") == []
 
 
 def test_두_장_모두_미래를_말하면_한쪽으로_몰지_않는다():
     """둘 다 계획형이면 시제로는 못 가른다 — 기존 순서 규칙에 맡긴다."""
     report = _report(
-        current_challenges=(_sentence(_5장_계획어투, ("153",)),),
-        future_strategy=(_sentence(_재구성_6장_계획어투, ("153",)),),
+        current_challenges=(_sentence(_계획_단문, ("153",)),),
+        future_strategy=(_sentence(_계획_단문, ("153",)),),
     )
 
     새보고서, 뺀수 = drop_cross_section_duplicates(report)
 
     assert 뺀수 == 1
-    assert _texts(새보고서, "current_challenges") == [_5장_계획어투]
+    assert _texts(새보고서, "current_challenges") == [_계획_단문]
+    assert _texts(새보고서, "future_strategy") == []
 
 
 def test_시제_규칙은_5장6장_밖의_쌍에는_걸리지_않는다():
-    """1장↔6장은 시제로 갈리는 쌍이 아니다 — 정본 순서 그대로 1장이 이긴다."""
+    """1장↔6장은 시제로 갈리는 쌍이 아니다 — 정본 순서 그대로 1장이 소유한다.
+
+    같은 배치를 5장↔6장에 두면 6장이 소유해 앞 장 문장이 빠진다(첫 시험). 여기서는
+    1장이 소유하므로 6장의 같은 문장이 빠지고, 계획 문장은 증명이 없어 남는다.
+    """
     report = _report(
-        identity=(_sentence(_실측_5장_진행어투, ("153",)),),
-        future_strategy=(_sentence(_재구성_6장_계획어투, ("153",)),),
+        identity=(
+            _sentence(_진행_단문, ("153",)),
+            _sentence(_다른_문장_153, ("153",)),
+        ),
+        future_strategy=(
+            _sentence(_진행_단문, ("153",)),
+            _sentence(_계획_확장, ("153",)),
+        ),
     )
 
     새보고서, 뺀수 = drop_cross_section_duplicates(report)
 
     assert 뺀수 == 1
-    assert _texts(새보고서, "identity") == [_실측_5장_진행어투]
-    assert _texts(새보고서, "future_strategy") == []
+    assert _texts(새보고서, "identity") == [_진행_단문, _다른_문장_153]
+    assert _texts(새보고서, "future_strategy") == [_계획_확장]
 
 
 def test_깊이가_더_깊은_장은_시제보다_먼저_이긴다():
-    """시제는 «동점»을 가르는 규칙이다 — 깊이 규칙을 밀어내지 않는다."""
-    다른_문장 = (
-        "회사는 국내 경기위축에 따른 공공기관 및 교육예산 축소로 교육서비스 "
-        "부문의 매출이 감소했다고 밝혔다."
-    )
+    """시제는 «동점»을 가르는 규칙이다 — 깊이 규칙을 밀어내지 않는다.
+
+    깊이 동점이면 6장이 소유해 5장 문장이 빠진다(첫 시험). 5장이 더 깊으면(3:2)
+    5장이 소유하므로 5장 문장은 남고 6장의 같은 문장이 빠진다.
+    """
     report = _report(
         current_challenges=(
-            _sentence(_실측_5장_진행어투, ("153",)),
-            _sentence(다른_문장, ("153",)),
+            _sentence(_진행_단문, ("153",)),
+            _sentence(_다른_문장_153, ("153",)),
+            _sentence(_보조_문장_153, ("153",)),
         ),
-        future_strategy=(_sentence(_재구성_6장_계획어투, ("153",)),),
+        future_strategy=(
+            _sentence(_진행_단문, ("153",)),
+            _sentence(_계획_확장, ("153",)),
+        ),
     )
 
     새보고서, 뺀수 = drop_cross_section_duplicates(report)
 
     assert 뺀수 == 1
-    assert _실측_5장_진행어투 in _texts(새보고서, "current_challenges")
-    assert _texts(새보고서, "future_strategy") == []
+    assert _texts(새보고서, "current_challenges") == [
+        _진행_단문, _다른_문장_153, _보조_문장_153,
+    ]
+    assert _texts(새보고서, "future_strategy") == [_계획_확장]
 
 
 def test_시제_판정은_생산_미래표지_함수를_그대로_쓴다():
@@ -545,6 +648,10 @@ def test_시제_판정은_생산_미래표지_함수를_그대로_쓴다():
 
     assert has_forward_marker(_재구성_6장_계획어투) is True
     assert has_forward_marker(_실측_5장_진행어투) is False
+    # 증명되는 시제 쌍 픽스처의 전제 — 계획형만 미래 표지를 단다.
+    assert [has_forward_marker(text) for text in (
+        _진행_단문, _계획_확장, _계획_단문, _다른_문장_153, _보조_문장_153,
+    )] == [False, True, True, False, False]
     assert future_section_prose_problem(_재구성_6장_계획어투) == ""
     assert future_section_prose_problem(_실측_5장_진행어투) == (
         "future_section_no_forward_statement"
@@ -570,7 +677,7 @@ def _표_남는_보고서(표_있는_장: str, 표) -> ComposedReport:
                     (_sentence(_파트너_문장, ("12",)),)
                     if section_id == 표_있는_장
                     else (
-                        _sentence(_파트너_문장_변형, ("12",)),
+                        _sentence(_파트너_문장_반복, ("12",)),
                         _sentence(_공연_문장, ("12",)),
                     )
                     if section_id == "identity"
@@ -624,7 +731,7 @@ def test_보도표가_남아도_안내문이_표를_말한다():
                     (_sentence(_파트너_문장, ("12",)),)
                     if section_id == "operations_partners"
                     else (
-                        _sentence(_파트너_문장_변형, ("12",)),
+                        _sentence(_파트너_문장_반복, ("12",)),
                         _sentence(_공연_문장, ("12",)),
                     )
                     if section_id == "identity"
@@ -667,7 +774,7 @@ def _네장이_비는_보고서() -> ComposedReport:
     return _report(
         past_changes=(_sentence(_파트너_문장, ("12",)),),
         identity=(
-            _sentence(_파트너_문장_변형, ("12",)),
+            _sentence(_파트너_문장_반복, ("12",)),
             _sentence(_공연_문장, ("12",)),
         ),
     )
@@ -859,15 +966,26 @@ def test_모든_호출부가_표가_있는_장을_넘긴다():
 # `duplicates_kept_sentence` 로 따로 본다 — 문턱은 여기와 같은 한 벌이다.
 # ══════════════════════════════════════════════════════════════════════
 
-def test_같은_근거의_닮은_문장은_그_장에_이미_있는_사실로_본다():
+def test_같은_근거의_같은_주장_문장은_그_장에_이미_있는_사실로_본다():
+    기존 = (ComposedSentence(_파트너_문장, ("1",), "확인"),)
+    옮길_문장 = ComposedSentence(_파트너_문장_반복, ("1",), "확인")
+    assert duplicates_kept_sentence(옮길_문장, 기존) is True
+
+
+def test_같은_근거의_의역_문장은_증명이_없어_장_안에서도_버리지_않는다():
+    """기대 변경 (2026-09-23 총괄 확정) — 종전에는 이 원래 의역 짝을 중복으로 버렸다.
+
+    재배치는 «중복»이면 옮겨 오는 문장을 버린다. 장 간 삭제와 같은 증명을 쓰므로,
+    주장절이 어절 그대로 대응하지 않는 의역은 버리지 않는다(한 장에 두 번 보일 수 있다).
+    """
     기존 = (ComposedSentence(_파트너_문장, ("1",), "확인"),)
     옮길_문장 = ComposedSentence(_파트너_문장_변형, ("1",), "확인")
-    assert duplicates_kept_sentence(옮길_문장, 기존) is True
+    assert duplicates_kept_sentence(옮길_문장, 기존) is False
 
 
 def test_근거_조각이_다르면_옮겨_온_문장을_중복으로_보지_않는다():
     기존 = (ComposedSentence(_파트너_문장, ("1",), "확인"),)
-    옮길_문장 = ComposedSentence(_파트너_문장_변형, ("2",), "확인")
+    옮길_문장 = ComposedSentence(_파트너_문장_반복, ("2",), "확인")
     assert duplicates_kept_sentence(옮길_문장, 기존) is False
 
 
@@ -887,14 +1005,21 @@ def test_같은_문서에서_온_다른_조각이면_더_높은_문턱으로_본
         CollectedFragment("2", "사업내용", "", document_identity="문서A"),
     )
     기존 = (ComposedSentence(_파트너_문장, ("1",), "확인"),)
-    거의같음 = ComposedSentence(_파트너_문장_거의같음, ("2",), "확인")
+    같음 = ComposedSentence(_파트너_문장_반복, ("2",), "확인")
     # 조각 열쇠만으로는 아예 비교하지 않는다 — 문서를 모르면 «다른 자료»다.
-    assert duplicates_kept_sentence(거의같음, 기존) is False
-    assert duplicates_kept_sentence(거의같음, 기존, fragments=조각들) is True
+    assert duplicates_kept_sentence(같음, 기존) is False
+    assert duplicates_kept_sentence(같음, 기존, fragments=조각들) is True
+    # 기대 변경 (2026-09-23) — 원래 사례 「확대하고」→「넓히고」는 같은 문서 문턱을
+    # 넘는 짝(0.9385)이지만 술어가 달라 삭제 증명이 없다. 종전에는 버렸다.
+    거의같음 = ComposedSentence(_파트너_문장_거의같음, ("2",), "확인")
+    assert duplicates_kept_sentence(거의같음, 기존, fragments=조각들) is False
 
 
 def test_같은_문서라도_문턱_아래면_옮겨_온_문장을_지우지_않는다():
-    """실측 겹침 0.8387 — 조각을 공유했다면 지웠을 짝이지만 여기서는 남긴다."""
+    """실측 겹침 0.8387 — 같은 문서 문턱 아래라 짝부터 안 된다.
+
+    ⚠️ 이 짝은 이제 삭제 증명도 없다(의역). 조각 공유로 짝이 되는 경우까지 남는다.
+    """
 
     조각들 = (
         CollectedFragment("1", "사업내용", "", document_identity="문서A"),
@@ -903,9 +1028,13 @@ def test_같은_문서라도_문턱_아래면_옮겨_온_문장을_지우지_않
     기존 = (ComposedSentence(_파트너_문장, ("1",), "확인"),)
     변형 = ComposedSentence(_파트너_문장_변형, ("2",), "확인")
     assert duplicates_kept_sentence(변형, 기존, fragments=조각들) is False
-    # 같은 조각을 인용하면 낮은 문턱이라 같은 짝이 «중복»이 된다.
+    # 기대 변경 (2026-09-23) — 같은 조각이면 낮은 문턱으로 짝은 되지만 증명이 없어
+    # 버리지 않는다(종전 True). 같은 주장 문장은 계속 중복이다.
     assert duplicates_kept_sentence(
         ComposedSentence(_파트너_문장_변형, ("1",), "확인"), 기존,
+    ) is False
+    assert duplicates_kept_sentence(
+        ComposedSentence(_파트너_문장_반복, ("1",), "확인"), 기존,
     ) is True
 
 

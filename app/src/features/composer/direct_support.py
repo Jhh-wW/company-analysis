@@ -23,6 +23,17 @@ from src.features.composer.direct_support_constants import (
     ATTRIBUTION_RE,
     CAUSE_CLAIM_ROLES_MISMATCH,
     CAUSE_CLAIM_UNCOVERED,
+    CLAIM_PURPOSE_INTERPRETATION_RE,
+    FACT_CLAUSE_SPLIT_RE,
+    PURPOSE_ACTION_VERB_RE,
+    PURPOSE_INTERPRETATION_UNSUPPORTED,
+    PURPOSE_MARKER_RE,
+    PURPOSE_NEGATION_BOUNDARY_RE,
+    PURPOSE_SOURCE_CLAUSE_SPLIT_RE,
+    PURPOSE_SUBJECT_WORD_RE,
+    PURPOSE_TOKEN_PARTICLE_RE,
+    SELF_REFERENCE_SUBJECTS,
+    SOURCE_ANAPHOR_START_RE,
     CAUSE_DIRECTION_REVERSED,
     CAUSE_HEDGED_IN_SOURCE,
     CAUSE_NEGATED_IN_SOURCE,
@@ -101,6 +112,185 @@ def superlative_attribution_problem(
     for token in present:
         if not any(_surface(token) in source for source in sources):
             return SUPERLATIVE_WITHOUT_SOURCE
+    return ""
+
+
+def _purpose_tokens(span: str) -> tuple[str, ...]:
+    """해석 내용을 대조용 낱말 표면형으로 나눈다 — 조사 한 번 떼기, 두 글자 이상.
+
+    목적 표지 낱말(위한·위해 등) 자체는 빼고 돌려준다 — 표지의 존재는 따로
+    확인하므로, 「위한/위해」 같은 굴절 차이로 정상 원문을 떨어뜨리지 않는다.
+    """
+
+    tokens: list[str] = []
+    for word in span.split():
+        stripped = PURPOSE_TOKEN_PARTICLE_RE.sub("", word)
+        if PURPOSE_MARKER_RE.fullmatch(stripped):
+            continue
+        key = _surface(stripped)
+        if len(key) >= 2:
+            tokens.append(key)
+    return tuple(tokens)
+
+
+def _purpose_affirmed(sentence: str) -> bool:
+    """그 원문 문장에 «부정되지 않은» 목적 표지가 실제로 있는가.
+
+    표지마다 그 목적 서술 절 안(다음 쉼표·세미콜론 전)에서만 명시 부정을
+    찾는다 — 「…확장이 아니라고 밝혔다」의 표지는 세지 않고, 쉼표 뒤 다른
+    절의 무관한 부정으로 정상 목적을 지우지도 않는다.
+    """
+
+    for marker in PURPOSE_MARKER_RE.finditer(sentence):
+        tail = sentence[marker.end():]
+        boundary = PURPOSE_NEGATION_BOUNDARY_RE.search(tail)
+        window = tail[: boundary.start()] if boundary else tail
+        if not SOURCE_NEGATION_RE.search(window):
+            return True
+    return False
+
+
+def _clause_words(clause: str) -> list[str]:
+    """절을 낱말로 나누고 끝 쉼표를 뗀다 — 조사 판정이 쉼표에 막히지 않게."""
+
+    return [word.rstrip(",，") for word in clause.split() if word.rstrip(",，")]
+
+
+def _clause_subject(clause: str) -> str:
+    """절의 첫 주제·주격 낱말(조사 뗀 표면형). 없으면 빈 문자열."""
+
+    for word in _clause_words(clause):
+        matched = PURPOSE_SUBJECT_WORD_RE.match(word)
+        if matched:
+            return _surface(matched["subject"])
+    return ""
+
+
+def _fact_action(fact_clause: str) -> tuple[str, str] | None:
+    """사실 절의 (행동 어간, 목적어) — 서술어가 닫힌 꼴이 아니면 None.
+
+    목적어는 서술어 바로 앞 낱말에서 조사 하나를 뗀 값이며, 두 글자 미만이면
+    빈 문자열로 둔다(행동 어간만으로 결속한다).
+    """
+
+    words = _clause_words(fact_clause)
+    if not words:
+        return None
+    verb = PURPOSE_ACTION_VERB_RE.match(words[-1])
+    if verb is None:
+        return None
+    target = ""
+    if len(words) >= 2:
+        target = _surface(PURPOSE_TOKEN_PARTICLE_RE.sub("", words[-2]))
+        if len(target) < 2:
+            target = ""
+    return _surface(verb["stem"]), target
+
+
+def _source_purpose_units(sentence: str) -> list[tuple[str, str]]:
+    """원문 문장을 «목적 대조 단위»(절 글, 그 절의 주체)로 나눈다.
+
+    ★ 목적·행동·주체는 한 단위 안에서 함께 찾아야 한다. 문장 전체에서 모으면
+      「설비를 매각했으며, 신규법인 설립은 …을 목적으로 추진했다」처럼 다른
+      절(다른 행동·다른 주체)의 목적을 빌린다(독립 검증 확정 반례).
+    ★ 지시어로 시작하는 절(「이는 …을 목적으로 한다」)은 바로 앞 절과 한 단위다 —
+      원문 스스로 앞 행동의 목적을 적은 정상 서술이기 때문이다. 두 절 이상
+      건너 묶지 않는다.
+    ★ 주체는 그 단위의 첫 주제·주격 낱말이다. 없으면 문장 첫 절의 주체를
+      물려받는다(「회사는 …했고, …를 위해 …했다」). 단위가 자기 주체를 가지면
+      그것이 우선한다 — 「…, 경쟁 기업은 …를 위해 …」는 경쟁 기업의 목적이다.
+    """
+
+    clauses = [clause for clause in PURPOSE_SOURCE_CLAUSE_SPLIT_RE.split(sentence)
+               if clause and clause.strip()]
+    if not clauses:
+        return []
+    sentence_subject = _clause_subject(clauses[0])
+    units: list[tuple[str, str]] = []
+    for index, clause in enumerate(clauses):
+        unit = clause
+        if index and SOURCE_ANAPHOR_START_RE.match(clause):
+            unit = clauses[index - 1] + " " + clause
+        units.append((unit, _clause_subject(unit) or sentence_subject))
+    return units
+
+
+def _same_actor(candidate_subject: str, source_subject: str) -> bool:
+    """두 절의 주체가 같은 회사로 읽히는가 — 모르는 쪽이 있으면 막지 않는다.
+
+    공시 원문의 「회사는」은 후보의 회사 이름과 같은 주체다. 원문 주체가 자기
+    지칭 밖의 다른 이름이면(경쟁 기업 등) 다른 주체의 목적이다. 후보가 자기
+    지칭인데 원문이 다른 이름이면 같은 회사인지 확인할 수 없어 막는다.
+    """
+
+    if not candidate_subject or not source_subject:
+        return True
+    return (candidate_subject == source_subject
+            or source_subject in SELF_REFERENCE_SUBJECTS)
+
+
+def purpose_interpretation_problem(
+    text: str, sources_mapping: Mapping[str, str] | Sequence[str]
+) -> str:
+    """지시어로 사실을 받아 «의미한다»로 단정한 목적·의미 해석만 원문과 대조한다.
+
+    ★ 4차 실측 — 설립 결정 사실 절 뒤에 「이는 북미 시장 진출을 위한 사업 운영
+      구조의 확장을 의미한다」가 붙어 «확인» 사실로 공개됐지만, 인용 원문에는
+      결정·자본금만 있었다. 이 검사는 그 닫힌 꼴(이는/이것은 + 의미한다·뜻한다)
+      만 보고, 해석 내용의 낱말들이 «한 원문 문장» 안에 실제로 있는지 본다.
+    ★ 낱말 일치만으로 승인하지 않는다(독립 검토 확정 반례 반영):
+      · 해석이 목적 표지(위한·위해·목적)를 달았으면 그 원문 문장에 «부정되지
+        않은» 목적 표지가 있어야 한다 — 「…확장이 아니라고 밝혔다」는 근거가
+        아니다(`_purpose_affirmed`).
+      · 그 원문 문장이 지시어 앞 사실 절과 «같은 행동»(서술어 어간 + 목적어)을
+        말하고 «같은 주체»여야 한다. 「회사」 한 낱말 공유로 설비 매각의 목적을
+        법인 설립 원문에서 빌리거나, 경쟁 기업의 목적을 빌리지 못한다.
+      · 사실 절이 없거나 서술어가 닫힌 꼴 밖이면 행동을 특정하지 못해 승인하지
+        않는다 — 탈락 사유가 남아 제한 재작성이 사실 절만 회복한다.
+    ★ 원문이 같은 사실에 그 목적·의미를 실제로 적었으면 그대로 통과한다.
+      표지 없는 서술·부정(「의미하지 않는다」)·빈 해석은 판정하지 않는다.
+    ⚠️ 통과가 곧 참은 아니다 — 문장 전체의 타당성은 기존 의미 검수가 계속
+      판정한다. «등급과 무관하게» 걸린다 — 확인에만 걸면 같은 무근거 꼬리가
+      해석 라벨로 공개되는 우회가 된다.
+    """
+
+    normalized = unicodedata.normalize("NFKC", str(text or ""))
+    for matched in CLAIM_PURPOSE_INTERPRETATION_RE.finditer(normalized):
+        tokens = _purpose_tokens(matched["span"])
+        if not tokens:
+            continue
+        # 지시어가 받는 사실 절 — 같은 후보에서 지시어 바로 앞 절이다.
+        fact_clause = FACT_CLAUSE_SPLIT_RE.split(normalized[: matched.start()])[-1]
+        action = _fact_action(fact_clause)
+        if action is None:
+            return PURPOSE_INTERPRETATION_UNSUPPORTED
+        stem, target = action
+        candidate_subject = _clause_subject(fact_clause)
+        needs_purpose = bool(PURPOSE_MARKER_RE.search(matched["span"]))
+        supported = False
+        for source in _source_values(sources_mapping):
+            for sentence in SOURCE_SENTENCE_SPLIT_RE.split(
+                unicodedata.normalize("NFKC", str(source or ""))
+            ):
+                # 목적 낱말·목적 표지·행동·주체를 «같은 절 단위» 안에서만 찾는다.
+                for unit, unit_subject in _source_purpose_units(sentence):
+                    unit_key = _surface(unit)
+                    if not unit_key or any(token not in unit_key for token in tokens):
+                        continue
+                    if needs_purpose and not _purpose_affirmed(unit):
+                        continue
+                    if stem not in unit_key or (target and target not in unit_key):
+                        continue
+                    if not _same_actor(candidate_subject, unit_subject):
+                        continue
+                    supported = True
+                    break
+                if supported:
+                    break
+            if supported:
+                break
+        if not supported:
+            return PURPOSE_INTERPRETATION_UNSUPPORTED
     return ""
 
 

@@ -29,11 +29,9 @@ from src.features.composer.constants import (
     DART_FINANCIAL_API_LABEL,
     DART_FINANCIAL_API_PREFIX,
     DART_FINANCIAL_API_URL,
-    FLOW_ARROW_SECTION_IDS,
     FLOW_CAPTION_BY_SECTION,
     FLOW_HEADERS_BY_SECTION,
     FLOW_PRESENTATION,
-    FLOW_UNCONFIRMED_CELL,
     GRADE_INTERPRETED,
     PARAGRAPH_MAX_SENTENCES,
     PORTFOLIO_TABLE_SECTION_ID,
@@ -1775,12 +1773,11 @@ def build_public_structure_seal(
             rows: list[list[str]] = []
             row_bindings: list[dict[str, object]] = []
             for row in section.flow_rows:
-                public_row = [
-                    (str(cell).strip() or FLOW_UNCONFIRMED_CELL)
-                    if section.section_id in FLOW_ARROW_SECTION_IDS
-                    else str(cell).strip()
-                    for cell in row.cells
-                ]
+                # ★ 빈 칸을 「미확인」으로 채우지 않는다 — render._flow_report_table
+                #   과 같은 정정(2026-09-23 4차 실측). 검수가 본 적 없는 노드를
+                #   봉인에 만들지 않고, 표시 축소는 visualization._flow가 한다.
+                #   봉인 행과 렌더 행은 같은 규칙이어야 지문 대조가 유지된다.
+                public_row = [str(cell).strip() for cell in row.cells]
                 binding = _flow_binding(
                     row.citations,
                     fragment_bindings,

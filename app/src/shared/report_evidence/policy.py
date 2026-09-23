@@ -74,6 +74,18 @@ INJECTED_EVIDENCE_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
+# 필수 커버리지와 분리한 «선택 후보» 칸. 공식 원문이 직접 뒷받침할 때만 조각의
+# 지원 칸으로 운반하며, 장 준비 판정·필수 칸 충족·조회 기록에는 쓰지 않는다.
+# 2026-09-23 4차 실측: 감사보고서 「회사의 개요」 문단으로 작가가 본점 소재지를
+# identity:official_location으로 정확히 썼지만, 공식 문서의 지원 칸이 필수 칸뿐이라
+# 검수 전에 탈락했다. 엔진 사본은 analysis_engine의 evidence_collection/constants.py.
+# 「2026년」 같은 약한 낱말로 채점되는 칸을 열면 여러 장의 문단을 납치하므로,
+# 본점·소재지처럼 강한 직접 표현이 있는 칸만 좁게 넣는다.
+OPTIONAL_CANDIDATE_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
+    "identity": ("identity:official_location",),
+}
+
+
 def required_slots_for(section_id: str) -> tuple[str, ...]:
     """한 장의 전체 필수 의미 칸을 돌려주며 오타는 조용히 받지 않는다."""
 
@@ -100,3 +112,34 @@ def collector_slots_for(section_id: str) -> tuple[str, ...]:
     required = required_slots_for(section_id)
     injected = set(injected_slots_for(section_id))
     return tuple(slot_id for slot_id in required if slot_id not in injected)
+
+
+def optional_candidate_slots_for(section_id: str) -> tuple[str, ...]:
+    """원문이 직접 뒷받침하면 운반하지만 필수 커버리지로 세지 않는 칸."""
+
+    required = required_slots_for(section_id)
+    optional = OPTIONAL_CANDIDATE_SLOTS_BY_SECTION.get(section_id, ())
+    if set(optional) & set(required):  # 선택 칸이 필수 칸을 가장하지 않게 막는다.
+        raise ValueError(f"{section_id}의 선택 후보 의미 칸 정책이 손상됐습니다")
+    return optional
+
+
+def candidate_slots_for(section_id: str) -> tuple[str, ...]:
+    """수집 조각이 지원 칸으로 실을 수 있는 칸 = 수집 필수 칸 + 선택 후보 칸."""
+
+    return (*collector_slots_for(section_id), *optional_candidate_slots_for(section_id))
+
+
+def _validate_optional_candidate_policy() -> None:
+    unknown_sections = set(OPTIONAL_CANDIDATE_SLOTS_BY_SECTION) - set(
+        REQUIRED_EVIDENCE_SECTION_IDS
+    )
+    if unknown_sections:
+        raise ValueError("선택 후보 의미 칸 정책에 알 수 없는 장이 있습니다")
+    for section_id, slot_ids in OPTIONAL_CANDIDATE_SLOTS_BY_SECTION.items():
+        if any(not slot_id.startswith(f"{section_id}:") for slot_id in slot_ids):
+            raise ValueError(f"{section_id}의 선택 후보 의미 칸이 다른 장을 가리킵니다")
+        optional_candidate_slots_for(section_id)
+
+
+_validate_optional_candidate_policy()

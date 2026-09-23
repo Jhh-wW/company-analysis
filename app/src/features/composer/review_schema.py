@@ -14,6 +14,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from src.features.composer.body_review_constants import BODY_REVIEW_COMPARISON_KEY
+from src.features.composer.combined_relation_constants import (
+    COMBINED_RELATION_WORD_KEY,
+    COMBINED_SCOPE_KEY,
+)
 from src.features.composer.diagram_review_constants import DIAGRAM_REASON_KEY
 from src.features.composer.direct_support_constants import RELATION_TYPES
 from src.features.composer.future_plan_constants import (
@@ -25,6 +29,7 @@ from src.features.composer.future_plan_constants import (
 from src.features.composer.grounding_constants import (
     GROUNDING_KEY,
     NUMERIC_KEY,
+    RECOGNITION_KEY,
     REVIEW_ENTRIES_KEY,
     REVIEW_NUMBER_KEY,
     REVIEW_REJECTED,
@@ -103,12 +108,15 @@ def _grounding_schema() -> dict[str, Any]:
         "방향": {"type": "string", "enum": sorted(TREND_DIRECTIONS)},
         "관측": _array(observation),
     })
-    # 관계 유형에 따라 원인·결과 또는 대상·역할값을 읽는다. 선택 필드를
-    # 모두 채우게 하지 않으며, 해당 유형의 필수 증명은 기존 가드에 맡긴다.
+    # 관계 유형에 따라 원인·결과, 대상·역할값, 또는 결합의 범위·관계를 읽는다.
+    # 선택 필드를 모두 채우게 하지 않으며, 해당 유형의 필수 증명은 기존 가드에
+    # 맡긴다. «결합»은 유형 enum에만 있고 두 칸이 빠져 있어, 스키마가 붙는 호출에서
+    # 안내문(combined_relation_constants)대로 쓴 결합 항목이 거절됐다.
     relation = _object({
         **_strings("근거", "원문"),
         "유형": {"type": "string", "enum": list(RELATION_TYPES)},
-        **_strings("원인", "결과", "대상", "역할값"),
+        **_strings("원인", "결과", "대상", "역할값",
+                   COMBINED_SCOPE_KEY, COMBINED_RELATION_WORD_KEY),
     }, required=("근거", "원문", "유형"))
     future = _object({
         **_strings(*FUTURE_FIELD_KEYS),
@@ -120,6 +128,9 @@ def _grounding_schema() -> dict[str, Any]:
         TIME_KEY: _array(_object(_strings("표현", "근거", "원문", "기간"))),
         RELATION_KEY: _array(relation),
         FUTURE_KEY: _array(future),
+        # 정성 수익 인식 기준 단정의 정확 인용(4차 채택안). 최소 세 칸만 두고
+        # 배열 자체는 선택이다 — 요구가 없는 후보에 빈 근거를 만들게 하지 않는다.
+        RECOGNITION_KEY: _array(_object(_strings("표현", "근거", "원문"))),
     }, required=())
 
 

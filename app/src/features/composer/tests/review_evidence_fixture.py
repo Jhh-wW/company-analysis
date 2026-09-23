@@ -43,6 +43,21 @@ class ReviewItem:
     text: str
 
 
+def _citation_ids(raw: str) -> tuple[str, ...]:
+    """「조각 2, 조각 5」 인용 칸을 조각 id 목록으로 읽는다.
+
+    쉼표 뒤 공백을 먼저 걷어야 두 번째 인용부터 「조각 」 접두어가 남지 않는다.
+    남으면 가짜 검수 응답의 «근거»가 프롬프트 인용과 어긋나 정상 후보가 빠진다.
+    """
+
+    pieces = (piece.strip() for piece in raw.split(","))
+    return tuple(
+        piece.removeprefix("조각 ").strip()
+        for piece in pieces
+        if piece and piece != "(없음)"
+    )
+
+
 def _read_json_value(prompt: str, start: int) -> tuple[object, int]:
     decoder = json.JSONDecoder()
     value, end = decoder.raw_decode(prompt[start:])
@@ -66,17 +81,12 @@ def review_items(prompt: str) -> tuple[ReviewItem, ...]:
             text = " ".join(str(cell) for cell in value) if isinstance(value, list) else ""
         else:
             continue
-        citations = tuple(
-            piece.removeprefix("조각 ").strip()
-            for piece in match.group("citations").split(",")
-            if piece.strip() and piece.strip() != "(없음)"
-        )
         items.append(
             ReviewItem(
                 number=int(match.group("number")),
                 section=match.group("section"),
                 kind=match.group("kind"),
-                citations=citations,
+                citations=_citation_ids(match.group("citations")),
                 text=text,
             )
         )
@@ -90,17 +100,12 @@ def review_items(prompt: str) -> tuple[ReviewItem, ...]:
         if not prompt.startswith(_SENTENCE_PREFIX, value_start):
             continue
         value, _end = _read_json_value(prompt, value_start + len(_SENTENCE_PREFIX))
-        citations = tuple(
-            piece.removeprefix("조각 ").strip()
-            for piece in match.group("citations").split(",")
-            if piece.strip() and piece.strip() != "(없음)"
-        )
         items.append(
             ReviewItem(
                 number=int(match.group("number")),
                 section="",
                 kind="문장",
-                citations=citations,
+                citations=_citation_ids(match.group("citations")),
                 text=str(value) if isinstance(value, str) else "",
             )
         )

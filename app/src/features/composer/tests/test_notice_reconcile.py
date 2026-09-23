@@ -61,11 +61,15 @@ _크랙_문장 = (
     "회사는 홈페이지에서 AI 엔터테인먼트 콘텐츠 플랫폼 '크랙(Crack)'을 "
     "운영하고 있으며, 청소년 보호 정책 강화를 추진하고 있다."
 )
-#: 같은 사실을 어투만 바꿔 다른 장에 옮겨 적은 모양 (중복 제거가 잡는 짝).
+#: 같은 사실을 어투만 바꿔 다른 장에 옮겨 적은 모양. 짝(비교 후보)은 되지만
+#: 「운영하고 있으며」↔「운영한다고 밝히며」로 주장절이 어절 그대로 대응하지 않아
+#: 이제 지우지 않는다(2026-09-23 총괄 확정). 보존 기대 음성으로 남긴다.
 _크랙_문장_변형 = (
     "회사는 홈페이지에서 AI 엔터테인먼트 콘텐츠 플랫폼 '크랙(Crack)'을 "
     "운영한다고 밝히며, 청소년 보호 정책의 강화를 추진하고 있다."
 )
+#: 증명되는 참 중복 — 같은 주장 문장이 두 장에 실린 꼴. 안내문 대조 기계는 이것으로 잰다.
+_크랙_문장_반복 = _크랙_문장
 #: 실측 — 뤼튼 보고서 3쪽 5.2에 인쇄된 문장.
 _상장_문장 = (
     "회사는 상장 준비에 본격 착수했다고 밝혔으며, 국내 주요 증권사에 "
@@ -107,11 +111,29 @@ def _emptied_by_dedupe() -> ComposedReport:
             _IDENTITY,
             (_sentence(_크랙_문장), _sentence(_상장_문장)),
         ),
-        _CULTURE: ComposedSection(_CULTURE, (_sentence(_크랙_문장_변형),)),
+        _CULTURE: ComposedSection(_CULTURE, (_sentence(_크랙_문장_반복),)),
     })
     deduped, dropped = drop_cross_section_duplicates(report)
     assert dropped == 1, "이 픽스처가 중복을 못 잡으면 아무것도 증명하지 못합니다"
     return deduped
+
+
+def test_어투만_바꾼_원래_짝은_지우지_않아_이동_안내문이_생기지_않는다():
+    """기대 변경 (2026-09-23 총괄 확정) — 종전 재현 경로는 이 짝으로 8장을 비웠다."""
+    report = _report({
+        _IDENTITY: ComposedSection(
+            _IDENTITY,
+            (_sentence(_크랙_문장), _sentence(_상장_문장)),
+        ),
+        _CULTURE: ComposedSection(_CULTURE, (_sentence(_크랙_문장_변형),)),
+    })
+    deduped, dropped = drop_cross_section_duplicates(report)
+
+    assert dropped == 0
+    assert [sentence.text for sentence in _section(deduped, _CULTURE).sentences] == [
+        _크랙_문장_변형
+    ]
+    assert _section(deduped, _CULTURE).notice == ""
 
 
 # ══════════════════════════════════════════════════════════

@@ -140,6 +140,27 @@ COLLECTOR_SLOT_IDS: Final[frozenset[str]] = frozenset(
     slot_id for slots in COLLECTOR_SLOTS_BY_SECTION.values() for slot_id in slots
 )
 
+#: ══════════════════════════════════════════════════════════
+#: 선택 후보 슬롯 — 원문이 직접 뒷받침할 때만 조각에 싣는 칸.
+#: ★ 정본: app/src/shared/report_evidence/policy.py의
+#:   OPTIONAL_CANDIDATE_SLOTS_BY_SECTION. 엔진은 app을 import할 수 없어 값을
+#:   복사하며 app 시험이 두 값을 대조한다.
+#: ★ 필수 커버리지와 분리한다. 이 칸은 조회 기록(attempts.slot_ids)·필수 칸
+#:   충족·장 준비 판정에 절대 쓰지 않는다 — 없어도 수집 실패가 아니다.
+#: ★ 왜 필요한가(2026-09-23 4차 실측) — 감사보고서 「회사의 개요」 문단에 본점
+#:   소재지가 있고 작가도 그 문단으로 identity:official_location 문장을 정확히
+#:   썼지만, 문단의 지원 칸이 필수 칸뿐이라 검수 전에 탈락했다.
+#: ★ 좁게 연다 — 「2026년」처럼 어느 문단에나 있는 약한 낱말 칸(plan_timing
+#:   등)을 열면 여러 장의 문단을 납치한다(relevance.py 주석). 본점·소재지처럼
+#:   강한 직접 표현이 있는 칸만 넣는다.
+OPTIONAL_CANDIDATE_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
+    "identity": ("identity:official_location",),
+}
+
+OPTIONAL_CANDIDATE_SLOT_IDS: Final[frozenset[str]] = frozenset(
+    slot_id for slots in OPTIONAL_CANDIDATE_SLOTS_BY_SECTION.values() for slot_id in slots
+)
+
 #: 이 엔진이 인식하는 전체 slot_id — composer 45개 어휘 ∪ 수집기 전용 신규
 #: 슬롯(self_context·stated_differentiator). EvidenceFragment·CollectionAttempt
 #: 검증은 이 합집합
@@ -281,6 +302,25 @@ SOURCE_KIND_SLOT_SCOPE: Final[dict[str, tuple[str, ...]]] = {
     ),
 }
 
+#: 전문(全文) 연차 공시만 선택 후보 칸을 채점한다. 반기·분기 보고서는 4·5장
+#: 보충 자료라 1장 소재지 같은 칸을 새로 주장하지 않는다.
+_OPTIONAL_SLOTS_SORTED: Final[tuple[str, ...]] = tuple(sorted(OPTIONAL_CANDIDATE_SLOT_IDS))
+SOURCE_KIND_OPTIONAL_SLOT_SCOPE: Final[dict[str, tuple[str, ...]]] = {
+    SOURCE_KIND_BUSINESS_REPORT: _OPTIONAL_SLOTS_SORTED,
+    SOURCE_KIND_AUDIT_REPORT: _OPTIONAL_SLOTS_SORTED,
+    SOURCE_KIND_CONSOLIDATED_AUDIT_REPORT: _OPTIONAL_SLOTS_SORTED,
+    SOURCE_KIND_SEMIANNUAL_REPORT: (),
+    SOURCE_KIND_QUARTERLY_REPORT: (),
+}
+
+#: 조각 채점 허용 범위 = 필수 커버리지 칸 ∪ 선택 후보 칸. 조회 기록(attempt)과
+#: 필수 커버리지는 계속 SOURCE_KIND_SLOT_SCOPE만 쓴다. 두 표를 합치지 않고 따로
+#: 두어 선택 칸이 「이 공시로 확인했다」는 커버리지 주장으로 새지 않게 한다.
+SOURCE_KIND_CANDIDATE_SLOT_SCOPE: Final[dict[str, tuple[str, ...]]] = {
+    source_kind: slot_ids + SOURCE_KIND_OPTIONAL_SLOT_SCOPE[source_kind]
+    for source_kind, slot_ids in SOURCE_KIND_SLOT_SCOPE.items()
+}
+
 # ══════════════════════════════════════════════════════════
 # 비용·안전 상한
 # ══════════════════════════════════════════════════════════
@@ -363,6 +403,80 @@ TOC_HEADING_MARKERS: Final[tuple[str, ...]] = ("목차",)
 #: 같은 문단이 문서 전체에서 이 횟수 이상 반복되면 상투 문구(면책 등)로 본다.
 BOILERPLATE_MIN_REPEAT_COUNT: Final[int] = 2
 BOILERPLATE_MIN_CHARS: Final[int] = 8
+
+# ══════════════════════════════════════════════════════════
+# 관계법인 회계범위 각주 운반 — legacy 발췌 보충(entity_scope_footnote.py)
+# ══════════════════════════════════════════════════════════
+
+#: 표 행 이름 «바로 뒤»에 붙은 각주 표식 「이름(*)」·「이름(*1)」.
+ENTITY_FOOTNOTE_ROW_MARK_PATTERN: Final[re.Pattern[str]] = re.compile(r"(?<=\S)\((\*\d{0,2})\)")
+#: 공백(또는 문서 처음) 뒤에서 시작하는 각주 정의 「(*) 설명」·「(*1) 설명」.
+ENTITY_FOOTNOTE_DEFINITION_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?:^|(?<=\s))\((\*\d{0,2})\)(?=\s*\S)"
+)
+#: 재무제표 주석 번호 제목 「5. 매도가능증권」 — 한 주석(표+각주)의 경계.
+ENTITY_FOOTNOTE_NOTE_HEADING_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?:^|(?<=\s))\d{1,2}\.\s?[가-힣]"
+)
+#: 한 주석 안의 소표 머리 «후보» 「(1) 당기말 내역」·「(2) 전기말 내역」. 괄호 숫자는
+#: 표 안 음수 금액 「(12)」에도 쓰이므로 이것만으로 소표를 확정하지 않는다 — 후보가
+#: 행 앞 기간 표제를 담지 못하면 상한 안에서 더 앞 후보를 검토한다.
+ENTITY_FOOTNOTE_SUBTABLE_HEADING_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?:^|(?<=\s))\(\d{1,2}\)(?=\s)"
+)
+#: 기간 표제 — 당기말·전기말·당기·전기·기초·기말·반기·분기 낱말과 연도 날짜.
+#: 「당기손익」「전기요금」처럼 뒤에 다른 낱말이 붙은 말은 기간으로 보지 않는다.
+ENTITY_FOOTNOTE_PERIOD_LABEL_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?<![가-힣])(?:전전|당|전)(?:반기|분기|기)(?:말|초)?"
+    r"(?=[^가-힣]|$|현재|중|의|에|과|와|및|은|는|부터|까지)"
+    r"|(?<![가-힣])기(?:초|말)(?=[^가-힣]|$|현재|의|에|과|와|및|은|는)"
+    r"|(?<!\d)(?:19|20)\d{2}\s*(?:년|[.\-/]\s*\d{1,2})"
+)
+#: 회계 적용 범위를 제한하는 각주 표현(공백 무시 비교). 거래 사실을 부정하는
+#: 말이 아니라 「연결·지분법·종속기업 회계 범위」를 좁히는 표현만 넣는다.
+ENTITY_SCOPE_LIMIT_MARKERS: Final[tuple[str, ...]] = (
+    "종속기업에서제외",
+    "관계기업에서제외",
+    "연결대상에서제외",
+    "연결범위에서제외",
+    "연결재무제표작성대상에서제외",
+    "지분법적용대상에서제외",
+    "지분법을적용하지",
+    "지분법적용을중단",
+)
+#: 같은 문장에 있으면 아직 일어나지 않은 제외로 보고 운반 근거로 쓰지 않는다
+#: (예정 제외를 현재 범위 제한처럼 전하지 않기 위해서다. 공백 무시 비교).
+ENTITY_SCOPE_FUTURE_MARKERS: Final[tuple[str, ...]] = ("예정", "계획", "할것", "될것")
+#: 각주 정의 안 문장 끝 — 「…되었습니다. 또한, …」를 문장별로 가른다.
+ENTITY_FOOTNOTE_SENTENCE_END_PATTERN: Final[re.Pattern[str]] = re.compile(r"(?<=다\.)\s+")
+#: 법인 이름이 아니라 표의 머리·분류·금액 이름인 낱말. 이름 토큰 묶음의 앞뒤
+#: 경계를 정하는 데만 쓴다. v1 목록이며 전 공시 표를 전수 조사하지 않았다(확인
+#: 못 함). 모르는 머리말이 앞에 붙으면 이름이 관계자 조각과 일치하지 않아 운반을
+#: 포기한다(잘못 붙이는 대신 놓치는 쪽).
+ENTITY_FOOTNOTE_TABLE_WORDS: Final[frozenset[str]] = frozenset({
+    "단위", "천원", "백만원", "원", "구분", "회사명", "법인명", "기업명", "특수관계자명",
+    "특수관계자", "종속기업", "종속회사", "관계기업", "관계회사", "공동기업", "지배기업",
+    "기타", "당기", "전기", "당기말", "전기말", "기초", "기말", "지분율", "지분률",
+    "취득원가", "장부금액", "장부가액", "순자산가액", "소재지", "업종", "결산월",
+    "합계", "소계", "계", "주식수", "보유주식수", "금융수익", "영업수익", "영업비용",
+    "대여금", "기타채권", "기타채무", "대여", "회수", "매출", "매입", "채권", "채무",
+})
+#: 이름 토큰 앞뒤에서 떼어 보는 괄호·구두점.
+ENTITY_FOOTNOTE_TOKEN_PUNCTUATION: Final[str] = "()[]{}:;,.·「」『』\"'"
+#: 행 표식 앞에서 이름을 찾는 최대 거리. 이 안에서 경계를 못 찾으면 이름 시작을
+#: 확정할 수 없으므로 운반하지 않는다.
+ENTITY_FOOTNOTE_LABEL_WINDOW_CHARS: Final[int] = 120
+#: 이름 토큰 수 상한 — 경계 없이 이어지는 긴 토큰열을 이름으로 오인하지 않는다.
+ENTITY_FOOTNOTE_LABEL_MAX_TOKENS: Final[int] = 8
+#: 이름의 최소 글자 수(공백 제외). 짧은 약칭 한두 글자를 법인으로 보지 않는다.
+ENTITY_FOOTNOTE_LABEL_MIN_CHARS: Final[int] = 4
+#: 운반 구간 글자 상한 기본값 — legacy 발췌 조각 상한(run_pilot.FRAG_CHARS)과 같다.
+#: 호출자는 실제 엔진 값을 넘긴다.
+ENTITY_FOOTNOTE_DEFAULT_MAX_CHARS: Final[int] = 1_200
+#: 한 문서에서 보충하는 각주 조각 수 상한 — 작성 입력을 불리지 않는다.
+ENTITY_SCOPE_FOOTNOTE_MAX_FRAGMENTS: Final[int] = 3
+#: legacy 조각 원문위치 표기 — audit_financials의 「평문 문자 N-M」 관례와 같다.
+ENTITY_FOOTNOTE_LOCATION_TEMPLATE: Final[str] = "평문 문자 {start}-{end}"
 
 # ══════════════════════════════════════════════════════════
 # 장별 적합도 채점

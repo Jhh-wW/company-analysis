@@ -92,6 +92,9 @@ BLOCKED_EXCLUDED_SECTION: Final[str] = "excluded_section"
 BLOCKED_ROW_LIMIT: Final[str] = "row_limit"
 #: 이 실행 모드는 공개 구조를 결속하지 못해, 표를 붙이면 보고서 전체가 막힌다.
 BLOCKED_UNBINDABLE_MODE: Final[str] = "release_mode_cannot_bind_structures"
+#: 같은 기사의 «같은 원문 사실»이 앞 장 표에 이미 실려 뺀 조각. 사유 문자열은
+#: 진단 호환을 위해 그대로 두지만, 판정 단위는 기사 전체가 아니라 기사+정확 원문이다
+#: — 같은 기사의 다른 사실은 뒤 장 표에 그대로 실린다.
 BLOCKED_DUPLICATE_ARTICLE: Final[str] = "article_listed_in_another_section"
 BLOCKED_ARTICLE_META: Final[str] = "inconsistent_article_metadata"
 #: 행의 보도 문장이 그 장의 산문에 이미 실려 있어 표에서 뺀 행.
@@ -492,7 +495,10 @@ def augment_news_blocks(
     row_counts: list[tuple[str, int]] = []
     candidate_counts: list[tuple[str, int]] = []
     changed = False
-    listed_articles: set[str] = set()
+    # ★ 기사 «전체»가 아니라 (기사, 정확 원문) 단위로 한 번만 싣는다. 기사 단위로
+    #   막으면 앞 장 표가 기사를 선점해 같은 기사의 «다른» 사실(뒤 장 소유)이
+    #   본문에도 표에도 없이 사라진다(4차 후속 — 한 기사의 전사 실적과 제품 성과).
+    listed_claims: set[tuple[str, str]] = set()
     for section in report.sections:
         allowed = allowed_fragment_ids_by_section.get(section.section_id)
         owned = [
@@ -523,14 +529,21 @@ def augment_news_blocks(
             grouped.setdefault(key, []).append(fragment)
         # ── ① 행 후보 확정 — 기사 메타가 갖춰진 기사만 행 후보가 된다 ──
         body_text = "\n".join(sentence.text for sentence in section.sentences)
-        candidates: list[tuple[str, NewsRow, int]] = []
+        candidates: list[tuple[str, NewsRow, tuple[CollectedFragment, ...]]] = []
+        candidate_count = 0
         for key, article in grouped.items():
             if len({(f.document_date, f.source_publisher, f.document_title) for f in article}) != 1:
                 blocked[BLOCKED_ARTICLE_META] += len(article)
                 continue
-            candidates.append((key, article_row(article, body_text), len(article)))
-        if candidates:
-            candidate_counts.append((section.section_id, len(candidates)))
+            candidate_count += 1
+            unlisted = tuple(f for f in article if (key, _normalized(f.text)) not in listed_claims)
+            if len(unlisted) != len(article):
+                blocked[BLOCKED_DUPLICATE_ARTICLE] += len(article) - len(unlisted)
+            if not unlisted:
+                continue
+            candidates.append((key, article_row(unlisted, body_text), unlisted))
+        if candidate_count:
+            candidate_counts.append((section.section_id, candidate_count))
         # ── ② 산문 중복 생존을 «먼저» 가른 뒤에야 기사 중복을 예약한다 ──
         #   판정은 렌더·공개 봉인이 쓰는 같은 함수(`nonredundant_news_rows`)다.
         #   나중에 어차피 걸러질 행이 listed_articles를 선점해 다른 장의 유효
@@ -538,18 +551,15 @@ def augment_news_blocks(
         #   같은 함수를 다시 걸어도 생존 행은 그대로라 재적용은 멱등이다.
         probe = replace(
             section,
-            news_rows=tuple(row for _key, row, _count in candidates),
+            news_rows=tuple(row for _key, row, _article in candidates),
         )
         survivor_ids = {id(row) for row in nonredundant_news_rows(probe)}
-        for key, row, fragment_count in candidates:
+        for key, row, article in candidates:
             if id(row) not in survivor_ids:
-                blocked[BLOCKED_REDUNDANT_WITH_PROSE] += fragment_count
-                continue
-            if key in listed_articles:
-                blocked[BLOCKED_DUPLICATE_ARTICLE] += fragment_count
+                blocked[BLOCKED_REDUNDANT_WITH_PROSE] += len(article)
                 continue
             rows.append(row)
-            listed_articles.add(key)
+            listed_claims.update((key, _normalized(f.text)) for f in article)
         if not rows:
             rebuilt.append(section)
             continue

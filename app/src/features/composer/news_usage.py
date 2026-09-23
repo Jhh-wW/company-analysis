@@ -10,10 +10,11 @@ from dataclasses import replace
 from datetime import date
 
 from src.features.composer.news_constants import (
-    NEWS_ATTRIBUTION_TEMPLATE, NEWS_DECISIONS_KEY, NEWS_PERIOD_MONTHS,
+    NEWS_ATTRIBUTION_TEMPLATE, NEWS_CLAIM_SENTENCE_SPLIT_RE, NEWS_DECISIONS_KEY, NEWS_PERIOD_MONTHS,
     NEWS_VALID_EXCLUSION_REASONS,
     NEWS_REJECTION_REASONS,
     NEWS_KOREAN_SYLLABLE_PATTERN,
+    NEWS_WRITER_ATTRIBUTION_LEAD_RE,
 )
 from src.features.composer.news_block import _is_news_fragment, news_ownership_from_claim_slots
 from src.features.composer.port import ComposedSentence
@@ -88,7 +89,10 @@ def supplement_news_candidates(report, fragments, ownership=None):
     original_claims = {_original_claim_key(fragment) for fragment in news
                        if (attribution_prefix(fragment) + fragment.text.strip(),
                            frozenset({fragment.fragment_id})) in existing_news_sentences}
-    seen_events = {f.news_event_key or " ".join(f.text.split()) for f in news if f.fragment_id in used}
+    # ★ 같은 사건의 미사용 조각은 본문 원문 후보로 거듭 올리지 않는다. 지우는 것이 아니다 —
+    #   검수 후보가 아니므로 검수 탈락 차단을 받지 않고 장 끝 보도표에 그대로 남는다
+    #   (주장 역할로 나눈 같은 기사의 부분도 같다). 본문 원문 보강이 늘어나는 것을 막는다.
+    seen_events = {_event_key(f) for f in news if f.fragment_id in used}
     added = []
     rebuilt = []
     for section in report.sections:
@@ -104,7 +108,7 @@ def supplement_news_candidates(report, fragments, ownership=None):
             # 외국어 원문은 검수를 통과한 작가의 한국어 설명으로만 공개한다.
             if not re.search(NEWS_KOREAN_SYLLABLE_PATTERN, fragment.text):
                 continue
-            event = fragment.news_event_key or " ".join(fragment.text.split())
+            event = _event_key(fragment)
             canonical_candidate = (attribution_prefix(fragment) + fragment.text.strip(),
                                    frozenset({fragment.fragment_id}))
             if ((event in seen_events and fragment.fragment_id not in used)
@@ -117,6 +121,10 @@ def supplement_news_candidates(report, fragments, ownership=None):
             # 법인 정체 슬롯의 공식 사실을 뉴스로 대체하지 않는다.
             if section.section_id == "identity":
                 continue
+            # ★ 수치·단어가 겹친다는 이유로 여기서 후보를 빼지 않는다. 작가 문장이 검수에서
+            #   떨어지면 이 조각은 검수 탈락으로 분류돼 보도표에서도 막힌다 — 정확 원문
+            #   후보가 없으면 다른 기간·제품·조건의 사실까지 사라진다. 진짜 중복은 검수 뒤
+            #   실제로 남은 문장과 정확 원문 문장을 대조해 `retain_verified_news`가 정리한다.
             candidates.append(ComposedSentence(
                 text=attribution_prefix(fragment) + fragment.text.strip(),
                 citations=(fragment.fragment_id,), grade=GRADE_CONFIRMED, planned_claim_slot=slots[0],
@@ -130,6 +138,71 @@ def supplement_news_candidates(report, fragments, ownership=None):
     return replace(report, sections=tuple(rebuilt)), tuple(added)
 
 
+def _claim_sentences(text: str) -> frozenset[str]:
+    """공백 폭만 맞춘 원문 문장 집합 — 글자·숫자·부호·대소문자는 바꾸지 않는다."""
+    return frozenset(" ".join(part.split()) for part in NEWS_CLAIM_SENTENCE_SPLIT_RE.split(text.strip())
+                     if part.strip())
+
+
+def _claim_body(sentence, news) -> str:
+    """보도 출처 머리말을 뗀 주장 본문. 머리말이 없거나 공식 문장이면 전체 글자."""
+    cited = [news[fid] for fid in sentence.citations if fid in news]
+    if cited and len(cited) == len(sentence.citations):
+        prefix = attribution_prefix(cited[0])
+        if sentence.text.startswith(prefix):
+            return sentence.text[len(prefix):]
+    return sentence.text
+
+
+def _claim_dates(sentence, news) -> frozenset[str]:
+    """이 문장이 인용한 뉴스 조각의 발행일 집합 — 다른 날짜의 «지난해»는 다른 사실이다."""
+    return frozenset(news[fid].document_date for fid in sentence.citations if fid in news and news[fid].document_date)
+
+
+def _drop_claims_already_published(sentences, news, record, section_id):
+    """검수를 통과해 남은 문장이 원문 대체 후보의 모든 문장을 글자 그대로 담으면 뺀다.
+
+    비교 기준은 «실제로 남은» 같은 장 문장뿐이다(미승인 초안·먼저 붙인 후보 아님).
+    후보 원문 문장이 하나라도 빠져 있으면 새 사실이 있는 것이므로 남긴다. 문장
+    집합이 똑같으면 앞에 온 쪽을 남긴다. 작가 문장은 이 단계에서 빼지 않는다.
+
+    ★ 같은 글자라도 발행일이 다른 기사에서 온 주장은 중복으로 보지 않는다. 상대
+      시점(«지난해»)은 발행일 기준이라 다른 날짜의 같은 문장이 다른 사실이다.
+    """
+    claims = [_claim_sentences(_claim_body(sentence, news)) for sentence in sentences]
+    dates = [_claim_dates(sentence, news) for sentence in sentences]
+    kept = []
+    for index, sentence in enumerate(sentences):
+        mine = claims[index]
+        covered = sentence.news_source_alternative and bool(mine) and any(
+            other != index and mine <= claims[other] and (mine != claims[other] or other < index)
+            and (dates[index] & dates[other])
+            for other in range(len(sentences))
+        )
+        if covered:
+            record(sentence, section_id, "중복정리", "duplicate_claim")
+            continue
+        kept.append(sentence)
+    return tuple(kept)
+
+
+def _writer_lead_matches(match, fragment) -> bool:
+    """작가가 단 머리말의 날짜·발행처가 그 기사 메타데이터와 정확히 같은가."""
+    if match["year"]:
+        try:
+            lead_date = date(int(match["year"]), int(match["month"]), int(match["day"]))
+        except ValueError:
+            return False
+        if lead_date.isoformat() != fragment.document_date:
+            return False
+    publisher = (match["publisher"] or "").strip()
+    return not publisher or publisher.casefold() == fragment.source_publisher.strip().casefold()
+
+
+def _event_key(fragment) -> str:
+    return fragment.news_event_key or " ".join(fragment.text.split())
+
+
 def _attribute_news_candidate(sentence, news):
     if not sentence.citations or not set(sentence.citations).issubset(news):
         return sentence
@@ -138,7 +211,14 @@ def _attribute_news_candidate(sentence, news):
             or any(not fragment.document_date or not fragment.source_publisher for fragment in cited)):
         return sentence
     prefix = attribution_prefix(cited[0])
-    return sentence if sentence.text.startswith(prefix) else replace(sentence, text=prefix + sentence.text)
+    if sentence.text.startswith(prefix):
+        return sentence
+    # 작가가 스스로 단 비규격 머리말은 같은 날짜·발행처일 때만 규격으로 바꾼다.
+    # 머리말을 겹쳐 붙이면 날짜 숫자가 원문에 없는 수치로 읽혀 정상 문장이 떨어진다.
+    lead = NEWS_WRITER_ATTRIBUTION_LEAD_RE.match(sentence.text)
+    if lead is not None and sentence.text[lead.end():].strip() and _writer_lead_matches(lead, cited[0]):
+        return replace(sentence, text=prefix + sentence.text[lead.end():])
+    return replace(sentence, text=prefix + sentence.text)
 
 
 def retain_verified_news(report, fragments, *, review_input=None, diagnostics=None):
@@ -207,7 +287,7 @@ def retain_verified_news(report, fragments, *, review_input=None, diagnostics=No
                     continue
                 alternative_claims.update(cited_claims)
             kept_sentences.append(sentence)
-        kept = tuple(kept_sentences)
+        kept = _drop_claims_already_published(kept_sentences, news, record, section.section_id)
         # 검수 탈락으로 장이 비어도 안내문을 남기지 않는다 — 탈락은 처리 과정이라
         # 독자 정보가 아니다(2026-09-16). 사유는 위 record()가 진단에만 적는다.
         sections.append(replace(section, sentences=kept))
@@ -233,10 +313,15 @@ def news_usage_diagnostics(report, fragments, supplemented=(), *, review_candida
     for fid, fragment in news.items():
         if fid in body_ids:
             reason, explanation = "본문반영", "날짜·발행처를 포함한 본문 후보가 검수를 통과했습니다."
+        elif (fid in review_candidates or fid in supplemented) and fid in list_ids:
+            reason, explanation = "보도표반영", "본문 후보는 검수 또는 공개 기준을 통과하지 못했고, 정확 원문은 장 끝 보도표에 실었습니다."
         elif fid in review_candidates or fid in supplemented:
             reason, explanation = "검수후미반영", "본문 후보가 검수 또는 최종 공개 안전 기준을 통과하지 못해 본문과 목록에서 제외했습니다."
         elif fid in decisions:
+            # 작가의 구체적 제외 사유가 가장 정확한 설명이다(보도표에 실렸어도 유지).
             reason, explanation = decisions[fid]
+        elif fid in list_ids:
+            reason, explanation = "보도표반영", "본문에는 싣지 않고 장 끝 보도표에 정확 원문을 실었습니다."
         elif not fragment.news_grounded:
             reason, explanation = "본문검증미확인", "법인·사업사실·원문·시점 검증 통과 표시가 없어 자동 본문 보강하지 않았습니다."
         elif not re.search(NEWS_KOREAN_SYLLABLE_PATTERN, fragment.text):

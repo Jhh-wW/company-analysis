@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from src.shared.report_evidence.policy import (
+    OPTIONAL_CANDIDATE_SLOTS_BY_SECTION,
     REQUIRED_EVIDENCE_SECTION_IDS,
     collector_slots_for,
 )
@@ -41,7 +42,9 @@ def _engine_constants_path() -> Path:
     return _engine_module_dir() / "constants.py"
 
 
-def _extract_collector_slots_by_section(path: Path) -> dict[str, tuple[str, ...]]:
+def _extract_collector_slots_by_section(
+    path: Path, name: str = "COLLECTOR_SLOTS_BY_SECTION"
+) -> dict[str, tuple[str, ...]]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
         # 일반 대입(``NAME = {...}``)과 주석 붙은 대입(``NAME: Final[...] = {...}``)
@@ -54,16 +57,14 @@ def _extract_collector_slots_by_section(path: Path) -> dict[str, tuple[str, ...]
             value_node = node.value
         else:
             continue
-        if "COLLECTOR_SLOTS_BY_SECTION" not in targets or value_node is None:
+        if name not in targets or value_node is None:
             continue
         literal = ast.literal_eval(value_node)
         return {
             str(section_id): tuple(str(slot_id) for slot_id in slots)
             for section_id, slots in literal.items()
         }
-    raise AssertionError(
-        "엔진 상수 파일에 COLLECTOR_SLOTS_BY_SECTION 딕셔너리 리터럴이 없습니다"
-    )
+    raise AssertionError(f"엔진 상수 파일에 {name} 딕셔너리 리터럴이 없습니다")
 
 
 def test_엔진의_수집_슬롯_어휘가_정책과_같다() -> None:
@@ -87,3 +88,23 @@ def test_엔진의_수집_슬롯_어휘가_정책과_같다() -> None:
         assert tuple(engine_slots[section_id]) == collector_slots_for(section_id), (
             f"{section_id} 의 수집 슬롯 어휘가 엔진과 정책 사이에서 갈라졌습니다"
         )
+
+
+def test_엔진의_선택_후보_슬롯_어휘가_정책과_같다() -> None:
+    """선택 후보 칸도 엔진 사본과 정본이 갈라지면 수집기가 붙인 칸을 app이 거절한다."""
+
+    engine_module_dir = _engine_module_dir()
+    if not engine_module_dir.exists():
+        pytest.skip(
+            "엔진 evidence_collection 소스가 이 저장소에 없음 — "
+            "app만 떼어 낸 배치"
+        )
+
+    engine_optional = _extract_collector_slots_by_section(
+        _engine_constants_path(), "OPTIONAL_CANDIDATE_SLOTS_BY_SECTION"
+    )
+
+    assert engine_optional == {
+        section_id: tuple(slot_ids)
+        for section_id, slot_ids in OPTIONAL_CANDIDATE_SLOTS_BY_SECTION.items()
+    }

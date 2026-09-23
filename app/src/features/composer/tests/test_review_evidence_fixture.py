@@ -8,8 +8,17 @@ from typing import Any
 
 from src.features.composer.tests import review_evidence_fixture as fixture
 from src.features.composer.grounding import grounding_problem
-from src.features.composer.port import CollectedFragment, ComposedSentence
-from src.features.composer.verify import _GroupedReviewItem, _build_grouped_review_prompt
+from src.features.composer.port import (
+    CollectedFragment,
+    ComposedReport,
+    ComposedSection,
+    ComposedSentence,
+)
+from src.features.composer.verify import (
+    _GroupedReviewItem,
+    _build_grouped_review_prompt,
+    verify_report,
+)
 from src.shared.report_quality.assessment import has_public_numeric_token
 
 
@@ -43,6 +52,77 @@ def test_실제_묶음검수_프롬프트의_등급줄_뒤_본문도_빠짐없�
     assert json.loads(fixture.grounded_review_response(prompt))["판정"] == [
         {"번호": 1, "장": "business_model", "근거": ["1"], "결과": "참"}
     ]
+
+
+_MULTI_CITED_TEXT = "회사는 고객에게 분석 서비스를 제공하고 구독료를 받는다."
+_MULTI_CITED_FRAGMENTS = (
+    CollectedFragment(fragment_id="1", kind="사업내용", text="회사는 고객에게 분석 서비스를 제공한다."),
+    CollectedFragment(
+        fragment_id="2", kind="사업내용", text="회사는 분석 서비스 이용 고객에게 구독료를 받는다."
+    ),
+)
+
+
+def _multi_cited_sentence() -> ComposedSentence:
+    return ComposedSentence(
+        text=_MULTI_CITED_TEXT,
+        citations=("1", "2"),
+        grade="확인",
+        planned_claim_slot="business_model:value_exchange",
+    )
+
+
+def test_실제_묶음검수_프롬프트의_두번째_인용도_조각_접두어_없이_읽는다() -> None:
+    """인용 칸 「조각 1, 조각 2」의 두 번째 id에 「조각 」이 남으면 안 된다."""
+
+    sentence = _multi_cited_sentence()
+    prompt = _build_grouped_review_prompt(
+        [_GroupedReviewItem(number=1, section_id="business_model", kind="문장",
+                            citations=sentence.citations, sentence=sentence)],
+        {fragment.fragment_id: fragment for fragment in _MULTI_CITED_FRAGMENTS},
+        None,
+    )
+    assert "인용: 조각 1, 조각 2)" in prompt
+
+    (item,) = fixture.review_items(prompt)
+    assert item.citations == ("1", "2")
+    (entry,) = json.loads(fixture.grounded_review_response(prompt))["판정"]
+    assert entry["근거"] == ["1", "2"]
+
+
+def test_옛_단일형식도_같은_규칙으로_다중_인용을_읽는다() -> None:
+    prompt = (
+        "\n[1] (등급: 확인, 인용: 조각 3, 조각 10)\n"
+        f"  문장(JSON 문자열): {json.dumps('첫 문장이다.', ensure_ascii=False)}"
+    )
+
+    (item,) = fixture.review_items(prompt)
+    assert item.citations == ("3", "10")
+
+
+def test_다중_인용_참_응답은_장별_허용근거_검수에서_정상_후보를_지우지_않는다() -> None:
+    """장별 허용 근거를 넘기는 검수는 응답 «근거»가 인용과 다르면 후보를 뺀다.
+
+    도우미가 두 번째 id를 「조각 2」로 되돌리면 정상 다중 인용 후보가 진단 없이
+    사라진다 — 가짜 검수가 생산 경계의 실패를 만들어 내는 반례다.
+    """
+
+    report = ComposedReport((ComposedSection("business_model", (_multi_cited_sentence(),)),))
+    diagnostics: list[dict] = []
+
+    checked = verify_report(
+        report,
+        _MULTI_CITED_FRAGMENTS,
+        None,
+        fixture.grounded_review_response,
+        allowed_fragment_ids_by_section={"business_model": frozenset({"1", "2"})},
+        diagnostics=diagnostics,
+    )
+
+    assert [sentence.text for sentence in checked.sections[0].sentences] == [
+        _MULTI_CITED_TEXT
+    ]
+    assert diagnostics == []
 
 
 def _proof_entries(value: object) -> list[dict[str, object]]:

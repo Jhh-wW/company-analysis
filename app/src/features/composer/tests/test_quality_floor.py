@@ -433,7 +433,9 @@ def test_원래_54후보에서_미결속_주장을_빼도_품질하한은_낮추
         expected = [row["글"] for row in golden_public_rows(sections, section.cell)]
         assert actual == expected, section.cell
     body_count = sum(len(section.prose_lines) for section in report.sections)
-    assert body_count == 35
+    # 35 → 36 (2026-09-23): 1장 표어 문장이 증명 없는 삭제 대신 보존된다 —
+    # golden_fixture_contract.GOLDEN_OMITTED_INDICES 갱신 주석 참조. 하한 상수는 그대로다.
+    assert body_count == 36
     assert len(report.fact_records) == body_count
     assert output.composed_sentences == len(fixture_body)
     assert output.verified_sentences == body_count + len(report.summary_items)

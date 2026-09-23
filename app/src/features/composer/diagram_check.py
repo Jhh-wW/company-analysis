@@ -105,12 +105,16 @@ from src.features.composer.diagram_review_constants import (
     FLOW_UNINFORMATIVE_OPERATIONS_CODE,
     PRODUCT_GOODS_OPPOSITE,
     PRODUCT_GOODS_PRIMACY_RE,
+    REVENUE_BLOCK_BREAK_RE,
     REVENUE_COMPOSITION_MARKERS,
     REVENUE_DEDUCTION_CLAUSE_RE,
-    REVENUE_SENTENCE_SPLIT_RE,
+    REVENUE_LINE_AMOUNT_RE,
+    REVENUE_OPERATING_HEADER,
+    REVENUE_SENTENCE_SEGMENT_RE,
     REVENUE_STREAM_AGGREGATE_NAMES,
     REVENUE_STREAM_RE,
     REVENUE_STREAM_TRAILING_PARTICLES,
+    REVENUE_STREAM_UNMARKED_SUFFIXES,
     REVENUE_STREAM_YEAR_NAME_RE,
 )
 from src.features.composer.grounding import constrain_verdicts, grounding_hint
@@ -737,12 +741,29 @@ def revenue_stream_names(source_texts: Sequence[str]) -> tuple[str, ...]:
 
     names: list[str] = []
     for text in source_texts:
-        for sentence in REVENUE_SENTENCE_SPLIT_RE.split(str(text or "")):
+        raw = str(text or "")
+        # 구획 머리 앵커 — 표지 없는 「…수익」의 행 귀속은 문장이 아니라
+        # «원문 전체»의 위치로 정한다. 금융·서비스업 손익계산서는 머리와
+        # 항목이 줄바꿈으로 갈라져 같은 문장에 함께 있지 않다(조기 독립
+        # 검증 반례: 「영업수익\n이자수익 100\n수수료수익 20」).
+        # ★ 블록 종료 앵커는 「영업외수익」만이 아니라 영업비용·영업이익·
+        #   재무상태표 구획 머리까지 포함한다(최종 경계 반례:
+        #   「영업수익\n이자수익100\n유동부채\n선수수익20」).
+        operating_anchors = [
+            found.start() for found in re.finditer(REVENUE_OPERATING_HEADER, raw)
+        ]
+        block_break_anchors = [
+            found.start() for found in REVENUE_BLOCK_BREAK_RE.finditer(raw)
+        ]
+        for segment in REVENUE_SENTENCE_SEGMENT_RE.finditer(raw):
+            sentence = segment.group(0)
             composition = any(
                 marker in sentence for marker in REVENUE_COMPOSITION_MARKERS
             )
             for match in REVENUE_STREAM_RE.finditer(sentence):
-                name, gap, trailing = match.group(1), match.group(2), match.group(3)
+                name, gap, suffix, trailing = (
+                    match.group(1), match.group(2), match.group(3), match.group(4),
+                )
                 if REVENUE_DEDUCTION_CLAUSE_RE.search(sentence, match.start()):
                     # 조사 붙은 주어 뒤의 차감 절은 매출원 명사구가 아니다.
                     # 다른 매출원까지 삼키지 않도록 현재 match 범위와 대조한다.
@@ -761,6 +782,31 @@ def revenue_stream_names(source_texts: Sequence[str]) -> tuple[str, ...]:
                 if not composition and gap:
                     # 붙여 쓰지 않은 「… 매출」은 구성 절 안에서만 이름으로 본다.
                     continue
+                if not composition and suffix not in REVENUE_STREAM_UNMARKED_SUFFIXES:
+                    # 표지 없는 붙여 쓴 「…수익」은 회계 항목이 흔하다(선수수익·
+                    # 영업외수익·이자수익·보조금수익 — 2026-09-23 4차 실측 P13).
+                    # 다만 금융·서비스업의 정상 수익원도 이 접미를 쓰므로 통째로
+                    # 빼지 않고 두 조건으로 가른다(조기 독립 검증 반영):
+                    #   ① 행 귀속 — 앞쪽 가장 가까운 구획 머리가 「영업수익」이다
+                    #      (「영업외수익」 구획에 속하면 영업외 항목이다).
+                    #   ② 금액 행 — 항목 바로 뒤에 숫자가 온다. 「선수수익으로
+                    #      계상」 같은 회계 처리 서술은 금액 행이 아니다.
+                    position = segment.start() + match.start()
+                    last_operating = max(
+                        (a for a in operating_anchors if a < position), default=None
+                    )
+                    last_break = max(
+                        (a for a in block_break_anchors if a < position), default=None
+                    )
+                    in_operating_block = last_operating is not None and (
+                        last_break is None or last_operating > last_break
+                    )
+                    amount_follows = (
+                        REVENUE_LINE_AMOUNT_RE.match(raw, segment.start() + match.end())
+                        is not None
+                    )
+                    if not (in_operating_block and amount_follows):
+                        continue
                 if name not in names:
                     names.append(name)
     return tuple(names)

@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from src.shared.report_quality.review_diagnostic_constants import (
     CANDIDATE_FINGERPRINT_RE,
     CANDIDATE_FINGERPRINT_VERSION,
-    GROUNDING_DETAIL_STAGES, GROUNDING_DETAIL_VERSION,
+    GROUNDING_DETAIL_CHECK_KINDS, GROUNDING_DETAIL_STAGES, GROUNDING_DETAIL_VERSION,
     REVIEW_ITEMS,
     REVIEW_KINDS,
     REVIEW_REASONS,
@@ -57,7 +57,7 @@ def observed_review_outcomes(
         if (isinstance(detail, Mapping)
             and detail.get("version") == GROUNDING_DETAIL_VERSION
             and detail.get("stage") in GROUNDING_DETAIL_STAGES
-            and detail.get("check_kind") in ("수치", "추세", "시점", "근거")):
+            and detail.get("check_kind") in GROUNDING_DETAIL_CHECK_KINDS):
             safe_detail = {name: detail[name] for name in ("version", "stage", "check_kind")}
             index = detail.get("entry_index")
             if type(index) is int and index >= 0:

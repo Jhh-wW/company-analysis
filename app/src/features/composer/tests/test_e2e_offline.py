@@ -390,7 +390,9 @@ def test_ENGINE_V2_전체_흐름이_검증된_v2_보고서를_만든다(
     assert len(rates) == 3
     assert all(fact.section_owner == "past_changes" for fact in rates)
     assert all(validate_versioned_numeric_record(fact) == () for fact in rates)
-    assert len(report.fact_records) == 38
+    # 38 → 39 (2026-09-23): 1장 표어 문장은 뒤 절 주체를 증명할 수 없어 8장과 겹쳐
+    # 남는다 — golden_fixture_contract.GOLDEN_OMITTED_INDICES 갱신 주석 참조.
+    assert len(report.fact_records) == 39
     all_prose = [text for section in report.sections for text, _ in section.prose_lines]
     for section in report.sections:
         expected = [row["글"] for row in golden_public_rows(fixture_sections, section.cell)]

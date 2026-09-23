@@ -47,10 +47,15 @@ _문장 = (
     "회사는 Sony Music, TME, Republic Records 등 글로벌 유수의 음반·음원 "
     "유통 전문사와 파트너십을 체결하여 글로벌 유통 범위를 확대하고 있다."
 )
+#: 원래 의역 짝 — 짝(비교 후보)은 되지만 삭제 증명이 없어 이제 옮기지 않는다
+#: (2026-09-23 총괄 확정). 보존 기대 음성으로 남긴다.
 _문장_변형 = (
     "회사는 Sony Music, TME, Republic Records 등 글로벌 유통 전문사와의 "
     "파트너십을 통해 음반·음원의 글로벌 유통 범위를 확대하고 있다."
 )
+#: 소유 장이 남기는 같은 주장 문장. 인용이 하나 더 있어 지운 후보와 «지문»이
+#: 다르다 — 장부가 삭제 후보가 아니라 실제 소유 후보에 결속됐는지 가를 수 있다.
+_소유_인용 = ("n1", "n2")
 _무관한_문장 = (
     "회사의 신인개발 부문은 캐스팅팀과 트레이닝팀으로 구성되어 연습생을 "
     "모집하고 체계적인 트레이닝을 제공한다."
@@ -86,7 +91,7 @@ def _dropped_report_and_ledger() -> tuple[ComposedReport, list[MovedFactRecord]]
     report = _report(
         culture=(_sentence(_문장, ("n1",)),),
         operations_partners=(
-            _sentence(_문장_변형, ("n1",)),
+            _sentence(_문장, _소유_인용),
             _sentence("회사는 파트너 협력 조직을 별도로 운영한다.", ("n1",)),
         ),
     )
@@ -98,6 +103,26 @@ def _dropped_report_and_ledger() -> tuple[ComposedReport, list[MovedFactRecord]]
 
 
 _7장_표시 = "7장 «사업 운영과 파트너 구조»"
+
+
+def test_원래_의역_짝은_옮기지_않아_이동_장부도_안내문도_없다() -> None:
+    """기대 변경 (2026-09-23 총괄 확정) — 종전 재현 경로는 이 의역 짝으로 8장을 비웠다.
+
+    「유수의」가 빠지고 「체결하여」가 「통해」로 바뀌어 삭제 증명이 없다 → 8장 문장이
+    남고, 남은 장에는 이동 안내문도 장부도 생기지 않는다.
+    """
+    sink: list[MovedFactRecord] = []
+    report = _report(
+        culture=(_sentence(_문장, ("n1",)),),
+        operations_partners=(
+            _sentence(_문장_변형, ("n1",)),
+            _sentence("회사는 파트너 협력 조직을 별도로 운영한다.", ("n1",)),
+        ),
+    )
+    result, dropped = drop_cross_section_duplicates(report, moved_facts_sink=sink)
+    assert dropped == 0 and sink == []
+    assert [sentence.text for sentence in _section(result, "culture").sentences] == [_문장]
+    assert _section(result, "culture").notice == ""
 
 
 def test_이동_근거가_살아_있으면_대상_장_번호와_제목을_적는다() -> None:

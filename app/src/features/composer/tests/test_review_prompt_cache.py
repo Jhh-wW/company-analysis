@@ -45,7 +45,9 @@ def test_explicit_opt_in_only_attaches_metadata(monkeypatch, configured):
 
 
 # 2026-09-23: 평면 경로 고정 접두부 10706 → 10794 (REVIEW_JSON_GUIDE «모든 번호 빠짐없이» 안내 88자).
-@pytest.mark.parametrize("grouped,prefix_chars", ((False, 11142), (True, 12196)))
+# 2026-09-23: 공용 GROUNDING_GUIDE «인식기준» 안내 177자 → 11142→11319, 12196→12373.
+#   그 177자만 되돌리면 옛 값이 그대로 재현되고, 아래 분할 표식 단정은 값과 무관하다.
+@pytest.mark.parametrize("grouped,prefix_chars", ((False, 11319), (True, 12373)))
 @pytest.mark.parametrize("factory", (_golden_case, _large_case, _boundary_case))
 def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
     monkeypatch, grouped, prefix_chars, factory,
@@ -69,10 +71,10 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "a87c264adcc1d25c529f07b3b1358ef03709b91921aa52c832f1592eb19519a8"),
-    (_golden_case, True, "c39e729c6e1e2db95719d0c37036d3bc2ededfd8b85730b89041fec8049176a4"),
-    (_boundary_case, False, "73a6b9f99de922ac412b67505cda560ef24b7dbd2d027b8cd42bc1158c30da10"),
-    (_boundary_case, True, "c9a8489a900b8d5c866cf4536118d07b020b6b44ba12b0a522d5812a42ecf96a"),
+    (_golden_case, False, "43903829e61c77a71c4573caf71e56f1835686c0316804b5fee478e5e932b3ed"),
+    (_golden_case, True, "c4a28d93298c40d1d1cef5a86e22d54aa074fbed1ca1b7e98afa02d21135041b"),
+    (_boundary_case, False, "5272127506f6f2231bd7602712734e2c78e8e9e569e65d1bfceb29dc79104c62"),
+    (_boundary_case, True, "176a4d84585e524765c36ff3ca76199880366d1b6c0f3eef029620f72b2d2813"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
@@ -130,7 +132,8 @@ def test_diagram_cache_excludes_card_switch_sources_and_rows(monkeypatch, items)
     cached = diagram_check._review_prompt(items, texts)
     reference = diagram_check._review_prompt((), {})
     assert cached.encode("utf-8") == plain.encode("utf-8")
-    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 8326
+    # 2026-09-23 공용 «인식기준» 안내 177자: 8326 → 8503 (되돌리면 8326 재현).
+    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 8503
     assert cached[:cached.cache_prefix_chars] == reference[:reference.cache_prefix_chars]
     assert texts["2"] not in cached[:cached.cache_prefix_chars]
     assert getattr(cached, "response_schema", None) is None

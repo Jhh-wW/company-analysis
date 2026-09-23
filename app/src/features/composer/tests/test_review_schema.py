@@ -88,13 +88,53 @@ def test_prompt_is_string_and_concatenation_preserves_schema_and_exact_bytes():
         prompt + 1
 
 
-@pytest.mark.parametrize("schema,expected", (
-    (FLAT_REVIEW_SCHEMA, "ec40152ca2ad8aa43192180dd0583bff4a6c3f5e52042ac1f2b915bc7fd0b94d"),
-    (DIAGRAM_REVIEW_SCHEMA, "ba1d778829286673bd6cde6ebb5d559274c78f0202b92d6e4128891736dfc1c8"),
-))
-def test_retry_schema_hash_matches_provider_accepted_schema(schema, expected):
+def _schema_sha(schema):
     encoded = json.dumps(schema, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    assert hashlib.sha256(encoded).hexdigest() == expected
+    return hashlib.sha256(encoded).hexdigest()
+
+
+# ★ 2026-09-23 정성 인식기준 근거 배열(«인식기준»)을 더했고, 이어서 관계 항목에
+#   결합 유형의 두 칸(«범위»·«관계»)을 더했다. 제공자가 실제로 문법을 컴파일해
+#   받아들인 값은 두 추가 «전» 해시(accepted)다. 새 스키마는 그 값에서 선택 배열
+#   하나와 선택 문자열 칸 두 개만 더한 것임을 아래에서 증명한다 — 새 스키마의
+#   제공자 컴파일 성공은 유료 호출 없이는 확인되지 않았으므로 «accepted»로 부르지
+#   않는다(current). recognition은 인식기준만 더한 직전 값이다.
+@pytest.mark.parametrize("schema,accepted,recognition,current", (
+    (FLAT_REVIEW_SCHEMA,
+     "ec40152ca2ad8aa43192180dd0583bff4a6c3f5e52042ac1f2b915bc7fd0b94d",
+     "ff4e031accf5776e3f189483531e5c5270bea8c8d1ec8cd6da75008384f901ab",
+     "bb974f18bc5d33def32725d9d6a401a3eb0265f878af6ac624bcb7ff2af966cf"),
+    (DIAGRAM_REVIEW_SCHEMA,
+     "ba1d778829286673bd6cde6ebb5d559274c78f0202b92d6e4128891736dfc1c8",
+     "43db498656efc5545d712fcc1f0c9893fe69fbd1f2dcca8a42a470c03e4bcb8a",
+     "5e650e7f2d7b91af0d6a9d45f632f0880accfd835b8c3d801207880d02660201"),
+))
+def test_retry_schema_hash_matches_provider_accepted_schema(schema, accepted, recognition, current):
+    assert _schema_sha(schema) == current
+    relation = schema["$defs"]["grounding"]["properties"]["관계"]["items"]
+    assert relation["properties"]["범위"] == relation["properties"]["관계"] == {"type": "string"}
+    assert relation["required"] == ["근거", "원문", "유형"]
+    assert relation["additionalProperties"] is False
+    previous = deepcopy(schema)
+    for key in ("범위", "관계"):
+        del previous["$defs"]["grounding"]["properties"]["관계"]["items"]["properties"][key]
+    assert _schema_sha(previous) == recognition
+    schema = previous
+    grounding = schema["$defs"]["grounding"]
+    assert grounding["properties"]["인식기준"] == {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {"표현": {"type": "string"}, "근거": {"type": "string"},
+                           "원문": {"type": "string"}},
+            "required": ["표현", "근거", "원문"],
+            "additionalProperties": False,
+        },
+    }
+    assert "인식기준" not in grounding["required"]
+    previous = deepcopy(schema)
+    del previous["$defs"]["grounding"]["properties"]["인식기준"]
+    assert _schema_sha(previous) == accepted
 
 
 @pytest.mark.parametrize("kind", REVIEW_KINDS)
@@ -111,11 +151,14 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
     assert prompt
 
 
+# 2026-09-23 공용 GROUNDING_GUIDE 끝에 «인식기준» 근거 안내 177자 추가. 그 177자만
+#   되돌리면 네 해시·도식 두 해시가 모두 직전 값(a87c264a·c39e729c·73a6b9f9·
+#   c9a8489a / a370eb2b·f769528b)과 같음을 재생해 확인했다(tmp 무과금 재생 기록).
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "a87c264adcc1d25c529f07b3b1358ef03709b91921aa52c832f1592eb19519a8"),
-    (_golden_case, True, "c39e729c6e1e2db95719d0c37036d3bc2ededfd8b85730b89041fec8049176a4"),
-    (_boundary_case, False, "73a6b9f99de922ac412b67505cda560ef24b7dbd2d027b8cd42bc1158c30da10"),
-    (_boundary_case, True, "c9a8489a900b8d5c866cf4536118d07b020b6b44ba12b0a522d5812a42ecf96a"),
+    (_golden_case, False, "43903829e61c77a71c4573caf71e56f1835686c0316804b5fee478e5e932b3ed"),
+    (_golden_case, True, "c4a28d93298c40d1d1cef5a86e22d54aa074fbed1ca1b7e98afa02d21135041b"),
+    (_boundary_case, False, "5272127506f6f2231bd7602712734e2c78e8e9e569e65d1bfceb29dc79104c62"),
+    (_boundary_case, True, "176a4d84585e524765c36ff3ca76199880366d1b6c0f3eef029620f72b2d2813"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
     # de0a68e1의 원래 builder로 재생한 전체 UTF-8 프롬프트 해시다.
@@ -132,8 +175,8 @@ def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected)
 
 
 @pytest.mark.parametrize("items,expected", (
-    ((), "a370eb2bc54ccf413f01805ba1cd5ef083b0b5a0ce6e0084c9a0615a99c1eff1"),
-    (FLOW_ITEMS, "f769528b88dffc065e7bcfabb7953ffec183c28260ed80e499f392d19392a40f"),
+    ((), "4d9a30dd4be59739ee487d661b9f388d0f50bc30df1d9aa725390a86972191cc"),
+    (FLOW_ITEMS, "7a0baa2a1ca065230e04d05b2d8e56381c55c8a6ce809df65fd8112872d9a7e1"),
 ))
 def test_diagram_prompt_bytes_match_pre_schema_baseline(items, expected):
     prompt = diagram_check._review_prompt(items, {"1": TEXT})
@@ -539,3 +582,120 @@ def test_malformed_numeric_proof_is_rejected_by_schema_and_semantics(schema_vali
     row = {"번호": 1, "결과": "참", "검증근거": {"수치": entries}}
     assert not schema_validator(FLAT_REVIEW_SCHEMA).is_valid(_native_response([row], FLAT_REVIEW_SCHEMA))
     assert grounding_problem(numeric_fixture._THREE_YEAR_TEXT, numeric_fixture._THREE_YEAR_SOURCE, row)
+
+
+# ══════════════════════════════════════════════════════════
+# 결합(수량 범위 결속) 항목 — 안내문대로 쓴 항목이 실제 공급자 스키마를 통과하고
+# 실제 파서·가드까지 가서 원문 결속으로만 승인되는가
+# ══════════════════════════════════════════════════════════
+
+_COMBINED_CLAIM = "당사는 32개 협력사로부터 부품을 납품받는다."
+_COMBINED_SOURCE = "당사는 32개 협력사로부터 부품을 납품받습니다."
+_COMBINED_ITEM = {"근거": "1", "범위": "32개", "관계": "납품",
+                  "원문": "당사는 32개 협력사로부터 부품을 납품받", "유형": "결합"}
+
+
+def _combined_payload(schema, *relations):
+    row = {"번호": 1, "장": "identity", "근거": ["1"], "결과": "참",
+           "검증근거": {"관계": list(relations)}}
+    return _native_response([row], schema)
+
+
+def _assert_fits(schema_validator, schema, payload):
+    schema_validator(schema).validate(payload)
+    schema_validator(transform_schema(schema)).validate(payload)
+
+
+@pytest.mark.parametrize("schema", SCHEMAS, ids=SCHEMA_NAMES)
+def test_combined_item_from_the_guide_fits_actual_provider_schemas(schema_validator, schema):
+    """안내문(combined_relation_constants)이 요구하는 다섯 칸 그대로 — 기존 원인·역할 항목과 함께."""
+    from src.features.composer.combined_relation_constants import (
+        COMBINED_RELATION_REVIEW_GUIDE_OBSERVED,
+    )
+
+    for key in _COMBINED_ITEM:
+        assert f'"{key}"' in COMBINED_RELATION_REVIEW_GUIDE_OBSERVED
+    cause = {"근거": "1", "원문": "공급 차질로 납기가 지연됐다.", "유형": "인과",
+             "원인": "공급 차질", "결과": "납기 지연"}
+    role = {"근거": "1", "원문": "가람 서비스는 수수료를 부과한다.", "유형": "과금",
+            "대상": "가람 서비스", "역할값": "수수료"}
+    _assert_fits(schema_validator, schema, _combined_payload(schema, _COMBINED_ITEM, cause, role))
+    assert transform_schema(schema) == schema  # SDK 정규화도 두 칸을 그대로 둔다
+
+
+@pytest.mark.parametrize("schema", SCHEMAS, ids=SCHEMA_NAMES)
+@pytest.mark.parametrize("defect", (
+    {"범휘": "32개"},            # 칸 이름 오타 — 알 수 없는 키
+    {"관계어": "납품"},          # 칸 이름 오타
+    {"비고": "추가 설명"},       # 알 수 없는 키
+    {"범위": 32},               # 문자열이 아님
+    {"관계": None},             # null 불허
+    {"유형": "결함"},           # 유형 enum 오타
+))
+def test_combined_item_typos_and_unknown_keys_stay_rejected(schema_validator, schema, defect):
+    item = {**_COMBINED_ITEM, **defect}
+    payload = _combined_payload(schema, item)
+    assert not schema_validator(schema).is_valid(payload)
+    assert not schema_validator(transform_schema(schema)).is_valid(payload)
+
+
+@pytest.mark.parametrize("schema", SCHEMAS, ids=SCHEMA_NAMES)
+@pytest.mark.parametrize("missing", ("근거", "원문", "유형"))
+def test_combined_item_keeps_relation_required_fields(schema_validator, schema, missing):
+    item = {key: value for key, value in _COMBINED_ITEM.items() if key != missing}
+    assert not schema_validator(schema).is_valid(_combined_payload(schema, item))
+
+
+def test_schema_valid_combined_item_reaches_parser_and_guard_with_source_binding(schema_validator):
+    """실제 파서(support_entries_by_number)가 항목을 그대로 가드에 넘기고, 가드는 원문과 대조한다."""
+    from src.features.composer.combined_relation_constants import (
+        COMBINED_SCOPE_QUOTE_NOT_IN_SOURCE, COMBINED_SCOPE_RANGE_NOT_IN_QUOTE,
+        COMBINED_SCOPE_SOURCE_NOT_CITED,
+    )
+    from src.features.composer.combined_relation_guard import combined_relation_report
+    from src.features.composer.direct_support import support_entries_by_number
+
+    sources = {"1": _COMBINED_SOURCE}
+    cases = (
+        (_COMBINED_ITEM, ""),
+        ({**_COMBINED_ITEM, "원문": "당사는 32개 협력사로부터 부품을 공급받"},
+         COMBINED_SCOPE_QUOTE_NOT_IN_SOURCE),
+        ({**_COMBINED_ITEM, "범위": "40개"}, COMBINED_SCOPE_RANGE_NOT_IN_QUOTE),
+        ({**_COMBINED_ITEM, "근거": "2"}, COMBINED_SCOPE_SOURCE_NOT_CITED),
+    )
+    for item, expected in cases:
+        payload = _combined_payload(FLAT_REVIEW_SCHEMA, item)
+        _assert_fits(schema_validator, FLAT_REVIEW_SCHEMA, payload)  # 모양은 모두 합법
+        entries = support_entries_by_number(json.dumps(payload, ensure_ascii=False))[1]
+        assert entries["관계"] == [item]
+        report = combined_relation_report(_COMBINED_CLAIM, sources, entries)
+        assert report.triggers and report.problem == expected
+
+
+def test_allowing_the_fields_does_not_approve_evidence_in_enforced_verdicts(schema_validator, monkeypatch):
+    """스위치를 임시로 켜 실제 판정 경로(constrain_verdicts)를 부른다. 칸을 허용했다고
+    승인되지 않는다 — 원문 결속이 맞는 결합 항목만 «참»을 지킨다."""
+    from src.features.composer.combined_relation_constants import (
+        COMBINED_SCOPE_EVIDENCE_MISSING, COMBINED_SCOPE_QUOTE_NOT_IN_SOURCE,
+    )
+    from src.features.composer.grounding_constants import REVIEW_GROUNDING_REJECTED
+
+    monkeypatch.setattr(
+        "src.features.composer.combined_relation_guard.COMBINED_RELATION_ENFORCED", True)
+    candidates = {1: (_COMBINED_CLAIM, {"1": _COMBINED_SOURCE})}
+    cases = (
+        (_COMBINED_ITEM, "참", None),
+        ({**_COMBINED_ITEM, "원문": "당사는 32개 협력사로부터 부품을 공급받"},
+         REVIEW_GROUNDING_REJECTED, COMBINED_SCOPE_QUOTE_NOT_IN_SOURCE),
+        # 결합 칸을 달았어도 유형이 결합이 아니면 결합 근거가 아니다.
+        ({**_COMBINED_ITEM, "유형": "역할"}, REVIEW_GROUNDING_REJECTED, COMBINED_SCOPE_EVIDENCE_MISSING),
+    )
+    for item, verdict, problem in cases:
+        payload = _combined_payload(FLAT_REVIEW_SCHEMA, item)
+        _assert_fits(schema_validator, FLAT_REVIEW_SCHEMA, payload)
+        constrained, problems = constrain_verdicts(
+            json.dumps(payload, ensure_ascii=False), {1: "참"}, candidates,
+            confirmed_prose_numbers=frozenset({1}),
+        )
+        assert constrained[1] == verdict
+        assert problems.get(1) == problem

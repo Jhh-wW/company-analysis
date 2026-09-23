@@ -12,11 +12,18 @@
   §5는 «단어를 바꾸었어도 대상·사건·시점·값이 같으면 중복»이라고 못 박는다.
 
 ★ 이것은 «닫힌 목록 게이트»가 아니다.
-  - 어휘 목록·어미 패턴·출처 종류 화이트리스트를 쓰지 않는다.
-  - 문장 «내용의 좋고 나쁨»을 판단하지 않는다. 두 문장이 같은 근거를 쓰면서
-    글자가 겹치는가라는 «모양»만 본다.
+  - 어휘 목록·출처 종류 화이트리스트를 쓰지 않는다. 문장 «내용의 좋고 나쁨»을
+    판단하지 않는다.
+  - 두 단계로 나뉜다(2026-09-23 총괄 확정). ① 같은 근거를 쓰면서 글자 3-그램이
+    겹치는가는 «비교 후보(짝)와 소유 장»을 고르는 데만 쓴다 — 겹침은 같은 조건·
+    관계·사실이 남았다는 증명이 아니다. ② 실제 삭제는 지울 문장의 각 완전 주장절이
+    소유 문장의 완전 주장절과 어절 그대로(부호·대소문자·인용부호 안 글자 보존)
+    대응할 때만 한다. 허용하는 어미 변환은 절 끝의 닫힌 종결형↔연결형 묶음뿐이다
+    (`dedupe_proof_constants`). 증명하지 못하면 겹쳐 보여도 남긴다.
   - 거절이 아니라 «이동»이다 — 지운 문장은 소유 장에 그대로 남아 있다.
   - 장을 삭제하지 않는다. 비면 정직한 안내문을 남긴다.
+  - 아래 상수 주석의 옛 실측(겹침만으로 지우던 시기)은 비교 후보 문턱의 근거로
+    남긴 역사다.
 
 ★ 소유 장을 «먼저 나온 장»으로 정하지 않는다. 실측에서 파트너 사실이 1장에
   먼저 스쳐 지나가고 7장이 세 문장으로 제대로 다뤘다. 순서대로 지우면 제대로
@@ -58,6 +65,18 @@ from src.features.composer.dedupe_notice_constants import (
     NOTICE_ONLY_MATERIALS_PREFIX,
     NOTICE_ONLY_MATERIALS_TEMPLATE,
 )
+from src.features.composer.dedupe_proof_constants import (
+    PROOF_APOSTROPHE_NEIGHBOR_RE,
+    PROOF_CLAUSE_COMMA,
+    PROOF_CLAUSE_LINK_SUFFIX,
+    PROOF_ENDING_CLASSES,
+    PROOF_MIN_STEM_CHARS,
+    PROOF_QUOTE_PAIRS,
+    PROOF_QUOTE_TOGGLES,
+    PROOF_SENTENCE_TERMINATORS,
+    PROOF_THOUSANDS_COMMA_RE,
+    PROOF_TOPIC_PARTICLES,
+)
 from src.features.composer.future_plan_guard import has_forward_marker
 from src.features.composer.news_dedupe_constants import (
     NEWS_DEDUPE_CLAIM_TIME_PAIRS, NEWS_DEDUPE_LEGACY_KINDS,
@@ -83,9 +102,9 @@ logger = logging.getLogger(__name__)
 #: 형태소 목록 없이도 그 차이를 넘어선다 — 닫힌 목록을 만들지 않기 위한 선택이다.
 _NGRAM_SIZE: Final[int] = 3
 
-#: 두 문장을 «같은 사실»로 볼 겹침 비율. 겹침 = 교집합 ÷ 짧은 쪽 크기.
-#: 0.6은 보수적인 값이다 — 애매하면 남긴다(잘못 지우는 쪽이 더 나쁘다).
-#: 이 값은 «근거 조각을 공유하는» 짝에만 쓴다.
+#: 두 문장을 «비교 후보(짝)»로 볼 겹침 비율. 겹침 = 교집합 ÷ 짧은 쪽 크기.
+#: 이 값은 «근거 조각을 공유하는» 짝에만 쓴다. 짝이 됐다고 지우지 않는다 — 실제
+#: 삭제는 `_owner_cover`의 완전 주장절 대응 증명이 따로 있어야 한다(2026-09-23).
 _OVERLAP_THRESHOLD: Final[float] = 0.6
 
 #: 조각은 다르지만 «같은 원문 문서»를 근거로 든 짝에 쓰는 더 높은 겹침 기준.
@@ -146,6 +165,16 @@ _TENSE_OWNED_PAIR: Final[frozenset[str]] = frozenset(
 
 #: 글자만 남긴다 — 한글·영문·숫자. 공백·문장부호는 표기 차이라 무시한다.
 _KEEP_CHARS_RE: Final[re.Pattern[str]] = re.compile(r"[^0-9A-Za-z가-힣]+")
+
+#: 문장 속 수치 토큰(천 단위 쉼표는 표기 차이라 지운다). 수치는 두 자리에서 쓴다.
+#: ① 짝 판정 — 두 문장이 «서로 상대에 없는» 수치를 각각 가지면 다른 기간·금액의
+#:    사실이라 짝이 아니다(4차 후속 — 「2024년 100억원」이 「2025년 120억원」을 지웠다).
+#: ② 실제 삭제 — 지울 문장에만 있는 수치가 남는 소유 문장들에 없으면 지우지 않는다.
+#: ★ 통합 수정 — 처음에는 ①을 «집합이 조금이라도 다르면»으로 썼다. 그러자 남는
+#:   소유 문장에만 수치가 더 있는 경우(지워도 잃는 수치가 없다)까지 짝에서 빠져 저장본
+#:   1장의 일본·미국 진출 문장이 6장과 겹친 채 남았다. 보호할 쪽은 «지울 문장의
+#:   수치»이므로 ②에서 비대칭으로 지킨다.
+_NUMBER_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"\d[\d,]*(?:\.\d+)?")
 
 
 def _document_keys(
@@ -265,6 +294,10 @@ class MovedFactRecord:
     documents: frozenset[str]
     news_seals: frozenset[tuple[str, str]] = frozenset()
     owner_fingerprints: tuple[str, ...] = ()
+    #: ``True``면 지운 문장의 내용이 소유 장 «여러 문장에 나뉘어» 남은 경우다.
+    #: 그 문장들이 «모두» 살아 있어야 이동을 말한다. ``False``(기본)는 기록한
+    #: 문장 «하나»가 지운 문장을 혼자 덮으므로 하나만 살아 있어도 된다.
+    owner_fingerprints_all_required: bool = False
 
 
 def moved_owner_fingerprint(sentence: ComposedSentence) -> str:
@@ -284,7 +317,11 @@ def moved_owner_fingerprint(sentence: ComposedSentence) -> str:
 
 
 def _signature(text: str) -> frozenset[str]:
-    """문장을 글자 3-그램 집합으로 바꾼다 (표기 차이에 둔감한 지문)."""
+    """문장을 글자 3-그램 집합으로 바꾼다 (표기 차이에 둔감한 지문).
+
+    ★ 비교 «후보»를 고르는 유사도용이다. 소문자화·기호 제거를 하므로 삭제
+      증명(`_sentence_words`)에는 쓰지 않는다.
+    """
     normalized = unicodedata.normalize("NFKC", text or "").lower()
     condensed = _KEEP_CHARS_RE.sub("", normalized)
     if len(condensed) < _NGRAM_SIZE:
@@ -293,6 +330,118 @@ def _signature(text: str) -> frozenset[str]:
         condensed[index : index + _NGRAM_SIZE]
         for index in range(len(condensed) - _NGRAM_SIZE + 1)
     )
+
+
+@dataclass(frozen=True)
+class _Word:
+    """어절의 «삭제 증명용» 표면형과 인용부호를 보존한 절 경계 정보.
+
+    - ``base``: 어절 그대로(인용 밖 천 단위 쉼표·문장 끝 종결 부호·절 경계 쉼표
+      제거만, 호환 정규화 없음). 대소문자·음수 부호·가운뎃점·인용부호·괄호 같은
+      의미 기호는 그대로 남는다 — «-100억원»과 «100억원», «AB»와 «Ab»는 다르다.
+    - ``quote_lock``: 이 위치 «앞»까지의 글자에 인용부호·괄호 안 글자(또는 그
+      부호)가 있다. 잠긴 글자는 어미 변환과 절 경계 판정의 대상이 아니다.
+    - ``clause_end``: 인용부호 밖 나열 연결어미(«…며»)로 끝나 절 경계가 되는가.
+    """
+
+    base: str
+    quote_lock: int
+    clause_end: bool
+
+
+_PROOF_QUOTE_CLOSERS: Final[frozenset[str]] = frozenset(PROOF_QUOTE_PAIRS.values())
+
+
+def _is_apostrophe(token: str, position: int) -> bool:
+    """영문자 사이의 ASCII 작은따옴표 — 인용이 아니라 영어 아포스트로피다."""
+
+    return (
+        token[position] == "'"
+        and 0 < position < len(token) - 1
+        and bool(PROOF_APOSTROPHE_NEIGHBOR_RE.fullmatch(token[position - 1]))
+        and bool(PROOF_APOSTROPHE_NEIGHBOR_RE.fullmatch(token[position + 1]))
+    )
+
+
+def _quote_flags(tokens: Sequence[str]) -> tuple[list[list[bool]], bool]:
+    """어절마다 글자별 «잠금» 표시와, 인용부호 짝이 맞았는지를 돌려준다."""
+
+    flags: list[list[bool]] = []
+    depth = 0
+    open_toggles: set[str] = set()
+    for token in tokens:
+        token_flags: list[bool] = []
+        for position, char in enumerate(token):
+            if char in PROOF_QUOTE_PAIRS:
+                depth += 1
+                token_flags.append(True)
+            elif char in _PROOF_QUOTE_CLOSERS:
+                token_flags.append(True)
+                depth -= 1
+            elif char in PROOF_QUOTE_TOGGLES and not _is_apostrophe(token, position):
+                token_flags.append(True)
+                open_toggles ^= {char}
+            else:
+                token_flags.append(depth > 0 or bool(open_toggles))
+        flags.append(token_flags)
+    return flags, depth == 0 and not open_toggles
+
+
+def _sentence_words(text: str) -> tuple[_Word, ...]:
+    """어절 단위 «삭제 증명용» 표면형 — 의미 기호를 지우지 않는다.
+
+    ★ 지우는 것은 이름 붙인 좁은 표시뿐이다(`dedupe_proof_constants`):
+      숫자 천 단위 쉼표, 문장 마지막 어절 끝의 종결 부호, 절 경계 연결어미
+      바로 뒤 쉼표. 모두 인용부호·괄호 «밖»일 때만이다.
+    ★ 호환 정규화(NFKC)를 하지 않는다 — 「①」이 「1」로, 인용된 「1,000」이
+      「1000」으로 바뀌면 원문 표기가 달라진 두 문장을 같다고 증명하게 된다
+      (독립 검증 반례 — 인용된 제품 이름 「'Model 1,000'」↔「'Model 1000'」).
+    ★ 인용부호 짝이 맞지 않으면 어디까지가 인용인지 모른다 — 모든 어절을
+      잠가 쉼표 정규화·어미 변환·절 경계를 쓰지 않는다(완전 동일만 증명된다).
+    """
+
+    tokens = (text or "").split()
+    flags, balanced = _quote_flags(tokens)
+    words: list[_Word] = []
+    for position, (token, token_flags) in enumerate(zip(tokens, flags)):
+        token_marks = list(token_flags) if balanced else [True] * len(token)
+        thousands = {
+            match.start() for match in PROOF_THOUSANDS_COMMA_RE.finditer(token)
+            if not token_marks[match.start()]
+        }
+        chars = [char for index, char in enumerate(token) if index not in thousands]
+        marks = [
+            locked for index, locked in enumerate(token_marks) if index not in thousands
+        ]
+        if position == len(tokens) - 1:
+            while chars and chars[-1] in PROOF_SENTENCE_TERMINATORS and not marks[-1]:
+                chars.pop()
+                marks.pop()
+        if (
+            len(chars) >= 2
+            and chars[-1] == PROOF_CLAUSE_COMMA
+            and chars[-2] == PROOF_CLAUSE_LINK_SUFFIX
+            and not marks[-1]
+            and not marks[-2]
+        ):
+            chars.pop()
+            marks.pop()
+        if not chars:
+            continue
+        quote_lock = max(
+            (index + 1 for index, locked in enumerate(marks) if locked), default=0
+        )
+        base = "".join(chars)
+        words.append(_Word(
+            base=base,
+            quote_lock=quote_lock,
+            clause_end=(
+                len(base) >= 2
+                and base.endswith(PROOF_CLAUSE_LINK_SUFFIX)
+                and len(base) - len(PROOF_CLAUSE_LINK_SUFFIX) >= quote_lock
+            ),
+        ))
+    return tuple(words)
 
 
 def _overlap(left: frozenset[str], right: frozenset[str]) -> float:
@@ -344,7 +493,207 @@ def _same_fact(
         return bool(left_claim) and left_claim == right_claim
     else:
         return False
+    if _numbers_conflict(left_text, right_text):
+        # 서로 상대에 없는 수치를 각각 가지면 다른 기간·금액의 사실이다. 한쪽에만 더
+        # 있는 수치는 여기서 가르지 않고, 실제 삭제에서 «지울 문장의 수치»를 지킨다.
+        return False
     return _overlap(left_signature, right_signature) >= threshold
+
+
+def _number_tokens(text: str) -> frozenset[str]:
+    return frozenset(token.replace(",", "") for token in _NUMBER_TOKEN_RE.findall(text or ""))
+
+
+def _numbers_conflict(left_text: str, right_text: str) -> bool:
+    """두 문장이 «서로 상대에 없는» 수치를 각각 하나 이상 가졌는가 (대칭 판정)."""
+
+    left, right = _number_tokens(left_text), _number_tokens(right_text)
+    return bool(left - right) and bool(right - left)
+
+
+@dataclass(frozen=True)
+class _OwnerCover:
+    """지울 문장을 실제로 덮는 소유 장 문장들(flat 색인)과 생존 요구 방식."""
+
+    members: tuple[int, ...]
+    all_required: bool
+
+
+def _ending_equivalent(left: _Word, right: _Word) -> bool:
+    """절 끝에서만 쓰는 닫힌 종결형↔연결형 변환 — 본체가 완전히 같아야 한다."""
+
+    for endings in PROOF_ENDING_CLASSES:
+        left_stems = _unlocked_stems(left, endings)
+        if left_stems & _unlocked_stems(right, endings):
+            return True
+    return False
+
+
+def _unlocked_stems(word: _Word, endings: frozenset[str]) -> frozenset[str]:
+    """이 어절에서 «잠기지 않은» 어미 하나를 벗긴 본체들. 짧은 본체는 뺀다."""
+
+    stems: set[str] = set()
+    for ending in endings:
+        if not word.base.endswith(ending):
+            continue
+        stem = word.base[: len(word.base) - len(ending)]
+        if len(stem) >= PROOF_MIN_STEM_CHARS and len(stem) >= word.quote_lock:
+            stems.add(stem)
+    return frozenset(stems)
+
+
+def _clause_final_correspond(left: _Word, right: _Word) -> bool:
+    """절의 «마지막» 어절 대응 — 완전 동일 또는 닫힌 어미 변환뿐이다."""
+
+    if left.base == right.base:
+        return True
+    if _number_tokens(left.base) != _number_tokens(right.base):
+        return False
+    return _ending_equivalent(left, right)
+
+
+def _clause_fit(
+    candidate_words: Sequence[_Word],
+    start: int,
+    owner_words: Sequence[_Word],
+) -> int:
+    """후보 어절열의 ``start``부터가 소유 문장 «전체»와 통째로 맞는가.
+
+    맞으면 소비한 후보 어절 수(= 소유 문장 어절 수), 아니면 0. 대응은 1:1이고
+    «어느 쪽 어절도 건너뛰지 않는다». 마지막 어절만 닫힌 어미 변환을 허용하고
+    나머지는 완전 동일이어야 한다.
+
+    ★ 주체 생략 예외는 없다(총괄 확정) — 소유 문장의 주어(「X는」)를 후보에
+      회사명이 어딘가 언급됐다는 이유로 건너뛰는 것은 명시 주체 결속이 아니다.
+    ★ 소유 문장의 «뒤 절만 남기는» 대응(앞 절 덮기)은 없다(총괄 확정 — 독립 검증
+      반례). 뒤 절의 목표·조건(「…하며 신규 공장을 운영하는 경우에만 계약을
+      유지한다」)이 앞 절까지 한정하는지 표면으로 증명할 수 없다. 소유 문장은
+      언제나 전체가 대응해야 한다.
+    ★ 후보 쪽이 이 절 뒤에 이어지면(합집합 분할) 후보의 마지막 어절이 절
+      경계여야 한다 — 절 경계가 아닌 곳에서 쪼개 서로 다른 소유 문장의
+      낱말로 «한 주장»을 조립하는 것을 막는다.
+    """
+
+    consumed = len(owner_words)
+    if consumed < 1 or start + consumed > len(candidate_words):
+        return 0
+    for offset in range(consumed - 1):
+        if candidate_words[start + offset].base != owner_words[offset].base:
+            return 0
+    last_candidate = candidate_words[start + consumed - 1]
+    if not _clause_final_correspond(last_candidate, owner_words[consumed - 1]):
+        return 0
+    if start + consumed < len(candidate_words) and not last_candidate.clause_end:
+        return 0
+    return consumed
+
+
+def _single_owner_covers(
+    candidate_words: Sequence[_Word], owner_words: Sequence[_Word]
+) -> bool:
+    """후보 문장 전체가 소유 문장 하나 전체와 통째로 대응하는가."""
+
+    return bool(candidate_words) and _clause_fit(
+        candidate_words, 0, owner_words,
+    ) == len(candidate_words)
+
+
+def _union_word_cover(
+    candidate_words: Sequence[_Word],
+    pool: Sequence[int],
+    word_lists: Sequence[tuple[_Word, ...]],
+) -> tuple[int, ...]:
+    """후보 문장을 절 경계에서 나눠, 조각마다 «서로 다른 소유 문장 전체»에 맞춘다.
+
+    ★ «한 문장 두 사실» 꼴만 허용한다 — 후보의 각 주장절이 소유 문장 하나와
+      통째로(어절 하나 빠짐없이, 주어 생략 예외 없이) 대응해야 한다. 서로 다른
+      소유 문장의 낱말 조각으로 후보의 한 주장을 조립할 수 없다 — 조각 경계는
+      언제나 인용부호 밖 나열 연결어미 절 경계다. 뒤 절의 주어가 생략된 후보는
+      주체를 증명할 수 없어 여기서 맞지 않는다(보존).
+    ★ 한 소유 문장은 조각 하나만 맡는다. 맞는 문장이 여럿이면 앞선 색인을
+      택한다(결정적). 막히면 즉시 실패 — 실패는 언제나 보존이다.
+    """
+
+    if not _is_explicit_topic(candidate_words[0]):
+        return ()
+    position = 0
+    chosen: list[int] = []
+    available = list(pool)
+    while position < len(candidate_words):
+        # 절마다 첫 어절이 문장 첫 주제어와 «같은 어절»이어야 한다(명시 주체 반복).
+        if candidate_words[position].base != candidate_words[0].base:
+            return ()
+        fitted_member = -1
+        fitted_count = 0
+        for member in available:
+            consumed = _clause_fit(candidate_words, position, word_lists[member])
+            if consumed:
+                fitted_member, fitted_count = member, consumed
+                break
+        if fitted_member < 0:
+            return ()
+        chosen.append(fitted_member)
+        available.remove(fitted_member)
+        position += fitted_count
+    return tuple(chosen) if len(chosen) >= 2 else ()
+
+
+def _is_explicit_topic(word: _Word) -> bool:
+    """인용부호 밖에서 주제 조사(은/는)로 끝나는 어절 — 명시 주체 표지."""
+
+    return word.quote_lock == 0 and any(
+        len(word.base) > len(particle) and word.base.endswith(particle)
+        for particle in PROOF_TOPIC_PARTICLES
+    )
+
+
+def _owner_cover(
+    candidate: int,
+    neighbors: Sequence[int],
+    word_lists: Sequence[tuple[_Word, ...]],
+    number_sets: Sequence[frozenset[str]],
+) -> Optional[_OwnerCover]:
+    """소유 장 문장(들)이 지울 문장의 주장절을 «통째로» 담는가. 못 담으면 None.
+
+    ★ 삭제 직전의 공통 안전 증명이다(2026-09-23 총괄 확정 — 독립 반례 대응).
+      3그램 겹침·깊이·typed 소유는 «비교 후보와 소유 장»을 고르는 데만 쓰고,
+      실제 삭제 권위는 이 증명 하나다 — 겹침 60%는 같은 조건·관계·사실이
+      남았다는 증거가 아니다. 장 간·장 안·시제 쌍 모두 같은 증명을 소비한다.
+    ★ 허용하는 것은 둘뿐이다: ① 삭제 증명 표면형(`_sentence_words`)의 어절 완전
+      동일 ② 절 끝 어절의 닫힌 종결형↔연결형 변환(`PROOF_ENDING_CLASSES`).
+      주어 생략·어간 추정·어절 건너뛰기는 없다. 설명할 수 없는 차이는 전부
+      보존이다 — 의역·어순·조사·태·시제·부정·조건·상대·부호·대소문자 차이는
+      증명 실패로 남는다.
+    ★ ``neighbors``는 지울 문장과 «직접 짝»(같은 조각·같은 문서·같은 봉인 사건)인
+      소유 장 문장만이다. 같은 근거를 인용했다는 이유만으로 무관한 문장의
+      어절을 빌려 오지 않는다.
+    ★ 먼저 소유 문장 하나가 후보 문장 «전체»와 통째로 같은지 본다(장부는 하나만
+      살아도 된다). 소유 문장의 앞 절만 맞는 경우는 지우지 않는다. 못 담으면 절
+      경계 분할 합집합을 본다 — 명시 주체를 반복한 후보의 각 절이 소유 문장
+      하나씩 «전체»와 같을 때다. 이때 장부는 조각을 맡은 문장 «전부»의 생존을
+      요구한다.
+    ★ 수치 부분집합은 보조 «필수» 조건이다 — 지울 문장의 수치가 남는 문장(들)에
+      모두 있어야 하되, 수치가 맞는다는 것만으로는 지우지 않는다.
+    """
+
+    words = word_lists[candidate]
+    numbers = number_sets[candidate]
+    if not words:
+        return None
+    alone = tuple(
+        member
+        for member in neighbors
+        if numbers <= number_sets[member]
+        and _single_owner_covers(words, word_lists[member])
+    )
+    if alone:
+        return _OwnerCover(alone, all_required=False)
+    chosen = _union_word_cover(words, neighbors, word_lists)
+    if chosen and numbers <= frozenset().union(
+        *(number_sets[member] for member in chosen)
+    ):
+        return _OwnerCover(chosen, all_required=True)
+    return None
 
 
 def duplicates_kept_sentence(
@@ -362,6 +711,10 @@ def duplicates_kept_sentence(
     ★ 문턱·지문·문서 열쇠는 위 함수와 «같은 한 벌»(`_same_fact`)을 쓴다.
     ★ 인용이 없거나 너무 짧은 문장은 비교하지 않는다 — 장 간 중복과 같은
       이유다(짧은 문장은 우연히 많이 겹친다). 비교하지 않으면 «중복 아님»이다.
+    ★ 중복이라 답하면 부르는 쪽이 «이 문장»을 버린다(verify 재배치). 그래서 장 간
+      삭제와 «같은 안전 증명»(`_owner_cover`)을 소비한다 — 이 문장의 어절(추가
+      설명·조건)과 수치가 짝이 된 기존 문장(들)에 실제로 남아 있어야 중복이다.
+      수치만 지키고 부가 설명을 잃는 판정은 하지 않는다(4차 후속 — 총괄 채택).
     """
 
     citations = frozenset(sentence.citations)
@@ -372,6 +725,7 @@ def duplicates_kept_sentence(
     signature = _signature(sentence.text)
     documents = _documents_of(citations, keys)
     news_seals = _news_seals_of(citations, fragment_map)
+    matched: list[ComposedSentence] = []
     for other in kept:
         other_citations = frozenset(other.citations)
         if not other_citations or len(other.text) < _MIN_COMPARE_CHARS:
@@ -389,8 +743,16 @@ def duplicates_kept_sentence(
             left_text=sentence.text,
             right_text=other.text,
         ):
-            return True
-    return False
+            matched.append(other)
+    if not matched:
+        return False
+    texts = [sentence.text] + [other.text for other in matched]
+    return _owner_cover(
+        0,
+        range(1, len(texts)),
+        [_sentence_words(text) for text in texts],
+        [_number_tokens(text) for text in texts],
+    ) is not None
 
 
 def _section_order() -> dict[str, int]:
@@ -588,6 +950,11 @@ def drop_cross_section_duplicates(
     이 결정 규칙은 ②로 새로 걸린 짝에도 그대로 쓴다 — 무리의 인용을 모두
     모아(group_citations) 그 근거를 가장 여러 문장으로 다룬 장이 이긴다.
 
+    짝(닮음)과 실제 삭제는 다르다. 짝은 무리를 묶는 대칭 판정이고, 삭제는 «지울
+    문장 쪽»을 본다 — 그 문장과 직접 짝인 소유 장 문장(들)이 그 문장의 «모든
+    어절»과 수치를 실제로 담고 있음을 증명할 때만 지운다(`_owner_cover`,
+    2026-09-23 총괄 채택 안전 증명). 증명하지 못하면 겹쳐 보여도 남긴다.
+
     Args:
         report: 검증(verify_report)까지 끝난 보고서.
         fragments: 이 보고서가 인용한 조각들. ②를 판정하려면 «어느 조각이 어느
@@ -620,6 +987,8 @@ def drop_cross_section_duplicates(
         return report, 0
 
     signatures = [_signature(item[2].text) for item in flat]
+    word_lists = [_sentence_words(item[2].text) for item in flat]
+    number_sets = [_number_tokens(item[2].text) for item in flat]
     citation_sets = [frozenset(item[2].citations) for item in flat]
     document_keys = _document_keys(fragments)
     document_sets = [_documents_of(citations, document_keys)
@@ -662,6 +1031,9 @@ def drop_cross_section_duplicates(
     # 장 색인 → 그 장의 문장을 «가져간» 소유 장 색인들. 안내문이 가리키는 곳을
     # 뒤 단계가 다시 확인할 수 있게 남긴다(`ComposedSection.moved_to_sections`).
     moved_owner_indexes: dict[int, set[int]] = {}
+    # 무리마다 소유 장을 먼저 전부 정한다. 삭제 후보 «전체»를 알아야, 다른 무리에서
+    # 곧 빠질 문장을 «내용을 남긴 소유 문장»으로 세는 일을 막을 수 있다.
+    decisions: list[tuple[list[int], int]] = []
     for group in _tight_groups(similar, len(flat)):
         if len({flat[index][0] for index in group}) < 2:
             continue  # 한 장 안의 반복은 이 단계가 다루지 않는다
@@ -672,12 +1044,25 @@ def drop_cross_section_duplicates(
         group_citations: set[str] = set()
         for index in group:
             group_citations |= citation_sets[index]
+        # ★ 깊이에서 «명시적으로 다른 주장 칸»을 단 문장은 뺀다(4차 후속). 넓은 한
+        #   조각을 7장이 공장·제휴·조달 같은 «다른» 사실에 여러 번 인용했다고 해서 2장의
+        #   매출 구성 정답을 가져가면 안 된다. 주장 칸이 빈 문장은 주제를 모르므로 종전처럼
+        #   센다. 무리 문장의 주장 칸이 비어 있는 장(옛 입력)도 종전처럼 모두 센다.
+        member_slots: dict[int, set[str]] = {}
+        for index in group:
+            member_slots.setdefault(flat[index][0], set()).add(
+                flat[index][2].planned_claim_slot
+            )
         depth: dict[int, int] = {}
         for section_index, section in enumerate(report.sections):
+            slots = member_slots.get(section_index, set())
+            topical = bool(slots) and "" not in slots
             count = sum(
                 1
                 for sentence in section.sentences
                 if group_citations & set(sentence.citations)
+                and (not topical or not sentence.planned_claim_slot
+                     or sentence.planned_claim_slot in slots)
             )
             if count:
                 depth[section_index] = count
@@ -727,7 +1112,8 @@ def drop_cross_section_duplicates(
                     != STRATEGY_TABLE_SECTION_ID
                 } or tied
         # 5장↔6장 동점은 정본 순서가 아니라 시제로 가른다(_TENSE_OWNED_PAIR 주석).
-        owner = _future_section_owner(tied, group, flat, report)
+        tense_owner = _future_section_owner(tied, group, flat, report)
+        owner = tense_owner
         if owner is None:
             owner = min(
                 tied,
@@ -735,24 +1121,55 @@ def drop_cross_section_duplicates(
                     report.sections[section_index].section_id, section_index
                 ),
             )
-        owner_fingerprints = tuple(dict.fromkeys(
-            moved_owner_fingerprint(flat[index][2])
-            for index in group if flat[index][0] == owner
-        ))
+        decisions.append((group, owner))
+
+    droppable = {
+        index
+        for group, owner in decisions
+        for index in group
+        if flat[index][0] != owner
+    }
+    for group, owner in decisions:
         for index in group:
-            if flat[index][0] != owner:
-                drop.add(index)
-                moved_owner_indexes.setdefault(flat[index][0], set()).add(owner)
-                if moved_facts_sink is not None:
-                    moved_facts_sink.append(MovedFactRecord(
-                        from_section_id=report.sections[flat[index][0]].section_id,
-                        owner_section_id=report.sections[owner].section_id,
-                        signature=signatures[index],
-                        citations=citation_sets[index],
-                        documents=document_sets[index],
-                        news_seals=news_seal_sets[index],
-                        owner_fingerprints=owner_fingerprints,
-                    ))
+            if flat[index][0] == owner:
+                continue
+            # ★ 시제로 소유를 정한 쌍(5↔6장)도 «같은» 안전 증명을 받는다(4차 후속 —
+            #   조건·관계 보존을 시제 소유가 우회하지 않는다). 시제는 어느 장이
+            #   남길 쪽인지(소유 방향)만 정하고, 실제 삭제는 아래 증명이 있어야
+            #   한다 — 조건·별도 절을 가진 문장은 시제 쌍에서도 남는다.
+            # ★ 짧은 쪽 기준 겹침은 «소유 문장이 이 문장을 덮는가»를 보장하지 않는다.
+            #   이 문장이 부가 절(조건·대상·다른 사실)이나 자기만의 수치를 더
+            #   가졌으면 소유 장이 대신할 수 없으니 남긴다 — 애매하면 남긴다.
+            # ★ 덮는 문장은 이 후보와 «직접 짝»인 소유 장 문장이다. 완전 연결
+            #   무리 밖이어도 된다(무리는 서로 모두 닮아야 해서, 한 사실씩 나눠
+            #   적은 소유 문장 둘은 한 무리에 함께 들지 못한다). 다른 무리에서
+            #   빠질 문장은 내용을 남긴다고 할 수 없어 뺀다.
+            neighbors = [
+                member for member in sorted(similar.get(index, ()))
+                if flat[member][0] == owner and member not in droppable
+            ]
+            cover = _owner_cover(index, neighbors, word_lists, number_sets)
+            if cover is None:
+                continue
+            kept_members = cover.members
+            all_required = cover.all_required
+            drop.add(index)
+            moved_owner_indexes.setdefault(flat[index][0], set()).add(owner)
+            if moved_facts_sink is not None:
+                # 장부는 «이 문장의 내용을 실제로 남긴» 소유 문장에만 결속한다.
+                moved_facts_sink.append(MovedFactRecord(
+                    from_section_id=report.sections[flat[index][0]].section_id,
+                    owner_section_id=report.sections[owner].section_id,
+                    signature=signatures[index],
+                    citations=citation_sets[index],
+                    documents=document_sets[index],
+                    news_seals=news_seal_sets[index],
+                    owner_fingerprints=tuple(dict.fromkeys(
+                        moved_owner_fingerprint(flat[member][2])
+                        for member in kept_members
+                    )),
+                    owner_fingerprints_all_required=all_required,
+                ))
 
     if not drop:
         _log_chapter_sentence_counts(report, report)
@@ -1118,15 +1535,17 @@ def _moved_fact_survives(
 
     문서 지도 인자는 기존 호출 계약을 보존한다. 원문 범위나 3그램 유사도로
     다른 후보를 대신 인정하지 않으며, 소유 지문이 없는 옛 장부는 증명이 없다.
+    지운 내용이 소유 장 여러 문장에 나뉘어 남은 기록은 그 문장이 «모두» 살아
+    있어야 한다 — 하나만 남으면 옮긴 사실의 일부가 사라진 것이다.
     """
 
     if owner.section_id != record.owner_section_id or not record.owner_fingerprints:
         return False
     expected = frozenset(record.owner_fingerprints)
-    return any(
-        moved_owner_fingerprint(sentence) in expected
-        for sentence in owner.sentences
-    )
+    present = {moved_owner_fingerprint(sentence) for sentence in owner.sentences}
+    if record.owner_fingerprints_all_required:
+        return expected <= present
+    return bool(expected & present)
 
 
 def _reconciled_notice_strict(
