@@ -122,6 +122,7 @@ def test_보도를_의역한_AI_산문에는_정규화를_적용한다():
 
 
 def test_표_칸과_안내문은_정규화하지_않는다():
+    from src.features.composer.tests.flow_fixtures import reviewed_flow_fixture
     notice = "확인된 자료가 없습니다."
     composed = ComposedReport(sections=(
         ComposedSection(
@@ -133,11 +134,14 @@ def test_표_칸과_안내문은_정규화하지_않는다():
     ))
     table = PerformanceTable("실적", ("항목", "값"), (("확인합니다.", "있습니다."),), "", "[1]")
     diagnostics = {}
+    fragments = _fragments(WRTN_SENTENCE)
+    composed = reviewed_flow_fixture(composed, fragments, baseline_date="2026-09-22")
     rendered = render_report(
-        "시험회사", composed, _fragments(WRTN_SENTENCE), table,
+        "시험회사", composed, fragments, table,
         as_of_date="2026-09-22", style_diagnostics=diagnostics,
     )
-    assert rendered.sections[0].prose_lines == [(notice, "")]
+    assert rendered.sections[0].prose_lines == []
+    assert rendered.sections[0].guidance_lines == [notice]
     assert rendered.sections[0].tables[0].rows[0] == list(composed.sections[0].flow_rows[0].cells)
     assert rendered.sections[0].tables[1].rows[0] == list(composed.sections[0].news_rows[0].cells)
     assert rendered.sections[1].tables[0].rows == [["확인합니다.", "있습니다."]]

@@ -75,6 +75,15 @@ _FUTURE_STRATEGY_SENTENCES: Final[tuple[str, ...]] = tuple(
     sentence for _target, _activity, sentence in _FUTURE_STRATEGY_PLANS
 )
 _FUTURE_SECTION_INDEX: Final[int] = SECTION_IDS.index(STRATEGY_TABLE_SECTION_ID)
+# 원문과 작가가 함께 사용하는 9장 차별점. 낱말 나열 때문에 보충 단계에서
+# 먼저 닫히지 않아야 이 파일의 최종 manifest 오류 주입을 실제로 검증한다.
+_COMPETITIVE_SENTENCES: Final[tuple[str, ...]] = (
+    "회사는 정밀 광학 검사 기술을 차별점으로 제시한다.",
+    "회사는 고객 공정에 맞춘 소프트웨어 제공을 경쟁력으로 설명한다.",
+    "회사는 전국 정비망을 고객 대응 역량의 강점으로 제시한다.",
+    "회사는 자체 설계한 센서를 기술 차별화 요소로 설명한다.",
+    "회사는 장기 공급 계약에 기반한 안정적 납품을 경쟁력으로 제시한다.",
+)
 #: 검수 prompt 한 항목에서 «그 후보가 실제로 쓴 문장»이 실린 줄.
 _CANDIDATE_TEXT_RE: Final[re.Pattern[str]] = re.compile(
     r"(?m)^\s*문장\(JSON 문자열\): (.+)$"
@@ -89,7 +98,7 @@ assert len(_FUTURE_STRATEGY_PLANS) == len(_section_sentences(_FUTURE_SECTION_IND
 
 
 def _section_sentences_with_future_plans(section_index: int) -> tuple[str, ...]:
-    """미래 장만 계획 문장으로 바꾸고 나머지 여덟 장은 공용 자료를 그대로 쓴다.
+    """미래 계획과 자기 선언 차별점을 원문·작가 양쪽에 함께 반영한다.
 
     공용 도우미 한 곳만 갈아 끼워 «원문 조각»과 «작가 응답»이 같은 문장을 쓰게
     한다. 둘을 따로 적으면 한쪽만 고쳐져 조용히 어긋난다.
@@ -97,6 +106,8 @@ def _section_sentences_with_future_plans(section_index: int) -> tuple[str, ...]:
 
     if section_index == _FUTURE_SECTION_INDEX:
         return _FUTURE_STRATEGY_SENTENCES
+    if section_index == SECTION_IDS.index("competitive_position"):
+        return _COMPETITIVE_SENTENCES
     return _section_sentences(section_index)
 
 

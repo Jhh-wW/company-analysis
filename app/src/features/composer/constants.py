@@ -65,7 +65,7 @@ SECTION_TITLES: Final[dict[str, str]] = {
     "identity": "기업 정체성",
     "business_model": "사업 구조와 수익 모델",
     "portfolio": "핵심 제품·서비스와 포트폴리오 역할",
-    "past_changes": "3개년 주요 변화와 실행",
+    "past_changes": "주요 변화와 실적",
     "current_challenges": "당면 과제와 대응",
     "future_strategy": "성장 전략",
     "operations_partners": "사업 운영과 파트너 구조",
@@ -101,7 +101,7 @@ SECTION_GUIDES: Final[dict[str, str]] = {
         "전사 3개년 실적(4장), 아직 시작하지 않은 계획(6장), 파트너 계약(7장)."
     ),
     "past_changes": (
-        "4장 «3개년 주요 변화와 실행» — 지난 3개년의 실적 흐름과 회사가 실제로 한 "
+        "4장 «주요 변화와 실적» — 확인된 기간의 실적 흐름과 회사가 실제로 한 "
         "주요 변화·실행(투자·출시·조직 개편 등)을 쓴다. 수치는 실적표와 조각 원문에 "
         "있는 값만 쓴다.\n"
         "구성 변화 표의 수치는 표가 소유하고 산문은 늘거나 준 방향만 쓴다.\n"

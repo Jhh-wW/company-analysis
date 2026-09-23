@@ -30,12 +30,16 @@ from src.features.composer.news_constants import NEWS_REVIEW_GUIDE
 from src.features.composer.news_usage import attribution_prefix, news_metadata
 from src.features.composer.news_block import _is_news_fragment
 from src.features.composer.absence_claim_guard import absence_claim_problem
+from src.features.composer.flow_review_binding import bind_reviewed_flow_row
+from src.features.composer.flow_review_constants import FLOW_REVIEW_BINDING_INVALID
+from src.shared.report_quality.review_diagnostic_constants import CANDIDATE_FINGERPRINT_VERSION
 from src.features.composer.accounting_policy_constants import (
     ACCOUNTING_POLICY_MIXED,
 )
 from src.features.composer.accounting_policy_guard import (
     accounting_policy_mixed, accounting_policy_problem,
 )
+from src.features.composer.competitive_scope_guard import competitive_section_evidence_problem
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_accounting_policy_problem,
     culture_financial_risk_goal_problem,
@@ -78,6 +82,7 @@ from src.features.composer.grounding_rewrite import (
     rewrite_grounding_rejected,
 )
 from src.features.composer.grounding_rewrite_constants import (
+    GROUNDING_REWRITE_EXCLUDED_REASONS,
     GROUNDING_REWRITE_MAX_SENTENCES,
 )
 from src.features.composer.review_protocol_observation import (
@@ -274,6 +279,7 @@ def _append_grounding_diagnostic(
         "candidate_sha256": hashlib.sha256(
             candidate_text.encode("utf-8")
         ).hexdigest(),
+        "candidate_fingerprint_version": CANDIDATE_FINGERPRINT_VERSION,
         "verification_items": (
             (REVIEW_SCOPE_ITEMS[reason_code],)
             if reason_code in REVIEW_SCOPE_ITEMS
@@ -1453,6 +1459,8 @@ def _ask_grouped_verdicts(
             and item.sentence.grade == GRADE_CONFIRMED
             and item.citations
         ),
+        prose_numbers=frozenset(item.number for item in items
+            if item.sentence is not None and item.sentence.structured_claim is None),
         baseline_date=baseline_date,
         verbatim_by_number=verbatim_by_number,
         evidence_ids_by_number=evidence_ids_by_number,
@@ -1682,6 +1690,7 @@ def _apply_grounding(
     culture_candidate_numbers: frozenset[int] = frozenset(),
     flow_cells_by_number: Optional[Mapping[int, Sequence[str]]] = None,
     confirmed_prose_numbers: frozenset[int] = frozenset(),
+    prose_numbers: Optional[frozenset[int]] = None,
     baseline_date: Optional[str] = None,
     verbatim_by_number: Optional[Mapping[int, VerbatimNewsSource]] = None,
     evidence_ids_by_number: Optional[Mapping[int, frozenset[str]]] = None,
@@ -1708,10 +1717,12 @@ def _apply_grounding(
     #     생기는 자리마다 판정도 함께 그 값으로 바뀌기 때문이다(아래 본문·
     #     `constrain_verdicts` 양쪽 모두). 장 이동으로 넘어간 문장은 사유를
     #     남기지 않으므로 여기에도 없다.
+    grounding_details: dict[int, dict[str, object]] = {}
     constrained, problems = constrain_verdicts(
         raw, verdicts, candidates, cells_by_number=flow_cells_by_number,
         baseline_date=baseline_date, verbatim_by_number=verbatim_by_number,
         confirmed_prose_numbers=confirmed_prose_numbers,
+        details_by_number=grounding_details,
     )
     # ★ 결속 요구를 «제외»한 자리는 진단 목록에 남지 않는다(제외는 탈락이 아니다).
     #   그래서 개수·규칙 버전·후보지문만 로그로 남겨 «어느 표지의 요구가 빠졌는지»를
@@ -1808,6 +1819,15 @@ def _apply_grounding(
                 )
         # 실제 소유 장을 따른다. 오래된 주장 슬롯만으로 요약이나 다른 장의
         # 정상 회계 설명까지 문화 장의 배치 제한에 넣지 않는다.
+        if (context and context[:2] == ("competitive_position", DIAGNOSTIC_KIND_BODY)
+            and number in (confirmed_prose_numbers if prose_numbers is None else prose_numbers)):
+            problem = competitive_section_evidence_problem(text, {
+                source_id: value for source_id, value in sources.items() if source_id != TABLE_SOURCE_ID
+            })
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
         if context and context[:2] == ("culture", DIAGNOSTIC_KIND_BODY):
             # ★ 세 번째 검사(원문 절 긍정 계약)는 후보 «표현»이 아니라 후보가
             #   기댄 원문을 본다 — 앞의 두 검사가 표현만 보기 때문에 같은 재무
@@ -1927,7 +1947,10 @@ def _apply_grounding(
             problems[number] = problem
     for number, problem in problems.items():
         logger.warning("의미 근거 검증: %s, 후보 %d 공개 제외", problem, number)
-        detail: Optional[dict[str, object]] = None
+        detail: Optional[dict[str, object]] = (
+            {"grounding_detail": grounding_details[number]}
+            if number in grounding_details else None
+        )
         if problem in ROLE_BINDING_REASON_TEXTS and number in candidates:
             # ★ 역할·과금 결속 탈락은 «어느 단계에서, 어떤 요구와 어떤 제출 유형으로»
             #   났는지를 함께 남긴다. 유형 오류 코드만 보고 형식 오류로 확정하지
@@ -2444,6 +2467,7 @@ def _ask_verdicts(
             and item.sentence.grade == GRADE_CONFIRMED
             and item.sentence.citations
         ),
+        prose_numbers=frozenset(item.number for item in items if item.sentence.structured_claim is None),
         baseline_date=baseline_date,
         verbatim_by_number=verbatim_by_number,
         evidence_ids_by_number={
@@ -2678,6 +2702,7 @@ def _is_grounding_rewrite_target(
         and sentence.citations
         and section_id != REVIEW_SUMMARY_GROUP
         and reason_code
+        and reason_code not in GROUNDING_REWRITE_EXCLUDED_REASONS
     )
 
 
@@ -2729,6 +2754,7 @@ def _grounding_rewrite_pass(
     final: dict[int, Optional[ComposedSentence]],
     *,
     rewrite_ask: Optional[AskFn] = None,
+    diagnostics: Optional[list[dict]] = None,
 ) -> tuple[list[_ReviewItem], dict[str, object]]:
     """근거 결속 탈락 문장들을 AI 1회로 묶어 고쳐 쓰고 기계 검사를 건다.
 
@@ -2758,10 +2784,18 @@ def _grounding_rewrite_pass(
         # 문장 수가 이 칸의 뜻이다.
         "대상": len(ordered),
     }
-    selected = ordered[:GROUNDING_REWRITE_MAX_SENTENCES]
+    # 번호순으로 앞 장만 차지하지 않도록 같은 상한 안에서 장별 한 개씩 고른다.
+    by_section: dict[str, list[_ReviewItem]] = {}
+    for item in ordered:
+        by_section.setdefault(item.section_id, []).append(item)
+    balanced = [items[index] for index in range(max(map(len, by_section.values()), default=0))
+                for items in by_section.values() if index < len(items)]
+    selected = balanced[:GROUNDING_REWRITE_MAX_SENTENCES]
+    record["선택"] = len(selected)
+    record["상한미전송"] = len(ordered) - len(selected)
     if len(ordered) > GROUNDING_REWRITE_MAX_SENTENCES:
         logger.warning(
-            "근거 결속 재작성 대상이 %d개라 프롬프트 상한을 넘는다 — 앞 %d개만 "
+            "근거 결속 재작성 대상이 %d개라 프롬프트 상한을 넘는다 — 장별 순환으로 %d개만 "
             "고쳐 쓰고 나머지는 제거한다",
             len(ordered), GROUNDING_REWRITE_MAX_SENTENCES,
         )
@@ -2773,15 +2807,24 @@ def _grounding_rewrite_pass(
                 text=item.sentence.text,
                 citations=tuple(item.sentence.citations),
                 reason_code=reason_by_number.get(item.number, ""),
+                detail=next((
+                    record.get("grounding_detail", {})
+                    for record in reversed(diagnostics or [])
+                    if record.get("section_id") == item.section_id
+                    and record.get("candidate_sha256") == hashlib.sha256(item.sentence.text.encode("utf-8")).hexdigest()
+                ), {}),
             )
             for item in selected
         ),
         frag_by_id,
     )
+    record["실제전송"] = len(outcome.sent)
+    record["길이미전송"] = len(selected) - len(outcome.sent)
     if outcome.state != GROUNDING_REWRITE_STATE_DONE:
         record["상태"] = GROUNDING_REWRITE_STATE_FORMAT_FAILED
         record["응답꼴"] = list(outcome.shapes)
         return [], record
+    record["응답누락"] = max(0, len(outcome.sent) - len(outcome.rewritten) - outcome.abandoned)
     recheck_items: list[_ReviewItem] = []
     machine_passed = 0
     for item in selected:
@@ -2810,6 +2853,7 @@ def _grounding_rewrite_pass(
     record["재작성수신"] = len(outcome.rewritten)
     record["포기"] = outcome.abandoned
     record["기계검사통과"] = machine_passed
+    record["기계검사탈락"] = len(outcome.rewritten) - machine_passed
     record["응답꼴"] = outcome.shapes[-1] if outcome.shapes else ""
     return recheck_items, record
 
@@ -2857,6 +2901,7 @@ def _rewrite_grounding_and_recheck(
                 table_texts_for_section,
                 final,
                 rewrite_ask=rewrite_ask,
+                diagnostics=diagnostics,
             )
             recheck_items.extend(grounding_items)
         except AskFatalError as error:
@@ -3248,6 +3293,7 @@ def _semantic_review_grouped(
     rewrite_ask: Optional[AskFn] = None,
     recheck_ask: Optional[AskFn] = None,
     grounding_rewrite_enabled: bool = False,
+    skip_empty_grouped_review: bool = False,
 ) -> tuple[list[list[ComposedSentence]], dict[str, tuple[FlowRow, ...]]]:
     """packet 문장과 도식을 장별 근거 블록으로 묶어 AI 1회 검수한다.
 
@@ -3326,15 +3372,16 @@ def _semantic_review_grouped(
                     flow_row=row,
                 )
             )
-    # FULL 묶음은 후보가 비었어도 reviewer 1회를 실제로 호출한다. 9 writer의
-    # 파싱 실패를 reviewer 0회로 축약하면 기본 영수증 9+1 계약과 provider 비용
-    # 장부가 갈라진다. 빈 묶음은 어떤 항목도 되살리지 못하며, 응답도 버린다.
+    # FULL은 빈 묶음도 영수증 9+1 계약상 검수한다. 그 계약이 없는 부분보고서는
+    # 명시적으로 생략을 선택할 수 있다. 도식도 items에 포함되므로 본문만 비었다고
+    # 도식 검수를 건너뛰지 않는다. 어느 경로도 빈 응답으로 후보를 되살리지 않는다.
     if not items:
-        _ask_grouped_verdicts(
-            ask, (), frag_by_id, table, diagnostics=diagnostics,
-            initial_ask=initial_ask,
-            protocol_diagnostics=protocol_diagnostics,
-        )
+        if not skip_empty_grouped_review:
+            _ask_grouped_verdicts(
+                ask, (), frag_by_id, table, diagnostics=diagnostics,
+                initial_ask=initial_ask,
+                protocol_diagnostics=protocol_diagnostics,
+            )
         return (
             _groups_without_positions(groups, rejected_sentence_positions),
             {section_id: () for section_id in flow_rows_by_section},
@@ -3453,11 +3500,22 @@ def _semantic_review_grouped(
 
     rebuilt_flows: dict[str, tuple[FlowRow, ...]] = {}
     for section_id, rows in flow_rows_by_section.items():
-        rebuilt_flows[section_id] = tuple(
-            row
-            for row_index, row in enumerate(rows)
-            if flow_positions.get((section_id, row_index)) in flow_kept_numbers
-        )
+        reviewed_rows: list[FlowRow] = []
+        for row_index, row in enumerate(rows):
+            if flow_positions.get((section_id, row_index)) not in flow_kept_numbers:
+                continue
+            try:
+                reviewed_rows.append(bind_reviewed_flow_row(
+                    row, section_id=section_id, fragments=frag_by_id,
+                    review_path="grouped", baseline_date=baseline_date or "",
+                ))
+            except ValueError:
+                _append_grounding_diagnostic(
+                    diagnostics, section_id=section_id, kind="도식",
+                    reason_code=FLOW_REVIEW_BINDING_INVALID,
+                    candidate_text=" ".join(row.cells), sources={},
+                )
+        rebuilt_flows[section_id] = tuple(reviewed_rows)
     total_flow_rows = sum(len(rows) for rows in flow_rows_by_section.values())
     kept_flow_rows = sum(len(rows) for rows in rebuilt_flows.values())
     if total_flow_rows != kept_flow_rows:
@@ -3539,6 +3597,7 @@ def _verify_report_inner(
     allow_sentence_rewrite: bool = True,
     sentence_rewrite_gate: Optional[Callable[[tuple[str, ...]], bool]] = None,
     grounding_rewrite_enabled: bool = False,
+    skip_empty_grouped_review: bool = False,
 ) -> ComposedReport:
     frag_by_id = {
         fragment.fragment_id: fragment
@@ -3624,6 +3683,7 @@ def _verify_report_inner(
             rewrite_ask=rewrite_ask,
             recheck_ask=recheck_ask,
             grounding_rewrite_enabled=grounding_rewrite_enabled,
+            skip_empty_grouped_review=skip_empty_grouped_review,
         )
     reviewed_summary = reviewed_groups.pop()
 
@@ -3674,6 +3734,7 @@ def verify_report(
     allow_sentence_rewrite: bool = True,
     sentence_rewrite_gate: Optional[Callable[[tuple[str, ...]], bool]] = None,
     grounding_rewrite_enabled: bool = False,
+    skip_empty_grouped_review: bool = False,
 ) -> ComposedReport:
     """진입 함수 — 규칙 ①~④를 보고서 전체에 문장 단위로 적용한다.
 
@@ -3729,6 +3790,9 @@ def verify_report(
         baseline_date: 보고서 기준일 (ISO ``YYYY-MM-DD``). 근거 결속의
             executive_status_guard 에만 쓴다 — 넘기지 않으면 그 가드가 날짜
             문턱 없이 이탈 표지 존재만으로 판정한다. 기존 호출 계약은 그대로다.
+        skip_empty_grouped_review: 부분보고서에서 본문·요약·도식 검수 후보가 모두
+            없으면 묶음 검수 호출을 생략한다. 기본값은 FULL 영수증의 검수 1회를
+            유지하며, 후보가 하나라도 있으면 이 값과 관계없이 검수한다.
 
     Returns:
         검증된 ComposedReport. 어떤 입력에서도 예외를 던지지 않으며,
@@ -3741,7 +3805,7 @@ def verify_report(
                 and baseline_date is None and rewrite_ask is None
                 and recheck_ask is None and allow_sentence_rewrite
                 and sentence_rewrite_gate is None
-                and not grounding_rewrite_enabled):
+                and not grounding_rewrite_enabled and not skip_empty_grouped_review):
             # legacy 호출 모양과 monkeypatch 경계를 그대로 보존한다.
             return _verify_report_inner(
                 report, fragments, performance_table, ask
@@ -3762,6 +3826,7 @@ def verify_report(
             allow_sentence_rewrite=allow_sentence_rewrite,
             sentence_rewrite_gate=sentence_rewrite_gate,
             grounding_rewrite_enabled=grounding_rewrite_enabled,
+            skip_empty_grouped_review=skip_empty_grouped_review,
         )
     except AskFatalError:
         # 요청 전역 장애 — «검증기 내부 오류»로 위장하지 않고 그대로 재전파한다.

@@ -43,7 +43,7 @@ SECTION_SPECS: Final[tuple[SectionSpec, ...]] = (
     SectionSpec("identity", "1", "기업 정체성"),
     SectionSpec("business_model", "2", "사업 구조와 수익 모델"),
     SectionSpec("portfolio", "3", "핵심 제품·서비스와 포트폴리오 역할"),
-    SectionSpec("past_changes", "4", "3개년 주요 변화와 실행", "#과거"),
+    SectionSpec("past_changes", "4", "주요 변화와 실적", "#과거"),
     SectionSpec("current_challenges", "5", "당면 과제와 대응", "#현재"),
     SectionSpec("future_strategy", "6", "성장 전략", "#미래"),
     SectionSpec("operations_partners", "7", "사업 운영과 파트너 구조"),
@@ -123,7 +123,7 @@ PORTFOLIO_SHORTFALL_REASON: Final[str] = (
 
 PAST_CHANGES_SHORTFALL_REASON: Final[str] = (
     "연속 3개 완료 사업연도의 검증 실적표를 공식 자료와 결속하지 못해 "
-    "4장 3개년 주요 변화와 실행은 제공하지 않았습니다. 과거 변화가 없다는 "
+    "4장 주요 변화와 실적은 제공하지 않았습니다. 과거 변화가 없다는 "
     "뜻은 아닙니다."
 )
 

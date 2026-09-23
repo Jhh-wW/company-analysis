@@ -5862,6 +5862,7 @@ def _v2_ask_via_provider(
     from src.features.composer.port import AskFatalError  # noqa: PLC0415
 
     def ask(prompt: str) -> str:
+        replay_started = time.monotonic()
         # 출력 상한은 «보내기 직전»에 확정한다 — 1차 검수 재요청의 상한은 첫
         # 답의 실제 출력에 달려 있어 이 클로저를 만들 때는 아직 모른다.
         cap = max_tokens() if callable(max_tokens) else max_tokens
@@ -5989,7 +5990,35 @@ def _v2_ask_via_provider(
         except Exception:  # noqa: BLE001 — 진단 오류는 본 기능에 전파하지 않는다
             pass
         blocks = getattr(response, "content", None) or []
-        return "".join(str(getattr(block, "text", "") or "") for block in blocks)
+        response_text = "".join(str(getattr(block, "text", "") or "") for block in blocks)
+        # 명시적으로 켠 로컬 평가에서만 보관한다. 실패해도 응답·정산은 그대로다.
+        from src.features.pipeline.private_replay import (
+            local_provider_replay_enabled, record_local_provider_replay,
+        )
+        from src.features.pipeline.private_replay_constants import (
+            MILLISECONDS_PER_SECOND, REPLAY_DIAGNOSTIC_STEP,
+        )
+        if local_provider_replay_enabled():
+            stored = False
+            try:
+                stored = record_local_provider_replay(
+                    prompt=text, response=response_text, stage=stage,
+                    model=str(getattr(response, "model", "") or getattr(engine, "MODEL", "") or GENERATION_MODEL),
+                    response_schema=dict(response_schema) if response_schema is not None else None,
+                    output_limit=cap, stop_reason=str(getattr(response, "stop_reason", "") or ""),
+                    elapsed_ms=max(0, int((time.monotonic() - replay_started) * MILLISECONDS_PER_SECOND)),
+                ) is True
+            except Exception:  # noqa: BLE001 — 선택 보관 장애는 이미 끝난 응답·정산을 바꾸지 않는다
+                pass
+            try:
+                run_diagnostics.current_steps().append({
+                    "step": REPLAY_DIAGNOSTIC_STEP,
+                    "단계": stage if type(stage) is str and stage in V2_RESPONSE_STAGES else V2_RESPONSE_UNKNOWN,
+                    "시도수": 1, "저장수": int(stored), "미보관수": int(not stored),
+                })
+            except Exception:  # noqa: BLE001 — 진단 장애도 정상 응답에 전파하지 않는다
+                pass
+        return response_text
 
     def refresh_parallel_capability() -> None:
         # 부모가 연 예산·정산 문맥과 검증된 계량 client만 병렬 실행할 수 있다.

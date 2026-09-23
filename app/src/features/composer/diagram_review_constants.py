@@ -58,6 +58,12 @@ FLOW_GENERIC_CELL_TERMS: Final[frozenset[str]] = frozenset(
         "제공",
         "이용",
         "운영",
+        "콘텐츠",
+        "AI 콘텐츠",
+        "인공지능 콘텐츠",
+        "콘텐츠 제공",
+        "고객에게 제공",
+        "미확인",
     }
 )
 
@@ -117,11 +123,7 @@ ACCOUNTING_REVENUE_LABEL_RE: Final[re.Pattern[str]] = re.compile(
 OPERATIONS_FLOW_ORIGIN_HEADER: Final[str] = "무엇으로 시작하나"
 OPERATIONS_FLOW_TARGET_HEADER: Final[str] = "누구에게 닿나"
 FLOW_UNINFORMATIVE_OPERATIONS_CODE: Final[str] = "flow_uninformative_operations"
-# 대상도 없고 나머지도 아래 일반 설명뿐인 도식만 제외한다. 고유명·수치는 보존한다.
-OPERATIONS_GENERIC_LABELS: Final[frozenset[str]] = frozenset({
-    "", "미확인", "콘텐츠", "인공지능콘텐츠", "ai콘텐츠", "콘텐츠제공",
-    "상품", "제품", "서비스", "제공", "판매", "운영",
-})
+# 파서와 검수는 FLOW_GENERIC_CELL_TERMS의 같은 판정 함수를 쓴다.
 
 #: 매출원 이름을 뽑는 자리 — 「<이름>매출」·「<이름> 매출」·「<이름>수익」.
 #: ★ 뒤 글자를 함께 잡아 두고 판정 함수가 «조사인지 합성어인지»를 가른다.
@@ -129,12 +131,16 @@ OPERATIONS_GENERIC_LABELS: Final[frozenset[str]] = frozenset({
 #:   「용역 매출과」의 「과」는 조사라 남아야 한다. 한글에는 낱말 경계(\b)가
 #:   없어 정규식 하나로는 이 둘을 가르지 못한다.
 REVENUE_STREAM_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?<![가-힣A-Za-z0-9])([가-힣A-Za-z0-9]{2,12})(\s?)(?:매출|수익)([가-힣]?)"
+    r"(?<![가-힣A-Za-z0-9])([가-힣A-Za-z0-9]{2,12})(\s?)(?:매출|수익)([가-힣]*)"
+)
+REVENUE_DEDUCTION_CLAUSE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:은|는)\s*(?:매출|수익)(?:에서|으로부터)\s*(?:차감|공제|제외)"
 )
 
 #: 「매출/수익」 뒤에 와도 이름의 끝을 뜻하는 조사. 이 글자들만 통과시킨다.
 REVENUE_STREAM_TRAILING_PARTICLES: Final[frozenset[str]] = frozenset(
-    {"", "은", "는", "이", "가", "을", "를", "와", "과", "로", "의", "에", "도", "만"}
+    {"", "은", "는", "이", "가", "을", "를", "와", "과", "로", "의", "에", "도", "만",
+     "으로", "으로는", "에서", "에는", "으로부터"}
 )
 
 #: 기간·범위를 가리키는 수식어는 매출«원»이 아니다. 「연결 매출」·「당기

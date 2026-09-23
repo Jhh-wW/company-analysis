@@ -558,18 +558,15 @@ def test_보충_경로는_승인_장만_대조한다(monkeypatch):
 
     _run_recovering_full((_IDENTITY,))
 
-    assert len(받은_인자) == 2, (
-        "보충 경로가 안내문 대조를 부르지 않았습니다 — 1회차만 불렸습니다"
-    )
-    assert 받은_인자[0] == {}, "본 경로는 모든 장을 대조한다"
-    assert 받은_인자[1] == {"section_ids": frozenset({_IDENTITY})}
+    # 본문 검수와 공개 전 도식 필터 뒤 대조를 거친다. 보충도 같은 두 경계를 거치되 승인 장만 대조한다.
+    assert [value.get("section_ids") for value in 받은_인자] == [
+        None, None, frozenset({_IDENTITY}), frozenset({_IDENTITY}),
+    ]
+    assert all(isinstance(value["moved_facts"], list) and value["fragments"] for value in 받은_인자)
 
 
 def test_대조한_안내문이_공개_투영까지_그대로_간다():
-    """★ 화면까지 확인 — 안내문은 렌더가 장 «첫 문단»으로 싣고, 봉인 경로의
-    공개 투영이 그 문단을 그대로 복사한다. 투영이 별도로 안내문을 다시
-    만들지 않으므로, 대조를 렌더 «앞»에 두면 PDF에도 그 글자가 나간다.
-    """
+    """대조한 안내문은 번호 없는 안내로 봉인되며 사실 문단에 섞이지 않는다."""
     from src.features.composer.render import render_report
     from src.features.report_standard.public_projection import (
         build_public_projection,
@@ -591,10 +588,9 @@ def test_대조한_안내문이_공개_투영까지_그대로_간다():
         for block in projection.sections
         if block.display.cell == _PAST_CHANGES
     )
-    assert [text for _번호, text in 화면.paragraphs] == [
-        NOTICE_INSUFFICIENT_EVIDENCE_TABLE_KEPT
-    ]
-    assert 화면.sentences[0][0] == NOTICE_INSUFFICIENT_EVIDENCE_TABLE_KEPT
+    assert 화면.guidance_lines == (NOTICE_INSUFFICIENT_EVIDENCE_TABLE_KEPT,)
+    assert 화면.paragraphs == ()
+    assert 화면.sentences == ()
 
 
 def test_모든_호출부가_같은_표_자리를_넘긴다():

@@ -117,7 +117,15 @@ REVENUE_RECOGNITION_ACT_RE: Final[re.Pattern[str]] = re.compile(
 )
 REVENUE_RECOGNITION_CRITERION_RE: Final[re.Pattern[str]] = re.compile(
     r"위험과보상|신뢰성있게측정|수행의무|선수수익|진행기준|인도기준|완성기준|"
-    r"거래가격|변동대가|개별판매가격|대체용도|지급청구권"
+    r"거래가격|변동대가|개별판매가격|대체용도|지급청구권|"
+    r"\d+년(?:이내|내)(?:에)?완료|중소기업특례|회계처리특례"
+)
+
+# 자산의 인식·측정 방법과 실제 취득·손상 사건을 분리한다. 회사 고유 금액과
+# 이미 일어난 정책 변경은 기존 절별 면제로 보존한다.
+FIXED_ASSET_SUBJECT_RE: Final[re.Pattern[str]] = re.compile(r"(?:유형|무형)자산")
+FIXED_ASSET_MEASUREMENT_RE: Final[re.Pattern[str]] = re.compile(
+    r"취득원가|감가상각누계액|손상차손누계액|내용연수|상각(?:하고있|한다|방법)"
 )
 
 # ── ⑩ 회계처리 방법·특례 서술 ────────────────────────────────────────
@@ -148,6 +156,7 @@ LIQUIDITY_BOILERPLATE_RE: Final[re.Pattern[str]] = re.compile(
 #: 그 절은 회계정책 상용구다. 범주 이름은 로그·시험에서 어느 규칙이 걸렸는지
 #: 되짚는 데만 쓴다 — 사유 코드는 언제나 하나다.
 ACCOUNTING_POLICY_RULES: Final[tuple[tuple[str, re.Pattern[str], re.Pattern[str]], ...]] = (
+    ("자산인식측정", FIXED_ASSET_SUBJECT_RE, FIXED_ASSET_MEASUREMENT_RE),
     ("금융상품측정", FINANCIAL_INSTRUMENT_SUBJECT_RE, FINANCIAL_INSTRUMENT_MEASURE_RE),
     ("대손충당금", BAD_DEBT_SUBJECT_RE, BAD_DEBT_TREATMENT_RE),
     ("현금성자산정의", CASH_EQUIVALENT_SUBJECT_RE, CASH_EQUIVALENT_MATURITY_RE),
@@ -156,8 +165,8 @@ ACCOUNTING_POLICY_RULES: Final[tuple[tuple[str, re.Pattern[str], re.Pattern[str]
     ("이연법인세", DEFERRED_TAX_SUBJECT_RE, DEFERRED_TAX_TREATMENT_RE),
     ("회계기준적용", ACCOUNTING_STANDARD_SUBJECT_RE, ACCOUNTING_STANDARD_CONTEXT_RE),
     ("재무제표표시", FINANCIAL_STATEMENT_SUBJECT_RE, FINANCIAL_STATEMENT_PRESENTATION_RE),
-    ("수익인식기준", REVENUE_RECOGNITION_ACT_RE, REVENUE_RECOGNITION_CRITERION_RE),
     ("회계처리방법", ACCOUNTING_TREATMENT_SUBJECT_RE, ACCOUNTING_TREATMENT_CONTEXT_RE),
+    ("수익인식기준", REVENUE_RECOGNITION_ACT_RE, REVENUE_RECOGNITION_CRITERION_RE),
     ("유동성관리", LIQUIDITY_SUBJECT_RE, LIQUIDITY_BOILERPLATE_RE),
 )
 

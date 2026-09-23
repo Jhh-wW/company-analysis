@@ -375,8 +375,8 @@ def test_요약이_요청예약액_소진이면_본문을_버리지_않는다() 
     assert 보고서.summary_items, "★ 요약은 본문 확인 문장으로 채워져야 한다"
 
 
-def test_요약이_계정장애면_여전히_요청_전체가_멈춘다() -> None:
-    """★ 안전선 — 깃발 없는 요청 전역 장애는 강등되지 않는다."""
+def test_결정적_요약은_계정장애를_일으킬_추가호출이_없다() -> None:
+    """계정 장애를 숨기는 대신 별도 요약 호출 자체가 없어야 한다."""
 
     class _요약에서_계정장애(_FakeWriter):
         def __call__(self, prompt: str) -> str:
@@ -388,11 +388,11 @@ def test_요약이_계정장애면_여전히_요청_전체가_멈춘다() -> Non
                 )
             return super().__call__(prompt)
 
-    with pytest.raises(AskFatalError):
-        run_v2(
-            "가나다전자",
-            _raw_fragments(),
-            None,
-            writer_ask=_요약에서_계정장애(),
-            reviewer_ask=_FakeReviewer(),
-        )
+    writer = _요약에서_계정장애()
+    output = run_v2(
+        "가나다전자", _raw_fragments(), None,
+        writer_ask=writer, reviewer_ask=_FakeReviewer(),
+    )
+    assert len(writer.prompts) == 9
+    assert not any("핵심 요약" in prompt for prompt in writer.prompts)
+    assert len(output.report.summary_items) == 5

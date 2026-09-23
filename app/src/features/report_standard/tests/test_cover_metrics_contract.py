@@ -179,7 +179,7 @@ def test_PDF_표지_띠는_4장_실적표와_같은_출처_번호를_쓴다(
     """표지에 «새 출처»를 만들지 않는다 — 부록 번호와 1:1이 유지된다."""
 
     report = _report(performance_table)
-    marker = citation_marker(cover_metrics(report).cite)
+    marker = f"[{citation_number(cover_metrics(report).cite)}]"
     assert marker, "시험 전제가 깨졌다 — 실적표에 출처 번호가 있어야 한다."
 
     with pdfplumber.open(io.BytesIO(build_pdf(report))) as document:

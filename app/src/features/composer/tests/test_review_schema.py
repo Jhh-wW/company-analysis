@@ -112,10 +112,10 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "932bbb0c3766856a9a5ad72284be92d2be310799559a3e458443146216fbb7de"),
-    (_golden_case, True, "e514adce8e826170e6774c43c36300a66618ca8d12f54f9d3ba3f6ee934759eb"),
-    (_boundary_case, False, "a3d40640d5ee2139066dd43a5f6d691d0657349da0b6e13263ae1de74c11c9b1"),
-    (_boundary_case, True, "9266901272c8817372917081e848d82323d84add65573e2e1711feeb16c78510"),
+    (_golden_case, False, "a87c264adcc1d25c529f07b3b1358ef03709b91921aa52c832f1592eb19519a8"),
+    (_golden_case, True, "c39e729c6e1e2db95719d0c37036d3bc2ededfd8b85730b89041fec8049176a4"),
+    (_boundary_case, False, "73a6b9f99de922ac412b67505cda560ef24b7dbd2d027b8cd42bc1158c30da10"),
+    (_boundary_case, True, "c9a8489a900b8d5c866cf4536118d07b020b6b44ba12b0a522d5812a42ecf96a"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
     # de0a68e1의 원래 builder로 재생한 전체 UTF-8 프롬프트 해시다.
@@ -125,6 +125,8 @@ def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected)
     # 2026-09-22 회사 계획 귀속 안내 126자 추가: 옛 안내문만 복원하면 옛 해시와 같다.
     # 2026-09-23 평면 경로 REVIEW_JSON_GUIDE 에 «모든 번호를 빠짐없이 판정» 안내 88자 추가
     #   (뤼튼 실측 요청 50·응답 20). 묶음(grouped) 안내문은 그대로라 그쪽 해시는 같다.
+    # 2026-09-23 원칙/특례·제품 귀속·제외 주석·발표/실행 시점 안내 추가.
+    # 추가 안내만 제거한 4개 해시는 변경 직전 프롬프트와 같음을 재생해 확인했다.
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
 

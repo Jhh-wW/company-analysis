@@ -147,8 +147,8 @@ def test_run_v2_produced_distinct_row_cites_survive_notion_build_blocks():
 
     assert [
         list(flow.headers),
-        [*flow.rows[0][:-1], f"{flow.rows[0][-1]} 〔2〕"],
-        [*flow.rows[1][:-1], f"{flow.rows[1][-1]} 〔20〕"],
+        [*flow.rows[0][:-1], f"{flow.rows[0][-1]} [2]"],
+        [*flow.rows[1][:-1], f"{flow.rows[1][-1]} [20]"],
     ] in matrices
 
 

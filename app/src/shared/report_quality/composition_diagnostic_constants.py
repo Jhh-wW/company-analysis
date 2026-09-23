@@ -25,8 +25,19 @@ ROW_NUMBER_CONFLICT = "number_conflicting_duplicate"
 
 PROTOCOL_STEP = "8_본문검수_응답판독"
 SECTION_EXECUTION_STEP = "v2_작성_실행방식"
+# 장수는 반환 목차 수, 동시상한은 설정값이며 실제 공급자 호출 수가 아니다.
 SECTION_EXECUTION_COUNT_FIELDS = ("동시상한", "장수", "소요_ms")
+SECTION_EXECUTION_TARGET_COUNT_FIELD = "작성대상장수"
+SECTION_EXECUTION_EMPTY_COUNT_FIELD = "빈근거생략장수"
+SECTION_EXECUTION_PARTIAL_COUNT_FIELDS = (
+    SECTION_EXECUTION_TARGET_COUNT_FIELD, SECTION_EXECUTION_EMPTY_COUNT_FIELD,
+)
 SUMMARY_STEP = "8_핵심요약_단계"
+SUMMARY_PATH_LEGACY = "legacy"
+SUMMARY_PATH_FACT_REUSE = "verified_fact_reuse"
+SUMMARY_PATHS = frozenset((SUMMARY_PATH_LEGACY, SUMMARY_PATH_FACT_REUSE))
+PUBLIC_BINDING_STEP = "8_공개근거_최종선택"
+PUBLIC_BINDING_COUNT_FIELDS = ("본문후보수", "결속문장수", "미결속제외수")
 BODY_MACHINE_STEP = "8_본문검수_기계통과"
 BODY_DISPOSITION_STEP = "8_본문검수_처분"
 EMPTY_RECOVERY_STEP = "8_빈장_복구"
@@ -77,6 +88,9 @@ GROUNDING_REWRITE_STATES = frozenset((
 ))
 #: «완료» 기록의 닫힌 개수 칸. 대상 → 재작성수신(포기 제외) → 기계검사통과 → 재검수참 → 최종반영.
 GROUNDING_REWRITE_COUNT_KEYS = ("대상", "재작성수신", "포기", "기계검사통과", "재검수참", "재검수애매", "최종반영")
+GROUNDING_REWRITE_OPTIONAL_COUNT_KEYS = (
+    "선택", "상한미전송", "실제전송", "길이미전송", "응답누락", "기계검사탈락",
+)
 #: «응답꼴» 칸의 모양이 상태마다 다르다 — 읽는 쪽이 둘을 같게 다루면 안 된다.
 #:   · 완료      : 문자열 하나(«마지막» 시도의 꼴). 앞 시도가 형식 실패였어도
 #:                 결국 읽힌 답이 판정의 근거이므로 마지막 하나만 남긴다.

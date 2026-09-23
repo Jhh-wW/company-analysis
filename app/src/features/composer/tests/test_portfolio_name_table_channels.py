@@ -67,7 +67,11 @@ _ARTIFACT_DIR = Path(__file__).resolve().parents[5] / ".local-artifacts" / "p39"
 
 def _fragments() -> dict[int, dict[str, str]]:
     frags: dict[int, dict[str, str]] = {
-        1: {"종류": "사업내용", "원문": "가나다회사는 사업부문 하나를 운영한다."},
+        1: {
+            "종류": "사업내용",
+            "원문": "가나다회사는 사업부문 하나를 운영한다. 회사는 고객에게 사업부문 운영 서비스를 제공한다.",
+            "출처": "https://www.ganada.example/business",
+        },
         2: {
             "종류": "홈페이지",
             "원문": "고객 존중을 핵심 가치로 삼는다.",

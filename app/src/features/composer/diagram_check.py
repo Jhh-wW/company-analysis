@@ -79,6 +79,10 @@ from src.features.composer.constants import (
     STRATEGY_TABLE_SECTION_ID,
 )
 from src.features.composer.logic import extract_json_payload
+from src.features.composer.flow_generic_cells import is_generic_flow_cell
+from src.features.composer.flow_review_binding import bind_reviewed_flow_row
+from src.features.composer.flow_review_constants import FLOW_REVIEW_BINDING_INVALID
+from src.shared.report_generation.models import exact_text_sha256
 from src.features.composer.verdict_number import coerce_verdict_number
 from src.features.composer.challenge_guard import challenge_response_problem
 from src.features.composer.challenge_response_evidence import (
@@ -98,11 +102,11 @@ from src.features.composer.diagram_review_constants import (
     FLOW_REVENUE_STREAM_MISSING_CODE,
     OPERATIONS_FLOW_ORIGIN_HEADER,
     OPERATIONS_FLOW_TARGET_HEADER,
-    OPERATIONS_GENERIC_LABELS,
     FLOW_UNINFORMATIVE_OPERATIONS_CODE,
     PRODUCT_GOODS_OPPOSITE,
     PRODUCT_GOODS_PRIMACY_RE,
     REVENUE_COMPOSITION_MARKERS,
+    REVENUE_DEDUCTION_CLAUSE_RE,
     REVENUE_SENTENCE_SPLIT_RE,
     REVENUE_STREAM_AGGREGATE_NAMES,
     REVENUE_STREAM_RE,
@@ -614,6 +618,10 @@ def _drop_invented_numbers(
                 + "»: 인용 원문에 없는 수 — "
                 + ", ".join(invented)
                 + ("" if not blocked_codes else f" ({', '.join(blocked_codes)})")
+                + " — 검사 범위: 인용 조각만 ["
+                + ", ".join(f"{fid}:{exact_text_sha256(texts[fid])}"
+                            for fid in row.citations if fid in texts)
+                + "]"
             )
             continue
         kept.append(row)
@@ -649,7 +657,7 @@ def _drop_uninformative_operations_rows(
     for row in rows:
         cells = tuple(_compact_surface(cell) for cell in row.cells)
         if (index < len(cells) and cells[index] in {"", "미확인"}
-                and all(cell in OPERATIONS_GENERIC_LABELS for cell in cells)):
+                and all(not cell or is_generic_flow_cell(cell) for cell in cells)):
             problems.append(
                 f"{FLOW_UNINFORMATIVE_OPERATIONS_CODE}: 대상이 미확인이고 일반 설명뿐인 운영 경로 제외"
             )
@@ -735,6 +743,12 @@ def revenue_stream_names(source_texts: Sequence[str]) -> tuple[str, ...]:
             )
             for match in REVENUE_STREAM_RE.finditer(sentence):
                 name, gap, trailing = match.group(1), match.group(2), match.group(3)
+                if REVENUE_DEDUCTION_CLAUSE_RE.search(sentence, match.start()):
+                    # 조사 붙은 주어 뒤의 차감 절은 매출원 명사구가 아니다.
+                    # 다른 매출원까지 삼키지 않도록 현재 match 범위와 대조한다.
+                    deduction = REVENUE_DEDUCTION_CLAUSE_RE.search(sentence, match.start())
+                    if deduction is not None and deduction.start() < match.end():
+                        continue
                 if trailing not in REVENUE_STREAM_TRAILING_PARTICLES:
                     # 「매출액」·「매출원가」·「수익률」 — 이름이 아니라 합계·지표다.
                     continue
@@ -1019,6 +1033,7 @@ def _review_rows(
     *,
     diagnostics: Optional[list[dict]] = None,
     baseline_date: Optional[str] = None,
+    fragments_by_id: Optional[Mapping[str, CollectedFragment]] = None,
 ) -> tuple[dict[str, tuple[FlowRow, ...]], list[str]]:
     """모든 장의 경로를 «한 묶음»으로 검수한다 (AI 1회).
     """
@@ -1159,7 +1174,24 @@ def _review_rows(
             )
             continue
         if result == VERDICT_TRUE:
-            kept[section_id].append(row)
+            # 별도·묶음 검수 모두 같은 입력 결속을 공개까지 운반한다.
+            review_fragments = fragments_by_id if fragments_by_id is not None else {
+                fid: CollectedFragment(fid, "", text) for fid, text in texts.items()
+            }
+            try:
+                reviewed_row = bind_reviewed_flow_row(
+                    row, section_id=section_id, fragments=review_fragments,
+                    review_path="legacy", baseline_date=baseline_date or "",
+                )
+            except ValueError:
+                _append_grounding_diagnostic(
+                    diagnostics, section_id=section_id, kind="도식",
+                    reason_code=FLOW_REVIEW_BINDING_INVALID,
+                    candidate_text=" ".join(row.cells), sources=candidates[number][1],
+                )
+                dropped.append(f"[{section_id}] {number}번 경로: {FLOW_REVIEW_BINDING_INVALID}")
+                continue
+            kept[section_id].append(reviewed_row)
             continue
         # 번호 누락·계약 밖 판정은 «애매»가 아니라 그 줄의 검수 미완료다.
         dropped.append(
@@ -1295,6 +1327,7 @@ def check_diagrams(
         reviewed, dropped = _review_rows(
             after_numbers, texts, ask, diagnostics=diagnostics,
             baseline_date=baseline_date,
+            fragments_by_id={fragment.fragment_id: fragment for fragment in fragments},
         )
         problems.extend(dropped)
     else:
@@ -1304,9 +1337,6 @@ def check_diagrams(
                 f"[{section_id}] {number}번 경로: 의미 검수기가 없어 공개 제외"
                 for number, _row in enumerate(rows, start=1)
             )
-
-    if not problems:
-        return number_checked, ()
 
     rebuilt = tuple(
         replace(

@@ -56,6 +56,9 @@
 !/app/tools/run_canonical_pilot25.py
 !/app/tools/manage_pilot_quality.py
 !/app/tools/quality_observations.py
+!/app/tools/report_metrics.py
+!/app/tools/review_public_output.py
+!/app/tools/report_review_text.py
 !/app/tools/evaluate_companies.py
 !/app/tools/evaluation_constants.py
 !/app/tools/confirm_evaluation_manifest.py

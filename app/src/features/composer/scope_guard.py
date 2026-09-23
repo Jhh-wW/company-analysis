@@ -16,6 +16,12 @@ from src.features.composer.scope_constants import (
     FLOW_CONDITION_END_RE, FLOW_DIRECT_SCOPE_BRIDGE_RE, FLOW_SENTENCE_SUBJECT_RE,
     OWNER_BRIDGE_RE, RELATIVE_OWNER_RE, ROW_SEPARATOR_RE,
     SCOPE_CONDITION_UNBOUND, TABLE_HEADERS,
+    RECOGNITION_CLAUSE_RE, RECOGNITION_SOURCE_BOUNDARY_RE, RECOGNITION_COMMA_RE,
+    RECOGNITION_OPEN_CONDITION_RE, RECOGNITION_DEPENDENT_START_RE,
+    REVENUE_SUBJECT_RE, RECOGNITION_RE,
+    COMPLETION_RE, PROGRESS_RE, DURATION_LIMIT_RE,
+    EXPLICIT_EXCLUSION_RE, ENTITY_SUBJECT_RE, CURRENT_SUBSIDIARY_RE,
+    HISTORICAL_MEMBERSHIP_RE,
 )
 
 
@@ -87,6 +93,73 @@ def _owner_bound(clause: str, owner: str, condition: re.Match[str], owners: set[
     return False
 
 
+def _recognition_source_clauses(source: str) -> list[str]:
+    """완료 용역의 열린 기간 조건만 쉼표 뒤 종속 인식 절에 붙인다."""
+    clauses: list[str] = []
+    for sentence in RECOGNITION_SOURCE_BOUNDARY_RE.split(source):
+        pending: list[str] = []
+        for clause in RECOGNITION_COMMA_RE.split(sentence):
+            if pending:
+                if RECOGNITION_DEPENDENT_START_RE.search(clause) and RECOGNITION_RE.search(clause):
+                    clauses.append(", ".join((*pending, clause)))
+                    pending = []
+                    continue
+                if RECOGNITION_OPEN_CONDITION_RE.search(clause) and not RECOGNITION_RE.search(clause):
+                    pending.append(clause)
+                    continue
+                # 완결된 서술이나 독립 주어가 나오면 앞 조건을 빌려주지 않는다.
+                clauses.extend(pending)
+                pending = []
+            if (DURATION_LIMIT_RE.search(clause) and COMPLETION_RE.search(clause)
+                    and REVENUE_SUBJECT_RE.search(clause)
+                    and RECOGNITION_OPEN_CONDITION_RE.search(clause)
+                    and not RECOGNITION_RE.search(clause)):
+                pending.append(clause)
+            else:
+                clauses.append(clause)
+        clauses.extend(pending)
+    return clauses
+
+
+def _narrative_scope_problem(text: str, sources: Mapping[str, str]) -> str:
+    """한정이 직접 붙은 인식 방식과 명시된 제외 주체만 대조한다.
+
+    일반적인 의미 일치 판정이 아니다. 다른 상품의 조건이나 다른 법인의
+    제외를 공유 단어만으로 연결하지 않으며, 모호한 주체는 의미 검수에 남긴다.
+    """
+    source_clauses = [clause for source in sources.values()
+                      for clause in _recognition_source_clauses(source)]
+    completion_sources = [clause for clause in source_clauses
+                          if COMPLETION_RE.search(clause) and RECOGNITION_RE.search(clause)]
+    limited_sources = [clause for clause in completion_sources if DURATION_LIMIT_RE.search(clause)]
+    # 원칙(진행)과 한정된 특례(완료)가 실제 자기 인용에 모두 있을 때만 검사한다.
+    if (limited_sources and all(DURATION_LIMIT_RE.search(clause) for clause in completion_sources)
+        and any(PROGRESS_RE.search(clause) and RECOGNITION_RE.search(clause) for clause in source_clauses)):
+        source_limits = {(m["value"], m["unit"]) for clause in limited_sources
+                         for m in DURATION_LIMIT_RE.finditer(clause)}
+        for clause in RECOGNITION_CLAUSE_RE.split(text):
+            if not (REVENUE_SUBJECT_RE.search(clause) and COMPLETION_RE.search(clause)
+                    and RECOGNITION_RE.search(clause)):
+                continue
+            candidate_limits = {(m["value"], m["unit"]) for m in DURATION_LIMIT_RE.finditer(clause)}
+            if not candidate_limits.intersection(source_limits):
+                return SCOPE_CONDITION_UNBOUND
+    for candidate_clause in re.split(r"[.;。\n,，]", text):
+        if not CURRENT_SUBSIDIARY_RE.search(candidate_clause) or HISTORICAL_MEMBERSHIP_RE.search(candidate_clause):
+            continue
+        for source in sources.values():
+            for clause in re.split(r"[.;。\n]", source):
+                if not EXPLICIT_EXCLUSION_RE.search(clause):
+                    continue
+                owner_match = ENTITY_SUBJECT_RE.search(clause)
+                if owner_match and re.search(
+                    r"(?<![A-Za-z0-9가-힣])" + re.escape(owner_match["owner"])
+                    + r"(?=(?:은|는|이|가|의|을|를)?(?:\s|[,.;]|$))", candidate_clause,
+                ):
+                    return SCOPE_CONDITION_UNBOUND
+    return ""
+
+
 def scope_problem(candidate_text: str, sources_mapping: Mapping[str, str]) -> str:
     """고정 코드 또는 빈 문자열을 반환하는 무호출·무저장 범위 방어다.
 
@@ -95,6 +168,9 @@ def scope_problem(candidate_text: str, sources_mapping: Mapping[str, str]) -> st
     넓은 주어에 조건을 직접 붙이거나 정확한 상품 예시를 유지하면 통과한다.
     """
     text = unicodedata.normalize("NFKC", candidate_text)
+    narrative_problem = _narrative_scope_problem(text, sources_mapping)
+    if narrative_problem:
+        return narrative_problem
     units = [unit for source in sources_mapping.values() for unit in _units(unicodedata.normalize("NFKC", source))]
     owners = {unit.owner for unit in units if unit.owner}
     for clause in CLAUSE_RE.split(text):

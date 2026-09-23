@@ -47,7 +47,8 @@ from src.features.composer.constants import (
     SECTION_IDS,
     SECTION_TITLES,
 )
-from src.features.composer.logic import FragmentsInput
+from src.features.composer.logic import FragmentsInput, _normalize_fragments
+from src.features.composer.flow_review_binding import flow_review_problem
 from src.features.composer.news_block import (
     NEWS_BLOCK_HEADERS,
     NEWS_BLOCK_PRESENTATION,
@@ -620,7 +621,7 @@ def _source_label(meta: _FragmentMeta, filing_meta: Optional[FilingMeta]) -> str
 
 
 def _flow_report_table(
-    section: ComposedSection, numbers: Mapping[str, int]
+    section: ComposedSection, numbers: Mapping[str, int], *, fragments: Mapping[str, object], as_of_date: str
 ) -> Optional[ReportTable]:
     """7장 경로표를 흐름도용 ReportTable로 바꾼다. 실을 줄이 없으면 None.
 
@@ -643,6 +644,9 @@ def _flow_report_table(
     #   constants.FLOW_ARROW_SECTION_IDS 주석(카드는 빈 칸을 «빼는» 렌더러다).
     fills_unconfirmed = section.section_id in FLOW_ARROW_SECTION_IDS
     for row in section.flow_rows:
+        problem = flow_review_problem(row, section_id=section.section_id, fragments=fragments, baseline_date=as_of_date)
+        if problem:
+            raise ValueError(f"공개 도식 검수 결속이 유효하지 않습니다: {problem}")
         row_numbers = [
             numbers[str(citation).strip()]
             for citation in row.citations
@@ -1312,12 +1316,8 @@ def render_report(
 
     for section in report.sections:
         prose_lines: list[tuple[str, str]] = []
-        notice_paragraph = ""
         # 자료 부족·생성 실패의 정직한 안내문을 본문 «앞»에 둔다
         # (기준문서 3절: 안내 1~2문장 + 찾은 만큼의 내용).
-        if section.notice:
-            prose_lines.append((section.notice, ""))
-            notice_paragraph = section.notice
         shows = section_shows[section.section_id]
         breaks = set(_paragraph_breaks(section.sentences, numbers))
         prose_paragraphs: list[str] = []
@@ -1380,7 +1380,7 @@ def render_report(
         # 먼저 넣고 프로그램표를 뒤에 붙인다(목업이 요구하는 「흐름 → 구성」
         # 순서와도 맞는다).
         if section.section_id in FLOW_HEADERS_BY_SECTION:
-            flow_table = _flow_report_table(section, numbers)
+            flow_table = _flow_report_table(section, numbers, fragments={item.fragment_id: item for item in _normalize_fragments(fragments)}, as_of_date=as_of_date)
             if flow_table is not None:
                 for raw_cite in flow_table.source_cites:
                     flow_cite = citation_number(raw_cite)
@@ -1515,9 +1515,8 @@ def render_report(
                 prose_lines=prose_lines,
                 # 화면·PDF가 문단을 만드는 단위. 비면 소비하는 쪽이 예전처럼
                 # prose_lines를 이어 붙인다 (뒤로 호환).
-                prose_paragraphs=(
-                    ([notice_paragraph] if notice_paragraph else []) + prose_paragraphs
-                ),
+                prose_paragraphs=prose_paragraphs,
+                guidance_lines=[section.notice] if section.notice else [],
                 display_number=SECTION_DISPLAY_NUMBERS.get(
                     section.section_id, ""
                 ),

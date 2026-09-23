@@ -51,6 +51,7 @@ from src.features.composer.verify import (
 )
 from src.shared.report_quality.composition_diagnostic_constants import (
     GROUNDING_REWRITE_COUNT_KEYS,
+    GROUNDING_REWRITE_OPTIONAL_COUNT_KEYS,
     GROUNDING_REWRITE_STATE_CALL_ABORTED,
     GROUNDING_REWRITE_STATE_DONE,
     GROUNDING_REWRITE_STATE_FORMAT_FAILED,
@@ -216,6 +217,60 @@ def _record(protocol: list[dict]) -> dict | None:
 
 def _texts(report: ComposedReport) -> list[str]:
     return [sentence.text for sentence in report.sections[0].sentences]
+
+
+def test_repair_budget_is_shared_round_robin_across_sections(monkeypatch):
+    from src.features.composer import verify
+    from src.features.composer.grounding_rewrite import GroundingRewriteOutcome
+    captured = []
+    def rewrite(_ask, targets, _fragments):
+        captured.extend(targets)
+        return GroundingRewriteOutcome(sent=tuple(item.number for item in targets), abandoned=len(targets))
+    monkeypatch.setattr(verify, "rewrite_grounding_rejected", rewrite)
+    sections = ["identity"] * 12 + ["portfolio"] * 2 + ["past_changes"] * 2
+    targets = [verify._ReviewItem(index, ComposedSentence("보호 정책을 설명한다.", ("1",), GRADE_CONFIRMED), section)
+               for index, section in enumerate(sections, 1)]
+    _items, record = verify._grounding_rewrite_pass(lambda _: "", targets,
+        {item.number: "semantic_grounding_invalid" for item in targets}, {}, lambda _: (), {})
+    assert [item.number for item in captured[:3]] == [1, 13, 15]
+    assert len(captured) == GROUNDING_REWRITE_MAX_SENTENCES
+    assert record["대상"] == 16 and record["상한미전송"] == 4
+    assert record["실제전송"] == 12 and record["길이미전송"] == 0
+    assert record["응답누락"] == 0 and record["기계검사탈락"] == 0
+
+
+def test_pure_accounting_policy_is_not_rewritten_as_company_information():
+    from src.features.composer.verify import _is_grounding_rewrite_target
+    sentence = ComposedSentence("유형자산은 원가로 측정한다.", ("1",), GRADE_CONFIRMED)
+    assert not _is_grounding_rewrite_target(sentence, "identity", "accounting_policy_boilerplate")
+    assert _is_grounding_rewrite_target(sentence, "identity", "semantic_grounding_invalid")
+
+
+def test_oversized_first_evidence_does_not_starve_later_small_target():
+    from src.features.composer.grounding_rewrite import GroundingRewriteTarget, build_grounding_rewrite_prompt
+    from src.features.composer.grounding_rewrite_constants import GROUNDING_REWRITE_MAX_PROMPT_CHARS
+    from src.features.composer.port import CollectedFragment
+    long_text = "긴 자료 원문 " * GROUNDING_REWRITE_MAX_PROMPT_CHARS
+    small_text = "회사는 보호 정책을 설명한다."
+    targets = (GroundingRewriteTarget(1, "첫 후보", ("1",), "semantic_grounding_invalid"),
+               GroundingRewriteTarget(2, "두 번째 후보", ("2",), "semantic_grounding_invalid"))
+    prompt, kept = build_grounding_rewrite_prompt(targets, {
+        "1": CollectedFragment("1", "공식자료", long_text),
+        "2": CollectedFragment("2", "공식자료", small_text),
+    })
+    assert tuple(item.number for item in kept) == (2,)
+    assert small_text in prompt and long_text not in prompt
+    assert len(prompt) <= GROUNDING_REWRITE_MAX_PROMPT_CHARS
+
+
+def test_duplicate_abandonment_cannot_inflate_repair_denominator():
+    from src.features.composer.grounding_rewrite import _read_rewrites
+    rewritten, abandoned, _shape = _read_rewrites({"문장들": [
+        {"번호": 1, "포기": True, "글": ""},
+        {"번호": 1, "포기": True, "글": ""},
+        {"번호": 1, "포기": False, "글": "나중 응답"},
+    ]}, frozenset({1}))
+    assert rewritten == {} and abandoned == 1
 
 
 # ══════════════════════════════════════════════════════════
@@ -687,6 +742,7 @@ def test_완료_기록의_칸_이름은_공유_상수와_정확히_같다():
     assert record["상태"] == GROUNDING_REWRITE_STATE_DONE
     assert set(record) == (
         {"step", "상태", "대상장", "응답꼴"} | set(GROUNDING_REWRITE_COUNT_KEYS)
+        | set(GROUNDING_REWRITE_OPTIONAL_COUNT_KEYS)
     )
     assert record["대상장"] == ["identity"]
     assert record["응답꼴"] == "계약"

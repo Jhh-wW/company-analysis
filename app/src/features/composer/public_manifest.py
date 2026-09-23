@@ -7,6 +7,8 @@ import하지 않고 검증을 마친 입력으로 기대 구조를 만들고, �
 
 from __future__ import annotations
 
+from src.features.composer.flow_review_binding import flow_review_problem
+
 from src.features.composer.news_block import news_list_excerpt
 
 import hashlib
@@ -893,7 +895,15 @@ def _flow_binding(
     *,
     headers: Sequence[str],
     row: Sequence[str],
+    reviewed_row: object,
+    section_id: str,
+    original_fragments: Mapping[str, CollectedFragment],
+    as_of_date: str,
 ) -> dict[str, object]:
+    problem = flow_review_problem(reviewed_row, section_id=section_id, fragments=original_fragments, baseline_date=as_of_date)
+    if problem:
+        raise PublicManifestError(f"공개 도식 검수 결속이 유효하지 않습니다: {problem}")
+    receipt = reviewed_row.review_binding
     ids = tuple(dict.fromkeys(str(value).strip() for value in fragment_ids))
     sources = tuple(fragments.get(fragment_id) for fragment_id in ids)
     if not ids or any(source is None for source in sources):
@@ -905,7 +915,9 @@ def _flow_binding(
         "exact_evidence_hashes": [source.exact_evidence_hash for source in concrete],
         "row_evidence_hash": "",
         "injected_fact_id": "",
-        "semantic_review": "bundled:true",
+        "semantic_review": receipt.review_path,
+        "review_rule_version": receipt.rule_version,
+        "review_candidate_sha256": receipt.candidate_sha256,
         "typed_cells": [
             _typed_cell(
                 header=header,
@@ -1563,7 +1575,7 @@ def _expected_public_content_projection(
             )
             for index, sentence in enumerate(section.sentences)
         ]
-        lines = ([[section.notice, ""]] if section.notice else []) + [
+        lines = [
             [display, ""] for display in displays
         ]
         starts = set(_expected_paragraph_starts(section.sentences, numbers))
@@ -1576,8 +1588,6 @@ def _expected_public_content_projection(
             buffer.append(display)
         if buffer:
             paragraphs.append(" ".join(buffer))
-        if section.notice:
-            paragraphs.insert(0, section.notice)
         for sentence in section.sentences:
             for number in _sentence_numbers(sentence, numbers):
                 owners = used_sections.setdefault(number, [])
@@ -1604,7 +1614,7 @@ def _expected_public_content_projection(
                 "empty_reason": "",
                 "prose_lines": lines,
                 "prose_paragraphs": paragraphs,
-                "guidance_lines": [],
+                "guidance_lines": [section.notice] if section.notice else [],
                 "display_number": str(section_index + 1),
                 "tag": _SECTION_TAGS.get(section.section_id, ""),
                 "tables": section_tables,
@@ -1776,6 +1786,10 @@ def build_public_structure_seal(
                     fragment_bindings,
                     headers=FLOW_HEADERS_BY_SECTION[section.section_id],
                     row=public_row,
+                    reviewed_row=row,
+                    section_id=section.section_id,
+                    original_fragments={fragment.fragment_id: fragment for fragment in normalized_fragments},
+                    as_of_date=as_of_date,
                 )
                 rows.append(public_row)
                 row_bindings.append(binding)

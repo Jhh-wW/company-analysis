@@ -162,6 +162,30 @@ class StructuredClaim:
 
 
 @dataclass(frozen=True)
+class FlowEvidenceRef:
+    """도식 검수 시점의 인용 원문·문서·날짜 결속."""
+
+    fragment_id: str
+    document_identity: str
+    document_content_sha256: str
+    exact_evidence_sha256: str
+    document_date: str
+    source_scope_sha256: str = ""
+
+
+@dataclass(frozen=True)
+class FlowReviewBinding:
+    """독립 검수기가 확정한 행의 입력 지문. 작가 응답에서 읽지 않는다."""
+
+    section_id: str
+    candidate_sha256: str
+    evidence_refs: tuple[FlowEvidenceRef, ...]
+    review_path: str
+    rule_version: str
+    baseline_date: str = ""
+
+
+@dataclass(frozen=True)
 class FlowRow:
     """사업 경로 한 줄 — «무엇으로 시작 / 회사가 하는 일 / 누구에게 닿나».
 
@@ -174,6 +198,9 @@ class FlowRow:
     cells: tuple[str, ...]
     #: 이 줄의 근거 조각 id. 비면 근거 없는 줄이라 싣지 않는다.
     citations: tuple[str, ...] = ()
+    #: 내용 동등성은 종전대로 두되 공개 허용은 반드시 receipt를 별도 검산한다.
+    #: replace로 내용이 바뀌면 기존 지문이 어긋나므로 승인이 재사용되지 않는다.
+    review_binding: Optional[FlowReviewBinding] = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

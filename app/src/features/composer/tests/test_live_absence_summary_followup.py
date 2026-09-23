@@ -131,7 +131,9 @@ def _run_shadow(*, summary_failure: str):
         corp_type="상장사",
         as_of_date="2026-08-24",
         review_diagnostics_sink=diagnostics,
-        evidence_available_fallback=bool(summary_failure),
+        # 요약 선택기는 더 이상 호출하지 않는다. 부분 근거 보고서 분기를
+        # 함께 켜면 장별 수집 정책까지 달라져 부재 단언 시험과 섞인다.
+        evidence_available_fallback=False,
     )
     return output, writer, diagnostics
 
@@ -186,29 +188,29 @@ def _assert_live_defects_are_gone(output, writer, diagnostics) -> None:
         assert LIVE_CITED_ABSENCE_CLAIM_SECTION_9 not in prompt
 
 
-def test_shadow_ai_selection_path_keeps_absence_claims_out_of_body_cover_and_diagnostics():
+def test_shadow_deterministic_summary_keeps_absence_claims_out_of_body_cover_and_diagnostics():
     output, writer, diagnostics = _run_shadow(summary_failure="")
 
     _assert_live_defects_are_gone(output, writer, diagnostics)
-    assert len(writer.summary_prompts) == 1, "고르기는 정확히 1회다"
-    assert output.report.publication_policy == "legacy-shadow-exception-v1"
+    assert writer.summary_prompts == []
+    assert output.report.publication_policy == "structured-safety-v1"
 
 
-def test_shadow_degradable_selector_limit_fills_from_verified_body_with_same_result():
-    """강등 가능 한도 — legacy 단계 안에서 검증 본문 문장으로 채우는 경로."""
+def test_shadow_summary_never_calls_degradable_selector():
+    """요약 호출 상한 분기에 들어가지 않고 결속된 본문만 재사용한다."""
 
     output, writer, diagnostics = _run_shadow(summary_failure="degradable")
 
     _assert_live_defects_are_gone(output, writer, diagnostics)
-    assert len(writer.summary_prompts) == 1, "한도에 걸린 뒤 다시 부르지 않는다"
-    assert output.report.publication_policy == "legacy-shadow-exception-v1"
+    assert writer.summary_prompts == []
+    assert output.report.publication_policy == "structured-safety-v1"
 
 
-def test_shadow_fatal_selector_failure_falls_back_to_rule_summary_with_same_result():
-    """강등 불가 장애 — run_v2가 `_rule_summary_stage`·확보 근거 보고서로 내려간다."""
+def test_shadow_summary_never_calls_fatal_selector():
+    """요약 장애 분기에 들어가지 않으므로 강등도 발생하지 않는다."""
 
     output, writer, diagnostics = _run_shadow(summary_failure="fatal")
 
     _assert_live_defects_are_gone(output, writer, diagnostics)
-    assert len(writer.summary_prompts) == 1, "장애 뒤 다시 부르지 않는다"
-    assert output.report.publication_policy == "evidence-available-v1"
+    assert writer.summary_prompts == []
+    assert output.report.publication_policy == "structured-safety-v1"

@@ -50,10 +50,17 @@ from src.features.composer.role_binding_constants import ROLE_BINDING_REASON_TEX
 #:   실패한 글이라 못 살리면 빼는 쪽이 안전하다.
 GROUNDING_REWRITE_MAX_SENTENCES: Final[int] = 12
 
-#: 묶음 재작성 프롬프트 전체의 글자 상한. 넘으면 «뒤쪽 대상부터» 뺀다.
+# 모든 절이 순수 회계정책인 원문을 장 고유 사실로 바꿀 근거는 없다.
+# 혼합 문장과 자기 인용 불일치는 이 집합에 넣지 않아 기존 회복 기회를 지킨다.
+GROUNDING_REWRITE_EXCLUDED_REASONS: Final[frozenset[str]] = frozenset({
+    "accounting_policy_boilerplate", "culture_accounting_policy_misplaced",
+    "competitive_section_evidence_offcontract",
+})
+
+#: 묶음 재작성 프롬프트 전체의 글자 상한. 완전한 자기 인용이 들어갈 후보만 담는다.
 #:
-#: ★ 왜 뒤쪽부터인가 — 대상은 장 순서·번호 순으로 정렬돼 있어, 뒤쪽을 빼면
-#:   앞 장이 먼저 보장된다. 임의로 고르면 같은 입력에 같은 결과가 안 나온다.
+#: 장별 순환 우선순서는 고정한다. 긴 후보가 상한을 넘으면 그 후보만 건너뛰고,
+#: 뒤의 짧은 후보를 검토한다. 원문을 잘라 새로운 근거 범위를 만들지 않는다.
 #: ★ 왜 24,000인가 — 같은 요청 안에서 «작가 한 번에 실어도 되는» 크기로 이미
 #:   운영에서 쓰이는 값에 맞춘다. 빈 장 복구는 한 번의 작가 호출에 장마다
 #:   12,000자(`MAX_EMPTY_RECOVERY_EVIDENCE_CHARS`)씩 최대 2장

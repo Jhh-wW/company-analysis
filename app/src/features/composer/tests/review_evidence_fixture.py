@@ -22,6 +22,7 @@ from src.features.composer.grounding_constants import (
 _ITEM_HEAD_RE = re.compile(
     r"\n\[(?P<number>\d+)\] \(장: (?P<section>[^,]+), 종류: "
     r"(?P<kind>[^,]+), 인용: (?P<citations>[^)]*)\)\n"
+    r"(?:  등급: [^\n]+\n)?"
 )
 _LEGACY_ITEM_HEAD_RE = re.compile(
     r"\n\[(?P<number>\d+)\] \(등급: [^,]+, 인용: "

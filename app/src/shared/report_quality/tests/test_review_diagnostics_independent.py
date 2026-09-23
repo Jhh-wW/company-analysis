@@ -21,6 +21,17 @@ def _event(candidate: str = "제외된 후보") -> dict[str, object]:
     }
 
 
+def test_versioned_numeric_detail_retains_only_closed_metadata():
+    event = {**_event(), "candidate_fingerprint_version": "candidate-raw-utf8-v1",
+             "grounding_detail": {"version": "grounding-detail-v1", "check_kind": "수치",
+                                  "stage": "quote_not_bound", "entry_index": 2, "raw_text": "비공개 원문"}}
+    observed = observed_review_outcomes([event])[0]
+    assert observed["candidate_fingerprint_version"] == "candidate-raw-utf8-v1"
+    assert observed["grounding_detail"] == {"version": "grounding-detail-v1", "check_kind": "수치",
+                                             "stage": "quote_not_bound", "entry_index": 2}
+    assert observed_review_outcomes([{**event, "candidate_fingerprint_version": "unknown"}]) == ()
+
+
 @pytest.mark.parametrize("malformed", (None, {}, [None, {}, []]))
 def test_관측_경계는_최상위_비목록_및_오염_목록을_안전하게_버린다(
     malformed: object,

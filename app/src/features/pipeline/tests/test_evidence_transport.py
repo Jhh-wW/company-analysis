@@ -382,6 +382,21 @@ def test_typed는_공식IR_legacy_소유표가_아닌_봉인된_장에만_간다
     )
 
 
+def test_실제_typed_운반자가_소비자와_같은_등록종류_정본을_쓴다() -> None:
+    from src.shared.report_evidence.transport_kind import (
+        TYPED_TRANSPORT_KIND_PREFIX as shared_prefix,
+        is_typed_transport_kind,
+    )
+
+    frags = _all_legacy_frags()
+    frags[99] = _typed_raw()
+    fragment = _fragment_by_id(_build(frags), 99)
+    assert TYPED_TRANSPORT_KIND_PREFIX == shared_prefix
+    assert is_typed_transport_kind(fragment.kind)
+    assert not is_typed_transport_kind(fragment.kind + "\n")
+    assert not is_typed_transport_kind(fragment.kind.replace(shared_prefix, "typed-evidence-v1:", 1))
+
+
 def test_typed_formal_source_kind는_허용하고_같은_legacy_kind는_거절한다() -> None:
     typed_frags = _all_legacy_frags()
     typed_frags[99] = _typed_raw(source_kind=SOURCE_KIND_OFFICIAL_IR_PDF)

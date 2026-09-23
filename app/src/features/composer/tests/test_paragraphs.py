@@ -140,8 +140,8 @@ def test_문단을_이어_붙이면_문장_전부가_들어_있다():
     assert "2025년 매출은 1,200억원이다." in 이어붙임
 
 
-def test_안내문도_문단_하나로_나간다():
-    """자료가 없어 안내문만 있는 장도 문단이 있어야 화면이 안 빈다."""
+def test_안내문은_사실문단과_분리된_무번호_안내로_나간다():
+    """자료 부족 안내는 화면에 남지만 문단 번호나 사실을 만들지 않는다."""
     sections = tuple(
         ComposedSection(section_id=sid, sentences=(), notice="자료를 찾지 못했습니다.")
         for sid in SECTION_IDS
@@ -151,4 +151,6 @@ def test_안내문도_문단_하나로_나간다():
     )
     report = render_report("가나다전자(주)", composed, _fragments(), None)
 
-    assert _paragraphs(report) == ["자료를 찾지 못했습니다."]
+    assert _paragraphs(report) == []
+    assert all(section.guidance_lines == ["자료를 찾지 못했습니다."] for section in report.sections)
+    assert report.fact_records == []

@@ -49,7 +49,14 @@ def test_transport_contract_matches_the_actual_producer():
         STRAY_CITATION_MARKER_REASON_CODES,
     )
 
+    from src.features.composer.flow_review_constants import (
+        FLOW_REVIEW_BINDING_INVALID, FLOW_REVIEW_BINDING_MISSING,
+    )
+    from src.features.composer.competitive_scope_constants import COMPETITIVE_SECTION_EVIDENCE_OFFCONTRACT
     assert set(REVIEW_SCOPE_ITEMS) == {
+        "public_sentence_fact_unbound", "public_sentence_fact_duplicate",
+        COMPETITIVE_SECTION_EVIDENCE_OFFCONTRACT,
+        FLOW_REVIEW_BINDING_INVALID, FLOW_REVIEW_BINDING_MISSING,
         MODALITY_PLAN_ASSERTED, SCOPE_CONDITION_UNBOUND, CULTURE_EVIDENCE_SCOPE_MISMATCH,
         QUANTIFIED_DIVIDEND_UNBOUND,
         CULTURE_ACCOUNTING_POLICY_MISPLACED, *DIRECT_SUPPORT_REASON_TEXTS,

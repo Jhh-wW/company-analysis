@@ -23,6 +23,9 @@ from src.shared.report_quality.models import (
     SafetyAssessment,
 )
 from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
+from src.shared.report_quality.optional_sections import (
+    OPTIONAL_SECTION_WIRE_KEYS, optional_sections_from_wire, optional_sections_to_wire,
+)
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -77,6 +80,11 @@ def _canonical_assessment_value(value: GenerationAssessment) -> dict[str, Any]:
         # 이 키가 존재하지 않았다. 빈 기본 필드를 직렬화하면 같은 저장본의
         # assessment/receipt SHA-256이 달라지므로 과거 버전에서만 생략한다.
         quality.pop("section_interpretation_counts", None)
+    quality.pop("optional_sections_version", None)
+    quality.pop("optional_sections", None)
+    quality.update(optional_sections_to_wire(
+        value.quality.optional_sections_version, value.quality.optional_sections,
+    ))
     return payload
 
 
@@ -475,9 +483,12 @@ def generation_assessment_from_dict(data: Mapping[str, Any]) -> GenerationAssess
     # v3부터 장별 해석 수가 영수증 정본이다. 과거 v1/v2 저장 bytes는 키가
     # 없던 모양 그대로 읽되, v3가 그 옛 모양으로 빠지는 것은 허용하지 않는다.
     v3_wire = raw.get("contract_version") == STRICT_QUALITY_CONTRACT_VERSION
+    quality_keys = _QUALITY_KEYS if v3_wire else _LEGACY_QUALITY_KEYS
+    if type(raw["quality"]) is dict and OPTIONAL_SECTION_WIRE_KEYS.intersection(raw["quality"]):
+        quality_keys = quality_keys | OPTIONAL_SECTION_WIRE_KEYS
     quality_raw = _require_exact_dict(
         raw["quality"],
-        keys=_QUALITY_KEYS if v3_wire else _LEGACY_QUALITY_KEYS,
+        keys=quality_keys,
         label="QualityAssessment",
     )
     safety_raw = _require_exact_dict(
@@ -513,6 +524,7 @@ def generation_assessment_from_dict(data: Mapping[str, Any]) -> GenerationAssess
         for value in problem_codes_raw
     ):
         raise ValueError("QualityAssessment 문제 코드가 JSON 문자열 배열이 아닙니다")
+    optional_version, optional_sections = optional_sections_from_wire(quality_raw)
     quality = QualityAssessment(
         contract_version=quality_raw["contract_version"],
         grade=QualityGrade(quality_raw["grade"]),
@@ -555,6 +567,8 @@ def generation_assessment_from_dict(data: Mapping[str, Any]) -> GenerationAssess
             else ()
         ),
         problem_codes=tuple(QualityProblemCode(value) for value in problem_codes_raw),
+        optional_sections_version=optional_version,
+        optional_sections=optional_sections,
     )
     safety = SafetyAssessment(
         contract_version=safety_raw["contract_version"],

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import sqlite3
 from dataclasses import fields, replace
 from typing import Any, Optional
@@ -79,6 +80,15 @@ from src.shared.report_generation.public_projection import (
 # ══════════════════════════════════════════════════════════
 
 
+def _unaudited_years_from_wire(value: object) -> tuple[str, ...]:
+    """감사 상태의 연도를 추측·문자열 강제 변환 없이 보존한다."""
+    if (type(value) is not list
+            or any(type(year) is not str or re.fullmatch(r"[0-9]{4}", year) is None for year in value)
+            or len(value) != len(set(value))):
+        raise ValueError("감사받지 않은 비교연도는 중복 없는 네 자리 연도 문자열 배열이어야 합니다")
+    return tuple(value)
+
+
 def _table_to_dict(table: ReportTable) -> dict[str, Any]:
     payload = {
         "caption": table.caption,
@@ -91,6 +101,8 @@ def _table_to_dict(table: ReportTable) -> dict[str, Any]:
         "scale_places": table.scale_places,
         "display_unit": table.display_unit,
     }
+    if table.unaudited_years:
+        payload["unaudited_years"] = list(_unaudited_years_from_wire(list(table.unaudited_years)))
     if table.row_cites:
         payload["row_cites"] = [list(row) for row in validated_row_cites(table.rows, table.row_cites)]
         payload["source_cites"] = list(table.source_cites)
@@ -139,6 +151,7 @@ def _table_from_dict(data: dict[str, Any]) -> ReportTable:
         entity_scope=str(data.get("entity_scope", "")),
         raw_unit=str(data.get("raw_unit", "")),
         unit_dimension=str(data.get("unit_dimension", "")),
+        unaudited_years=_unaudited_years_from_wire(data.get("unaudited_years", [])),
         source_cites=[str(value) for value in data.get("source_cites", [])],
         manifest_ref=str(data.get("manifest_ref", "")),
         row_fact_ids=[str(value) for value in data.get("row_fact_ids", [])],

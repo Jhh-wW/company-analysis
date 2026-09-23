@@ -115,11 +115,22 @@ _CULTURE_SENTENCE_BODIES: Final[tuple[str, ...]] = (
     "회사는 직원 현황과 평균 근속연수를 공시한다",
 )
 
+# 9장은 원문에 실제로 선언된 차별점이 있어야 회사 신원 운반 검증까지 도달한다.
+_COMPETITIVE_SENTENCES: Final[tuple[str, ...]] = (
+    "회사는 정밀 광학 검사 기술을 차별점으로 제시한다.",
+    "회사는 고객 공정에 맞춘 소프트웨어 제공을 경쟁력으로 설명한다.",
+    "회사는 전국 정비망을 고객 대응 역량의 강점으로 제시한다.",
+    "회사는 자체 설계한 센서를 기술 차별화 요소로 설명한다.",
+    "회사는 장기 공급 계약에 기반한 안정적 납품을 경쟁력으로 제시한다.",
+)
+
 
 def _장_문장(section_index: int, mark: str, ending_index: int) -> str:
     """작가 대역과 조각 원문이 같은 장별 문장을 쓰게 한다."""
     if section_index == _FUTURE_SECTION_INDEX:
         return _FUTURE_STRATEGY_SENTENCES[ending_index]
+    if section_index == SECTION_IDS.index("competitive_position"):
+        return _COMPETITIVE_SENTENCES[ending_index]
     if section_index == _CULTURE_SECTION_INDEX:
         return (
             f"{mark} {_CULTURE_SENTENCE_BODIES[ending_index]}고 "

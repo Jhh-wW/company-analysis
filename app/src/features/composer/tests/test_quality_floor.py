@@ -42,6 +42,9 @@ from src.features.composer.logic import (
 from src.features.composer.pipeline import V2RunOutput, run_v2
 from src.features.composer.render import INTERPRETATION_MARKER
 from src.features.composer.tests.test_pipeline import _summary_selection_json
+from src.features.composer.tests.golden_fixture_contract import (
+    golden_fragments_with_identity, golden_responses_with_slots, golden_public_rows,
+)
 from src.features.composer.verify import (
     NOTICE_ALL_SENTENCES_REJECTED,
     REVIEW_PROMPT_HEADER,
@@ -58,12 +61,12 @@ from src.shared.report_quality.assessment import has_public_numeric_token
 COMPANY_NAME: Final[str] = "제이와이피엔터테인먼트"
 
 _FIXTURE_DIR: Final[Path] = Path(__file__).resolve().parent / "fixtures"
-_FRAGMENTS_FIXTURE: Final[dict[str, Any]] = json.loads(
+_FRAGMENTS_FIXTURE: Final[dict[str, Any]] = golden_fragments_with_identity(json.loads(
     (_FIXTURE_DIR / "jyp_fragments.json").read_text(encoding="utf-8")
-)
-_RESPONSES_FIXTURE: Final[dict[str, Any]] = json.loads(
+))
+_RESPONSES_FIXTURE: Final[dict[str, Any]] = golden_responses_with_slots(json.loads(
     (_FIXTURE_DIR / "jyp_ask_responses.json").read_text(encoding="utf-8")
-)
+))
 
 # ── 완성 하한 값 — 기준문서 03장 6절(G4)을 숫자 그대로 옮긴 것.
 #    ★ 한 번은 이 숫자를 생산 상수 import로 바꿨다가 되돌렸다.
@@ -142,11 +145,6 @@ def _fixture_summary_sentences() -> list[dict[str, Any]]:
       (확인 등급 비율)을 재는 데만 남겨 둔다.
     """
     return list(_RESPONSES_FIXTURE["핵심요약_응답"]["문장들"])
-
-
-#: 요약 «고르기»가 돌려주는 문장 수. 가짜 AI(`_summary_selection_json`)가 서로
-#: 다른 장에서 세 개를 고른다. 생산 상수를 빌려 오지 않고 글자로 적는다.
-_SUMMARY_PICKS = 3
 
 
 # ══════════════════════════════════════════════════════════
@@ -292,7 +290,8 @@ def test_핵심_요약과_1_8장이_실질_내용으로_존재한다(
     ]
     # 하한: 안내문-전용 장 ≤ 1개. 골든 입력에서는 0개여야 훼손이 없는 것이다.
     assert len(notice_only) <= MAX_NOTICE_ONLY_SECTIONS, notice_only
-    assert notice_only == [], notice_only
+    # 9장은 회사의 차별성 근거가 없는 비교만 담겨 있어 생략하는 것이 정본이다.
+    assert notice_only == ["competitive_position"], notice_only
 
 
 # ══════════════════════════════════════════════════════════
@@ -340,13 +339,10 @@ def test_요약은_3에서_5문장이고_서로_다른_장에서_고른_본문_�
     section_ids = [item.section_id for item in report.summary_items]
     assert all(section_ids), f"요약 카드의 장 표시가 비었다: {section_ids}"
     assert len(set(section_ids)) == len(section_ids), section_ids
-    # 옛 골든 fixture의 AI 요약 수치는 의미 결속이 없으므로 새 생성 안전
-    # 경계가 제외하고, 부족분은 이미 검증된 본문으로 보충할 수 있다. 보충을
-    # 금지해 미결속 수치를 되살리는 것보다 최종 요약에 숫자가 없는지가 정본이다.
-    assert all(
-        not has_public_numeric_token(_CITATION_MARKER_RE.sub("", text))
-        for text in summary_texts
-    )
+    bound_claims = {(fact.section_owner, fact.claim) for fact in report.fact_records}
+    assert all((item.section_id, _CITATION_MARKER_RE.sub("", item.text).strip())
+               in bound_claims for item in report.summary_items)
+
 
 
 # ══════════════════════════════════════════════════════════
@@ -413,7 +409,7 @@ def test_부록_번호와_본문_인용이_1대1이다(
 # ══════════════════════════════════════════════════════════
 
 
-def test_기준문서_하한은_낮추지_않고_미결속_수치를_제외한_결과는_partial이다(
+def test_원래_54후보에서_미결속_주장을_빼도_품질하한은_낮추지_않는다(
     floor_run: tuple[V2RunOutput, _AllTrueReviewer],
 ) -> None:
     output, reviewer = floor_run
@@ -428,84 +424,30 @@ def test_기준문서_하한은_낮추지_않고_미결속_수치를_제외한_�
     assert len(fixture_body) >= MIN_SUBSTANTIVE_SENTENCES
     assert fixture_confirmed / len(fixture_all) >= MIN_CONFIRMED_RATIO
 
-    # ② 숫자가 없는 문장은 전부 보존한다. 제품 결정 ③ 이후에는
-    #    «검사를 이미 두 번 통과한» 수치 문장(등급 확인 + 인용 있음 + 검수 AI가
-    #    참으로 판정해 verified)까지 살아남는다 — 구조화 근거(NumericBinding)를
-    #    요구하는 옛 규칙은 «해석» 등급 수치 문장에만 남는다(해석은 사실
-    #    주장이 아니라 애초에 구조화 근거를 만들 길이 없다). 주장이 아니라
-    #    fixture 등급 실측으로 확인한다.
-    body_texts = [
-        text
-        for section in report.sections
-        for text in _substantive_texts(section)
-    ]
-    unbound_numeric_body = [
-        sentence
-        for sentence in fixture_body
-        if has_public_numeric_token(sentence["글"])
-    ]
-    assert unbound_numeric_body
-    interpreted_unbound_numeric_body = [
-        sentence
-        for sentence in unbound_numeric_body
-        if sentence["등급"] == GRADE_INTERPRETED
-    ]
-    confirmed_unbound_numeric_body = [
-        sentence
-        for sentence in unbound_numeric_body
-        if sentence["등급"] == GRADE_CONFIRMED
-    ]
-    # 이 fixture의 «확인» 등급 수치 문장은 전부 인용이 있다 — 세 조건 중
-    # 인용 조건은 걸리지 않고 등급(해석)만 걸린다는 것을 실측으로 못 박는다.
-    assert len(confirmed_unbound_numeric_body) + len(
-        interpreted_unbound_numeric_body
-    ) == len(unbound_numeric_body)
-    assert all(sentence["인용"] for sentence in confirmed_unbound_numeric_body)
-    # 기존 장 간 중복 소유권 규칙이 숫자 없는 중복 한 문장도 별도로 모은다.
-    DEDUPE_MOVED_IN_FIXTURE = 1
-    assert len(body_texts) == (
-        len(fixture_body)
-        - len(interpreted_unbound_numeric_body)
-        - DEDUPE_MOVED_IN_FIXTURE
-    )
-    assert SUMMARY_MIN_SENTENCES <= len(report.summary_items) <= SUMMARY_MAX_SENTENCES
-    # ★ 초안 합은 「본문 + 고른 요약」이다 (2026-09-11). 예전에는 fixture의
-    #   요약 4문장이 그대로 초안이었다 — AI가 요약을 새로 썼기 때문이다.
-    #   지금은 검증된 본문에서 세 문장을 고르므로 초안에 새 글자가 없다.
-    assert output.composed_sentences == len(fixture_body) + _SUMMARY_PICKS
-    assert output.verified_sentences == len(body_texts) + len(report.summary_items)
+    # ② 원문에서 사전 검토한 생존 사실만 공개한다. 무인용 해석을 다시 붙여
+    #    40문장 하한을 채우지 않으며, 안전한 사실은 순서·글자까지 보존한다.
+    sections = _RESPONSES_FIXTURE["장별_응답"]
+    for section in report.sections:
+        actual = [_CITATION_MARKER_RE.sub("", text).removesuffix(INTERPRETATION_MARKER).strip()
+                  for text in _substantive_texts(section)]
+        expected = [row["글"] for row in golden_public_rows(sections, section.cell)]
+        assert actual == expected, section.cell
+    body_count = sum(len(section.prose_lines) for section in report.sections)
+    assert body_count == 35
+    assert len(report.fact_records) == body_count
+    assert output.composed_sentences == len(fixture_body)
+    assert output.verified_sentences == body_count + len(report.summary_items)
     assert reviewer.rewrite_prompts == []
 
-    # ③ 하한 자체(본문 40문장·확인 비율 50%)는 낮추지 않는다 — 안전선.
-    #    제품 결정 ③ 이후 이 fixture는 «회복»해 두 지표 모두
-    #    하한을 넘긴다. 그런데도 등급은 여전히 PARTIAL이다 — 이유는 이 시험이
-    #    다루는 게이트(수치 문장 결속)가 아니라 «구조화 사실(FactRecord) 하한»
-    #    이라는 별도 게이트다. 이 시험은 실적표(table=None)를 일부러 안 주므로
-    #    report.fact_records가 0건이라 그 게이트를 못 채운다 — 표가 있는
-    #    경로는 test_e2e_offline.py가 본다(assessment.py의 substantive_claims는
-    #    fact_records만 세지, 렌더된 문장 수를 세지 않는다).
+    # ③ 제품 하한(40개 사실·8개 독립 문서·50% 확인)은 그대로다. 골든 파일의
+    #    원래 54개 후보 중 미결속 내용을 뺀 결과가 하한을 못 넘음을 측정한다.
+    assert body_count < MIN_SUBSTANTIVE_SENTENCES
+    assert output.quality_observation.document_sources < MIN_CITED_SOURCES
+    assert report.grade.value == "부분 완성"
+    assert {"too_few_substantive_claims", "too_few_document_sources"} <= set(
+        output.quality_observation.quality_problem_codes
+    )
     rendered = _all_sentence_texts(report)
-    rendered_confirmed = sum(
-        1 for text in rendered if not text.endswith(INTERPRETATION_MARKER)
-    )
-    assert len(body_texts) >= MIN_SUBSTANTIVE_SENTENCES, "회복 확인: 40문장 하한을 넘겼다"
-    assert report.grade.value == "부분 완성"  # ← 안전선: 등급은 여전히 PARTIAL이다
+    confirmed = sum(not text.endswith(INTERPRETATION_MARKER) for text in rendered)
+    assert confirmed / len(rendered) >= MIN_CONFIRMED_RATIO
     assert any("숫자·날짜 문장" in reason for reason in report.shortfall_reasons)
-    report_facts = output.quality_observation.substantive_claims
-    report_sources = output.quality_observation.document_sources
-    # ★ 머리말에서 «내부 임계값»(40개·8개)을 뺐다. 그 숫자는 화면
-    #   어디에도 설명이 없어 「40점 만점에 3점」으로 오독되고, 독자가 할 수 있는
-    #   일도 없다. 대신 «실제 개수»는 그대로 싣는다 — 그게 신뢰도 판단의 근거다.
-    #   ⚠️ 여기서 지키는 것은 「임계값이 보이나」가 아니라 「사실이 남았나」다.
-    assert any(
-        "출처와 뜻이 함께 확인된 사실" in reason
-        and f"{report_facts}건" in reason
-        for reason in report.shortfall_reasons
-    ), "★ 확인된 사실 개수가 독자에게 안 보인다"
-    assert any(
-        "원문 문서" in reason and f"{report_sources}개" in reason
-        for reason in report.shortfall_reasons
-    ), "★ 참고한 원문 문서 개수가 독자에게 안 보인다"
-    assert rendered_confirmed / len(rendered) >= MIN_CONFIRMED_RATIO, (
-        "회복 확인: 확인 비율도 50% 하한을 넘겼다"
-    )

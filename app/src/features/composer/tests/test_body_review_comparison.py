@@ -20,6 +20,20 @@ from src.features.composer.verify import (
 # 실제 감사의 의미 추가 유형을 회사·금액에 의존하지 않는 짝으로 재현한다.
 CONTRASTS = (
     (
+        "product_attribute_scope", "portfolio",
+        "회사는 범용 도구 가람과 대화형 도구 나래를 제공한다. 나래는 엔터테인먼트 플랫폼이다.",
+        "회사의 모든 제품은 엔터테인먼트 플랫폼이다.",
+        "나래는 엔터테인먼트 플랫폼이다.",
+        "1: 나래만, 전체 범위 아님",
+    ),
+    (
+        "unsupported_relative_time", "past_changes",
+        "회사는 보호 정책을 검토했다고 밝혔다.",
+        "같은 시기 회사는 보호 정책을 검토했다고 밝혔다.",
+        "회사는 보호 정책을 검토했다고 밝혔다.",
+        "1: 동시성 기준 없음",
+    ),
+    (
         "ownership", "operations_partners",
         "종속회사의 여행사업부문은 출장관리·호텔예약 플랫폼을 보유한다.",
         "종속회사의 여행사업부문은 자체 개발한 출장관리·호텔예약 플랫폼을 보유한다.",
@@ -247,7 +261,8 @@ def test_grounded_multiple_interpretations_still_demote(grouped):
         return json.dumps({"판정": [_entry(item, "애매", "1: 경로 사실, 효과는 여러 해석")
                                   for item in _items(prompt)]}, ensure_ascii=False)
 
-    result = _run("competitive_position", (ComposedSentence(text, ("1",), "확인"),),
+    # 판매 경로 해석은 사업 모델 장의 소재다. 9장은 별도 자기선언 원문 계약을 따른다.
+    result = _run("business_model", (ComposedSentence(text, ("1",), "확인"),),
                   (CollectedFragment("1", "사업내용", "회사는 온라인과 오프라인 판매 경로를 보유한다."),),
                   ask, grouped)
     assert result.sections[0].sentences[0].text == text

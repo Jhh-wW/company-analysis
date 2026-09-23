@@ -136,10 +136,10 @@ def test_composer_source_only_cites_survive_first_json_db_validation_and_pdf(tmp
     for token in ("가온검사기", "나래정비", "2023", "2024", "2025", "900", "1,000", "1,200", "억원", "2026-09-02", "2026-08-20"):
         assert _compact(token) in pdf_text
     assert pdf_text.index("가온검사기") < pdf_text.index("나래정비")
-    assert "〔2〕" in pdf_text and "〔41〕" in pdf_text
+    assert "[2]" in pdf_text and "[41]" in pdf_text
     appendix = "\n".join(text for text in page_texts if "본문의 번호가 아래 원문을 가리킵니다." in text)
-    appendix_numbers = [int(line.strip()) for line in appendix.splitlines() if line.strip().isdigit()]
-    assert appendix_numbers[-6:] == [1, 2, 3, 4, 41, 42]
+    appendix_numbers = [int(number) for number in re.findall(r"(?m)^\[(\d+)\]\s*$", appendix)]
+    assert appendix_numbers == [1, 2, 3, 4, 41, 42]
     # ★ 2026-09-10 갱신 — 예전에는 부록 글자에서 `news-fragment-41`을 직접
     #   찾았다. `984bcacf`(「산문 자기 인용 검수와 PDF 웹 출처 표시 보완」)가
     #   `core.citations.location_display`로 「원문 위치」 칸의 내부 조각 id를

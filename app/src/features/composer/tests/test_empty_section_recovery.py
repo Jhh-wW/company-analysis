@@ -25,6 +25,7 @@ from src.shared.report_quality.source_identity import document_identity_from_par
 
 PAST_TEXT = "가나다전자는 물류 사업을 분할하고 투자 사업을 영위하고 있다."
 CULTURE_TEXT = "가나다전자는 구성원 역량 개발을 위해 직무 교육을 운영한다."
+COMPETITIVE_TEXT = "가나다전자는 모듈형 검사 설계를 제품의 핵심 강점으로 설명한다."
 
 
 def _fragment(section_id="past_changes", text=PAST_TEXT, fragment_id="1"):
@@ -38,7 +39,7 @@ def _fragment(section_id="past_changes", text=PAST_TEXT, fragment_id="1"):
         source_document_id="2026031600000" + fragment_id,
         document_content_sha256=hashlib.sha256(text.encode()).hexdigest(),
         formal_source_kind="dart_business_report", identity_binding="dart_corp_code",
-        supported_claim_slots=(section_id + ":facts",),
+        supported_claim_slots=(CLAIM_SLOTS_BY_SECTION[section_id][0],),
     )
 
 
@@ -178,15 +179,20 @@ def test_pipeline_recovers_only_new_facts_with_available_calls(monkeypatch, avai
 
     original = PAST_TEXT if repeat_rejected else "가나다전자는 물류 사업을 합병하고 제조 사업을 영위하고 있다."
     draft = ComposedReport(tuple(ComposedSection(section_id, (
-        ComposedSentence(original, ("1",), GRADE_CONFIRMED),
+        ComposedSentence(original, ("1",), GRADE_CONFIRMED,
+                         planned_claim_slot=CLAIM_SLOTS_BY_SECTION[section_id][0]),
     ) if section_id == "past_changes" else ()) for section_id in SECTION_IDS))
     monkeypatch.setattr(pipeline, "compose_sections", lambda *args, **kwargs: draft)
-    initial = _FakeVerifier([_verdict_json({1: "거짓"})])
+    initial = _FakeVerifier([json.dumps({"판정": [{
+        "번호": 1, "장": "past_changes", "근거": ["1"], "결과": "거짓",
+        "근거대조": "1: 후보를 거절함",
+    }]}, ensure_ascii=False)])
     writer_calls = []
     recovery_reviewer = _FakeReviewer()
     def recovery_writer(prompt):
         writer_calls.append(prompt)
-        return _response({"past_changes": [(PAST_TEXT, "1", GRADE_CONFIRMED)]})
+        return _response({"past_changes": [(PAST_TEXT, "1", GRADE_CONFIRMED)]},
+                         claim_slot=CLAIM_SLOTS_BY_SECTION["past_changes"][0])
     diagnostics = []
     output = pipeline.run_v2(
         "가나다전자", (_fragment(),), None, writer_ask=_FakeWriter(), reviewer_ask=initial,
@@ -200,7 +206,9 @@ def test_pipeline_recovers_only_new_facts_with_available_calls(monkeypatch, avai
     assert len(recovery_reviewer.prompts) == int(available and not repeat_rejected)
     past = next(section for section in output.report.sections if section.cell == "past_changes")
     assert any(PAST_TEXT in str(line) for line in past.prose_lines) is (available and not repeat_rejected)
-    assert len(initial.rewrite_prompts) == (0 if available else 1)
+    # 부분 보고서도 장별 소유 근거의 묶음 검수를 사용한다. 이 경로는 개별
+    # 거짓 재작성 대신 아래의 제한된 빈 장 복구만 호출한다.
+    assert len(initial.rewrite_prompts) == 0
     if available and not repeat_rejected:
         assert any(item.get("복구장") == ["past_changes"] for item in diagnostics)
 
@@ -343,7 +351,7 @@ def _full_packets(*, culture_owns_recovery_fragment: bool):
     """
     from src.features.composer.tests.test_pipeline import _strict_packet_set
 
-    base = _strict_packet_set()
+    base = _strict_packet_set(evidence_texts=(COMPETITIVE_TEXT,))
     extra = _culture_recovery_fragment()
     return SectionEvidencePacketSet(
         company_id=base.company_id,
@@ -374,6 +382,15 @@ def _full_writer_leaving_culture_empty():
 
     class _Writer(_StrictThinWriter):
         def __call__(self, prompt: str) -> str:
+            if self.section_calls < len(_ALL_SECTION_IDS) and (
+                _ALL_SECTION_IDS[self.section_calls] == "competitive_position"
+            ):
+                self.prompts.append(prompt)
+                self.section_calls += 1
+                return json.dumps({"문장들": [{
+                    "글": COMPETITIVE_TEXT, "인용": ["2"], "등급": GRADE_CONFIRMED,
+                    "주장슬롯": "competitive_position:stated_differentiator",
+                }]}, ensure_ascii=False)
             if self.section_calls < len(_ALL_SECTION_IDS) and (
                 _ALL_SECTION_IDS[self.section_calls] == "culture"
             ):
@@ -500,7 +517,8 @@ def test_section_the_writer_never_attempted_is_still_a_recovery_target():
             "가나다전자", (_fragment(),), None,
             writer_ask=_FakeWriter(), reviewer_ask=_FakeReviewer(),
             empty_recovery_writer_ask=lambda prompt: writer_calls.append(prompt) or _response(
-                {"past_changes": [(PAST_TEXT, "1", GRADE_CONFIRMED)]}),
+                {"past_changes": [(PAST_TEXT, "1", GRADE_CONFIRMED)]},
+                claim_slot=CLAIM_SLOTS_BY_SECTION["past_changes"][0]),
             empty_recovery_reviewer_ask=_FakeReviewer(),
             empty_recovery_can_start=lambda: True,
             evidence_availability=EvidenceAvailability("partial"),

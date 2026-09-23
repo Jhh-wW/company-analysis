@@ -18,13 +18,22 @@ import re
 import time
 import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, Callable, Final, Optional, Union
 
 from src.core.citations import citation_number
 from src.features.composer.parallel_sections import run_section_jobs, section_worker_count
-from src.shared.report_quality.composition_diagnostic_constants import SECTION_EXECUTION_STEP
+from src.features.composer.partial_evidence import PartialEvidenceView
+from src.features.composer.partial_evidence_constants import (
+    EXACT_EVIDENCE_SCOPE_GUIDE,
+    PARTIAL_EVIDENCE_SCOPE_GUIDE,
+)
+from src.shared.report_quality.composition_diagnostic_constants import (
+    SECTION_EXECUTION_STEP,
+    SECTION_EXECUTION_TARGET_COUNT_FIELD,
+    SECTION_EXECUTION_EMPTY_COUNT_FIELD,
+)
 from src.features.composer.parallel_section_constants import (
     MILLISECONDS_PER_SECOND,
     SERIAL_SECTION_CALLS,
@@ -77,10 +86,7 @@ from src.features.composer.constants import (
     SENTENCE_RANGE_GUIDE,
     VALID_GRADES,
 )
-from src.features.composer.diagram_review_constants import (
-    FLOW_GENERIC_CELL_PARTICLES,
-    FLOW_GENERIC_CELL_TERMS,
-)
+from src.features.composer.flow_generic_cells import is_generic_flow_cell
 from src.features.composer.port import (
     AskFatalError,
     CollectedFragment,
@@ -456,6 +462,7 @@ def build_section_prompt(
     *,
     show_supported_claim_slots: bool = False,
     shared_evidence_prefix: bool = False,
+    allowed_fragment_ids: frozenset[str] | None = None,
 ) -> str:
     """장 하나를 쓰게 하는 지시문 — 지침 + 조각 전체 + 실적표 + JSON 강제.
 
@@ -515,7 +522,7 @@ def build_section_prompt(
     #   의존하면 앞부분이 장마다 달라져 캐시가 영영 안 맞는다.
     fragments_block = _render_fragments(
         fragments,
-        show_supported_claim_slots=show_supported_claim_slots,
+        show_supported_claim_slots=(show_supported_claim_slots or allowed_fragment_ids is not None),
     )
     section_parts = [
         SECTION_GUIDES[section_id],
@@ -526,6 +533,13 @@ def build_section_prompt(
         ),
         "\n\n",
         CITATION_RULES_GUIDE,
+        EXACT_EVIDENCE_SCOPE_GUIDE,
+        (
+            PARTIAL_EVIDENCE_SCOPE_GUIDE.format(
+                fragment_ids=", ".join(sorted(allowed_fragment_ids, key=int)) or "없음",
+            )
+            if allowed_fragment_ids is not None else ""
+        ),
         NEWS_WRITER_GUIDE if any(_is_news_fragment(f) for f in fragments) else "",
         FORBIDDEN_TOPICS_GUIDE,
         SENTENCE_RANGE_GUIDE.format(
@@ -816,53 +830,6 @@ def parse_section_response(
 # ══════════════════════════════════════════════════════════
 # 장 단위 생성
 # ══════════════════════════════════════════════════════════
-
-
-def _generic_cell_key(value: str) -> str:
-    """일반어 대조용 열쇠 — 호환문자를 펼치고 공백을 없앤 소문자 표면.
-
-    ★ 왜 여기에 따로 두나 — 같은 일을 하는 ``diagram_check._compact_surface``를
-      부르면 ``diagram_check → logic`` 방향의 import가 되돌아와 순환이 된다.
-      이 함수는 «한 낱말 대조»에만 쓰는 최소판이라 구두점까지 지우지 않는다.
-    """
-
-    normalized = unicodedata.normalize("NFKC", str(value or ""))
-    return "".join(normalized.split()).casefold()
-
-
-#: 일반어 목록을 대조 열쇠로 미리 바꿔 둔다 — 칸마다 다시 만들지 않는다.
-_GENERIC_CELL_KEYS: Final[frozenset[str]] = frozenset(
-    _generic_cell_key(term) for term in FLOW_GENERIC_CELL_TERMS
-)
-
-
-def is_generic_flow_cell(value: str) -> bool:
-    """칸 값 «전체»가 어느 회사에나 들어맞는 한 낱말인가.
-
-    Args:
-        value: 도식 칸 하나의 값.
-
-    Returns:
-        「상품」·「고객」·「개인 사용자」처럼 회사를 전혀 가리키지 못하는 한
-        낱말이면 참. 빈 칸은 이 검사의 대상이 아니므로 거짓이다.
-
-    ★ 빈 칸에 거짓을 주는 것은 «검사 대상이 아니다»라는 뜻이다. 「칸이 비면
-      어떻게 하나」는 부르는 쪽(`_flow_row_from_item`·렌더러)이 이미 정해 뒀다.
-    ★ 조사는 «하나»만 뗀다. 「고객사」처럼 낱말을 이루는 글자는 떼지 않으므로
-      뜻이 있는 칸은 그대로 남는다.
-    """
-
-    key = _generic_cell_key(value)
-    if not key:
-        return False
-    if key in _GENERIC_CELL_KEYS:
-        return True
-    for particle in FLOW_GENERIC_CELL_PARTICLES:
-        if key.endswith(particle):
-            stem = key[: -len(particle)]
-            if stem and stem in _GENERIC_CELL_KEYS:
-                return True
-    return False
 
 
 def _flow_row_from_item(
@@ -1373,6 +1340,7 @@ def _sanitize_report_to_section_evidence(
     *,
     supported_claim_slots_by_fragment_id: Mapping[str, frozenset[str]] | None = None,
     enforce_claim_slot_support: bool = False,
+    enforce_declared_claim_slot_support: bool = False,
 ) -> ComposedReport:
     """장 밖 조각을 인용한 본문·도식 줄을 검수 AI 전에 제외한다.
 
@@ -1381,6 +1349,12 @@ def _sanitize_report_to_section_evidence(
     """
 
     supported_by_id = supported_claim_slots_by_fragment_id or {}
+
+    def claim_slot_required(sentence: ComposedSentence) -> bool:
+        return enforce_claim_slot_support or (
+            enforce_declared_claim_slot_support
+            and any(supported_by_id.get(citation) for citation in sentence.citations)
+        )
 
     def claim_slot_is_supported(
         sentence: ComposedSentence, *, section_id: str
@@ -1425,7 +1399,7 @@ def _sanitize_report_to_section_evidence(
             if set(sentence.citations).issubset(allowed)
             and not contains_inline_citation_marker(sentence.text)
             and (
-                not enforce_claim_slot_support
+                not claim_slot_required(sentence)
                 or claim_slot_is_supported(sentence, section_id=section.section_id)
             )
         )
@@ -1435,13 +1409,18 @@ def _sanitize_report_to_section_evidence(
             if set(row.citations).issubset(allowed)
             and not any(contains_inline_citation_marker(cell) for cell in row.cells)
             and (
-                not enforce_claim_slot_support
+                not (enforce_claim_slot_support or (
+                    enforce_declared_claim_slot_support
+                    and any(supported_by_id.get(citation) for citation in row.citations)
+                ))
                 or flow_row_is_supported(section_id=section.section_id, row=row)
             )
         )
         notice = section.notice
         if section.sentences and not sentences and not notice:
-            slot_rejected = enforce_claim_slot_support and any(
+            slot_rejected = any(
+                claim_slot_required(sentence)
+                and
                 set(sentence.citations).issubset(allowed)
                 and not contains_inline_citation_marker(sentence.text)
                 and not claim_slot_is_supported(
@@ -1455,8 +1434,8 @@ def _sanitize_report_to_section_evidence(
                 else _NOTICE_OUTSIDE_PACKET_CITATIONS
             )
         sections.append(
-            ComposedSection(
-                section_id=section.section_id,
+            replace(
+                section,
                 sentences=sentences,
                 notice=notice,
                 flow_rows=flow_rows,
@@ -1574,8 +1553,9 @@ def compose_sections(
     *,
     section_evidence_packets: Optional[SectionEvidencePackets] = None,
     composition_diagnostics: Optional[list[dict]] = None,
+    partial_evidence: PartialEvidenceView | None = None,
 ) -> ComposedReport:
-    """9개 장 전부를 작가 AI로 쓴다 — 장마다 1회 호출(파싱 실패 시 +1회).
+    """9개 목차를 만들며 확보자료 실행에서는 근거가 있는 장만 작성한다.
 
     Args:
         company_name: 분석 대상 법인 이름.
@@ -1602,8 +1582,13 @@ def compose_sections(
       전달하지 않고, 중복은 뒤의 single-owner/dedupe 단계에 맡긴다.
     """
     prepared: Optional[_PreparedSectionEvidencePackets] = None
+    if partial_evidence is not None and section_evidence_packets is not None:
+        raise ValueError("FULL 장별 packet과 확보자료 보기를 동시에 사용할 수 없습니다")
     if section_evidence_packets is None:
-        normalized = _normalize_fragments(fragments)
+        normalized = (
+            _normalize_fragments(fragments) if partial_evidence is None
+            else partial_evidence.fragments
+        )
     else:
         prepared = _prepare_section_evidence_packets(
             section_evidence_packets
@@ -1619,26 +1604,31 @@ def compose_sections(
         )
         # packet 모드에서는 flat 입력을 작가 프롬프트에 섞지 않는다.
         normalized = ()
+    independent = prepared is not None or partial_evidence is not None
     sections: list[ComposedSection] = []
     already_written: list[str] = []
     jobs: list[Callable[[], ComposedSection]] = []
-    if prepared is not None:
+    if independent and (partial_evidence is None or any(partial_evidence.packets.values())):
         prepare_parallel = getattr(ask, "prepare_parallel", None)
         if callable(prepare_parallel):
             # 유료 실행 Context와 지연 클라이언트는 부모에서 준비한 뒤 복사한다.
             prepare_parallel()
-    workers = section_worker_count(ask) if prepared is not None else SERIAL_SECTION_CALLS
+    workers = section_worker_count(ask) if independent else SERIAL_SECTION_CALLS
     started_at = time.monotonic()
     for section_id in SECTION_IDS:
+        if partial_evidence is not None and not partial_evidence.packets[section_id]:
+            # 근거가 없는 장은 AI를 호출하지 않는다. 작업 결과는 마지막에 목차순으로 합친다.
+            sections.append(ComposedSection(section_id, (), notice=NOTICE_INSUFFICIENT_EVIDENCE))
+            continue
         section_fragments = (
             normalized if prepared is None else prepared.packets[section_id]
         )
         section_table = (
             performance_table
-            if prepared is None or section_id == "past_changes"
+            if not independent or section_id == "past_changes"
             else None
         )
-        prompt_already_written = already_written if prepared is None else ()
+        prompt_already_written = already_written if not independent else ()
         # 장부가 있으면 작업 스레드에 들어가기 전에 장 ID와 배정 순서를 고정한다.
         bind_section = getattr(ask, "for_section", None)
         section_ask = bind_section(section_id) if callable(bind_section) else ask
@@ -1660,9 +1650,13 @@ def compose_sections(
                 # packet 모드는 장마다 조각이 달라 공유 앞부분이 아예 없다.
                 # 켜 봐야 캐시 «쓰기» 할증만 물고 읽기가 없어 손해다.
                 shared_evidence_prefix=prepared is None,
+                allowed_fragment_ids=(
+                    partial_evidence.allowed_fragment_ids_by_section[section_id]
+                    if partial_evidence is not None else None
+                ),
             ),
             section_ask,
-            reject_inline_citation_markers=prepared is not None,
+            reject_inline_citation_markers=independent,
             # packet/FULL 호출 계약은 장마다 정확히 한 번이다. 형식 오류를
             # 재호출로 감추지 않고 해당 장을 fail-closed 안내문으로 남긴다.
             parse_retry_limit=(0 if prepared is not None else PARSE_RETRY_LIMIT),
@@ -1672,23 +1666,43 @@ def compose_sections(
         else:
             section = job()
             sections.append(section)
-        if prepared is None:
+        if not independent:
             already_written.extend(sentence.text for sentence in section.sentences)
     if jobs:
-        sections = run_section_jobs(jobs, max_workers=workers)
+        sections.extend(run_section_jobs(jobs, max_workers=workers))
+    sections.sort(key=lambda section: SECTION_IDS.index(section.section_id))
     if composition_diagnostics is not None:
-        composition_diagnostics.append({
+        execution = {
             "step": SECTION_EXECUTION_STEP,
             "동시상한": workers,
             "장수": len(sections),
             "소요_ms": max(0, int((time.monotonic() - started_at) * MILLISECONDS_PER_SECOND)),
-        })
+        }
+        if partial_evidence is not None:
+            # 대상 장수에는 파싱 재요청을 더하지 않는다. 실제 호출 수와 구분한다.
+            target_count = sum(bool(partial_evidence.packets[section_id]) for section_id in SECTION_IDS)
+            execution[SECTION_EXECUTION_TARGET_COUNT_FIELD] = target_count
+            execution[SECTION_EXECUTION_EMPTY_COUNT_FIELD] = len(sections) - target_count
+        composition_diagnostics.append(execution)
     report = ComposedReport(sections=tuple(sections), summary=())
     # 작가 응답을 읽은 «직후» 줄 수 — 아래 정리에서 사라진 줄과 구분하기 위해
     # 반드시 정리 «전»에 남긴다.
     record_flow_row_counts(
         composition_diagnostics, report, stage=DIAGRAM_STAGE_PARSED
     )
+    if partial_evidence is not None:
+        sanitized = _sanitize_report_to_section_evidence(
+            report, partial_evidence.allowed_fragment_ids_by_section,
+            supported_claim_slots_by_fragment_id={
+                fragment.fragment_id: frozenset(fragment.supported_claim_slots)
+                for fragment in partial_evidence.fragments
+            },
+            enforce_declared_claim_slot_support=True,
+        )
+        record_flow_row_counts(
+            composition_diagnostics, sanitized, stage=DIAGRAM_STAGE_SECTION_EVIDENCE,
+        )
+        return sanitized
     if prepared is None:
         return report
     sanitized = _sanitize_report_to_section_evidence(

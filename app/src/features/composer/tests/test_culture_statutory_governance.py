@@ -133,8 +133,9 @@ def test_prose_review_removes_real_failures_without_an_extra_model_call(grouped,
     assert not any(text in json.dumps(public, ensure_ascii=False) for text in REAL_FAILURES)
     assert {source.number for source in rendered.citations} == ({len(texts)} if keep_training else set())
     if not keep_training:
-        assert culture["prose_lines"] == [(NOTICE_ALL_SENTENCES_REJECTED, "")]
-        assert culture["prose_paragraphs"] == [NOTICE_ALL_SENTENCES_REJECTED]
+        assert culture["prose_lines"] == []
+        assert culture["prose_paragraphs"] == []
+        assert culture["guidance_lines"] == [NOTICE_ALL_SENTENCES_REJECTED]
         assert culture["fact_ids"] == []
 
 

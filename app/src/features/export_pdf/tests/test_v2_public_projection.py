@@ -45,6 +45,7 @@ from src.features.composer.render import (
     render_report,
 )
 from src.features.export_pdf import logic as pdf_logic
+from src.features.composer.tests.flow_fixtures import reviewed_flow_fixture
 from src.features.export_pdf.content_manifest import (
     PDF_MANIFEST_SHA256_KEY,
     PDF_MANIFEST_VERSION_KEY,
@@ -270,7 +271,9 @@ def _v2_full_report(*, suffix: str = "1", scope: str = _PRIVATE_SCOPE) -> Report
     rendered = _sealed(
         render_report(
             "가나다전자",
-            _composed(),
+            reviewed_flow_fixture(
+                _composed(), _fragments(), baseline_date="2026-09-01",
+            ),
             _fragments(),
             _performance_table(),
             table_presentation="trend",
@@ -348,7 +351,7 @@ def test_v2_PDF는_블록_밖_문자열을_만들지_않는다(monkeypatch):
     assert _squeezed(_확인_문장) in text
     assert _squeezed(_PRIVATE_SCOPE) not in text
     # 부록 「사실 검증」 라벨도 봉인값에서 나와야 한다(전역을 막았으므로).
-    labels = {row.verification_label for row in report.public_projection.citations}
+    labels = {row.verification_label for row in report.public_projection.citation_groups}
     assert labels
     for label in labels:
         assert _squeezed(label) in text
@@ -565,8 +568,9 @@ def test_v2_PDF_텍스트는_display_paragraphs와_글자_단위로_같다():
 #: 줄었고, 본문 낱말 변경은 생성일 구분자 한 건뿐이다.
 #: 2026-09-23: 외부 언론 0건 안내 한 문장과 공식 웹 자료 열 라벨을 갱신했다.
 #: 이전 함수로 만든 PDF의 지문을 재현하고 이 세 줄만 바뀌었음을 대조했다.
-_V1_DEMO_PDF_SHA256 = "8b2ccad6af5564869330d1c66137026033732e74a926d02b4835297c0aef7299"
-_V1_DEMO_PDF_LENGTH = 91450
+# 2026-09-23: 4장 제목만 기간 중립 문구로 갱신. 옛 제목을 복원하면 직전 PDF 지문과 정확히 같다.
+_V1_DEMO_PDF_SHA256 = "ebb2eaf9b7acd30af0618684eacc9253b0200056ad7c35c91b827fdb86ebc433"
+_V1_DEMO_PDF_LENGTH = 91395
 
 
 def test_v1_PDF는_바이트_불변이다():

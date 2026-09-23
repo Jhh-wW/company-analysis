@@ -592,7 +592,7 @@ def test_top_band_shows_own_first_heading_but_continuation_inherits_last(demo_pd
 #: 낱말을 대조했으며 2026-08-19 한 개가 2026.08.19로 바뀐 것만 확인했다.
 _BODY_WORDS_SHA256 = (
     # 외부 언론 0건 안내와 회사 공식 웹 라벨 두 줄의 의도된 변경이다.
-    "e5753d07d6581a8537262784f66f517e9ff42ee96369356a388451dd2b306d85"
+    "7ed0f9979234461654322f1105db5d17371b0aba560aada9543873579aa07fbb"
 )
 
 #: 줄바꿈·쪽 나눔까지 포함한 «배치» 지문. 디자인을 바꾸면 여기서 먼저 깨진다.
@@ -609,7 +609,7 @@ _BODY_WORDS_SHA256 = (
 #: 같은 쪽에 들어가 7쪽에서 6쪽으로 줄었고, 출처와 본문 낱말은 보존됐다.
 _BODY_LAYOUT_SHA256 = (
     # 위 세 줄 외 본문·수치·쪽 나눔은 이전 함수 산출물과 대조했다.
-    "3d8a6bf88985da6f03d0e2727784b3963170b6ba07bea3194ea6f4cb3c41a52a"
+    "fd70e4d1a101cb1e7a02036afd81cacb15135d558b350a74b0cd5918a6cb2b2e"
 )
 
 

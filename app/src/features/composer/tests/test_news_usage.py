@@ -10,7 +10,7 @@ from pypdf import PdfReader
 
 from src.core import news_intake_switch
 from src.features.composer.constants import SECTION_IDS
-from src.features.composer.news_block import augment_news_blocks, news_ownership_from_claim_slots
+from src.features.composer.news_block import NEWS_BLOCK_HEADERS, augment_news_blocks, news_ownership_from_claim_slots
 from src.features.composer.news_usage import news_usage_diagnostics, supplement_news_candidates
 from src.features.composer.pipeline import run_v2
 from src.features.composer.port import ComposedReport, ComposedSection
@@ -106,6 +106,20 @@ def _run(mode=ReleaseMode.FULL, *, verdict="참", exclude=False, fragments=None,
     return output, writer, reviewer, packets
 
 
+def _assert_body_evidence_survives_without_repeated_list(output, fragments, article_count):
+    """목록 중복 제외 뒤에도 정확한 본문·결속 팩트·기사 출처가 모두 남는다."""
+    body = " ".join(text for section in output.report.sections for text, _cite in section.prose_lines)
+    assert output.news_usage_diagnostics["목록기사수"] == 0
+    assert dict(output.news_block_candidate_row_counts_by_section) == {"business_model": article_count}
+    assert output.news_block_row_counts_by_section == ()
+    assert dict(output.news_block_blocked_counts_by_reason)["redundant_with_prose"] == len(fragments)
+    for fragment in fragments:
+        assert fragment.text in body
+        assert any(fragment.text in fact.claim and fact.evidence_binding
+                   for fact in output.report.fact_records)
+        assert int(fragment.fragment_id) in {citation.number for citation in output.report.citations}
+
+
 def test_초안이_보도수치를_늘렸어도_같은_검수에서_통과한_원문후보만_남긴다():
     output, writer, reviewer, _ = _run(
         direct_news=True, news_transform=lambda text: text.replace("3건", "30건"),
@@ -114,7 +128,7 @@ def test_초안이_보도수치를_늘렸어도_같은_검수에서_통과한_�
     assert "30건" not in body
     assert "신규 설비 공급 계약을 3건 체결" in body
     assert output.news_usage_diagnostics["본문사용기사수"] == 2
-    assert output.news_usage_diagnostics["목록기사수"] == 2
+    _assert_body_evidence_survives_without_repeated_list(output, _fragments(), 2)
     assert writer.calls == 9
     assert len(reviewer.prompts) == 1
 
@@ -184,7 +198,7 @@ def test_여러_유용근거를_본문에_쓰되_작성9_검수1_호출계약을
     assert writer.calls == 9
     assert len(reviewer.prompts) == 1
     assert output.news_usage_diagnostics["본문사용기사수"] == 2
-    assert output.news_usage_diagnostics["목록기사수"] == 2
+    _assert_body_evidence_survives_without_repeated_list(output, _fragments(), 2)
     assert output.quality_observation.document_sources == 9
     body = " ".join(text for section in output.report.sections for text, _ in section.prose_lines)
     assert "2026-09-01 가나다경제 보도에 따르면, 가나다전자는 신규 설비 공급 계약을 3건" in body
@@ -307,8 +321,8 @@ def test_같은기사_여러원문도_FULL_독립봉인을_통과한다():
         document_content_sha256=first.document_content_sha256)
     output, *_ = _run(fragments=(first, second))
     assert output.report.public_projection is not None
-    assert output.news_usage_diagnostics["목록기사수"] == 1
     assert output.news_usage_diagnostics["본문사용기사수"] == 1
+    _assert_body_evidence_survives_without_repeated_list(output, (first, second), 1)
 
 
 def test_본문의_긴_정확원문을_목록에서_다시_통째로_복사하지_않는다():
@@ -317,9 +331,8 @@ def test_본문의_긴_정확원문을_목록에서_다시_통째로_복사하�
     output, *_ = _run(fragments=(fragment,))
     section = next(section for section in output.report.sections if section.cell == "business_model")
     assert any(text in sentence for sentence, _ in section.prose_lines)
-    content = section.tables[-1].rows[0][2]
-    assert "전체 보도 근거는 이 장 본문 참조" in content
-    assert text not in content
+    assert not any(table.headers == list(NEWS_BLOCK_HEADERS) for table in section.tables)
+    _assert_body_evidence_survives_without_repeated_list(output, (fragment,), 1)
     assert output.report.public_projection is not None
 
 

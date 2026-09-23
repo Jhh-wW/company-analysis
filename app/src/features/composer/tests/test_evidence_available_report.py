@@ -4,7 +4,7 @@
   ① 조각 0개 + 자료 확보 상태가 주어지면 AI를 한 번도 부르지 않고 아홉 장
      안내 + 회사 신원만 담은 부분 보고서가 나온다(v2 출고 검증·PDF 통과).
   ② 검증된 문장이 한 장뿐이어도 «요약 3문장» 하한 때문에 전체가 막히지 않는다.
-  ③ 요약 고르기 단계에서 AI 전역 장애(돈 문제)가 나도 이미 검증한 본문은 보존된다.
+  ③ 요약은 검증 본문을 재사용하므로 추가 AI 호출 장애와 비용이 생기지 않는다.
   ④ 작성 도중 AI 전역 장애가 나면 미검증 초안은 버리고 확보 자료로 마무리한다.
   ⑤ 기본 인자(전환 없음)에서는 예전처럼 예외로 끝난다 — 동작 불변.
   ⑥ 정책 값은 저장 payload를 거쳐도 살아남고, 웹·PDF 재검사도 같은 값으로 통과한다.
@@ -88,6 +88,7 @@ def _one_sentence_writer() -> _FakeWriter:
                         "글": "가나다전자는 반도체 검사 장비 전문기업이다.",
                         "인용": ["1"],
                         "등급": GRADE_CONFIRMED,
+                        "주장슬롯": "identity:corporate_identity",
                     }
                 ]
             },
@@ -134,8 +135,8 @@ def test_조각이_없으면_AI_없이_회사_신원과_안내만_담은_보고�
     assert COVERAGE_LINE_NONE in report.shortfall_reasons
     assert SUMMARY_NOTICE_EMPTY in report.shortfall_reasons
     for section in report.sections:
-        assert section.prose_lines == [(NOTICE_EVIDENCE_NONE, "")]
-        # 안내뿐인 장은 empty_reason에도 병기한다(파이프라인 빈 등록부 guard용).
+        assert section.prose_lines == []
+        # 안내는 본문 번호 없이 독립 필드로 표시한다.
         assert section.empty_reason == NOTICE_EVIDENCE_NONE
         assert not section.fact_ids and not section.tables
     assert output.degraded_reason == ""
@@ -221,7 +222,7 @@ class _SummaryStageMoneyFailure(_FakeWriter):
         return super().__call__(prompt)
 
 
-def test_요약_단계_돈_문제여도_전환이_허용되면_검증_본문을_보존한다() -> None:
+def test_요약_AI를_호출하지_않고_검증_본문을_보존한다() -> None:
     writer = _SummaryStageMoneyFailure()
 
     output = run_v2(
@@ -233,16 +234,16 @@ def test_요약_단계_돈_문제여도_전환이_허용되면_검증_본문을_
         preserve_on_ask_failure=True,
     )
 
-    _assert_evidence_available_shape(output)
     report = output.report
+    assert not any("핵심 요약" in prompt for prompt in writer.prompts)
     body = [text for section in report.sections for text, _cite in section.prose_lines]
     assert any("가나다전자는 반도체 검사 장비 전문기업" in text for text in body), (
         "검수를 통과한 본문 문장이 그대로 남아야 한다"
     )
     assert not any(section.empty_reason for section in report.sections if section.prose_lines and "[1]" in section.prose_lines[0][0])
-    assert output.degraded_reason == DEGRADED_REASON_PROVIDER_UNAVAILABLE
-    assert output.degraded_cause_kind == "RuntimeError"
-    assert "summary_selection" in output.ai_stages_skipped
+    assert output.degraded_reason == ""
+    assert output.degraded_cause_kind == ""
+    assert "summary_selection" not in output.ai_stages_skipped
     assert report.summary_items, "규칙 요약이 검증 본문 문장으로 채워져야 한다"
     # 규칙 요약은 검증 본문 문장 그대로다 — 새 글자를 만들지 않는다.
     for item in report.summary_items:
@@ -278,7 +279,8 @@ def test_작성_도중_예산_소진이면_미검증_초안을_버리고_확보_
     report = output.report
     assert reviewer.prompts == [], "검수 없이 초안을 실을 수 없으므로 검수도 부르지 않는다"
     for section in report.sections:
-        assert section.prose_lines == [(NOTICE_AI_UNAVAILABLE, "")]
+        assert section.prose_lines == []
+        assert section.empty_reason == NOTICE_AI_UNAVAILABLE
     assert output.degraded_reason == DEGRADED_REASON_REQUEST_BUDGET_EXHAUSTED
     assert output.ai_stages_skipped == ("compose_verify",)
     assert report.citations == []
@@ -324,15 +326,15 @@ def test_안내문이_내부_키_모양이면_거절한다() -> None:
 # ══════════════════════════════════════════════════════════
 
 
-class _CancelledAtSummary(_FakeWriter):
-    """요약 고르기에서 실행 취소(조정 오류)로 죽는 작가."""
+class _CancelledAtSection(_FakeWriter):
+    """실제로 호출하는 장 작성에서 취소·조정 오류를 전달한다."""
 
     def __init__(self, cause: BaseException) -> None:
         super().__init__()
         self._cause = cause
 
     def __call__(self, prompt: str) -> str:
-        if "핵심 요약" in prompt:
+        if self.section_calls >= 2:
             raise AskFatalError(self._cause)
         return super().__call__(prompt)
 
@@ -366,7 +368,7 @@ def test_전역_취소나_epoch_변경은_전환을_허용해도_그대로_올�
             "가나다전자",
             _raw_fragments(),
             None,
-            writer_ask=_CancelledAtSummary(cause),
+            writer_ask=_CancelledAtSection(cause),
             reviewer_ask=_FakeReviewer(),
             preserve_on_ask_failure=True,
             evidence_availability=_PARTIAL,
@@ -452,7 +454,7 @@ def test_재작성_단계_돈_문제여도_검증을_마친_문장은_남는다(
 
     _assert_evidence_available_shape(output)
     body = [text for section in output.report.sections for text, _ in section.prose_lines]
-    assert any("가나다전자는 반도체 검사 장비 전문기업" in text for text in body)
+    assert any("본사는 수원에 있다" in text for text in body)
     assert output.degraded_reason == DEGRADED_REASON_PROVIDER_UNAVAILABLE
     assert output.degraded_cause_kind == "RuntimeError"
     assert "sentence_rewrite" in output.ai_stages_skipped

@@ -12,6 +12,30 @@ def test_작성_시간과_상한만_남기고_원문은_버린다():
     assert observed_composition_steps([{**record, "원문": "비공개"}]) == (record,)
 
 
+@pytest.mark.parametrize("target,skipped", [(7, 2), (0, 9), (9, 0)])
+def test_부분작성_대상과_생략수는_함께_보존하고_임의_호출수는_버린다(target, skipped):
+    record = {
+        "step": "v2_작성_실행방식", "동시상한": 3, "장수": 9, "소요_ms": 200,
+        "작성대상장수": target, "빈근거생략장수": skipped,
+    }
+    assert observed_composition_steps([{**record, "원문": "비공개", "실제호출수": 9}]) == (record,)
+
+
+@pytest.mark.parametrize("counts", [
+    {"작성대상장수": 7}, {"빈근거생략장수": 2},
+    {"작성대상장수": -1, "빈근거생략장수": 10},
+    {"작성대상장수": True, "빈근거생략장수": 8},
+    {"작성대상장수": 7, "빈근거생략장수": "원문"},
+    {"작성대상장수": 7, "빈근거생략장수": -2},
+    {"작성대상장수": 7, "빈근거생략장수": False},
+    {"작성대상장수": 7, "빈근거생략장수": 3},
+    {"작성대상장수": 6, "빈근거생략장수": 2},
+])
+def test_부분작성_수의_누락과_열린값과_목차불일치는_거절한다(counts):
+    record = {"step": "v2_작성_실행방식", "동시상한": 3, "장수": 9, "소요_ms": 200, **counts}
+    assert observed_composition_steps([record]) == ()
+
+
 @pytest.mark.parametrize("field,value", [
     ("동시상한", 0), ("동시상한", True), ("장수", -1), ("소요_ms", "원문"),
 ])

@@ -8,6 +8,8 @@ from typing import Any
 
 from src.features.composer.tests import review_evidence_fixture as fixture
 from src.features.composer.grounding import grounding_problem
+from src.features.composer.port import CollectedFragment, ComposedSentence
+from src.features.composer.verify import _GroupedReviewItem, _build_grouped_review_prompt
 from src.shared.report_quality.assessment import has_public_numeric_token
 
 
@@ -18,6 +20,29 @@ _FRAGMENTS: dict[str, dict[str, str]] = json.loads(
 _RESPONSES: dict[str, Any] = json.loads(
     (_FIXTURE_DIR / "jyp_ask_responses.json").read_text(encoding="utf-8")
 )
+
+
+def test_실제_묶음검수_프롬프트의_등급줄_뒤_본문도_빠짐없이_읽는다() -> None:
+    sentence = ComposedSentence(
+        text="회사는 고객에게 분석 서비스를 제공한다.",
+        citations=("1",),
+        grade="확인",
+        planned_claim_slot="business_model:value_exchange",
+    )
+    prompt = _build_grouped_review_prompt(
+        [_GroupedReviewItem(number=1, section_id="business_model", kind="문장",
+                            citations=sentence.citations, sentence=sentence)],
+        {"1": CollectedFragment(fragment_id="1", kind="사업내용", text=sentence.text)},
+        None,
+    )
+    items = fixture.review_items(prompt)
+    assert len(items) == 1
+    assert items[0].text == sentence.text
+    assert items[0].section == "business_model"
+    assert items[0].citations == ("1",)
+    assert json.loads(fixture.grounded_review_response(prompt))["판정"] == [
+        {"번호": 1, "장": "business_model", "근거": ["1"], "결과": "참"}
+    ]
 
 
 def _proof_entries(value: object) -> list[dict[str, object]]:

@@ -24,6 +24,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from src.features.composer.constants import PARSE_RETRY_LIMIT
+from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_GUIDES
 from src.features.composer.grounding_rewrite_constants import (
     GROUNDING_REWRITE_ABANDON_KEY,
     GROUNDING_REWRITE_EVIDENCE_HEAD,
@@ -62,6 +63,7 @@ class GroundingRewriteTarget:
     text: str
     citations: tuple[str, ...]
     reason_code: str
+    detail: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -119,6 +121,7 @@ def _target_lines(targets: Sequence[GroundingRewriteTarget]) -> list[str]:
             f"  원문장(JSON 문자열): "
             f"{json.dumps(target.text, ensure_ascii=False)}\n"
             f"  탈락 사유: {grounding_reason_text(target.reason_code)}\n"
+            f"  세부 검사: {GROUNDING_DETAIL_GUIDES.get(str(target.detail.get('stage', '')), '추가 상세 없음')}\n"
         )
     return lines
 
@@ -129,32 +132,23 @@ def build_grounding_rewrite_prompt(
 ) -> tuple[str, tuple[GroundingRewriteTarget, ...]]:
     """프롬프트와 «실제로 실린» 대상 목록을 만든다.
 
-    글자 상한을 넘으면 뒤쪽 대상부터 빼고 다시 만든다 — 조각 원문도 함께 줄어야
-    하므로 목록을 줄인 뒤 처음부터 다시 조립한다(남은 대상이 인용하지 않는
-    조각은 더 이상 실리지 않는다).
+    순환으로 정한 우선순서를 지키되 한 후보의 긴 원문 때문에 뒤의 짧은 후보까지
+    굶지 않게, 완전한 자기 인용을 넣을 수 있는 후보만 같은 상한 안에 담는다.
     """
 
-    kept = list(targets)
-    while kept:
+    kept: list[GroundingRewriteTarget] = []
+    prompt = ""
+    for target in targets:
+        trial = [*kept, target]
         parts = [GROUNDING_REWRITE_PROMPT_HEADER, GROUNDING_REWRITE_EVIDENCE_HEAD]
-        parts.extend(_fragment_lines(kept, frag_by_id))
+        parts.extend(_fragment_lines(trial, frag_by_id))
         parts.append(GROUNDING_REWRITE_TARGET_HEAD)
-        parts.extend(_target_lines(kept))
+        parts.extend(_target_lines(trial))
         parts.append(GROUNDING_REWRITE_TAIL)
-        prompt = "".join(parts)
-        if len(prompt) <= GROUNDING_REWRITE_MAX_PROMPT_CHARS or len(kept) == 1:
-            if len(prompt) > GROUNDING_REWRITE_MAX_PROMPT_CHARS:
-                # 대상 하나만 남았는데도 상한을 넘는다 — 조각 원문 자체가 큰
-                # 경우다. 자르면 근거가 잘린 채로 고쳐 쓰게 되므로 보내지 않는다.
-                logger.warning(
-                    "근거 결속 재작성 프롬프트가 대상 1개로도 상한(%d자)을 넘는다 — "
-                    "보내지 않는다",
-                    GROUNDING_REWRITE_MAX_PROMPT_CHARS,
-                )
-                return "", ()
-            return prompt, tuple(kept)
-        kept.pop()
-    return "", ()
+        trial_prompt = "".join(parts)
+        if len(trial_prompt) <= GROUNDING_REWRITE_MAX_PROMPT_CHARS:
+            kept, prompt = trial, trial_prompt
+    return prompt, tuple(kept)
 
 
 def _read_rewrites(
@@ -172,6 +166,7 @@ def _read_rewrites(
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
         return {}, 0, EMPTY_RECOVERY_SHAPE_NO_TARGET
     rewritten: dict[int, str] = {}
+    seen_numbers: set[int] = set()
     abandoned = 0
     for row in rows:
         if not isinstance(row, Mapping):
@@ -179,11 +174,12 @@ def _read_rewrites(
         number = row.get(GROUNDING_REWRITE_NUMBER_KEY)
         if not isinstance(number, int) or isinstance(number, bool):
             continue
-        if number not in requested or number in rewritten:
+        if number not in requested or number in seen_numbers:
             # 요청하지 않은 번호는 버린다. 같은 번호를 두 번 주면 첫 답만 쓴다 —
             # 뒤의 답으로 덮으면 같은 응답에서 «어느 쪽이 쓰였는지»가 응답 순서에
             # 좌우된다.
             continue
+        seen_numbers.add(number)
         if bool(row.get(GROUNDING_REWRITE_ABANDON_KEY)):
             abandoned += 1
             continue

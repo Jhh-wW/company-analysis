@@ -55,6 +55,7 @@ from src.features.composer.port import (
     PerformanceTable,
 )
 from src.features.composer.render import render_report
+from src.features.composer.tests.flow_fixtures import reviewed_flow_fixture
 from src.features.pipeline.canonical_demo import build_demo_report
 from src.features.pipeline.port import FactRecord, Report
 from src.features.report_standard.public_projection import build_public_projection
@@ -227,7 +228,7 @@ def _unsealed_v2_report(
 
     rendered = render_report(
         "가나다전자",
-        _composed(),
+        reviewed_flow_fixture(_composed(), _fragments(), baseline_date="2026-09-01"),
         _fragments(),
         _performance_table(),
         table_presentation="trend",
@@ -495,7 +496,7 @@ def test_웹_v2_부록에_사실검증_열이_PDF와_같은_라벨로_나온다(
 
     assert f'<th scope="col">{_VERIFICATION_COLUMN_LABEL}</th>' in article
     assert projection.citations, "재료가 잘못됐다 — 봉인에 부록 행이 없다"
-    for row in projection.citations:
+    for row in projection.citation_groups:
         assert row.verification_label
         assert f"<td>{row.verification_label}</td>" in article
         assert f"<td>{row.status_display}</td>" in article
@@ -561,7 +562,7 @@ def test_웹과_PDF는_같은_display_sha256의_블록에서_나왔다(
     # 만들던 문자열과 달라서(예: 자료 상태의 fact_status), 블록을 읽지 않으면
     # 화면에 나올 수 없다.
     assert projection.citations
-    for row in projection.citations:
+    for row in projection.citation_groups:
         assert f"<td>{row.status_display}</td>" in article
         assert f"<td>{row.verification_label}</td>" in article
         assert f"<td>{row.used_in_display}</td>" in article
@@ -638,7 +639,7 @@ def test_웹_v2는_ledger를_렌더하지_않는다(monkeypatch: pytest.MonkeyPa
 _V1_GOLDEN = Path(__file__).with_name("result_v1_article_golden.html")
 _V1_GOLDEN_TEXT_SHA256_CURRENT_APPROVED = (
     # 2026-09-23: 기존 날짜 점 표기와 부록 안내·공식 웹 라벨을 반영했다.
-    "9e31b84f75c32bde2a1f5e39539f7e76c9c26245d807ae67449b2796912b12c2"
+    "92b71ad8a91b264643d3c794365d51f96dea4cf072a7218898443048f7ba7a57"
 )
 
 

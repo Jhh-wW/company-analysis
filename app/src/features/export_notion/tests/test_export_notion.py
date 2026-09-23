@@ -886,10 +886,10 @@ def test_v1_Notion_블록은_불변이다() -> None:
     # 2026-09-23: 기존 생성일 점 표기와 이번 부록 안내·공식 웹 라벨을 반영한다.
     # HEAD 함수와 대조한 이번 변경은 안내 한 블록과 자료명 두 칸뿐이다.
     assert _blocks_sha256(full_blocks) == (
-        "99b35fbc2301208598af4decf9ced2b840bc5c5d50a427f33e11d54ab54129f5"
+        "58c408351ad4c964947a226a9109781b0a3e30884507f5e8090bdea62494562c"
     )
     assert _blocks_sha256(logic.build_blocks(partial)) == (
-        "1b72d1b49b5480fa39e56ce4cda1d6210c6fc2f0ef596c631c1497a65d852d8d"
+        "ec6ade9e630b820f522e5798908d7fc1c20900919ce00b863abc09162f3496b5"
     )
 
 

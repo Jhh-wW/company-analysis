@@ -96,6 +96,8 @@ def test_flat_본문_결속누락은_원문없는_구조화진단으로_남는�
             "reason_code": GROUNDING_MISSING,
             "candidate_sha256": _digest(_CANDIDATE),
             "verification_items": ("수치",),
+            "candidate_fingerprint_version": "candidate-raw-utf8-v1",
+            "grounding_detail": {"version": "grounding-detail-v1", "check_kind": "근거", "stage": "grounding_missing"},
         }
     ]
     serialized = json.dumps(diagnostics, ensure_ascii=False)
@@ -138,6 +140,8 @@ def test_verify_sentences는_요약의_잘못된_결속을_invalid로_구분한�
             "reason_code": GROUNDING_INVALID,
             "candidate_sha256": _digest(_CANDIDATE),
             "verification_items": ("수치",),
+            "candidate_fingerprint_version": "candidate-raw-utf8-v1",
+            "grounding_detail": {"version": "grounding-detail-v1", "check_kind": "수치", "stage": "expression_not_in_candidate", "entry_index": 0},
         }
     ]
 
@@ -180,6 +184,8 @@ def test_grouped_본문과_도식의_결속누락을_각각_기록한다() -> No
             "reason_code": GROUNDING_MISSING,
             "candidate_sha256": _digest(_CANDIDATE),
             "verification_items": ("수치",),
+            "candidate_fingerprint_version": "candidate-raw-utf8-v1",
+            "grounding_detail": {"version": "grounding-detail-v1", "check_kind": "근거", "stage": "grounding_missing"},
         },
         {
             "section_id": "operations_partners",
@@ -187,6 +193,8 @@ def test_grouped_본문과_도식의_결속누락을_각각_기록한다() -> No
             "reason_code": GROUNDING_MISSING,
             "candidate_sha256": _digest(flow_text),
             "verification_items": ("수치",),
+            "candidate_fingerprint_version": "candidate-raw-utf8-v1",
+            "grounding_detail": {"version": "grounding-detail-v1", "check_kind": "근거", "stage": "grounding_missing"},
         },
     ]
 
@@ -225,6 +233,7 @@ def test_legacy_도식도_같은_진단수집기를_쓴다() -> None:
                 "원재료 매출액은 약 1,683억원 고객"
             ),
             "verification_items": ("수치",),
+            "candidate_fingerprint_version": "candidate-raw-utf8-v1",
         }
     ]
 

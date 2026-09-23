@@ -90,6 +90,7 @@ TABLE_FONT_SIZE_PT: Final[float] = 7.7
 BODY_LEADING_PT: Final[float] = 14.1
 # 짧은 글 전용 장은 제목과 함께 묶어 마지막 문단만 다음 쪽에 남지 않게 한다.
 SHORT_TEXT_SECTION_MAX_HEIGHT_PT: Final[float] = 200.0
+SECTION_INTRO_WITH_TABLE_MAX_HEIGHT_PT: Final[float] = 300.0
 CARD_LEADING_PT: Final[float] = 11.8
 TABLE_LEADING_PT: Final[float] = 10.0
 # 부록 시작에는 제목 블록 49pt, 안내문 15pt, 머리행 22pt와
@@ -97,6 +98,7 @@ TABLE_LEADING_PT: Final[float] = 10.0
 APPENDIX_MIN_START_HEIGHT_PT: Final[float] = 182.0
 APPENDIX_MIN_START_ROWS: Final[int] = 3
 APPENDIX_CELL_PADDING_PT: Final[float] = 6.0
+READER_APPENDIX_CELL_PADDING_PT: Final[float] = 4.0
 #: A4 세로 길이(297mm). 부록 꼬리 두 행이 한 쪽에 들어가는지 잴 때 쓴다.
 A4_HEIGHT_PT: Final[float] = 297 * 72 / 25.4
 #: 부록 표의 «머리행 + 마지막 두 본문 행»이 이 높이 안에 들어갈 때만 두 행을

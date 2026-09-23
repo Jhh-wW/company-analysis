@@ -34,7 +34,6 @@ from src.features.composer.diagram_check import (
 from src.features.composer.pipeline import run_v2
 from src.features.composer.tests.test_pipeline import (
     _summary_selection_json,
-    summary_candidate_filler,
 )
 from src.features.composer.port import filing_meta_from_raw, fragments_from_raw
 from src.features.composer.portfolio_name_table import (
@@ -48,6 +47,10 @@ from src.features.composer.portfolio_names import (
     representative_name_sources,
 )
 from src.features.pipeline import real
+from src.features.pipeline.tests.name_table_fixture import (
+    supported_body_sentences,
+    with_supported_body_fragments,
+)
 from src.features.pipeline.tests.test_product_name_fragments import (
     CORP_ID,
     GENERATION_SHA256,
@@ -59,9 +62,7 @@ from src.features.pipeline.tests.test_product_name_fragments import (
 
 #: 로컬에만 두는 실측 원문(공개 DART 사업보고서 사본). 없으면 건너뛴다.
 #: 키는 회사명이 아니라 «업종 설명»이다 — 회사명 문자열을 코드에 안 남긴다.
-_RUNS_ROOT = Path(
-    "C:/Users/jh-wo/.claude/workspace/기업분석2/app/.local_evaluation_runs"
-)
+_RUNS_ROOT = Path(__file__).resolve().parents[4] / ".local_evaluation_runs"
 _RECEIPTS = {
     "상장 엔터사": "20260320000802",
     "대형 제조사": "20260310002820",
@@ -102,7 +103,7 @@ def _frags_from_real_filing(receipt: str) -> dict[int, dict[str, object]]:
         raw_path=str(path),
     )
     assert added > 0, "실측 원문에서 이름 조각이 하나도 안 나왔습니다"
-    return frags
+    return with_supported_body_fragments(frags)
 
 
 class _Writer:
@@ -123,17 +124,7 @@ class _Writer:
         if "핵심 요약" in prompt:
             # 요약은 이제 «고르기»다 — 문장을 지어내지 않고 후보 번호만 답한다.
             return _summary_selection_json(prompt)
-        payload: dict[str, object] = {
-            "문장들": [
-                {"글": "테스트 회사의 공식 근거다.", "인용": ["1"], "등급": "확인"}
-            ]
-        }
-        # 장마다 다른 문장을 하나 더 둬야 요약 후보가 3개 이상 생긴다
-        # (근거는 `summary_candidate_filler` docstring).
-        문장들 = payload["문장들"]
-        보충 = summary_candidate_filler(prompt)
-        if isinstance(문장들, list) and 보충 is not None:
-            문장들.append(보충)
+        payload: dict[str, object] = {"문장들": supported_body_sentences(prompt)}
         if PORTFOLIO_TABLE_HEADERS[0] in prompt:
             self.portfolio_prompts.append(prompt)
             cells = (

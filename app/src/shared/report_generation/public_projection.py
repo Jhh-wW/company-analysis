@@ -938,6 +938,40 @@ def public_section_content_block_from_dict(
 
 
 @dataclass(frozen=True)
+class PublicCitationGroup:
+    """원장 번호를 보존하는 독자용 기사·출처 표시 행."""
+
+    numbers: tuple[int, ...]
+    label_display: str
+    url: str
+    status_display: str
+    verification_label: str
+    location: str
+    used_in_display: str
+
+    def __post_init__(self) -> None:
+        if (type(self.numbers) is not tuple or not self.numbers
+                or any(type(number) is not int or number < 1 for number in self.numbers)
+                or len(set(self.numbers)) != len(self.numbers)):
+            raise PublicProjectionError("출처 표시 묶음 번호가 잘못됐습니다")
+        for name in ("label_display", "url", "status_display", "verification_label", "location", "used_in_display"):
+            _require_str(getattr(self, name), label=f"출처 표시 묶음 {name}")
+
+
+def _citation_group_from_dict(data: object) -> PublicCitationGroup:
+    expected = {"numbers", "label_display", "url", "status_display", "verification_label", "location", "used_in_display"}
+    if type(data) is not dict or set(data) != expected or type(data["numbers"]) is not list:
+        raise PublicProjectionError("출처 표시 묶음 형식이 잘못됐습니다")
+    return PublicCitationGroup(**{**data, "numbers": tuple(data["numbers"])})
+
+
+def _citation_groups_from_list(data: object) -> tuple[PublicCitationGroup, ...]:
+    if type(data) is not list:
+        raise PublicProjectionError("출처 표시 묶음은 배열이어야 합니다")
+    return tuple(_citation_group_from_dict(row) for row in data)
+
+
+@dataclass(frozen=True)
 class PublicReportProjection:
     """보고서 전체의 공개 projection — 헤더·표지·요약·아홉 장·부록."""
 
@@ -951,8 +985,28 @@ class PublicReportProjection:
     #: (title, detail).
     grade_notice: tuple[str, str]
     citations_note: str = ""
+    # 구형 FULL 저장본에서는 필드와 canonical 지문 모두 추가하지 않는다.
+    citation_groups: tuple[PublicCitationGroup, ...] = field(default=(), metadata={"canonical_omit_empty": True})
+    reader_notes: tuple[str, ...] = field(default=(), metadata={"canonical_omit_empty": True})
+    summary_notes: tuple[tuple[str, str], ...] = field(default=(), metadata={"canonical_omit_empty": True})
 
     def __post_init__(self) -> None:
+        _require_str_tuple(self.reader_notes, label="자료 범위 안내")
+        if type(self.summary_notes) is not tuple or any(
+            type(row) is not tuple or len(row) != 2 or any(type(value) is not str for value in row)
+            for row in self.summary_notes
+        ):
+            raise PublicProjectionError("요약 주석 형식이 잘못됐습니다")
+        if any(ordinal not in {row.ordinal for row in self.summary} for ordinal, _ in self.summary_notes):
+            raise PublicProjectionError("요약 주석이 없는 요약 행을 참조합니다")
+        if len({ordinal for ordinal, _ in self.summary_notes}) != len(self.summary_notes):
+            raise PublicProjectionError("요약 주석 번호가 중복됐습니다")
+        if type(self.citation_groups) is not tuple or any(type(row) is not PublicCitationGroup for row in self.citation_groups):
+            raise PublicProjectionError("출처 표시 묶음 형식이 잘못됐습니다")
+        if self.citation_groups:
+            numbers = [number for row in self.citation_groups for number in row.numbers]
+            if len(numbers) != len(set(numbers)) or set(numbers) != {row.number for row in self.citations}:
+                raise PublicProjectionError("출처 표시 묶음은 원장 번호를 정확히 한 번씩 포함해야 합니다")
         if type(self.citations_note) is not str:
             raise PublicProjectionError("부록 안내문은 문자열이어야 합니다")
         if type(self.version) is not str or self.version != PUBLIC_PROJECTION_VERSION:
@@ -1063,7 +1117,8 @@ def public_report_projection_from_dict(
         "summary_source_grade_contribution",
         "grade_notice",
     }
-    if type(data) is not dict or set(data) not in (expected, expected | {"citations_note"}):
+    optional = {"citations_note", "citation_groups", "reader_notes", "summary_notes"}
+    if type(data) is not dict or not expected <= set(data) or set(data) - expected - optional:
         raise PublicProjectionError("공개 projection의 key 또는 객체 형식이 계약과 다릅니다")
     header_raw = data["header"]
     if type(header_raw) is not dict:
@@ -1107,6 +1162,9 @@ def public_report_projection_from_dict(
         ),
         grade_notice=tuple(grade_notice_raw),
         citations_note=str(data.get("citations_note", "")),
+        citation_groups=_citation_groups_from_list(data.get("citation_groups", [])),
+        reader_notes=_tuple_of_str(data.get("reader_notes", []), label="자료 범위 안내"),
+        summary_notes=_tuple_of_fixed_width(data.get("summary_notes", []), width=2, label="요약 주석"),
     )
     if public_report_projection_to_dict(value) != data:
         raise PublicProjectionError("공개 projection이 canonical wire 왕복과 다릅니다")

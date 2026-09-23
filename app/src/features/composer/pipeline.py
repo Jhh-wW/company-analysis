@@ -59,6 +59,8 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     STYLE_RENDER_SUPPLEMENT,
     STYLE_STEP,
     SUMMARY_STEP,
+    SUMMARY_PATH_FACT_REUSE,
+    PUBLIC_BINDING_STEP,
 )
 from src.features.composer.logic import (
     AskFn,
@@ -112,6 +114,8 @@ from src.features.composer.evidence_availability import (
     EvidenceAvailability,
 )
 from src.features.composer.dedupe import (
+    MovedFactRecord,
+    drop_superseded_news_plans,
     drop_cross_section_duplicates,
     reconcile_section_notices,
     sections_with_program_tables,
@@ -124,6 +128,12 @@ from src.features.composer.empty_section_recovery import (
 )
 from src.features.composer.empty_section_recovery_constants import EMPTY_RECOVERY_STEP, MAX_EMPTY_RECOVERY_SECTIONS
 from src.features.composer.diagram_check import check_diagram_numbers, check_diagrams
+from src.features.composer.partial_evidence import build_partial_evidence_view
+from src.features.composer.flow_review_binding import filter_reviewed_flow_rows
+from src.features.composer.quality_projection import (
+    BoundPublicSentenceSelection, select_bound_public_sentences,
+)
+from src.shared.report_quality.review_diagnostic_constants import CANDIDATE_FINGERPRINT_VERSION
 from src.features.composer.dup_detect import CONFIDENCE_CONFIRMED, find_numeric_duplicates
 from src.features.composer.extractive_summary import (
     distinct_summary_candidates,
@@ -132,6 +142,7 @@ from src.features.composer.extractive_summary import (
 from src.features.composer.news_block import (
     NewsBlockResult,
     augment_news_blocks,
+    nonredundant_news_rows,
     news_ownership_from_claim_slots,
 )
 from src.features.composer.portfolio_name_table import (
@@ -301,6 +312,8 @@ class V2RunOutput:
     news_block_row_counts_by_section: tuple[tuple[str, int], ...] = ()
     #: 보도표에서 «뺀 행»과 «못 붙인 장»의 사유별 수(`news_block.BLOCKED_*`).
     news_block_blocked_counts_by_reason: tuple[tuple[str, int], ...] = ()
+    #: 공개 행과 구분한 기사 후보 수. 제외됐으면 후보는 남고 공개 행은 0이다.
+    news_block_candidate_row_counts_by_section: tuple[tuple[str, int], ...] = ()
     news_usage_diagnostics: dict[str, object] = field(default_factory=dict)
     #: 원문을 저장하지 않는 검수 제외 진단. 본문·요약·도식에서 같은 계약을 쓴다.
     review_diagnostics: tuple[dict[str, object], ...] = ()
@@ -1277,6 +1290,53 @@ def _apply_evidence_available_policy(
     )
 
 
+def _record_public_binding(
+    selection: BoundPublicSentenceSelection,
+    composition_diagnostics: list[dict],
+    review_diagnostics: list[dict],
+) -> None:
+    """공개 직전 제외를 원문 없는 위치·사유·지문으로 남긴다."""
+    composition_diagnostics.append({
+        "step": PUBLIC_BINDING_STEP,
+        "본문후보수": len(selection.fact_ids) + len(selection.excluded),
+        "결속문장수": len(selection.fact_ids),
+        "미결속제외수": len(selection.excluded),
+    })
+    review_diagnostics.extend({
+        "section_id": item.section_id, "kind": "본문",
+        "reason_code": item.reason_code, "candidate_sha256": item.candidate_sha256,
+        "candidate_fingerprint_version": CANDIDATE_FINGERPRINT_VERSION,
+        "verification_items": ("공개 사실 결속",),
+    } for item in selection.excluded)
+
+
+def _visible_news_row_counts(
+    report: ComposedReport, fragments: FragmentsInput,
+) -> tuple[tuple[str, int], ...]:
+    """renderer와 같은 생존 행·실존 인용 조건으로 최종 공개 행만 센다."""
+    valid_ids = {fragment.fragment_id for fragment in _normalize_fragments(fragments)}
+    counts = []
+    for section in report.sections:
+        count = sum(bool(valid_ids.intersection(row.citations))
+                    for row in nonredundant_news_rows(section))
+        if count:
+            counts.append((section.section_id, count))
+    return tuple(counts)
+
+
+def _record_fact_summary(
+    candidate_count: int, summary_count: int, composition_diagnostics: list[dict],
+) -> None:
+    """정상·확보자료 마무리가 같은 요약 계측 계약을 사용한다."""
+    composition_diagnostics.append({
+        "step": SUMMARY_STEP, "경로": SUMMARY_PATH_FACT_REUSE, "도달단계": "최종",
+        "본문후보수": candidate_count, "초안수": 0, "검수후수": None,
+        "첫보충후수": None, "수치검사후수": summary_count,
+        "최종수": summary_count, "작성한도도달": False, "검수한도도달": False,
+        "추가AI호출": 0, "사실결속수": summary_count,
+    })
+
+
 def _finish_evidence_available(
     company_name: str,
     verified: ComposedReport,
@@ -1306,6 +1366,8 @@ def _finish_evidence_available(
     name_table: object | None = None,
     verified_program_facts: Sequence[FactRecord] = (),
     program_registry_sources: Sequence[Source] = (),
+    moved_facts: Sequence[MovedFactRecord] = (),
+    news_block_result: NewsBlockResult | None = None,
 ) -> V2RunOutput:
     """검증된 본문(또는 안내뿐인 본문)에서 AI 0회로 확보 근거 보고서를 마무리한다.
 
@@ -1323,6 +1385,7 @@ def _finish_evidence_available(
 
     extra_reasons: list[str] = []
     body = verified
+    news_block = news_block_result or NewsBlockResult(report=body)
     numeric_filtering: NumericSafetyFiltering
     if tail_already_applied:
         body, numeric_filtering = enforce_public_numeric_safety(body)
@@ -1353,32 +1416,48 @@ def _finish_evidence_available(
     body = sanitize_stray_citation_markers(
         body, fragments, diagnostics=review_diagnostics,
     )
-    final, numeric_filtering = _rule_summary_stage(
-        body, numeric_filtering, company_name=company_name,
+    body = filter_reviewed_flow_rows(
+        body, _normalize_fragments(fragments), baseline_date=as_of_date or "",
+        diagnostics=review_diagnostics,
     )
+    def _render_available(candidate, *, style_diagnostics=None):
+        return render_report(
+            company_name, candidate, fragments, performance_table,
+            corp_type=corp_type, grade=Grade.PARTIAL, generated_at=generated_at,
+            as_of_date=as_of_date, analysis_period=analysis_period,
+            latest_performance_period=latest_performance_period,
+            table_presentation=table_presentation, filing_meta=filing_meta,
+            composition_tables=composition_tables, citation_style=citation_style,
+            company_id=str(company_id).strip(), release_mode="",
+            verified_program_facts=verified_program_facts,
+            program_registry_sources=program_registry_sources,
+            name_table=name_table, style_diagnostics=style_diagnostics,
+        )
+    body_rendered = _render_available(body)
+    selection = select_bound_public_sentences(body, body_rendered)
+    _record_public_binding(selection, composition_diagnostics, review_diagnostics)
+    body = selection.report
+    final_moved_facts = list(moved_facts)
+    body, superseded = drop_superseded_news_plans(
+        body, fragments=_normalize_fragments(fragments),
+        sections_with_tables=sections_with_program_tables(performance_table, composition_tables),
+        moved_facts_sink=final_moved_facts,
+    )
+    if selection.excluded or superseded:
+        news_block = _augment_news_blocks(
+            body, fragments, None, enabled=True,
+            review_candidates=frozenset(news_review_candidates),
+        )
+        body = news_block.report
+    body = reconcile_section_notices(
+        body, sections_with_program_tables(performance_table, composition_tables),
+        moved_facts=final_moved_facts, fragments=_normalize_fragments(fragments),
+    )
+    extractive = select_extractive_summary(body, body_rendered.fact_records)
+    _record_fact_summary(len(selection.fact_ids), len(extractive.items), composition_diagnostics)
+    final = ComposedReport(sections=body.sections, summary=extractive.bound_sentences)
     style_diagnostics: dict[str, int] = {}
-    rendered = render_report(
-        company_name,
-        final,
-        fragments,
-        performance_table,
-        corp_type=corp_type,
-        grade=Grade.PARTIAL,
-        generated_at=generated_at,
-        as_of_date=as_of_date,
-        analysis_period=analysis_period,
-        latest_performance_period=latest_performance_period,
-        table_presentation=table_presentation,
-        filing_meta=filing_meta,
-        composition_tables=composition_tables,
-        citation_style=citation_style,
-        company_id=str(company_id).strip(),
-        release_mode="",
-        verified_program_facts=verified_program_facts,
-        program_registry_sources=program_registry_sources,
-        name_table=name_table,
-        style_diagnostics=style_diagnostics,
-    )
+    rendered = _render_available(final, style_diagnostics=style_diagnostics)
     _record_style_diagnostics(
         style_diagnostics, composition_diagnostics,
         render=STYLE_RENDER_EVIDENCE_AVAILABLE,
@@ -1428,6 +1507,9 @@ def _finish_evidence_available(
         generation_evidence=None,
         generation_metrics=generation_metrics,
         review_diagnostics=final_review_diagnostics,
+        news_block_row_counts_by_section=_visible_news_row_counts(final, fragments),
+        news_block_candidate_row_counts_by_section=news_block.candidate_row_counts_by_section,
+        news_block_blocked_counts_by_reason=news_block.blocked_counts_by_reason,
         degraded_reason=degraded_reason,
         degraded_cause_kind=degraded_cause_kind,
         ai_stages_skipped=tuple(ai_stages_skipped),
@@ -1927,6 +2009,17 @@ def run_v2(
                     )
                 )
 
+    partial_evidence = (
+        build_partial_evidence_view(_normalize_fragments(verification_fragments))
+        if prepared_evidence is None and release_mode is ReleaseMode.SHADOW
+        and (evidence_availability is not None or evidence_available_fallback)
+        else None
+    )
+    writer_allowed_ids = (
+        prepared_evidence.allowed_fragment_ids_by_section if prepared_evidence is not None
+        else partial_evidence.allowed_fragment_ids_by_section if partial_evidence is not None
+        else None
+    )
     baseline_date = as_of_date or None
     recovery_sources: dict[str, tuple] = {}
     recovery_attempted: frozenset[str] = frozenset()
@@ -1973,14 +2066,15 @@ def run_v2(
             # 없으면 어떤 장의 도식 0줄이 «작가가 안 냈다»인지 «우리가 걸렀다»인지
             # 되짚을 방법이 없다.
             composition_diagnostics=composition_diagnostics,
+            partial_evidence=partial_evidence,
         )
         draft, news_supplemented = supplement_news_candidates(
             draft, _normalize_fragments(verification_fragments),
-            prepared_evidence.allowed_fragment_ids_by_section if prepared_evidence else None,
+            writer_allowed_ids,
         )
         news_review_candidates = news_citation_ids(draft, _normalize_fragments(verification_fragments))
         news_review_rejections = []
-        if release_mode is not ReleaseMode.SHADOW:
+        if release_mode is not ReleaseMode.SHADOW or partial_evidence is not None:
             if prepared_evidence is not None:
                 draft = _sanitize_report_to_section_evidence(
                     draft,
@@ -2005,17 +2099,26 @@ def run_v2(
                     packet_union_ids,
                     stage="draft-pre-review",
                 )
+            elif partial_evidence is not None:
+                draft = _sanitize_report_to_section_evidence(
+                    draft, partial_evidence.allowed_fragment_ids_by_section,
+                    supported_claim_slots_by_fragment_id={
+                        fragment.fragment_id: frozenset(fragment.supported_claim_slots)
+                        for fragment in partial_evidence.fragments
+                    },
+                    enforce_declared_claim_slot_support=True,
+                )
             # flow 숫자는 기존 canonical 검사로 먼저 재검산한다. 관계 의미는
             # 바로 다음 bundled reviewer 한 번에 본문과 함께 판정한다.
             draft, diagram_problems = check_diagram_numbers(
                 draft, _normalize_fragments(verification_fragments),
                 derived_ratio_diagnostics=composition_diagnostics,
             )
-            if prepared_evidence is not None:
+            if writer_allowed_ids is not None:
                 _assert_composed_report_evidence_invariant(
                     draft,
-                    prepared_evidence.allowed_fragment_ids_by_section,
-                    packet_union_ids,
+                    writer_allowed_ids,
+                    frozenset().union(*writer_allowed_ids.values()),
                     stage="diagram-numeric-pre-review",
                 )
         else:
@@ -2024,12 +2127,12 @@ def run_v2(
         rewrite_gate = None
         if recovery_enabled:
             recovery_sources = recovery_evidence(_normalize_fragments(verification_fragments))
-            if prepared_evidence is not None:
+            if writer_allowed_ids is not None:
                 # ★ 장별 packet 경로(FULL)에서는 장이 «들고 있는» 조각만 인용할 수
                 #   있다. 이 교집합을 빼면 복구 문장이 post-verify-dedupe 단계의
                 #   장별 근거 소유권 불변식을 깨뜨려, 검증을 마친 보고서 «전체»가
                 #   ValueError로 죽는다(logic._assert_composed_report_evidence_invariant).
-                allowed_by_section = prepared_evidence.allowed_fragment_ids_by_section
+                allowed_by_section = writer_allowed_ids
                 restricted: dict[str, tuple] = {}
                 for section_id, section_fragments in recovery_sources.items():
                     allowed_ids = allowed_by_section.get(section_id) or frozenset()
@@ -2059,6 +2162,8 @@ def run_v2(
         if prepared_evidence is None:
             verified = verify_report(
                 draft, verification_fragments, performance_table, reviewer_for_run,
+                allowed_fragment_ids_by_section=writer_allowed_ids,
+                skip_empty_grouped_review=partial_evidence is not None,
                 diagnostics=review_diagnostics,
                 initial_ask=initial_reviewer_for_run,
                 initial_retry_ask=initial_retry_reviewer_for_run,
@@ -2127,6 +2232,7 @@ def run_v2(
     )
     # ★ 조각을 함께 넘긴다. 안 넘기면 «같은 문서의 다른 조각» 중복(3장↔7장
     #   수주 문장 실측)이 그대로 남는다 — 문서 열쇠가 없으면 그 판정을 못 한다.
+    moved_facts: list[MovedFactRecord] = []
     verified, moved_sentences = drop_cross_section_duplicates(
         verified, fragments=_normalize_fragments(verification_fragments),
         # ★ 장이 «들고 있지 않은» 표(실적표·매출 구성표)가 어느 장에 실리는지
@@ -2135,6 +2241,7 @@ def run_v2(
         sections_with_tables=sections_with_program_tables(
             performance_table, composition_tables
         ),
+        moved_facts_sink=moved_facts,
     )
     if moved_sentences:
         logger.info("장 간 중복 %d문장을 소유 장으로 모았습니다", moved_sentences)
@@ -2174,7 +2281,7 @@ def run_v2(
                     # packet 계약에서는 의미 칸이 붙은 문장만 사실 장부에 오른다.
                     # 칸 없는 문장을 실으면 그 장이 「결속되지 않은 공개 내용」이
                     # 되어 보고서 «전체»가 공개 차단된다.
-                    require_claim_slot=prepared_evidence is not None,
+                    require_claim_slot=writer_allowed_ids is not None,
                     rejected_fingerprints={
                         section.section_id: frozenset(rejected_sentence_fingerprint(sentence.text)
                                                      for sentence in section.sentences)
@@ -2213,7 +2320,16 @@ def run_v2(
     #       검수용(8000토큰)을 그대로 쓰면 예약만으로 예산의 21.7%를 먹어
     #       비싼 회사에서 보고서 «전체»가 예산 초과로 실패한다(실측).
     #     근거 없는 줄만 빼며, 줄이 다 빠지면 도식을 안 그릴 뿐 장은 남는다.
-    if release_mode is ReleaseMode.SHADOW:
+    if partial_evidence is not None:
+        verified = _sanitize_report_to_section_evidence(
+            verified, partial_evidence.allowed_fragment_ids_by_section,
+            supported_claim_slots_by_fragment_id={
+                fragment.fragment_id: frozenset(fragment.supported_claim_slots)
+                for fragment in partial_evidence.fragments
+            },
+            enforce_declared_claim_slot_support=True,
+        )
+    if release_mode is ReleaseMode.SHADOW and partial_evidence is None:
         try:
             verified, diagram_problems = check_diagrams(
                 verified,
@@ -2240,7 +2356,7 @@ def run_v2(
                 *diagram_problems,
                 f"AI 장애로 의미 검수를 못 한 관계 flow {hidden}행 공개 제외",
             )
-    elif prepared_evidence is None:
+    elif writer_allowed_ids is None:
         # ENFORCE_NO_PARTIAL은 이식기 호환 모드라 typed packet/장별 bundled
         # 의미 판정이 없다. 관계를 확인하지 못한 flow를 공개하거나 별도 diagram
         # AI를 장부 밖에서 부르지 않고, 행만 보수적으로 미공개 처리한다.
@@ -2256,7 +2372,7 @@ def run_v2(
                 *diagram_problems,
                 f"ENFORCE_NO_PARTIAL 미결속 관계 flow {hidden}행 공개 제외",
             )
-    else:
+    elif prepared_evidence is not None:
         _assert_composed_report_evidence_invariant(
             verified,
             prepared_evidence.allowed_fragment_ids_by_section,
@@ -2320,6 +2436,8 @@ def run_v2(
             draft_body_count=draft_body_count,
             news_review_candidates=news_review_candidates,
             name_table=name_table,
+            moved_facts=moved_facts,
+            news_block_result=news_block,
             # 본문은 FULL 작성본 그대로라 프로그램 등록부에 결속된 문장이 살아
             # 있다. 같은 등록부를 넘겨야 renderer가 그 문장의 짝을 찾는다 —
             # 빼면 무차감 중단이 생성 실패로 뒤집힌다.
@@ -2392,7 +2510,12 @@ def run_v2(
             ),
         )
 
-    # ②-f 안내문 최종 대조 — 여기가 «문장이 더 이상 바뀌지 않는» 마지막 자리다.
+    verified = filter_reviewed_flow_rows(
+        verified, _normalize_fragments(verification_fragments),
+        baseline_date=as_of_date or "", diagnostics=review_diagnostics,
+    )
+
+    # ②-f 공개 근거와 안내문을 요약·봉인 전에 같은 후보에 확정한다.
     #     중복 제거가 「그쪽으로 모았습니다」를 붙인 뒤에도 본문 검수·수치 안전·
     #     빈 장 복구·보도표 보강이 문장을 지우거나 더한다. 그래서 안내문을 붙인
     #     자리에서는 참이던 말이 화면에서는 거짓이 된다(실측 — 뤼튼 8장은
@@ -2405,36 +2528,13 @@ def run_v2(
     verified = reconcile_section_notices(
         verified,
         sections_with_program_tables(performance_table, composition_tables),
+        moved_facts=moved_facts, fragments=_normalize_fragments(verification_fragments),
     )
 
-    # ③ 요약. 두 갈래 모두 «본문에 없던 말을 새로 만들지 않는다». SHADOW는
-    # 검증된 본문 문장 중 AI가 고른 3~5문장을 쓰고(AI 1회), 엄격 모드는
-    # 렌더러가 만든 검증 FactRecord에 정확히 결속된 본문 문장을 0원으로
-    # 재사용한다. 고른 문장은 본문 문장 그 자체라 요약은 그 본문 문장의
-    # 결속과 «같은 수준»으로 결속되고, 그래서 요약 재검증 호출이 없다.
-    # (본문이 결속을 못 만든 실행에서는 요약도 결속되지 않는다 — 요약이
-    #  본문보다 느슨해지지 않을 뿐, 없는 결속을 만들어 주지는 않는다.)
-    if release_mode is ReleaseMode.SHADOW:
-        try:
-            final, summary_draft_count, numeric_filtering = _legacy_summary_stage(
-                verified,
-                writer_ask=writer_ask,
-                body_numeric_filtering=body_numeric_filtering,
-                summary_diagnostics=composition_diagnostics,
-                company_name=company_name,
-            )
-        except AskFatalError as error:
-            if not fallback_allowed or _fallback_blocked(error):
-                raise
-            # 고르기 AI를 못 부르면 검증 본문 문장으로만 규칙 요약을 채운다.
-            ai_failure = ai_failure or error
-            ai_stages_skipped.append(AI_STAGE_SUMMARY)
-            final, numeric_filtering = _rule_summary_stage(
-                verified, body_numeric_filtering, company_name=company_name,
-            )
-            summary_draft_count = 0
-    else:
-        body_rendered = render_report(
+    # ③ 모든 생성 모드에서 검증 사실과 정확히 결속된 본문만 재사용한다.
+    # 미결속 산문을 제외한 동일 후보를 요약·renderer·공개 manifest가 소비한다.
+    def _render_bound_body():
+        return render_report(
             company_name,
             verified,
             verification_fragments,
@@ -2463,29 +2563,44 @@ def run_v2(
             ),
             name_table=name_table,
         )
-        extractive = select_extractive_summary(verified, body_rendered.fact_records)
-        # FULL은 이 시점의 결과가 아직 ``primary`` 후보일 뿐이다. 요약이
-        # 부족하더라도 먼저 품질 영수증을 만들고 복구 정책이 보충/중단을
-        # 결정해야 한다. STOP이면 아래 출고 검증까지 도달하지 않으며,
-        # RUN_SUPPLEMENTS이면 병합 뒤 요약을 새로 계산한다.
-        if (
-            not extractive.release_ready
-            and release_mode is not ReleaseMode.FULL
-        ):
-            if fallback_allowed:
-                return _downgrade_after_write(DEGRADED_REASON_QUALITY_FLOOR)
-            raise V2ValidationError(
-                (
-                    "엄격 출고용 핵심 요약에 서로 다른 장의 검증 사실이 "
-                    f"3개 이상 필요하지만 {len(extractive.items)}개뿐입니다",
-                )
-            )
-        final = ComposedReport(
-            sections=verified.sections,
-            summary=extractive.bound_sentences,
+    body_rendered = _render_bound_body()
+    public_selection = select_bound_public_sentences(verified, body_rendered)
+    verified = public_selection.report
+    # 완료 문장의 사실 결속이 확보된 뒤에만 같은 행동의 예고를 대체한다.
+    verified, superseded = drop_superseded_news_plans(
+        verified, fragments=_normalize_fragments(verification_fragments),
+        sections_with_tables=sections_with_program_tables(performance_table, composition_tables),
+        moved_facts_sink=moved_facts,
+    )
+    if public_selection.excluded or superseded:
+        news_block = _augment_news_blocks(
+            verified, verification_fragments, prepared_evidence,
+            enabled=(release_mode is ReleaseMode.SHADOW or prepared_evidence is not None),
+            review_candidates=news_review_candidates,
         )
-        summary_draft_count = 0
-        numeric_filtering = body_numeric_filtering
+        verified = news_block.report
+    verified = reconcile_section_notices(
+        verified,
+        sections_with_program_tables(performance_table, composition_tables),
+        moved_facts=moved_facts, fragments=_normalize_fragments(verification_fragments),
+    )
+    _record_public_binding(public_selection, composition_diagnostics, review_diagnostics)
+    if public_selection.excluded or superseded:
+        body_rendered = _render_bound_body()
+    extractive = select_extractive_summary(verified, body_rendered.fact_records)
+    # FULL 하한은 뒤의 권위 있는 품질/복구 정책이 판정한다. 확보자료 보고서는
+    # 근거가 0~2개뿐이면 그 범위만 보여 주며 요약 길이를 맞추려고 호출하지 않는다.
+    if not extractive.release_ready and release_mode is ReleaseMode.ENFORCE_NO_PARTIAL:
+        raise V2ValidationError(
+            (
+                "엄격 출고용 핵심 요약에 서로 다른 장의 검증 사실이 "
+                f"3개 이상 필요하지만 {len(extractive.items)}개뿐입니다",
+            )
+        )
+    final = ComposedReport(sections=verified.sections, summary=extractive.bound_sentences)
+    summary_draft_count = 0
+    numeric_filtering = body_numeric_filtering
+    _record_fact_summary(len(public_selection.fact_ids), len(extractive.items), composition_diagnostics)
 
     if prepared_evidence is not None:
         _assert_composed_report_evidence_invariant(
@@ -2706,6 +2821,7 @@ def run_v2(
                 sections_with_tables=sections_with_program_tables(
                     performance_table, composition_tables
                 ),
+                moved_facts_sink=moved_facts,
             )
             if supplement_moved:
                 logger.info(
@@ -2747,6 +2863,10 @@ def run_v2(
             merged_body = sanitize_stray_citation_markers(
                 merged_body, verification_fragments, diagnostics=review_diagnostics,
             )
+            merged_body = filter_reviewed_flow_rows(
+                merged_body, _normalize_fragments(verification_fragments),
+                baseline_date=as_of_date or "", diagnostics=review_diagnostics,
+            )
             base_by_id = {
                 section.section_id: section for section in base_body.sections
             }
@@ -2785,6 +2905,7 @@ def run_v2(
                 verified,
                 sections_with_program_tables(performance_table, composition_tables),
                 section_ids=frozenset(targets),
+                moved_facts=moved_facts, fragments=_normalize_fragments(verification_fragments),
             )
 
             # 요약·manifest·render·quality candidate/assessment는 보충 병합본에서
@@ -2810,9 +2931,35 @@ def run_v2(
                 program_registry_sources=prepared_evidence.program_sources,
                 name_table=name_table,
             )
-            extractive = select_extractive_summary(
+            supplement_selection = select_bound_public_sentences(verified, body_rendered)
+            _record_public_binding(supplement_selection, composition_diagnostics, review_diagnostics)
+            verified = supplement_selection.report
+            verified, supplement_superseded = drop_superseded_news_plans(
+                verified, fragments=_normalize_fragments(verification_fragments),
+                sections_with_tables=sections_with_program_tables(performance_table, composition_tables),
+                moved_facts_sink=moved_facts, removal_section_ids=frozenset(targets),
+            )
+            if supplement_selection.excluded or supplement_superseded:
+                news_block = _augment_news_blocks(
+                    verified, verification_fragments, prepared_evidence,
+                    enabled=True, review_candidates=news_review_candidates,
+                )
+                verified = news_block.report
+            verified = reconcile_section_notices(
                 verified,
-                body_rendered.fact_records,
+                sections_with_program_tables(performance_table, composition_tables),
+                section_ids=frozenset(targets),
+                moved_facts=moved_facts, fragments=_normalize_fragments(verification_fragments),
+            )
+            selected_by_id = {section.section_id: section for section in verified.sections}
+            if any(selected_by_id[section_id] != base_by_id[section_id]
+                   for section_id in SECTION_IDS if section_id not in target_set):
+                _raise_recovery_stop("non_target_section_mutated")
+            if supplement_selection.excluded or supplement_superseded:
+                body_rendered = _render_bound_body()
+            extractive = select_extractive_summary(verified, body_rendered.fact_records)
+            _record_fact_summary(
+                len(supplement_selection.fact_ids), len(extractive.items), composition_diagnostics,
             )
             supplement_summary_release_ready = extractive.release_ready
             final = ComposedReport(
@@ -3003,6 +3150,7 @@ def run_v2(
         release_mode is ReleaseMode.SHADOW
         and (
             evidence_availability is not None
+            or partial_evidence is not None
             or ai_failure is not None
             or bool(_downgraded_from)
         )
@@ -3204,8 +3352,9 @@ def run_v2(
             name_table.table_titles if name_table is not None else ()
         ),
         portfolio_name_table_blocked_reason=name_table_result.blocked_reason,
-        news_block_row_counts_by_section=news_block.row_counts_by_section,
+        news_block_row_counts_by_section=_visible_news_row_counts(final, verification_fragments),
         news_block_blocked_counts_by_reason=news_block.blocked_counts_by_reason,
+        news_block_candidate_row_counts_by_section=news_block.candidate_row_counts_by_section,
         news_usage_diagnostics=news_usage_diagnostics(
             verified, _normalize_fragments(verification_fragments), news_supplemented,
             review_candidates=news_review_candidates,

@@ -136,6 +136,29 @@ def _unlock(stream) -> None:
 
 
 @contextmanager
+def try_exclusive_file_lock(path: Path) -> Iterator[bool]:
+    """한 번만 OS 배타 잠금을 시도한다. 사용 중이면 기다리지 않고 False다.
+
+    잠금 파일은 계속 유지한다. 프로세스가 종료되면 OS가 잠금을 해제하므로
+    PID 파일의 생존 판정이나 잔여 파일 삭제가 필요하지 않다.
+    """
+    stream = _open_plain_lock_file(Path(path))
+    acquired = False
+    try:
+        _ensure_lock_byte(stream)
+        acquired = _try_lock(stream)
+        yield acquired
+    finally:
+        try:
+            if acquired:
+                _unlock(stream)
+        except OSError as exc:
+            raise BoundedFileLockError("파일 잠금을 안전하게 해제하지 못했습니다") from exc
+        finally:
+            stream.close()
+
+
+@contextmanager
 def exclusive_file_lock(
     path: Path,
     *,
@@ -183,4 +206,5 @@ __all__ = [
     "BoundedFileLockError",
     "BoundedFileLockTimeout",
     "exclusive_file_lock",
+    "try_exclusive_file_lock",
 ]

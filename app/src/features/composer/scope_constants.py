@@ -3,6 +3,35 @@
 import re
 
 SCOPE_CONDITION_UNBOUND = "scope_condition_unbound"
+# 서술형 원칙·특례는 표의 상품 조건과 별개로 실제 한정 절에 묶는다.
+RECOGNITION_CLAUSE_RE = re.compile(r"[.;。\n]|[,，]|(?:하며|되며|이며|하고)\s*")
+# 원문만 쉼표로 열린 조건을 보존하며, 문장·병렬 서술 경계는 넘지 않는다.
+RECOGNITION_SOURCE_BOUNDARY_RE = re.compile(r"[.;。\n]|(?:하며|되며|이며|하고)\s*")
+RECOGNITION_COMMA_RE = re.compile(r"[,，]")
+RECOGNITION_OPEN_CONDITION_RE = re.compile(
+    r"(?:에\s*(?:대해서|대하여|대해)(?:는)?"
+    r"|(?:경우|때)(?:에)?(?:만|는)?"
+    r"|(?:용역|프로젝트|계약|거래)(?:은|는)"
+    r"|중(?:에서)?(?:는)?|(?:날|시점)에)\s*$"
+)
+RECOGNITION_DEPENDENT_START_RE = re.compile(
+    r"^\s*(?:(?:제공(?:을)?\s*)?(?:완료|완성기준)"
+    r"|(?:수익|매출)(?:을|로|으로)?\s*(?:인식|계상))"
+)
+REVENUE_SUBJECT_RE = re.compile(r"용역|프로젝트|수익|매출")
+RECOGNITION_RE = re.compile(r"인식|계상")
+COMPLETION_RE = re.compile(r"완료|완성기준")
+PROGRESS_RE = re.compile(r"진행기준|진행률")
+DURATION_LIMIT_RE = re.compile(r"(?P<value>\d+)\s*(?P<unit>년|개월)\s*(?:이내|내|이하)")
+EXPLICIT_EXCLUSION_RE = re.compile(
+    r"종속기업(?:에서|의?\s*범위에서)?\s*제외(?:(?:되었|하였|했|된)|(?=\s*(?:\(|$)))"
+)
+ENTITY_SUBJECT_RE = re.compile(
+    r"(?:^|[.;。\n])\s*(?P<owner>[A-Za-z가-힣][A-Za-z0-9가-힣_.-]*(?:\s+[A-Za-z][A-Za-z0-9_.-]*)*)"
+    r"(?:은|는|이|가)\s*"
+)
+CURRENT_SUBSIDIARY_RE = re.compile(r"종속기업(?:이다|으로|에\s*포함|에\s*해당|을\s*보유)|종속기업인")
+HISTORICAL_MEMBERSHIP_RE = re.compile(r"과거|당시|이전|제외(?:되었|하였|했|된)|(?:처분|매각)(?:했|하였|된)")
 # 회사·상품·특정 등급을 나열하지 않고 범위/조건의 문법만 읽는다.
 CONDITION_RE = re.compile(
     r"(?:신용|평가)?등급\s*(?P<grade>[A-Za-z][A-Za-z0-9+\-]*)"

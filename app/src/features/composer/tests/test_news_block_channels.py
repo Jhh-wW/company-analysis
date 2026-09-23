@@ -300,11 +300,14 @@ def test_9장에는_보도표가_없다(보고서) -> None:
 
 
 def test_실행_기록용_수치가_결과에_실린다(FULL_실행결과) -> None:
+    # 2장·5장 기사는 보도 산문으로 이미 본문에 실려, 행을 만들지 않고
+    # «산문 중복» 사유로 센다 — 만든 행수와 인쇄 행수가 같아야 한다(P17).
     assert dict(FULL_실행결과.news_block_row_counts_by_section) == {
         "identity": len(_NEWS_BY_SECTION["identity"]),
-        "business_model": 1,
-        "current_challenges": 1,
     }
+    assert dict(FULL_실행결과.news_block_blocked_counts_by_reason)[
+        "redundant_with_prose"
+    ] == 2
 
 
 # ══════════════════════════════════════════════════════════
@@ -676,14 +679,16 @@ def test_packet_없는_부분_경로에서도_보도표가_붙고_출고검증�
     assert _news_table(report, "culture") is None
 
     # ② 실행 기록 수치가 채워지고 「소유권 없음」 사유가 사라졌다.
+    #    2장·5장 기사는 보도 산문으로 본문에 실려 행을 만들지 않는다(P17).
     assert dict(output.news_block_row_counts_by_section) == {
         "identity": len(_NEWS_BY_SECTION["identity"]),
-        "business_model": 1,
-        "current_challenges": 1,
     }
     assert "no_section_ownership" not in dict(
         output.news_block_blocked_counts_by_reason
     )
+    assert dict(output.news_block_blocked_counts_by_reason)[
+        "redundant_with_prose"
+    ] == 2
 
     # ③ 행에 발행일·매체·원문이 그대로 있다.
     table = _news_table(report, "identity")
@@ -828,9 +833,12 @@ def test_3장_중복_보도표가_빠져도_이름_표와_보도_산문은_남�
     assert output.portfolio_name_table_name_count == 3, (
         output.portfolio_name_table_blocked_reason
     )
-    assert dict(output.news_block_row_counts_by_section) == {
-        PORTFOLIO_TABLE_SECTION_ID: len(_NEWS_IN_PORTFOLIO)
-    }
+    # 산문 중복 행은 이제 augment가 아예 만들지 않는다 — 진단 행수와 인쇄가
+    # 같아지고, 빠진 수는 «redundant_with_prose» 사유로 남는다(P17).
+    assert dict(output.news_block_row_counts_by_section) == {}
+    assert dict(output.news_block_blocked_counts_by_reason)[
+        "redundant_with_prose"
+    ] == len(_NEWS_IN_PORTFOLIO)
 
     section = next(
         section

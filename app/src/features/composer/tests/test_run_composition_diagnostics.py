@@ -48,6 +48,9 @@ def test_real_run_preserves_output_calls_and_records_across_final_gate(
 
     assert writer.prompts == baseline_writer.prompts
     assert reviewer.prompts == baseline_reviewer.prompts
+    assert len(writer.prompts) == 9
+    assert not any("핵심 요약" in prompt for prompt in writer.prompts)
+    assert len(reviewer.prompts) == 1
     records = observed_composition_steps(sink)
     assert len(records) == len(sink)
     parses = [record for record in records if record["step"] == "8_본문검수_응답판독"]

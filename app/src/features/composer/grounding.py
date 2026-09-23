@@ -13,6 +13,7 @@ from src.features.composer.combined_relation_guard import (
 )
 from src.features.composer.future_plan_constants import FUTURE_KEY
 from src.features.composer.grounding_constants import REVIEW_SUPPORT_CANDIDATE_VERDICTS
+from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_VERSION
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -507,26 +508,39 @@ def _dimension(text: str) -> str:
     return DIMENSION_AMOUNT
 
 
-def _numeric_valid(text: str, entries: object, sources: Mapping[str, str]) -> bool:
-    if not isinstance(entries, list) or not entries:
+def _numeric_valid(
+    text: str, entries: object, sources: Mapping[str, str],
+    detail: dict[str, object] | None = None,
+) -> bool:
+    def fail(stage: str, index: int | None = None) -> bool:
+        if detail is not None:
+            detail.update(version=GROUNDING_DETAIL_VERSION, check_kind="수치", stage=stage)
+            if index is not None:
+                detail["entry_index"] = index
         return False
+    if not isinstance(entries, list) or not entries:
+        return fail("entries_missing")
     covered: Counter = Counter()
     used_spans: list[tuple[int, int]] = []
-    for entry in entries:
+    for index, entry in enumerate(entries):
         if not isinstance(entry, Mapping):
-            return False
+            return fail("entry_type", index)
         expression, metric, source_metric = (entry.get(k) for k in ("표현", "항목", "원문항목"))
         quote = _quote(entry, sources)
-        if (not all(isinstance(x, str) and x for x in (expression, metric, source_metric))
-            or expression not in text or metric not in expression or quote is None
-            or not _metric_matches(metric, source_metric)):
-            return False
+        if not all(isinstance(x, str) and x for x in (expression, metric, source_metric)):
+            return fail("expression_fields", index)
+        if expression not in text or metric not in expression:
+            return fail("expression_not_in_candidate", index)
+        if quote is None:
+            return fail("quote_not_bound", index)
+        if not _metric_matches(metric, source_metric):
+            return fail("metric_mismatch", index)
         expression_amounts = _amount_spans(expression)
         candidate_value = entry.get("후보값")
         if candidate_value is None and len(expression_amounts) == 1:
             candidate_value = expression_amounts[0].text
         if not isinstance(candidate_value, str):
-            return False
+            return fail("candidate_value_missing", index)
         candidate_bindings = _metric_value_spans(metric, candidate_value, text)
         expression_spans = [m.span() for m in re.finditer(re.escape(expression), text)]
         candidate = next((number for number in candidate_bindings if any(
@@ -534,9 +548,11 @@ def _numeric_valid(text: str, entries: object, sources: Mapping[str, str]) -> bo
         ) and all(number.end <= start or end <= number.start for start, end in used_spans)), None)
         span = (candidate.start, candidate.end) if candidate else None
         if span is None:
-            return False
+            return fail("candidate_value_scope", index)
         used_spans.append(span)
         value = _bound_value(entry, quote)
+        if value is None:
+            return fail("source_value_scope", index)
         values = _amount_values(candidate_value)
         from src.features.composer.verify import _number_matches_by_math
         # 차원은 «검수가 적어 낸 글자»가 아니라 원문에서 그 수가 무엇이었나로 본다.
@@ -549,25 +565,27 @@ def _numeric_valid(text: str, entries: object, sources: Mapping[str, str]) -> bo
         same_dimension = candidate.dimension in source_dimensions
         ratio_conversion = (RATIO_METRIC_RE.search(_label(metric))
                             and not _amounts(entry["원문값"]) and _dimension(candidate_value) == DIMENSION_RATIO)
-        if (value is None or sum(values.values()) != 1
-            or not _number_matches_by_math(_amounts(candidate_value)[0], frozenset({value}))
-            or not (same_dimension or ratio_conversion)):
-            return False
+        if sum(values.values()) != 1:
+            return fail("candidate_value_missing", index)
+        if not _number_matches_by_math(_amounts(candidate_value)[0], frozenset({value})):
+            return fail("value_mismatch", index)
+        if not (same_dimension or ratio_conversion):
+            return fail("dimension_mismatch", index)
         candidate_period = _bound_period(metric, candidate, text)
         source_bindings = _metric_value_spans(source_metric, entry["원문값"], quote)
         source_periods = {_bound_period(source_metric, number, quote) for number in source_bindings}
         if ratio_conversion:
             source_periods.add(_period_at(quote, quote.find(entry["원문값"])))
         if candidate_period and candidate_period not in source_periods:
-            return False
+            return fail("period_mismatch", index)
         # 괄호 속 소계 이름만 골라 괄호 바깥의 다른 항목명을 지우지 못한다.
         for match in PARENTHETICAL_RE.finditer(text):
             if (value in _amount_values(match.group("body"))
                 and metric in match.group("body")):
                 if match.group() not in expression or not _metric_matches(match.group("label"), metric):
-                    return False
+                    return fail("parenthetical_scope", index)
         covered.update(values)
-    return covered == _amount_values(text)
+    return True if covered == _amount_values(text) else fail("numeric_coverage")
 
 
 def _stated_continuous_periods(text: str, expression: str) -> int:
@@ -768,8 +786,15 @@ def _reported_comparison_valid(text: str, entries: object, sources: Mapping[str,
     return True
 
 
-def grounding_problem(text: str, sources: Mapping[str, str], entry: Mapping) -> str:
+def grounding_problem(
+    text: str, sources: Mapping[str, str], entry: Mapping,
+    *, detail: dict[str, object] | None = None,
+) -> str:
     """필요 근거 누락과 결속·연산 실패를 구분하며 호출이나 저장을 하지 않는다."""
+    def invalid_shape() -> str:
+        if detail is not None:
+            detail.update(version=GROUNDING_DETAIL_VERSION, check_kind="근거", stage="grounding_shape")
+        return GROUNDING_INVALID
     # 원문 한정이 사라진 후보는 검수 모델의 참·애매나 추가 근거 JSON으로
     # 승인하지 않는다. 다른 문장과 기존 수치·시점 검증 경로는 그대로 둔다.
     scope_issue = (
@@ -783,6 +808,8 @@ def grounding_problem(text: str, sources: Mapping[str, str], entry: Mapping) -> 
     if not required and evidence is None:
         return ""
     if not isinstance(evidence, Mapping):
+        if detail is not None:
+            detail.update(version=GROUNDING_DETAIL_VERSION, check_kind="근거", stage="grounding_missing")
         return GROUNDING_MISSING
     # 같은 판정 번호의 수치 배열 안에서만 원문참조를 원문으로 되돌린다 — 다른
     # 배열(추세·시점)이나 다른 판정 번호는 이 함수가 한 번에 한 후보만 받으므로
@@ -791,34 +818,46 @@ def grounding_problem(text: str, sources: Mapping[str, str], entry: Mapping) -> 
         resolve_numeric_quote_refs(evidence[NUMERIC_KEY])
         if NUMERIC_KEY in evidence else None
     )
+    numeric_detail: dict[str, object] = {}
+    numeric_valid = (_numeric_valid(text, numeric_entries, sources, numeric_detail)
+                     if NUMERIC_KEY in evidence else None)
     if (TREND_KEY in required and NUMERIC_KEY in evidence
-        and _numeric_valid(text, numeric_entries, sources)
+        and numeric_valid
         and _reported_comparison_valid(text, numeric_entries, sources)):
         required = tuple(kind for kind in required if kind != TREND_KEY)
     validators = {NUMERIC_KEY: _numeric_valid, TREND_KEY: _trend_valid, TIME_KEY: _time_valid}
     for kind in required:
         if kind not in evidence:
+            if detail is not None:
+                detail.update(version=GROUNDING_DETAIL_VERSION, check_kind=kind, stage="grounding_missing")
             return GROUNDING_MISSING
     for kind, payload in evidence.items():
         # 관계 근거는 아래 constrain_verdicts가 번호 중복을 함께 확인한 뒤
         # 자기 인용에 결속한다. 기존 수치·추세·시점 검증은 전부 유지한다.
         if kind == RELATION_KEY:
             if not isinstance(payload, list) or any(not isinstance(item, Mapping) for item in payload):
-                return GROUNDING_INVALID
+                return invalid_shape()
             continue
         # 미래 근거는 6장 성장 계획 표와 그 장의 본문 계획 문장에서 쓰이며,
         # future_plan_guard 가 그 줄의 칸·인용 또는 그 문장·인용에 따로 결속한다.
         # 여기서는 모양만 보고 넘긴다 — 관계 근거와 같다.
         if kind == FUTURE_KEY:
             if not isinstance(payload, list) or any(not isinstance(item, Mapping) for item in payload):
-                return GROUNDING_INVALID
+                return invalid_shape()
             continue
         if kind not in required and payload == []:
             continue
         if kind not in validators:
-            return GROUNDING_INVALID
+            return invalid_shape()
         effective_payload = numeric_entries if kind == NUMERIC_KEY else payload
-        if not validators[kind](text, effective_payload, sources):
+        valid = (numeric_valid
+                 if kind == NUMERIC_KEY else validators[kind](text, effective_payload, sources))
+        if not valid:
+            if detail is not None and kind == NUMERIC_KEY:
+                detail.update(numeric_detail)
+            if detail is not None and not detail:
+                detail.update(version=GROUNDING_DETAIL_VERSION, check_kind=kind,
+                              stage="trend_invalid" if kind == TREND_KEY else "time_invalid")
             return GROUNDING_INVALID
     return ""
 
@@ -863,6 +902,7 @@ def constrain_verdicts(
     baseline_date: str | None = None,
     verbatim_by_number: Mapping[int, VerbatimNewsSource] | None = None,
     confirmed_prose_numbers: frozenset[int] = frozenset(),
+    details_by_number: dict[int, dict[str, object]] | None = None,
 ) -> tuple[dict[int, str], dict[int, str]]:
     """같은 검수 응답의 근거를 실제 입력에 결속한다. 추가 AI 호출은 없다.
 
@@ -897,8 +937,11 @@ def constrain_verdicts(
         if number not in verdicts or verdicts[number] == REVIEW_REJECTED:
             continue
         text, sources = candidates[number]
-        problem = grounding_problem(text, sources, entry)
+        detail: dict[str, object] = {}
+        problem = grounding_problem(text, sources, entry, detail=detail)
         if problem:
+            if details_by_number is not None and detail:
+                details_by_number[number] = detail
             result[number] = REVIEW_GROUNDING_REJECTED
             problems[number] = problem
     relation_evidence = support_entries_by_number(raw)

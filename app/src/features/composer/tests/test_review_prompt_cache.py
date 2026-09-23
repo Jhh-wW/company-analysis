@@ -45,7 +45,7 @@ def test_explicit_opt_in_only_attaches_metadata(monkeypatch, configured):
 
 
 # 2026-09-23: 평면 경로 고정 접두부 10706 → 10794 (REVIEW_JSON_GUIDE «모든 번호 빠짐없이» 안내 88자).
-@pytest.mark.parametrize("grouped,prefix_chars", ((False, 10794), (True, 11848)))
+@pytest.mark.parametrize("grouped,prefix_chars", ((False, 11142), (True, 12196)))
 @pytest.mark.parametrize("factory", (_golden_case, _large_case, _boundary_case))
 def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
     monkeypatch, grouped, prefix_chars, factory,
@@ -69,10 +69,10 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "932bbb0c3766856a9a5ad72284be92d2be310799559a3e458443146216fbb7de"),
-    (_golden_case, True, "e514adce8e826170e6774c43c36300a66618ca8d12f54f9d3ba3f6ee934759eb"),
-    (_boundary_case, False, "a3d40640d5ee2139066dd43a5f6d691d0657349da0b6e13263ae1de74c11c9b1"),
-    (_boundary_case, True, "9266901272c8817372917081e848d82323d84add65573e2e1711feeb16c78510"),
+    (_golden_case, False, "a87c264adcc1d25c529f07b3b1358ef03709b91921aa52c832f1592eb19519a8"),
+    (_golden_case, True, "c39e729c6e1e2db95719d0c37036d3bc2ededfd8b85730b89041fec8049176a4"),
+    (_boundary_case, False, "73a6b9f99de922ac412b67505cda560ef24b7dbd2d027b8cd42bc1158c30da10"),
+    (_boundary_case, True, "c9a8489a900b8d5c866cf4536118d07b020b6b44ba12b0a522d5812a42ecf96a"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,

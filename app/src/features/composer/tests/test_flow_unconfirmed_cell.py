@@ -73,6 +73,7 @@ from src.features.composer.port import (
     ComposedSentence,
     FlowRow,
 )
+from src.features.composer.tests.flow_fixtures import reviewed_flow_fixture
 from src.features.composer.render import render_report
 from src.features.report_standard.visualization import table_visualization
 
@@ -95,7 +96,7 @@ def _report(
 ) -> ComposedReport:
     """흐름표 줄을 «한 장에만» 실은 보고서. 다른 장은 문장만 갖는다."""
 
-    return ComposedReport(
+    return reviewed_flow_fixture(ComposedReport(
         sections=tuple(
             ComposedSection(
                 section_id=section_id,
@@ -115,7 +116,7 @@ def _report(
             ComposedSentence(text="시점은 안 밝혔다.", citations=("1",), grade="확인"),
             ComposedSentence(text="대응 체계가 갖춰지는 중이다.", citations=("1",), grade="해석"),
         ),
-    )
+    ), _fragments())
 
 
 def _flow_table_of(report, section_cell: str):
@@ -226,12 +227,10 @@ def test_웹과_PDF가_같은_표를_받는다() -> None:
     ★ 범위 (정정) — 이 계약은 «화살표로 그리는 장»에만 해당한다.
       5장(과제와 대응)은 화살표 장이다. 카드 장에서는 반대로 빈 칸이
       «남아 있어야» 하고, 그건 아래 ④가 지킨다.
-    ★ 이 입력(모든 칸이 빔)은 화살표 장에서는 `visualization._flow` 의
-      「전부 빈 줄은 버린다」에 닿지 못한다 — 여기서 이미 「미확인」으로 차
-      있기 때문이다. 그 규칙이 여전히 살아 있다는 것은 카드 장 입력으로
-      확인한다(아래 `test_전부_빈_줄은_카드에서도_빠진다`).
+    일부 칸이 비어 있는 합격 행은 한 번만 채운다. 모든 칸이 빈 행은
+    검수 결속을 만들 수 없으므로 공개 전 필터에서 탈락한다.
     """
-    rows = (FlowRow(cells=("", ""), citations=("1",)),)
+    rows = (FlowRow(cells=("원자재 가격 상승", ""), citations=("1",)),)
 
     report = render_report("가나다전자", _report(rows), _fragments(), None)
 
@@ -362,7 +361,6 @@ def test_전부_빈_줄은_카드에서도_빠진다() -> None:
         "가나다전자", _report(rows, CULTURE_TABLE_SECTION_ID), _fragments(), None
     )
 
-    # 표(데이터)에는 두 줄 다 남는다 — 아무것도 «버리지» 않는다는 결정 그대로.
-    assert len(_flow_rows_of(report, CULTURE_TABLE_SECTION_ID)) == 2
-    # 화면에 그려지는 카드는 하나다.
+    # 전부 빈 행은 의미 검수 결속을 만들지 못하므로 공개 전 필터에서 빠진다.
+    assert len(_flow_rows_of(report, CULTURE_TABLE_SECTION_ID)) == 1
     assert len(_cards_of(report, CULTURE_TABLE_SECTION_ID)) == 1

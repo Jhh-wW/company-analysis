@@ -303,6 +303,16 @@ _CULTURE_SENTENCES: Final[tuple[str, ...]] = (
     "회사는 조직개편으로 부서 구성을 다시 정했다.",
 )
 
+# 9장 정상 표본은 일반 제품 소개와 구분되는 회사의 차별점 자기설명을 담는다.
+_COMPETITIVE_SENTENCES: Final[tuple[str, ...]] = (
+    "회사는 모듈형 소프트웨어 설계를 자사 제품의 강점으로 설명한다.",
+    "회사는 맞춤형 공정 조정 역량을 고객 대응의 차별점으로 제시한다.",
+    "회사는 직영 서비스망을 유지보수 지원의 강점으로 설명한다.",
+    "회사는 독자적인 검사 알고리즘을 기술 경쟁력으로 제시한다.",
+    "회사는 다양한 제품 규격을 공급 역량의 차별점으로 설명한다.",
+    "회사는 축적한 현장 경험을 설비 운영 지원의 강점으로 제시한다.",
+)
+
 
 def _future_strategy_evidence(index: int, fragment_id: str) -> dict:
     """시험용 원문과 후보가 공유하는 계획 문장을 근거로 제공한다."""
@@ -337,6 +347,8 @@ def _section_sentence(section_id: str, mark: str, ending_index: int, ending: str
         return _FUTURE_STRATEGY_SENTENCES[ending_index]
     if section_id == "culture":
         return _CULTURE_SENTENCES[ending_index]
+    if section_id == "competitive_position":
+        return _COMPETITIVE_SENTENCES[ending_index]
     return (
         f"{mark} 회사 {mark}사업 {mark}고객 {mark}제품 전략 운영 문화 경쟁 "
         f"과제 대응 협력 실적 {ending} {mark}부문을 공식 자료에서 확인했다."
@@ -351,6 +363,9 @@ def _fragment_text(mark: str) -> str:
         # 8장 문서도 그 장의 후보와 «같은 절»을 담는다 — 6장과 같은 방식이다.
         common = _CULTURE_SENTENCES[0]
         sentences = " ".join(_CULTURE_SENTENCES)
+    elif mark == _MARKS[SECTION_IDS.index("competitive_position")]:
+        common = _COMPETITIVE_SENTENCES[0]
+        sentences = " ".join(_COMPETITIVE_SENTENCES)
     else:
         # ★ _section_sentence 와 같은 모양을 유지한다 (꼬리 표현만 없다).
         #   원문이 후보 문장의 어휘를 담고 있어야 근거 결속이 성립한다.
@@ -918,7 +933,7 @@ def test_보충뒤에도_얇으면_세번째호출없이_닫힌사유로_끝난�
     assert "low_public_sentence_coverage" in caught.value.problem_codes
 
 
-def test_보충검수에서_안전실패하면_세번째회차없이_즉시중단한다():
+def test_보충검수의_미결속_해석을_제외한_뒤_품질미달이면_재호출하지_않는다():
     class SecondRoundSafetyBlockedReviewer(_BoundGroupedReviewer):
         def __call__(self, prompt: str) -> str:
             payload = json.loads(super().__call__(prompt))
@@ -929,10 +944,11 @@ def test_보충검수에서_안전실패하면_세번째회차없이_즉시중�
 
     writer = _RecoveringPacketWriter(("identity",))
     reviewer = SecondRoundSafetyBlockedReviewer()
+    diagnostics = []
     with pytest.raises(
         V2ValidationError,
-        match="report_recovery:post_supplement_safety_blocked",
-    ):
+        match="report_recovery:post_supplement_quality_failed",
+    ) as caught:
         run_v2(
             "가나다전자",
             (),
@@ -943,11 +959,15 @@ def test_보충검수에서_안전실패하면_세번째회차없이_즉시중�
             section_evidence_packets=_packets(),
             company_id="00123456",
             build_identity_sha256="b" * 64,
+            composition_diagnostics_sink=diagnostics,
         )
 
     assert len(writer.prompts) == 10
     assert len(reviewer.prompts) == 2
     assert writer.section_calls["identity"] == 2
+    # 불안전한 해석은 공개 후보에서 제거됐고, 남은 근거가 필수칸을 채우지 못한다.
+    assert "missing_required_public_claim_slots" in caught.value.problem_codes
+    assert any(step.get("미결속제외수", 0) > 0 for step in diagnostics)
 
 
 def test_보충후보지문이_같으면_재보충없이_중단한다(monkeypatch):
@@ -1455,7 +1475,7 @@ def test_SHADOW_flat은_legacy_요약과_검수호출을_유지하고_manifest�
         release_mode=ReleaseMode.SHADOW,
     )
 
-    assert len(writer.prompts) == 10  # 본문 9 + legacy 요약 «고르기» 1
+    assert len(writer.prompts) == 9  # 본문 9; 요약은 검증된 사실 원장에서 결정적으로 고른다.
     # ★ 2026-09-11 이전에는 2였다 (본문 1 + 요약 검수 1). 요약이 검증된 본문
     #   문장을 글자 그대로 싣게 되면서 요약 재검증 호출이 사라졌다.
     assert len(reviewer.prompts) == 1  # 본문 검수 1
