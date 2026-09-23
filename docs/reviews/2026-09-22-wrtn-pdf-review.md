@@ -1,6 +1,6 @@
 # 뤼튼테크놀로지스 PDF 독립 검수 (2026-09-22)
 
-검수 대상은 `C:/Users/jh-wo/Downloads/주식회사-뤼튼테크놀로지스-company-analysis.pdf` 5쪽이다. SHA256 `afb4e622…ebe1`과 HEAD `4b674a33`은 지시와 일치했고, 원본은 변경하지 않았다. 5쪽 전부를 150dpi 이미지로 렌더링해 눈으로 읽었으며, 렌더와 증거 텍스트는 `app/.local_evaluation_runs/wrtn-news-review-20260922/claude/`에만 두었다. 수집 로그는 열지 않았고, 아래 결함의 원인은 단정하지 않는다.
+검수 대상은 `%USERPROFILE%/Downloads/주식회사-뤼튼테크놀로지스-company-analysis.pdf` 5쪽이다. SHA256 `afb4e622…ebe1`과 HEAD `4b674a33`은 지시와 일치했고, 원본은 변경하지 않았다. 5쪽 전부를 150dpi 이미지로 렌더링해 눈으로 읽었으며, 렌더와 증거 텍스트는 `app/.local_evaluation_runs/wrtn-news-review-20260922/claude/`에만 두었다. 수집 로그는 열지 않았고, 아래 결함의 원인은 단정하지 않는다.
 
 ## 핵심 결과 (status)
 

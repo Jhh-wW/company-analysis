@@ -48,7 +48,7 @@ Claude Fable이 PDF 5쪽 전체와 부록을 검수했고, 총괄도 3·4쪽 렌
 
 ## 식별·검증 기록
 
-- 입력: `C:/Users/jh-wo/Downloads/주식회사-뤼튼테크놀로지스-company-analysis.pdf`
+- 입력: `%USERPROFILE%/Downloads/주식회사-뤼튼테크놀로지스-company-analysis.pdf`
 - PDF SHA-256: `afb4e622aef3a10c5d181d07ec54c408424cd5eafbdfc51e6b635495a1e5ebe1`
 - 운영 보고서·실행 ID: `b0fa583b8249006769d57b4a8c23fd15`
 - 보고서 저장 시각: `2026-09-22T12:11:25` UTC
@@ -63,4 +63,4 @@ Claude Fable이 PDF 5쪽 전체와 부록을 검수했고, 총괄도 3·4쪽 렌
 
 Astra의 추가 무료 시험에서 격리 누락으로 기본 로컬 DB에 시험 관리자 로그인 세션 3건이 생성됐다. 해당 작업은 실패로 보고됐다. 총괄은 계정·관리자 여부·정확한 만료 시각이 보고된 3행과 일치함을 확인한 뒤 그 3행만 제거했으며, 대상 잔여 0과 전체 행 수 3 감소를 검증했다. 시험 시 기존 저장 함수가 만료 세션을 정리했을 가능성은 사전 스냅샷이 없어 삭제 건수를 확인할 수 없다. 운영 데이터는 이 시험의 대상이 아니었다. 후속 검토에서는 시험 실행을 금지했다.
 
-총괄은 [Orca orchestration 스킬](C:/Users/jh-wo/.agents/skills/orchestration/SKILL.md)로 Astra의 코드·운영 대조와 Claude Fable의 PDF 검수를 조정했다.
+총괄은 Orca orchestration 스킬(`%USERPROFILE%/.agents/skills/orchestration/SKILL.md`)로 Astra의 코드·운영 대조와 Claude Fable의 PDF 검수를 조정했다.

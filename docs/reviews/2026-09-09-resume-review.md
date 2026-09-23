@@ -91,7 +91,7 @@ Orca v3 1.4.197 후보의 격리 GUI 재시도는 초기 main/renderer/preload, 
 
 1.4.198 후보도 새 격리 프로필에서 숨김 GUI를 한 번 실행해 준비·실제 권한 IPC·listener 연결/정상 종료 시 해제를 확인했다. 사용자 설치판 PID 27396과 지정 설정·인증·후보 파일은 유지됐다. 자동 읽기 전용 업데이트 확인만 있었고 다운로드 캐시는 없었다. 활동 중인 원본 orca-data 전체 해시 변경을 전체 사용자 상태 불변으로 숨기지 않았다. 현재 앱에 패치를 적용한 것은 아니며 OS 알림 전체 E2E·지연 턴 식별·원격·재시작·업데이트 후 지속성 한계는 남는다. 근거는 원래 checkout의 `.local-artifacts/resume-20260909-orca-198/report.md`와 `resume-20260909-orca-gui-198/report.md`다.
 
-이전 실행·비용 대사·Orca 후보의 상세 증거는 원래 작업공간 `C:/Users/jh-wo/.claude/workspace/기업분석2`의 Git에서 제외된 `.local-artifacts/resume-20260909-*`에 있다. 새 checkout의 같은 디렉터리에 실제 세 번째 평가의 `WOORI-semantic-quality.md`, `WOORI-semantic-news.md`, `evaluation-launch/stopped-semantic.json` 등을 보존했다. 푸시·배포·현재 Orca 설치 변경은 하지 않았다.
+이전 실행·비용 대사·Orca 후보의 상세 증거는 원래 작업공간 `%USERPROFILE%/.claude/workspace/기업분석2`의 Git에서 제외된 `.local-artifacts/resume-20260909-*`에 있다. 새 checkout의 같은 디렉터리에 실제 세 번째 평가의 `WOORI-semantic-quality.md`, `WOORI-semantic-news.md`, `evaluation-launch/stopped-semantic.json` 등을 보존했다. 푸시·배포·현재 Orca 설치 변경은 하지 않았다.
 
 ## 네 번째 우리은행 및 첫 SM 실제 평가
 

@@ -100,7 +100,7 @@
 
 남은 확인은 운영 기업개황의 실제 `stock_name`과 기존 typed 공식 조각에 명시 정의가 있는지다. 이 확인 없이 운영 누락의 직접 원인이 해결됐다고 말할 수 없다. 개별 원응답이 없는 기존 신원 실패 5건을 전부 약칭 문제로 설명하지 않으며, 읽은 기사 15개를 모두 분석한 것으로 해석하지 않는다.
 
-조정자와 진행·완료 보고에는 [Orca orchestration 스킬](C:/Users/jh-wo/.agents/skills/orchestration/SKILL.md)을 사용했다.
+조정자와 진행·완료 보고에는 Orca orchestration 스킬(`%USERPROFILE%/.agents/skills/orchestration/SKILL.md`)을 사용했다.
 
 ## 후속 구현과 무료 회귀검증
 

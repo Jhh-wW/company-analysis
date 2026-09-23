@@ -63,4 +63,4 @@ Claude Fable과 현행 코드 및 공개 회사 정보를 확인했다. 오늘 �
 
 비용 정산과 PDF 저장 뒤 이번 서버 PID 30144, 포트 8029의 작업 폴더·명령을 확인하고 종료했다. 종료 시 런처의 `-1` 표시는 완료 후 명시적으로 서버를 종료한 결과이며 보고서 생성 실패가 아니다. 원문·PDF·DB·인증 세션·비밀 파일은 Git에 추가하지 않는다. 운영 배포는 수행하지 않았다.
 
-총괄은 [Orca orchestration 스킬](C:/Users/jh-wo/.agents/skills/orchestration/SKILL.md)로 Astra 두 명과 Claude Fable의 독립 검수 및 후속 수정을 조정했다.
+총괄은 Orca orchestration 스킬(`%USERPROFILE%/.agents/skills/orchestration/SKILL.md`)로 Astra 두 명과 Claude Fable의 독립 검수 및 후속 수정을 조정했다.

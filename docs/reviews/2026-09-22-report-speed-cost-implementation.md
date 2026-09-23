@@ -74,6 +74,6 @@ DNS·접근 규칙 캐시와 진단 목록은 작업마다 분리하되, 완료�
 
 시험 건수는 반복 실행과 겹치는 파일을 단순 합산하지 않는다. 실제 서비스 배포·커밋·푸시는 하지 않았다.
 
-총괄이 Astra 작업자들과 Claude Fable 작업자를 조정했다. 구현·검토·시험은 같은 작업 폴더에서 파일 소유권을 나눠 진행했다. 작업자 재배정과 결과 수신은 [Orca orchestration 스킬](C:/Users/jh-wo/.agents/skills/orchestration/SKILL.md)을 사용했다.
+총괄이 Astra 작업자들과 Claude Fable 작업자를 조정했다. 구현·검토·시험은 같은 작업 폴더에서 파일 소유권을 나눠 진행했다. 작업자 재배정과 결과 수신은 Orca orchestration 스킬(`%USERPROFILE%/.agents/skills/orchestration/SKILL.md`)을 사용했다.
 
 모든 작업자의 완료 보고를 수신하고 실행 기록을 보존한 뒤 터미널을 정리했다. 최종 확인에서 진행 중이거나 회수할 작업자는 없다.

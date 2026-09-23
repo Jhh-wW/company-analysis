@@ -38,7 +38,7 @@ def test_transport검사에_걸린_이름조각만_탈락하고_나머지는_붙
 
     frags, added = real._attach_name_candidate_fragments(  # noqa: SLF001
         dict(before),
-        filing_text=names._kakao_text(),  # noqa: SLF001
+        filing_text=names._product_services_text(),  # noqa: SLF001
         filing_meta=names._filing(),  # noqa: SLF001
         corp_id=names.CORP_ID,
         typed_fragments=(names._typed_anchor(),),  # noqa: SLF001
@@ -68,7 +68,7 @@ def test_기본조각이_검사를_못넘으면_이름조각을_붙이지_않고
 
     frags, added = real._attach_name_candidate_fragments(  # noqa: SLF001
         dict(before),
-        filing_text=names._kakao_text(),  # noqa: SLF001
+        filing_text=names._product_services_text(),  # noqa: SLF001
         filing_meta=names._filing(),  # noqa: SLF001
         corp_id=names.CORP_ID,
         typed_fragments=(anchor,),

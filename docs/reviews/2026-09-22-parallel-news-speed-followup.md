@@ -2,7 +2,7 @@
 
 2026-09-22 · 총괄 진행 기록
 
-사용자가 기존 작업을 최대한 병렬로 진행하도록 요청했다. 기존 PDF 품질 개선 조정자는 별도 실행과 브랜치 소유권을 유지하며, 이 실행은 뉴스 검증·최초 검수 형식·독립 검토를 담당한다. 작업 조정에는 [Orca orchestration 스킬](C:/Users/jh-wo/.agents/skills/orchestration/SKILL.md)을 사용한다.
+사용자가 기존 작업을 최대한 병렬로 진행하도록 요청했다. 기존 PDF 품질 개선 조정자는 별도 실행과 브랜치 소유권을 유지하며, 이 실행은 뉴스 검증·최초 검수 형식·독립 검토를 담당한다. 작업 조정에는 Orca orchestration 스킬(`%USERPROFILE%/.agents/skills/orchestration/SKILL.md`)을 사용한다.
 
 ## 작업 소유권
 

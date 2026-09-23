@@ -36,7 +36,7 @@
 루트 `.venv/Scripts/python.exe -X utf8`로 실행했다. `app/conftest.py`를 그대로 적용했으며 `--confcutdir`는 사용하지 않았다. 실행 전에 `app/.local_evaluation_runs/parallel-news-fix/isolated` 부모 디렉터리를 생성하고 다음 환경을 설정했다.
 
 ```powershell
-$env:STORAGE_DB_PATH = 'C:/Users/jh-wo/.claude/workspace/기업분석2/app/.local_evaluation_runs/parallel-news-fix/isolated/storage.db'
+$env:STORAGE_DB_PATH = "$env:USERPROFILE/.claude/workspace/기업분석2/app/.local_evaluation_runs/parallel-news-fix/isolated/storage.db"
 $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = '1'
 $env:PYTHON_DOTENV_DISABLED = '1'
 ```
@@ -51,7 +51,7 @@ $env:PYTHON_DOTENV_DISABLED = '1'
   src/features/news_intake/tests/test_grounded_contract.py `
   src/features/news_intake/tests/test_collection.py `
   src/features/news_intake/tests/test_metadata_relevance.py `
-  -q --basetemp='C:/Users/jh-wo/.claude/workspace/기업분석2/app/.local_evaluation_runs/parallel-news-fix/grounding-final-ctx-f962e0fd6850'
+  -q --basetemp="$env:USERPROFILE/.claude/workspace/기업분석2/app/.local_evaluation_runs/parallel-news-fix/grounding-final-ctx-f962e0fd6850"
 ```
 
 결과: **184 passed in 3.35s**, 종료 코드 0. `git diff --check`도 변경한 추적 소스 기준으로 통과했다.
@@ -69,4 +69,4 @@ $env:PYTHON_DOTENV_DISABLED = '1'
 
 이번 보완은 전체 법인명 뒤 조사 하나에 한정된다. 공식 법인명과 브랜드명의 근거 연결, 다른 조사 복합형, 원응답의 신원 근거 비정확 복사 문제는 해결됐다고 볼 수 없다. 회사명 일치는 여전히 동일 법인·실질성의 충분조건이 아니며 기존 문맥·모델·원문 검증을 함께 거친다. 이데일리 원문이 운영의 읽음 15개나 분석 입력에 실제로 포함됐는지도 확인하지 못했다. 배포와 새 유료 보고서 생성은 하지 않았다.
 
-조정자와의 재현·계획·결과 전달에는 [Orca orchestration 스킬](C:/Users/jh-wo/.agents/skills/orchestration/SKILL.md)을 사용했다.
+조정자와의 재현·계획·결과 전달에는 Orca orchestration 스킬(`%USERPROFILE%/.agents/skills/orchestration/SKILL.md`)을 사용했다.

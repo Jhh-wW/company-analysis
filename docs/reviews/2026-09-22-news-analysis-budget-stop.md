@@ -23,4 +23,4 @@
 
 이 변경은 사용할 수 없는 본문 요청의 낭비를 줄인다. 뤼튼의 검증 통과 0건 전체를 해결하는 변경이 아니다. 매체 등록, 회사 별칭, 원문·주체 결속의 개별 탈락 대조와 수정은 여전히 필요하다. 운영 배포와 새 보고서 품질 검증도 이번 변경 완료에 포함하지 않는다.
 
-사용자가 로그인한 내부 탭에서 관리자 대시보드 및 [해당 실행의 진단 화면](https://company-analysis-beta.onrender.com/admin/runs/b0fa583b8249006769d57b4a8c23fd15/diagnostics)을 실제로 열었다. 화면의 54개 단계 중 뉴스 단계에서 검색 200·선별 56·본문 시도 20·본문 읽기 15·분석 3회·검증 및 본문 사용 0을 다시 확인했고 이전 운영 DB 조회와 일치했다. 조작에는 [Orca CLI 스킬](C:/Users/jh-wo/.agents/skills/orca-cli/SKILL.md)을 사용했다.
+사용자가 로그인한 내부 탭에서 관리자 대시보드 및 [해당 실행의 진단 화면](https://company-analysis-beta.onrender.com/admin/runs/b0fa583b8249006769d57b4a8c23fd15/diagnostics)을 실제로 열었다. 화면의 54개 단계 중 뉴스 단계에서 검색 200·선별 56·본문 시도 20·본문 읽기 15·분석 3회·검증 및 본문 사용 0을 다시 확인했고 이전 운영 DB 조회와 일치했다. 조작에는 Orca CLI 스킬(`%USERPROFILE%/.agents/skills/orca-cli/SKILL.md`)을 사용했다.
