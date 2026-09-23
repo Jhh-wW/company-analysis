@@ -650,6 +650,15 @@ def test_스위치OFF면_3장_부족_바이트골든을_유지한다(
         assert any(fact.metric == metric and fact.display_value == display
                    and fact.verification_status == "verified"
                    for fact in result.report.fact_records)
+    # 인용이 둘인 정상 해석 문장도 공개돼야 한다 — 가짜 검수 응답의 인용 판독 결함이
+    # 이 문장을 빼던 상태를 골든으로 다시 굳히지 않게 의미로 먼저 못 박는다.
+    business = next(section for section in result.report.sections
+                    if section.cell == "business_model")
+    assert any(
+        line[0] == "음악이 팬덤을 만들고 공연이 수요를 모으며 MD·라이선싱·팬 플랫폼이 "
+                   "구매 접점을 늘리는 구조다. [2][3] — 해석"
+        for line in business.prose_lines
+    )
     # 2026-09-08: 회사 사실은 그대로 두고 뉴스 미조사 안내 한 줄만 골든에 추가했다.
     # 2026-09-11(3): 골든 바이트는 «원래대로»다. 8장 두 문장이 잠시 바뀌어
     #   골든을 다시 만들었다가, 조각 원문 쪽에서 근거를 맞추는 것으로 방식을
@@ -685,6 +694,12 @@ def test_스위치OFF면_3장_부족_바이트골든을_유지한다(
     # 않는다. 8장은 정식 typed 문화 근거만 허용하는 확보자료 경계를 따른다.
     # 검수 파서가 등급 줄 뒤의 본문도 읽게 보강한 뒤 정체성·수익 본문과
     # 위 재무 원값·계산값 보존을 확인했다. 요약은 검증된 사실 5개를 재사용한다.
+    # 2026-09-23(2): 생산 코드 변화가 아니다. 공유 검수 fixture 도우미
+    #   (`review_evidence_fixture._citation_ids`)가 두 번째 인용의 「조각 」 접두어를
+    #   남겨 가짜 응답 근거가 프롬프트 인용과 어긋나던 것을 고쳤다. 그 결과 인용이 둘인
+    #   2장 해석 문장 1개가 공개된다. 필드별 대조로 확인한 변화는 그 한 줄과 메타
+    #   (문장 통과 수 34→35, 부족 안내의 확인 사실 29→30건)뿐이다. 도우미만 옛 판으로
+    #   되돌리면 옛 골든과 바이트가 같다(7999바이트).
     actual = _stable_result_bytes(result)
     golden = json.loads(_GOLDEN_FIXTURE.read_text(encoding="utf-8"))
     assert golden["byte_count"] == len(actual)
