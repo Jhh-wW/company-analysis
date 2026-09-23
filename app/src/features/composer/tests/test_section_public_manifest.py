@@ -82,6 +82,12 @@ from src.shared.report_generation.canonical import (
     report_verification_payload,
 )
 from src.shared.report_generation.models import canonical_sha256
+from src.shared.report_recovery import (
+    PRIMARY_AI_CALLS as POLICY_PRIMARY_AI_CALLS,
+    PRIMARY_WRITER_CALLS,
+    SUPPLEMENT_CALLS_PER_SECTION,
+    SUPPLEMENT_REVIEW_CALLS,
+)
 from src.shared.report_quality.source_identity import document_identity_from_parts
 from src.shared.revenue_table_provenance import canonical_json
 
@@ -740,6 +746,505 @@ def _replace_table(report, section_id: str, transform):
     return replace(report, sections=sections)
 
 
+class _FirstRowBrokenReviewer:
+    """첫 검수 응답의 1번 행 닫는 괄호 자리에 «]»를 찍어 문서 전체를 못 읽게 만든다.
+
+    2026-09-23 유료 실측(14번 행 하나의 괄호 오류로 판정 42행 전체 소실)과 같은
+    부류다. 나머지 행은 온전해 행 단위 구제가 살리고, 1번만 판정 없이 남는다.
+    """
+
+    def __init__(self) -> None:
+        self.inner = _BoundGroupedReviewer()
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        answer = self.inner(prompt)
+        broken = answer.replace('}, {"번호"', ']}, {"번호"', 1)
+        assert broken != answer, "1번 행 뒤에 다음 행이 있어야 깨뜨릴 수 있다"
+        return broken
+
+
+def test_FULL_첫_검수의_깨진_한_행은_재요청_자리로_다시_물어_공개까지_간다():
+    """끝까지 — 장부 bundled·bundled_retry 두 기록, 영수증 검사·생산 증거 검증 통과, 출고.
+
+    ★ 음성 대조 — 셋 중 하나만 열지 않아도 빨개진다:
+      · 장부(재요청 래퍼)를 안 열면 재요청이 공급자 전에 막혀 기록이 1개다.
+      · 영수증(decide_post_validation)을 안 열면 ``report_recovery:primary_receipt_invalid``.
+      · 생산 증거 검증(models)을 안 열면 증거를 못 만들어 출고가 멈춘다.
+    """
+    from src.features.composer.constants import MISSING_VERDICTS_REMINDER
+    from src.shared.report_recovery import (
+        PRIMARY_AI_CALLS,
+        PRIMARY_REVIEW_RETRY_CALLS,
+        RecoveryAction,
+        decide_post_validation,
+    )
+
+    baseline, _, _, _ = _run_full()
+    writer = _CompletePacketWriter()
+    initial = _FirstRowBrokenReviewer()
+    retry = _BoundGroupedReviewer()
+    generic = _BoundGroupedReviewer()
+    output = run_v2(
+        "가나다전자",
+        (),
+        None,
+        writer_ask=writer,
+        reviewer_ask=generic,
+        initial_reviewer_ask=initial,
+        initial_retry_reviewer_ask=retry,
+        diagram_ask=_NoDiagram(),
+        release_mode=ReleaseMode.FULL,
+        section_evidence_packets=_packets(),
+        company_id="00123456",
+        build_identity_sha256="b" * 64,
+    )
+
+    # 첫 검수 1회(깨진 응답) + 재요청 자리 1회(빠진 1번만). 일반 검수 호출자는 안 쓴다.
+    assert len(initial.prompts) == 1 and len(retry.prompts) == 1
+    assert generic.prompts == []
+    assert MISSING_VERDICTS_REMINDER in retry.prompts[0]
+    assert [int(number) for number, *_ in _GROUPED_ITEM_RE.findall(retry.prompts[0])] == [1]
+    # 장부 — 두 기록이 bundled·bundled_retry 자리로 남는다.
+    evidence = output.generation_evidence
+    assert evidence is not None
+    reviewers = [record for record in evidence.call_ledger.records if record.role == "reviewer"]
+    assert [(record.section_id, record.role_index, record.outcome) for record in reviewers] == [
+        ("bundled", 1, "returned"), ("bundled_retry", 2, "returned"),
+    ]
+    assert (evidence.writer_calls, evidence.reviewer_calls) == (9, 2)
+    # 영수증 검사 — 기본 회차 9 + 2 = 11회로 공개 결정.
+    primary, = evidence.validation_receipts
+    assert (primary.writer_calls, primary.reviewer_calls) == (9, 2)
+    decision = decide_post_validation(primary)
+    assert decision.action is RecoveryAction.RELEASE_COMPLETE
+    assert decision.observed_total_ai_calls == (
+        PRIMARY_AI_CALLS + PRIMARY_REVIEW_RETRY_CALLS
+    )
+    # 출고 — FULL 그대로이고, 공개 내용은 깨지지 않은 같은 실행과 같다(1번 문장도
+    # 후속 판정으로 살아 있다).
+    assert output.effective_release_mode == ReleaseMode.FULL.value
+    assert output.report.public_structure_manifest
+    assert baseline.generation_evidence is not None
+    assert evidence.section_sha256s == baseline.generation_evidence.section_sha256s
+
+
+class _LimitReachedReviewer:
+    # 재요청 자리의 호출이 공급자 단계에서 «요청 호출 상한»에 닿은 것처럼 죽는다.
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str) -> str:
+        from src.features.composer.port import AskFatalError
+
+        self.prompts.append(prompt)
+        raise AskFatalError(RuntimeError("요청 한도"), call_limit=True)
+
+
+def test_FULL_재요청_자리_호출이_한도로_죽어도_실패기록과_함께_FULL로_출고한다():
+    # 끝까지 — 재요청 자리 호출이 공급자 단계에서 죽으면 장부에 «failed»
+    # bundled_retry 기록이 남는다. 그래도 영수증·생산 증거 검사를 지나 FULL 로
+    # 출고되고, 판정을 못 받은 1번 문장만 빠진다(재요청이 한도에 걸린 결말과 같다).
+    # ★ 음성 대조 — 생산 증거의 «재요청 자리 실패 허용»을 끄면(모든 실패 기록
+    #   거절) 증거를 못 만들어 출고가 멈춘다.
+    from src.shared.report_recovery import (
+        PRIMARY_AI_CALLS,
+        PRIMARY_REVIEW_RETRY_CALLS,
+        RecoveryAction,
+        decide_post_validation,
+    )
+
+    baseline, _, _, _ = _run_full()
+    initial = _FirstRowBrokenReviewer()
+    retry = _LimitReachedReviewer()
+    generic = _BoundGroupedReviewer()
+    output = run_v2(
+        "가나다전자",
+        (),
+        None,
+        writer_ask=_CompletePacketWriter(),
+        reviewer_ask=generic,
+        initial_reviewer_ask=initial,
+        initial_retry_reviewer_ask=retry,
+        diagram_ask=_NoDiagram(),
+        release_mode=ReleaseMode.FULL,
+        section_evidence_packets=_packets(),
+        company_id="00123456",
+        build_identity_sha256="b" * 64,
+    )
+
+    assert len(initial.prompts) == 1 and len(retry.prompts) == 1
+    assert generic.prompts == []
+    evidence = output.generation_evidence
+    assert evidence is not None
+    reviewers = [record for record in evidence.call_ledger.records if record.role == "reviewer"]
+    assert [(record.section_id, record.role_index, record.outcome) for record in reviewers] == [
+        ("bundled", 1, "returned"), ("bundled_retry", 2, "failed"),
+    ]
+    assert reviewers[1].error_kind == "AskFatalError"
+    primary, = evidence.validation_receipts
+    assert (primary.writer_calls, primary.reviewer_calls) == (9, 2)
+    decision = decide_post_validation(primary)
+    assert decision.action is RecoveryAction.RELEASE_COMPLETE
+    assert decision.observed_total_ai_calls == (
+        PRIMARY_AI_CALLS + PRIMARY_REVIEW_RETRY_CALLS
+    )
+    assert output.effective_release_mode == ReleaseMode.FULL.value
+    # 판정을 못 받은 1번 문장의 장만 바뀌고 나머지 장은 깨지지 않은 실행과 같다.
+    first_section, = (
+        section_id
+        for number, section_id, *_ in _GROUPED_ITEM_RE.findall(initial.prompts[0])
+        if int(number) == 1
+    )
+    assert baseline.generation_evidence is not None
+    base_hashes = dict(baseline.generation_evidence.section_sha256s)
+    hashes = dict(evidence.section_sha256s)
+    assert hashes.keys() == base_hashes.keys()
+    assert {
+        section_id for section_id, digest in hashes.items()
+        if digest != base_hashes[section_id]
+    } == {first_section}
+
+
+def test_FULL_재요청_1회와_보충_두장이_한_실행에서_승인되고_완료된다():
+    # 2026-09-24 총괄 결정 2 — 재요청 자리를 쓴 기본 회차(작성 9 + 검수 2) 뒤에도
+    # 두 장 보충이 영수증 상한 안에서 승인되고, 보충 회차까지 끝나 FULL 로 공개된다.
+    from src.shared.report_recovery import (
+        PRIMARY_REVIEW_RETRY_CALLS,
+        RecoveryAction,
+        decide_post_validation,
+    )
+
+    targets = ("identity", "business_model")
+    writer = _RecoveringPacketWriter(targets)
+    initial = _FirstRowBrokenReviewer()
+    retry = _BoundGroupedReviewer()
+    generic = _BoundGroupedReviewer()
+    output = run_v2(
+        "가나다전자",
+        (),
+        None,
+        writer_ask=writer,
+        reviewer_ask=generic,
+        initial_reviewer_ask=initial,
+        initial_retry_reviewer_ask=retry,
+        diagram_ask=_NoDiagram(),
+        release_mode=ReleaseMode.FULL,
+        section_evidence_packets=_packets(),
+        company_id="00123456",
+        build_identity_sha256="b" * 64,
+    )
+
+    evidence = output.generation_evidence
+    assert evidence is not None
+    assert output.effective_release_mode == ReleaseMode.FULL.value
+    # 첫 검수 1(깨진 1행) + 재요청 1(빠진 번호만) + 보충 검수 1.
+    assert (len(initial.prompts), len(retry.prompts), len(generic.prompts)) == (1, 1, 1)
+    primary, supplement = evidence.validation_receipts
+    assert (primary.writer_calls, primary.reviewer_calls) == (PRIMARY_WRITER_CALLS, 2)
+    assert supplement.supplemented_section_ids == targets
+    primary_with_retry = POLICY_PRIMARY_AI_CALLS + PRIMARY_REVIEW_RETRY_CALLS
+    supplement_calls = (
+        len(targets) * SUPPLEMENT_CALLS_PER_SECTION + SUPPLEMENT_REVIEW_CALLS
+    )
+    first = decide_post_validation(primary)
+    assert first.action is RecoveryAction.RUN_SUPPLEMENTS
+    assert first.observed_total_ai_calls == primary_with_retry
+    assert first.projected_total_ai_calls == primary_with_retry + supplement_calls
+    final = decide_post_validation(
+        primary,
+        supplement_authorization=first.supplement_authorization,
+        supplement_receipt=supplement,
+    )
+    assert final.action is RecoveryAction.RELEASE_COMPLETE
+    assert final.observed_total_ai_calls == primary_with_retry + supplement_calls
+    assert len(evidence.call_ledger.records) == primary_with_retry + supplement_calls
+    assert [
+        (record.validation_round.value, record.section_id)
+        for record in evidence.call_ledger.records if record.role == "reviewer"
+    ] == [("PRIMARY", "bundled"), ("PRIMARY", "bundled_retry"), ("SUPPLEMENT", "bundled")]
+
+
+class _GlobalFailureReviewer:
+    # 재요청 자리의 호출이 요청 «전역» 장애로 죽는다 — 강등 깃발이 없는 AskFatalError
+    # (돈·계정·billing-uncertain 부류, 예: 일일 예산 소진).
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str) -> str:
+        from src.features.composer.port import AskFatalError
+
+        self.prompts.append(prompt)
+        raise AskFatalError(RuntimeError("일일 예산 소진"))
+
+
+def test_FULL_재요청_자리가_전역_장애로_죽으면_기존_폴백으로_가고_진단에_남는다(
+    caplog, monkeypatch,
+):
+    # 2026-09-24 총괄 결정 3 — 처분은 바꾸지 않는다(전역 장애는 뒤 필수 호출도 못
+    # 나가므로 재전파). 이 시험은 그 처분을 고정하고, 멈춤이 «두 번째 검수 호출»에서
+    # 났다는 관측(판독 global_failure)이 진단에 남는지 본다.
+    # 기존 처분: pipeline 의 AI 전역 장애 갈래가 검수를 못 마친 초안을 버리고 안내뿐인
+    # 본문으로 바꾼다 → FULL 사후 판정이 안전 차단(무차감)으로 닫는다. 진단 목록은
+    # 예외가 나도 real.py 의 finally 가 실행 기록에 옮긴다.
+    from src.shared.report_quality.composition_diagnostic_constants import (
+        PROTOCOL_STEP,
+        READ_GLOBAL_FAILURE,
+        READ_OK,
+    )
+
+    from src.shared.report_quality.composition_diagnostics import (
+        observed_composition_steps,
+    )
+
+    recorders = []
+
+    class _LedgerSpy(pipeline_module._CallLedgerRecorder):
+        def __init__(self):
+            super().__init__()
+            recorders.append(self)
+
+    monkeypatch.setattr(pipeline_module, "_CallLedgerRecorder", _LedgerSpy)
+    composition: list[dict] = []
+    initial = _FirstRowBrokenReviewer()
+    retry = _GlobalFailureReviewer()
+    generic = _BoundGroupedReviewer()
+    # 검수 기록이 2회(실패한 bundled_retry)여도 사유는 이것이어야 한다 —
+    # ``report_recovery:primary_receipt_invalid`` 로 끝나면 결함이다(D 기준 트리 탐침).
+    with caplog.at_level("WARNING"), pytest.raises(
+        V2ValidationError, match="report_recovery:post_validation_safety_blocked",
+    ):
+        run_v2(
+            "가나다전자",
+            (),
+            None,
+            writer_ask=_CompletePacketWriter(),
+            reviewer_ask=generic,
+            initial_reviewer_ask=initial,
+            initial_retry_reviewer_ask=retry,
+            diagram_ask=_NoDiagram(),
+            release_mode=ReleaseMode.FULL,
+            section_evidence_packets=_packets(),
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
+            composition_diagnostics_sink=composition,
+            preserve_on_ask_failure=True,
+        )
+
+    assert (len(initial.prompts), len(retry.prompts), len(generic.prompts)) == (1, 1, 0)
+    assert [
+        (record["시도"], record["판독"])
+        for record in composition if record.get("step") == PROTOCOL_STEP
+    ] == [(1, READ_OK), (2, READ_GLOBAL_FAILURE)]  # 첫 응답은 행 단위 구제로 읽혔다
+    assert any(
+        "AI 작성·검수 중단" in record.getMessage() for record in caplog.records
+    )
+    # 진단 한 줄 — 판독 코드와 원인 «종류»만 남고 정화기를 그대로 지난다. 문구는 없다.
+    second, = [
+        record for record in composition
+        if record.get("step") == PROTOCOL_STEP and record["시도"] == 2
+    ]
+    assert second["원인종류"] == "RuntimeError"
+    assert second in observed_composition_steps(composition)
+    assert "일일 예산 소진" not in json.dumps(composition, ensure_ascii=False)
+    # 장부 — 첫 검수는 받았고, 재요청 자리는 실패로 기록됐다(검수 호출 2회).
+    recorder, = recorders
+    assert [
+        (record.section_id, record.outcome, record.error_kind)
+        for record in recorder.freeze().records if record.role == "reviewer"
+    ] == [("bundled", "returned", ""), ("bundled_retry", "failed", "AskFatalError")]
+
+
+def _provider_call_failed():
+    """운영(SDK 재시도 꺼짐)에서 일시적 공급자 오류 한 번이 올라오는 모양 — 가짜 관측."""
+    from src.core.provider_gateway import gateway
+    from src.core.provider_gateway.types import (
+        BillingDisposition,
+        ProviderObservation,
+        TransportState,
+    )
+
+    return gateway.ProviderCallFailed(ProviderObservation(
+        transport_state=TransportState.RESPONSE_RECEIVED,
+        billing_disposition=BillingDisposition.CONSERVATIVE_LIABILITY,
+        known_cost_krw=0.0,
+        liability_krw=1.0,
+        status_code=529,
+        error_type="OverloadedError",
+        request_id="req-retry",
+    ))
+
+
+class _CauseRaisingReviewer:
+    """정해 둔 원인으로 AskFatalError 를 던지는 검수 호출자(real.py 가 올리는 모양)."""
+
+    def __init__(self, cause) -> None:
+        self.cause = cause
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str) -> str:
+        from src.features.composer.port import AskFatalError
+
+        self.prompts.append(prompt)
+        raise AskFatalError(self.cause, call_limit=False)
+
+
+def _run_full_with_retry(initial, retry, composition):
+    return run_v2(
+        "가나다전자",
+        (),
+        None,
+        writer_ask=_CompletePacketWriter(),
+        reviewer_ask=_BoundGroupedReviewer(),
+        initial_reviewer_ask=initial,
+        initial_retry_reviewer_ask=retry,
+        diagram_ask=_NoDiagram(),
+        release_mode=ReleaseMode.FULL,
+        section_evidence_packets=_packets(),
+        company_id="00123456",
+        build_identity_sha256="b" * 64,
+        composition_diagnostics_sink=composition,
+        preserve_on_ask_failure=True,
+    )
+
+
+def test_FULL_재요청_자리의_공급자_호출_실패는_첫_판정으로_FULL_출고한다():
+    # 2026-09-24 결정 3 개정 — D 2단계 탐침 표 셋째 줄. 재요청(누락 후속)이 공급자 호출
+    # 실패 한 번을 만나도 첫 판정으로 진행해 FULL 로 나간다. 장부에는 bundled_retry 실패
+    # 기록 1건이 남고, 영수증은 9/2 다.
+    from src.shared.report_quality.composition_diagnostic_constants import (
+        PROTOCOL_STEP,
+        READ_OK,
+        READ_PROVIDER_FAILURE_DEGRADED,
+    )
+    from src.shared.report_recovery import (
+        PRIMARY_AI_CALLS,
+        PRIMARY_REVIEW_RETRY_CALLS,
+        RecoveryAction,
+        decide_post_validation,
+    )
+
+    composition: list[dict] = []
+    retry = _CauseRaisingReviewer(_provider_call_failed())
+    output = _run_full_with_retry(_FirstRowBrokenReviewer(), retry, composition)
+
+    assert output.effective_release_mode == ReleaseMode.FULL.value
+    assert len(retry.prompts) == 1
+    assert [
+        (record["시도"], record["판독"])
+        for record in composition if record.get("step") == PROTOCOL_STEP
+    ] == [(1, READ_OK), (2, READ_PROVIDER_FAILURE_DEGRADED)]
+    evidence = output.generation_evidence
+    assert evidence is not None
+    assert [
+        (record.section_id, record.outcome)
+        for record in evidence.call_ledger.records if record.role == "reviewer"
+    ] == [("bundled", "returned"), ("bundled_retry", "failed")]
+    primary, = evidence.validation_receipts
+    assert (primary.writer_calls, primary.reviewer_calls) == (9, 2)
+    decision = decide_post_validation(primary)
+    assert decision.action is RecoveryAction.RELEASE_COMPLETE
+    assert decision.observed_total_ai_calls == (
+        PRIMARY_AI_CALLS + PRIMARY_REVIEW_RETRY_CALLS
+    )
+
+
+def test_FULL_재요청_자리가_billing_uncertain_뒤_차단이면_예전처럼_출고_검증_차단이다():
+    # D 탐침 표 넷째 줄 대조 — 앞선 호출이 billing-uncertain 을 만든 뒤의 호출 차단
+    # (ProviderBudgetUnavailable)은 공급자 호출 실패가 아니다. 정책 불변으로 재전파한다.
+    from src.features.budget.provider_budget import ProviderBudgetUnavailable
+    from src.shared.report_quality.composition_diagnostic_constants import (
+        PROTOCOL_STEP,
+        READ_GLOBAL_FAILURE,
+    )
+
+    composition: list[dict] = []
+    retry = _CauseRaisingReviewer(ProviderBudgetUnavailable(
+        "미확정 provider 호출 뒤에는 같은 요청에서 다시 호출할 수 없습니다"
+    ))
+    with pytest.raises(
+        V2ValidationError, match="report_recovery:post_validation_safety_blocked",
+    ):
+        _run_full_with_retry(_FirstRowBrokenReviewer(), retry, composition)
+
+    second, = [
+        record for record in composition
+        if record.get("step") == PROTOCOL_STEP and record["시도"] == 2
+    ]
+    assert (second["판독"], second["원인종류"]) == (
+        READ_GLOBAL_FAILURE, "ProviderBudgetUnavailable",
+    )
+
+
+def test_FULL_첫_검수의_공급자_호출_실패는_강등하지_않고_출고_검증_차단이다():
+    # 첫 호출은 우아한 저하 대상이 아니다 — 재요청 자리 래퍼만 바뀌었다.
+    initial = _CauseRaisingReviewer(_provider_call_failed())
+    retry = _BoundGroupedReviewer()
+    with pytest.raises(
+        V2ValidationError, match="report_recovery:post_validation_safety_blocked",
+    ):
+        _run_full_with_retry(initial, retry, [])
+
+    assert len(initial.prompts) == 1
+    assert retry.prompts == []
+
+
+class _GenericFailingReviewer:
+    # 첫 검수 호출이 공급자 단계의 «일반 예외»로 죽는다 — 전역 장애(AskFatalError)가
+    # 아니라서 `_safe_ask` 가 None 으로 삼키는 경우다.
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        raise RuntimeError("공급자 연결 끊김")
+
+
+def test_FULL_첫_검수가_일반_예외로_죽으면_두번째_호출을_보내지_않고_예전_결말로_끝난다(caplog):
+    # 2026-09-24 보강 1 — 첫 «bundled» 기록이 실패면 재요청 자리를 쓰지 않는다.
+    # 재요청이 성공해 COMPLETE 까지 가면 생산 증거가 그 실패 기록을 거절해 «조립
+    # 실패»로 전체가 죽기 때문이다. 결말은 예전(재요청이 장부에 막히던 때)과 같다 —
+    # 판정이 하나도 없어 사후 판정이 안전 차단(무차감)으로 닫는다. 공급자 호출은 첫
+    # 검수 1회뿐이고, 보내지 않은 두 번째 호출의 관측·경고도 없다.
+    from src.shared.report_quality.composition_diagnostic_constants import PROTOCOL_STEP
+
+    initial = _GenericFailingReviewer()
+    retry = _BoundGroupedReviewer()
+    generic = _BoundGroupedReviewer()
+    composition: list[dict] = []
+    with caplog.at_level("WARNING"), pytest.raises(
+        V2ValidationError, match="report_recovery:post_validation_safety_blocked",
+    ):
+        run_v2(
+            "가나다전자",
+            (),
+            None,
+            writer_ask=_CompletePacketWriter(),
+            reviewer_ask=generic,
+            initial_reviewer_ask=initial,
+            initial_retry_reviewer_ask=retry,
+            diagram_ask=_NoDiagram(),
+            release_mode=ReleaseMode.FULL,
+            section_evidence_packets=_packets(),
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
+            composition_diagnostics_sink=composition,
+            preserve_on_ask_failure=True,
+        )
+
+    assert len(initial.prompts) == 1
+    assert retry.prompts == [] and generic.prompts == []
+    assert [
+        record["시도"] for record in composition if record.get("step") == PROTOCOL_STEP
+    ] == [1]
+    review_warnings = [
+        record.getMessage() for record in caplog.records
+        if record.levelname == "WARNING" and "검수 AI 호출이 실패했다" in record.getMessage()
+    ]
+    assert len(review_warnings) == 1
+
+
 def test_full_packet은_작성9_묶음검수1_요약0_도식0이다():
     output, writer, reviewer, diagram = _run_full(flow=True)
 
@@ -775,8 +1280,12 @@ def test_full_packet은_작성9_묶음검수1_요약0_도식0이다():
 @pytest.mark.parametrize(
     ("targets", "expected_calls"),
     (
-        (("identity",), 12),
-        (("identity", "business_model"), 13),
+        # 호출 수는 정책 상수에서 유도한다(2026-09-24 총괄 결정 2) — 기본 회차 +
+        # 장마다 보충 작성 1 + 보충 검수 1.
+        (("identity",), POLICY_PRIMARY_AI_CALLS
+         + SUPPLEMENT_CALLS_PER_SECTION + SUPPLEMENT_REVIEW_CALLS),
+        (("identity", "business_model"), POLICY_PRIMARY_AI_CALLS
+         + 2 * SUPPLEMENT_CALLS_PER_SECTION + SUPPLEMENT_REVIEW_CALLS),
     ),
 )
 def test_FULL은_승인장_한두개만_한번_보충하고_round장부를_잇는다(
@@ -786,7 +1295,9 @@ def test_FULL은_승인장_한두개만_한번_보충하고_round장부를_잇�
     output, writer, reviewer = _run_recovering_full(targets)
     evidence = output.generation_evidence
     assert evidence is not None
-    assert len(writer.prompts) == 9 + len(targets)
+    assert len(writer.prompts) == (
+        PRIMARY_WRITER_CALLS + len(targets) * SUPPLEMENT_CALLS_PER_SECTION
+    )
     assert len(reviewer.prompts) == 2
     assert len(evidence.call_ledger.records) == expected_calls
     assert len(evidence.validation_receipts) == 2
@@ -796,7 +1307,7 @@ def test_FULL은_승인장_한두개만_한번_보충하고_round장부를_잇�
     assert tuple(record.sequence for record in evidence.call_ledger.records) == tuple(
         range(1, expected_calls + 1)
     )
-    supplement_records = evidence.call_ledger.records[10:]
+    supplement_records = evidence.call_ledger.records[POLICY_PRIMARY_AI_CALLS:]
     assert tuple(record.validation_round.value for record in supplement_records) == (
         ("SUPPLEMENT",) * (len(targets) + 1)
     )
@@ -926,7 +1437,7 @@ def test_보충뒤에도_얇으면_세번째호출없이_닫힌사유로_끝난�
             build_identity_sha256="b" * 64,
         )
 
-    assert len(writer.prompts) == 10
+    assert len(writer.prompts) == PRIMARY_WRITER_CALLS + SUPPLEMENT_CALLS_PER_SECTION
     assert len(reviewer.prompts) == 2
     assert writer.section_calls["identity"] == 2
     assert "missing_required_public_claim_slots" in caught.value.problem_codes
@@ -962,7 +1473,7 @@ def test_보충검수의_미결속_해석을_제외한_뒤_품질미달이면_�
             composition_diagnostics_sink=diagnostics,
         )
 
-    assert len(writer.prompts) == 10
+    assert len(writer.prompts) == PRIMARY_WRITER_CALLS + SUPPLEMENT_CALLS_PER_SECTION
     assert len(reviewer.prompts) == 2
     assert writer.section_calls["identity"] == 2
     # 불안전한 해석은 공개 후보에서 제거됐고, 남은 근거가 필수칸을 채우지 못한다.
@@ -995,7 +1506,7 @@ def test_보충후보지문이_같으면_재보충없이_중단한다(monkeypatc
             build_identity_sha256="b" * 64,
         )
 
-    assert len(writer.prompts) == 10
+    assert len(writer.prompts) == PRIMARY_WRITER_CALLS + SUPPLEMENT_CALLS_PER_SECTION
     assert len(reviewer.prompts) == 2
 
 

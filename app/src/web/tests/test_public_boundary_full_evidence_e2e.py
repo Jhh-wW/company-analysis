@@ -27,7 +27,11 @@ import pytest
 
 from src.core import deployment_identity
 from src.core.constants import GENERATION_MODEL, PIPELINE_ENV, PIPELINE_REAL
-from src.features.composer.constants import GRADE_CONFIRMED, SECTION_IDS
+from src.features.composer.constants import (
+    GRADE_CONFIRMED,
+    MISSING_VERDICTS_REMINDER,
+    SECTION_IDS,
+)
 from src.features.composer.logic import SUMMARY_PROMPT_HEADER
 from src.features.composer.public_manifest import assert_stored_strict_manifest
 from src.features.homepage.ir_pdf import FetchedIrHtml, FetchedIrPdf
@@ -74,6 +78,7 @@ _COMPARATOR_RECEIPT = "20260315000999"
 _HOME = "https://company.example/"
 _JOB_ID = "public-boundary-full-evidence-e2e"
 _QUALITY_STOP_JOB_ID = "public-boundary-full-quality-stop-e2e"
+_REVIEW_RETRY_JOB_ID = "public-boundary-full-review-retry-e2e"
 _SIDECAR_JOB_ID = "public-boundary-sidecar-discovery-e2e"
 _IR_PDF_URL = "https://company.example/ir/2026-q2.pdf"
 _RECRUIT_URL = "https://recruit.company.example/jobs"
@@ -320,6 +325,10 @@ class _ProviderMessages:
         # assessor, receipt, recovery는 절대 대체하지 않는다.
         self.persistently_thin_sections: set[str] = set()
         self.writer_section_calls: dict[str, int] = {}
+        # 첫 검수 응답만 1번 행의 닫는 괄호 자리에 «]»를 찍는 적대 모드 — 문서 전체가
+        # JSON으로 못 읽혀 행 단위 구제와 재요청 자리를 실제 경계로 관통시킨다
+        # (2026-09-23 유료 실측: 한 행의 괄호 한 글자로 판정 42행 소실).
+        self.break_first_review_row = False
 
     @staticmethod
     def _prompt(kwargs: dict[str, Any]) -> str:
@@ -362,6 +371,10 @@ class _ProviderMessages:
                 {"판정": verdicts},
                 ensure_ascii=False,
             )
+            if self.break_first_review_row and len(self.reviewer_prompts) == 1:
+                broken = text.replace('}, {"번호"', ']}, {"번호"', 1)
+                assert broken != text, "첫 검수 응답에 행이 둘 이상 있어야 깨뜨릴 수 있다"
+                text = broken
         elif SUMMARY_PROMPT_HEADER in prompt:
             text = json.dumps({"문장들": []}, ensure_ascii=False)
         else:
@@ -1202,6 +1215,138 @@ def test_실제FULL은_필수칸과_장당3이_보충뒤에도비면_검증본�
     assert job.report_persisted is True
     assert job.delivery_persisted is True
     assert job.slot_released is True
+
+
+@pytest.mark.local_integration
+def test_실제FULL에서_첫_검수의_깨진_한_행을_재요청_자리로_다시_물어_FULL로_출고한다(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolated_company_catalog_state: None,
+) -> None:
+    """외부 AI 응답만 깨뜨리고 생산 real.py·장부·영수증·생산 증거·출고는 그대로 탄다.
+
+    ★ 2026-09-23 FULL 검수 «1회 + 재요청 자리 1» 개방의 끝까지 시험 — real.py 가
+      넘기는 재요청 전용 호출자가 장부의 ``bundled_retry`` 자리로 기록되고, 영수증
+      (검수 2회)과 생산 증거가 통과해 FULL 보고서가 저장·배달된다. 공개 내용에서
+      깨진 1번 행의 문장도 후속 판정으로 살아 있다(FULL 등급 COMPLETE).
+    """
+
+    monkeypatch.setenv(PIPELINE_ENV, PIPELINE_REAL)
+    monkeypatch.setenv(real.ENGINE_V2_ENV_NAME, real.ENGINE_V2_ENV_ON)
+    monkeypatch.setenv(real.REPORT_RELEASE_MODE_ENV_NAME, ReleaseMode.FULL.value)
+    monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / "artifacts"))
+    for name in deployment_identity.COMMIT_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
+
+    _engine, external_services = _install_production_engine_with_fake_external_services(
+        monkeypatch,
+        tmp_path,
+    )
+    external_services.client.messages.break_first_review_row = True
+    _install_actual_official_collector_with_fake_http(monkeypatch)
+    monkeypatch.setattr(
+        job_runtime,
+        "_require_report_delivery",
+        _ACTUAL_REQUIRE_REPORT_DELIVERY,
+    )
+    monkeypatch.setattr(
+        job_runtime,
+        "_finalize_report_delivery",
+        _ACTUAL_FINALIZE_REPORT_DELIVERY,
+    )
+    monkeypatch.setattr(reports_router, "_release_state", _ACTUAL_RELEASE_STATE)
+    pipeline = runtime.make_pipeline()
+    assert isinstance(pipeline, real.RealPipeline)
+    monkeypatch.setattr(runtime, "_PIPELINE", pipeline)
+
+    paid_runtime.prepare_budget_state_machine_cutover()
+    share_key = "review-retry-admin@example.com"
+    slot_bucket_id = paid_runtime._reserve_run_slot(  # noqa: SLF001
+        share_tracks.Track.ADMIN,
+        share_key,
+    )
+    assert slot_bucket_id
+    _begin_running_lifecycle(_REVIEW_RETRY_JOB_ID)
+    job = job_runtime.Job(
+        job_id=_REVIEW_RETRY_JOB_ID,
+        user_input=UserInput(company="가나다전자", job="", region=""),
+        card=CompanyCard(
+            legal_name="가나다전자",
+            typed_name="가나다전자",
+            address="서울특별시 강남구 테헤란로",
+            ceo="홍길동",
+            founded="20000101",
+            ref=_COMPANY_ID,
+        ),
+        share_key=share_key,
+        is_paid=True,
+        paid_cap_krw=100_000.0,
+        slot_bucket_id=slot_bucket_id,
+        report_audience=ReportAudience.ADMIN,
+    )
+
+    asyncio.run(job_runtime._run_job(job))
+
+    assert job.result is not None
+    assert job.result.outcome is Outcome.REPORT, (
+        job.result.final_gate_reason,
+        job.result.message,
+    )
+    report = job.result.report
+    assert report is not None
+    assert report.grade is Grade.COMPLETE
+    assert report.release_mode == ReleaseMode.FULL.value
+    assert job.result.final_gate_reason == ""
+    assert job.report_persisted is True
+    assert job.delivery_persisted is True
+    assert job.slot_released is True
+    # 작가 9 + 첫 검수(깨진 응답) 1 + 재요청 자리(빠진 1번만) 1.
+    messages = external_services.client.messages
+    assert len(messages.writer_prompts) == 9
+    assert len(messages.reviewer_prompts) == 2
+    assert MISSING_VERDICTS_REMINDER in messages.reviewer_prompts[1]
+    assert [
+        int(number)
+        for number, *_ in messages._review_locked_item_re.findall(  # noqa: SLF001
+            messages.reviewer_prompts[1]
+        )
+    ] == [1]
+    evidence = report.generation_evidence
+    assert evidence is not None
+    assert (evidence.writer_calls, evidence.reviewer_calls) == (9, 2)
+    assert [
+        (record.section_id, record.role_index, record.outcome)
+        for record in evidence.call_ledger.records
+        if record.role == "reviewer"
+    ] == [("bundled", 1, "returned"), ("bundled_retry", 2, "returned")]
+    primary, = evidence.validation_receipts
+    assert primary.reviewer_calls == 2
+    assert_report_matches_generation_evidence(
+        report_verification_payload(report),
+        evidence,
+        manifest_bytes=report.public_structure_manifest.encode("utf-8"),
+    )
+    assert_stored_strict_manifest(report)
+    # ★ 출고 모드 진단 한 줄(2026-09-24 후속)이 실제로 저장됐다. 평가 도구
+    #   (tools/evaluate_companies.py)는 run_id 로 이 표의 steps_json 을 그대로
+    #   diagnostics.json 에 내보낸다 — composer 목록 → real.py 정화기 → 실행 진단
+    #   수집 → 저장까지 한 번도 끊기지 않았다는 뜻이다.
+    from src.features.observability import run_steps_store
+
+    with storage_db.connect() as conn:
+        stored = run_steps_store.load(conn, _REVIEW_RETRY_JOB_ID)
+    assert stored is not None
+    assert [
+        step for step in stored.steps if step.get("step") == "8_출고모드_적용"
+    ] == [{
+        "step": "8_출고모드_적용",
+        "요청모드": "FULL",
+        "적용모드": "FULL",
+        "강등출처": "",
+        "검수호출": {"bundled": 1, "bundled_retry": 1},
+        "장부사용": True,
+    }]
 
 
 @pytest.mark.local_integration

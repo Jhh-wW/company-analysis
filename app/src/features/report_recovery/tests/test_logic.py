@@ -9,6 +9,9 @@ import pytest
 from src.features.report_recovery.constants import (
     MAX_TOTAL_AI_CALLS,
     PRIMARY_AI_CALLS,
+    PRIMARY_WRITER_CALLS,
+    SUPPLEMENT_CALLS_PER_SECTION,
+    SUPPLEMENT_REVIEW_CALLS,
 )
 from src.features.report_recovery.logic import decide_post_validation
 from src.features.report_recovery.models import (
@@ -34,11 +37,23 @@ from src.shared.report_quality.models import (
 )
 from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
 from src.shared.report_recovery import (
+    PRIMARY_REVIEW_RETRY_CALLS,
     decide_post_validation as shared_decide_post_validation,
 )
 
 
 _CONTRACT_VERSION = STRICT_QUALITY_CONTRACT_VERSION
+
+# 시나리오별 호출 수는 정책 상수에서 유도한다(2026-09-24 총괄 결정 2). 상수의
+# «값» 자체는 이 파일 끝의 기준값 시험 한 곳이 리터럴로 고정한다 — 유도식만
+# 쓰면 상수가 함께 낮아지는 회귀를 못 잡는다.
+_PRIMARY_CALLS = PRIMARY_AI_CALLS
+_PRIMARY_CALLS_WITH_RETRY = PRIMARY_AI_CALLS + PRIMARY_REVIEW_RETRY_CALLS
+
+
+def _supplement_calls(section_count: int) -> int:
+    """보충 한 회차의 호출 수 — 장마다 작성 1회 + 묶음 검수 1회."""
+    return section_count * SUPPLEMENT_CALLS_PER_SECTION + SUPPLEMENT_REVIEW_CALLS
 
 
 def test_기존feature경로는_shared정본을_그대로재export한다() -> None:
@@ -169,6 +184,7 @@ def _primary(
     *,
     company_id: str = "corp-1",
     candidate_sha256: str = "a" * 64,
+    reviewer_calls: int = 1,
 ) -> GenerationValidationReceipt:
     return GenerationValidationReceipt(
         company_id=company_id,
@@ -176,7 +192,7 @@ def _primary(
         assessment=assessment,
         round=ValidationRound.PRIMARY,
         writer_calls=9,
-        reviewer_calls=1,
+        reviewer_calls=reviewer_calls,
         section_sha256s=_section_sha256s("primary-section"),
         evidence_packet_sha256s=_section_sha256s("evidence-packet"),
         # 장별 봉인 블록 지문 — 보충 결속이 장부까지 비교하므로 정상
@@ -247,8 +263,8 @@ def _recoverable(*section_ids: str) -> GenerationAssessment:
 @pytest.mark.parametrize(
     ("sections", "expected_calls"),
     [
-        (("identity",), 12),
-        (("identity", "culture"), 13),
+        (("identity",), _PRIMARY_CALLS + _supplement_calls(1)),
+        (("identity", "culture"), _PRIMARY_CALLS + _supplement_calls(2)),
     ],
 )
 def test_얇은장_두개이하는_정확한후보와장에_보충을_결속한다(
@@ -270,9 +286,12 @@ def test_얇은장_두개이하는_정확한후보와장에_보충을_결속한�
         decision.supplement_authorization.base_receipt_sha256
         == primary.receipt_sha256
     )
-    assert decision.observed_total_ai_calls == 10
+    assert decision.observed_total_ai_calls == _PRIMARY_CALLS
     assert decision.projected_total_ai_calls == expected_calls
-    assert decision.projected_total_ai_calls <= MAX_TOTAL_AI_CALLS == 13
+    # 영수증 상한 = 기본 + 검수 재요청 자리 + 보충 두 장 + 보충 검수(값은 파일 끝
+    # 기준값 시험). 요청당 AI 호출 상한(시간 규약)은 이 값이 아니다
+    # (core.constants.MAX_AI_CALLS_PER_REQUEST).
+    assert decision.projected_total_ai_calls <= MAX_TOTAL_AI_CALLS
 
 
 def test_의미범주가_얇은장도_문구해석없이_보충대상이된다() -> None:
@@ -305,7 +324,7 @@ def test_한장_해석3개는_한번만_보충하고_남으면_무차감_STOP한
 
     assert first.action is RecoveryAction.RUN_SUPPLEMENTS
     assert first.supplement_section_ids == ("identity",)
-    assert first.projected_total_ai_calls == 12
+    assert first.projected_total_ai_calls == _PRIMARY_CALLS + _supplement_calls(1)
     assert first.supplement_authorization is not None
 
     still_heavy = _supplement(
@@ -321,7 +340,7 @@ def test_한장_해석3개는_한번만_보충하고_남으면_무차감_STOP한
 
     assert final.action is RecoveryAction.STOP_NO_CHARGE
     assert final.reason_code == "post_supplement_quality_failed"
-    assert final.observed_total_ai_calls == 12
+    assert final.observed_total_ai_calls == _PRIMARY_CALLS + _supplement_calls(1)
     assert final.authorized_additional_ai_calls == 0
     assert final.supplement_authorization is None
     assert final.publish_allowed is False
@@ -359,7 +378,7 @@ def test_필수의미칸누락과_2문장장은_한번보충뒤에도남으면_�
     primary = _primary(failed)
     first = decide_post_validation(primary)
     assert first.action is RecoveryAction.RUN_SUPPLEMENTS
-    assert first.projected_total_ai_calls == 12
+    assert first.projected_total_ai_calls == _PRIMARY_CALLS + _supplement_calls(1)
     assert first.supplement_authorization is not None
 
     supplement = _supplement(
@@ -374,7 +393,7 @@ def test_필수의미칸누락과_2문장장은_한번보충뒤에도남으면_�
     )
 
     assert final.action is RecoveryAction.STOP_NO_CHARGE
-    assert final.observed_total_ai_calls == 12
+    assert final.observed_total_ai_calls == _PRIMARY_CALLS + _supplement_calls(1)
     assert final.authorized_additional_ai_calls == 0
     assert final.supplement_authorization is None
     assert not final.publish_allowed
@@ -413,7 +432,7 @@ def test_해석보충뒤_틀린수치가_남으면_세번째호출없이_무차�
 
     assert final.action is RecoveryAction.STOP_NO_CHARGE
     assert final.reason_code == "post_supplement_safety_blocked"
-    assert final.observed_total_ai_calls == 12
+    assert final.observed_total_ai_calls == _PRIMARY_CALLS + _supplement_calls(1)
     assert final.authorized_additional_ai_calls == 0
     assert final.supplement_authorization is None
     assert not final.publish_allowed
@@ -426,7 +445,7 @@ def test_얇은장이_세개면_비싼보충을_시작하지않는다() -> None:
     decision = decide_post_validation(primary)
 
     assert decision.action is RecoveryAction.STOP_NO_CHARGE
-    assert decision.projected_total_ai_calls == 10
+    assert decision.projected_total_ai_calls == _PRIMARY_CALLS
 
 
 @pytest.mark.parametrize(
@@ -452,8 +471,8 @@ def test_안전실패나_비회복품질은_즉시_무차감으로끝낸다(
 
     assert safety.action is RecoveryAction.STOP_NO_CHARGE
     assert nonrecoverable.action is RecoveryAction.STOP_NO_CHARGE
-    assert safety.projected_total_ai_calls == 10
-    assert nonrecoverable.projected_total_ai_calls == 10
+    assert safety.projected_total_ai_calls == _PRIMARY_CALLS
+    assert nonrecoverable.projected_total_ai_calls == _PRIMARY_CALLS
 
 
 def test_품질때문에_닫은중단만_품질코드를_함께_싣는다() -> None:
@@ -542,7 +561,7 @@ def test_완성평가영수증만_공개와_정상차감을_함께허용한다()
     decision = decide_post_validation(primary)
 
     assert decision.action is RecoveryAction.RELEASE_COMPLETE
-    assert decision.observed_total_ai_calls == 10
+    assert decision.observed_total_ai_calls == _PRIMARY_CALLS
     assert decision.authorized_additional_ai_calls == 0
     assert decision.publish_allowed
     assert decision.charge_allowed
@@ -565,8 +584,8 @@ def test_보충뒤_완성본은_실제12호출을_기록하고_공개한다() ->
     )
 
     assert decision.action is RecoveryAction.RELEASE_COMPLETE
-    assert decision.observed_total_ai_calls == 12
-    assert decision.projected_total_ai_calls == 12
+    assert decision.observed_total_ai_calls == _PRIMARY_CALLS + _supplement_calls(1)
+    assert decision.projected_total_ai_calls == _PRIMARY_CALLS + _supplement_calls(1)
     assert decision.publish_allowed
     assert decision.charge_allowed
 
@@ -588,7 +607,7 @@ def test_보충뒤에도_실패하면_두번째승인없이_무차감끝낸다()
     )
 
     assert decision.action is RecoveryAction.STOP_NO_CHARGE
-    assert decision.observed_total_ai_calls == 13
+    assert decision.observed_total_ai_calls == _PRIMARY_CALLS + _supplement_calls(2)
     assert decision.supplement_authorization is None
     assert not decision.charge_allowed
 
@@ -813,3 +832,89 @@ def test_불일치한평가등급이나_문제코드는_영수증이되지못한
     )
     with pytest.raises(TypeError, match="닫힌 QualityProblemCode"):
         _primary(untyped_code)
+
+
+# ══════════════════════════════════════════════════════════
+# FULL 검수 «1회 + 재요청 자리 1» (2026-09-23 개방)
+#   첫 영수증의 검수는 묶음 1회, 또는 형식 재요청·누락 후속 자리까지 2회다.
+#   기대값은 리터럴로 적는다 — 생산 상수를 import 해 비교하면 값이 함께 움직여도
+#   초록이 된다.
+# ══════════════════════════════════════════════════════════
+
+
+@pytest.mark.parametrize("reviewer_calls", (1, 2))
+def test_첫_영수증의_검수는_묶음1회와_재요청자리1회까지_받는다(reviewer_calls: int) -> None:
+    decision = decide_post_validation(
+        _primary(_assessment(), reviewer_calls=reviewer_calls)
+    )
+
+    assert decision.action is RecoveryAction.RELEASE_COMPLETE
+    assert decision.observed_total_ai_calls == PRIMARY_WRITER_CALLS + reviewer_calls
+    assert decision.publish_allowed and decision.charge_allowed
+
+
+@pytest.mark.parametrize("reviewer_calls", (0, 3))
+def test_첫_영수증의_검수가_0회나_3회면_받지_않는다(reviewer_calls: int) -> None:
+    with pytest.raises(ValueError, match="9회 작성·1회 검수"):
+        decide_post_validation(_primary(_assessment(), reviewer_calls=reviewer_calls))
+
+
+def test_재요청자리를_쓴_기본회차도_두장을_한번보충하고_14호출로_공개한다() -> None:
+    primary = _primary(_recoverable("identity", "culture"), reviewer_calls=2)
+
+    first = decide_post_validation(primary)
+
+    assert first.action is RecoveryAction.RUN_SUPPLEMENTS
+    assert first.observed_total_ai_calls == _PRIMARY_CALLS_WITH_RETRY
+    assert first.projected_total_ai_calls == _PRIMARY_CALLS_WITH_RETRY + _supplement_calls(2)
+    assert first.supplement_authorization is not None
+    supplement = _supplement(primary, first.supplement_authorization, _assessment())
+
+    final = decide_post_validation(
+        primary,
+        supplement_authorization=first.supplement_authorization,
+        supplement_receipt=supplement,
+    )
+
+    assert final.action is RecoveryAction.RELEASE_COMPLETE
+    assert final.observed_total_ai_calls == _PRIMARY_CALLS_WITH_RETRY + _supplement_calls(2)
+    assert final.publish_allowed and final.charge_allowed
+
+
+def test_보충결정은_기본회차_10회나_11회뒤에만_만든다() -> None:
+    authorization = decide_post_validation(
+        _primary(_recoverable("identity"))
+    ).supplement_authorization
+    assert authorization is not None
+    for observed in (_PRIMARY_CALLS, _PRIMARY_CALLS_WITH_RETRY):
+        decision = RecoveryDecision(
+            action=RecoveryAction.RUN_SUPPLEMENTS,
+            reason_code="one_recovery_round_allowed",
+            observed_total_ai_calls=observed,
+            authorized_additional_ai_calls=_supplement_calls(1),
+            supplement_authorization=authorization,
+        )
+        assert decision.projected_total_ai_calls == observed + _supplement_calls(1)
+    for observed in (_PRIMARY_CALLS - 1, _PRIMARY_CALLS_WITH_RETRY + 1):
+        with pytest.raises(ValueError, match="재요청 자리 1회까지|상한"):
+            RecoveryDecision(
+                action=RecoveryAction.RUN_SUPPLEMENTS,
+                reason_code="one_recovery_round_allowed",
+                observed_total_ai_calls=observed,
+                authorized_additional_ai_calls=_supplement_calls(1),
+                supplement_authorization=authorization,
+            )
+
+
+def test_호출수_정책_기준값은_리터럴로_한곳에서_고정한다() -> None:
+    """위 시나리오 시험들은 정책 상수에서 호출 수를 유도한다(총괄 결정 2).
+
+    유도식만 쓰면 상수가 함께 낮아지는 회귀(예: 영수증 상한에서 재요청 자리를
+    빼는 것)를 시나리오 시험이 따라 바뀌며 놓친다. 그래서 값 자체는 여기 한 곳에서
+    리터럴로 지킨다.
+    """
+    assert (
+        PRIMARY_WRITER_CALLS, PRIMARY_AI_CALLS, PRIMARY_REVIEW_RETRY_CALLS,
+    ) == (9, 10, 1)
+    assert (SUPPLEMENT_CALLS_PER_SECTION, SUPPLEMENT_REVIEW_CALLS) == (1, 1)
+    assert MAX_TOTAL_AI_CALLS == 14

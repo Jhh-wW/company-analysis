@@ -19,17 +19,24 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     DIAGRAM_ROW_COUNT_SECTION_IDS,
     DIAGRAM_ROW_COUNT_STAGES,
     DIAGRAM_ROW_COUNT_STEP,
+    PROTOCOL_CAUSE_KIND_FIELD,
+    PROTOCOL_CAUSE_KIND_MAX_CHARS,
     PROTOCOL_COUNT_FIELDS,
     PROTOCOL_ENUM_FIELDS,
     PROTOCOL_OFFSET_FIELDS,
     PROTOCOL_ROW_REASONS,
     PROTOCOL_STEP,
+    READ_GLOBAL_FAILURE,
     SUMMARY_BOOL_FIELDS,
     SUMMARY_COUNT_FIELDS,
     SUMMARY_STAGES,
     SUMMARY_STEP,
     SUMMARY_PATHS, SUMMARY_PATH_FACT_REUSE,
     PUBLIC_BINDING_STEP, PUBLIC_BINDING_COUNT_FIELDS,
+    RELEASE_MODE_APPLIED_FIELD, RELEASE_MODE_DOWNGRADED_FROM_FIELD,
+    RELEASE_MODE_LEDGER_USED_FIELD, RELEASE_MODE_NAMES,
+    RELEASE_MODE_REQUESTED_FIELD, RELEASE_MODE_REVIEW_CALLS_FIELD,
+    RELEASE_MODE_REVIEW_SLOTS, RELEASE_MODE_STEP,
     SECTION_EXECUTION_STEP,
     SECTION_EXECUTION_COUNT_FIELDS,
     SECTION_EXECUTION_PARTIAL_COUNT_FIELDS,
@@ -44,6 +51,13 @@ from src.shared.report_quality.composition_diagnostic_constants import (
 
 def _count(value: object, *, minimum: int = 0) -> bool:
     return type(value) is int and value >= minimum
+
+
+#: 원인 «종류» 칸의 모양 — 파이썬 식별자(예외 클래스 이름)만 받는다. 문장·공백·
+#: 한글이 섞이면 오류 문구가 새는 것이므로 기록을 통째로 버린다.
+_CAUSE_KIND_RE = re.compile(
+    f"[A-Za-z_][A-Za-z0-9_]{{0,{PROTOCOL_CAUSE_KIND_MAX_CHARS - 1}}}"
+)
 
 
 def _section_execution(record: Mapping) -> dict[str, object] | None:
@@ -87,6 +101,12 @@ def _protocol(record: Mapping) -> dict[str, object] | None:
         key: value for key, value in reasons.items()
         if isinstance(key, str) and key in PROTOCOL_ROW_REASONS and _count(value)
     }
+    if result["판독"] == READ_GLOBAL_FAILURE:
+        # 두 번째 검수 호출의 요청 전역 장애(2026-09-24 결정 3) — 종류 칸이 필수다.
+        cause_kind = record.get(PROTOCOL_CAUSE_KIND_FIELD)
+        if not isinstance(cause_kind, str) or _CAUSE_KIND_RE.fullmatch(cause_kind) is None:
+            return None
+        result[PROTOCOL_CAUSE_KIND_FIELD] = cause_kind
     return result
 
 
@@ -244,7 +264,8 @@ def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], 
             _body_section_move(record) if step == BODY_SECTION_MOVE_STEP else
             _empty_recovery(record) if step == EMPTY_RECOVERY_STEP else
             _grounding_rewrite(record) if step == GROUNDING_REWRITE_STEP else
-            _style(record) if step == STYLE_STEP else None
+            _style(record) if step == STYLE_STEP else
+            _release_mode(record) if step == RELEASE_MODE_STEP else None
         )
         if normalized is not None:
             result.append(normalized)
@@ -315,6 +336,52 @@ def _body_section_move(record: Mapping) -> dict[str, object] | None:
         return None
     return {"step": BODY_SECTION_MOVE_STEP, "출발장": source, "도착장": target,
             "사유코드": reason, "이동": moved, "이동불가": dict(blocked)}
+
+
+def _mode_name(value: object, *, allow_empty: bool) -> str | None:
+    """닫힌 출고 모드 이름(또는 허용할 때 빈 값)만 돌려준다."""
+    if not isinstance(value, str):
+        return None
+    if value == "" and allow_empty:
+        return value
+    return value if value in RELEASE_MODE_NAMES else None
+
+
+def _release_mode(record: Mapping) -> dict[str, object] | None:
+    """출고 모드 한 줄 — 모드 이름·자리별 개수·참거짓만 통과시킨다(2026-09-24).
+
+    «장부사용» 이 참이면 «검수호출» 은 닫힌 두 자리의 0 이상 정수여야 하고, 거짓이면
+    null 이어야 한다. 짝이 어긋난 기록은 통째로 버린다 — 장부 없는 실행에 호출 수가
+    적혀 있으면 어느 쪽이 사실인지 가를 수 없다.
+    """
+    requested = _mode_name(record.get(RELEASE_MODE_REQUESTED_FIELD), allow_empty=False)
+    applied = _mode_name(record.get(RELEASE_MODE_APPLIED_FIELD), allow_empty=True)
+    downgraded_from = _mode_name(
+        record.get(RELEASE_MODE_DOWNGRADED_FROM_FIELD), allow_empty=True,
+    )
+    ledger_used = record.get(RELEASE_MODE_LEDGER_USED_FIELD)
+    review_calls = record.get(RELEASE_MODE_REVIEW_CALLS_FIELD)
+    if requested is None or applied is None or downgraded_from is None:
+        return None
+    if type(ledger_used) is not bool:
+        return None
+    calls: dict[str, int] | None = None
+    if ledger_used:
+        if (not isinstance(review_calls, Mapping)
+                or set(review_calls) != set(RELEASE_MODE_REVIEW_SLOTS)
+                or any(not _count(review_calls[slot]) for slot in RELEASE_MODE_REVIEW_SLOTS)):
+            return None
+        calls = {slot: review_calls[slot] for slot in RELEASE_MODE_REVIEW_SLOTS}
+    elif review_calls is not None:
+        return None
+    return {
+        "step": RELEASE_MODE_STEP,
+        RELEASE_MODE_REQUESTED_FIELD: requested,
+        RELEASE_MODE_APPLIED_FIELD: applied,
+        RELEASE_MODE_DOWNGRADED_FROM_FIELD: downgraded_from,
+        RELEASE_MODE_REVIEW_CALLS_FIELD: calls,
+        RELEASE_MODE_LEDGER_USED_FIELD: ledger_used,
+    }
 
 
 def _closed_shape_list(value: object) -> list[str] | None:

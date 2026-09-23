@@ -61,6 +61,7 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     GROUNDING_REWRITE_STATE_CALL_ABORTED,
     GROUNDING_REWRITE_STATE_DONE,
     GROUNDING_REWRITE_STATE_FORMAT_FAILED,
+    GROUNDING_REWRITE_STATE_NO_LEDGER_SLOT,
     GROUNDING_REWRITE_STEP,
     SECTION_MOVE_BLOCKED_DUPLICATE,
     SECTION_MOVE_BLOCKED_NO_TARGET,
@@ -95,6 +96,7 @@ from src.features.composer.review_protocol_observation import (
     new_protocol_observation,
     note_envelope,
     note_optional_call_aborted,
+    note_optional_call_global_failure,
     note_row_failure,
     note_row_salvage,
 )
@@ -678,6 +680,10 @@ def _safe_optional_ask(
       한 번이 재전파돼 ``verify_report`` 전체가 실패하고, 이미 확보한 판정(예:
       행 단위로 구제한 41행)까지 본문이 통째로 안내문이 됐다. «거짓» 재작성·
       근거 결속 재작성의 저하 갈래(`_semantic_review`)와 같은 처분이다.
+    ★ FULL 의 재요청 자리에서는 공급자 호출 실패(ProviderCallFailed)도 강등 가능
+      (``provider_failure``)으로 올라온다 — composer/pipeline.py 의 재요청 전용
+      래퍼가 그 한 곳만 바꾼다(2026-09-24 결정 3 개정). 관측 판독은
+      ``provider_failure_degraded`` 다.
     ⚠️ 첫 호출은 이 함수를 쓰지 않는다 — 본문 1차 검수는 우아한 저하 대상이
       아니다(`MAX_REWRITE_CALLS_PER_VERIFY` 머리말). 그 밖의 AskFatalError(돈·
       계정·billing-uncertain·전역 취소)는 예전처럼 재전파한다.
@@ -690,10 +696,35 @@ def _safe_optional_ask(
         if not getattr(error, "degradable", False):
             raise
         logger.warning(
-            "요청 AI 한도(%s)에 닿아 검수 %s 호출을 포기한다 — 첫 응답의 판정으로 진행한다",
-            _grounding_abort_reason(error), purpose,
+            "검수 %s 호출을 포기한다(사유 %s) — 첫 응답의 판정으로 진행한다",
+            purpose, _grounding_abort_reason(error),
         )
         return None, error
+
+
+def _note_second_call_global_failure(
+    error: AskFatalError,
+    protocol_diagnostics: Optional[list[dict]],
+    observe: Optional[dict],
+) -> None:
+    """두 번째 검수 호출이 요청 «전역» 장애로 멈춘 시도를 관측 한 줄로 남긴다.
+
+    2026-09-24 총괄 결정 3 — 처분은 바꾸지 않는다. 부르는 쪽이 예외를 그대로
+    재전파하고 바깥 폴백(composer/pipeline.py 의 AI 전역 장애 갈래)이 처리한다.
+    요청 AI 몫 소진(degradable)은 적지 않는다 — `_safe_optional_ask` 가 포기로
+    처리하거나(판독 call_limit_reached·request_budget_exhausted), 재전파되면 바깥
+    단계가 사유를 따로 남긴다.
+    """
+    if getattr(error, "degradable", False) or observe is None:
+        return
+    if protocol_diagnostics is None:
+        return
+    # 장애의 «종류»만 남긴다 — 원인 예외의 클래스 이름(문구·원문은 싣지 않는다).
+    cause = getattr(error, "cause", None)
+    note_optional_call_global_failure(
+        observe, cause_kind=type(cause if cause is not None else error).__name__,
+    )
+    protocol_diagnostics.append(observe)
 
 
 def _second_review_call_allowed(
@@ -703,12 +734,14 @@ def _second_review_call_allowed(
 
     ``available`` 이 없으면(기본) 언제나 보낸다 — 예전 동작 그대로다. 거짓이면
     호출도 관측도 만들지 않는다 — 관측은 실제로 보낸 호출에만 만든다.
-    ★ 왜 묻는가 (2026-09-23 적대 검토 D3) — FULL 의 호출 장부는 검수자 호출을
-      1회로 묶어 두 번째 호출을 공급자 «전»에 RuntimeError 로 막는다. 그 예외를
-      `_safe_ask` 가 일반 호출 실패로 삼키면, 보내지도 않은 호출이 «빈 응답»
-      관측과 «검수 AI 호출이 실패했다» 경고로 남아 공급자 장애처럼 보인다.
-      장부 예외를 타입 이름·문구로 알아보지 않는다 — 장부를 가진 부르는 쪽이
-      호출 «전»에 답한다.
+    ★ 왜 묻는가 (2026-09-23 적대 검토 D3) — FULL 의 호출 장부는 검수자 자리가
+      꽉 차면(보충 검수의 한 자리, 재요청 전용 호출자가 없는 최초 검수의 한 자리)
+      두 번째 호출을 공급자 «전»에 RuntimeError 로 막는다. 그 예외를 `_safe_ask`
+      가 일반 호출 실패로 삼키면, 보내지도 않은 호출이 «빈 응답» 관측과 «검수 AI
+      호출이 실패했다» 경고로 남아 공급자 장애처럼 보인다. 장부 예외를 타입
+      이름·문구로 알아보지 않는다 — 장부를 가진 부르는 쪽(composer/pipeline.py
+      `_review_slot_question`)이 호출 «전»에 답한다. 최초 본문 검수는 재요청 전용
+      호출자에 두 번째 자리(``bundled_retry``)가 열려 있어 참이다.
     ``purpose``: 로그에만 쓰는 단계 이름. 응답·문장은 로그에 넣지 않는다.
     """
     if available is None or available():
@@ -1537,12 +1570,12 @@ def _ask_grouped_verdicts(
         는 재전파한다. 일반 호출 실패는 None 으로 삼키고 첫 응답 결과를 그대로 쓴다.
       · 빈 묶음(``items`` 없음)은 영수증 계약상 1회만 보낸다 — 판정할 번호가 없다.
     ⚠️ FULL 실행의 호출 장부(composer/pipeline.py `_CallLedgerRecorder`)는 이
-      검수의 검수자 호출을 1회로 묶는다(2026-09-23 현재). 그 장부 아래에서는 두
-      번째 호출이 공급자에 닿기 전에 장부가 RuntimeError 로 막고 `_safe_ask` 가
-      None 으로 삼킨다 — FULL 에서는 행 단위 구제만 효과가 있고 재요청·후속은
-      «호출 실패»와 같게 닫힌다(추가 과금·영수증 변화 없음, fail-closed).
-      ``second_review_call_available`` 를 넘기면 그 «보내지 않은» 호출을 관측·
-      경고 없이 건너뛴다(2026-09-23 현재 pipeline 은 넘기지 않는다).
+      검수를 «검수 1회 + 재요청 자리 1»로 묶는다(2026-09-23 개방). 두 번째 호출은
+      재요청 전용 호출자(``initial_retry_ask``)로 나가 장부의 ``bundled_retry``
+      자리에 기록되고 영수증에 남는다. 그 호출자가 없거나(한 자리 래퍼로 나감)
+      보충 검수처럼 자리가 한 개뿐이면, pipeline 이 ``second_review_call_available``
+      로 미리 «자리 없음»을 알려 보내지도 관측하지도 않는다. 세 번째 검수자 호출은
+      장부가 공급자 «전»에 막는다.
 
     ``second_review_call_available``: 두 번째 호출(형식 재요청·누락 후속) 직전에
     부르는 질문(선택). 거짓이면 그 호출을 보내지 않고 관측도 만들지 않는다
@@ -1617,15 +1650,25 @@ def _ask_grouped_verdicts(
             break
         retries += 1
         retry_prompt = _packet_review_prompt(prompt + RETRY_REMINDER)
-        raw, aborted = _safe_optional_ask(
-            retry_reviewer, retry_prompt, purpose=_PURPOSE_FORMAT_RETRY,
-        )
+        try:
+            raw, aborted = _safe_optional_ask(
+                retry_reviewer, retry_prompt, purpose=_PURPOSE_FORMAT_RETRY,
+            )
+        except AskFatalError as error:
+            _note_second_call_global_failure(
+                error, protocol_diagnostics,
+                _observe_attempt(retries + 1, retry_prompt, None),
+            )
+            raise
         observe = _observe_attempt(retries + 1, retry_prompt, raw)
         verdicts = _parse_grouped_verdicts(
             raw, owners, evidence_ids_by_number, observe=observe,
         )
         if aborted is not None:
-            note_optional_call_aborted(observe, call_limit=aborted.call_limit)
+            note_optional_call_aborted(
+                observe, call_limit=aborted.call_limit,
+                provider_failure=aborted.provider_failure,
+            )
         if observe is not None:
             protocol_diagnostics.append(observe)
     if verdicts is None:
@@ -1647,9 +1690,20 @@ def _ask_grouped_verdicts(
                     verbatim_by_number=verbatim_by_number,
                 ) + MISSING_VERDICTS_REMINDER
             )
-            followup_raw, aborted = _safe_optional_ask(
-                retry_reviewer, followup_prompt, purpose=_PURPOSE_MISSING_FOLLOWUP,
-            )
+            try:
+                followup_raw, aborted = _safe_optional_ask(
+                    retry_reviewer, followup_prompt,
+                    purpose=_PURPOSE_MISSING_FOLLOWUP,
+                )
+            except AskFatalError as error:
+                _note_second_call_global_failure(
+                    error, protocol_diagnostics,
+                    _observe_attempt(
+                        retries + 1, followup_prompt, None,
+                        requested_count=len(missing_numbers),
+                    ),
+                )
+                raise
             observe = _observe_attempt(
                 retries + 1, followup_prompt, followup_raw,
                 requested_count=len(missing_numbers),
@@ -1661,7 +1715,10 @@ def _ask_grouped_verdicts(
                 requested_numbers=sorted(missing_numbers),
             )
             if aborted is not None:
-                note_optional_call_aborted(observe, call_limit=aborted.call_limit)
+                note_optional_call_aborted(
+                    observe, call_limit=aborted.call_limit,
+                    provider_failure=aborted.provider_failure,
+                )
             if observe is not None:
                 protocol_diagnostics.append(observe)
             recovered = {
@@ -2723,13 +2780,23 @@ def _ask_verdicts(
             break
         retries += 1
         retry_prompt = ReviewPrompt(prompt + RETRY_REMINDER, FLAT_REVIEW_SCHEMA)
-        raw, aborted = _second_call(retry_prompt, _PURPOSE_FORMAT_RETRY)
+        try:
+            raw, aborted = _second_call(retry_prompt, _PURPOSE_FORMAT_RETRY)
+        except AskFatalError as error:
+            _note_second_call_global_failure(
+                error, protocol_diagnostics,
+                _observe_attempt(retries + 1, retry_prompt, None),
+            )
+            raise
         observe = _observe_attempt(retries + 1, retry_prompt, raw)
         verdicts = _parse_verdicts(
             raw, observe=observe, requested_numbers=requested_numbers,
         )
         if aborted is not None:
-            note_optional_call_aborted(observe, call_limit=aborted.call_limit)
+            note_optional_call_aborted(
+                observe, call_limit=aborted.call_limit,
+                provider_failure=aborted.provider_failure,
+            )
         if observe is not None:
             protocol_diagnostics.append(observe)
     if verdicts is None:
@@ -2759,7 +2826,19 @@ def _ask_verdicts(
                 ) + MISSING_VERDICTS_REMINDER,
                 FLAT_REVIEW_SCHEMA,
             )
-            followup_raw, aborted = _second_call(followup_prompt, _PURPOSE_MISSING_FOLLOWUP)
+            try:
+                followup_raw, aborted = _second_call(
+                    followup_prompt, _PURPOSE_MISSING_FOLLOWUP,
+                )
+            except AskFatalError as error:
+                _note_second_call_global_failure(
+                    error, protocol_diagnostics,
+                    _observe_attempt(
+                        retries + 1, followup_prompt, None,
+                        requested_count=len(missing_numbers),
+                    ),
+                )
+                raise
             observe = _observe_attempt(
                 retries + 1, followup_prompt, followup_raw,
                 requested_count=len(missing_numbers),
@@ -2769,7 +2848,10 @@ def _ask_verdicts(
                 requested_numbers=sorted(missing_numbers),
             )
             if aborted is not None:
-                note_optional_call_aborted(observe, call_limit=aborted.call_limit)
+                note_optional_call_aborted(
+                    observe, call_limit=aborted.call_limit,
+                    provider_failure=aborted.provider_failure,
+                )
             if observe is not None:
                 protocol_diagnostics.append(observe)
             recovered = {
@@ -3076,6 +3158,26 @@ def _grounding_aborted_record(
     }
 
 
+def _grounding_no_ledger_slot_record(
+    targets: Sequence[_ReviewItem],
+    final: dict[int, Optional[ComposedSentence]],
+) -> dict[str, object]:
+    """재작성을 보내지 않았다 — 대상을 전부 빼고 «장부자리없음» 기록을 만든다.
+
+    부르는 쪽(FULL 호출 장부)이 재작성 자리가 없다고 답한 경우다(2026-09-24 발견 1
+    확정 (a)). 보내지 않은 호출이므로 전송 수·응답꼴 칸을 만들지 않는다.
+    """
+
+    for item in targets:
+        final[item.number] = None
+    return {
+        "step": GROUNDING_REWRITE_STEP,
+        "상태": GROUNDING_REWRITE_STATE_NO_LEDGER_SLOT,
+        "대상장": list(dict.fromkeys(item.section_id for item in targets)),
+        "대상": len(targets),
+    }
+
+
 def _finish_grounding_record(
     record: dict[str, object],
     targets: Sequence[_ReviewItem],
@@ -3226,6 +3328,7 @@ def _rewrite_grounding_and_recheck(
     baseline_date: Optional[str] = None,
     rewrite_ask: Optional[AskFn] = None,
     recheck_ask: Optional[AskFn] = None,
+    rewrite_call_available: Optional[Callable[[], bool]] = None,
 ) -> None:
     """근거 결속 탈락 문장을 묶어 고쳐 쓰고, 재검수를 «한 번»으로 끝낸다.
 
@@ -3243,7 +3346,18 @@ def _rewrite_grounding_and_recheck(
     """
     recheck_items: list[_ReviewItem] = list(pending_recheck_items)
     grounding_record: Optional[dict[str, object]] = None
-    if targets:
+    if targets and rewrite_call_available is not None and not rewrite_call_available():
+        # ★ 부르는 쪽(FULL 호출 장부)이 «재작성 자리 없음»이라고 답했다(2026-09-24
+        #   발견 1 확정 (a)). 보내지 않고, 대상은 예전처럼 제거한다. 예전에는 재작성을
+        #   «시도»해 장부가 공급자 전에 막았고, 그 예외를 형식 실패로 삼켜 «작성형식
+        #   실패·실제전송·읽기실패»라는 가짜 관측이 남았다. 예외 타입·문구로 알아보지
+        #   않는다 — 장부를 가진 쪽이 호출 «전»에 답한다(D3 와 같은 방식).
+        logger.info(
+            "부르는 쪽이 근거 결속 재작성 자리를 허락하지 않아 %d개 문장을 재작성 없이 뺀다",
+            len(targets),
+        )
+        grounding_record = _grounding_no_ledger_slot_record(targets, final)
+    elif targets:
         try:
             grounding_items, grounding_record = _grounding_rewrite_pass(
                 ask,
@@ -3337,6 +3451,7 @@ def _semantic_review(
     sentence_rewrite_gate: Optional[Callable[[tuple[str, ...]], bool]] = None,
     grounding_rewrite_enabled: bool = False,
     second_review_call_available: Optional[Callable[[], bool]] = None,
+    grounding_rewrite_call_available: Optional[Callable[[], bool]] = None,
 ) -> list[list[ComposedSentence]]:
     """인용 있는 «확인»·«해석» 문장을 같은 1회 검수 호출로 대조한다.
 
@@ -3598,6 +3713,7 @@ def _semantic_review(
             baseline_date=baseline_date,
             rewrite_ask=rewrite_ask,
             recheck_ask=recheck_ask,
+            rewrite_call_available=grounding_rewrite_call_available,
         )
 
     rebuilt: list[list[ComposedSentence]] = []
@@ -3652,6 +3768,7 @@ def _semantic_review_grouped(
     grounding_rewrite_enabled: bool = False,
     skip_empty_grouped_review: bool = False,
     second_review_call_available: Optional[Callable[[], bool]] = None,
+    grounding_rewrite_call_available: Optional[Callable[[], bool]] = None,
 ) -> tuple[list[list[ComposedSentence]], dict[str, tuple[FlowRow, ...]]]:
     """packet 문장과 도식을 장별 근거 블록으로 묶어 한 요청으로 검수한다.
 
@@ -3832,6 +3949,7 @@ def _semantic_review_grouped(
             baseline_date=baseline_date,
             rewrite_ask=rewrite_ask,
             recheck_ask=recheck_ask,
+            rewrite_call_available=grounding_rewrite_call_available,
         )
 
     moved_positions, move_blocked = _pending_moves(
@@ -3967,6 +4085,7 @@ def _verify_report_inner(
     grounding_rewrite_enabled: bool = False,
     skip_empty_grouped_review: bool = False,
     second_review_call_available: Optional[Callable[[], bool]] = None,
+    grounding_rewrite_call_available: Optional[Callable[[], bool]] = None,
 ) -> ComposedReport:
     frag_by_id = {
         fragment.fragment_id: fragment
@@ -4020,6 +4139,7 @@ def _verify_report_inner(
             sentence_rewrite_gate=sentence_rewrite_gate,
             grounding_rewrite_enabled=grounding_rewrite_enabled,
             second_review_call_available=second_review_call_available,
+            grounding_rewrite_call_available=grounding_rewrite_call_available,
         )
     else:
         allowed_for_review = dict(allowed_fragment_ids_by_section)
@@ -4035,9 +4155,9 @@ def _verify_report_inner(
         #   항목만 누락 후속을 이 호출자로 1회 보낸다(`_ask_grouped_verdicts`).
         #   예전 «reviewer 1회 고정»에서는 JSON 한 글자 오류로 판정 42행이 통째로
         #   사라져 9장 중 8장이 빈 보고서가 됐다.
-        # ⚠️ FULL 의 호출 장부는 검수자 호출을 1회로 묶어 이 두 번째 호출을 공급자
-        #   «전»에 막는다. FULL 에서 그 42행 소실을 막는 것은 파서의 행 단위 구제
-        #   (`_review_entries`)이고, 깨진 한 행은 여전히 판정 없이 제거된다.
+        # ★ FULL 의 호출 장부도 이 두 번째 호출에 자리 하나(``bundled_retry``)를
+        #   연다(2026-09-23). 행 단위 구제(`_review_entries`)가 살린 행은 그대로 두고,
+        #   깨진 한 행의 번호만 누락 후속으로 다시 물어 채운다.
         reviewed_groups, reviewed_flow_rows = _semantic_review_grouped(
             checked_groups,
             group_ids,
@@ -4060,6 +4180,7 @@ def _verify_report_inner(
             grounding_rewrite_enabled=grounding_rewrite_enabled,
             skip_empty_grouped_review=skip_empty_grouped_review,
             second_review_call_available=second_review_call_available,
+            grounding_rewrite_call_available=grounding_rewrite_call_available,
         )
     reviewed_summary = reviewed_groups.pop()
 
@@ -4112,6 +4233,7 @@ def verify_report(
     grounding_rewrite_enabled: bool = False,
     skip_empty_grouped_review: bool = False,
     second_review_call_available: Optional[Callable[[], bool]] = None,
+    grounding_rewrite_call_available: Optional[Callable[[], bool]] = None,
 ) -> ComposedReport:
     """진입 함수 — 규칙 ①~④를 보고서 전체에 문장 단위로 적용한다.
 
@@ -4132,8 +4254,8 @@ def verify_report(
               예약액을 넘겨 1차 검수가 통째로 실패했다).
             ★ packet 엄격 경로(``allowed_fragment_ids_by_section`` 지정)도 같은
               계약이다(2026-09-23) — 형식 재요청과 누락 후속(둘 중 최대 1회)이
-              이 호출자로 나간다. 단, FULL 의 호출 장부는 검수자 호출을 1회로
-              묶어 두어 그 아래에서는 두 번째 호출이 공급자에 닿지 않는다
+              이 호출자로 나간다. FULL 의 호출 장부는 이 호출자에게만 두 번째
+              자리(``bundled_retry``)를 열어 그 한 번을 영수증에 남긴다
               (`_ask_grouped_verdicts` 머리말).
         rewrite_ask: «거짓» 판정 문장 재작성 전용 호출자. 생략하면 ``ask``.
         recheck_ask: 재작성문 재검수 전용 호출자. 생략하면 ``ask``.
@@ -4179,11 +4301,18 @@ def verify_report(
             누락 후속)을 보내기 직전에 부르는 질문(선택). 거짓을 돌려주면 그 호출을
             보내지 않고 관측도 만들지 않는다 — 첫 응답의 판정으로 진행하고, 첫
             응답을 통째로 못 읽었으면 예전처럼 대상 문장을 뺀다(fail-closed).
-            생략하면 언제나 보낸다(예전 동작). ★ 호출 장부처럼 «이 요청의 검수
-            호출은 1회뿐»임을 아는 부르는 쪽이 쓴다 — 넘기지 않으면 장부가 공급자
-            전에 막은 호출이 «빈 응답» 관측과 «호출 실패» 경고로 남는다(2026-09-23
-            적대 검토 D3, `_second_review_call_allowed`). 재작성·재검수에는 쓰지
-            않는다.
+            생략하면 언제나 보낸다(예전 동작). ★ 호출 장부처럼 «이 검수에 남은
+            호출 자리»를 아는 부르는 쪽이 쓴다 — FULL 본문 검수는 1회 + 재요청 자리 1
+            (재요청 전용 호출자일 때), 그 밖의 검수는 1회다. 첫 검수가 실패로
+            기록됐으면 자리가 남아도 거짓이다(2026-09-24). 넘기지 않으면 장부가
+            공급자 전에 막은 호출이 «빈 응답» 관측과 «호출 실패» 경고로 남는다
+            (2026-09-23 적대 검토 D3, `_second_review_call_allowed`). 재작성·재검수
+            에는 쓰지 않는다.
+        grounding_rewrite_call_available: 근거 결속 재작성을 보내기 직전에 부르는
+            질문(선택). 거짓이면 재작성을 보내지 않고, 대상 문장은 예전처럼 빼며,
+            진단에는 «장부자리없음» 한 줄만 남긴다. 생략하면 예전과 같다. ★ FULL
+            호출 장부는 재작성 호출자에게 첫 검수와 같은 한 자리만 주므로, 첫 검수
+            뒤에는 이 질문이 거짓이다(2026-09-24 발견 1 확정 (a)).
 
     Returns:
         검증된 ComposedReport. 어떤 입력에서도 예외를 던지지 않으며,
@@ -4197,7 +4326,8 @@ def verify_report(
                 and recheck_ask is None and allow_sentence_rewrite
                 and sentence_rewrite_gate is None
                 and not grounding_rewrite_enabled and not skip_empty_grouped_review
-                and second_review_call_available is None):
+                and second_review_call_available is None
+                and grounding_rewrite_call_available is None):
             # legacy 호출 모양과 monkeypatch 경계를 그대로 보존한다.
             return _verify_report_inner(
                 report, fragments, performance_table, ask
@@ -4220,6 +4350,7 @@ def verify_report(
             grounding_rewrite_enabled=grounding_rewrite_enabled,
             skip_empty_grouped_review=skip_empty_grouped_review,
             second_review_call_available=second_review_call_available,
+            grounding_rewrite_call_available=grounding_rewrite_call_available,
         )
     except AskFatalError:
         # 요청 전역 장애 — «검증기 내부 오류»로 위장하지 않고 그대로 재전파한다.

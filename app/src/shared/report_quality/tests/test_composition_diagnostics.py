@@ -180,16 +180,42 @@ def test_row_salvage_observation_passes_with_dropped_row_count() -> None:
     assert "응답" not in observed
 
 
-@pytest.mark.parametrize("read_code", ["call_limit_reached", "request_budget_exhausted"])
+@pytest.mark.parametrize(
+    "read_code", [
+        "call_limit_reached", "request_budget_exhausted", "global_failure",
+        "provider_failure_degraded",
+    ],
+)
 def test_optional_call_abort_read_codes_pass_the_sanitizer(read_code: str) -> None:
-    """두 번째 검수 호출을 요청 AI 몫 소진으로 포기한 시도의 판독 코드(2026-09-23).
+    """두 번째 검수 호출을 요청 AI 몫 소진으로 포기한 시도(2026-09-23)와 요청 «전역»
+    장애로 멈춘 시도(``global_failure``, 2026-09-24 결정 3)의 판독 코드.
 
     닫힌 목록에 없으면 정화기가 그 시도 기록을 통째로 버려, 「왜 후속이 안 됐나」가
     실행 기록에서 사라진다.
     """
-    event = _parse_event(시도=2, 판독=read_code, 응답문자=0, 요청번호수=1, 미응답번호수=1)
+    extra = {"원인종류": "ProviderBudgetExceeded"} if read_code == "global_failure" else {}
+    event = _parse_event(
+        시도=2, 판독=read_code, 응답문자=0, 요청번호수=1, 미응답번호수=1, **extra,
+    )
     (observed,) = observed_composition_steps([event])
     assert observed["판독"] == read_code
+    assert observed == event  # 전역 장애의 원인 «종류» 칸도 그대로 지난다
+
+
+@pytest.mark.parametrize("cause_kind", [
+    None, "", "예산 소진", "Provider Budget", "일일 예산이 소진됐습니다: 잔액 0원", "A" * 81, 7,
+], ids=("missing", "empty", "korean", "space", "message", "too_long", "not_text"))
+def test_global_failure_without_a_closed_cause_kind_is_dropped(cause_kind) -> None:
+    """원인 «종류»는 예외 클래스 이름 모양만 받는다 — 오류 문구가 새면 기록째 버린다."""
+    extra = {} if cause_kind is None else {"원인종류": cause_kind}
+    event = _parse_event(시도=2, 판독="global_failure", 응답문자=0, **extra)
+    assert observed_composition_steps([event]) == ()
+
+
+def test_cause_kind_is_not_carried_on_other_read_codes() -> None:
+    event = _parse_event(시도=2, 판독="call_limit_reached", 응답문자=0, 원인종류="RuntimeError")
+    (observed,) = observed_composition_steps([event])
+    assert "원인종류" not in observed
 
 
 def test_protocol_record_without_dropped_row_count_is_rejected() -> None:
@@ -461,3 +487,83 @@ def test_근거결속_재작성_호출중단_기록은_닫힌_오류종류만_�
 ])
 def test_근거결속_재작성_기록은_닫힌_계약_밖이면_버려진다(record):
     assert observed_composition_steps([record]) == ()
+
+
+def test_근거결속_재작성_장부자리없음_기록은_대상만_담고_그대로_지난다():
+    """FULL 장부가 재작성 자리가 없다고 답한 경우(2026-09-24 발견 1 확정 (a))."""
+    record = {
+        "step": "8_근거결속_재작성", "상태": "장부자리없음",
+        "대상장": ["identity", "culture"], "대상": 3,
+    }
+    assert observed_composition_steps([record]) == (record,)
+
+
+# ── 출고 모드 한 줄(2026-09-24 후속) ──
+#   모드 이름·자리별 검수 호출 수·장부 사용 여부만 실행 기록으로 간다. «장부사용»과
+#   «검수호출»은 짝이다 — 장부가 없으면 null, 있으면 닫힌 두 자리의 0 이상 정수.
+
+
+def _release_record(**overrides):
+    record = {
+        "step": "8_출고모드_적용",
+        "요청모드": "FULL",
+        "적용모드": "FULL",
+        "강등출처": "",
+        "검수호출": {"bundled": 1, "bundled_retry": 1},
+        "장부사용": True,
+    }
+    record.update(overrides)
+    return record
+
+
+@pytest.mark.parametrize("overrides", [
+    {},
+    {"적용모드": ""},
+    {"적용모드": "SHADOW", "강등출처": "FULL"},
+    {"요청모드": "SHADOW", "적용모드": "SHADOW", "검수호출": None, "장부사용": False},
+    {"적용모드": "SHADOW", "강등출처": "FULL", "검수호출": None, "장부사용": False},
+], ids=("full", "blocked", "downgraded_after_ledger", "shadow", "downgraded_before_ledger"))
+def test_출고모드_줄은_정화기를_그대로_지난다(overrides):
+    record = _release_record(**overrides)
+    assert observed_composition_steps([record]) == (record,)
+
+
+def test_출고모드_줄의_계약_밖_칸은_실행_기록으로_가지_않는다():
+    (observed,) = observed_composition_steps([_release_record(회사="가나다전자")])
+    assert "회사" not in observed
+
+
+@pytest.mark.parametrize("overrides", [
+    {"요청모드": ""},
+    {"요청모드": "PARTIAL"},
+    {"적용모드": "full"},
+    {"강등출처": "SHADOW_X"},
+    {"장부사용": 1},
+    {"장부사용": "true"},
+    {"검수호출": None},
+    {"장부사용": False},
+    {"검수호출": {"bundled": 1}},
+    {"검수호출": {"bundled": 1, "bundled_retry": 1, "extra": 0}},
+    {"검수호출": {"bundled": -1, "bundled_retry": 0}},
+    {"검수호출": {"bundled": True, "bundled_retry": 0}},
+    {"검수호출": {"bundled": "1", "bundled_retry": 0}},
+])
+def test_출고모드_줄이_닫힌_계약_밖이면_버려진다(overrides):
+    assert observed_composition_steps([_release_record(**overrides)]) == ()
+
+
+def test_출고모드_줄의_이름표는_장부와_출고모드_정본과_같다():
+    """정화기의 닫힌 목록이 정본과 어긋나면 진짜 줄이 조용히 버려진다(쌍둥이 대조)."""
+    from src.shared.report_generation.models import (
+        BUNDLED_REVIEW_RETRY_SECTION_ID,
+        BUNDLED_REVIEW_SECTION_ID,
+    )
+    from src.shared.report_quality.composition_diagnostic_constants import (
+        RELEASE_MODE_NAMES,
+        RELEASE_MODE_REVIEW_SLOTS,
+    )
+
+    assert RELEASE_MODE_REVIEW_SLOTS == (
+        BUNDLED_REVIEW_SECTION_ID, BUNDLED_REVIEW_RETRY_SECTION_ID,
+    )
+    assert RELEASE_MODE_NAMES == {"SHADOW", "ENFORCE_NO_PARTIAL", "FULL"}

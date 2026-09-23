@@ -1,5 +1,6 @@
 """작성 기능과 실행 기능이 공유하는 원문 없는 단계 진단 계약."""
 
+from src.shared.report_evidence.constants import ReleaseMode
 from src.shared.report_quality.constants import STRICT_REQUIRED_QUALITY_SECTION_IDS
 
 PATH_FLAT = "flat"
@@ -32,6 +33,22 @@ READ_ALL_ROWS_INVALID = "all_rows_invalid"
 #: 걸렸다. 첫 응답의 판정은 그대로 쓴다(composer/verify.py `_safe_optional_ask`).
 READ_CALL_LIMIT = "call_limit_reached"
 READ_REQUEST_BUDGET = "request_budget_exhausted"
+#: 검수의 «두 번째 호출»이 요청 «전역» 장애(돈·계정·billing-uncertain·전역 취소 —
+#: ``AskFatalError`` 가운데 degradable 이 아닌 것)로 멈춘 시도(2026-09-24 결정 3).
+#: 처분은 바꾸지 않는다 — 예외는 그대로 재전파되고 바깥 폴백(composer/pipeline.py 의
+#: AI 전역 장애 갈래)이 처리한다. 이 코드는 멈춤이 «두 번째 검수 호출»에서 났다는
+#: 사실만 남긴다. 응답은 없다.
+READ_GLOBAL_FAILURE = "global_failure"
+#: FULL 재요청 자리의 두 번째 호출이 «공급자 호출 실패»(ProviderCallFailed)로 죽어,
+#: 그 호출만 포기하고 첫 응답의 판정으로 진행한 시도(2026-09-24 결정 3 개정). 재전파한
+#: 전역 장애(``global_failure``)와 코드를 나눈다 — 앞의 것은 보고서가 FULL 로 나가고,
+#: 뒤의 것은 출고 검증 차단으로 끝난다.
+READ_PROVIDER_FAILURE_DEGRADED = "provider_failure_degraded"
+#: ``global_failure`` 시도에만 붙는 칸 — 장애의 «종류»만 남긴다(원인 예외의 클래스
+#: 이름, 예: ProviderBudgetExceeded). 오류 문구·응답·원문은 싣지 않는다. 결과의
+#: ``degraded_cause_kind`` 와 같은 뜻이다. 정화기는 파이썬 식별자 모양만 받는다.
+PROTOCOL_CAUSE_KIND_FIELD = "원인종류"
+PROTOCOL_CAUSE_KIND_MAX_CHARS = 80
 ROW_NOT_MAPPING = "not_mapping"
 ROW_NUMBER_NOT_INT = "number_not_int"
 ROW_RESULT_INVALID = "result_not_allowed"
@@ -100,9 +117,13 @@ GROUNDING_REWRITE_STEP = "8_근거결속_재작성"
 GROUNDING_REWRITE_STATE_DONE = "완료"
 GROUNDING_REWRITE_STATE_CALL_ABORTED = "호출중단"
 GROUNDING_REWRITE_STATE_FORMAT_FAILED = "작성형식실패"
+#: 부르는 쪽(FULL 호출 장부)이 재작성 자리가 없다고 답해 재작성을 «보내지 않은» 경우
+#: (2026-09-24 발견 1 확정 (a)). 대상 문장은 예전처럼 빠진다. 이 기록은 대상장·대상
+#: 개수만 담는다 — 보내지 않은 호출이라 전송 수·응답꼴이 없다.
+GROUNDING_REWRITE_STATE_NO_LEDGER_SLOT = "장부자리없음"
 GROUNDING_REWRITE_STATES = frozenset((
     GROUNDING_REWRITE_STATE_DONE, GROUNDING_REWRITE_STATE_CALL_ABORTED,
-    GROUNDING_REWRITE_STATE_FORMAT_FAILED,
+    GROUNDING_REWRITE_STATE_FORMAT_FAILED, GROUNDING_REWRITE_STATE_NO_LEDGER_SLOT,
 ))
 #: «완료» 기록의 닫힌 개수 칸. 대상 → 재작성수신(포기 제외) → 기계검사통과 → 재검수참 → 최종반영.
 GROUNDING_REWRITE_COUNT_KEYS = ("대상", "재작성수신", "포기", "기계검사통과", "재검수참", "재검수애매", "최종반영")
@@ -118,7 +139,8 @@ GROUNDING_REWRITE_OPTIONAL_COUNT_KEYS = (
 PROTOCOL_READ_CODES = frozenset((
     READ_OK, READ_EMPTY, READ_JSON_SYNTAX, READ_NOT_OBJECT,
     READ_VERDICTS_KEY_MISSING, READ_VERDICTS_NOT_LIST, READ_ALL_ROWS_INVALID,
-    READ_CALL_LIMIT, READ_REQUEST_BUDGET,
+    READ_CALL_LIMIT, READ_REQUEST_BUDGET, READ_GLOBAL_FAILURE,
+    READ_PROVIDER_FAILURE_DEGRADED,
 ))
 PROTOCOL_ENUM_FIELDS = {
     "경로": frozenset((PATH_FLAT, PATH_PACKET)),
@@ -257,3 +279,26 @@ STYLE_RENDER_EVIDENCE_AVAILABLE = "확보근거"
 STYLE_RENDERS = frozenset((
     STYLE_RENDER_PRIMARY, STYLE_RENDER_SUPPLEMENT, STYLE_RENDER_EVIDENCE_AVAILABLE,
 ))
+
+#: 이 실행이 «실제로» 어느 출고 모드로 끝났는지와 FULL 호출 장부를 썼는지 — 한 줄
+#: (2026-09-24 후속). 평가 산출물에서 «작성 전 SHADOW 강등»(장부사용 false)과 «FULL
+#: 장부를 쓰고 난 뒤 강등»(장부사용 true)을 가르고, 검수 재요청 자리(bundled_retry)가
+#: 실제로 쓰였는지 본다. 회사명·원문은 싣지 않는다 — 모드 이름·개수·참거짓만.
+#: ★ 줄은 AI 호출 전에 «적용모드 빈 값»으로 먼저 열고 출고 모드가 정해지는 곳에서
+#:   채운다. 적용모드가 빈 값이면 출고 모드가 정해지기 전에 실행이 멈췄다(출고 검증
+#:   차단 등). 검수호출은 본문 검수 직후와 출고 직전에 장부에서 다시 센다.
+RELEASE_MODE_STEP = "8_출고모드_적용"
+RELEASE_MODE_REQUESTED_FIELD = "요청모드"
+RELEASE_MODE_APPLIED_FIELD = "적용모드"
+RELEASE_MODE_DOWNGRADED_FROM_FIELD = "강등출처"
+#: FULL 호출 장부의 PRIMARY 검수 호출 수(자리별, 실패 기록 포함). 장부가 없는
+#: 실행(SHADOW·부분 보고서)은 null — «장부사용 false» 와 늘 짝이다.
+RELEASE_MODE_REVIEW_CALLS_FIELD = "검수호출"
+RELEASE_MODE_LEDGER_USED_FIELD = "장부사용"
+#: 출고 모드 이름의 닫힌 목록 — ``ReleaseMode`` 값 그대로다.
+RELEASE_MODE_NAMES = frozenset(mode.value for mode in ReleaseMode)
+#: «검수호출» 칸의 닫힌 열쇠 — FULL 호출 장부의 PRIMARY 검수 자리 이름.
+#: ⚠️ ``shared/report_generation/models.py`` 의 ``BUNDLED_REVIEW_SECTION_ID``·
+#:   ``BUNDLED_REVIEW_RETRY_SECTION_ID`` 와 같은 값이어야 한다. 공유 계층끼리의
+#:   import 순환을 피하려고 글자를 따로 적고, 두 값을 맞대는 시험이 지킨다.
+RELEASE_MODE_REVIEW_SLOTS = ("bundled", "bundled_retry")

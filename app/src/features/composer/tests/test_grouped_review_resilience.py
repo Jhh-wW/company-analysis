@@ -17,7 +17,8 @@
       모두 스키마 없음, 켜면 세 호출 모두 FLAT_REVIEW_SCHEMA. 두 갈래를 다 본다.
   (4) 근거 결속은 파서가 받아들인 «같은» 구제 행을 본다 — 깨진 원문을 그대로 읽으면
       수치 결속 검사가 구제된 판정을 건너뛰는 fail-open 이 된다.
-  (5) FULL 호출 장부 아래에서는 두 번째 검수 호출이 공급자에 닿지 않는다(현재 계약).
+  (5) FULL 호출 장부는 «검수 1회 + 재요청 자리 1»이다(2026-09-23 개방) — 두 번째
+      호출은 ``bundled_retry`` 자리로 기록되고, 세 번째 검수자 호출은 공급자 전에 막힌다.
   (6) 두 번째 호출이 요청 AI 몫 소진에 걸려도 첫 판정을 지킨다.
   (7) 부르는 쪽이 «두 번째 호출 불가»를 미리 알리면 보내지도 관측하지도 않는다.
   (1-가) 구제가 모델이 준 적 없는 판정을 만들지 않는다 — «판정» 키 2회 이상이면
@@ -70,6 +71,7 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     PROTOCOL_SYNTAX_DROPPED_ROWS_FIELD,
     READ_ALL_ROWS_INVALID,
     READ_EMPTY,
+    READ_GLOBAL_FAILURE,
     READ_JSON_SYNTAX,
     READ_NOT_OBJECT,
     READ_OK,
@@ -200,8 +202,11 @@ def _never(prompt):
     pytest.fail("최초 검수 경로가 후속 검수 호출자(ask)를 사용했습니다")
 
 
-def _ask_grouped(items, fragments, *, initial, retry=None, ask=None, available=None):
-    sinks = SimpleNamespace(diagnostics=[], protocol=[], problems={})
+def _ask_grouped(
+    items, fragments, *, initial, retry=None, ask=None, available=None, sinks=None,
+):
+    # 예외로 끝나는 시험도 관측을 볼 수 있게 바깥에서 받은 칸을 그대로 쓴다.
+    sinks = sinks or SimpleNamespace(diagnostics=[], protocol=[], problems={})
     sinks.result = verify._ask_grouped_verdicts(
         ask or _never, items, fragments, None,
         initial_ask=initial, initial_retry_ask=retry,
@@ -1212,39 +1217,55 @@ def test_packet_보고서는_깨진_한_행_때문에_장을_비우지_않는다
 
 
 # ══════════════════════════════════════════════════════════
-# (5) FULL 호출 장부 — 현재 계약에서는 두 번째 검수 호출이 공급자에 닿지 않는다
+# (5) FULL 호출 장부 — «검수 1회 + 재요청 자리 1» (2026-09-23 개방)
 # ══════════════════════════════════════════════════════════
 
 
-def test_FULL_호출_장부_아래에서는_두_번째_검수_호출이_공급자_전에_막힌다():
-    """FULL 은 검수자 호출을 영수증상 1회(PRIMARY_REVIEW_CALLS)로 묶는다.
+def test_FULL_호출_장부는_재요청_자리로_두_번째_검수를_받고_세_번째는_막는다():
+    """pipeline 이 감싸는 모양 그대로 — 최초 검수 한 자리, 재요청 전용 두 자리.
 
-    그래서 FULL 에서는 행 단위 구제만 효과가 있고, 재요청·누락 후속은 장부가
-    공급자 호출 «전»에 막아 «호출 실패»처럼 닫힌다 — 추가 과금도, 영수증 호출 수
-    변화도 없다. 이 계약을 바꾸면(장부·영수증 1회 → 2회) 이 시험이 먼저 깨져
-    `_ask_grouped_verdicts` 머리말의 ⚠️ 문단을 함께 고치게 만든다.
+    깨진 한 행의 번호만 누락 후속으로 다시 물어 채우고, 그 호출은 장부의
+    ``bundled_retry`` 자리로 기록된다(영수증 검수 2회). pipeline 의 물음 함수는
+    두 번째 호출 직전에 «자리 있음»을 답한다. 세 번째 검수자 호출은 장부가 공급자
+    «전»에 막는다.
     """
-    from src.features.composer.pipeline import _CallLedgerRecorder
+    from src.features.composer.pipeline import (
+        PRIMARY_REVIEW_RETRY_SECTION_IDS, _CallLedgerRecorder, _review_slot_question,
+    )
     from src.shared.generation_validation_receipt import ValidationRound
+    from src.shared.report_recovery import PRIMARY_REVIEW_CALLS, PRIMARY_REVIEW_RETRY_CALLS
 
     recorder = _CallLedgerRecorder()
     provider_initial = _Caller("provider-initial", _broken_answer)
     provider_retry = _Caller("provider-retry", lambda p: _rows(p))
-
-    def wrap(ask):
-        return recorder.wrap(
-            ask, role="reviewer", validation_round=ValidationRound.PRIMARY,
-            section_ids=("bundled",),
-        )
-
-    run = _ask_grouped(
-        ITEMS, FRAGMENTS, initial=wrap(provider_initial), retry=wrap(provider_retry),
+    initial = recorder.wrap(
+        provider_initial, role="reviewer", validation_round=ValidationRound.PRIMARY,
+        section_ids=("bundled",),
+    )
+    retry = recorder.wrap(
+        provider_retry, role="reviewer", validation_round=ValidationRound.PRIMARY,
+        section_ids=PRIMARY_REVIEW_RETRY_SECTION_IDS,
     )
 
-    assert provider_initial.count == 1 and provider_retry.count == 0
-    assert recorder.calls_for(ValidationRound.PRIMARY, role="reviewer") == 1
-    assert run.result == {number: "참" for number in range(1, TOTAL + 1) if number != BROKEN}
-    assert [record["판독"] for record in run.protocol] == [READ_OK, READ_EMPTY]
+    run = _ask_grouped(
+        ITEMS, FRAGMENTS, initial=initial, retry=retry,
+        available=_review_slot_question(
+            recorder, ValidationRound.PRIMARY,
+            PRIMARY_REVIEW_CALLS + PRIMARY_REVIEW_RETRY_CALLS,
+        ),
+    )
+
+    assert provider_initial.count == 1 and provider_retry.count == 1
+    assert _numbers_in(provider_retry.prompts[0]) == [BROKEN]
+    assert run.result == {number: "참" for number in range(1, TOTAL + 1)}
+    assert [record["판독"] for record in run.protocol] == [READ_OK, READ_OK]
+    reviewers = [record for record in recorder.freeze().records if record.role == "reviewer"]
+    assert [(record.section_id, record.role_index) for record in reviewers] == [
+        ("bundled", 1), ("bundled_retry", 2),
+    ]
+    with pytest.raises(RuntimeError):
+        retry("세 번째 검수 시도")
+    assert provider_retry.count == 1, "세 번째 시도는 공급자에 닿지 않는다"
 
 
 # ══════════════════════════════════════════════════════════
@@ -1262,16 +1283,19 @@ def test_FULL_호출_장부_아래에서는_두_번째_검수_호출이_공급�
 DEGRADABLE_FLAGS = (
     ("call_limit", "call_limit_reached"),
     ("request_budget", "request_budget_exhausted"),
+    # FULL 재요청 자리의 공급자 호출 실패(2026-09-24 결정 3 개정) — 판독 코드를 나눈다.
+    ("provider_failure", "provider_failure_degraded"),
 )
 
 
-def _ask_review(kind, *, initial, retry, available=None):
+def _ask_review(kind, *, initial, retry, available=None, sinks=None):
     """packet 이면 묶음 검수, flat 이면 평문 최초 검수를 같은 호출자·관측으로 부른다."""
     if kind == "packet":
         return _ask_grouped(
             ITEMS, FRAGMENTS, initial=initial, retry=retry, available=available,
+            sinks=sinks,
         )
-    sinks = SimpleNamespace(diagnostics=[], protocol=[], problems={})
+    sinks = sinks or SimpleNamespace(diagnostics=[], protocol=[], problems={})
     sinks.result = verify._ask_verdicts(
         _never, FLAT_ITEMS, FRAGMENTS, "",
         initial_ask=initial, initial_retry_ask=retry,
@@ -1320,9 +1344,18 @@ def test_돈_계정_장애는_두_번째_호출에서도_재전파한다(kind, s
     error = AskFatalError(RuntimeError("일일 예산 소진"))
     initial = _Caller("initial", (lambda p: INVALID) if stage == "retry" else _broken_answer)
     retry = _Caller("retry", lambda p: error)
+    sinks = SimpleNamespace(diagnostics=[], protocol=[], problems={})
     with pytest.raises(AskFatalError) as raised:
-        _ask_review(kind, initial=initial, retry=retry)
+        _ask_review(kind, initial=initial, retry=retry, sinks=sinks)
     assert raised.value is error and not raised.value.degradable
+    # 2026-09-24 결정 3 — 처분은 그대로(재전파)이고, 그 시도는 진단 한 줄로 남는다.
+    # 남는 것은 판독 코드와 원인 «종류»(예외 클래스 이름)뿐이다 — 문구는 싣지 않는다.
+    second = sinks.protocol[-1]
+    assert (second["시도"], second["판독"], second["원인종류"]) == (
+        2, READ_GLOBAL_FAILURE, "RuntimeError",
+    )
+    assert "일일 예산 소진" not in json.dumps(sinks.protocol, ensure_ascii=False)
+    assert observed_composition_steps([second]) == (second,)
 
 
 @pytest.mark.parametrize("kind", ("packet", "flat"))
@@ -1445,13 +1478,15 @@ def test_물음이_참이면_예전처럼_보내고_빠진_번호가_없으면_�
     assert whole.asked == 0
 
 
-def test_FULL_장부_아래에서_물음을_넘기면_가짜_빈_응답_관측과_실패_경고가_없다(caplog):
-    """(5)의 장부 그대로, 부르는 쪽(pipeline)이 «검수 호출은 1회뿐»을 넘긴 모습.
+def test_FULL_장부의_검수자리가_하나뿐이면_물음이_막아_가짜_빈_응답_관측과_실패_경고가_없다(
+        caplog):
+    """보충 검수처럼(또는 재요청 전용 호출자가 없어) 장부 자리가 하나뿐인 모습.
 
-    pipeline 배선 제안의 효과 — 장부·영수증·공급자 호출 수는 (5)와 같고, 관측은
-    실제로 보낸 첫 호출 하나만 남는다.
+    pipeline 의 물음 함수(`_review_slot_question`, 자리 1)가 두 번째 호출 «전»에
+    «자리 없음»을 답한다 — 공급자 호출은 첫 한 번뿐이고, 관측은 실제로 보낸 첫
+    호출 하나만 남으며, «검수 AI 호출이 실패했다» 경고도 없다.
     """
-    from src.features.composer.pipeline import _CallLedgerRecorder
+    from src.features.composer.pipeline import _CallLedgerRecorder, _review_slot_question
     from src.shared.generation_validation_receipt import ValidationRound
 
     recorder = _CallLedgerRecorder()
@@ -1467,7 +1502,7 @@ def test_FULL_장부_아래에서_물음을_넘기면_가짜_빈_응답_관측�
     with caplog.at_level("INFO", logger=VERIFY_LOGGER):
         run = _ask_grouped(
             ITEMS, FRAGMENTS, initial=wrap(provider_initial), retry=wrap(provider_retry),
-            available=lambda: False,
+            available=_review_slot_question(recorder, ValidationRound.PRIMARY, 1),
         )
 
     assert provider_initial.count == 1 and provider_retry.count == 0
