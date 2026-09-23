@@ -84,6 +84,20 @@ FORMAL_ATTEMPT_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
     {*FORMAL_DOCUMENT_SOURCE_KINDS, *SITE_PROBE_GATE_SOURCE_KINDS}
 )
 
+# 공식 웹 수집기가 «정해 둔 상한»(쪽 수·바이트·시간)에 닿아 멈췄다는 닫힌 사유
+# 코드. 상한 도달은 «열지 못했다»가 아니라 «정한 만큼만 읽었다»는 뜻이다. 상한
+# 주석(homepage 광역 수집 상한)이 적은 대로 이 사유를 정상 회사를 막는 근거로
+# 쓰지 않도록, FULL 출고 사전검사는 DART가 아닌 필수 경로의 이 잘림을 출고
+# 차단에서 뺀다(«수집 미완료» 관측에는 그대로 남는다).
+# ★ 왜 shared에 있나 — 사유를 «남기는 쪽»(homepage)과 «읽는 쪽»(pipeline
+#   사전검사)이 다른 feature다. 한쪽을 직접 import하면 경계 위반이라 정본을
+#   여기 두고, 생산자는 같은 글자를 쓴다(시험이 생산 코드의 글자를 대조한다).
+# ★ DART 문서 수집의 잘림(deadline_exceeded·cap_reached·total_bytes_exceeded
+#   등)은 여기 넣지 않는다. 필수 공시를 끝까지 못 읽은 것은 출고를 막는다.
+COLLECTION_CAP_TRUNCATION_REASON_CODES: Final[frozenset[str]] = frozenset(
+    {"truncated_page_cap", "truncated_byte_cap", "truncated_time_cap"}
+)
+
 
 #: 수집 시도 식별자는 생산부가 ``<종류>-<일련번호>``로 만든다. 요약부는
 #: 「sitemap 목록 조회」와 「본문 페이지 조회」를 갈라야 하는데 둘 다 같은

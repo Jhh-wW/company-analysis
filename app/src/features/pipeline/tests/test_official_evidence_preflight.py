@@ -548,11 +548,21 @@ def test_robots실패와_웹신원불일치는_격리하고_검증된_DART자료
     )
 
     assert preflight.decision.status is GenerationGateStatus.STOP_TRANSIENT_FAILURE
+    assert preflight.decision.unknown_section_ids == ("business_model",)
     assert preflight.dart_partial_fallback is True
     assert preflight.can_call_ai is True
+    # 2026-09-24 갱신(ADR 0004): 예전에는 OPTIONAL robots 실패 한 건이 «미완료
+    # 수집»으로 세여 «웹 일시 장애»(INCOMPLETE) 갈래를 골랐다. robots 시도는
+    # 광역 수집기가 늘 OPTIONAL로 남기는 경로라 이제 출고 차단이 아니다. 이
+    # 장이 여전히 막히는 이유는 장 준비도 판정(site-probe 게이트 전부 차단 →
+    # UNKNOWN)이 그대로이기 때문이고, 전환 사유도 그 판정을 따른다. 실패
+    # 관측은 수집미완료로 그대로 남는다.
+    assert preflight.collection_incomplete is True
+    assert preflight.release_blocking_incomplete is False
+    assert preflight.dart_partial_reason == "insufficient_with_ready_sections"
     assert (
         preflight.detail_code
-        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INCOMPLETE
+        == FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT
     )
 
 

@@ -52,4 +52,4 @@ XML 원본과 실제 파서 모두 119,412개 회사였다. 원본 모든 필드
 
 두어스를 지원하려면 DART 고유번호 없이도 공식 홈페이지·사업자 정보 등으로 같은 회사를 확인하고, 확보한 자료만으로 보고서를 만드는 경로가 필요하다. 공개되지 않은 매출·이익은 확인되지 않았다고 표시해야 한다. 이는 현재 기능에 구현된 우회 방법이 아니라 별도 기능 확장이다.
 
-Claude Fable 작업 배정과 결과 수신에는 [Orca orchestration 스킬](C:/Users/jh-wo/.agents/skills/orchestration/SKILL.md)을 사용했다.
+Claude Fable 작업 배정과 결과 수신에는 Orca orchestration 스킬(`%USERPROFILE%/.agents/skills/orchestration/SKILL.md`)을 사용했다.

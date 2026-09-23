@@ -355,6 +355,7 @@ from src.features.pipeline.comparison_transport import (
 )
 from src.features.pipeline.official_collection_diagnostics import (
     official_collection_attempt_step,
+    optional_incomplete_attempt_step,
 )
 from src.features.pipeline.official_evidence_preflight import (
     OfficialEvidencePreflight,
@@ -3822,7 +3823,14 @@ class RealPipeline:
         corp_code = card.ref
         if financial_source.CORP_CODE.fullmatch(corp_code or "") is None:
             return RunResult(outcome=Outcome.NOT_FOUND, message=_message(Outcome.NOT_FOUND))
+        # 두 플래그를 나눠 든다(ADR 0004). collection_incomplete(관측)는 끝까지
+        # 못 읽은 모든 경로를 세어 캐시 적격·«자료확인완료»·진단에 쓴다.
+        # release_blocking_incomplete(출고 차단)는 FULL을 SHADOW로 내리는
+        # 미완료만 센다 — 선택 경로의 상한 잘림·실패는 관측에만 남는다.
+        # 자료원 실패 기록(record_collection_failure)은 둘 다 참으로 만든다.
+        # 불변식: 출고 차단이면 반드시 관측도 참이다.
         collection_incomplete = False
+        release_blocking_incomplete = False
         try:
             profile = engine.get_json("company.json", {"corp_code": corp_code}, counter)
             if (
@@ -3833,7 +3841,7 @@ class RealPipeline:
                 raise ValueError("DART 회사정보 응답의 상태 또는 회사가 올바르지 않습니다")
         except Exception as error:  # 이미 확인한 회사 신원을 자료 갱신 실패로 버리지 않는다.
             raise_if_request_interrupted(error)
-            collection_incomplete = True
+            collection_incomplete = release_blocking_incomplete = True
             record_collection_failure(steps, source="기업개황", reason="profile_refresh_failed", error=error)
             # 확인 카드의 법인 코드·이름만 유지한다. 법인구분이나 홈페이지
             # 인증을 추정하지 않으므로 이 값으로 공식 웹 신원을 승격할 수 없다.
@@ -3865,7 +3873,7 @@ class RealPipeline:
             audit_no_data = audit.get("status") == "013"
         except Exception as error:  # 빈 공시목록으로 대상 외를 입증하지 않는다.
             raise_if_request_interrupted(error)
-            collection_incomplete = True
+            collection_incomplete = release_blocking_incomplete = True
             audit_rows = []
             record_collection_failure(steps, source="감사 공시목록", reason="audit_listing_failed", error=error)
         try:
@@ -3873,7 +3881,7 @@ class RealPipeline:
         except Exception as error:
             raise_if_request_interrupted(error)
             registry = None
-            collection_incomplete = True
+            collection_incomplete = release_blocking_incomplete = True
             record_collection_failure(steps, source="대상 판정", reason="public_registry_failed", error=error)
         has_audit = any(
             "감사보고서" in (row.get("report_nm") or "") for row in audit_rows
@@ -3904,7 +3912,7 @@ class RealPipeline:
             )
         except Exception as error:
             raise_if_request_interrupted(error)
-            collection_incomplete = True
+            collection_incomplete = release_blocking_incomplete = True
             # 엔진의 명시적 부분 수집 예외만 성공 연도 자료를 운반한다.
             partial_error = getattr(engine, "PartialFinancialCollectionError", None)
             if isinstance(partial_error, type) and isinstance(error, partial_error):
@@ -3971,7 +3979,7 @@ class RealPipeline:
             )
         except Exception as error:
             raise_if_request_interrupted(error)
-            collection_incomplete = True
+            collection_incomplete = release_blocking_incomplete = True
             filing = None
             record_collection_failure(steps, source="최신 공시목록", reason="latest_filing_failed", error=error)
         if build_three_year_table(
@@ -4164,7 +4172,7 @@ class RealPipeline:
                         type(error).__name__,
                         _safe_error_summary(error),
                     )
-                collection_incomplete = True
+                collection_incomplete = release_blocking_incomplete = True
                 record_collection_failure(steps, source="공식 근거", reason=failure_reason, error=error)
                 official_evidence = retain_official_collection(
                     corp_code, official_evidence, reason_code=failure_reason,
@@ -4207,7 +4215,28 @@ class RealPipeline:
                     ),
                 }
             )
+            # 출고를 막지 않은 미완료(선택 경로 + 설계 상한 예외 필수 경로)는 비차단
+            # 근거·종류·상태·사유별 개수로만 남긴다. 수집미완료가 참인데 부분
+            # 보고서로 안 내려간 이유를 기록에서 읽게 한다.
+            if (
+                official_preflight.optional_incomplete_attempts
+                or official_preflight.design_cap_exempt_attempts
+            ):
+                steps.append(
+                    optional_incomplete_attempt_step(
+                        official_preflight.optional_incomplete_attempts,
+                        design_cap_exempt=(
+                            official_preflight.design_cap_exempt_attempts
+                        ),
+                    )
+                )
+            # 관측은 모든 FAILED·TRUNCATED를, 출고 차단은 사전검사가 고른 차단분만
+            # 합친다. 둘을 한 값으로 합치면 선택 경로 잘림만으로 FULL이 꺼진다.
             collection_incomplete = collection_incomplete or official_preflight.collection_incomplete
+            release_blocking_incomplete = (
+                release_blocking_incomplete
+                or official_preflight.release_blocking_incomplete
+            )
             supplementary_research_required = (
                 news_intake_switch.news_intake_enabled()
                 and official_preflight.supplementary_research_allowed
@@ -4268,7 +4297,7 @@ class RealPipeline:
                     "공식준비장": len(official_preflight.decision.ready_section_ids),
                 })
 
-            if official_preflight.dart_partial_fallback or collection_incomplete:
+            if official_preflight.dart_partial_fallback or release_blocking_incomplete:
                 # FULL은 아홉 장·독립 문서 8건을 모두 요구한다. 사전검사가 부분
                 # 보고서 갈래(웹 경로 일시 장애 / 자료 일부 부족 / 정식 문서 하한
                 # 도달 불가)로 열어 준 경우에는 이미 존재하는 SHADOW의 안전한
@@ -4290,14 +4319,22 @@ class RealPipeline:
                     official_evidence.source_snapshot_sha256
                 )
             )
-            if not generation_source_identity_digest and not collection_incomplete:
+            # 재무 자료 «없음» 회사의 생성 신원은 출고 차단만 막는다. 관측
+            # 미완료(선택 경로 잘림)만 있으면 신원을 세운 뒤 아래에서 캐시와
+            # 분리된 부분 지문으로 바꾼다 — 여기서 관측값으로 막으면 재무 API가
+            # 없는 회사는 선택 경로 잘림 하나로 FULL이 꺼진다.
+            if not generation_source_identity_digest and not release_blocking_incomplete:
                 generation_source_identity_digest = source_identity.generation_digest_without_financials(
                     official_evidence.source_snapshot_sha256
                 )
                 if generation_source_identity_digest:
                     steps.append({"step": "6_수집_생성신원_재무자료없음"})
-            if not generation_source_identity_digest or collection_incomplete:
+            # 출고 모드는 «신원 없음 또는 출고 차단»일 때만 SHADOW로 내린다.
+            if not generation_source_identity_digest or release_blocking_incomplete:
                 requested_release_mode = ReleaseMode.SHADOW
+            # 캐시 신원은 관측으로 가른다. 끝까지 못 읽은 수집은 FULL이어도 정상
+            # 캐시 신원과 분리된 부분 지문을 쓰고 재사용 대상이 아니다.
+            if not generation_source_identity_digest or collection_incomplete:
                 generation_source_identity_digest = partial_generation_digest(
                     company_id=corp_code,
                     official_snapshot=official_evidence.source_snapshot_sha256,
@@ -4378,7 +4415,7 @@ class RealPipeline:
                     failure_reason = FINAL_GATE_REASON_INTERNAL_EVIDENCE_CONTRACT
                 v2_comparison_result = None
                 requested_release_mode = ReleaseMode.SHADOW
-                collection_incomplete = True
+                collection_incomplete = release_blocking_incomplete = True
                 record_collection_failure(
                     steps, source="회사 공식 비교", reason=failure_reason, error=error,
                 )
@@ -4386,7 +4423,10 @@ class RealPipeline:
                 assert isinstance(comparison_outcome.value, _ComparisonOutcome)
                 v2_comparison_result = comparison_outcome.value.result
                 generation_source_identity_digest = comparison_outcome.value.folded_digest
-        if collection_incomplete:
+        # 출고 차단일 때만 SHADOW와 부분 지문을 다시 정한다. 선택 경로 미완료만
+        # 있는 FULL은 위에서 이미 부분 지문 위에 비교 생산물을 접었으므로, 여기서
+        # 다시 만들면 비교 신원이 생성 신원에서 빠진다.
+        if release_blocking_incomplete:
             requested_release_mode = ReleaseMode.SHADOW
             generation_source_identity_digest = partial_generation_digest(
                 company_id=corp_code,
@@ -4671,7 +4711,7 @@ class RealPipeline:
             )
         except Exception as error:
             raise_if_request_interrupted(error)
-            collection_incomplete = True
+            collection_incomplete = release_blocking_incomplete = True
             requested_release_mode = ReleaseMode.SHADOW
             record_collection_failure(steps, source="추가 자료 수집", reason="legacy_collection_failed", error=error)
             try:
@@ -4744,10 +4784,17 @@ class RealPipeline:
         required_performance_year_count = historical_performance_required_year_count(
             performance_table
         )
-        collection_incomplete = collection_incomplete or any(
+        # 기록된 자료원 실패(추가 자료 수집·매출 구성표·언론 보도 포함)는 지금처럼
+        # 관측과 출고 차단 둘 다 세운다. 출고 모드는 출고 차단 값만 본다 —
+        # 관측 값으로 고르면 사전검사의 선택 경로 미완료가 여기서 FULL을 끈다.
+        recovery_failure_recorded = any(
             observation.get("step") == COLLECTION_RECOVERY_STEP for observation in steps
         )
-        if collection_incomplete:
+        collection_incomplete = collection_incomplete or recovery_failure_recorded
+        release_blocking_incomplete = (
+            release_blocking_incomplete or recovery_failure_recorded
+        )
+        if release_blocking_incomplete:
             requested_release_mode = ReleaseMode.SHADOW
         sources = _sources_from(steps)
 
@@ -6840,8 +6887,9 @@ def _run_v2_composer(
     # 통째로 빠진다(2026-09-10 멀티캠퍼스 실측: 도식 16줄·요약 작성 미실행).
     #
     # ⚠️ 적용 범위 — 이 예약은 «SHADOW 계약으로 도는 실행»에만 효과가 있다
-    #   (독립 검토 지적). 재작성은 flat 검수 경로에만 있고(FULL 의 엄격 packet
-    #   경로는 검수 1회 고정이라 재작성 자체가 없다), 도식 AI 검수와 핵심 요약
+    #   (독립 검토 지적). FULL 의 엄격 packet 경로는 호출 장부가 본문 검수를
+    #   «1회 + 재요청 자리 1»로 묶어, 재작성·재검수는 자리가 없어 보내지
+    #   않는다(2026-09-24, ADR 0003). 도식 AI 검수와 핵심 요약
     #   «고르기»도 composer 가 SHADOW 일 때만 부른다. 즉 순수 FULL 실행에는
     #   «필수 후속 2회»가 애초에 없어 아무것도 바뀌지 않는다. 문제의 실측
     #   실행은 FULL 요청이 부분 보고서 갈래로 내려간 것이었다(위

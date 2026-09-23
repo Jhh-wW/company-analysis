@@ -72,4 +72,4 @@
 
 실제 비교가 시간 반감·품질 유지 기준을 충족하지 못했으므로 운영 적용 조건이 성립하지 않았다. `main` 푸시는 Render 배포를 바로 유발하므로 시험용 브랜치에만 로컬 커밋을 남겼다. 운영 적용은 완료되지 않았으며 Render 로그인 여부와 무관하게 이번 결과로 배포를 진행하지 않는다.
 
-총괄이 [Orca orchestration 스킬](C:/Users/jh-wo/.agents/skills/orchestration/SKILL.md)로 Astra의 시험기 보강·자료 일치 조사와 Claude Fable의 배포 경로 검토를 조정했다.
+총괄이 Orca orchestration 스킬(`%USERPROFILE%/.agents/skills/orchestration/SKILL.md`)로 Astra의 시험기 보강·자료 일치 조사와 Claude Fable의 배포 경로 검토를 조정했다.

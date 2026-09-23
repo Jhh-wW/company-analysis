@@ -44,6 +44,60 @@ _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}")
 _COMPANY_ID_RE: Final[re.Pattern[str]] = re.compile(r"[0-9]{8}")
 _CALL_ROLES: Final[frozenset[str]] = frozenset({"writer", "reviewer"})
 _CALL_OUTCOMES: Final[frozenset[str]] = frozenset({"returned", "failed"})
+#: 검수 호출의 장부 범위 — 본문·도식을 한 요청으로 묶은 검수(``bundled``)와, 그
+#: 검수의 형식 재요청 «또는» 누락 후속 자리(``bundled_retry``, PRIMARY 회차만).
+BUNDLED_REVIEW_SECTION_ID: Final[str] = "bundled"
+BUNDLED_REVIEW_RETRY_SECTION_ID: Final[str] = "bundled_retry"
+#: 회차마다 받는 reviewer 장부 모양(기록 순서 그대로).
+#: ⚠️ 호출 수 정책의 정본(``report_recovery`` 의 PRIMARY_REVIEW_CALLS·
+#:   PRIMARY_REVIEW_RETRY_CALLS·SUPPLEMENT_REVIEW_CALLS)과 따로 적는다. 생산 증거
+#:   검증은 회복 정책과 독립된 방어 겹이다 — 둘이 어긋나지 않는지는 시험이 대조한다.
+_REVIEWER_SECTIONS_BY_ROUND: Final[
+    Mapping[ValidationRound, frozenset[tuple[str, ...]]]
+] = {
+    ValidationRound.PRIMARY: frozenset({
+        (BUNDLED_REVIEW_SECTION_ID,),
+        (BUNDLED_REVIEW_SECTION_ID, BUNDLED_REVIEW_RETRY_SECTION_ID),
+    }),
+    ValidationRound.SUPPLEMENT: frozenset({(BUNDLED_REVIEW_SECTION_ID,)}),
+}
+
+
+def _reviewer_call_counts(validation_round: ValidationRound) -> frozenset[int]:
+    """그 회차가 받는 reviewer 호출 수 — 허용 장부 모양의 길이들."""
+    return frozenset(
+        len(sections) for sections in _REVIEWER_SECTIONS_BY_ROUND[validation_round]
+    )
+
+
+def _optional_review_retry_record(
+    records: tuple[GenerationCallRecord, ...],
+) -> GenerationCallRecord | None:
+    """«실패»로 남아도 성공 증거가 될 수 있는 유일한 기록 — 없으면 None.
+
+    정확히 하나다: PRIMARY 회차의 «마지막» reviewer 기록이 재요청 자리
+    (``bundled_retry``)일 때 그 기록뿐이다(2026-09-24 총괄 결정 1). 첫 묶음 검수
+    (``bundled``)·작가·보충 회차 기록의 실패는 여전히 성공 증거가 될 수 없다.
+
+    그 호출은 이미 받은 첫 검수 응답을 다듬는 선택 단계다. 요청 AI 몫 소진
+    (``AskFatalError.degradable``)으로 포기되면 장부는 그 시도를 ``failed`` 로 남기고,
+    검수는 첫 응답의 판정으로 진행하며 판정을 못 받은 번호는 판정 없이 제거된다
+    (fail-closed). 공개되는 내용은 여전히 성공한 묶음 검수 한 번이 판정한 것뿐이다.
+    """
+    primary_reviewers = sorted(
+        (
+            record for record in records
+            if record.role == "reviewer"
+            and record.validation_round is ValidationRound.PRIMARY
+        ),
+        key=lambda record: record.sequence,
+    )
+    if (
+        primary_reviewers
+        and primary_reviewers[-1].section_id == BUNDLED_REVIEW_RETRY_SECTION_ID
+    ):
+        return primary_reviewers[-1]
+    return None
 
 
 def require_sha256(value: object, *, label: str) -> str:
@@ -387,8 +441,16 @@ class GenerationProducerEvidence:
         }
         if "" in versions or len(versions) != 1:
             raise ValueError("생성 평가의 품질·안전 계약 버전이 서로 다릅니다")
+        # ★ 예외는 PRIMARY 검수의 재요청 자리 기록 «하나»뿐이다
+        #   (`_optional_review_retry_record`). 그 자리를 연 뒤(2026-09-23), 재요청 한
+        #   번의 요청 한도·공급자 오류가 보고서 «전체» 공개를 막으면 자리를 열기 전보다
+        #   나빠진다 — 그때는 재요청이 장부에서 막혀 기록조차 없었고, 첫 응답의 판정으로
+        #   공개됐다. 실패 기록이 둘이거나, 실패가 마지막 PRIMARY 검수 기록이 아니면
+        #   거절한다(같은 객체인지로 가른다).
+        allowed_failure = _optional_review_retry_record(self.call_ledger.records)
         if any(
-            record.outcome != "returned" for record in self.call_ledger.records
+            record.outcome != "returned" and record is not allowed_failure
+            for record in self.call_ledger.records
         ):
             raise ValueError("성공 FULL 생산 증거에는 실패한 AI 호출이 있을 수 없습니다")
         self._assert_receipt_call_chain()
@@ -423,8 +485,16 @@ class GenerationProducerEvidence:
             ("writer",) * len(writers) + ("reviewer",) * len(reviewers)
         ):
             raise ValueError("검증 회차의 writer/reviewer 실제 호출 순서가 깨졌습니다")
-        if len(reviewers) != 1 or reviewers[0].section_id != "bundled":
-            raise ValueError("각 검증 회차에는 고정 bundled reviewer 한 번이 필요합니다")
+        # 검수는 묶음 한 번(``bundled``)이고, PRIMARY 만 그 뒤 재요청 자리
+        # (``bundled_retry``) 한 번을 더 받는다 — 순서까지 그대로여야 한다.
+        if (
+            tuple(record.section_id for record in reviewers)
+            not in _REVIEWER_SECTIONS_BY_ROUND[receipt.round]
+        ):
+            raise ValueError(
+                "각 검증 회차에는 고정 bundled reviewer 한 번이 필요합니다"
+                "(PRIMARY 만 bundled_retry 자리 한 번 더)"
+            )
         return writers
 
     def _assert_receipt_call_chain(self) -> None:
@@ -436,8 +506,14 @@ class GenerationProducerEvidence:
         primary = receipts[0]
         if primary.round is not ValidationRound.PRIMARY:
             raise ValueError("첫 검증 영수증은 PRIMARY여야 합니다")
-        if primary.writer_calls != 9 or primary.reviewer_calls != 1:
-            raise ValueError("PRIMARY 검증 영수증은 실제 writer 9·reviewer 1이어야 합니다")
+        primary_reviewer_counts = _reviewer_call_counts(ValidationRound.PRIMARY)
+        if primary.writer_calls != 9 or primary.reviewer_calls not in (
+            primary_reviewer_counts
+        ):
+            raise ValueError(
+                "PRIMARY 검증 영수증은 실제 writer 9·reviewer 1"
+                "(재요청 자리 포함 2까지)이어야 합니다"
+            )
         primary_writers = self._assert_round_records(primary)
         if tuple(record.section_id for record in primary_writers) != (
             REQUIRED_EVIDENCE_SECTION_IDS
@@ -645,6 +721,8 @@ def assert_canonical_producer_evidence(value: object) -> str:
 
 
 __all__ = [
+    "BUNDLED_REVIEW_RETRY_SECTION_ID",
+    "BUNDLED_REVIEW_SECTION_ID",
     "GENERATION_PRODUCER_EVIDENCE_VERSION",
     "GenerationCallLedger",
     "GenerationCallRecord",

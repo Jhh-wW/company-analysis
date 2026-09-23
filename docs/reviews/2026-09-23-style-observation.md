@@ -117,11 +117,11 @@ M1~M5는 1차 수정 시점의 4개 시험 파일(38건), M6~M8은 B안 뒤 배�
 ```powershell
 $env:PYTHON_DOTENV_DISABLED = '1'
 $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = '1'
-$tmp = 'C:\Users\jh-wo\AppData\Local\Temp\so0923'          # 새 짧은 임시 폴더
+$tmp = "$env:TEMP\so0923"          # 새 짧은 임시 폴더
 New-Item -ItemType Directory -Force $tmp | Out-Null
 $env:STORAGE_DB_PATH = "$tmp\storage.db"                    # 격리 DB (기존 DB 사용 금지)
-Set-Location 'C:\Users\jh-wo\orca\workspaces\기업분석2\fix-style-observation-20260923\app'
-& 'C:\Users\jh-wo\.claude\workspace\기업분석2\.venv\Scripts\python.exe' -X utf8 -B -m pytest -p no:cacheprovider --basetemp "$tmp\pytest" `
+Set-Location "$env:USERPROFILE\orca\workspaces\기업분석2\fix-style-observation-20260923\app"
+& "$env:USERPROFILE\.claude\workspace\기업분석2\.venv\Scripts\python.exe" -X utf8 -B -m pytest -p no:cacheprovider --basetemp "$tmp\pytest" `
   src/shared/report_quality/tests/test_style_observation.py `
   src/shared/report_quality/tests/test_composition_diagnostics.py `
   src/features/composer/tests/test_style_diagnostics_wiring.py `

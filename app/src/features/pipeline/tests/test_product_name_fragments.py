@@ -105,11 +105,11 @@ def _filing() -> dict[str, str]:
     }
 
 
-def _kakao_text() -> str:
+def _product_services_text() -> str:
     return (FIXTURES / "kakao_product_services.txt").read_text(encoding="utf-8")
 
 
-def _hybe_artist_path() -> Path:
+def _artist_contracts_path() -> Path:
     return FIXTURES / "hybe_artist_contracts.xml"
 
 
@@ -118,7 +118,7 @@ def test_이름조각은_packet과_가짜작가의_3장카드를_통과한다() 
     steps: list[dict[str, object]] = []
     frags, added = real._attach_name_candidate_fragments(  # noqa: SLF001
         before,
-        filing_text=_kakao_text(),
+        filing_text=_product_services_text(),
         filing_meta=_filing(),
         corp_id=CORP_ID,
         typed_fragments=(_typed_anchor(),),
@@ -152,7 +152,7 @@ def test_이름조각은_packet과_가짜작가의_3장카드를_통과한다() 
     candidate = next(
         item
         for item in collect_name_candidates(
-            _kakao_text(), source_kind=SOURCE_KIND_DART_BUSINESS_REPORT
+            _product_services_text(), source_kind=SOURCE_KIND_DART_BUSINESS_REPORT
         )
         if item.name == "카카오톡"
     )
@@ -200,7 +200,7 @@ def test_typed신원이_없어도_후보수와_단계는_남고_조각은_없다
 
     frags, added = real._attach_name_candidate_fragments(  # noqa: SLF001
         before,
-        filing_text=_kakao_text(),
+        filing_text=_product_services_text(),
         filing_meta=_filing(),
         corp_id=CORP_ID,
         typed_fragments=(),
@@ -228,17 +228,18 @@ def test_typed신원이_없어도_후보수와_단계는_남고_조각은_없다
 # ─────────────────────────────────────────────────────────────────────
 
 # 로컬에만 두는 실측 원문(공개 DART 사업보고서 사본). 없으면 그 시험만 건너뛴다.
-LOCAL_HYBE_FILINGS = sorted(
-    Path(
-        "C:/Users/jh-wo/.claude/workspace/기업분석2/app/.local_evaluation_runs"
-    ).glob("*/analysis_engine/pilot/raw_filings/20260320000802.xml")
+# 경로는 저장소 기준이다. 특정 PC의 절대경로를 박으면 다른 작업 사본도 그 PC의
+# 원문을 읽어 격리가 깨진다. 변수 이름은 회사명이 아니라 «업종 설명»이다.
+_RUNS_ROOT = Path(__file__).resolve().parents[4] / ".local_evaluation_runs"
+LOCAL_ENTERTAINMENT_FILINGS = sorted(
+    _RUNS_ROOT.glob("*/analysis_engine/pilot/raw_filings/20260320000802.xml")
 )
 
 
 def test_공백접힌_평문으로는_아티스트_이름을_못_읽는다() -> None:
     """이 시험이 초록이면 표 파서가 필요 없다는 뜻이다 — 실제로는 0건이다."""
 
-    collapsed = " ".join(_hybe_artist_path().read_text(encoding="utf-8").split())
+    collapsed = " ".join(_artist_contracts_path().read_text(encoding="utf-8").split())
 
     assert collect_name_candidates(collapsed, source_kind="사업보고서") == ()
 
@@ -254,7 +255,7 @@ def test_원문경로를_넘기면_표에서_대표IP_조각이_생긴다() -> N
         corp_id=CORP_ID,
         typed_fragments=(_typed_anchor(),),
         steps=steps,
-        raw_path=str(_hybe_artist_path()),
+        raw_path=str(_artist_contracts_path()),
     )
 
     assert added > 0
@@ -286,7 +287,7 @@ def test_표에서_만든_이름조각도_transport_사전검증을_통과한다
         corp_id=CORP_ID,
         typed_fragments=(_typed_anchor(),),
         steps=[],
-        raw_path=str(_hybe_artist_path()),
+        raw_path=str(_artist_contracts_path()),
     )
     packets = real._full_section_evidence_packets(  # noqa: SLF001
         corp_id=CORP_ID,
@@ -312,7 +313,7 @@ def test_원문파일이_없으면_평문_파서로_되돌아간다(tmp_path: Pa
 
     _, added = real._attach_name_candidate_fragments(  # noqa: SLF001
         _legacy_fragments(),
-        filing_text=_kakao_text(),
+        filing_text=_product_services_text(),
         filing_meta=_filing(),
         corp_id=CORP_ID,
         typed_fragments=(_typed_anchor(),),
@@ -326,10 +327,10 @@ def test_원문파일이_없으면_평문_파서로_되돌아간다(tmp_path: Pa
 
 
 @pytest.mark.skipif(
-    not LOCAL_HYBE_FILINGS, reason="로컬 공시 원문 사본이 없는 환경입니다"
+    not LOCAL_ENTERTAINMENT_FILINGS, reason="로컬 공시 원문 사본이 없는 환경입니다"
 )
-def test_실측_하이브_사업보고서_전체에서_대표IP를_읽는다() -> None:
-    tables = read_filing_tables(LOCAL_HYBE_FILINGS[0])
+def test_실측_엔터사_사업보고서_전체에서_대표IP를_읽는다() -> None:
+    tables = read_filing_tables(LOCAL_ENTERTAINMENT_FILINGS[0])
     candidates = collect_name_candidates_from_tables(
         tables, source_kind="사업보고서"
     )
@@ -373,7 +374,7 @@ def 스위치_켬():
 
 
 @pytest.mark.skipif(
-    not LOCAL_HYBE_FILINGS, reason="로컬 공시 원문 사본이 없는 환경입니다"
+    not LOCAL_ENTERTAINMENT_FILINGS, reason="로컬 공시 원문 사본이 없는 환경입니다"
 )
 def test_실측_원문의_대표IP가_3장_packet과_작가_프롬프트까지_간다(
     스위치_켬,
@@ -388,7 +389,7 @@ def test_실측_원문의_대표IP가_3장_packet과_작가_프롬프트까지_�
         corp_id=CORP_ID,
         typed_fragments=(_typed_anchor(),),
         steps=steps,
-        raw_path=str(LOCAL_HYBE_FILINGS[0]),
+        raw_path=str(LOCAL_ENTERTAINMENT_FILINGS[0]),
     )
 
     # (a) 수집 단계 기록 — 어떤 입력으로 몇 개를 읽었는가.
@@ -622,9 +623,7 @@ def test_segment_label_is_available_only_to_portfolio_names() -> None:
 # ─────────────────────────────────────────────────────────────────────
 
 LOCAL_MANUFACTURER_FILINGS = sorted(
-    Path(
-        "C:/Users/jh-wo/.claude/workspace/기업분석2/app/.local_evaluation_runs"
-    ).glob("*/analysis_engine/pilot/raw_filings/20260310002820.xml")
+    _RUNS_ROOT.glob("*/analysis_engine/pilot/raw_filings/20260310002820.xml")
 )
 
 

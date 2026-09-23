@@ -124,7 +124,7 @@ baseline PDF 경로를 회사 항목의 `baseline_pdf`에 지정하면 동일 py
 
 워크트리 코드는 수정하지 않았다. 외부 네트워크를 차단하고 별도 임시 DB에서 두 결함을 재현했으며, 표적 회귀 시험 255건을 실행했다. 유료 provider, 운영 서버, 실제 사용자 DB, 배포는 호출·변경하지 않았다. 후속 메시지에서 유료 시험 허용을 전달받았지만 이 감사에서는 비교 실행기를 찾고 정확성 조건을 정리하는 데 그쳤다. 실제 PDF 5개와 뉴스 내용 감사는 조정자가 담당하므로 중복 판정하지 않았다.
 
-경로는 저장소 루트 `C:/Users/jh-wo/.claude/workspace/기업분석2` 기준이다. 심각도 P1은 유료 검증 또는 서비스 운영에 큰 영향을 주어 다음 실험·운영 전 우선 수정할 항목, P2는 사용자 안내·관측·문서의 확인된 기능 결함이다. 이번 범위에서 새 P0나 인증 우회는 입증하지 못했다. 이것은 보안 전체가 안전하다는 판정이 아니다.
+경로는 저장소 루트 `%USERPROFILE%/.claude/workspace/기업분석2` 기준이다. 심각도 P1은 유료 검증 또는 서비스 운영에 큰 영향을 주어 다음 실험·운영 전 우선 수정할 항목, P2는 사용자 안내·관측·문서의 확인된 기능 결함이다. 이번 범위에서 새 P0나 인증 우회는 입증하지 못했다. 이것은 보안 전체가 안전하다는 판정이 아니다.
 
 ## 확인한 결함과 수정 우선순위
 
@@ -238,7 +238,7 @@ baseline PDF 경로를 회사 항목의 `baseline_pdf`에 지정하면 동일 py
 - 묶음 A **125 통과, 5.56초**: Job lifecycle, runtime failure diagnostics, stopped evidence guidance, response security, 회원 열람·설문 KPI 1건, singleflight, budget state machine, official evidence preflight.
 - 묶음 B **130 통과, 20.42초**: report access routes, request limits, release mode cache isolation, storage cache, spend store.
 - Python `-B`, pytest `-p no:cacheprovider`, 저장소 밖 임시 basetemp와 APP_DATA_ROOT/STORAGE_DB_PATH/관측 경로를 사용했다. provider 환경키를 제거하고 외부 socket.connect를 차단했다. Windows asyncio용 loopback만 허용했다. 각 실행의 기존 Starlette/httpx 지원 종료 예정 경고 1개는 기능 실패가 아니었다.
-- 최초 재현 스크립트는 `C:/Users/jh-wo/AppData/Local/Temp/company-quality-audit-20260908-task2/재현.py`에 있다. 실행하면 새 임시 DB를 만들고 HTTP 상태와 DB 잠금 중 타이머 지연을 출력한다. 저장소나 운영 DB는 수정하지 않는다. 수정 후 재실행 값은 이 문서 상단에 별도로 기록했다.
+- 최초 재현 스크립트는 `%TEMP%/company-quality-audit-20260908-task2/재현.py`에 있다. 실행하면 새 임시 DB를 만들고 HTTP 상태와 DB 잠금 중 타이머 지연을 출력한다. 저장소나 운영 DB는 수정하지 않는다. 수정 후 재실행 값은 이 문서 상단에 별도로 기록했다.
 - 모든 test 개수 통과는 보고서 내용 품질 증명이 아니다. 웹 공통 fixture는 다른 기능 시험을 위해 PDF 후보·승인 대역을 제공한다(`app/src/web/tests/conftest.py:26` 이후). 실제 회사 원문→문장→수치→채널 결과의 품질을 확인하려면 별도 원문 기반 비교가 필요하다.
 - 비용 원장 손실, cache/idempotency 우회, 인증 우회는 이번 표적 실행에서 새로 입증되지 않았다. 외부 공급자 장애·실제 장기 비용·배포 부하까지 검증했다는 주장은 하지 않는다.
 - 배포 제약은 코드에도 명시돼 있다: Render 단일 instance/영속 디스크, 플랫폼 종료 유예와 앱 drain 차이(`render.yaml:15-24`, `job_runtime.py:124`, `runtime.py:417-419`), 외부 복구세대 업로드/독립 서명 adapter 미완성(`docs/architecture/system-overview.md:121-122`와 `render.yaml` 말미), 일반 public forwarded evidence verifier 및 image supply-chain verifier 부재(`deploy/README_배포_절차.md:7-12`, `:111` 이후). 이를 새로 발견한 보안 침해로 과장하지 않았지만, 실제 운영 승인·재해복구 완료의 증거도 현재 로컬 시험만으로 만들 수 없다.

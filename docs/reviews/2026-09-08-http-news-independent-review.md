@@ -31,7 +31,7 @@
 
 ### 재검증 산출물과 시험
 
-임시 폴더는 `C:/Users/jh-wo/AppData/Local/Temp/company-news-review-task45e`다.
+임시 폴더는 `%TEMP%/company-news-review-task45e`다.
 
 - 현재 재현: `reproduce_budget.py`, `reproduce.py` — 각각 Python 종료 코드 0.
 - 수정 후 결과: `budget-revalidation-results.json`, `metrics-revalidation-results.json`.
@@ -72,7 +72,7 @@
 
 이 오류는 기사 수를 0으로 꾸미지는 않지만, 이번 유료 시험의 핵심 비교 지표를 매번 잃는다. 단계명을 공통 계약에 결속하고 실제 생산 단계명을 소비하는 연결 시험이 필요하다. 전체 `diagnostics.json`에는 원본 단계가 남으므로 이미 생긴 원장으로 재추출할 수 있다.
 
-재현 파일: `C:/Users/jh-wo/AppData/Local/Temp/company-news-review-task45e/reproduce.py`.
+재현 파일: `%TEMP%/company-news-review-task45e/reproduce.py`.
 결과 파일: 같은 폴더의 `reproduction-results.json`.
 
 ## 초기 P2 2 — 뉴스 6회 뒤 두 장 보충의 필수 재검수가 호출 상한에 막힌다
@@ -98,7 +98,7 @@
 
 **묶음 크기 5만으로 24기사/5회를 보장할 수 없다.** 현재 기간 창마다 남은 묶음을 분석하므로 `ceil(16/5) + ceil(4/5) + ceil(4/5) = 6`회다. 또 본문 최대 길이 12,000자 다섯 개만으로 60,000자가 되어 회사 문맥과 프롬프트를 더하면 60,000자 입력 상한을 넘고 `analyze_batch`가 다시 분할한다. 출력 상한 5,000토큰에 기사별 판정과 발췌가 모두 들어가는지도 검증해야 한다.
 
-재현 파일: `C:/Users/jh-wo/AppData/Local/Temp/company-news-review-task45e/reproduce_budget.py`.
+재현 파일: `%TEMP%/company-news-review-task45e/reproduce_budget.py`.
 결과 파일: 같은 폴더의 `budget-results.json`. 각 시나리오의 본문 읽기 24회, 분석 6회, 분석 실패 `null`, 네트워크 시도 0회가 기록된다.
 
 ## 추가 요청: 모드별 호출 예약
@@ -128,9 +128,9 @@
 저장소 밖 임시 스크립트만 추가했다. 앱 소스와 기존 시험 파일은 수정하지 않았다. Python의 socket 연결·이름 조회·전송 이벤트를 시작부터 전부 차단했고 실제 HTTP POST와 유료 API는 0회다.
 
 ```powershell
-python -B 'C:/Users/jh-wo/AppData/Local/Temp/company-news-review-task45e/reproduce.py'
-python -B 'C:/Users/jh-wo/AppData/Local/Temp/company-news-review-task45e/reproduce_budget.py'
-python -B 'C:/Users/jh-wo/AppData/Local/Temp/company-news-review-task45e/run_checks.py'
+python -B "$env:TEMP/company-news-review-task45e/reproduce.py"
+python -B "$env:TEMP/company-news-review-task45e/reproduce_budget.py"
+python -B "$env:TEMP/company-news-review-task45e/run_checks.py"
 ```
 
 최종 제한 시험: **146 통과, 3 제외, 14.81초, 차단한 네트워크 시도 0회**. 결과는 같은 임시 폴더의 `final-checks.log`다. 대상은 평가기, 뉴스 신원 문맥, 파이프라인 뉴스 연결, 뉴스 표 연결, 본문 활용, 수집 시험 여섯 파일이다. 처음에는 네트워크 차단 상태에서 Windows asyncio가 내부 소켓을 만드는 웹 표시 시험 세 개가 실패했고, 제품 결함으로 집계하지 않고 마지막 실행에서 제외했다. 환경 기본 Python에 일부 패키지가 없어 저장소의 기존 `.venv/Lib/site-packages`를 사용했으며 설치나 네트워크 접근은 하지 않았다.

@@ -94,22 +94,29 @@ class AskFatalError(Exception):
         *,
         call_limit: bool = False,
         request_budget: bool = False,
+        provider_failure: bool = False,
     ) -> None:
         self.cause = cause
         #: 호출 «횟수» 상한이라 선택적 단계를 포기하고 이어가도 되는가.
         self.call_limit = bool(call_limit)
         #: 요청 로컬 «예약액» 소진이라 선택적 단계를 포기하고 이어가도 되는가.
         self.request_budget = bool(request_budget)
+        #: 공급자 호출 한 번의 실패를 «선택적 단계 포기»로 받아도 되는가.
+        #: ★ FULL 본문 검수의 재요청 자리 한 곳에서만 참이 된다(2026-09-24 결정 3
+        #:   개정) — composer/pipeline.py 의 재요청 전용 래퍼가 원인이 공급자 호출
+        #:   실패(ProviderCallFailed)일 때만 이 깃발로 다시 올린다. 그 밖의 모든
+        #:   생성 지점은 기본값(거짓) 그대로라 동작이 바뀌지 않는다.
+        self.provider_failure = bool(provider_failure)
         super().__init__(str(cause))
 
     @property
     def degradable(self) -> bool:
         """선택적 단계를 건너뛰고 «지금까지 만든 것»으로 끝내도 되는가.
 
-        두 깃발을 여기서 한 번만 합친다 — 강등 지점이 네 곳이라 각자
+        깃발들을 여기서 한 번만 합친다 — 강등 지점이 네 곳이라 각자
         조건을 적으면 한 곳만 빠뜨려도 그 단계에서만 보고서가 버려진다.
         """
-        return self.call_limit or self.request_budget
+        return self.call_limit or self.request_budget or self.provider_failure
 
 
 @dataclass(frozen=True)

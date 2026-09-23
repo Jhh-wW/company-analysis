@@ -52,6 +52,13 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     DIAGRAM_STAGE_SECTION_EVIDENCE,
     EMPTY_RECOVERY_NO_BUDGET,
     EMPTY_RECOVERY_NO_EVIDENCE,
+    RELEASE_MODE_APPLIED_FIELD,
+    RELEASE_MODE_DOWNGRADED_FROM_FIELD,
+    RELEASE_MODE_LEDGER_USED_FIELD,
+    RELEASE_MODE_REQUESTED_FIELD,
+    RELEASE_MODE_REVIEW_CALLS_FIELD,
+    RELEASE_MODE_REVIEW_SLOTS,
+    RELEASE_MODE_STEP,
     STYLE_COUNTS_FIELD,
     STYLE_RENDER_EVIDENCE_AVAILABLE,
     STYLE_RENDER_FIELD,
@@ -162,6 +169,8 @@ from src.features.composer.port import (
     SectionEvidencePacketSet,
 )
 from src.shared.report_generation.models import (
+    BUNDLED_REVIEW_RETRY_SECTION_ID,
+    BUNDLED_REVIEW_SECTION_ID,
     GenerationCallLedger,
     GenerationCallRecord,
     GenerationProducerEvidence,
@@ -175,7 +184,10 @@ from src.shared.generation_validation_receipt import (
     ValidationRound,
 )
 from src.shared.report_recovery import (
+    PRIMARY_REVIEW_CALLS,
+    PRIMARY_REVIEW_RETRY_CALLS,
     QUALITY_DERIVED_STOP_REASON_CODES,
+    SUPPLEMENT_REVIEW_CALLS,
     RecoveryAction,
     RecoveryDecision,
     SupplementAuthorization,
@@ -183,6 +195,7 @@ from src.shared.report_recovery import (
     supplement_unchanged_sections,
 )
 from src.core.citations import citation_number
+from src.core.provider_gateway.gateway import ProviderCallFailed
 from src.shared.engine_build_identity import EngineBuildIdentityChangedError
 from src.shared.generation_coordination import GenerationCoordinationError
 from src.shared.report_generation.public_projection import build_report_digest
@@ -333,6 +346,19 @@ class V2RunOutput:
     downgraded_from_release_mode: str = ""
 
 
+#: FULL 호출 장부에서 «최초 본문 검수의 재요청 전용 호출자»가 쓰는 자리.
+#: 최초 검수·재작성·재검수·보충 검수 호출자는 묶음 한 자리(``bundled``)뿐이다.
+#: 장부는 (회차, 역할)마다 공용 계수를 쓰고 래퍼마다 자기 자리 수로 상한을 보므로,
+#: 첫 검수가 1번(``bundled``), 형식 재요청 «또는» 누락 후속이 2번(``bundled_retry``)
+#: 자리를 쓰고 그 뒤 검수자 호출(재작성·재검수·세 번째 시도)은 모두 막힌다.
+#: 자리 수는 호출 수 정책(PRIMARY_REVIEW_CALLS + PRIMARY_REVIEW_RETRY_CALLS)과
+#: 같아야 한다 — 시험이 대조한다.
+PRIMARY_REVIEW_RETRY_SECTION_IDS: tuple[str, ...] = (
+    BUNDLED_REVIEW_SECTION_ID,
+    BUNDLED_REVIEW_RETRY_SECTION_ID,
+)
+
+
 class _CallLedgerRecorder:
     """실제 호출 결과를 사전에 결속한 장별 배정 순서로 기록한다."""
 
@@ -452,6 +478,117 @@ class _CallLedgerRecorder:
                 record.validation_round is validation_round and record.role == role
                 for record in self._records
             )
+
+    def has_failed(self, validation_round: ValidationRound, *, role: str) -> bool:
+        """그 회차·역할에 «실패»로 끝난 실제 호출 기록이 있는가(읽기 전용 질의)."""
+        with self._lock:
+            return any(
+                record.validation_round is validation_round
+                and record.role == role
+                and record.outcome != "returned"
+                for record in self._records
+            )
+
+    def section_counts(
+        self, validation_round: ValidationRound, *, role: str,
+    ) -> dict[str, int]:
+        """그 회차·역할의 실제 호출 기록 수를 장부 자리(section_id)별로 센다(읽기 전용).
+
+        실패 기록도 «실제로 시도한 호출»이라 함께 센다 — 영수증의 호출 수와 같은 셈이다.
+        """
+        with self._lock:
+            counts: dict[str, int] = {}
+            for record in self._records:
+                if record.validation_round is validation_round and record.role == role:
+                    counts[record.section_id] = counts.get(record.section_id, 0) + 1
+            return counts
+
+
+def _review_slot_question(
+    call_recorder: Optional[_CallLedgerRecorder],
+    validation_round: ValidationRound,
+    slots: int,
+) -> Optional[Callable[[], bool]]:
+    """검수의 두 번째 호출 직전에 «장부에 검수자 자리가 남았나»를 묻는 함수.
+
+    verify 의 ``second_review_call_available`` 에 넘긴다. 거짓이면 verify 는 그
+    호출을 보내지도 관측하지도 않는다 — 장부가 공급자 «전»에 막은 호출이 «빈 응답»
+    관측과 «호출 실패» 경고로 남지 않게 한다(2026-09-23 적대 검토 D3). 장부가 없는
+    실행(FULL 이 아님)은 None — 예전 동작 그대로다.
+    ★ 자리가 남아도 그 회차 검수자 기록 중 «실패»가 있으면 거짓이다(2026-09-24 보강 1).
+      첫 검수가 일반 예외로 죽으면 `_safe_ask` 가 None 으로 삼키고 파서가 형식
+      재요청을 부른다. 그 재요청이 성공해 COMPLETE 까지 가도, 생산 증거는
+      ``bundled_retry`` 실패 하나만 받으므로 첫 ``bundled`` 실패 기록 때문에 증거
+      생성에서 «조립 실패»로 전체가 죽는다. 그래서 예전(재요청이 장부에서 막히던
+      때)처럼 두 번째 호출 없이 «판정 없음»으로 끝나게 둔다.
+    ``slots``: 그 회차 검수자 호출이 실제로 쓸 수 있는 자리 수. 재요청이 나갈 래퍼의
+    자리 수와 같아야 한다.
+    """
+    if call_recorder is None:
+        return None
+
+    def available() -> bool:
+        return (
+            call_recorder.calls_for(validation_round, role="reviewer") < slots
+            and not call_recorder.has_failed(validation_round, role="reviewer")
+        )
+
+    return available
+
+
+def _review_call_counts(
+    call_recorder: Optional[_CallLedgerRecorder],
+) -> Optional[dict[str, int]]:
+    """FULL 장부의 PRIMARY 검수 호출 수를 자리별로 센다(없는 자리는 0). 장부가 없으면 None."""
+    if call_recorder is None:
+        return None
+    counts = call_recorder.section_counts(ValidationRound.PRIMARY, role="reviewer")
+    return {slot: counts.get(slot, 0) for slot in RELEASE_MODE_REVIEW_SLOTS}
+
+
+def _open_release_mode_line(
+    sink: Optional[list[dict]],
+    *,
+    requested: str,
+    call_recorder: Optional[_CallLedgerRecorder],
+) -> dict[str, object]:
+    """출고 모드 진단 한 줄을 «적용모드 빈 값»으로 먼저 연다(2026-09-24 후속).
+
+    AI 호출 «전»에 열어 두면, 출고 모드가 정해지기 전에 실행이 예외로 멈춰도(출고
+    검증 차단 등) 그 줄이 «미확정»으로 실행 기록에 남는다 — real.py 가 예외가 나도
+    진단 목록을 정화해 옮긴다. 출고 모드가 정해지는 곳에서 `_settle_release_mode_line`
+    이 같은 줄을 채운다. ``sink`` 가 없으면(진단을 받지 않는 호출) 줄만 만든다.
+    """
+    line: dict[str, object] = {
+        "step": RELEASE_MODE_STEP,
+        RELEASE_MODE_REQUESTED_FIELD: requested,
+        RELEASE_MODE_APPLIED_FIELD: "",
+        RELEASE_MODE_DOWNGRADED_FROM_FIELD: "",
+        RELEASE_MODE_REVIEW_CALLS_FIELD: _review_call_counts(call_recorder),
+        RELEASE_MODE_LEDGER_USED_FIELD: call_recorder is not None,
+    }
+    if sink is not None:
+        sink.append(line)
+    return line
+
+
+def _settle_release_mode_line(
+    line: dict[str, object],
+    *,
+    call_recorder: Optional[_CallLedgerRecorder],
+    output: Optional[V2RunOutput] = None,
+) -> None:
+    """열어 둔 출고 모드 줄을 채운다 — 검수 호출 수는 늘 다시 세고, ``output`` 이 있으면
+    그 결과의 실제 적용 모드와 강등 출처를 적는다.
+
+    출고 모드가 정해지는 모든 반환 지점(정상 반환·작성 뒤 강등·AI 0회 확보 근거
+    보고서)이 이 함수 하나를 부른다. 본문 검수 직후에는 ``output`` 없이 불러 검수
+    호출 수만 갱신한다 — 그 뒤 출고 검증에서 멈춰도 재요청 자리 사용이 남는다.
+    """
+    line[RELEASE_MODE_REVIEW_CALLS_FIELD] = _review_call_counts(call_recorder)
+    if output is not None:
+        line[RELEASE_MODE_APPLIED_FIELD] = output.effective_release_mode
+        line[RELEASE_MODE_DOWNGRADED_FROM_FIELD] = output.downgraded_from_release_mode
 
 
 def _total_sentences(report: ComposedReport) -> int:
@@ -1115,6 +1252,41 @@ def _degradable_on_fallback(ask: Optional[AskFn], sink: list[AskFatalError]) -> 
     return call
 
 
+def _provider_failure_degradable(ask: Optional[AskFn]) -> Optional[AskFn]:
+    """FULL 재요청 자리의 «공급자 호출 실패» 한 번을 강등 가능으로 바꾼다.
+
+    2026-09-24 결정 3 개정 — 재요청은 이미 받은 첫 검수 응답을 다듬는 선택적
+    단계이고, 첫 판정은 이미 손에 있다. SDK 재시도가 꺼져 있어(한 번의 일시적
+    공급자 오류가 곧 ProviderCallFailed) 이 한 번을 요청 전역 장애로 올리면, 다 된
+    FULL 보고서가 출고 검증 차단으로 끝난다(D 2단계 탐침). 그래서 원인이
+    ProviderCallFailed 일 때만 ``provider_failure`` 깃발로 다시 올려,
+    `verify._safe_optional_ask` 가 그 호출만 포기하고 첫 판정으로 진행하게 한다.
+
+    ★ 장부 래퍼 «바깥»에 씌운다 — 장부 execute 는 그대로 실패 기록을 남기고(생산
+      증거가 허용하는 유일한 실패 기록), 영수증 검수 수는 2다.
+    ★ `_fallback_blocked` 가 참인 원인(조정 오류·epoch 변경·전역 취소)과
+      ProviderCallFailed 가 아닌 원인(예산·계정·billing-uncertain 뒤 차단 등)은
+      지금처럼 재전파한다 — 정책 불변. 이미 강등 가능한 예외도 그대로 둔다.
+    """
+
+    if ask is None:
+        return None
+
+    def call(prompt: str) -> str:
+        try:
+            return ask(prompt)
+        except AskFatalError as error:
+            if (
+                error.degradable
+                or _fallback_blocked(error)
+                or not isinstance(error.cause, ProviderCallFailed)
+            ):
+                raise
+            raise AskFatalError(error.cause, provider_failure=True) from error
+
+    return call
+
+
 def _degraded_reason_of(error: AskFatalError) -> str:
     """AI 전역 장애를 닫힌 전환 사유로 바꾼다. 예산 feature를 import하지 않는다."""
 
@@ -1694,6 +1866,10 @@ def run_v2(
             첫 답의 실제 출력에 맞춘 작은 상한을 가진 호출자를 여기에 넣으면
             그 한 번의 예약액만 줄어든다(답의 내용·형식 요구는 그대로다).
             (None) 예전과 똑같이 initial_reviewer_ask 로 재요청한다.
+            ★ FULL 에서는 이 호출자만 호출 장부의 두 번째 검수 자리
+              (``bundled_retry``)를 받는다(2026-09-23) — 형식 재요청 «또는» 누락
+              후속 한 번이 영수증에 검수 2회로 남는다. None 이면 재요청이 한 자리
+              래퍼로 나가므로 FULL 에서는 보내지 않는다(`_review_slot_question`).
         rewrite_ask: «거짓» 판정 문장 재작성 전용 호출자. 재작성은 선택적
             다듬기라 못 해도 그 문장이 제거될 뿐이지만, 뒤따르는 도식 검수·
             요약 작성·요약 검수는 못 하면 보고서에서 통째로 빠진다. 부르는
@@ -1742,7 +1918,12 @@ def run_v2(
     if evidence_availability is not None and release_mode is ReleaseMode.SHADOW:
         if not _normalize_fragments(fragments):
             # 조각이 하나도 없으면 작가·검수를 부를 재료가 없다 — AI 0회.
-            return compose_evidence_available_report(
+            release_line = _open_release_mode_line(
+                composition_diagnostics_sink,
+                requested=_downgraded_from or release_mode.value,
+                call_recorder=None,
+            )
+            evidence_output = compose_evidence_available_report(
                 company_name,
                 fragments,
                 performance_table,
@@ -1760,6 +1941,18 @@ def run_v2(
                 review_diagnostics_sink=review_diagnostics_sink,
                 composition_diagnostics_sink=composition_diagnostics_sink,
             )
+            if _downgraded_from:
+                # FULL 사전 검사가 AI 호출 «전»에 SHADOW 로 다시 돌린 실행이다. 이
+                # 결과도 «FULL 에서 내려왔다»를 싣는다 — 결과 필드의 계약 그대로다
+                # (확보 근거 보고서로 내려온 경우 원래 요청 모드). 예전에는 이 갈래만
+                # 빈 값이었다.
+                evidence_output = replace(
+                    evidence_output, downgraded_from_release_mode=_downgraded_from,
+                )
+            _settle_release_mode_line(
+                release_line, call_recorder=None, output=evidence_output,
+            )
+            return evidence_output
     ai_failure: AskFatalError | None = None
     ai_stages_skipped: list[str] = []
 
@@ -1839,16 +2032,21 @@ def run_v2(
                 section_ids=("bundled",),
             )
         if initial_retry_reviewer_ask is not None:
-            # 재요청 호출자도 «똑같이» 감싼다. 장부의 role 계수가 FULL의
-            # 「검수 1회 고정」을 지키는 장치이므로(두 번째 reviewer 호출은
-            # 장부에서 RuntimeError → _safe_ask 가 None 으로 삼킨다), 여기만
-            # 감싸지 않으면 FULL에서 재요청이 «영수증 없이» 나가 그 고정이
-            # 풀린다. 감싸 두면 지금 동작이 그대로 유지된다.
-            initial_retry_reviewer_for_run = call_recorder.wrap(
-                initial_retry_reviewer_ask,
-                role="reviewer",
-                validation_round=ValidationRound.PRIMARY,
-                section_ids=("bundled",),
+            # 재요청 호출자도 «똑같이» 감싸되, 이 래퍼만 «검수 1회 + 재요청 자리 1»
+            # 을 연다(2026-09-23). 형식 재요청 «또는» 누락 후속 한 번이 장부의
+            # 2번 자리(bundled_retry)로 기록되고 영수증에 남는다. 재작성·재검수
+            # 래퍼는 한 자리 그대로라 첫 검수 뒤에는 여전히 막히고, 세 번째 검수자
+            # 호출도 막힌다. 감싸지 않으면 재요청이 «영수증 없이» 나간다.
+            # 재요청 자리의 공급자 호출 실패 한 번은 첫 판정으로 진행한다(2026-09-24
+            # 결정 3 개정, `_provider_failure_degradable`). 장부 래퍼는 안쪽에 둬서
+            # 실패 기록이 그대로 남는다.
+            initial_retry_reviewer_for_run = _provider_failure_degradable(
+                call_recorder.wrap(
+                    initial_retry_reviewer_ask,
+                    role="reviewer",
+                    validation_round=ValidationRound.PRIMARY,
+                    section_ids=PRIMARY_REVIEW_RETRY_SECTION_IDS,
+                )
             )
 
     rewrite_failures: list[AskFatalError] = []
@@ -2009,6 +2207,14 @@ def run_v2(
                     )
                 )
 
+    # 출고 모드 진단 한 줄 — 첫 AI 호출 «전»에 «미확정»으로 열고, 출고 모드가 정해지는
+    # 반환 지점마다 채운다. 사전 검사에서 SHADOW 로 다시 도는 실행은 안쪽 실행이 자기
+    # 줄을 연다(바깥은 아직 열지 않았다).
+    release_line = _open_release_mode_line(
+        composition_diagnostics,
+        requested=_downgraded_from or release_mode.value,
+        call_recorder=call_recorder,
+    )
     partial_evidence = (
         build_partial_evidence_view(_normalize_fragments(verification_fragments))
         if prepared_evidence is None and release_mode is ReleaseMode.SHADOW
@@ -2159,6 +2365,22 @@ def run_v2(
         #   임원 문장까지 근거 없음으로 뺀다. render 메타로만 쓰이던 값을 판정에도
         #   쓰는 것이라 형식은 그대로 ISO(YYYY-MM-DD)다.
         baseline_date = as_of_date or None
+        # FULL 장부의 검수자 자리 — 재요청 전용 호출자가 있으면 그 래퍼의 두 자리
+        # (PRIMARY_REVIEW_RETRY_SECTION_IDS), 없으면 재요청이 한 자리 래퍼로 나가므로
+        # 첫 검수 한 자리뿐이다.
+        retry_slots = (
+            PRIMARY_REVIEW_RETRY_CALLS if initial_retry_reviewer_ask is not None else 0
+        )
+        primary_review_call_available = _review_slot_question(
+            call_recorder, ValidationRound.PRIMARY, PRIMARY_REVIEW_CALLS + retry_slots,
+        )
+        # 근거 결속 재작성 호출자는 첫 검수와 «같은» 한 자리(``bundled``) 래퍼라, 첫
+        # 검수 뒤에는 장부가 반드시 막는다. 보내지 않고 «장부자리없음»으로 기록하게
+        # 미리 답한다(2026-09-24 발견 1 확정 (a)). 장부가 없으면(SHADOW·부분 보고서)
+        # None — 예전 동작 그대로다.
+        primary_rewrite_call_available = _review_slot_question(
+            call_recorder, ValidationRound.PRIMARY, PRIMARY_REVIEW_CALLS,
+        )
         if prepared_evidence is None:
             verified = verify_report(
                 draft, verification_fragments, performance_table, reviewer_for_run,
@@ -2173,6 +2395,8 @@ def run_v2(
                 protocol_diagnostics=composition_diagnostics,
                 baseline_date=baseline_date,
                 grounding_rewrite_enabled=grounding_rewrite_enabled,
+                second_review_call_available=primary_review_call_available,
+                grounding_rewrite_call_available=primary_rewrite_call_available,
             )
         else:
             verified = verify_report(
@@ -2191,6 +2415,8 @@ def run_v2(
                 protocol_diagnostics=composition_diagnostics,
                 baseline_date=baseline_date,
                 grounding_rewrite_enabled=grounding_rewrite_enabled,
+                second_review_call_available=primary_review_call_available,
+                grounding_rewrite_call_available=primary_rewrite_call_available,
             )
             _assert_composed_report_evidence_invariant(
                 verified,
@@ -2217,6 +2443,13 @@ def run_v2(
         news_review_candidates = set()
         news_review_rejections = []
         diagram_problems = ()
+    finally:
+        # 본문 검수(재요청 자리 포함)가 끝났다 — 이 뒤 PRIMARY 검수 호출은 늘지 않는다.
+        # 출고 검증에서 멈추거나, 폴백이 막힌 전역 장애(조정 오류·epoch 변경·전역
+        # 취소)가 위 except 에서 그대로 올라가도 재요청 자리 사용이 실행 기록에 남도록
+        # 지금 센다(2026-09-24 독립 검토 F2 — 예전에는 재전파가 이 셈보다 앞서 줄이
+        # 0/0 으로 남았다). 장부를 읽기만 하므로 원래 예외를 가리지 않는다.
+        _settle_release_mode_line(release_line, call_recorder=call_recorder)
     if rewrite_failures and ai_failure is None:
         # 재작성 단계의 전역 장애 — verify_report가 미다듬 문장만 제거했고
         # 검증을 마친 나머지 문장은 그대로 남았다. 전환 사유만 기록한다.
@@ -2407,7 +2640,7 @@ def run_v2(
     ) -> V2RunOutput:
         """FULL이 작성 뒤 품질 하한에 걸렸을 때 검증 본문으로 부분 보고서를 낸다."""
 
-        return _finish_evidence_available(
+        downgraded = _finish_evidence_available(
             company_name,
             verified,
             verification_fragments,
@@ -2452,6 +2685,11 @@ def run_v2(
                 else ()
             ),
         )
+        # FULL 장부를 쓰고 난 «뒤»의 강등 — 장부사용 참, 강등출처 FULL 로 남는다.
+        _settle_release_mode_line(
+            release_line, call_recorder=call_recorder, output=downgraded,
+        )
+        return downgraded
 
     # ②-d 첫 구조화 claim 슬라이스 — 검증된 DART 3개년 표의 원값에서
     # 누적 증감률을 코드로 재계산한다. AI 산문에서 숫자를 역추출하지 않으며,
@@ -2807,6 +3045,11 @@ def run_v2(
                 diagnostics=review_diagnostics,
                 protocol_diagnostics=composition_diagnostics,
                 baseline_date=baseline_date,
+                # 보충 검수는 한 자리 그대로다(재요청 자리를 열지 않는다) — 두 번째
+                # 호출은 장부가 막으므로 미리 묻고 보내지도 관측하지도 않는다.
+                second_review_call_available=_review_slot_question(
+                    call_recorder, ValidationRound.SUPPLEMENT, SUPPLEMENT_REVIEW_CALLS,
+                ),
             )
             supplement_verified, supplement_moved = drop_cross_section_duplicates(
                 retain_verified_news(
@@ -3326,7 +3569,7 @@ def run_v2(
             name_usage.counts_by_label,
         )
 
-    return V2RunOutput(
+    output = V2RunOutput(
         report=rendered,
         composed_sentences=composed_item_count,
         verified_sentences=_total_sentences(final),
@@ -3371,6 +3614,8 @@ def run_v2(
         effective_release_mode=release_mode.value,
         downgraded_from_release_mode=_downgraded_from,
     )
+    _settle_release_mode_line(release_line, call_recorder=call_recorder, output=output)
+    return output
 
 
 __all__ = [

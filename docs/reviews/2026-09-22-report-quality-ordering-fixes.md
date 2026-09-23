@@ -71,4 +71,4 @@ Windows는 파일 끝을 넘는 범위도 잠글 수 있으므로 초기화 쓰�
 
 로컬 유료 시험 산출물·DB·원문·비밀 파일은 Git에 추가하지 않는다.
 
-작업 분담과 독립 검수는 [Orca orchestration 스킬](C:/Users/jh-wo/.agents/skills/orchestration/SKILL.md)을 통해 Astra와 Claude Fable에 배정했다.
+작업 분담과 독립 검수는 Orca orchestration 스킬(`%USERPROFILE%/.agents/skills/orchestration/SKILL.md`)을 통해 Astra와 Claude Fable에 배정했다.

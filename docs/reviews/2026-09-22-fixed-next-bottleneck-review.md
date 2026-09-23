@@ -85,4 +85,4 @@
 
 유료 재생성·원래 보고서/PDF 변경·서버 제어·배포는 하지 않았다. 이 후속 수정은 생성 후의 코드 변경이므로 앞의 395.12초·1,157.37원 결과를 수정 후 품질 증거로 삼을 수 없다. 총괄의 통합 검수와 이후 실제 생성물 검증이 남는다.
 
-작업 지시 확인과 결과 전달에는 [Orca orchestration 스킬](C:/Users/jh-wo/.agents/skills/orchestration/SKILL.md)을 사용했다.
+작업 지시 확인과 결과 전달에는 Orca orchestration 스킬(`%USERPROFILE%/.agents/skills/orchestration/SKILL.md`)을 사용했다.

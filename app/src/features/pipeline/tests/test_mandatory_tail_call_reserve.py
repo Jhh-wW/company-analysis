@@ -156,6 +156,25 @@ def test_필수후속몫은_도식_요약고르기_2회다() -> None:
     )
 
 
+def test_FULL_검수_재요청_자리는_새_몫_없이_재요청_여유_안에서_흡수한다() -> None:
+    """2026-09-23 FULL 검수 «1회 + 재요청 자리 1» 개방은 런타임 몫을 늘리지 않는다.
+
+    뉴스가 남기는 몫(필수 12 + 빈 장 복구 2 + 재요청 여유 2)은 그대로다. 재요청 여유
+    2의 유도식(PARSE_RETRY_LIMIT 1 × 재요청 단계 2: 본문 검수·도식)이 이미 «본문 검수»
+    재요청 1회를 센다. 요청당 AI 호출 상한(시간 규약 20회)도 그대로다 — 영수증
+    장부의 상한(MAX_TOTAL_AI_CALLS 13 → 14)은 이 상한이 아니다.
+    """
+    assert report_recovery.PRIMARY_REVIEW_RETRY_CALLS == 1
+    assert report_recovery.WRITER_RETRY_ALLOWANCE_CALLS == 2
+    assert (
+        report_recovery.PRIMARY_REVIEW_RETRY_CALLS
+        <= report_recovery.WRITER_RETRY_ALLOWANCE_CALLS
+    )
+    assert report_recovery.MANDATORY_REPORT_AI_CALLS == 12
+    assert report_recovery.MAX_TOTAL_AI_CALLS == 14
+    assert real.MAX_AI_CALLS_PER_REQUEST == _상한
+
+
 def test_예약이_걸린_호출은_경계에서_정확히_한_번_더_거부된다() -> None:
     """N-1은 열리고 N은 닫힌다 — 예약을 0으로 낮추면 이 시험이 빨개진다."""
     engine = real._MeteredEngine(SimpleNamespace())

@@ -1567,7 +1567,13 @@ def test_우리은행_운영모양은_FULL패킷전에_문서하한_부분보고
     assert preflight.decision.status.value == "READY_FOR_GENERATION"
     assert preflight.independent_document_count == 4
     assert preflight.dart_partial_fallback is True
-    assert preflight.dart_partial_reason == "transient_web_failure"
+    # 2026-09-24 갱신(ADR 0004): 이 모양의 조회 기록 셋(공식 웹 조회 실패·IR
+    # 실패·신원 불일치)은 모두 OPTIONAL이다. 예전에는 두 실패가 «웹 일시 장애»
+    # 갈래를 가로챘다. 이제 선택 경로 실패는 관측으로만 남고, 전환 사유는
+    # 시험 이름대로 문서 하한(4+최대3<8)이 된다.
+    assert preflight.collection_incomplete is True
+    assert preflight.release_blocking_incomplete is False
+    assert preflight.dart_partial_reason == "too_few_documents_for_full"
 
     _freeze_runtime(
         monkeypatch,
@@ -1591,26 +1597,28 @@ def test_우리은행_운영모양은_FULL패킷전에_문서하한_부분보고
     # 2026-09-11 진단 필드 보강으로 기대 dict을 갱신했다 — 전환이 열리면
     # 「사유코드」가 정상적으로 비므로 무엇이 왜 막혔는지를 옆 필드로 남긴다.
     # 이 모양은 문서 하한 전환이라 불명·미달 장이 하나도 없다.
+    # 2026-09-24 갱신(ADR 0004): 사유코드·전환갈래가 문서 하한 갈래로 바뀌었다.
+    # 수집미완료는 관측이라 그대로 참이다.
     assert formal_step == {
         "step": "6_수집_공식근거사전검사",
         "후보장": len(REQUIRED_EVIDENCE_SECTION_IDS),
         "준비장": len(REQUIRED_EVIDENCE_SECTION_IDS),
         "독립문서수": 4,
         "판정": "READY_FOR_GENERATION",
-        "사유코드": "preflight_official_evidence_incomplete",
+        "사유코드": "preflight_document_sources_insufficient",
         "작성허용": True,
         "수집미완료": True,
         "DART부분보고서전환": True,
         "불명장수": 0,
         "불명장목록": [],
         "미달장수": 0,
-        "전환갈래": "transient_web_failure",
+        "전환갈래": "too_few_documents_for_full",
         "차단사유코드": [],
         "차단사유코드총수": 0,
     }
     assert {
         "step": "6_수집_DART부분보고서전환",
-        "사유코드": "transient_web_failure",
+        "사유코드": "too_few_documents_for_full",
     } in steps
 
 

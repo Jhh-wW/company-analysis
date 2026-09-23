@@ -42,7 +42,10 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     PROTOCOL_SYNTAX_DROPPED_ROWS_FIELD,
     EXTRACT_FAILED,
     EXTRACT_ROW_SALVAGE,
+    PROTOCOL_CAUSE_KIND_FIELD,
     READ_CALL_LIMIT,
+    READ_GLOBAL_FAILURE,
+    READ_PROVIDER_FAILURE_DEGRADED,
     READ_REQUEST_BUDGET,
     READ_OK,
     READ_EMPTY,
@@ -128,15 +131,36 @@ def note_row_salvage(observe: Optional[dict], dropped_rows: int) -> None:
     observe[PROTOCOL_SYNTAX_DROPPED_ROWS_FIELD] = int(dropped_rows)
 
 
-def note_optional_call_aborted(observe: Optional[dict], *, call_limit: bool) -> None:
-    """두 번째 호출을 요청 AI 몫 소진으로 포기했음을 닫힌 판독 코드로 적는다.
+def note_optional_call_aborted(
+    observe: Optional[dict], *, call_limit: bool, provider_failure: bool = False,
+) -> None:
+    """두 번째 호출을 포기했음을 닫힌 판독 코드로 적는다.
 
-    ``call_limit`` 이 참이면 호출 «횟수» 상한, 거짓이면 요청 로컬 «예약액» 소진이다
-    (AskFatalError 의 두 깃발). 오류 문구·응답은 담지 않는다.
+    ``provider_failure`` 가 참이면 FULL 재요청 자리의 공급자 호출 실패를 강등한
+    경우(2026-09-24 결정 3 개정)다. 아니면 ``call_limit`` 이 참일 때 호출 «횟수»
+    상한, 거짓일 때 요청 로컬 «예약액» 소진이다(AskFatalError 의 깃발). 오류 문구·
+    응답은 담지 않는다.
     """
     if observe is None:
         return
+    if provider_failure:
+        observe["판독"] = READ_PROVIDER_FAILURE_DEGRADED
+        return
     observe["판독"] = READ_CALL_LIMIT if call_limit else READ_REQUEST_BUDGET
+
+
+def note_optional_call_global_failure(
+    observe: Optional[dict], *, cause_kind: str,
+) -> None:
+    """두 번째 호출이 요청 «전역» 장애로 멈췄음을 닫힌 판독 코드와 원인 «종류»로 적는다.
+
+    처분은 부르는 쪽이 정한다(예외 재전파). 여기서는 사실만 남긴다 — ``cause_kind`` 는
+    원인 예외의 클래스 이름이고, 오류 문구·응답은 담지 않는다(2026-09-24 결정 3).
+    """
+    if observe is None:
+        return
+    observe["판독"] = READ_GLOBAL_FAILURE
+    observe[PROTOCOL_CAUSE_KIND_FIELD] = cause_kind
 
 
 def note_row_failure(observe: Optional[dict], code: str) -> None:

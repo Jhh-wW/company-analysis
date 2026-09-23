@@ -71,7 +71,7 @@
 | 법인 목록 | `G/analysis_engine/corpcode/CORPCODE.xml` | 저장 당시 DART 목록. 뤼튼 행의 법인번호 `01921445`, 영문명 `Wrtn Technologies Inc.` 확인. 기업개황 확인 완료 manifest와 같지는 않다. |
 | 현대글로비스 실행 입력 | `app/.local_evaluation_runs/report-speed-20260922/company-confirmed.json` | `GLOVIS_SPEED`, `00360595`, 확정명 `현대글로비스(주)`, `identity_confirmed=true`의 기존 manifest. |
 | 현대글로비스 앞선 순차/병렬 | `app/.local_evaluation_runs/20260922_182500_a5b86af7a52034a7296d1295/http-evaluation-artifacts/glovis_serial/GLOVIS_SPEED/`, `app/.local_evaluation_runs/20260922_183442_f5c6e9dcf8996c00833322f0/http-evaluation-artifacts/glovis_parallel/GLOVIS_SPEED/` | 당시 설정·결과와 비교. 기존 DB/세션으로 새 시험을 시작하지 않는다. |
-| 뤼튼 원본 PDF | `C:/Users/jh-wo/Downloads/주식회사-뤼튼테크놀로지스-company-analysis.pdf` | SHA-256 직접 계산 결과 `afb4e622aef3a10c5d181d07ec54c408424cd5eafbdfc51e6b635495a1e5ebe1`. 기존 기록과 동일한 원본이다. |
+| 뤼튼 원본 PDF | `%USERPROFILE%/Downloads/주식회사-뤼튼테크놀로지스-company-analysis.pdf` | SHA-256 직접 계산 결과 `afb4e622aef3a10c5d181d07ec54c408424cd5eafbdfc51e6b635495a1e5ebe1`. 기존 기록과 동일한 원본이다. |
 | 뤼튼 PDF 검수 자료 | `W/claude/text.txt`, `page-1.png`부터 `page-5.png` | 기존 문장/배치 비교. 이번 리뷰가 새 전쪽 시각 검수를 수행했다는 뜻은 아니다. |
 | 뤼튼 공시 발췌 | `W/claude/dart-20260414000008-income-statement.txt`, `dart-20260414000008-balance-sheet.txt`, `dart-20260414000008-notes.txt` | 손익·재무상태·주석 원문 발췌 fixture. 전체 제출 XML이 아닌 발췌임을 표시한다. |
 | 뤼튼 공식 웹 목록 | `W/claude/wrtn-news-list-2026-09-22.txt`, `wrtn-news-links-2026-09-22.txt` | 저장된 목록 텍스트와 원문 URL 후보. 개별 외부 기사의 완전한 본문/분석 응답으로 취급하지 않는다. |

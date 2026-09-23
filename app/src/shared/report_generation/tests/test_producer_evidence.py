@@ -178,7 +178,12 @@ def _record(
     )
 
 
-def _primary_ledger() -> GenerationCallLedger:
+def _primary_ledger(
+    *,
+    reviewer_sections: tuple[str, ...] = ("bundled",),
+    reviewer_outcomes: tuple[str, ...] | None = None,
+) -> GenerationCallLedger:
+    """PRIMARY 작가 9 + 검수 기록들. 검수는 기본 묶음 1회(옛 모양 그대로)."""
     records = tuple(
         _record(
             index,
@@ -188,9 +193,20 @@ def _primary_ledger() -> GenerationCallLedger:
         )
         for index, section_id in enumerate(REQUIRED_EVIDENCE_SECTION_IDS, start=1)
     )
-    return GenerationCallLedger(
-        (*records, _record(10, role="reviewer", role_index=1, section_id="bundled"))
+    outcomes = reviewer_outcomes or ("returned",) * len(reviewer_sections)
+    reviewers = tuple(
+        _record(
+            len(records) + offset,
+            role="reviewer",
+            role_index=offset,
+            section_id=section_id,
+            outcome=outcome,
+        )
+        for offset, (section_id, outcome) in enumerate(
+            zip(reviewer_sections, outcomes), start=1,
+        )
     )
+    return GenerationCallLedger((*records, *reviewers))
 
 
 def _primary_receipt(
@@ -198,6 +214,7 @@ def _primary_receipt(
     assessment: GenerationAssessment | None = None,
     candidate_sha256: str = "c" * 64,
     section_sha256s: tuple[tuple[str, str], ...] | None = None,
+    reviewer_calls: int = 1,
 ) -> GenerationValidationReceipt:
     return GenerationValidationReceipt(
         company_id="00123456",
@@ -205,7 +222,7 @@ def _primary_receipt(
         assessment=assessment or _complete_assessment(),
         round=ValidationRound.PRIMARY,
         writer_calls=9,
-        reviewer_calls=1,
+        reviewer_calls=reviewer_calls,
         section_sha256s=section_sha256s or _digests(1),
         evidence_packet_sha256s=_digests(8),
     )
@@ -794,3 +811,189 @@ def test_실제_생성지표와_품질관측은_exact_wire로_왕복하고_평�
     unknown["unknown"] = True
     with pytest.raises(ValueError, match="key"):
         generation_quality_observation_from_dict(unknown)
+
+
+# ══════════════════════════════════════════════════════════
+# FULL 검수 «1회 + 재요청 자리 1» (2026-09-23 개방)
+#   PRIMARY 검수 기록은 ("bundled",) 또는 ("bundled", "bundled_retry") 순서만 받는다.
+#   SUPPLEMENT 는 ("bundled",) 그대로다. 저장된 옛 1회 증거도 그대로 읽힌다.
+# ══════════════════════════════════════════════════════════
+
+_RETRY_SECTIONS = ("bundled", "bundled_retry")
+
+
+def test_PRIMARY_검수_재요청_자리까지_두_기록이_exact_wire로_왕복한다():
+    ledger = _primary_ledger(reviewer_sections=_RETRY_SECTIONS)
+    evidence = _evidence(receipts=(_primary_receipt(reviewer_calls=2),), ledger=ledger)
+
+    assert producer_evidence_from_dict(producer_evidence_to_dict(evidence)) == evidence
+    assert evidence.reviewer_calls == 2
+    reviewers = [record for record in ledger.records if record.role == "reviewer"]
+    assert [(record.section_id, record.role_index) for record in reviewers] == [
+        ("bundled", 1), ("bundled_retry", 2),
+    ]
+
+
+def test_저장된_옛_검수_1회_생산증거도_그대로_다시_읽힌다():
+    """재요청 자리를 열기 전에 저장된 증거(검수 1회)를 저장소에서 다시 읽는 경로."""
+    stored = json.loads(json.dumps(producer_evidence_to_dict(_evidence())))
+
+    restored = producer_evidence_from_dict(stored)
+
+    assert restored == _evidence()
+    assert restored.reviewer_calls == 1
+    assert [
+        record.section_id for record in restored.call_ledger.records
+        if record.role == "reviewer"
+    ] == ["bundled"]
+
+
+@pytest.mark.parametrize("sections", [
+    ("bundled_retry",),
+    ("bundled_retry", "bundled"),
+    ("bundled", "bundled"),
+    ("bundled", "bundled_retry", "bundled_retry"),
+], ids=("retry_only", "reversed", "bundled_twice", "three_reviews"))
+def test_PRIMARY_검수_기록은_bundled_또는_bundled_다음_bundled_retry뿐이다(sections):
+    ledger = _primary_ledger(reviewer_sections=sections)
+    receipt = _primary_receipt(reviewer_calls=len(sections))
+    with pytest.raises(ValueError, match="bundled|PRIMARY"):
+        _evidence(receipts=(receipt,), ledger=ledger)
+
+
+def test_재요청_자리_기록만_실패로_남아도_성공_증거가_된다():
+    """재요청은 첫 검수를 다듬는 선택 단계다 — 실패하면 첫 판정으로 공개된다."""
+    ledger = _primary_ledger(
+        reviewer_sections=_RETRY_SECTIONS, reviewer_outcomes=("returned", "failed"),
+    )
+    evidence = _evidence(receipts=(_primary_receipt(reviewer_calls=2),), ledger=ledger)
+    assert evidence.reviewer_calls == 2
+    assert producer_evidence_from_dict(producer_evidence_to_dict(evidence)) == evidence
+
+
+@pytest.mark.parametrize(("sections", "outcomes"), [
+    (("bundled",), ("failed",)),
+    (_RETRY_SECTIONS, ("failed", "returned")),
+    (_RETRY_SECTIONS, ("failed", "failed")),
+], ids=("single_failed", "first_failed", "both_failed"))
+def test_묶음_검수_기록이_실패면_성공_증거가_될_수_없다(sections, outcomes):
+    ledger = _primary_ledger(reviewer_sections=sections, reviewer_outcomes=outcomes)
+    with pytest.raises(ValueError, match="실패한 AI 호출"):
+        _evidence(
+            receipts=(_primary_receipt(reviewer_calls=len(sections)),), ledger=ledger,
+        )
+
+
+def _supplement_chain(*, supplement_reviewer_section: str):
+    base_sections = _digests(1)
+    primary = _primary_receipt(
+        assessment=_partial_assessment(), section_sha256s=base_sections,
+        reviewer_calls=2,
+    )
+    supplement = GenerationValidationReceipt(
+        company_id="00123456",
+        candidate_sha256="d" * 64,
+        assessment=_complete_assessment(),
+        round=ValidationRound.SUPPLEMENT,
+        writer_calls=1,
+        reviewer_calls=1,
+        section_sha256s=tuple(
+            (section_id, "f" * 64 if section_id == "identity" else digest)
+            for section_id, digest in base_sections
+        ),
+        evidence_packet_sha256s=primary.evidence_packet_sha256s,
+        base_receipt_sha256=primary.receipt_sha256,
+        supplemented_section_ids=("identity",),
+    )
+    ledger = GenerationCallLedger((
+        *_primary_ledger(reviewer_sections=_RETRY_SECTIONS).records,
+        _record(12, role="writer", role_index=1, section_id="identity",
+                validation_round=ValidationRound.SUPPLEMENT),
+        _record(13, role="reviewer", role_index=1,
+                section_id=supplement_reviewer_section,
+                validation_round=ValidationRound.SUPPLEMENT),
+    ))
+    return (primary, supplement), ledger
+
+
+def test_재요청_자리를_쓴_PRIMARY_뒤에도_SUPPLEMENT_는_묶음_1회로_이어진다():
+    receipts, ledger = _supplement_chain(supplement_reviewer_section="bundled")
+    evidence = _evidence(receipts=receipts, ledger=ledger)
+    assert evidence.reviewer_calls == 3
+    assert tuple(record.sequence for record in ledger.records) == tuple(range(1, 14))
+
+
+def test_SUPPLEMENT_에는_재요청_자리가_없다():
+    receipts, ledger = _supplement_chain(supplement_reviewer_section="bundled_retry")
+    with pytest.raises(ValueError, match="bundled"):
+        _evidence(receipts=receipts, ledger=ledger)
+
+
+@pytest.mark.parametrize("reviewer_calls", (0, 1, 2, 3))
+def test_생산증거와_회복정책은_PRIMARY_검수_횟수를_같게_받는다(reviewer_calls):
+    """두 겹(생산 증거 검증·회복 정책)이 따로 적은 검수 횟수가 어긋나지 않는지 대조한다.
+
+    한쪽만 넓히면 FULL 공개가 다른 쪽에서 멈춘다(영수증만 열면 증거 검증에서,
+    증거만 열면 ``report_recovery:primary_receipt_invalid`` 에서).
+    """
+    from src.shared.report_recovery import decide_post_validation
+
+    sections = ("bundled", "bundled_retry", "bundled_retry")[:reviewer_calls]
+    receipt = _primary_receipt(reviewer_calls=reviewer_calls)
+    try:
+        _evidence(receipts=(receipt,), ledger=_primary_ledger(reviewer_sections=sections))
+        evidence_accepts = True
+    except ValueError:
+        evidence_accepts = False
+    try:
+        decide_post_validation(receipt)
+        policy_accepts = True
+    except ValueError:
+        policy_accepts = False
+    assert evidence_accepts is policy_accepts is (reviewer_calls in (1, 2))
+
+
+# ── 허용되는 실패 기록은 «정확히 하나»(2026-09-24 총괄 결정 1) ──
+#   role=reviewer · section_id=bundled_retry · PRIMARY · 그 회차의 마지막 reviewer 기록.
+#   그 밖의 실패 기록은 재요청 자리를 연 뒤에도 전부 거절한다.
+
+
+def test_재요청_자리_실패도_PRIMARY_마지막_검수기록이_아니면_거절한다():
+    ledger = _primary_ledger(
+        reviewer_sections=("bundled_retry", "bundled"),
+        reviewer_outcomes=("failed", "returned"),
+    )
+    with pytest.raises(ValueError, match="실패한 AI 호출"):
+        _evidence(receipts=(_primary_receipt(reviewer_calls=2),), ledger=ledger)
+
+
+def test_재요청_자리가_아닌_작가_기록의_실패는_여전히_거절한다():
+    records = list(_primary_ledger(reviewer_sections=_RETRY_SECTIONS).records)
+    records[0] = _record(
+        1, role="writer", role_index=1,
+        section_id=REQUIRED_EVIDENCE_SECTION_IDS[0], outcome="failed",
+    )
+    with pytest.raises(ValueError, match="실패한 AI 호출"):
+        _evidence(
+            receipts=(_primary_receipt(reviewer_calls=2),),
+            ledger=GenerationCallLedger(tuple(records)),
+        )
+
+
+@pytest.mark.parametrize("failed_role", ("writer", "reviewer"))
+def test_보충_회차_기록의_실패는_재요청을_쓴_뒤에도_거절한다(failed_role):
+    receipts, ledger = _supplement_chain(supplement_reviewer_section="bundled")
+    records = list(ledger.records)
+    index = next(
+        position for position, record in enumerate(records)
+        if record.validation_round is ValidationRound.SUPPLEMENT
+        and record.role == failed_role
+    )
+    original = records[index]
+    records[index] = _record(
+        original.sequence, role=original.role, role_index=original.role_index,
+        section_id=original.section_id,
+        validation_round=ValidationRound.SUPPLEMENT, outcome="failed",
+    )
+    with pytest.raises(ValueError, match="실패한 AI 호출"):
+        _evidence(receipts=receipts, ledger=GenerationCallLedger(tuple(records)))

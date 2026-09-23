@@ -35,15 +35,44 @@ from src.shared.report_quality.models import (
 # FULL 근거 패킷: 장별 작가 9회 + 장 경계가 묶인 검수 1회.
 PRIMARY_WRITER_CALLS: Final[int] = 9
 PRIMARY_REVIEW_CALLS: Final[int] = 1
+#: 그 검수의 «두 번째 호출»(형식 재요청 «또는» 누락 후속) 자리 — 조건부, 최대 1회.
+#:
+#: ★ 왜 여나 (2026-09-23 유료 실측) — 본문 검수 응답 42행 중 한 행의 괄호 한 글자
+#:   오류로 문서 전체가 못 읽혔다. 행 단위 구제로 41행은 살렸지만, 깨진 한 행은
+#:   다시 물을 자리가 없어 판정 없이 제거됐다(FULL 장부가 검수를 1회로 묶었다).
+#:   이 자리가 있으면 빠진 번호만 한 번 더 묻는다(composer/verify.py
+#:   `_ask_grouped_verdicts`). 호출 장부는 재요청 전용 호출자에게만 두 번째 자리
+#:   (``bundled_retry``)를 연다 — 재작성·재검수는 그대로 막힌다.
+#: ★ 런타임 몫은 새로 잡지 않는다 — 뉴스 단계가 미리 남기는 재요청 여유
+#:   (``WRITER_RETRY_ALLOWANCE_CALLS``, 아래)가 유도식에서 이미 «본문 검수» 재요청
+#:   1회를 센다. 요청당 AI 호출 상한(``core.constants.MAX_AI_CALLS_PER_REQUEST``)과
+#:   그 시간 규약(상한×180초 ≤ lease−240초), 필수 몫(``MANDATORY_REPORT_AI_CALLS``)은
+#:   그대로다.
+#: ★ FULL 최악의 셈(2026-09-24) — 뉴스 4 + 작성 9 + 검수 1 + 재요청 1 + 빈 장 복구 2
+#:   + 보충 3 = 20 = 요청 상한(20×180=3600 ≤ 3900−240=3660). 빈 장 복구는 시작 전에
+#:   뒤 몫(3·2회)이 남는지 묻는데, 재요청까지 15·16회를 쓴 시점에도 통과한다. FULL
+#:   에는 장 작성 재요청(장부가 9회로 묶음)·도식 AI 검수(SHADOW 전용)·재작성·재검수
+#:   (장부가 첫 검수 뒤 막음)이 없다.
+PRIMARY_REVIEW_RETRY_CALLS: Final[int] = 1
 
 # 얇은 장 하나마다 한 번만 보충하고, 보충 결과를 한 번에 다시 검수한다.
 MAX_SUPPLEMENT_SECTIONS: Final[int] = 2
 SUPPLEMENT_CALLS_PER_SECTION: Final[int] = 1
 SUPPLEMENT_REVIEW_CALLS: Final[int] = 1
 
+#: 기본 회차의 «계획» 호출(작가 9 + 검수 1). 재요청 자리는 조건부라 여기 넣지 않는다.
 PRIMARY_AI_CALLS: Final[int] = PRIMARY_WRITER_CALLS + PRIMARY_REVIEW_CALLS
+#: 영수증으로 셀 수 있는 보고서 AI 호출의 최대 — 기본 회차(재요청 자리 포함) +
+#: 보충 한 회차.
+#: ⚠️ 이것은 «영수증 장부의 상한»이지 요청당 AI 호출 상한(시간 규약)이 아니다.
+#:   그 상한은 ``core.constants.MAX_AI_CALLS_PER_REQUEST``(뉴스·필수 후속·빈 장
+#:   복구까지 센다)이고 이 변경으로 바뀌지 않는다. 여기에 재요청 자리를 넣지
+#:   않으면, 기본 회차가 그 자리를 쓴 실행(11회)의 두 장 보충 결정(11+2+1=14)이
+#:   이 상한을 넘어 ``RecoveryDecision`` 이 거절하고, 파이프라인은 그 실행을
+#:   ``report_recovery:primary_receipt_invalid`` 로 닫는다.
 MAX_TOTAL_AI_CALLS: Final[int] = (
     PRIMARY_AI_CALLS
+    + PRIMARY_REVIEW_RETRY_CALLS
     + MAX_SUPPLEMENT_SECTIONS * SUPPLEMENT_CALLS_PER_SECTION
     + SUPPLEMENT_REVIEW_CALLS
 )
@@ -95,6 +124,14 @@ EMPTY_RECOVERY_AI_CALLS: Final[int] = (
 # 01:09 11회)에서 파싱 재요청·보강 호출로 1~2회가 더 나갔고, 그만큼 뒤 단계(빈 장
 # 복구)가 굶었다. 뉴스처럼 «앞»에서 도는 단계가 이 여유까지 남겨야 복구 몫이 산다.
 # 값은 PARSE_RETRY_LIMIT(1)×관측된 재요청 단계 수(2: 본문 검수·도식)에서 유도한다.
+# ★ 2026-09-23부터 FULL 본문 검수의 재요청·누락 후속 자리(PRIMARY_REVIEW_RETRY_CALLS)가
+#   실제로 이 여유의 «본문 검수» 몫을 쓴다 — 새 몫을 더하지 않는다. FULL 은 호출
+#   장부가 장 작성을 9회로 묶고(재요청 없음) 도식 AI 검수를 부르지 않아(SHADOW
+#   전용 — composer/pipeline.py 의 check_diagrams 분기) 예전에는 이 여유를 쓰지
+#   않았다. FULL 이 아닌 실행(SHADOW·ENFORCE_NO_PARTIAL, 부분 보고서 포함)은
+#   장부가 없어 이 재요청이 원래 가능했으므로 바뀌지 않는다. 대신 FULL 에서
+#   재요청을 쓴 실행은 검수 «뒤»의 조건부 단계(빈 장 복구·보충)에 남는 여유가
+#   1회 줄어든다.
 WRITER_RETRY_ALLOWANCE_CALLS: Final[int] = 2
 
 # 본문 «앞»에서 도는 단계(뉴스 등)가 남겨야 하는 최소 몫.
@@ -204,8 +241,14 @@ class RecoveryDecision:
         if self.action is RecoveryAction.RUN_SUPPLEMENTS:
             if self.supplement_authorization is None:
                 raise ValueError("보충 행동에는 결속된 승인이 필요합니다")
-            if self.observed_total_ai_calls != PRIMARY_AI_CALLS:
-                raise ValueError("보충 승인은 기본 9회 작성·1회 검수 뒤에만 가능합니다")
+            if not (
+                PRIMARY_AI_CALLS
+                <= self.observed_total_ai_calls
+                <= PRIMARY_AI_CALLS + PRIMARY_REVIEW_RETRY_CALLS
+            ):
+                raise ValueError(
+                    "보충 승인은 기본 9회 작성·1회 검수(재요청 자리 1회까지) 뒤에만 가능합니다"
+                )
             expected = (
                 len(self.supplement_authorization.section_ids)
                 * SUPPLEMENT_CALLS_PER_SECTION
@@ -586,11 +629,16 @@ def decide_post_validation(
         raise TypeError("첫 검증의 결속된 영수증이 필요합니다")
     if primary_receipt.round is not ValidationRound.PRIMARY:
         raise ValueError("첫 영수증은 기본 생성 회차여야 합니다")
-    if (
-        primary_receipt.writer_calls != PRIMARY_WRITER_CALLS
-        or primary_receipt.reviewer_calls != PRIMARY_REVIEW_CALLS
+    # 검수는 묶음 1회에 재요청·누락 후속 자리 1회까지다(PRIMARY_REVIEW_RETRY_CALLS).
+    # 저장된 옛 영수증(검수 1회)도 이 범위 안이라 그대로 읽힌다.
+    if primary_receipt.writer_calls != PRIMARY_WRITER_CALLS or not (
+        PRIMARY_REVIEW_CALLS
+        <= primary_receipt.reviewer_calls
+        <= PRIMARY_REVIEW_CALLS + PRIMARY_REVIEW_RETRY_CALLS
     ):
-        raise ValueError("첫 영수증에는 실제 9회 작성·1회 검수가 필요합니다")
+        raise ValueError(
+            "첫 영수증에는 실제 9회 작성·1회 검수(재요청 자리 1회까지)가 필요합니다"
+        )
     if (supplement_authorization is None) != (supplement_receipt is None):
         raise ValueError("보충 승인과 실제 보충 영수증은 함께 필요합니다")
     if supplement_authorization is not None and (
@@ -620,6 +668,7 @@ __all__ = [
     "REWRITE_RECHECK_CALLS",
     "PRIMARY_AI_CALLS",
     "PRIMARY_REVIEW_CALLS",
+    "PRIMARY_REVIEW_RETRY_CALLS",
     "PRIMARY_WRITER_CALLS",
     "RecoveryAction",
     "RecoveryDecision",
