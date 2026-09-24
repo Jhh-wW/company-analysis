@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from datetime import date
 from decimal import Decimal
 
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+from src.shared.company_identity import exact_company_names_equivalent
 from src.shared.report_evidence.constants import FORMAL_DOCUMENT_SOURCE_KINDS
 from src.shared.report_evidence.policy import (
     EVIDENCE_SLOT_POLICY_VERSION,
@@ -27,12 +29,21 @@ from src.shared.report_quality.constants import (
     OFFICIAL_PROSE_LEGACY_FILING_KIND,
     STRICT_QUALITY_CONTRACT_VERSION,
     STRICT_QUALITY_CONTRACT_VERSIONS,
+    STATED_DIFFERENTIATOR_CLAIM_TYPE,
     VERIFIED_PROSE_CLAIM_TYPE,
 )
 from src.shared.report_quality.comparison_claims import (
+    COMPARISON_LIMITATION_SLOT,
+    STATED_DIFFERENTIATOR_SLOT,
+    STATED_DIFFERENTIATOR_MARKERS,
+    STATED_DIFFERENTIATOR_FORBIDDEN_JUDGMENTS,
     comparison_context_claim_problems,
     comparison_program_problems,
     comparison_target_source_problems,
+    clean_stated_differentiator_sentence,
+    stated_differentiator_claim,
+    stated_differentiator_limitation_claim,
+    stated_differentiator_subject_prefix,
 )
 from src.shared.report_quality.dto import ClaimFact, ReportCandidate, SourceDocument
 from src.shared.report_quality.comparison_numeric import comparison_numeric_problems
@@ -228,6 +239,115 @@ def _official_prose_numbers_proven(
     return prose_numbers_verbatim_in_fragments(fact.claim, cited_texts)
 
 
+def _stated_program_cited_text(
+    fact: ClaimFact,
+    sources: Mapping[str, SourceDocument],
+) -> str | None:
+    """자기 선언 프로그램의 단일 공식 인용 원문. 자격·바이트가 어긋나면 없다.
+
+    이 프로그램의 state_evidence는 산문의 JSON 목록이 아니라 정확 원문이다.
+    기존 비교 프로그램 검사가 이 종류를 항상 받는다고 가정하지 않고, 숫자
+    예외의 회사·출처·날짜·검증·슬롯 경계를 여기서 직접 닫는다.
+    """
+
+    if (
+        fact.claim_type != STATED_DIFFERENTIATOR_CLAIM_TYPE
+        or fact.claim_slot not in {STATED_DIFFERENTIATOR_SLOT, COMPARISON_LIMITATION_SLOT}
+        or fact.section_owner != STATED_DIFFERENTIATOR_SLOT.split(":", 1)[0]
+        or fact.verification_state != VerificationState.VERIFIED.value
+        or fact.evidence_binding_valid is not True
+        or not fact.legal_entity.strip()
+        or not fact.claim.startswith(fact.legal_entity)
+        or fact.comparison_judgment
+        or any(term in fact.claim for term in STATED_DIFFERENTIATOR_FORBIDDEN_JUDGMENTS)
+        or any((
+            fact.raw_value, fact.calculation, fact.display_value, fact.rounding_rule,
+            fact.numeric_checks, fact.metric, fact.period_start, fact.period_end,
+            fact.sign, fact.unit, fact.unit_dimension, fact.formula,
+        ))
+        or len(fact.supporting_source_ids) != 1
+        or len(fact.supporting_source_identities) != 1
+        or len(fact.supporting_evidence_hashes) != 1
+    ):
+        return None
+    source = sources.get(fact.source_id)
+    if (
+        source is None
+        or source.counts_toward_document_floor is not True
+        or (
+            source.source_kind != OFFICIAL_PROSE_LEGACY_FILING_KIND
+            and source.source_kind not in FORMAL_DOCUMENT_SOURCE_KINDS
+        )
+        or not exact_company_names_equivalent(fact.legal_entity, source.publisher)
+        or not fact.source_identity.strip()
+        or fact.supporting_source_ids != (fact.source_id,)
+        or fact.supporting_source_identities != (source.document_identity,)
+        or fact.source_identity != source.document_identity
+    ):
+        return None
+    try:
+        if date.fromisoformat(source.published_on).isoformat() != source.published_on:
+            return None
+    except (TypeError, ValueError):
+        return None
+    exact_text = fact.state_evidence
+    if not isinstance(exact_text, str) or not exact_text.strip():
+        return None
+    exact_hash = hashlib.sha256(exact_text.encode("utf-8")).hexdigest()
+    if (
+        fact.supporting_evidence_hashes != (exact_hash,)
+        or exact_hash not in source.exact_evidence_hashes
+    ):
+        return None
+    if (
+        fact.claim_slot == STATED_DIFFERENTIATOR_SLOT
+        and (
+            not stated_differentiator_subject_prefix(
+                clean_stated_differentiator_sentence(exact_text),
+                company_name=fact.legal_entity,
+            )
+            or not any(
+                marker in exact_text for marker in STATED_DIFFERENTIATOR_MARKERS
+            )
+            or fact.claim != stated_differentiator_claim(exact_text, fact.legal_entity)
+        )
+    ):
+        # 원문의 회사 주어·선언 표지가 없거나 숫자 외 동사·조건·부정을
+        # 바꾼 선언은 공식 출처의 숫자만 빌려 만든 사실이므로 예외를 주지 않는다.
+        return None
+    return exact_text
+
+
+def _stated_program_numbers_proven(
+    fact: ClaimFact,
+    sources: Mapping[str, SourceDocument],
+    public_facts: Sequence[ClaimFact],
+) -> bool:
+    """공식 자기 선언과 그 정확한 재인용만 숫자 예외를 받는다."""
+
+    exact_text = _stated_program_cited_text(fact, sources)
+    if exact_text is None or not official_number_tokens(fact.claim):
+        return False
+    if not prose_numbers_verbatim_in_fragments(fact.claim, (exact_text,)):
+        return False
+    if fact.claim_slot == STATED_DIFFERENTIATOR_SLOT:
+        return True
+    # 한계 문장 안에 숫자가 등장한다는 이유로 임의 설명까지 승인하지 않는다.
+    # 같은 원문을 인용한 원본 사실이 최종 공개 집합에 실제 남아 있어야 하며,
+    # 그 사실을 넣은 생산 템플릿과 글자 단위로 같아야 한다.
+    return any(
+        base.claim_slot == STATED_DIFFERENTIATOR_SLOT
+        and base.source_id == fact.source_id
+        and base.legal_entity == fact.legal_entity
+        and _stated_program_cited_text(base, sources) == exact_text
+        and prose_numbers_verbatim_in_fragments(base.claim, (exact_text,))
+        and fact.claim == stated_differentiator_limitation_claim(
+            base.legal_entity, base.claim
+        )
+        for base in public_facts
+    )
+
+
 def assess_safety(
     candidate: ReportCandidate,
     contract: QualityContract,
@@ -246,6 +366,7 @@ def assess_safety(
     rejected: list[str] = []
     claim_owners: dict[tuple[str, str], str] = {}
     public_set = set(public_ids)
+    public_facts = tuple(facts[fact_id] for fact_id in public_set if fact_id in facts)
     strict_claim_type_policy = contract.version == STRICT_QUALITY_CONTRACT_VERSION
     if candidate.has_unbound_summary_content:
         problems.append("요약에 본문 fact_id와 결속되지 않은 공개 내용이 있습니다")
@@ -411,7 +532,10 @@ def assess_safety(
         elif (
             has_numeric_payload
             and contract.version == STRICT_QUALITY_CONTRACT_VERSION
-            and _official_prose_numbers_proven(fact, sources)
+            and (
+                _official_prose_numbers_proven(fact, sources)
+                or _stated_program_numbers_proven(fact, sources, public_facts)
+            )
         ):
             # ★ 확인 등급 공식 원문 산문의 숫자 표현이 «모두» 인용 조각 원문에 같은
             #   표기로 있음을 원문 지문까지 다시 맞춰 증명했다(ADR 0005). 날짜·개수처럼
@@ -420,6 +544,8 @@ def assess_safety(
             # ★ FULL 계약(v3)에서만 연다. 증명이 하나라도 어긋나면 이 분기를 타지 않고
             #   예전 요구가 그대로 막는다. SHADOW(관측 전용)와 ENFORCE_NO_PARTIAL의
             #   판정·표지는 바꾸지 않는다.
+            # 자기 선언 프로그램도 단일 공식 원문의 정확 지문과 숫자가 맞을 때만
+            # 같은 두 수치 검사를 생략한다. 계산·비교 프로그램에는 적용하지 않는다.
             has_numeric_payload = False
         if (
             strict_claim_type_policy
