@@ -18,8 +18,9 @@
 | 8 | [ADR 0002](adr/0002-review-parse-durability-and-empty-recovery-keys.md) | 검수 응답 판독·빈 장 복구 키 해석·감사 상용구·소속 단정 차단을 정한 이유 |
 | 9 | [ADR 0003](adr/0003-full-review-retry-slot-and-release-mode-diagnostic.md) | FULL 본문 검수의 재요청 자리 1회·출고 모드 진단을 정한 이유와 롤백 주의 |
 | 10 | [ADR 0004](adr/0004-full-preflight-optional-collection.md) | FULL 사전검사가 선택 경로 미완료를 출고 차단에서 떼어 낸 이유 |
-| 11 | [검수 안내](REVIEW_GUIDE.md) | 환경·실행·시험·운영 한계 체크리스트 |
-| 12 | [참고 보고서 50개 분석 요약](evidence/reference-reports-50-analysis-summary.md) | 목차를 그렇게 정한 조사 근거 |
+| 11 | [ADR 0005](adr/0005-full-safety-verbatim-numeric-official-prose.md) | FULL 안전 판정이 원문에 그대로 있는 숫자를 담은 공식 산문을 허용하고 안전 차단을 진단으로 남기는 이유 |
+| 12 | [검수 안내](REVIEW_GUIDE.md) | 환경·실행·시험·운영 한계 체크리스트 |
+| 13 | [참고 보고서 50개 분석 요약](evidence/reference-reports-50-analysis-summary.md) | 목차를 그렇게 정한 조사 근거 |
 
 실행·배포는 [`app/README.md`](../app/README.md)와 [`deploy/README.md`](../deploy/README.md)를,
 분석 엔진 진입점과 동적 import 계약은 [`analysis_engine/README.md`](../analysis_engine/README.md)를 본다.

@@ -14,11 +14,25 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Final, Sequence
+from typing import Final, Mapping, Sequence
 
 from src.features.composer.prose_facts import PROSE_FACT_ID_PREFIX
 from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_quality.composition_diagnostic_constants import (
+    SAFETY_BLOCK_KINDS_FIELD,
+    SAFETY_BLOCK_ROUND_FIELD,
+    SAFETY_BLOCK_SECTION_ORDER,
+    SAFETY_BLOCK_SECTIONS_FIELD,
+    SAFETY_BLOCK_STEP,
+    SAFETY_BLOCK_TOTAL_FIELD,
+)
+from src.shared.report_quality.dto import ReportCandidate
 from src.shared.report_quality.generation import GenerationQualityObservation
+from src.shared.report_quality.models import GenerationAssessment
+from src.shared.report_quality.safety_problem_kinds import (
+    SAFETY_PROBLEM_KINDS,
+    safety_problem_kind,
+)
 
 
 #: 부분 보고서 요약 한 줄에 실을 유형의 최대 개수. 넘치면 나머지는 개수로만
@@ -168,8 +182,124 @@ def log_generation_quality_observation(
     )
 
 
+#: 요약 판정 문장이 가리키는 장 id와 그 문장의 머리말.
+_SUMMARY_SECTION_ID: Final[str] = "summary"
+_SUMMARY_PROBLEM_HEAD: Final[str] = "요약"
+#: fact_id 바로 뒤에 붙는 조사·구분자. 이 중 하나가 이어질 때만 그 사실의 문장으로 본다
+#: — 다른 fact_id의 앞부분과 우연히 겹친 것을 그 사실로 세지 않는다.
+_FACT_ID_FOLLOWERS: Final[tuple[str, ...]] = ("의", ":", "가")
+#: 진단 줄을 못 만들었을 때의 경고 — 예외 «종류»만 남긴다(문장·원문은 싣지 않는다).
+_SAFETY_BLOCK_FAILURE_LOG_FORMAT: Final[str] = (
+    "FULL 공개 안전 차단 진단 줄을 만들지 못했습니다(%s)"
+)
+
+
+def _problem_section(problem: str, fact_sections: Mapping[str, str]) -> str:
+    """문제 문장 하나가 어느 장 이야기인지 가린다. 못 가리면 빈 값.
+
+    ① 문장 머리의 fact_id → 그 사실의 소유 장, ② 문장 속 첫 «{장 id}장»,
+    ③ «요약»으로 시작하는 요약 판정 문장. 셋 다 아니면 장을 지어내지 않는다.
+    """
+
+    for fact_id, section_id in fact_sections.items():
+        if (
+            fact_id
+            and problem.startswith(fact_id)
+            and problem[len(fact_id):len(fact_id) + 1] in _FACT_ID_FOLLOWERS
+        ):
+            return section_id
+    positions = [
+        (problem.find(f"{section_id}장"), section_id)
+        for section_id in SAFETY_BLOCK_SECTION_ORDER
+        if f"{section_id}장" in problem
+    ]
+    if positions:
+        return min(positions)[1]
+    if problem.startswith(_SUMMARY_PROBLEM_HEAD):
+        return _SUMMARY_SECTION_ID
+    return ""
+
+
+def safety_block_record(
+    problems: Sequence[str],
+    fact_sections: Mapping[str, str],
+    *,
+    validation_round: str,
+) -> dict[str, object]:
+    """FULL 공개 안전 차단 한 줄 — 유형별·장별 개수만 담는다.
+
+    유형은 :func:`summarize_safety_problems` 로 fact_id 해시·장 이름을 지운 요약
+    문장을 닫힌 코드로 접어 센다. 장별은 원래 문장에서 가린 장만 센다. 원문·
+    fact_id·source_id는 한 글자도 싣지 않는다.
+
+    Args:
+        problems: 안전 판정이 남긴 문제 문장들.
+        fact_sections: 후보 사실의 ``fact_id`` → 소유 장.
+        validation_round: 닫힌 회차 이름(1차·보충).
+
+    Returns:
+        정화기(``observed_composition_steps``)를 그대로 지나는 진단 한 줄.
+    """
+
+    kinds: dict[str, int] = {}
+    for type_text, count in summarize_safety_problems(problems):
+        kind = safety_problem_kind(type_text)
+        kinds[kind] = kinds.get(kind, 0) + count
+    sections: dict[str, int] = {}
+    for problem in problems:
+        section_id = _problem_section(problem, fact_sections)
+        if section_id in SAFETY_BLOCK_SECTION_ORDER:
+            sections[section_id] = sections.get(section_id, 0) + 1
+    return {
+        "step": SAFETY_BLOCK_STEP,
+        SAFETY_BLOCK_ROUND_FIELD: validation_round,
+        SAFETY_BLOCK_TOTAL_FIELD: len(problems),
+        SAFETY_BLOCK_KINDS_FIELD: {
+            kind: kinds[kind] for kind in SAFETY_PROBLEM_KINDS if kind in kinds
+        },
+        SAFETY_BLOCK_SECTIONS_FIELD: {
+            section_id: sections[section_id]
+            for section_id in SAFETY_BLOCK_SECTION_ORDER
+            if section_id in sections
+        },
+    }
+
+
+def record_full_safety_block(
+    sink: list[dict[str, object]],
+    assessment: GenerationAssessment,
+    candidate: ReportCandidate,
+    *,
+    validation_round: str,
+    logger: logging.Logger,
+) -> None:
+    """FULL 공개 안전 판정이 막았으면 그 한 줄을 ``sink`` 에 남긴다. 통과면 남기지 않는다.
+
+    ★ FULL 정지는 사유 코드만 운영 경계로 보낸다(``_raise_recovery_stop``). 문구는
+      WARNING 로그에만 찍혀 실행 기록에 남지 않았다 — 이 한 줄이 그 빈칸을 닫는다.
+    ★ 줄을 만들다 실패해도 판정과 사용자 안내는 그대로여야 한다. 이 함수가 예외를
+      내면 출고 검증 차단이 «조립 실패»로 바뀐다 — 실패는 예외 종류만 경고로 남긴다.
+    """
+
+    problems = tuple(assessment.safety.problems)
+    if not problems:
+        return
+    try:
+        record = safety_block_record(
+            problems,
+            {fact.fact_id: fact.section_owner for fact in candidate.facts},
+            validation_round=validation_round,
+        )
+    except Exception as error:  # noqa: BLE001 — 진단 실패가 출고 판정을 바꾸면 안 된다
+        logger.warning(_SAFETY_BLOCK_FAILURE_LOG_FORMAT, type(error).__name__)
+        return
+    sink.append(record)
+
+
 __all__ = [
     "MAX_SUMMARY_TYPES",
     "log_generation_quality_observation",
+    "record_full_safety_block",
+    "safety_block_record",
     "summarize_safety_problems",
 ]

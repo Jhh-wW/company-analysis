@@ -41,6 +41,7 @@ from src.shared.report_quality.constants import (
     COMPETITIVE_COMPARISON_CONTEXT_CLAIM_TYPE,
     HISTORICAL_PERFORMANCE_RATE_CLAIM_TYPE,
     INTERPRETATION_CLAIM_TYPE,
+    OFFICIAL_PROSE_LEGACY_FILING_KIND,
     VERIFIED_PROSE_CLAIM_TYPE,
 )
 
@@ -511,7 +512,12 @@ def build_generation_quality_candidate(
             document_content_sha256=source.document_content_sha256,
             publisher=source.publisher,
             counts_toward_document_floor=source.kind is not SourceKind.NEWS,
-            source_kind="news" if source.kind is SourceKind.NEWS else source.formal_source_kind,
+            source_kind=(
+                "news" if source.kind is SourceKind.NEWS
+                else (source.formal_source_kind or OFFICIAL_PROSE_LEGACY_FILING_KIND)
+                if source.kind is SourceKind.FILING
+                else source.formal_source_kind
+            ),
             published_on=source.published_at or source.disclosed_at,
         )
         for source in rendered.citations
