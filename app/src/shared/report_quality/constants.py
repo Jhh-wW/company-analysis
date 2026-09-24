@@ -31,6 +31,9 @@ INTERPRETATION_CLAIM_TYPE: Final[str] = "evidence_based_interpretation"
 #: «모두» 원문에 그대로 있을 때만 NumericBinding 없이 통과시킨다. 뉴스 산문의
 #: ``news_exact_text`` 와 열쇠를 나눠 두 경로가 서로의 조건을 빌리지 못하게 한다.
 OFFICIAL_PROSE_EXACT_TEXT_KEY: Final[str] = "official_exact_text"
+# 옛 공시 조각은 typed 종류가 없어도 렌더 Source.kind=FILING으로 확인된다.
+# 품질 투영에서만 쓰는 닫힌 표식이며 임의 OTHER URL에는 부여하지 않는다.
+OFFICIAL_PROSE_LEGACY_FILING_KIND: Final[str] = "filing"
 # V2 FULL composer가 실제 공개 FactRecord로 생산하는 닫힌 종류다. 임의 문자열을
 # «해석이 아니므로 사실»이라고 세면 claim_type 오타 하나가 해석 상한과 검증
 # 비율을 함께 우회한다. report_standard의 과거 canonical 어휘와 섞지 않고,

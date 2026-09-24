@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -27,13 +28,17 @@ from src.features.composer.tests.test_section_public_manifest import (
     _RecoveringPacketWriter,
 )
 from src.features.composer.validate import V2ValidationError
-from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_evidence.constants import (
+    ReleaseMode,
+    SOURCE_KIND_DART_BUSINESS_REPORT,
+)
 from src.shared.report_quality import assessment as assessment_module
 from src.shared.report_quality.constants import (
     OFFICIAL_PROSE_EXACT_TEXT_KEY,
     STRICT_QUALITY_CONTRACT_VERSION,
 )
 from src.shared.report_quality.numeric_detection import has_public_numeric_token
+from src.shared.report_quality.source_identity import document_identity_from_parts
 
 #: (장, 문장 번호) → 문장에 끼워 넣는 숫자 문구. 인용 조각 원문에도 같은 글자로
 #: 들어간다. 7차 실측처럼 날짜가 대부분이고 개수가 일부다 — 합계 15건.
@@ -89,13 +94,41 @@ def _install_numeric_sentences(
     monkeypatch.setattr(full_fixture, "_section_sentence", with_numbers)
 
 
+def _official_packets():
+    """숫자 산문의 끝-끝 시험은 typed 공시 출처를 사용한다."""
+
+    packets = _packets()
+    typed_packets = []
+    for index, packet in enumerate(packets.packets, start=1):
+        (fragment,) = packet.fragments
+        receipt = f"2026031500{index:04d}"
+        url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}"
+        official = replace(
+            fragment,
+            source_url=url,
+            document_identity=document_identity_from_parts(
+                document_id=receipt, host="dart.fss.or.kr", url=url,
+            ),
+            formal_source_kind=SOURCE_KIND_DART_BUSINESS_REPORT,
+            source_document_id=f"{SOURCE_KIND_DART_BUSINESS_REPORT}:{receipt}",
+            source_publisher="전자공시시스템",
+            identity_binding=(
+                f"corp_code=00123456;rcept_no={receipt};identity_check=verified"
+            ),
+            source_collected_on="2026-09-04",
+            document_date="2026-03-15",
+        )
+        typed_packets.append(replace(packet, fragments=(official,)))
+    return replace(packets, packets=tuple(typed_packets))
+
+
 def _run(release_mode: ReleaseMode):
     arguments: dict[str, object] = {
         "writer_ask": _CompletePacketWriter(),
         "reviewer_ask": _BoundGroupedReviewer(),
         "diagram_ask": _NoDiagram(),
         "release_mode": release_mode,
-        "section_evidence_packets": _packets(),
+        "section_evidence_packets": _official_packets(),
     }
     if release_mode is not ReleaseMode.SHADOW:
         arguments.update(company_id="00123456", build_identity_sha256="b" * 64)
@@ -325,7 +358,7 @@ def test_숫자_산문_FULL이_품질_하한에_걸리면_안전_차단_대신_�
         reviewer_ask=_BoundGroupedReviewer(),
         diagram_ask=_NoDiagram(),
         release_mode=ReleaseMode.FULL,
-        section_evidence_packets=_packets(),
+        section_evidence_packets=_official_packets(),
         company_id="00123456",
         build_identity_sha256="b" * 64,
         preserve_on_ask_failure=True,

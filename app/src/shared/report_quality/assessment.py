@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from decimal import Decimal
 
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+from src.shared.report_evidence.constants import FORMAL_DOCUMENT_SOURCE_KINDS
 from src.shared.report_evidence.policy import (
     EVIDENCE_SLOT_POLICY_VERSION,
     required_slots_for,
@@ -23,6 +24,7 @@ from src.shared.report_quality.constants import (
     STRICT_FACTUAL_CLAIM_TYPES,
     STRICT_PUBLIC_CLAIM_TYPES,
     OFFICIAL_PROSE_EXACT_TEXT_KEY,
+    OFFICIAL_PROSE_LEGACY_FILING_KIND,
     STRICT_QUALITY_CONTRACT_VERSION,
     STRICT_QUALITY_CONTRACT_VERSIONS,
     VERIFIED_PROSE_CLAIM_TYPE,
@@ -177,7 +179,10 @@ def _official_prose_cited_texts(
     bound = [sources.get(source_id) for source_id in source_ids]
     if any(
         source is None
-        or source.source_kind == "news"
+        or (
+            source.source_kind != OFFICIAL_PROSE_LEGACY_FILING_KIND
+            and source.source_kind not in FORMAL_DOCUMENT_SOURCE_KINDS
+        )
         or source.counts_toward_document_floor is not True
         for source in bound
     ):

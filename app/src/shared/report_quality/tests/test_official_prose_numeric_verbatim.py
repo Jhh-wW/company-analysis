@@ -15,6 +15,7 @@ from dataclasses import replace
 import pytest
 
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+from src.shared.report_evidence.constants import FORMAL_DOCUMENT_SOURCE_KINDS
 from src.shared.report_quality.assessment import (
     _official_prose_cited_texts,
     assess_safety,
@@ -365,6 +366,26 @@ def test_공식_문서_수에_들지_않는_출처는_대상이_아니다():
     candidate = _candidate("가나다전자는 2019년 설립됐다.", ("가나다전자는 2019년 설립됐다.",))
     source = replace(candidate.sources[0], counts_toward_document_floor=False)
     assert _problems(replace(candidate, sources=(source,))) == _BLOCKED
+
+
+@pytest.mark.parametrize("source_kind", ("", "other", "dart", "official_page_like"))
+def test_일반_URL_출처는_원문_숫자가_같아도_공식_예외를_타지_않는다(source_kind: str):
+    candidate = _candidate(
+        "가나다전자는 2019년 설립됐다.",
+        ("가나다전자는 2019년 설립됐다.",),
+        source_kinds=(source_kind,),
+    )
+    assert _problems(candidate) == _BLOCKED
+
+
+@pytest.mark.parametrize("source_kind", sorted(FORMAL_DOCUMENT_SOURCE_KINDS))
+def test_닫힌_공식_종류만_원문_숫자_예외를_받는다(source_kind: str):
+    candidate = _candidate(
+        "가나다전자는 2019년 설립됐다.",
+        ("가나다전자는 2019년 설립됐다.",),
+        source_kinds=(source_kind,),
+    )
+    assert _problems(candidate) == ()
 
 
 # ── 범위: FULL(v3) 계약에서만 연다 ──────────────────────────────────

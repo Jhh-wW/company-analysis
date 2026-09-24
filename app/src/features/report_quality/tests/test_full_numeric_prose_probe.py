@@ -22,6 +22,7 @@ from src.features.report_quality.tests.test_assessment import (
 from src.shared.report_quality.constants import (
     LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
     OFFICIAL_PROSE_EXACT_TEXT_KEY,
+    OFFICIAL_PROSE_LEGACY_FILING_KIND,
 )
 
 
@@ -53,7 +54,9 @@ def _probe(
     )
     assert fact.claim != target.claim, "연도 토큰을 넣지 못했다"
     cited_source = replace(
-        source, exact_evidence_hashes=(*source.exact_evidence_hashes, digest),
+        source,
+        exact_evidence_hashes=(*source.exact_evidence_hashes, digest),
+        source_kind=OFFICIAL_PROSE_LEGACY_FILING_KIND,
     )
     candidate = replace(
         base,
