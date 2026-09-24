@@ -302,3 +302,23 @@ RELEASE_MODE_NAMES = frozenset(mode.value for mode in ReleaseMode)
 #:   ``BUNDLED_REVIEW_RETRY_SECTION_ID`` 와 같은 값이어야 한다. 공유 계층끼리의
 #:   import 순환을 피하려고 글자를 따로 적고, 두 값을 맞대는 시험이 지킨다.
 RELEASE_MODE_REVIEW_SLOTS = ("bundled", "bundled_retry")
+
+#: FULL 공개 안전 판정이 출고를 막았을 때 «어떤 유형이 몇 건, 어느 장에 몇 건»인지
+#: 남기는 한 줄. 2026-09-24 7차 유료 실측에서 차단 문구가 서버 콘솔 경고에만 찍혀
+#: 평가 산출물로는 원인을 확정하지 못하고 재생기록으로 거꾸로 재구성해야 했다.
+#: 원문·fact_id·source_id는 싣지 않는다 — 닫힌 유형 코드
+#: (``safety_problem_kinds.SAFETY_PROBLEM_KINDS``)·장 id·개수만.
+#: ★ 장별 개수는 장을 가릴 수 있는 문제만 센다(사실의 소유 장, 문장 속 «X장»,
+#:   요약 문장). 그래서 장별 합은 문제수 이하이고, 유형별 합은 문제수와 같다.
+SAFETY_BLOCK_STEP = "8_공개안전_차단유형"
+SAFETY_BLOCK_ROUND_FIELD = "회차"
+SAFETY_BLOCK_ROUND_PRIMARY = "1차"
+SAFETY_BLOCK_ROUND_SUPPLEMENT = "보충"
+SAFETY_BLOCK_ROUNDS = frozenset((
+    SAFETY_BLOCK_ROUND_PRIMARY, SAFETY_BLOCK_ROUND_SUPPLEMENT,
+))
+SAFETY_BLOCK_TOTAL_FIELD = "문제수"
+SAFETY_BLOCK_KINDS_FIELD = "유형별"
+SAFETY_BLOCK_SECTIONS_FIELD = "장별"
+#: «장별» 칸의 장 순서 — 보고서 장 순서 뒤에 요약.
+SAFETY_BLOCK_SECTION_ORDER = (*STRICT_REQUIRED_QUALITY_SECTION_IDS, "summary")

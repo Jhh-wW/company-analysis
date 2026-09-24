@@ -37,6 +37,9 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     RELEASE_MODE_LEDGER_USED_FIELD, RELEASE_MODE_NAMES,
     RELEASE_MODE_REQUESTED_FIELD, RELEASE_MODE_REVIEW_CALLS_FIELD,
     RELEASE_MODE_REVIEW_SLOTS, RELEASE_MODE_STEP,
+    SAFETY_BLOCK_KINDS_FIELD, SAFETY_BLOCK_ROUND_FIELD, SAFETY_BLOCK_ROUNDS,
+    SAFETY_BLOCK_SECTION_ORDER, SAFETY_BLOCK_SECTIONS_FIELD, SAFETY_BLOCK_STEP,
+    SAFETY_BLOCK_TOTAL_FIELD,
     SECTION_EXECUTION_STEP,
     SECTION_EXECUTION_COUNT_FIELDS,
     SECTION_EXECUTION_PARTIAL_COUNT_FIELDS,
@@ -47,6 +50,7 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     STYLE_RENDERS,
     STYLE_STEP,
 )
+from src.shared.report_quality.safety_problem_kinds import SAFETY_PROBLEM_KINDS
 
 
 def _count(value: object, *, minimum: int = 0) -> bool:
@@ -265,6 +269,7 @@ def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], 
             _empty_recovery(record) if step == EMPTY_RECOVERY_STEP else
             _grounding_rewrite(record) if step == GROUNDING_REWRITE_STEP else
             _style(record) if step == STYLE_STEP else
+            _safety_block(record) if step == SAFETY_BLOCK_STEP else
             _release_mode(record) if step == RELEASE_MODE_STEP else None
         )
         if normalized is not None:
@@ -381,6 +386,46 @@ def _release_mode(record: Mapping) -> dict[str, object] | None:
         RELEASE_MODE_DOWNGRADED_FROM_FIELD: downgraded_from,
         RELEASE_MODE_REVIEW_CALLS_FIELD: calls,
         RELEASE_MODE_LEDGER_USED_FIELD: ledger_used,
+    }
+
+
+def _closed_counts(value: object, allowed: tuple[str, ...]) -> dict[str, int] | None:
+    """닫힌 열쇠 → 1 이상 정수 사전만 받아 ``allowed`` 순서로 돌려준다."""
+    if not isinstance(value, Mapping):
+        return None
+    if any(not isinstance(key, str) or key not in allowed
+           or not _count(count, minimum=1)
+           for key, count in value.items()):
+        return None
+    return {key: value[key] for key in allowed if key in value}
+
+
+def _safety_block(record: Mapping) -> dict[str, object] | None:
+    """FULL 공개 안전 차단 한 줄 — 닫힌 유형 코드·장 id·개수만 통과시킨다.
+
+    유형별 합은 문제수와 같아야 하고, 장별 합은 문제수를 넘을 수 없다(장을 가리지
+    못한 문제는 장별에 없다). 어긋나거나 열린 글자가 섞인 기록은 통째로 버린다.
+    """
+    validation_round = record.get(SAFETY_BLOCK_ROUND_FIELD)
+    total = record.get(SAFETY_BLOCK_TOTAL_FIELD)
+    if (not isinstance(validation_round, str)
+            or validation_round not in SAFETY_BLOCK_ROUNDS
+            or not _count(total, minimum=1)):
+        return None
+    kinds = _closed_counts(record.get(SAFETY_BLOCK_KINDS_FIELD), SAFETY_PROBLEM_KINDS)
+    sections = _closed_counts(
+        record.get(SAFETY_BLOCK_SECTIONS_FIELD), SAFETY_BLOCK_SECTION_ORDER,
+    )
+    if not kinds or sections is None:
+        return None
+    if sum(kinds.values()) != total or sum(sections.values()) > total:
+        return None
+    return {
+        "step": SAFETY_BLOCK_STEP,
+        SAFETY_BLOCK_ROUND_FIELD: validation_round,
+        SAFETY_BLOCK_TOTAL_FIELD: total,
+        SAFETY_BLOCK_KINDS_FIELD: kinds,
+        SAFETY_BLOCK_SECTIONS_FIELD: sections,
     }
 
 

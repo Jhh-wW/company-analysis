@@ -59,6 +59,8 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     RELEASE_MODE_REVIEW_CALLS_FIELD,
     RELEASE_MODE_REVIEW_SLOTS,
     RELEASE_MODE_STEP,
+    SAFETY_BLOCK_ROUND_PRIMARY,
+    SAFETY_BLOCK_ROUND_SUPPLEMENT,
     STYLE_COUNTS_FIELD,
     STYLE_RENDER_EVIDENCE_AVAILABLE,
     STYLE_RENDER_FIELD,
@@ -206,6 +208,7 @@ from src.shared.report_generation.canonical import (
 )
 from src.features.composer.quality_observation_log import (
     log_generation_quality_observation,
+    record_full_safety_block,
 )
 from src.features.composer.quality_projection import (
     build_generation_quality_candidate,
@@ -2964,6 +2967,17 @@ def run_v2(
             or call_recorder is None
         ):
             raise V2ValidationError(("FULL 생산 증거 재료가 누락됐습니다",))
+        # FULL 공개 안전이 막았으면 유형별·장별 개수를 실행 기록에 남긴다. 정지
+        # 경계는 사유 코드만 싣고 문구는 로그에만 찍혀, 평가 산출물에서 무엇이
+        # 막았는지 볼 수 없었다. 통과한 실행은 아무것도 남기지 않는다. 출고를 막는
+        # 예외 «전»에 넣어야 real.py 의 finally 가 GATE_STOPPED 경로에서도 옮긴다.
+        record_full_safety_block(
+            composition_diagnostics,
+            generation_assessment,
+            quality_candidate,
+            validation_round=SAFETY_BLOCK_ROUND_PRIMARY,
+            logger=logger,
+        )
         candidate_sha256 = canonical_sha256(quality_candidate)
         try:
             primary_receipt = GenerationValidationReceipt(
@@ -3283,6 +3297,14 @@ def run_v2(
                     quality_candidate,
                     contract_version=STRICT_QUALITY_CONTRACT_VERSION,
                 )
+            )
+            # 보충 병합본도 같은 한 줄을 «보충» 회차로 남긴다.
+            record_full_safety_block(
+                composition_diagnostics,
+                generation_assessment,
+                quality_candidate,
+                validation_round=SAFETY_BLOCK_ROUND_SUPPLEMENT,
+                logger=logger,
             )
             candidate_sha256 = canonical_sha256(quality_candidate)
             try:

@@ -14,6 +14,10 @@ import pytest
 
 from src.features.observability import constants as obs
 from src.features.observability import run_diagnostics
+from src.shared.report_quality.composition_diagnostic_constants import (
+    RELEASE_MODE_STEP,
+    SAFETY_BLOCK_STEP,
+)
 
 
 def _news_step(**overrides: object) -> dict:
@@ -164,13 +168,19 @@ def test_수집칸이_없어도_실행을_막지_않는다(caplog: pytest.LogCap
 
 
 def test_허용목록의_단계이름은_실제_생산코드에_있다():
-    """이름이 바뀌면 요약이 조용히 빈다. 그 침묵을 여기서 깬다."""
+    """이름이 바뀌면 요약이 조용히 빈다. 그 침묵을 여기서 깬다.
+
+    ★ 허용 목록을 적은 파일(observability/constants.py) 자신은 뒤지지 않는다 — 그
+      파일에는 목록의 이름이 늘 글자로 있어서, 뒤지면 생산 코드가 이름을 바꿔도 이
+      시험이 초록으로 남는다(2026-09-24 확인).
+    """
 
     source_root = Path(__file__).resolve().parents[3]
+    allowlist_module = Path(obs.__file__).resolve()
     sources = [
         path.read_text(encoding="utf-8")
         for path in source_root.rglob("*.py")
-        if "tests" not in path.parts
+        if "tests" not in path.parts and path.resolve() != allowlist_module
     ]
     assert sources, "생산 코드를 한 개도 찾지 못했습니다"
 
@@ -181,3 +191,43 @@ def test_허용목록의_단계이름은_실제_생산코드에_있다():
         and not any(f'"{name}"' in text for text in sources)
     ]
     assert missing == []
+
+
+def test_FULL_공개안전_차단_줄은_요약_한줄에_개수째로_실린다():
+    """운영 서버에는 요약 로그만 남는다 — 안전 차단 유형이 빠지면 원인을 다시 잃는다."""
+
+    # 생산 상수 값이 요약 허용 목록의 글자와 같아야 한다 — 이름이 바뀌면 요약이 조용히 빈다.
+    assert SAFETY_BLOCK_STEP == "8_공개안전_차단유형"
+    safety_line = {
+        "step": "8_공개안전_차단유형",
+        "회차": "1차",
+        "문제수": 30,
+        "유형별": {"numeric_labels_missing": 15, "numeric_binding_missing": 15},
+        "장별": {"identity": 14, "culture": 6},
+    }
+
+    summary = run_diagnostics.build_summary([_news_step(), safety_line])
+
+    picked = summary[run_diagnostics.KEY_STEPS]
+    assert [item["step"] for item in picked] == ["5b_뉴스_수집", "8_공개안전_차단유형"]
+    assert picked[1] == safety_line
+
+
+def test_출고모드_줄도_요약_한줄에_실린다():
+    """«작성 전 강등»과 «장부를 쓰고 난 뒤 강등»을 운영 요약 로그만으로도 가른다."""
+
+    assert RELEASE_MODE_STEP == "8_출고모드_적용"
+    release_line = {
+        "step": "8_출고모드_적용",
+        "요청모드": "FULL",
+        "적용모드": "SHADOW",
+        "강등출처": "FULL",
+        "검수호출": {"bundled": 1, "bundled_retry": 0},
+        "장부사용": True,
+    }
+
+    summary = run_diagnostics.build_summary([release_line, _news_step()])
+
+    picked = summary[run_diagnostics.KEY_STEPS]
+    assert [item["step"] for item in picked] == ["8_출고모드_적용", "5b_뉴스_수집"]
+    assert picked[0] == release_line
