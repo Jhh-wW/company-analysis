@@ -24,8 +24,10 @@ from src.shared.report_quality.evidence_support import prose_evidence_support_re
 from src.shared.report_quality.fact_binding import fact_evidence_binding
 from src.shared.report_quality.constants import (
     INTERPRETATION_CLAIM_TYPE,
+    OFFICIAL_PROSE_EXACT_TEXT_KEY,
     VERIFIED_PROSE_CLAIM_TYPE,
 )
+from src.shared.report_quality.numeric_detection import has_public_numeric_token
 from src.shared.report_quality.source_identity import document_identity
 
 
@@ -105,8 +107,14 @@ def evaluate_verified_prose_fact(
     company_name: str,
     as_of_date: str,
     evidence: Sequence[ProseEvidence],
+    carry_official_exact_text: bool = False,
 ) -> ProseFactBuildResult:
-    """검증 문장과 모든 인용이 정확히 맞을 때만 FactRecord를 만든다."""
+    """검증 문장과 모든 인용이 정확히 맞을 때만 FactRecord를 만든다.
+
+    ``carry_official_exact_text`` 는 FULL 렌더만 켠다(ADR 0005). 켜면 숫자 토큰이 든
+    확인 등급 산문이 공식 출처 조각의 정확 원문을 증거 목록에 싣는다. 끄면(SHADOW·
+    ENFORCE_NO_PARTIAL·기본값) 사실은 예전과 한 바이트도 다르지 않다.
+    """
 
     claim = _normalized_text(sentence.text)
     claim_slot = sentence.planned_claim_slot.strip()
@@ -125,6 +133,13 @@ def evaluate_verified_prose_fact(
         if failed:
             return ProseFactBuildResult(None, reason)
 
+    # FULL에서 확인 등급 산문에 숫자 토큰이 있으면 공식 출처 조각의 원문을 함께 싣는다.
+    # 싣는 조건은 안전 판정이 수치 결속을 요구하는 조건(공개 숫자 감지)과 같은 술어다.
+    numeric_confirmed_claim = (
+        carry_official_exact_text
+        and sentence.grade == GRADE_CONFIRMED
+        and has_public_numeric_token(claim)
+    )
     manifest: list[dict[str, str]] = []
     source_ids: list[str] = []
     source_identities: list[str] = []
@@ -155,6 +170,12 @@ def evaluate_verified_prose_fact(
             # 보도 수치는 계산값이 아니다. 최종 품질 검사가 날짜·출처와 함께
             # 실제 숫자·단위를 재대조할 정확 원문을 사실 결속 안에 남긴다.
             manifest[-1]["news_exact_text"] = item.exact_text
+        elif numeric_confirmed_claim:
+            # ★ 확인 등급 공식 원문 산문의 숫자는 FULL 안전 판정이 «인용 조각 원문에
+            #   그대로 있는가»를 바이트 지문과 함께 다시 대조한다(ADR 0005). 그 대조에
+            #   쓸 원문을 사실 결속 안에 싣는다. «원문을 문장마다 중복 저장하지 않는다»
+            #   원칙의 좁은 예외다 — FULL·확인 등급·숫자 든 산문에만.
+            manifest[-1][OFFICIAL_PROSE_EXACT_TEXT_KEY] = item.exact_text
 
     support_terms = _support_terms(claim, evidence)
     if not prose_evidence_support_ready(
@@ -177,7 +198,16 @@ def evaluate_verified_prose_fact(
             section_id=section_id,
             claim_slot=claim_slot,
             claim=claim,
-            evidence_manifest=manifest,
+            # ★ 사실 ID에는 싣는 원문을 넣지 않는다 — 원문은 이미 exact_sha256이
+            #   잠그고, ID가 바뀌면 옛 저장본·요약 결속과 어긋난다(ADR 0005).
+            evidence_manifest=[
+                {
+                    key: value
+                    for key, value in record.items()
+                    if key != OFFICIAL_PROSE_EXACT_TEXT_KEY
+                }
+                for record in manifest
+            ],
         ),
         legal_entity=_normalized_text(company_name),
         subject_scope=_normalized_text(company_name),
@@ -227,9 +257,11 @@ def evaluate_verified_prose_fact(
 def build_verified_prose_fact(
     sentence: ComposedSentence, *, section_id: str, company_name: str,
     as_of_date: str, evidence: Sequence[ProseEvidence],
+    carry_official_exact_text: bool = False,
 ) -> Optional[FactRecord]:
     """기존 호출부의 Optional 반환 계약을 유지한다."""
     return evaluate_verified_prose_fact(
         sentence, section_id=section_id, company_name=company_name,
         as_of_date=as_of_date, evidence=evidence,
+        carry_official_exact_text=carry_official_exact_text,
     ).fact

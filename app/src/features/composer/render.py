@@ -106,6 +106,7 @@ from src.shared.report_evidence.source_kind_policy import (
 from src.shared.report_evidence.constants import (
     SOURCE_KIND_NEWS,
     SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
+    ReleaseMode,
 )
 from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
 from src.shared.report_quality.summary_binding import (
@@ -1260,6 +1261,10 @@ def render_report(
                     company_name=company_name,
                     as_of_date=as_of_date,
                     evidence=prose_evidence,
+                    # FULL 렌더에서만 숫자 든 확인 산문이 인용 원문을 싣는다(ADR 0005).
+                    carry_official_exact_text=(
+                        release_mode == ReleaseMode.FULL.value
+                    ),
                 )
             if fact is None or fact.fact_id in seen_fact_ids:
                 continue

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+from collections.abc import Mapping
 from decimal import Decimal
 
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
@@ -19,8 +22,10 @@ from src.shared.report_quality.constants import (
     INTERPRETATION_CLAIM_TYPE,
     STRICT_FACTUAL_CLAIM_TYPES,
     STRICT_PUBLIC_CLAIM_TYPES,
+    OFFICIAL_PROSE_EXACT_TEXT_KEY,
     STRICT_QUALITY_CONTRACT_VERSION,
     STRICT_QUALITY_CONTRACT_VERSIONS,
+    VERIFIED_PROSE_CLAIM_TYPE,
 )
 from src.shared.report_quality.comparison_claims import (
     comparison_context_claim_problems,
@@ -40,6 +45,10 @@ from src.shared.report_quality.models import (
     VerificationState,
 )
 from src.shared.report_quality.numeric_validation import validate_versioned_numeric_claim
+from src.shared.report_quality.official_prose_numeric import (
+    official_number_tokens,
+    prose_numbers_verbatim_in_fragments,
+)
 from src.shared.report_quality.supplementary_prose import reviewed_news_prose_problems
 
 
@@ -134,6 +143,84 @@ def _has_numeric_payload(fact: ClaimFact) -> bool:
         or fact.display_value.strip()
         or has_public_numeric_token(fact.claim)
     )
+
+
+def _official_prose_cited_texts(
+    fact: ClaimFact,
+    sources: Mapping[str, SourceDocument],
+) -> tuple[str, ...] | None:
+    """확인 등급 공식 원문 산문이 인용한 조각의 정확 원문. 증명 자격이 없으면 None.
+
+    ADR 0005의 FULL 숫자 예외 재료다. 원문은 그 사실의 증거 목록(state_evidence)
+    기록에서만 꺼낸다. 기록마다 source_id가 사실의 인용 출처와 같고, 원문 SHA-256 =
+    기록 지문 = 사실의 조각 지문(같은 순서)이며, 그 지문이 같은 출처의 조각 지문
+    목록에 있어야 한다. 출처 목록 소속만으로는 «인용한 그 조각»을 가리지 못하므로
+    (그 문서의 허용 조각 전부다) 사실의 조각 지문과 직접 맞춘다. 하나라도 어긋나거나
+    기록이 깨졌으면 None — 예외를 삼켜 통과시키지 않는다.
+    """
+
+    if (
+        fact.claim_type != VERIFIED_PROSE_CLAIM_TYPE
+        or fact.verification_state != VerificationState.VERIFIED.value
+        or not fact.evidence_binding_valid
+        or fact.raw_value
+        or fact.calculation
+        or fact.display_value
+        or fact.numeric_checks
+        or fact.metric
+    ):
+        return None
+    source_ids = tuple(fact.supporting_source_ids)
+    evidence_hashes = tuple(fact.supporting_evidence_hashes)
+    if not source_ids or len(evidence_hashes) != len(source_ids):
+        return None
+    bound = [sources.get(source_id) for source_id in source_ids]
+    if any(
+        source is None
+        or source.source_kind == "news"
+        or source.counts_toward_document_floor is not True
+        for source in bound
+    ):
+        return None
+    try:
+        manifest = json.loads(fact.state_evidence)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(manifest, list) or len(manifest) != len(source_ids):
+        return None
+    texts: list[str] = []
+    for record, source_id, evidence_hash, source in zip(
+        manifest, source_ids, evidence_hashes, bound
+    ):
+        if not isinstance(record, dict):
+            return None
+        exact_text = record.get(OFFICIAL_PROSE_EXACT_TEXT_KEY)
+        if not isinstance(exact_text, str) or not exact_text.strip():
+            return None
+        if (
+            record.get("source_id") != source_id
+            or record.get("exact_sha256") != evidence_hash
+            or hashlib.sha256(exact_text.encode("utf-8")).hexdigest() != evidence_hash
+            or evidence_hash not in source.exact_evidence_hashes
+        ):
+            return None
+        texts.append(exact_text)
+    return tuple(texts)
+
+
+def _official_prose_numbers_proven(
+    fact: ClaimFact,
+    sources: Mapping[str, SourceDocument],
+) -> bool:
+    """문장의 숫자 토큰이 «모두» 인용 조각 원문에 그대로 있는가(ADR 0005)."""
+
+    cited_texts = _official_prose_cited_texts(fact, sources)
+    if cited_texts is None:
+        return False
+    # 공개 숫자 감지가 참인데 토큰이 비면 대조가 공허하게 참이 된다 — 증명이 아니다.
+    if not official_number_tokens(fact.claim):
+        return False
+    return prose_numbers_verbatim_in_fragments(fact.claim, cited_texts)
 
 
 def assess_safety(
@@ -315,6 +402,19 @@ def assess_safety(
             problems.extend(f"{fact_id}: {problem}" for problem in news_problems)
             # 검수·정확 원문에 결속한 보도 숫자는 공시 계산 NumericBinding과
             # 별개다. 원문 변조·날짜 누락은 위 판정이 막는다.
+            has_numeric_payload = False
+        elif (
+            has_numeric_payload
+            and contract.version == STRICT_QUALITY_CONTRACT_VERSION
+            and _official_prose_numbers_proven(fact, sources)
+        ):
+            # ★ 확인 등급 공식 원문 산문의 숫자 표현이 «모두» 인용 조각 원문에 같은
+            #   표기로 있음을 원문 지문까지 다시 맞춰 증명했다(ADR 0005). 날짜·개수처럼
+            #   원문을 옮긴 숫자는 계산값이 아니므로 NumericBinding을 요구하지 않는다.
+            #   건너뛰는 것은 아래 수치 이름표·NumericBinding 두 검사뿐이다.
+            # ★ FULL 계약(v3)에서만 연다. 증명이 하나라도 어긋나면 이 분기를 타지 않고
+            #   예전 요구가 그대로 막는다. SHADOW(관측 전용)와 ENFORCE_NO_PARTIAL의
+            #   판정·표지는 바꾸지 않는다.
             has_numeric_payload = False
         if (
             strict_claim_type_policy
