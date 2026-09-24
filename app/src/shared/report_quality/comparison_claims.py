@@ -7,15 +7,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date
 import re
+import unicodedata
 from typing import Protocol
 
 from src.shared.comparison_candidate_basis import (
     comparison_source_candidate_support_terms,
 )
-from src.shared.company_identity import exact_company_names_equivalent
+from src.shared.company_identity import exact_company_name_key, exact_company_names_equivalent
 from src.shared.report_quality.constants import (
     COMPARISON_JUDGMENTS,
     COMPETITIVE_COMPARISON_CLAIM_TYPE,
@@ -41,6 +42,9 @@ COMPARISON_JUDGMENT_SLOT = "competitive_position:comparison_judgment"
 COMPARISON_LIMITATION_SLOT = "competitive_position:limitation"
 COMPARISON_NUMERIC_METRICS = ("영업이익률", "매출 규모")
 STATED_DIFFERENTIATOR_SLOT = "competitive_position:stated_differentiator"
+STATED_DIFFERENTIATOR_MARKERS = (
+    "최초", "유일", "최다", "1위", "최대", "독자 개발", "특허",
+)
 STATED_DIFFERENTIATOR_FORBIDDEN_JUDGMENTS = (
     "우위",
     "열위",
@@ -54,6 +58,7 @@ _COMPANY_MARKER = re.compile(
     flags=re.IGNORECASE,
 )
 _CLAIM_NOISE = re.compile(r"[\W_]+", re.UNICODE)
+_STATED_LEADING_DECORATION = re.compile(r"^[\s\-–—*•·▪■□▶▷◆◇※①-⑳\d.)]+")
 
 
 class ComparisonContextFact(Protocol):
@@ -236,6 +241,75 @@ def _valid_iso_date(value: object) -> bool:
         return bool(_ISO_DATE.fullmatch(clean) and date.fromisoformat(clean))
     except ValueError:
         return False
+
+
+def clean_stated_differentiator_sentence(value: object) -> str:
+    """기존 자기 선언 생산기의 공백·목록 장식 정리 정본."""
+
+    text = " ".join(unicodedata.normalize("NFKC", str(value or "")).split())
+    return _STATED_LEADING_DECORATION.sub("", text).strip()
+
+
+def _stated_company_names(company_name: str, aliases: Iterable[str]) -> tuple[str, ...]:
+    values = [company_name, *aliases]
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        clean = " ".join(str(value or "").split())
+        key = exact_company_name_key(clean)
+        if clean and key and key not in seen:
+            seen.add(key)
+            out.append(clean)
+    return tuple(sorted(out, key=len, reverse=True))
+
+
+def stated_differentiator_subject_prefix(
+    sentence: str,
+    *,
+    company_name: str,
+    company_aliases: Iterable[str] = (),
+) -> str:
+    """기존 생산기가 인정한 회사 대명사·명시 이름의 주어 범위."""
+
+    for pronoun in ("우리 회사", "당사", "우리"):
+        if re.match(rf"^{re.escape(pronoun)}(?:은|는|이|가|에서|의|가)?(?:\s|,|는|은|이|가)", sentence):
+            return pronoun
+    for name in _stated_company_names(company_name, company_aliases):
+        if re.match(
+            rf"^{re.escape(name)}(?:은|는|이|가|에서|의|가)?(?:\s|,|는|은|이|가)",
+            sentence,
+        ):
+            return name
+    return ""
+
+
+def stated_differentiator_claim(
+    sentence: str, company_name: str, aliases: Iterable[str] = (),
+) -> str:
+    """자기 선언 원문의 회사 주어만 옮기는 생산·안전 검산 공통 정본.
+
+    생산자는 검증된 별칭을 넘길 수 있다. 안전 평가에는 별칭 증명이 운반되지
+    않으므로 빈 목록을 사용하며, 원문 주어를 추측해 새 별칭을 만들지 않는다.
+    """
+
+    clean = clean_stated_differentiator_sentence(sentence)
+    prefix = stated_differentiator_subject_prefix(
+        clean, company_name=company_name, company_aliases=aliases,
+    )
+    if prefix and exact_company_name_key(prefix) != exact_company_name_key(company_name):
+        return company_name + clean[len(prefix):]
+    if prefix != company_name:
+        return company_name + clean[len(prefix):]
+    return clean
+
+
+def stated_differentiator_limitation_claim(legal_entity: str, claim: str) -> str:
+    """자기 선언을 재인용하는 한계 문장의 생산·검산 공통 정본."""
+
+    return (
+        f"{legal_entity}가 공식 자료에서 밝힌 표현의 범위만 옮겼으며 "
+        f"'{claim}'에 대한 타사 비교 판정은 포함하지 않습니다."
+    )
 
 
 def stated_differentiator_program_problems(
@@ -436,4 +510,9 @@ __all__ = [
     "comparison_target_source_problems",
     "expected_comparison_context_claim",
     "stated_differentiator_program_problems",
+    "clean_stated_differentiator_sentence",
+    "stated_differentiator_subject_prefix",
+    "stated_differentiator_claim",
+    "stated_differentiator_limitation_claim",
+    "STATED_DIFFERENTIATOR_MARKERS",
 ]

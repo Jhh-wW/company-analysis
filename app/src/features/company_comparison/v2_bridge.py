@@ -39,6 +39,7 @@ from src.shared.report_quality.comparison_claims import (
     comparison_metric_claim,
     comparison_metric_summary,
     comparison_target_claim,
+    stated_differentiator_limitation_claim,
 )
 from src.shared.report_quality.constants import (
     COMPETITIVE_COMPARISON_CLAIM_TYPE,
@@ -452,10 +453,7 @@ def _attach_comparison_only(
 
 
 def _stated_limitation_fact(base: FactRecord, source: Source) -> FactRecord:
-    claim = (
-        f"{base.legal_entity}가 공식 자료에서 밝힌 표현의 범위만 옮겼으며 "
-        f"'{base.claim}'에 대한 타사 비교 판정은 포함하지 않습니다."
-    )
+    claim = stated_differentiator_limitation_claim(base.legal_entity, base.claim)
     return _reseal_fact(
         base,
         fact_id=_stable_fact_id(base, "stated_differentiator_limitation"),

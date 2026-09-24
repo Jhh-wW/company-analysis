@@ -75,6 +75,8 @@ from src.shared.report_quality.official_prose_numeric import (
         ("종로3가 거리", {"3가"}),
         ("제3과", {"3과"}),
         ("2019부터", {"2019"}),
+        # 단독 위치 조사만 제거한다. 주소 구획·각도·단원은 위 계약을 유지한다.
+        ("시험로 731에 위치", {"731"}),
         # 서술 꼬리는 지운다
         ("12.5%다", {"12.5%"}),
         ("3.5%라고", {"3.5%"}),
@@ -91,6 +93,25 @@ def test_토큰화_정규화_표(text: str, tokens: set[str]):
 
 def test_None도_빈_집합이다():
     assert official_number_tokens(None) == frozenset()  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("claim", "source", "expected"),
+    [
+        ("소재지는 시험로 731에 있다.", "소재지 시험로 731", True),
+        ("소재지는 시험로 732에 있다.", "소재지 시험로 731", False),
+        ("수치는 -731에 달한다.", "수치 731", False),
+        ("수치는 731에 달한다.", "수치 731원", False),
+        ("2019년에 설립했다.", "설립 2019", False),
+        ("소재지는 시험로3가에 있다.", "소재지 시험로3가", True),
+        ("소재지는 시험로3가에 있다.", "소재지 시험로3", False),
+        ("각도는 3도다.", "각도 3", False),
+        ("학습 범위는 제3과다.", "학습 범위 3", False),
+        ("비율은 3%다.", "비율 3", False),
+    ],
+)
+def test_단독_에_제거는_값과_다른_단위를_완화하지_않는다(claim, source, expected):
+    assert prose_numbers_verbatim_in_fragments(claim, (source,)) is expected
 
 
 def test_숫자_토큰이_없는_문장은_조각이_비어도_참이다():

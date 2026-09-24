@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import unicodedata
 from dataclasses import dataclass, replace
 from typing import Iterable, Mapping, Sequence
 
@@ -34,6 +33,12 @@ from src.shared.report_evidence.source_kind_policy import (
     document_slots_for_formal_source_kind,
 )
 from src.shared.report_quality.constants import STATED_DIFFERENTIATOR_CLAIM_TYPE
+from src.shared.report_quality.comparison_claims import (
+    STATED_DIFFERENTIATOR_MARKERS,
+    clean_stated_differentiator_sentence as _clean_sentence,
+    stated_differentiator_claim as _claim_sentence,
+    stated_differentiator_subject_prefix as _subject_prefix,
+)
 
 
 COMPETITIVE_SECTION_ID = "competitive_position"
@@ -41,15 +46,6 @@ STATED_DIFFERENTIATOR_SLOT = "competitive_position:stated_differentiator"
 #: 파이프라인 진단 기록에 쓰는 단계 이름. 호출부의 실패 기록과 같은 이름이어야
 #: 한 단계의 성공·실패가 같은 열에서 읽힌다.
 STATED_DIFFERENTIATOR_PROMOTION_STEP = "9장_자기선언_승격"
-STATED_DIFFERENTIATOR_MARKERS = (
-    "최초",
-    "유일",
-    "최다",
-    "1위",
-    "최대",
-    "독자 개발",
-    "특허",
-)
 FORBIDDEN_DIFFERENTIATOR_JUDGMENT_TERMS = (
     "우위",
     "열위",
@@ -59,7 +55,6 @@ FORBIDDEN_DIFFERENTIATOR_JUDGMENT_TERMS = (
 )
 MAX_STATED_DIFFERENTIATORS = 4
 
-_LEADING_DECORATION = re.compile(r"^[\s\-–—*•·▪■□▶▷◆◇※①-⑳\d.)]+")
 _TOKEN = re.compile(r"[0-9A-Za-z가-힣]{2,}")
 
 
@@ -90,42 +85,6 @@ class StatedDifferentiatorPromotion:
             "승격": self.promoted,
             "건너뜀": {kind: count for kind, count in self.skipped_by_source_kind},
         }
-
-
-def _clean_sentence(value: object) -> str:
-    text = " ".join(unicodedata.normalize("NFKC", str(value or "")).split())
-    return _LEADING_DECORATION.sub("", text).strip()
-
-
-def _company_names(company_name: str, aliases: Iterable[str]) -> tuple[str, ...]:
-    values = [company_name, *aliases]
-    out: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        clean = " ".join(str(value or "").split())
-        key = exact_company_name_key(clean)
-        if clean and key and key not in seen:
-            seen.add(key)
-            out.append(clean)
-    return tuple(sorted(out, key=len, reverse=True))
-
-
-def _subject_prefix(
-    sentence: str,
-    *,
-    company_name: str,
-    company_aliases: Iterable[str] = (),
-) -> str:
-    for pronoun in ("우리 회사", "당사", "우리"):
-        if re.match(rf"^{re.escape(pronoun)}(?:은|는|이|가|에서|의|가)?(?:\s|,|는|은|이|가)", sentence):
-            return pronoun
-    for name in _company_names(company_name, company_aliases):
-        if re.match(
-            rf"^{re.escape(name)}(?:은|는|이|가|에서|의|가)?(?:\s|,|는|은|이|가)",
-            sentence,
-        ):
-            return name
-    return ""
 
 
 def stated_differentiator_sentence_is_eligible(
@@ -354,20 +313,6 @@ def register_stated_differentiator_sentence_evidence(
             )
         )
     return copied
-
-
-def _claim_sentence(sentence: str, company_name: str, aliases: Iterable[str]) -> str:
-    clean = _clean_sentence(sentence)
-    prefix = _subject_prefix(
-        clean,
-        company_name=company_name,
-        company_aliases=aliases,
-    )
-    if prefix and exact_company_name_key(prefix) != exact_company_name_key(company_name):
-        return company_name + clean[len(prefix) :]
-    if prefix != company_name:
-        return company_name + clean[len(prefix) :]
-    return clean
 
 
 def _support_terms(sentence: str, claim: str, company_name: str) -> list[str]:
