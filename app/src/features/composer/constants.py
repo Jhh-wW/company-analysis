@@ -14,6 +14,7 @@ from collections.abc import Iterator, Mapping
 from typing import Final
 
 from src.core.revenue_table_switch import revenue_table_v2_enabled
+from src.features.composer.partial_evidence_constants import EXACT_EVIDENCE_SCOPE_GUIDE
 from src.shared.report_evidence.constants import (
     SOURCE_KIND_DART_AUDIT_REPORT,
     SOURCE_KIND_DART_BUSINESS_REPORT,
@@ -293,31 +294,56 @@ JSON_SCHEMA_GUIDE: Final[str] = (
     "\"인용\"의 조각id는 자료 목록의 [조각 n] 번호를 그대로 쓴다.\n"
 )
 
-# FULL packet에서만 기존 출력 스키마의 빈 슬롯 허용 예시를 좁힌다. SHADOW의
-# 문구와 바이트는 유지한다. 모든 장의 전용 경로표 스키마도 같은 예시를 쓴다.
+# FULL packet에서만 기존 두 필드 예시를 단일 지원쌍 선택으로 바꾼다.
+# SHADOW의 문구와 바이트는 유지하고, 전용 경로표 스키마도 같은 문장 예시를 쓴다.
 CLAIM_SLOT_SCHEMA_HINT: Final[str] = "<허용된 id 또는 빈 문자열>"
 FULL_CLAIM_SLOT_SCHEMA_HINT: Final[str] = "<인용한 조각의 지원 주장슬롯 id>"
+FULL_EVIDENCE_PAIR_SCHEMA_HINT: Final[str] = '"근거선택": ["<지원쌍 ID>"]'
+FULL_LEGACY_SENTENCE_SCHEMA: Final[str] = (
+    '"글": "<문장>", "인용": ["<조각id>", "..."], '
+    '"등급": "확인" 또는 "해석", "주장슬롯": "<허용된 id 또는 빈 문자열>"'
+)
+FULL_PAIR_SENTENCE_SCHEMA: Final[str] = (
+    '"글": "<문장>", "등급": "확인" 또는 "해석", '
+    + FULL_EVIDENCE_PAIR_SCHEMA_HINT
+)
+LEGACY_SCHEMA_CITATION_TAIL: Final[str] = (
+    '"인용"의 조각id는 자료 목록의 [조각 n] 번호를 그대로 쓴다.\n'
+)
+FULL_PAIR_SCHEMA_TAIL: Final[str] = (
+    "본문의 «근거선택»에는 선택표의 지원쌍 ID를 그대로 쓴다. "
+    "본문에 별도의 «인용»·«주장슬롯»은 쓰지 않는다.\n"
+)
+FULL_PAIR_FLOW_SCHEMA_TAIL: Final[str] = (
+    "본문의 «근거선택»에는 선택표의 지원쌍 ID를 쓴다. "
+    "«경로표» 행의 «인용»만 자료 목록의 [조각 n] 번호를 그대로 쓴다.\n"
+)
 FULL_SUPPORTED_SLOT_INDEX_HEAD: Final[str] = (
     "FULL 근거 선택표 — 먼저 아래 지원 주장슬롯에서 조각 번호를 고른 뒤 "
     "그 조각의 원문에 있는 사실만 문장으로 쓴다. 표시되지 않은 슬롯은 "
     "이 장의 자료가 지원하지 않으므로 쓰지 않는다:\n"
 )
 FULL_CITATION_SLOT_GUIDE: Final[str] = (
-    "FULL 출력 순서 — ① 원문에서 사실을 확인하고 지원 주장슬롯의 조각 번호를 "
-    "고른다. ② 그 조각이 지원하는 주장슬롯 id를 그대로 복사한다. "
-    "③ 확인한 사실만 문장으로 쓴다. 인용 배열에는 지금 이 장 자료에 표시된 "
-    "조각 id를 문자열로 정확히 복사한다. 대괄호나 '조각 ' 접두어를 붙이거나 "
-    "표 이름을 넣지 않는다. "
-    "인용한 조각 중 어느 것도 선택한 슬롯을 지원하지 않으면 그 문장을 내지 않는다.\n"
-    "④ 확인 문장의 숫자·연도·날짜는 바로 그 문장이 인용한 원문 조각의 표기를 "
+    "FULL 수치 작성 규칙 — 확인 문장의 숫자·연도·날짜는 바로 그 문장의 "
+    "근거선택 ID가 가리키는 원문 조각의 표기를 "
     "그대로 쓴다. 실적표나 인용하지 않은 다른 조각에서 값을 빌리거나 단위를 "
     "바꾸지 않는다. 구조화 계산 수치는 프로그램이 따로 만든다.\n"
+)
+FULL_EVIDENCE_PAIR_GUIDE: Final[str] = (
+    "FULL 근거선택 규칙 — 선택표의 `조각번호[지원쌍 ID]`에서 원문 사실에 "
+    "맞는 쌍 ID를 먼저 고르고, 문장의 «근거선택» 배열에 그대로 적는다. "
+    "한 문장의 선택지들은 모두 같은 주장슬롯이어야 한다. 출력에는 «글»·«등급»·"
+    "«근거선택»만 적고 «주장슬롯»과 «인용»은 별도로 고르지 않는다. "
+    "프로그램이 선택한 쌍의 슬롯과 조각번호를 그대로 복원한다. "
+    "두 옛 필드까지 넣으면 선택한 쌍과 정확히 일치하지 않는 문장은 제외한다. "
+    "맞는 쌍이 없거나 목록에 없는 ID라면 문장을 내지 않는다. "
+    "다른 조각으로 인용만 바꾸어 근거가 있는 척하지 않는다.\n"
 )
 FULL_PAST_CHANGES_SECTION_GUIDE: Final[str] = (
     "4장 «주요 변화와 실적» — 검증된 전사 실적표·수치 사실 문장은 프로그램이 "
     "별도로 삽입한다. 이 작성 응답에서는 표 이름을 인용하거나 표의 수치를 "
     "별도 산문으로 되풀이하지 않는다. 장별 공식 조각이 직접 지원하는 완료된 "
-    "실행과 변화의 배경·한계를 쓰고, 그 조각 id만 인용한다. 근거에 없는 "
+    "실행과 변화의 배경·한계를 쓰고, 그 조각의 지원쌍 ID만 선택한다. 근거에 없는 "
     "변화 원인을 만들지 않는다. 아직 해결되지 않은 문제는 5장, 미래 계획은 "
     "6장이 맡는다.\n"
 )
@@ -330,6 +356,52 @@ FULL_PAST_CHANGES_CITATION_RULES_GUIDE: Final[str] = (
         "표가 소유한 수치는 값을 다시 쓰지 말고 그 표를 가리킨다.",
         "표가 소유한 수치는 별도 검증 결과에 있으므로 이 장의 작성 응답에서 "
         "다시 쓰거나 표 이름을 인용하지 않는다.",
+    )
+)
+
+
+def _full_pair_citation_rules(guide: str) -> str:
+    """기존 의미·안전 지침을 유지하며 본문 출력 필드만 쌍 선택으로 바꾼다."""
+    return (
+        guide.replace(
+            "1. 모든 문장에 인용(조각 id 배열)과 등급을 붙인다.",
+            "1. 모든 본문 문장에 등급과 «근거선택» 지원쌍 ID를 붙인다.",
+        ).replace(
+            "«모두» 인용한다. 뒷받침하지 않는 조각은 넣지 마라.",
+            "«모두» 근거선택에 넣는다. 뒷받침하지 않는 조각은 고르지 마라.",
+        ).replace(
+            "반드시 근거 조각 id를 인용 배열에 넣는다.",
+            "반드시 그 조각의 지원쌍 ID를 근거선택에 넣는다.",
+        ).replace(
+            "바탕이 된 조각 id를 넣되, 종합적 해석이면 빈 배열도 허용된다.",
+            "바탕이 된 조각의 지원쌍 ID를 넣는다. 빈 선택은 허용되지 않는다.",
+        ).replace(
+            "숫자는 조각 원문이나 실적표에 있는 값만 쓴다.",
+            "숫자는 선택한 원문 조각에서 같은 표기로 확인되는 값만 쓴다. "
+            "실적표의 계산값은 별도 프로그램이 맡는다.",
+        ).replace(
+            "표가 소유한 수치는 값을 다시 쓰지 말고 그 표를 가리킨다.",
+            "표가 소유한 수치는 산문으로 되풀이하지 않는다.",
+        ).replace(
+            "않는다. 인용은 반드시 «인용» 배열로만 표시한다.",
+            "않는다. 본문 출처는 반드시 «근거선택» 배열로만 표시한다.",
+        )
+    )
+
+
+FULL_PAIR_CITATION_RULES_GUIDE: Final[str] = _full_pair_citation_rules(
+    CITATION_RULES_GUIDE
+)
+FULL_PAST_CHANGES_PAIR_CITATION_RULES_GUIDE: Final[str] = _full_pair_citation_rules(
+    FULL_PAST_CHANGES_CITATION_RULES_GUIDE
+)
+FULL_PAIR_EXACT_EVIDENCE_SCOPE_GUIDE: Final[str] = (
+    EXACT_EVIDENCE_SCOPE_GUIDE.replace(
+        "조각을 모두 명시적으로 인용한다.",
+        "조각의 지원쌍 ID를 모두 «근거선택»에 명시한다.",
+    ).replace(
+        "인용하지 않은 조각은 근거가 아니다.",
+        "선택하지 않은 조각은 근거가 아니다.",
     )
 )
 
@@ -443,6 +515,7 @@ RESPONSE_TEXT_KEY: Final[str] = "글"
 RESPONSE_CITATIONS_KEY: Final[str] = "인용"
 RESPONSE_GRADE_KEY: Final[str] = "등급"
 RESPONSE_CLAIM_SLOT_KEY: Final[str] = "주장슬롯"
+RESPONSE_EVIDENCE_PAIR_KEY: Final[str] = "근거선택"
 
 # ══════════════════════════════════════════════════════════
 # 자료 부족·실패 안내문 (기준문서 3절 — 장 삭제 금지, 정직한 안내)

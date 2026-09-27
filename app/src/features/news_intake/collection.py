@@ -9,7 +9,7 @@ from collections import Counter, deque
 from concurrent.futures import CancelledError, Future
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from src.core.provider_gateway import gateway
 from src.features.news_intake import constants as c
@@ -50,6 +50,14 @@ class _PlannedCandidate:
     lease: CallLease | None = None
 
 
+def _closed_subject_diagnostics(counts: Mapping[str, object]) -> dict[str, int]:
+    """원문·동적 열쇠를 버리고 닫힌 주어 실패 코드의 양수 개수만 남긴다."""
+    return {
+        code: count for code in c.SUBJECT_DIAGNOSTIC_CODES
+        if type(count := counts.get(code)) is int and count > 0
+    }
+
+
 def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyContext,
                           as_of: dt.date, fetch_text: Callable[[str], object],
                           analyze_grounded: GroundedAnalyzer,
@@ -71,6 +79,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     failures = [code for code in snapshot.reason_codes if code not in c.SEARCH_BUDGET_REASON_CODES]
     warnings: Counter[str] = Counter()
     identity_diagnostics: Counter[str] = Counter()
+    subject_diagnostics: Counter[str] = Counter()
     role_diagnostics: Counter[str] = Counter()
     budget_codes: list[str] = [code for code in snapshot.reason_codes if code in c.SEARCH_BUDGET_REASON_CODES]
     stages: Counter[str] = Counter()
@@ -196,7 +205,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                 response = None
         excerpts, rejected = validate_grounded_response(
             response, articles=batch, company=company, as_of=as_of, identity_diagnostics=identity_diagnostics,
-            role_diagnostics=role_diagnostics,
+            role_diagnostics=role_diagnostics, subject_diagnostics=subject_diagnostics,
         )
         excluded.update(rejected)
         if any(code in rejected for code in ("grounded_invalid_response", "grounded_invalid_item", "grounded_missing_result")):
@@ -559,6 +568,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         },
         "검증된이름변형": derived_company_names(company),
         "법인검증상세": dict(identity_diagnostics),
+        "주어결속상세": _closed_subject_diagnostics(subject_diagnostics),
         # 2장에 배정된 기간 실적을 4장 보조 칸으로 옮기거나 나눈 수(관측값).
         "주장역할조정": dict(role_diagnostics),
         "메타이름일치후보": sum(item.metadata_name_match for item in snapshot.candidates),

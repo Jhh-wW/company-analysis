@@ -166,8 +166,8 @@ def test_숫자_작성지침은_FULL_프롬프트에만_추가한다(monkeypatch
     args = ("가나다전자", "past_changes", (fragment,), None)
     shadow = composer_logic.build_section_prompt(*args)
     full = composer_logic.build_section_prompt(*args, show_supported_claim_slots=True)
-    assert "바로 그 문장이 인용한 원문 조각의 표기" in full
-    assert "바로 그 문장이 인용한 원문 조각의 표기" not in shadow
+    assert "근거선택 ID가 가리키는 원문 조각의 표기" in full
+    assert "근거선택 ID가 가리키는 원문 조각의 표기" not in shadow
 
     # FULL 전용 상수를 비워도 SHADOW 프롬프트는 한 바이트도 달라지지 않는다.
     monkeypatch.setattr(composer_logic, "FULL_CITATION_SLOT_GUIDE", "")

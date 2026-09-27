@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from src.features.composer.constants import GRADE_CONFIRMED, SECTION_IDS
 from src.features.composer.logic import build_section_prompt, parse_section_response
@@ -84,13 +85,14 @@ def test_FULL프롬프트는_근거번호와_지원슬롯을_먼저_짝짓고_�
     )
     legacy = build_section_prompt("테스트", "business_model", fragments, None)
 
-    assert "- business_model:value_exchange: 12\n" in prompt
-    assert "- business_model:customer_type: 27\n" in prompt
+    assert re.search(r"- business_model:value_exchange: 12\[p2-\d+\]\n", prompt)
+    assert re.search(r"- business_model:customer_type: 27\[p2-\d+\]\n", prompt)
     assert "- business_model:revenue_model: " not in prompt
     assert "- business_model:revenue_model\n" not in prompt
-    assert "조각 id를 문자열로 정확히 복사한다" in prompt
-    assert "대괄호나 '조각 ' 접두어를 붙이거나" in prompt
-    assert '"주장슬롯": "<인용한 조각의 지원 주장슬롯 id>"' in prompt
+    assert "근거선택 ID가 가리키는 원문 조각" in prompt
+    assert "«주장슬롯»과 «인용»은 별도로 고르지 않는다" in prompt
+    assert '"근거선택": ["<지원쌍 ID>"]' in prompt
+    assert '"주장슬롯": "<인용한 조각의 지원 주장슬롯 id>"' not in prompt
     assert "허용된 id 또는 빈 문자열" not in prompt
     assert "어느 자리에도 맞지 않으면 빈 문자열" not in prompt
     assert "허용된 id 또는 빈 문자열" in legacy
@@ -104,7 +106,7 @@ def test_FULL전용_흐름표_스키마에도_같은_지원슬롯_계약이_적�
         show_supported_claim_slots=True,
     )
 
-    assert '"주장슬롯": "<인용한 조각의 지원 주장슬롯 id>"' in prompt
+    assert '"근거선택": ["<지원쌍 ID>"]' in prompt
     assert "허용된 id 또는 빈 문자열" not in prompt
     assert "경로표" in prompt
 
@@ -116,7 +118,7 @@ def test_FULL모든장의_스키마가_빈슬롯예시를_허용하지_않는다
             show_supported_claim_slots=True,
         )
         assert "허용된 id 또는 빈 문자열" not in prompt
-        assert "<인용한 조각의 지원 주장슬롯 id>" in prompt
+        assert '"근거선택": ["<지원쌍 ID>"]' in prompt
 
 
 def test_FULL색인은_같은조각번호를_지원슬롯마다_중복기재하지_않는다() -> None:
@@ -129,7 +131,7 @@ def test_FULL색인은_같은조각번호를_지원슬롯마다_중복기재하�
         show_supported_claim_slots=True,
     )
 
-    assert prompt.count("- business_model:customer_type: 17\n") == 1
+    assert len(re.findall(r"- business_model:customer_type: 17\[p2-\d+\]\n", prompt)) == 1
 
 
 def test_FULL은_미지원_선택슬롯을_작성목록에서_제외한다() -> None:
@@ -162,7 +164,7 @@ def test_FULL_4장_수치필수칸은_프로그램책임이고_표이름인용�
     )
     legacy = build_section_prompt("테스트", "past_changes", (fragment,), None)
 
-    assert "- past_changes:completed_execution: 5\n" in prompt
+    assert re.search(r"- past_changes:completed_execution: 5\[p4-\d+\]\n", prompt)
     assert "FULL 프로그램 책임 의미칸" in prompt
     assert "past_changes:historical_performance" in prompt
     assert "- past_changes:historical_performance: " not in prompt
@@ -192,7 +194,7 @@ def test_FULL_9장_주입칸을_산문필수처럼_요구하지_않는다() -> N
     assert "competitive_position:limitation" not in writer_part
     assert "competitive_position:limitation" in injected_part
     assert "- competitive_position:limitation: 8\n" not in prompt
-    assert "- competitive_position:stated_differentiator: 8\n" in prompt
+    assert re.search(r"- competitive_position:stated_differentiator: 8\[p9-\d+\]\n", prompt)
 
 
 def test_작가의_확인은_독립검수전까지_verified가_아니다() -> None:

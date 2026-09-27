@@ -12,6 +12,98 @@ from dataclasses import dataclass
 
 from features.evidence_collection import auditor_boilerplate, constants as c
 
+def _has_revenue_type_mix(text: str) -> bool:
+    """실제 매출 유형 열거만 찾고 회계정책 일반론은 제외한다."""
+
+    return (
+        bool(c.REVENUE_TYPE_HEADING_PATTERN.search(text))
+        and not any(marker in text for marker in c.REVENUE_POLICY_MARKERS)
+        and sum(category in text for category in c.REVENUE_TYPE_CATEGORIES)
+        >= c.MIN_REVENUE_TYPE_CATEGORIES
+    )
+
+
+def _has_sales_channel(text: str) -> bool:
+    """실제 판매 경로 문맥만 선택 칸의 근거로 인정한다."""
+
+    if _has_sales_channel_table(text):
+        return True
+    if any(marker in text for marker in c.SALES_CHANNEL_DIRECT_MARKERS):
+        return True
+    if "판매경로" in text and any(
+        marker in text.replace("판매경로", "") for marker in c.SALES_CHANNEL_ROUTE_MARKERS
+    ):
+        return True
+    return (
+        any(marker in text for marker in c.SALES_CHANNEL_WEAK_MARKERS)
+        and any(marker in text for marker in c.SALES_CHANNEL_CONTEXT_MARKERS)
+        and not any(marker in text for marker in c.SALES_CHANNEL_EXCLUDED_COMPOUNDS)
+    )
+
+
+def _has_sales_channel_table(text: str) -> bool:
+    """같은 표의 판매경로 머리글과 소비자 도달 행을 함께 요구한다."""
+
+    rows = text.split(c.SALES_TABLE_ROW_SEPARATOR)
+    if len(rows) < 2 or any(marker in text for marker in c.SALES_TABLE_ACCOUNTING_MARKERS):
+        return False
+    header_cells = tuple(cell.strip() for cell in rows[0].split(c.SALES_TABLE_CELL_SEPARATOR))
+    if c.SALES_TABLE_HEADER_CELL not in header_cells:
+        return False
+    return any(
+        any(marker in row for marker in c.SALES_TABLE_ROUTE_MARKERS)
+        and any(marker in row for marker in c.SALES_TABLE_REACH_MARKERS)
+        for row in rows[1:]
+        if c.SALES_TABLE_CELL_SEPARATOR in row
+    )
+
+
+def _supply_relation_units(text: str) -> tuple[str, ...]:
+    """별개 문장·표 행의 단어를 합쳐 조달 관계로 만들지 않는다."""
+
+    return tuple(
+        unit for unit in c.SUPPLY_UNIT_BOUNDARY_PATTERN.split(text)
+        if not any(marker in unit for marker in c.SUPPLY_ACCOUNTING_MARKERS)
+        and any(marker in unit for marker in c.SUPPLY_RELATION_OBJECT_MARKERS)
+        and any(marker in unit for marker in c.SUPPLY_RELATION_ACTION_MARKERS)
+        and any(marker in unit for marker in c.SUPPLY_RELATION_PARTY_MARKERS)
+    )
+
+
+def _has_supply_relation(text: str) -> bool:
+    """동일 문장·행 안의 조달 대상·상대·행위만 후보로 분류한다."""
+
+    return bool(_supply_relation_units(text))
+
+
+def _has_supply_contract(text: str) -> bool:
+    """원재료의 실제 조달 계약 행위를 일반 계약 문구와 구분한다."""
+
+    return any(
+        "계약" in unit and any(event in unit for event in c.SUPPLY_CONTRACT_EVENTS)
+        for unit in _supply_relation_units(text)
+    )
+
+
+def _has_stated_investment_plan(text: str, section_heading: str) -> bool:
+    """공식 설비·투자 절의 명시적 미래 투자 실행만 후보로 분류한다."""
+
+    if not any(marker in section_heading for marker in c.STATED_PLAN_FILING_HEADINGS):
+        return False
+    if not (
+        any(marker in text for marker in c.STATED_PLAN_FUTURE_MARKERS)
+        and c.STATED_PLAN_INVESTMENT_PATTERN.search(text)
+        and c.STATED_PLAN_COMMITMENT_PATTERN.search(text)
+    ):
+        return False
+    return not any(marker in text for marker in (
+        *c.STATED_PLAN_UNCERTAIN_MARKERS,
+        *c.STATED_PLAN_OTHER_COMPANY_MARKERS,
+        *c.STATED_PLAN_ACCOUNTING_MARKERS,
+        *c.STATED_PLAN_QUOTE_MARKERS,
+    ))
+
+
 #: 슬롯별 키워드 신호. 값은 예시 표현이며 전수 검증되지 않았다(알려진 한계).
 SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
     # 「당사는」는 거의 모든 공시 문단에 붙는 문법상 주어일 뿐 회사 정체성
@@ -43,7 +135,7 @@ SLOT_KEYWORDS: dict[str, tuple[str, ...]] = {
         "수익의 형태", "매출로 구성", "매출 등으로 구성",
     ),
     "business_model:customer_type": ("고객사", "거래처", "수요처"),
-    "business_model:sales_channel": ("유통", "채널", "직판", "대리점"),
+    "business_model:sales_channel": ("유통", "채널", "직판", "대리점", "판매경로"),
     "business_model:regional_mix": ("내수", "수출", "해외", "지역별"),
     "business_model:value_exchange": ("제공한다", "대가", "가치"),
 
@@ -335,14 +427,54 @@ def score_fragment_slots_with_signal(
     has_any_direct_signal = False
     for declaration_index, (slot_id, keywords) in enumerate(SLOT_KEYWORDS.items()):
         hits = [keyword for keyword in keywords if keyword_has_direct_hit(keyword, text)]
+        revenue_mix = (
+            slot_id == "business_model:revenue_model"
+            and _has_revenue_type_mix(text)
+        )
+        if revenue_mix:
+            hits.append("revenue_type_mix")
+        sales_table = (
+            slot_id == "business_model:sales_channel"
+            and _has_sales_channel_table(text)
+        )
+        if sales_table:
+            hits.append("sales_channel_table")
+        supply_contract = (
+            slot_id == "operations_partners:supply_relation"
+            and _has_supply_contract(text)
+        )
+        if supply_contract:
+            hits.append("supply_contract")
+        investment_plan = (
+            slot_id == "future_strategy:stated_plan"
+            and _has_stated_investment_plan(text, section_heading)
+        )
+        if investment_plan:
+            hits.append("stated_investment_plan")
         if not hits:
             continue
         has_any_direct_signal = True
         if allowed_slot_ids is not None and slot_id not in allowed_slot_ids:
             continue
+        if slot_id == "business_model:sales_channel" and not _has_sales_channel(text):
+            continue
+        if slot_id == "operations_partners:supply_relation" and not _has_supply_relation(text):
+            continue
         section_id = c.SLOT_SECTION_OF[slot_id]
         score = min(c.RELEVANCE_MAX_SCORE_MILLIS, len(hits) * c.RELEVANCE_KEYWORD_HIT_SCORE_MILLIS)
-        reason_codes = [f"keyword_hit:{slot_id}"]
+        reason_codes = (
+            [f"keyword_hit:{slot_id}"]
+            if len(hits) > int(revenue_mix) + int(sales_table) + int(supply_contract) + int(investment_plan)
+            else []
+        )
+        if revenue_mix:
+            reason_codes.append("direct_pattern:revenue_type_mix")
+        if sales_table:
+            reason_codes.append("direct_pattern:sales_channel_table")
+        if supply_contract:
+            reason_codes.append("direct_pattern:supply_contract")
+        if investment_plan:
+            reason_codes.append("direct_pattern:stated_investment_plan")
         for hint in SECTION_HEADING_HINTS.get(section_id, ()):
             if hint in section_heading:
                 score = min(c.RELEVANCE_MAX_SCORE_MILLIS, score + c.RELEVANCE_HEADING_BONUS_MILLIS)

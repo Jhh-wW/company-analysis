@@ -24,6 +24,7 @@ from src.features.composer.constants import (
     CITATION_RULES_GUIDE,
     CLAIM_SLOTS_BY_SECTION,
     COMPETITIVE_POSITION_PARAGRAPH_PLAN,
+    FLOW_HEADERS_BY_SECTION,
     FLOW_PROMPT_BY_SECTION,
     FORBIDDEN_TOPICS_GUIDE,
     JSON_SCHEMA_GUIDE,
@@ -435,9 +436,16 @@ def test_프롬프트에_위치의존_방향어가_없다():
         for section_id in SECTION_IDS
     ]
 
-    for prompt in [*flat_prompts, *packet_ask.prompts]:
+    for prompt in flat_prompts:
         assert 금지어 not in prompt
         assert 있어야_할_문구 in prompt
+    for section_id, prompt in zip(SECTION_IDS, packet_ask.prompts, strict=True):
+        assert 금지어 not in prompt
+        assert "본문의 «근거선택»에는 선택표의 지원쌍 ID를" in prompt
+        if section_id in FLOW_HEADERS_BY_SECTION:
+            assert "«경로표» 행의 «인용»만 자료 목록의 [조각 n] 번호를 그대로 쓴다" in prompt
+        else:
+            assert 있어야_할_문구 not in prompt
     # 장을 SECTION_IDS에서 빼도 상수에 방향어가 남지 않게 원본도 함께 본다.
     for guide in (JSON_SCHEMA_GUIDE, *FLOW_PROMPT_BY_SECTION.values()):
         assert 금지어 not in guide

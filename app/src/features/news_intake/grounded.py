@@ -252,37 +252,50 @@ def _exact_date(value: str, evidence: str, text: str, temporal_status: str, as_o
     return any(form in compact for form in date_forms)
 
 
+def _subject_rejected(diagnostics: Counter[str] | None, reason: str) -> None:
+    """주어 결속의 첫 실패만 닫힌 코드로 세고 판정값은 바꾸지 않는다."""
+    if diagnostics is not None:
+        diagnostics[reason] += 1
+    return None
+
+
 def _bound_subject(raw: dict[str, str], body: str, company: NewsCompanyContext,
-                   start: int) -> tuple[str, int] | None:
+                   start: int, *, diagnostics: Counter[str] | None = None
+                   ) -> tuple[str, int] | None:
     """회사명이 생략된 대상은 명시 관계 원문까지 하나의 연속 범위로 보존한다."""
     text = raw["text"]
     subject, evidence = raw["subject"], raw["subject_evidence"]
     if mentions_target(text, company):
-        return (text, start) if not subject and not evidence else None
+        return (text, start) if not subject and not evidence else _subject_rejected(
+            diagnostics, c.SUBJECT_DIRECT_NAME_EXTRA_FIELDS
+        )
     if not subject.strip() or len(subject) > c.GROUNDED_SUBJECT_CHARS or not evidence:
-        return None
+        return _subject_rejected(diagnostics, c.SUBJECT_MISSING_OR_GENERIC)
     if normalize_company_name(subject) in c.IDENTITY_STOP_WORDS | c.SUBJECT_GENERIC_TERMS:
-        return None
+        return _subject_rejected(diagnostics, c.SUBJECT_MISSING_OR_GENERIC)
     subject_context = NewsCompanyContext(subject)
     if not mentions_target(text, subject_context) or not mentions_target(evidence, subject_context):
-        return None
+        return _subject_rejected(diagnostics, c.SUBJECT_NOT_IN_QUOTE_OR_RELATION)
     relation_start = body.find(evidence)
-    if (relation_start < 0 or body.find(evidence, relation_start + 1) >= 0
-            or not mentions_target(evidence, company)
-            or not any(marker in evidence for marker in c.SUBJECT_RELATION_MARKERS)):
-        return None
+    if relation_start < 0 or body.find(evidence, relation_start + 1) >= 0:
+        return _subject_rejected(diagnostics, c.SUBJECT_RELATION_NOT_EXACT_OR_AMBIGUOUS)
+    if not mentions_target(evidence, company) or not any(
+        marker in evidence for marker in c.SUBJECT_RELATION_MARKERS
+    ):
+        return _subject_rejected(diagnostics, c.SUBJECT_RELATION_TARGET_OR_MARKER_MISSING)
     combined_start = min(start, relation_start)
     combined_end = max(start + len(text), relation_start + len(evidence))
     if combined_end - combined_start > c.GROUNDED_MAX_EXCERPT_CHARS:
-        return None
+        return _subject_rejected(diagnostics, c.SUBJECT_SPAN_LONG_OR_AMBIGUOUS)
     combined = body[combined_start:combined_end]
     if body.find(combined, combined_start + 1) >= 0:
-        return None
+        return _subject_rejected(diagnostics, c.SUBJECT_SPAN_LONG_OR_AMBIGUOUS)
     return combined, combined_start
 
 
 def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsCompanyContext,
-             as_of: dt.date, excluded: Counter[str]) -> GroundedNewsExcerpt | None:
+             as_of: dt.date, excluded: Counter[str],
+             subject_diagnostics: Counter[str] | None = None) -> GroundedNewsExcerpt | None:
     if not isinstance(raw, dict) or set(raw) != set(EXCERPT_SCHEMA["required"]):
         excluded["grounded_invalid_excerpt"] += 1
         return None
@@ -297,7 +310,7 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
     if start < 0 or body.find(text, start + 1) >= 0:
         excluded["grounded_text_not_exact"] += 1
         return None
-    bound = _bound_subject(raw, body, company, start)
+    bound = _bound_subject(raw, body, company, start, diagnostics=subject_diagnostics)
     if bound is None:
         excluded["grounded_subject_missing"] += 1
         return None
@@ -382,7 +395,8 @@ def _apply_claim_role(excerpt: GroundedNewsExcerpt, time_evidence: str,
 def _article_excerpts(item: dict[str, Any], candidate: NewsCandidate, body: str,
                       company: NewsCompanyContext, as_of: dt.date,
                       excluded: Counter[str],
-                      role_diagnostics: Counter[str] | None = None) -> list[GroundedNewsExcerpt]:
+                      role_diagnostics: Counter[str] | None = None,
+                      subject_diagnostics: Counter[str] | None = None) -> list[GroundedNewsExcerpt]:
     """신원 검증 경로와 무관하게 출처·응답 구조·모든 인용 조건을 적용한다."""
     source_type = item["source_type"]
     if not isinstance(source_type, str):
@@ -399,7 +413,8 @@ def _article_excerpts(item: dict[str, Any], candidate: NewsCandidate, body: str,
         return []
     excerpts = []
     for raw_excerpt in raw_excerpts:
-        excerpt = _excerpt(raw_excerpt, candidate, body, company, as_of, excluded)
+        excerpt = _excerpt(raw_excerpt, candidate, body, company, as_of, excluded,
+                           subject_diagnostics)
         if excerpt is not None:
             excerpts.extend(_apply_claim_role(
                 excerpt, raw_excerpt["time_evidence"], company, as_of, role_diagnostics,
@@ -413,6 +428,7 @@ def validate_grounded_response(raw: object, *, articles: list[tuple[NewsCandidat
                                company: NewsCompanyContext, as_of: dt.date,
                                identity_diagnostics: Counter[str] | None = None,
                                role_diagnostics: Counter[str] | None = None,
+                               subject_diagnostics: Counter[str] | None = None,
                                ) -> tuple[tuple[GroundedNewsExcerpt, ...], dict[str, int]]:
     excluded: Counter[str] = Counter()
     items = parse_grounded_payload(raw)
@@ -445,8 +461,9 @@ def validate_grounded_response(raw: object, *, articles: list[tuple[NewsCandidat
         identity_failure = _identity_failure(item["entity_evidence"], body, company)
         article_excluded: Counter[str] = Counter()
         article_roles: Counter[str] = Counter()
+        article_subjects: Counter[str] = Counter()
         article_excerpts = _article_excerpts(item, candidate, body, company, as_of, article_excluded,
-                                             article_roles)
+                                             article_roles, article_subjects)
         if identity_failure is not None:
             # 같은 기사의 독립 검증된 인용만 신원 근거를 대신할 수 있다.
             recovered = any(_identity_supported(excerpt.text, company) for excerpt in article_excerpts)
@@ -457,6 +474,8 @@ def validate_grounded_response(raw: object, *, articles: list[tuple[NewsCandidat
                 excluded["grounded_identity_unverified"] += 1
                 continue
         excluded.update(article_excluded)
+        if subject_diagnostics is not None:
+            subject_diagnostics.update(article_subjects)
         if role_diagnostics is not None:
             # 신원 복구에 실패해 버린 기사의 조정은 세지 않는다 — 실제 운반된 것만.
             role_diagnostics.update(article_roles)

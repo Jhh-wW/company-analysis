@@ -14,6 +14,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from src.features.pipeline import real
 from src.features.pipeline.evidence_transport import (
     RAW_EVIDENCE_SECTION_IDS_KEY,
@@ -43,6 +45,26 @@ from src.shared.report_evidence.source_kind_policy import (
 )
 
 _LOCATION_SLOT = "identity:official_location"
+
+
+@pytest.mark.parametrize(
+    "section_id,slot_id,text",
+    (
+        ("business_model", "business_model:sales_channel", "회사는 제품을 대리점과 직판 경로로 판매합니다."),
+        ("operations_partners", "operations_partners:supply_relation", "회사는 원재료를 공급업체와 구매 계약으로 조달합니다."),
+    ),
+)
+def test_사업_선택칸은_정식원문_지원칸으로_운반된다(
+    section_id: str, slot_id: str, text: str,
+) -> None:
+    raw = _typed_raw_for_formal_kind(SOURCE_KIND_DART_AUDIT_REPORT)
+    raw[RAW_EVIDENCE_SECTION_IDS_KEY] = (section_id,)
+    raw[RAW_EVIDENCE_SLOT_IDS_KEY] = (slot_id,)
+    raw["원문"] = text
+    conversion = _flat({1: raw})
+    assert conversion.rejected_count == 0
+    assert conversion.fragments[0].supported_claim_slots == (slot_id,)
+    assert slot_id not in attempt_slots_for_formal_source_kind(SOURCE_KIND_DART_AUDIT_REPORT)
 
 
 def _identity_raw(source_kind: str, slots: tuple[str, ...]) -> dict[str, object]:

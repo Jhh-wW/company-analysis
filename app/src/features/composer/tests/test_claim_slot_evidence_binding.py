@@ -157,7 +157,7 @@ def test_과제근거를_대응주장의_증거로_바꿔쓸수없다() -> None:
 
     assert report.sections[0].sentences == ()
     assert "지원 주장슬롯: current_challenges:issue" in prompt
-    assert "빈 문자열이나 목록 밖 id는 허용되지 않는다" in prompt
+    assert "빈 배열이나 목록 밖 ID는 허용되지 않는다" in prompt
 
 
 def test_한조각이_과제와대응을_모두지원하면_대응주장이_남는다() -> None:

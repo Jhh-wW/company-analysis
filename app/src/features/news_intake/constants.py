@@ -429,6 +429,21 @@ GROUNDED_MIN_EXCERPT_CHARS: Final[int] = 25
 GROUNDED_MAX_EXCERPT_CHARS: Final[int] = 1_000
 GROUNDED_EXCERPTS_PER_ARTICLE: Final[int] = 2
 GROUNDED_SUBJECT_CHARS: Final[int] = 100
+# 주어 결속의 첫 실패 분기만 집계한다. 원문·기사 신원은 진단에 싣지 않는다.
+SUBJECT_DIRECT_NAME_EXTRA_FIELDS: Final[str] = "direct_name_extra_subject_fields"
+SUBJECT_MISSING_OR_GENERIC: Final[str] = "subject_missing_or_generic"
+SUBJECT_NOT_IN_QUOTE_OR_RELATION: Final[str] = "subject_not_in_quote_or_relation"
+SUBJECT_RELATION_NOT_EXACT_OR_AMBIGUOUS: Final[str] = "relation_not_exact_or_ambiguous"
+SUBJECT_RELATION_TARGET_OR_MARKER_MISSING: Final[str] = "relation_target_or_marker_missing"
+SUBJECT_SPAN_LONG_OR_AMBIGUOUS: Final[str] = "combined_span_over_limit_or_ambiguous"
+SUBJECT_DIAGNOSTIC_CODES: Final[tuple[str, ...]] = (
+    SUBJECT_DIRECT_NAME_EXTRA_FIELDS,
+    SUBJECT_MISSING_OR_GENERIC,
+    SUBJECT_NOT_IN_QUOTE_OR_RELATION,
+    SUBJECT_RELATION_NOT_EXACT_OR_AMBIGUOUS,
+    SUBJECT_RELATION_TARGET_OR_MARKER_MISSING,
+    SUBJECT_SPAN_LONG_OR_AMBIGUOUS,
+)
 SUBJECT_GENERIC_TERMS: Final[frozenset[str]] = frozenset({
     "그", "그녀", "그룹", "가수", "배우", "제품", "서비스", "브랜드", "고객",
     "회사", "기업", "관계자", "대표", "사장", "회장", "사업", "계약", "이번",

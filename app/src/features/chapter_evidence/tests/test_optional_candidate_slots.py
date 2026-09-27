@@ -98,7 +98,47 @@ def test_선택_후보_칸은_필수_칸과_겹치지_않고_수집칸_뒤에_�
             *collector_slots_for(section_id),
             *optional,
         )
-    assert OPTIONAL_CANDIDATE_SLOTS_BY_SECTION == {"identity": (_LOCATION,)}
+    assert OPTIONAL_CANDIDATE_SLOTS_BY_SECTION == {
+        "identity": (_LOCATION,),
+        "business_model": ("business_model:sales_channel",),
+        "operations_partners": ("operations_partners:supply_relation",),
+    }
+
+
+@pytest.mark.parametrize(
+    "section_id, slot_id, text",
+    (
+        ("business_model", "business_model:sales_channel", "회사는 제품을 대리점과 직판 경로로 판매합니다."),
+        ("operations_partners", "operations_partners:supply_relation", "회사는 원재료를 공급업체와 구매 계약으로 조달합니다."),
+    ),
+)
+def test_사업_선택칸은_장후보에_남지만_필수준비를_채우지_않는다(
+    section_id: str, slot_id: str, text: str,
+) -> None:
+    fragment = make_fragment(
+        company_id=_COMPANY, fragment_id=f"{section_id}-optional",
+        document_id=_DOC, section_id=section_id, slot_id=slot_id,
+        text=text, score_millis=750,
+    )
+    document = make_document(
+        company_id=_COMPANY, document_id=_DOC,
+        source_kind="dart_audit_report", exact_evidence_hashes=(sha256_of(text),),
+    )
+    attempt = make_attempt(
+        company_id=_COMPANY, attempt_id=f"document:{_DOC}",
+        source_kind="dart_audit_report", slot_ids=collector_slots_for(section_id),
+        state="OK", reason_code="document_fetch_ok",
+    )
+    candidates = produce_chapter_evidence_candidates(
+        company_id=_COMPANY, company_type="audit_only",
+        documents=(document,), fragments=(fragment,), attempts=(attempt,),
+    )
+    chosen = next(candidate for candidate in candidates if candidate.section_id == section_id)
+    assert len(chosen.fragments) == 1
+    assert chosen.fragments[0].covered_slot_ids == (slot_id,)
+    assert set(collector_slots_for(section_id)) <= set(
+        build_section_bundle(chosen, required_slot_ids=collector_slots_for(section_id)).missing_slot_ids
+    )
 
 
 # ── 살릴 것: 선택 칸 운반 ──────────────────────────────────
