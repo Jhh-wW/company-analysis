@@ -309,6 +309,32 @@ def _visible(body: str) -> str:
     return re.sub(r"\s+", "", re.sub(r"<[^>]+>", " ", body))
 
 
+def test_two_year_trend_appears_as_same_web_chart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _unsealed_v2_report()
+    sections = []
+    for section in report.sections:
+        if section.cell != "past_changes":
+            sections.append(section)
+            continue
+        tables = [
+            replace(table, rows=table.rows[:2], raw_rows=table.raw_rows[:2])
+            if table.presentation == "trend"
+            else table
+            for table in section.tables
+        ]
+        sections.append(replace(section, tables=tables))
+    report = _fill_manifest_refs(replace(report, sections=sections))
+    report = replace(report, public_projection=build_public_projection(report))
+
+    article = _article(_render(report, monkeypatch, report_id="two-year-trend-web"))
+    assert 'class="report-visual trend-chart"' in article
+    assert len(re.findall(r'<span class="trend-label">2024</span>', article)) == 3
+    assert len(re.findall(r'<span class="trend-label">2025</span>', article)) == 3
+    assert '<span class="trend-label">2023</span>' not in article
+
+
 #: 화면에 찍힌 문단 번호(`.pno`)를 순서대로 뽑는다 — `result.html`의 span 그대로다.
 _PNO_RE = re.compile(r'<span class="pno" aria-hidden="true">([^<]*)</span>')
 

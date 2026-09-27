@@ -121,6 +121,47 @@ REVENUE_RECOGNITION_CRITERION_RE: Final[re.Pattern[str]] = re.compile(
     r"\d+년(?:이내|내)(?:에)?완료|중소기업특례|회계처리특례"
 )
 
+# 1·2장에 들어오는 공사 진행률·투입원가의 기간 배분 설명만 추가로 가린다.
+# 대상어와 처리 동사가 한 절에 모두 있어야 하며, 다른 장에는 적용하지 않는다.
+PROGRESS_ALLOCATION_SUBJECT_RE: Final[re.Pattern[str]] = re.compile(
+    r"진행(?:률|정도)|투입원가"
+)
+PROGRESS_ALLOCATION_TREATMENT_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:수익|매출)(?:을|를|으로|로)?(?:기간별|보고기간별|회계기간별)?"
+    r"(?:나누어)?(?:배분|기록|인식|계상)|"
+    r"(?:기간별|보고기간별|회계기간별)(?:수익|매출)(?:을|를)?(?:배분|기록|인식|계상)"
+)
+PROGRESS_ALLOCATION_RULE_NAME: Final[str] = "진행수익배분"
+PROGRESS_ALLOCATION_SECTIONS: Final[frozenset[str]] = frozenset(
+    {"identity", "business_model"}
+)
+
+# 수익이라는 낱말이 앞 절에 있고, 다음 절이 공사 진행 원가의 측정·인식
+# 방법만 설명하는 문형. 진행/원가/측정 표지/인식 표지가 모두 한 절에 필요하다.
+PROGRESS_COST_SUBJECT_RE: Final[re.Pattern[str]] = re.compile(r"진행")
+PROGRESS_COST_INPUT_RE: Final[re.Pattern[str]] = re.compile(r"원가")
+PROGRESS_COST_MEASURE_RE: Final[re.Pattern[str]] = re.compile(
+    r"측정|추정|계산|비율"
+)
+PROGRESS_COST_RECOGNITION_RE: Final[re.Pattern[str]] = re.compile(r"인식|계상")
+PROGRESS_COST_RULE_NAME: Final[str] = "진행원가측정"
+
+# 과거형 동사 하나는 회계정책 일반론에도 있다. 상대방 이름 또는 발생 연도가
+# 사건 동사와 결속한 경우에만, 금액 없는 실제 사건으로 취급한다.
+PROGRESS_ALLOCATION_EVENT_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:[가-힣A-Za-z0-9]{2,}(?:고객사|거래처|기관|은행)(?:와|과|에|에게)"
+    r"(?:계약을)?(?:체결|수주|납품|지급)(?:했|하였|한)|"
+    r"20\d{2}년(?:\d{1,2}월)?[^.。;]*?"
+    r"(?:체결|수주|준공|완공|납품|지급|개시|출시)(?:했|하였|됐|되었|한|된))"
+)
+PROGRESS_ALLOCATION_BUSINESS_RELATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:서비스|제품|플랫폼|솔루션|시스템)(?:을|를|의)?"
+    r"(?:고객사?|거래처)(?:에|에게)(?:제공|공급|납품|판매)"
+)
+PROGRESS_ALLOCATION_ACTION_RE: Final[re.Pattern[str]] = re.compile(
+    r"배분|기록|인식|계상"
+)
+
 # 자산의 인식·측정 방법과 실제 취득·손상 사건을 분리한다. 회사 고유 금액과
 # 이미 일어난 정책 변경은 기존 절별 면제로 보존한다.
 FIXED_ASSET_SUBJECT_RE: Final[re.Pattern[str]] = re.compile(r"(?:유형|무형)자산")
@@ -251,7 +292,7 @@ ACCOUNTING_POLICY_EXEMPTIONS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
 #: 「회계처리 특례」가 함께 실리면 «회계처리방법» 규칙에 먼저 걸리므로 두
 #: 범주를 함께 둔다. 다른 범주(회계기준적용·이연법인세 등)는 검토하지 않는다.
 REVENUE_RECOGNITION_EXEMPTIBLE_RULES: Final[frozenset[str]] = frozenset({
-    "수익인식기준", "회계처리방법",
+    "수익인식기준", "회계처리방법", PROGRESS_ALLOCATION_RULE_NAME,
 })
 
 #: 면제 이름 — 로그·시험 관측용. 사유 코드가 아니다.

@@ -183,6 +183,9 @@ class ArticleFetchOutcome:
     urls_examined: int = 0
     #: 실제로 보낸 요청 수.
     calls_made: int = 0
+    #: 허용된 각 주소의 콜백이 모든 내부 URL 변형에서 명시적 robots 불허 또는
+    #: 기사 HTTP 403만 관측했다고 증명한 경우만 참이다. 미관측은 거짓이다.
+    all_urls_access_denied: bool = False
 
 
 @dataclass(frozen=True)
@@ -241,6 +244,7 @@ def fetch_article_body(job: ArticleFetchJob, candidate: NewsCandidate, lease: Ca
     failures: list[str] = []
     urls_examined = 0
     calls_made = 0
+    all_callback_variants_denied = True
     budget_exhausted = False
     stop_requested = False
     read_candidate: NewsCandidate | None = None
@@ -278,14 +282,18 @@ def fetch_article_body(job: ArticleFetchJob, candidate: NewsCandidate, lease: Ca
                     raise
                 except Exception:
                     failures.append(c.EXCLUDED_FETCH_FAILED)
+                    all_callback_variants_denied = False
                     continue
             if not result.succeeded:
+                if not getattr(result, "all_variants_access_denied", False):
+                    all_callback_variants_denied = False
                 reason = result.reason_code
                 failures.append(
                     reason if reason in c.BODY_FAILURE_CODES or c.HTTP_STATUS_REASON_RE.fullmatch(reason)
                     else c.EXCLUDED_FETCH_FAILED
                 )
                 continue
+            all_callback_variants_denied = False
             if result.stage == c.BODY_STAGE_META_DESCRIPTION:
                 excluded["metadata_only_not_body"] += 1
                 continue
@@ -329,6 +337,11 @@ def fetch_article_body(job: ArticleFetchJob, candidate: NewsCandidate, lease: Ca
         excluded=excluded, warnings=warnings, article_failures=tuple(failures),
         budget_exhausted=budget_exhausted, stop_requested=stop_requested,
         urls_examined=urls_examined, calls_made=calls_made,
+        all_urls_access_denied=(
+            all_callback_variants_denied and calls_made > 0
+            and calls_made == len(eligible_body_urls(candidate, job.company, job.policy))
+            and not budget_exhausted and not stop_requested
+        ),
     )
 
 

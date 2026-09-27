@@ -2169,12 +2169,16 @@ def _apply_grounding(
                 source_id: value for source_id, value in sources.items()
                 if source_id != TABLE_SOURCE_ID
             } if context[0] == REVENUE_RECOGNITION_EXEMPT_SECTION_ID else None
-            problem = accounting_policy_problem(text, policy_sources)
+            problem = accounting_policy_problem(
+                text, policy_sources, section_id=context[0]
+            )
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
                 continue
-            if accounting_policy_mixed(text, policy_sources):
+            if accounting_policy_mixed(
+                text, policy_sources, section_id=context[0]
+            ):
                 # 차단하지 않는다 — 회사 고유 사실이 같은 항목에 섞여 있어서
                 # 통째로 지우면 그 사실까지 함께 사라진다. 관측만 남긴다.
                 logger.info(

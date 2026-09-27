@@ -340,6 +340,32 @@ def test_builder의_visual은_table_visualization_결과와_같다() -> None:
     assert set(kinds) == {"composition", "trend", "flow", "card", "relation_pairs"}
 
 
+def test_two_year_trend_is_sealed_for_web_without_inventing_third_year() -> None:
+    report = _report()
+    sections = []
+    for section in report.sections:
+        if section.cell != "past_changes":
+            sections.append(section)
+            continue
+        tables = [
+            replace(table, rows=table.rows[:2], raw_rows=table.raw_rows[:2])
+            if table.presentation == "trend"
+            else table
+            for table in section.tables
+        ]
+        sections.append(replace(section, tables=tables))
+    projection = build_public_projection(_sealed(replace(report, sections=sections)))
+    block = _section_of(projection, "past_changes")
+    trends = [visual for visual in block.display.visuals if visual.kind == "trend"]
+
+    assert len(trends) == 1
+    assert all(len(points) == 2 for _label, _risk, points in trends[0].series)
+    assert {point["label"] for _label, _risk, points in trends[0].series for point in points} == {
+        "2024",
+        "2025",
+    }
+
+
 def test_builder의_도식_비율은_Decimal_문자열이고_float가_아니다() -> None:
     """I8 — 화면(result.html의 ``'%.4f'|format``)과 같은 소수 넷째 자리 문자열."""
 

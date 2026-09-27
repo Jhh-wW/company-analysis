@@ -34,6 +34,18 @@ from src.features.composer.accounting_policy_constants import (
     ACCOUNTING_POLICY_BOILERPLATE,
     ACCOUNTING_POLICY_EXEMPTIONS,
     ACCOUNTING_POLICY_RULES,
+    PROGRESS_ALLOCATION_EVENT_RE,
+    PROGRESS_ALLOCATION_BUSINESS_RELATION_RE,
+    PROGRESS_ALLOCATION_ACTION_RE,
+    PROGRESS_ALLOCATION_RULE_NAME,
+    PROGRESS_ALLOCATION_SECTIONS,
+    PROGRESS_ALLOCATION_SUBJECT_RE,
+    PROGRESS_ALLOCATION_TREATMENT_RE,
+    PROGRESS_COST_INPUT_RE,
+    PROGRESS_COST_MEASURE_RE,
+    PROGRESS_COST_RECOGNITION_RE,
+    PROGRESS_COST_RULE_NAME,
+    PROGRESS_COST_SUBJECT_RE,
     REVENUE_COMPOSITION_SUBJECT_RE,
     REVENUE_COMPOSITION_VERB_RE,
     REVENUE_RECOGNITION_ACT_RE,
@@ -99,8 +111,8 @@ def _stream_names(text: str) -> frozenset[str]:
     )
 
 
-def _stream_recognition_exemption(clause: str, sources: SourceTexts) -> str:
-    """자기 인용에 결속된 «실제 수익원의 제공·인식 조건»이면 면제 이름을 준다.
+def _stream_recognition_in_source(clause: str, source: str) -> bool:
+    """자기 인용 하나에 수익원 구성과 제공·인식 조건이 함께 있으면 참이다.
 
     세 가지가 모두 확인될 때만 면제한다 — 낱말 하나로는 절대 면제하지 않는다:
       ① 절이 「<이름> 매출」로 수익원을 명명하고, 같은 자기 인용의 «수익 구성
@@ -115,15 +127,11 @@ def _stream_recognition_exemption(clause: str, sources: SourceTexts) -> str:
     수익원 인식 절에 그 기준이 없어 면제되지 않는다.
     """
 
-    values = _source_texts(sources)
-    if not values:
-        return ""
     normalized = unicodedata.normalize("NFKC", clause)
     source_clauses = [
         source_clause
-        for value in values
         for source_clause in SOURCE_CLAUSE_SPLIT_RE.split(
-            unicodedata.normalize("NFKC", value))
+            unicodedata.normalize("NFKC", source))
         if _surface(source_clause)
     ]
     composition_surfaces = [
@@ -132,17 +140,19 @@ def _stream_recognition_exemption(clause: str, sources: SourceTexts) -> str:
         and REVENUE_COMPOSITION_VERB_RE.search(_surface(source_clause))
     ]
     if not composition_surfaces:
-        return ""
+        return False
     sentence_streams = _stream_names(normalized)
     if not sentence_streams:
-        return ""
+        return False
     for sub_clause in RECOGNITION_CLAUSE_RE.split(normalized):
         surface_sub = _surface(sub_clause)
         if not surface_sub:
             continue
         criteria = tuple(match.group() for match
                          in REVENUE_RECOGNITION_CRITERION_RE.finditer(surface_sub))
-        if not RECOGNITION_RE.search(surface_sub) and not criteria:
+        if not (RECOGNITION_RE.search(surface_sub)
+                or PROGRESS_ALLOCATION_TREATMENT_RE.search(surface_sub)
+                or criteria):
             # 인식 서술도 기준 표지도 없는 소절(수식·접속 꼬리)은 판단 대상이 아니다.
             continue
         streams = _stream_names(sub_clause) or sentence_streams
@@ -150,50 +160,87 @@ def _stream_recognition_exemption(clause: str, sources: SourceTexts) -> str:
             any(stream + "매출" in composition for composition in composition_surfaces)
             for stream in streams
         ):
-            return ""
+            return False
         recognition_surfaces = [
             _surface(source_clause) for source_clause in source_clauses
-            if RECOGNITION_RE.search(_surface(source_clause))
+            if (RECOGNITION_RE.search(_surface(source_clause))
+                or PROGRESS_ALLOCATION_TREATMENT_RE.search(_surface(source_clause)))
             and any(stream in _surface(source_clause) for stream in streams)
         ]
         if not recognition_surfaces:
-            return ""
+            return False
         if not all(any(marker in surface for surface in recognition_surfaces)
                    for marker in criteria):
-            return ""
+            return False
         for basis_re in (COMPLETION_RE, PROGRESS_RE):
             if basis_re.search(surface_sub) and not any(
                 basis_re.search(surface) for surface in recognition_surfaces
             ):
-                return ""
+                return False
         candidate_limits = {(m["value"], m["unit"])
                             for m in DURATION_LIMIT_RE.finditer(surface_sub)}
         source_limits = {(m["value"], m["unit"]) for surface in recognition_surfaces
                          for m in DURATION_LIMIT_RE.finditer(surface)}
         if not candidate_limits <= source_limits:
-            return ""
-    return REVENUE_STREAM_EXEMPTION_NAME
+            return False
+        if PROGRESS_ALLOCATION_TREATMENT_RE.search(surface_sub) and not any(
+            PROGRESS_ALLOCATION_TREATMENT_RE.search(surface)
+            and set(PROGRESS_ALLOCATION_ACTION_RE.findall(surface_sub))
+            <= set(PROGRESS_ALLOCATION_ACTION_RE.findall(surface))
+            and all(
+                match.group() in surface
+                for match in PROGRESS_ALLOCATION_SUBJECT_RE.finditer(surface_sub)
+            )
+            for surface in recognition_surfaces
+        ):
+            return False
+    return True
 
 
-def _exemption_with_sources(clause: str, sources: SourceTexts) -> str:
+def _stream_recognition_exemption(clause: str, sources: SourceTexts) -> str:
+    """한 인용 안에 수익원 나열과 해당 인식 설명이 함께 있을 때만 면제한다."""
+
+    for source in _source_texts(sources):
+        if _stream_recognition_in_source(clause, source):
+            return REVENUE_STREAM_EXEMPTION_NAME
+    return ""
+
+
+def _exemption_with_sources(
+    clause: str, sources: SourceTexts, section_id: str = ""
+) -> str:
     """절 자체 면제가 먼저, 그다음 자기 인용 결속 면제 — 관측과 판정이 같은 길."""
 
     name = _exemption(clause)
     if name:
         return name
+    rule = _rule_hit(clause, section_id)
+    if (
+        rule in {PROGRESS_ALLOCATION_RULE_NAME, PROGRESS_COST_RULE_NAME}
+        and (
+            PROGRESS_ALLOCATION_EVENT_RE.search(_surface(clause))
+            or PROGRESS_ALLOCATION_BUSINESS_RELATION_RE.search(_surface(clause))
+        )
+    ):
+        return "회사실제사건"
     if sources is None:
         return ""
-    rule = _rule_hit(clause)
     if rule not in REVENUE_RECOGNITION_EXEMPTIBLE_RULES:
         return ""
     # 「회계처리방법」에 걸린 절은 실제 수익 인식 서술일 때만 검토한다 — 제목
     # 꼴만 있는 절(「회계처리 기준의 방법」)에 수익원 면제를 대지 않는다.
-    if not REVENUE_RECOGNITION_ACT_RE.search(_surface(clause)):
+    if not (
+        REVENUE_RECOGNITION_ACT_RE.search(_surface(clause))
+        or (
+            rule == PROGRESS_ALLOCATION_RULE_NAME
+            and PROGRESS_ALLOCATION_TREATMENT_RE.search(_surface(clause))
+        )
+    ):
         return ""
     return _stream_recognition_exemption(clause, sources)
 
 
-def _rule_hit(clause: str) -> str:
+def _rule_hit(clause: str, section_id: str = "") -> str:
     """면제를 «무시하고» 그 절에 걸리는 규칙 범주 이름을 돌려준다.
 
     면제 판단과 규칙 판단을 한 함수에 섞으면, 면제가 실제로 일하고 있는지를
@@ -208,6 +255,20 @@ def _rule_hit(clause: str) -> str:
     # (culture 장 전용이 아니라 «순수 회계 측정»을 가리는 규칙이라 장과 무관하다.)
     if culture_accounting_policy_problem(clause):
         return "순수회계측정"
+    if (
+        section_id in PROGRESS_ALLOCATION_SECTIONS
+        and PROGRESS_ALLOCATION_SUBJECT_RE.search(surface_clause)
+        and PROGRESS_ALLOCATION_TREATMENT_RE.search(surface_clause)
+    ):
+        return PROGRESS_ALLOCATION_RULE_NAME
+    if (
+        section_id in PROGRESS_ALLOCATION_SECTIONS
+        and PROGRESS_COST_SUBJECT_RE.search(surface_clause)
+        and PROGRESS_COST_INPUT_RE.search(surface_clause)
+        and PROGRESS_COST_MEASURE_RE.search(surface_clause)
+        and PROGRESS_COST_RECOGNITION_RE.search(surface_clause)
+    ):
+        return PROGRESS_COST_RULE_NAME
     for name, subject_pattern, treatment_pattern in ACCOUNTING_POLICY_RULES:
         if (subject_pattern.search(surface_clause)
                 and treatment_pattern.search(surface_clause)):
@@ -215,7 +276,9 @@ def _rule_hit(clause: str) -> str:
     return ""
 
 
-def _matched_rule(clause: str, sources: SourceTexts = None) -> str:
+def _matched_rule(
+    clause: str, sources: SourceTexts = None, section_id: str = ""
+) -> str:
     """그 절이 회계정책 상용구면 걸린 범주 이름, 아니면 빈 문자열.
 
     범주 이름은 로그·시험에서 «어느 규칙이 걸렸는지»를 되짚는 데만 쓴다.
@@ -229,12 +292,14 @@ def _matched_rule(clause: str, sources: SourceTexts = None) -> str:
       호출자가 2장 본문에만 원문을 넘기므로 다른 장의 판정은 종전 그대로다.
     """
 
-    if _exemption_with_sources(clause, sources):
+    if _exemption_with_sources(clause, sources, section_id):
         return ""
-    return _rule_hit(clause)
+    return _rule_hit(clause, section_id)
 
 
-def _clause_verdicts(text: str, sources: SourceTexts = None) -> tuple[bool, ...]:
+def _clause_verdicts(
+    text: str, sources: SourceTexts = None, section_id: str = ""
+) -> tuple[bool, ...]:
     """비어 있지 않은 절마다 «회계정책 상용구인가»를 차례대로 돌려준다.
 
     빈 절(문장부호 뒤 꼬리)은 아예 세지 않는다 — 세면 「모든 절이 상용구」가
@@ -242,13 +307,15 @@ def _clause_verdicts(text: str, sources: SourceTexts = None) -> tuple[bool, ...]
     """
 
     return tuple(
-        bool(_matched_rule(clause, sources))
+        bool(_matched_rule(clause, sources, section_id))
         for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
         if _surface(clause)
     )
 
 
-def accounting_policy_problem(text: str, sources: SourceTexts = None) -> str:
+def accounting_policy_problem(
+    text: str, sources: SourceTexts = None, section_id: str = ""
+) -> str:
     """항목 전체가 회계정책 주석 상용구면 고정 사유를 돌려준다.
 
     Args:
@@ -264,24 +331,28 @@ def accounting_policy_problem(text: str, sources: SourceTexts = None) -> str:
        그대로 두면 빈 항목이 «전부 상용구»로 읽힌다.
     """
 
-    verdicts = _clause_verdicts(text, sources)
+    verdicts = _clause_verdicts(text, sources, section_id)
     if not verdicts:
         return ""
     return ACCOUNTING_POLICY_BOILERPLATE if all(verdicts) else ""
 
 
-def accounting_policy_mixed(text: str, sources: SourceTexts = None) -> bool:
+def accounting_policy_mixed(
+    text: str, sources: SourceTexts = None, section_id: str = ""
+) -> bool:
     """일부 절만 회계정책 상용구인 «혼합» 항목인가.
 
     차단 판단이 아니다 — 진단·로그 집계에만 쓴다. 회사 고유 사실과 상용구가
     한 항목에 섞여 있다는 뜻이므로, 그 항목을 지우면 사실까지 함께 사라진다.
     """
 
-    verdicts = _clause_verdicts(text, sources)
+    verdicts = _clause_verdicts(text, sources, section_id)
     return any(verdicts) and not all(verdicts)
 
 
-def accounting_policy_matched_rules(text: str, sources: SourceTexts = None) -> tuple[str, ...]:
+def accounting_policy_matched_rules(
+    text: str, sources: SourceTexts = None, section_id: str = ""
+) -> tuple[str, ...]:
     """절마다 걸린 범주 이름(안 걸린 절은 빈 문자열) — 관측·시험용.
 
     어느 규칙이 어느 절을 잡았는지 확인할 수 없으면, 차단 시험이 초록이어도
@@ -289,13 +360,15 @@ def accounting_policy_matched_rules(text: str, sources: SourceTexts = None) -> t
     """
 
     return tuple(
-        _matched_rule(clause, sources)
+        _matched_rule(clause, sources, section_id)
         for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
         if _surface(clause)
     )
 
 
-def accounting_policy_exemptions(text: str, sources: SourceTexts = None) -> tuple[str, ...]:
+def accounting_policy_exemptions(
+    text: str, sources: SourceTexts = None, section_id: str = ""
+) -> tuple[str, ...]:
     """절마다 걸린 면제 이름(면제 아닌 절은 빈 문자열) — 관측·시험용.
 
     «통과»만 보면 규칙이 애초에 안 걸린 것인지, 걸렸는데 면제된 것인지
@@ -303,13 +376,15 @@ def accounting_policy_exemptions(text: str, sources: SourceTexts = None) -> tupl
     """
 
     return tuple(
-        _exemption_with_sources(clause, sources)
+        _exemption_with_sources(clause, sources, section_id)
         for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
         if _surface(clause)
     )
 
 
-def accounting_policy_rules_ignoring_exemptions(text: str) -> tuple[str, ...]:
+def accounting_policy_rules_ignoring_exemptions(
+    text: str, section_id: str = ""
+) -> tuple[str, ...]:
     """면제가 «없었다면» 절마다 걸렸을 규칙 이름 — 관측·시험용.
 
     면제 시험이 지켜야 할 것은 「지금 통과한다」가 아니라 「막히던 것이
@@ -317,7 +392,7 @@ def accounting_policy_rules_ignoring_exemptions(text: str) -> tuple[str, ...]:
     """
 
     return tuple(
-        _rule_hit(clause)
+        _rule_hit(clause, section_id)
         for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
         if _surface(clause)
     )

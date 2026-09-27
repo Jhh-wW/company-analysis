@@ -42,6 +42,7 @@ from src.features.report_standard.visualization import (
     ChartPoint,
     ChartSeries,
     TableVisualization,
+    table_visualization,
 )
 
 
@@ -158,6 +159,36 @@ def _mixed_trend() -> TableVisualization:
             ),
         ),
     )
+
+
+def test_two_year_trend_renders_both_years_with_same_pdf_graphic() -> None:
+    table = ReportTable(
+        caption="완료 사업연도 실적",
+        headers=["사업연도", "매출"],
+        rows=[["2025", "300"], ["2024", "200"]],
+        display_unit="억원",
+        presentation="trend",
+    )
+    visual = table_visualization(table)
+    assert visual is not None
+
+    page = _page(_render(_TrendGraphic(visual, _PAGE_WIDTH)))
+    text = "".join(character["text"] for character in page["chars"])
+    assert "2024" in text
+    assert "2025" in text
+    assert "200" in text
+    assert "300" in text
+    assert "2023" not in text
+    bar_colors = (_rgb(constants.COLOR_CHART_LIGHT), _rgb(constants.COLOR_CHART_DARK))
+    bars = [
+        rect
+        for rect in page["rects"]
+        if any(
+            _same_color(rect.get("non_stroking_color"), color)
+            for color in bar_colors
+        )
+    ]
+    assert len(bars) == 2, "두 사업연도의 막대가 모두 그려져야 합니다"
 
 
 def test_음수_막대는_붉은색을_쓰지_않고_가장_진한_회색으로_그린다() -> None:

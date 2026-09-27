@@ -481,3 +481,121 @@ def test_요약_문맥에는_걸지_않는다():
     calls = []
     checked = verify_sentences(sentences, fragments, None, _approval(calls))
     assert [s.text for s in checked] == [accounting]
+
+
+@pytest.mark.parametrize("text", (
+    "공사계약의 진행률과 투입원가를 산정하여 보고기간별 수익을 배분한다.",
+    "계약 진행 정도에 따라 수익을 나누어 기록한다.",
+))
+@pytest.mark.parametrize("section_id", ("identity", "business_model"))
+def test_진행률_기간배분만인_본문은_핵심_두_장에서_차단한다(
+    text: str, section_id: str
+) -> None:
+    assert accounting_policy_rules_ignoring_exemptions(
+        text, section_id=section_id
+    ) == ("진행수익배분",)
+    assert accounting_policy_problem(text, section_id=section_id) == EXPECTED_REASON
+    assert accounting_policy_problem(text, section_id="past_changes") == ""
+
+
+def test_금액없는_명명된_계약_사건과_혼합항목은_남긴다() -> None:
+    event = "가나다 고객사와 체결한 전산 구축 계약은 진행률에 따라 수익을 배분한다."
+    service = "전산 서비스를 고객사에 제공하며 진행률에 따라 수익을 배분한다."
+    policy = "공사계약의 진행률과 투입원가를 산정하여 보고기간별 수익을 배분한다."
+    assert accounting_policy_rules_ignoring_exemptions(
+        event, section_id="business_model"
+    ) == ("진행수익배분",)
+    assert accounting_policy_exemptions(
+        event, section_id="business_model"
+    ) == ("회사실제사건",)
+    assert accounting_policy_problem(event, section_id="business_model") == ""
+    assert accounting_policy_exemptions(
+        service, section_id="business_model"
+    ) == ("회사실제사건",)
+    assert accounting_policy_problem(service, section_id="business_model") == ""
+    assert accounting_policy_problem(
+        policy + " " + event, section_id="business_model"
+    ) == ""
+    assert accounting_policy_mixed(
+        policy + " " + event, section_id="business_model"
+    ) is True
+
+
+@pytest.mark.parametrize("generic", (
+    "고객과 체결한 계약은 진행률에 따라 수익을 인식한다.",
+    "지급한 대가는 진행률에 따라 수익을 배분한다.",
+))
+def test_과거형_한단어만으로는_실제회사사건으로_면제하지_않는다(
+    generic: str,
+) -> None:
+    assert accounting_policy_exemptions(
+        generic, section_id="business_model"
+    ) == ("",)
+    assert accounting_policy_problem(
+        generic, section_id="business_model"
+    ) == EXPECTED_REASON
+
+
+def test_진행원가_측정방식만_말하는_절은_1장에_맞지_않는다() -> None:
+    text = "진행에 따른 발생 원가를 추정하고 누적 원가 비율을 계산해 인식한다."
+    assert accounting_policy_matched_rules(
+        text, section_id="identity"
+    ) == ("진행원가측정",)
+    assert accounting_policy_problem(text, section_id="identity") == EXPECTED_REASON
+    assert accounting_policy_problem(text, section_id="past_changes") == ""
+
+
+def test_진행_수익원_같은_인용만_자기_인용_면제한다() -> None:
+    candidate = "용역 매출은 진행률에 따라 수익을 배분한다."
+    composition = "영업수익은 용역 매출과 구독 매출로 구성된다."
+    recognition = "용역 매출은 진행률에 따라 수익을 배분한다."
+    assert accounting_policy_problem(
+        candidate,
+        {"1": composition, "2": recognition},
+        section_id="business_model",
+    ) == EXPECTED_REASON
+    assert accounting_policy_exemptions(
+        candidate,
+        {"1": composition + " " + recognition},
+        section_id="business_model",
+    ) == ("수익원결속",)
+    assert accounting_policy_problem(
+        candidate,
+        {"1": composition + " 용역 매출은 진행률에 따라 수익을 인식한다."},
+        section_id="business_model",
+    ) == EXPECTED_REASON
+
+
+def test_기존_수익인식_면제도_서로_다른_인용을_이어붙이지_않는다() -> None:
+    candidate = "용역 매출은 진행기준에 따라 수익을 인식한다."
+    composition = "영업수익은 용역 매출과 구독 매출로 구성된다."
+    recognition = "용역 매출은 진행기준에 따라 수익을 인식한다."
+    assert accounting_policy_problem(
+        candidate, {"1": composition, "2": recognition}
+    ) == EXPECTED_REASON
+    assert accounting_policy_problem(
+        candidate, {"1": composition + " " + recognition}
+    ) == ""
+
+
+def test_실제_검수에서_핵심장_정책만_제외하고_완공_사실은_보존한다() -> None:
+    policy = "계약 진행 정도에 따라 수익을 나누어 기록한다."
+    completed = "작년에 완공한 물류시설 계약의 누적 수익은 전년보다 늘었다."
+    report = ComposedReport((
+        ComposedSection("identity", (ComposedSentence(policy, ("policy",), "확인"),)),
+        ComposedSection("past_changes", (
+            ComposedSentence(completed, ("event",), "확인"),
+        )),
+    ))
+    fragments = (
+        CollectedFragment("policy", "감사보고서", policy),
+        CollectedFragment("event", "사업보고서", completed),
+    )
+    calls: list[str] = []
+    diagnostics: list[dict[str, str]] = []
+    checked = verify_report(
+        report, fragments, None, _approval(calls), diagnostics=diagnostics,
+    )
+    assert checked.sections[0].sentences == ()
+    assert [sentence.text for sentence in checked.sections[1].sentences] == [completed]
+    assert [item["reason_code"] for item in diagnostics] == [EXPECTED_REASON]

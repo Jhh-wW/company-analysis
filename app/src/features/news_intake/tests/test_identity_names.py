@@ -63,7 +63,7 @@ def test_공식한영대응이_없으면_본문을_읽어도_추측약칭을_증
     assert result.diagnostics["완전성"] == "partial"
     assert result.diagnostics["이름미확인후보"] == 1
     assert result.diagnostics["실패"] is None
-    assert "grounded_identity_unverified" in result.diagnostics["검증미완료"]
+    assert "body_target_name_missing" in result.diagnostics["검증미완료"]
     assert not result.diagnostics["캐시재사용가능"]
 
 
@@ -75,7 +75,7 @@ def test_부분후보가_검증돼도_해결못한이름은_미완료와_캐시�
         else "가나다전자는 산업설비 제조 사업에서 제어 장치 120대를 고객 공장에 공급했다.")
     assert len(result.fragments) == 1
     assert result.diagnostics["검색상태"] == "success"
-    assert "grounded_identity_unverified" in result.diagnostics["검증미완료"]
+    assert "body_target_name_missing" in result.diagnostics["검증미완료"]
     assert not result.diagnostics["캐시재사용가능"]
 
 
