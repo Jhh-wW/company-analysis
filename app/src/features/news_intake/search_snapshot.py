@@ -187,6 +187,48 @@ def diverse_candidates(candidates: list[NewsCandidate], limit: int) -> tuple[New
     return tuple(selected)
 
 
+def metadata_probe_budget(*, total_budget: int, attempted: int,
+                          window_budget: int, probes_attempted: int) -> int:
+    """분할된 기간 몫에서도 전체 기본 시도 상한 안의 탐색몫을 잃지 않는다."""
+    if total_budget <= 0 or window_budget <= 0:
+        return 0
+    total_probes = min(c.METADATA_MISMATCH_MAX_BODY_PROBES,
+                       total_budget // c.METADATA_MISMATCH_BODY_PROBE_DIVISOR)
+    target = min(total_budget, attempted + window_budget) * total_probes // total_budget
+    local_ceiling = (window_budget * total_probes + total_budget - 1) // total_budget
+    return min(max(0, target - probes_attempted), local_ceiling, window_budget)
+
+
+def body_ranked_candidates(candidates: list[NewsCandidate], *, attempt_budget: int,
+                           probe_budget: int,
+                           replacement: bool = False) -> tuple[NewsCandidate, ...]:
+    """기본 본문 탐색에서 메타 이름 비일치 후보를 제한적으로 분산한다.
+
+    검색 예비집합과 접근 거절 보충 순위는 바꾸지 않는다. 비일치 후보도 기존
+    신뢰 출처·기간·본문 법인 검증을 그대로 거쳐야만 조각이 된다.
+    """
+    ranked = diverse_candidates(candidates, len(candidates))
+    budget = min(max(attempt_budget, 0), len(ranked))
+    if replacement or budget == 0:
+        return ranked
+    matched = deque(item for item in ranked if item.metadata_name_match)
+    unmatched = deque(item for item in ranked if not item.metadata_name_match)
+    probe_count = min(max(0, probe_budget), budget, len(unmatched))
+    if probe_count == 0 or not matched:
+        return ranked
+    probe_positions = {
+        ((2 * index + 1) * budget) // (2 * probe_count)
+        for index in range(probe_count)
+    }
+    selected: list[NewsCandidate] = []
+    for position in range(budget):
+        preferred, fallback = (unmatched, matched) if position in probe_positions else (matched, unmatched)
+        selected.append((preferred if preferred else fallback).popleft())
+    selected.extend(matched)
+    selected.extend(unmatched)
+    return tuple(selected)
+
+
 def snapshot_digest(snapshot: NewsSearchSnapshot) -> str:
     return stable_digest({
         "version": c.COLLECTION_POLICY_VERSION,

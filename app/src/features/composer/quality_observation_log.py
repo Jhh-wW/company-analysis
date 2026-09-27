@@ -19,6 +19,10 @@ from typing import Final, Mapping, Sequence
 from src.features.composer.prose_facts import PROSE_FACT_ID_PREFIX
 from src.shared.report_evidence.constants import ReleaseMode
 from src.shared.report_quality.composition_diagnostic_constants import (
+    PRIMARY_QUALITY_STOP_STEP, PRIMARY_QUALITY_STOP_REASON_FIELD,
+    PRIMARY_QUALITY_STOP_CODES_FIELD, PRIMARY_QUALITY_STOP_SECTION_FIELDS,
+    PRIMARY_QUALITY_STOP_SAFETY_TOTAL_FIELD,
+    PRIMARY_QUALITY_STOP_SAFETY_KINDS_FIELD,
     SAFETY_BLOCK_KINDS_FIELD,
     SAFETY_BLOCK_ROUND_FIELD,
     SAFETY_BLOCK_SECTION_ORDER,
@@ -33,6 +37,8 @@ from src.shared.report_quality.safety_problem_kinds import (
     SAFETY_PROBLEM_KINDS,
     safety_problem_kind,
 )
+from src.shared.report_quality.composition_diagnostics import observed_composition_steps
+from src.shared.report_recovery import QUALITY_DERIVED_STOP_REASON_CODES
 
 
 #: 부분 보고서 요약 한 줄에 실을 유형의 최대 개수. 넘치면 나머지는 개수로만
@@ -296,10 +302,60 @@ def record_full_safety_block(
     sink.append(record)
 
 
+def primary_quality_stop_record(
+    assessment: GenerationAssessment,
+    reason_code: str,
+) -> dict[str, object]:
+    """강등 전 FULL 1차 품질 중단을 식별값 없는 닫힌 자료로 만든다."""
+    if reason_code not in QUALITY_DERIVED_STOP_REASON_CODES:
+        raise ValueError("품질 중단 사유 코드가 아닙니다")
+    quality = assessment.quality
+    kinds: dict[str, int] = {}
+    for problem in assessment.safety.problems:
+        kind = safety_problem_kind(problem)
+        kinds[kind] = kinds.get(kind, 0) + 1
+    sections = (
+        quality.notice_only_sections,
+        quality.one_claim_sections,
+        quality.underfilled_sections,
+        quality.semantic_underfilled_sections,
+    )
+    return {
+        "step": PRIMARY_QUALITY_STOP_STEP,
+        PRIMARY_QUALITY_STOP_REASON_FIELD: reason_code,
+        PRIMARY_QUALITY_STOP_CODES_FIELD: [code.value for code in quality.problem_codes],
+        **dict(zip(PRIMARY_QUALITY_STOP_SECTION_FIELDS, map(list, sections), strict=True)),
+        PRIMARY_QUALITY_STOP_SAFETY_TOTAL_FIELD: len(assessment.safety.problems),
+        PRIMARY_QUALITY_STOP_SAFETY_KINDS_FIELD: kinds,
+    }
+
+
+def record_primary_quality_stop(
+    sink: list[dict[str, object]],
+    assessment: GenerationAssessment,
+    reason_code: str,
+    *,
+    logger: logging.Logger,
+) -> None:
+    """진단 실패가 기존 품질 중단·강등의 결과를 바꾸지 않게 한다."""
+    if reason_code not in QUALITY_DERIVED_STOP_REASON_CODES:
+        return
+    try:
+        candidate = primary_quality_stop_record(assessment, reason_code)
+        normalized = observed_composition_steps((candidate,))
+        if normalized:
+            sink.append(normalized[0])
+    except Exception as error:  # noqa: BLE001 - 기록 실패는 제품 판정과 독립이다.
+        logger.warning("FULL 1차 품질 중단 진단을 남기지 못했습니다(%s)",
+                       type(error).__name__)
+
+
 __all__ = [
     "MAX_SUMMARY_TYPES",
     "log_generation_quality_observation",
     "record_full_safety_block",
+    "record_primary_quality_stop",
+    "primary_quality_stop_record",
     "safety_block_record",
     "summarize_safety_problems",
 ]

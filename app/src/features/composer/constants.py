@@ -293,6 +293,24 @@ JSON_SCHEMA_GUIDE: Final[str] = (
     "\"인용\"의 조각id는 자료 목록의 [조각 n] 번호를 그대로 쓴다.\n"
 )
 
+# FULL packet에서만 기존 출력 스키마의 빈 슬롯 허용 예시를 좁힌다. SHADOW의
+# 문구와 바이트는 유지한다. 모든 장의 전용 경로표 스키마도 같은 예시를 쓴다.
+CLAIM_SLOT_SCHEMA_HINT: Final[str] = "<허용된 id 또는 빈 문자열>"
+FULL_CLAIM_SLOT_SCHEMA_HINT: Final[str] = "<인용한 조각의 지원 주장슬롯 id>"
+FULL_SUPPORTED_SLOT_INDEX_HEAD: Final[str] = (
+    "FULL 근거 선택표 — 먼저 아래 지원 주장슬롯에서 조각 번호를 고른 뒤 "
+    "그 조각의 원문에 있는 사실만 문장으로 쓴다. 표시되지 않은 슬롯은 "
+    "이 장의 자료가 지원하지 않으므로 쓰지 않는다:\n"
+)
+FULL_CITATION_SLOT_GUIDE: Final[str] = (
+    "FULL 출력 순서 — ① 원문에서 사실을 확인하고 지원 주장슬롯의 조각 번호를 "
+    "고른다. ② 그 조각이 지원하는 주장슬롯 id를 그대로 복사한다. "
+    "③ 확인한 사실만 문장으로 쓴다. 인용 배열에는 지금 이 장 자료에 표시된 "
+    "조각 id를 문자열로 정확히 복사한다. 대괄호나 '조각 ' 접두어를 붙이거나 "
+    "표 이름을 넣지 않는다. "
+    "인용한 조각 중 어느 것도 선택한 슬롯을 지원하지 않으면 그 문장을 내지 않는다.\n"
+)
+
 PROMPT_FRAGMENTS_HEAD: Final[str] = "\n수집된 공식 자료 조각 (전체):\n"
 PROMPT_TABLE_HEAD: Final[str] = "\n프로그램이 검증해 만든 실적표:\n"
 

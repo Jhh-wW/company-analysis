@@ -43,6 +43,7 @@ from src.features.composer.constants import (
     ALREADY_WRITTEN_HEAD,
     ALREADY_WRITTEN_MAX_SENTENCES,
     CITATION_RULES_GUIDE,
+    CLAIM_SLOT_SCHEMA_HINT,
     CLAIM_SLOTS_BY_SECTION,
     DOCUMENT_LIST_GUIDE,
     DOCUMENT_LIST_HEAD,
@@ -50,6 +51,9 @@ from src.features.composer.constants import (
     EVIDENCE_LABEL_OMIT_NUMERIC_LOCATION,
     EVIDENCE_LABEL_SHORT_KIND,
     FORBIDDEN_TOPICS_GUIDE,
+    FULL_CITATION_SLOT_GUIDE,
+    FULL_CLAIM_SLOT_SCHEMA_HINT,
+    FULL_SUPPORTED_SLOT_INDEX_HEAD,
     GRADE_CONFIRMED,
     JSON_SCHEMA_GUIDE,
     NOTICE_COMPOSE_FAILED,
@@ -483,12 +487,27 @@ def build_section_prompt(
         "\n원자 주장 계획 — 각 문장은 가장 알맞은 id를 «주장슬롯»에 넣고, "
         "id는 고유 번호가 아니라 사실의 종류다. 같은 종류의 서로 다른 원자 "
         "사실에는 같은 id를 다시 써도 되지만, 같은 사실을 말만 바꿔 반복하지 "
-        "않는다. 어느 자리에도 맞지 않으면 빈 문자열로 두며 새 id를 만들지 "
-        "않는다:\n- " + "\n- ".join(claim_slots) + "\n"
+        "않는다. "
+        + (
+            "근거 조각이 지원하지 않는 사실은 쓰지 않으며 새 id를 만들지 않는다:\n- "
+            if show_supported_claim_slots else
+            "어느 자리에도 맞지 않으면 빈 문자열로 두며 새 id를 만들지 않는다:\n- "
+        )
+        + "\n- ".join(claim_slots) + "\n"
         if claim_slots
         else ""
     )
     if show_supported_claim_slots:
+        by_slot: dict[str, list[str]] = {slot: [] for slot in claim_slots}
+        for fragment in fragments:
+            for slot in fragment.supported_claim_slots:
+                if slot in by_slot and fragment.fragment_id not in by_slot[slot]:
+                    by_slot[slot].append(fragment.fragment_id)
+        claim_slot_guide += FULL_SUPPORTED_SLOT_INDEX_HEAD + "".join(
+            f"- {slot}: {', '.join(by_slot[slot])}\n"
+            for slot in claim_slots if by_slot[slot]
+        )
+        claim_slot_guide += FULL_CITATION_SLOT_GUIDE
         required_claim_slots = required_slots_for(section_id)
         claim_slot_guide += (
             "\nFULL 근거 결속 규칙 — 모든 산문 문장은 «확인»·«해석» 등급과 "
@@ -524,6 +543,11 @@ def build_section_prompt(
         fragments,
         show_supported_claim_slots=(show_supported_claim_slots or allowed_fragment_ids is not None),
     )
+    schema_guide = FLOW_PROMPT_BY_SECTION.get(section_id, JSON_SCHEMA_GUIDE)
+    if show_supported_claim_slots:
+        schema_guide = schema_guide.replace(
+            CLAIM_SLOT_SCHEMA_HINT, FULL_CLAIM_SLOT_SCHEMA_HINT
+        )
     section_parts = [
         SECTION_GUIDES[section_id],
         (
@@ -554,7 +578,7 @@ def build_section_prompt(
         # 흐름표를 내는 장(5장 대응표·7장 경로표)은 스키마 안내를 통째로 «바꾼다».
         # 덧붙이면 기본 안내의 「이 JSON만 출력한다」와 충돌해 작가가 표를
         # 빼먹는다 (소재 제조사 실측).
-        FLOW_PROMPT_BY_SECTION.get(section_id, JSON_SCHEMA_GUIDE),
+        schema_guide,
         _render_table(performance_table),
         _render_already_written(already_written),
     ]

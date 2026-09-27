@@ -209,6 +209,7 @@ from src.shared.report_generation.canonical import (
 from src.features.composer.quality_observation_log import (
     log_generation_quality_observation,
     record_full_safety_block,
+    record_primary_quality_stop,
 )
 from src.features.composer.quality_projection import (
     build_generation_quality_candidate,
@@ -3002,6 +3003,12 @@ def run_v2(
             raise V2ValidationError(
                 ("report_recovery:primary_receipt_invalid",)
             ) from error
+        record_primary_quality_stop(
+            composition_diagnostics,
+            generation_assessment,
+            recovery_decision.reason_code,
+            logger=logger,
+        )
 
         if recovery_decision.action is RecoveryAction.RUN_SUPPLEMENTS:
             authorization = recovery_decision.supplement_authorization

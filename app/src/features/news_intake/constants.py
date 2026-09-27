@@ -349,7 +349,7 @@ URL_VARIANT_ORDER: Final[tuple[str, ...]] = (
 MAX_URL_VARIANTS: Final[int] = 3
 
 # 새 수집 경로의 상한은 기사 수를 채우는 목표가 아니라 요청 비용의 경계다.
-COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v8"
+COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v9"
 NAME_ACRONYM_MIN_CHARS: Final[int] = 2
 NAME_ACRONYM_MAX_CHARS: Final[int] = 8
 NAME_RETAINED_SUFFIX_MIN_CHARS: Final[int] = 2
@@ -390,6 +390,10 @@ SEARCH_DESCRIPTION_CHARS: Final[int] = 2_000
 SEARCH_URL_CHARS: Final[int] = 2_000
 COMPANY_CONTEXT_CHARS: Final[int] = 4_000
 BODY_ARTICLE_BUDGET: Final[int] = 24
+# 검색 제목·요약에 공식명이 없는 신뢰 출처도 본문에서 법인을 증명할 수 있다.
+# 본문 시도 상한을 늘리지 않고 각 기간의 기본 탐색몫 안에서만 소량 조사한다.
+METADATA_MISMATCH_MAX_BODY_PROBES: Final[int] = 4
+METADATA_MISMATCH_BODY_PROBE_DIVISOR: Final[int] = 6
 BODY_CALL_BUDGET: Final[int] = 48
 BODY_CHARS_PER_ARTICLE: Final[int] = 12_000
 BODY_TOTAL_CHARS_BUDGET: Final[int] = 200_000

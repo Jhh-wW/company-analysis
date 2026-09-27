@@ -40,6 +40,10 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     SAFETY_BLOCK_KINDS_FIELD, SAFETY_BLOCK_ROUND_FIELD, SAFETY_BLOCK_ROUNDS,
     SAFETY_BLOCK_SECTION_ORDER, SAFETY_BLOCK_SECTIONS_FIELD, SAFETY_BLOCK_STEP,
     SAFETY_BLOCK_TOTAL_FIELD,
+    PRIMARY_QUALITY_STOP_STEP, PRIMARY_QUALITY_STOP_REASON_FIELD,
+    PRIMARY_QUALITY_STOP_CODES_FIELD, PRIMARY_QUALITY_STOP_SECTION_FIELDS,
+    PRIMARY_QUALITY_STOP_SAFETY_TOTAL_FIELD,
+    PRIMARY_QUALITY_STOP_SAFETY_KINDS_FIELD,
     SECTION_EXECUTION_STEP,
     SECTION_EXECUTION_COUNT_FIELDS,
     SECTION_EXECUTION_PARTIAL_COUNT_FIELDS,
@@ -51,6 +55,9 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     STYLE_STEP,
 )
 from src.shared.report_quality.safety_problem_kinds import SAFETY_PROBLEM_KINDS
+from src.shared.report_quality.constants import STRICT_REQUIRED_QUALITY_SECTION_IDS
+from src.shared.report_quality.models import QualityProblemCode
+from src.shared.report_recovery import QUALITY_DERIVED_STOP_REASON_CODES
 
 
 def _count(value: object, *, minimum: int = 0) -> bool:
@@ -270,6 +277,7 @@ def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], 
             _grounding_rewrite(record) if step == GROUNDING_REWRITE_STEP else
             _style(record) if step == STYLE_STEP else
             _safety_block(record) if step == SAFETY_BLOCK_STEP else
+            _primary_quality_stop(record) if step == PRIMARY_QUALITY_STOP_STEP else
             _release_mode(record) if step == RELEASE_MODE_STEP else None
         )
         if normalized is not None:
@@ -427,6 +435,46 @@ def _safety_block(record: Mapping) -> dict[str, object] | None:
         SAFETY_BLOCK_KINDS_FIELD: kinds,
         SAFETY_BLOCK_SECTIONS_FIELD: sections,
     }
+
+
+_QUALITY_CODES = frozenset(code.value for code in QualityProblemCode)
+_QUALITY_SECTIONS = frozenset(STRICT_REQUIRED_QUALITY_SECTION_IDS)
+
+
+def _primary_quality_stop(record: Mapping) -> dict[str, object] | None:
+    """FULL 1차 품질 중단에서 닫힌 코드·장·안전 유형만 보존한다."""
+    reason = record.get(PRIMARY_QUALITY_STOP_REASON_FIELD)
+    codes = record.get(PRIMARY_QUALITY_STOP_CODES_FIELD)
+    total = record.get(PRIMARY_QUALITY_STOP_SAFETY_TOTAL_FIELD)
+    kinds = _closed_counts(
+        record.get(PRIMARY_QUALITY_STOP_SAFETY_KINDS_FIELD),
+        SAFETY_PROBLEM_KINDS,
+    )
+    if (not isinstance(reason, str)
+            or reason not in QUALITY_DERIVED_STOP_REASON_CODES
+            or not isinstance(codes, (list, tuple)) or not codes
+            or any(not isinstance(code, str) or code not in _QUALITY_CODES
+                   for code in codes)
+            or len(codes) != len(set(codes))
+            or not _count(total) or kinds is None
+            or sum(kinds.values()) != total):
+        return None
+    result: dict[str, object] = {
+        "step": PRIMARY_QUALITY_STOP_STEP,
+        PRIMARY_QUALITY_STOP_REASON_FIELD: reason,
+        PRIMARY_QUALITY_STOP_CODES_FIELD: list(codes),
+        PRIMARY_QUALITY_STOP_SAFETY_TOTAL_FIELD: total,
+        PRIMARY_QUALITY_STOP_SAFETY_KINDS_FIELD: kinds,
+    }
+    for field in PRIMARY_QUALITY_STOP_SECTION_FIELDS:
+        sections = record.get(field)
+        if (not isinstance(sections, (list, tuple))
+                or any(not isinstance(section, str) or section not in _QUALITY_SECTIONS
+                       for section in sections)
+                or len(sections) != len(set(sections))):
+            return None
+        result[field] = list(sections)
+    return result
 
 
 def _closed_shape_list(value: object) -> list[str] | None:
