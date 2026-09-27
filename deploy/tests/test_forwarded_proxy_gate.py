@@ -412,7 +412,7 @@ def test_render_blueprint는_유료_관리자_실분석_한서비스만_좁게_�
     assert web["disk"] == {
         "name": "company-analysis-data",
         "mountPath": "/var/data",
-        "sizeGB": 1,
+        "sizeGB": 2,
     }
     assert values["DEPLOYMENT_EXPOSURE"]["value"] == "public"
     assert values["DEPLOYMENT_PLATFORM"]["value"] == "render"
