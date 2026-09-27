@@ -19,6 +19,7 @@ from dataclasses import replace
 import pytest
 
 from src.features.composer.pipeline import run_v2
+from src.features.composer.constants import SECTION_TITLES
 from src.features.composer.tests import test_section_public_manifest as full_fixture
 from src.features.composer.tests.test_section_public_manifest import (
     _BoundGroupedReviewer,
@@ -37,6 +38,7 @@ from src.shared.report_evidence.constants import (
 )
 from src.shared.report_quality import assessment as assessment_module
 from src.shared.report_quality.constants import (
+    HISTORICAL_PERFORMANCE_RATE_CLAIM_TYPE,
     OFFICIAL_PROSE_EXACT_TEXT_KEY,
     STRICT_QUALITY_CONTRACT_VERSION,
 )
@@ -127,9 +129,9 @@ def _official_packets():
     return replace(packets, packets=tuple(typed_packets))
 
 
-def _run(release_mode: ReleaseMode):
+def _run(release_mode: ReleaseMode, *, writer_ask=None):
     arguments: dict[str, object] = {
-        "writer_ask": _CompletePacketWriter(),
+        "writer_ask": writer_ask or _CompletePacketWriter(),
         "reviewer_ask": _BoundGroupedReviewer(),
         "diagram_ask": _NoDiagram(),
         "release_mode": release_mode,
@@ -220,22 +222,19 @@ def test_원문_증명을_끄면_같은_실행이_7차처럼_막힌다(monkeypat
     assert sum(problem.endswith(_BINDING) for problem in problems) == 15
 
 
-def test_작가가_원문_날짜_표기를_바꿔_옮기면_게이트에서_막힌다(monkeypatch):
-    """값이 같아 앞 단계 숫자 대조는 통과한다 — «원문 그대로» 겹만 막는다(음성)."""
+def test_작가가_원문_날짜_표기를_바꿔_옮기면_FULL_후보에서_먼저_제외한다(monkeypatch):
+    """값이 같아도 자기 인용의 표기가 다르면 최종 후보에 싣지 않는다."""
 
     _install_numeric_sentences(
         monkeypatch, source_phrases={("identity", 0): "2019.03.15 기준"},
     )
-    calls = _spy_safety(monkeypatch)
+    output = _run(ReleaseMode.FULL)
 
-    with pytest.raises(V2ValidationError, match="post_validation_safety_blocked"):
-        _run(ReleaseMode.FULL)
-
-    ((version, problems),) = calls
-    assert version == STRICT_QUALITY_CONTRACT_VERSION
-    assert len(problems) == 2
-    assert problems[0].startswith("v2-prose-") and problems[0].endswith(_LABELS)
-    assert problems[1].startswith("v2-prose-") and problems[1].endswith(_BINDING)
+    assert output.effective_release_mode == "FULL"
+    assert output.quality_observation.safety_problems == ()
+    numeric = _numeric_prose_facts(output.report)
+    assert len(numeric) == 14
+    assert not any("2019년 3월 15일" in fact.claim for fact in numeric)
 
 
 def test_원문에_없는_연도는_게이트_전에_빠지고_나머지는_FULL로_나간다(monkeypatch):
@@ -261,6 +260,59 @@ def test_원문에_없는_연도는_게이트_전에_빠지고_나머지는_FULL
     assert not any("1987년" in claim for claim in claims)
     assert "1987년" not in prose
     assert len(_numeric_prose_facts(output.report)) == 15
+
+
+def test_실적표에서_빌린_4장_연도는_FULL_후보에서_빠진다(monkeypatch):
+    """표의 연도 풀이 맞아도 자기 인용 조각이 아니면 안 된다."""
+    _install_numeric_sentences(
+        monkeypatch,
+        writer_only={('past_changes', 1): '2024년 기준'},
+    )
+
+    output = _run(ReleaseMode.FULL)
+
+    assert output.effective_release_mode == 'FULL'
+    assert output.quality_observation.safety_problems == ()
+    # 제거 대상 하나만 빠지고 프로그램이 만든 구조화 실적은 그대로 남는다.
+    assert len(_numeric_prose_facts(output.report)) == 14
+    assert any(
+        fact.claim_type == HISTORICAL_PERFORMANCE_RATE_CLAIM_TYPE
+        for fact in output.report.fact_records
+    )
+
+
+def test_숫자_문장을_제외한_뒤_얇은_장은_FULL_품질하한을_우회하지_못한다(monkeypatch):
+    """숫자 오류를 숨겨도 필수 장 분량을 자동 합격으로 올리지 않는다."""
+    from src.features.composer import pipeline as composer_pipeline
+
+    class ThinInvalidWriter(_CompletePacketWriter):
+        def __init__(self) -> None:
+            super().__init__()
+
+        def __call__(self, prompt: str) -> str:
+            payload = json.loads(super().__call__(prompt))
+            if f"«{SECTION_TITLES['identity']}»" in prompt:
+                payload["문장들"] = payload["문장들"][:3]
+                payload["문장들"][0]["글"] += " 2024년 기준."
+            return json.dumps(payload, ensure_ascii=False)
+
+    removed: list[tuple[tuple[str, int], ...]] = []
+    original = composer_pipeline.enforce_public_numeric_safety
+
+    def observed_filter(report, **kwargs):
+        filtered, observation = original(report, **kwargs)
+        if kwargs.get("strict_cited_fragments") is not None:
+            removed.append(observation.removed_section_counts)
+        return filtered, observation
+
+    monkeypatch.setattr(
+        composer_pipeline, "enforce_public_numeric_safety", observed_filter
+    )
+    with pytest.raises(V2ValidationError) as caught:
+        _run(ReleaseMode.FULL, writer_ask=ThinInvalidWriter())
+
+    assert any(("identity", 1) in counts for counts in removed)
+    assert any("quality" in reason or "품질" in reason for reason in caught.value.problems)
 
 
 def test_FULL과_SHADOW에서_숫자_산문_fact_id가_같다(monkeypatch):

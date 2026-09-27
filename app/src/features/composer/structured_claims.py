@@ -57,6 +57,14 @@ from src.shared.report_quality.constants import (
     ROUNDING_MODE,
 )
 from src.shared.report_quality.assessment import has_public_numeric_token
+from src.shared.report_quality.official_prose_numeric import (
+    official_number_tokens,
+    prose_numbers_verbatim_in_fragments,
+)
+from src.shared.report_evidence.constants import (
+    FORMAL_DOCUMENT_SOURCE_KINDS,
+    SOURCE_KIND_NEWS,
+)
 from src.shared.report_quality.dto import ClaimFact
 from src.shared.report_quality.models import VerificationState
 from src.shared.report_quality.numeric import (
@@ -72,7 +80,10 @@ from src.shared.report_quality.numeric_models import (
     NumericSign,
     UnitDimension,
 )
-from src.shared.report_quality.source_identity import document_identity_from_parts
+from src.shared.report_quality.source_identity import (
+    document_identity_components,
+    document_identity_from_parts,
+)
 from src.shared.report_quality.numeric_validation import validate_versioned_numeric_claim
 
 
@@ -448,9 +459,9 @@ def _structured_numeric_fact(
 
 #: ③ «이미 통과한 검사»를 인정할 것인가 (제품 결정).
 #:
-#: True  — `verification_state == "verified"` 인 문장은 통과시킨다.
-#:         그 표식은 ① 숫자를 인용 조각·실적표와 대조 통과 ② 검수 AI 가 참으로 판정
-#:         을 «둘 다» 거쳐야만 붙는다(기본값은 "unverified", 작가가 못 붙인다).
+#: True  — 기본/SHADOW는 `verification_state == "verified"` 문장을 통과시킨다.
+#:         FULL 공식 산문은 그 표식 외에 자기 인용 조각의 정확 숫자 표기도
+#:         요구한다. 이는 최종 출처·원문 지문 봉인 검사를 대체하지 않는다.
 #: False — 수치 안전 필터의 원래 동작. 구조화 사실이 붙은 문장만 통과 →
 #:         작가가 쓴 숫자 문장은 «전부» 삭제된다(실측: 45→25문장, 점수 33/100).
 #:
@@ -462,12 +473,15 @@ def is_release_ready_numeric_sentence(
     sentence: ComposedSentence,
     *,
     section_id: str,
+    strict_cited_fragments: Mapping[str, CollectedFragment] | None = None,
+    verified_program_fact_ids: frozenset[str] = frozenset(),
 ) -> bool:
     """숫자가 든 공개 문장이 의미 결속까지 완전한가."""
 
     if not has_public_numeric_token(sentence.text):
         return True
-    # ③ 이미 두 번 검사를 통과한 문장에 «또» 증명서를 요구하지 않는다.
+    # ③ 기본/SHADOW는 두 번 검사를 통과한 문장에 증명서를 다시 요구하지 않는다.
+    #    FULL 공식 산문만 자기 인용 원문의 숫자 표기를 추가 대조한다.
     #   ⚠️ 네 조건을 «모두» 요구한다 — 하나라도 빼면 검사를 빼는 것이 된다.
     #     · 증명서 없음 : 증명서가 «발급된» 문장은 아래 대조 경로로 보낸다.
     #       발급됐다는 건 표시 숫자를 계산값과 맞춰 볼 수 있다는 뜻이고,
@@ -483,9 +497,53 @@ def is_release_ready_numeric_sentence(
         and sentence.grade == GRADE_CONFIRMED
         and sentence.citations
     ):
+        if strict_cited_fragments is not None and not _full_official_prose_numbers_proven(
+            sentence, strict_cited_fragments, verified_program_fact_ids
+        ):
+            return False
         return True
     fact = _structured_numeric_fact(sentence, section_id=section_id)
     return fact is not None and validate_versioned_numeric_claim(fact) == ()
+
+
+def _full_official_prose_numbers_proven(
+    sentence: ComposedSentence,
+    fragments_by_id: Mapping[str, CollectedFragment],
+    verified_program_fact_ids: frozenset[str],
+) -> bool:
+    """FULL 공식 산문의 숫자가 자기 인용 조각에 정확히 있는지 확인한다.
+
+    구조화·프로그램 숫자와 뉴스에는 각각 독립된 검산 계약이 있다. 그 외 공식
+    산문만 최종 ADR 0005와 같은 토큰 증명을 미리 적용해, 표나 다른 조각의
+    숫자를 빌려 앞선 수치 검수를 통과한 문장이 전체 출고를 막지 않게 한다.
+    """
+    if sentence.verified_fact_id in verified_program_fact_ids:
+        return True
+    cited = tuple(fragments_by_id.get(citation) for citation in sentence.citations)
+    if any(fragment is None for fragment in cited):
+        return False
+    news_citations = tuple(
+        fragment.formal_source_kind == SOURCE_KIND_NEWS for fragment in cited
+    )
+    if all(news_citations):
+        return True
+    if any(news_citations):
+        # 공식·뉴스 혼합 인용은 어느 쪽의 최종 숫자 예외에도 속하지 않는다.
+        return False
+
+    def rendered_as_official(fragment: CollectedFragment) -> bool:
+        if fragment.formal_source_kind:
+            return fragment.formal_source_kind in FORMAL_DOCUMENT_SOURCE_KINDS
+        if fragment.text.startswith(DART_FINANCIAL_API_PREFIX):
+            return True
+        host, document_id = document_identity_components(fragment.document_identity)
+        return bool(host and document_id) or not fragment.source_url
+
+    if not all(rendered_as_official(fragment) for fragment in cited):
+        return True
+    return bool(official_number_tokens(sentence.text)) and prose_numbers_verbatim_in_fragments(
+        sentence.text, tuple(fragment.text for fragment in cited)
+    )
 
 
 def safe_numeric_owners_by_fact_id(
@@ -556,6 +614,9 @@ def is_release_ready_summary_sentence(
 
 def enforce_public_numeric_safety(
     report: ComposedReport,
+    *,
+    strict_cited_fragments: Mapping[str, CollectedFragment] | None = None,
+    verified_program_fact_ids: frozenset[str] = frozenset(),
 ) -> tuple[ComposedReport, NumericSafetyFiltering]:
     """새 v2 생성물의 미결속 수치·날짜 문장을 문장 단위로 제외한다.
 
@@ -573,6 +634,8 @@ def enforce_public_numeric_safety(
             if is_release_ready_numeric_sentence(
                 sentence,
                 section_id=section.section_id,
+                strict_cited_fragments=strict_cited_fragments,
+                verified_program_fact_ids=verified_program_fact_ids,
             )
         )
         removed = len(section.sentences) - len(kept)

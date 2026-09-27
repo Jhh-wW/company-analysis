@@ -2716,11 +2716,27 @@ def run_v2(
             packet_union_ids,
             stage="numeric-append",
         )
-    # ②-e 새 생성 수치 안전 경계. AI 산문에 숫자·날짜·백분율이 있으면
-    # 의미가 결속된 StructuredClaim/NumericBinding 없이는 공개 후보에서 뺀다.
-    # 산문을 역추출해 가짜 fact로 통과시키지 않는다. 프로그램이 만든 위 누적
-    # 증감률은 동일한 versioned 결속을 재검산한 뒤 그대로 남는다.
-    verified, body_numeric_filtering = enforce_public_numeric_safety(verified)
+    # ②-e 새 생성 수치 안전 경계. 구조화 수치는 NumericBinding으로 검산한다.
+    # FULL에서 검수된 공식 산문 숫자는 자기 인용 조각의 정확 표기까지 대조해
+    # 표·다른 조각에서 빌린 값만 미리 제외한다. 산문을 역추출해 가짜 fact를
+    # 만들지 않으며, 최종 출처 봉인·공개 안전 판정도 그대로 다시 거친다.
+    strict_numeric_fragments = (
+        {
+            fragment.fragment_id: fragment
+            for fragment in _normalize_fragments(verification_fragments)
+        }
+        if release_mode is ReleaseMode.FULL else None
+    )
+    strict_program_fact_ids = (
+        frozenset(fact.fact_id for fact in prepared_evidence.program_facts)
+        if release_mode is ReleaseMode.FULL and prepared_evidence is not None
+        else frozenset()
+    )
+    verified, body_numeric_filtering = enforce_public_numeric_safety(
+        verified,
+        strict_cited_fragments=strict_numeric_fragments,
+        verified_program_fact_ids=strict_program_fact_ids,
+    )
     # 공식 양사 비교는 AI 산문이 아니라 별도 다중 출처 수치 검산기가 만든다.
     # AI 수치 필터를 우회시키는 것이 아니라 그 필터가 끝난 뒤 packet에 이미
     # 봉인된 문장만 추가하고, 아래 품질 평가에서 다시 공식 재계산한다.
@@ -3104,7 +3120,11 @@ def run_v2(
                 filing_meta,
             )
             supplement_verified, supplement_numeric_filtering = (
-                enforce_public_numeric_safety(supplement_verified)
+                enforce_public_numeric_safety(
+                    supplement_verified,
+                    strict_cited_fragments=strict_numeric_fragments,
+                    verified_program_fact_ids=strict_program_fact_ids,
+                )
             )
 
             base_body = verified
@@ -3116,7 +3136,9 @@ def run_v2(
             # 병합 뒤 전역 수치 안전을 다시 계산한다. 비대상 장은 값뿐 아니라
             # ComposedSection 전체(본문·도식·structured fact)가 exact 동일해야 한다.
             merged_body, merged_numeric_filtering = enforce_public_numeric_safety(
-                merged_body
+                merged_body,
+                strict_cited_fragments=strict_numeric_fragments,
+                verified_program_fact_ids=strict_program_fact_ids,
             )
             merged_body = _append_verified_program_sentences(
                 merged_body, prepared_evidence
