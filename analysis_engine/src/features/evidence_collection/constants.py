@@ -189,6 +189,68 @@ SUPPLY_CONTRACT_EVENTS: Final[tuple[str, ...]] = ("갱신", "체결", "연장")
 SUPPLY_UNIT_BOUNDARY_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"[;\n]|(?<=[.!?。])(?:\s+|(?=[가-힣]))"
 )
+# 약한 단일어를 다른 문장이나 표 행의 계획·사업 표지와 결합하지 않는다.
+FACT_UNIT_BOUNDARY_PATTERN: Final[re.Pattern[str]] = SUPPLY_UNIT_BOUNDARY_PATTERN
+STOCK_ADMIN_HEADING_MARKERS: Final[tuple[str, ...]] = ("주식", "주주")
+STOCK_ADMIN_DOCUMENT_MARKERS: Final[tuple[str, ...]] = ("발행주식", "주식의 총수")
+STOCK_ADMIN_GOVERNANCE_MARKER: Final[str] = "이사회"
+STOCK_REAL_OPERATION_PRODUCT_MARKERS: Final[tuple[str, ...]] = ("제품", "상품", "부품")
+STOCK_REAL_OPERATION_ACTION_MARKERS: Final[tuple[str, ...]] = ("생산하여", "제조하여", "제조하고")
+STOCK_REAL_OPERATION_DELIVERY_MARKERS: Final[tuple[str, ...]] = (
+    "고객에게", "거래처에", "납품", "공급한다", "공급하고",
+)
+STOCK_ADMIN_PURPOSE_ROW_MARKERS: Final[tuple[str, ...]] = (
+    "정관", "사업목적", "사업 목적",
+)
+FUTURE_CONTEXT_ACTIVITY_MARKERS: Final[tuple[str, ...]] = (
+    "투자", "설비", "증설", "공장", "개발", "출시", "진출", "확대", "확장",
+    "신사업", "신규사업", "서비스", "제품", "프로젝트", "착공",
+)
+FUTURE_CONTEXT_INTENT_MARKERS: Final[tuple[str, ...]] = (
+    "향후", "앞으로", "예정", "추진할 계획", "계획을", "계획은", "계획이며",
+    "계획 수립", "신규 사업", "신규사업",
+)
+FUTURE_EXPLICIT_ACTION_PLAN_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"[가-힣]{2,}(?:할|하기로)\s*(?:계획|예정)"
+)
+FUTURE_CONTEXT_PLAN_HEADINGS: Final[tuple[str, ...]] = (
+    "향후 계획", "투자계획", "사업계획", "설비투자", "중장기",
+)
+FUTURE_SALES_PROCESS_HEADINGS: Final[tuple[str, ...]] = (
+    "판매경로", "판매방법", "판매 방식",
+)
+FUTURE_SALES_EXPLICIT_MARKERS: Final[tuple[str, ...]] = (
+    "향후", "앞으로", "예정", "증설", "착공", "신규 사업", "신규사업",
+)
+FUTURE_CONTEXT_INVESTMENT_TARGETS: Final[tuple[str, ...]] = (
+    "설비", "증설", "공장", "투자", "착공",
+)
+FUTURE_CONTEXT_INVESTMENT_STATUSES: Final[tuple[str, ...]] = (
+    "진행", "착수", "검토", "취소", "철회", "중단", "연기", "변경",
+)
+ACCOUNTING_TABLE_HEADER_MARKERS: Final[tuple[str, ...]] = (
+    "가치평가", "자산 가치", "금융자산",
+)
+ACCOUNTING_TABLE_SUBJECT_MARKERS: Final[tuple[str, ...]] = ("자산", "평가", "측정")
+CUSTOMER_VALUE_MARKERS: Final[tuple[str, ...]] = (
+    "고객가치", "고객에게", "사용자에게", "소비자에게",
+)
+OFFICER_PAY_HEADER_GROUPS: Final[tuple[tuple[str, ...], ...]] = (
+    ("이름", "성명"),
+    ("보수의 종류", "소득구분"),
+    ("총액", "보수총액"),
+    ("산정기준", "산정기준 및 방법"),
+)
+OFFICER_PAY_ROW_MARKERS: Final[tuple[str, ...]] = (
+    "급여", "상여", "퇴직소득", "근로소득",
+)
+OFFICER_PAY_ROLE_CELLS: Final[frozenset[str]] = frozenset({
+    "근로소득", "급여", "상여", "퇴직소득", "기타소득", "주식매수선택권",
+})
+WEAK_FUTURE_CONTEXT_SLOTS: Final[frozenset[str]] = frozenset({
+    "future_strategy:plan_status", "future_strategy:plan_timing",
+    "future_strategy:execution_signal",
+})
 SUPPLY_ACCOUNTING_MARKERS: Final[tuple[str, ...]] = (
     "저가법", "재고자산평가", "회계정책", "회계처리", "수익인식",
 )
@@ -542,7 +604,7 @@ FINANCIAL_COMPANY_REVENUE_KEYWORDS: Final[tuple[str, ...]] = (
 # 버전·출처 표기
 # ══════════════════════════════════════════════════════════
 
-COLLECTOR_VERSION: Final[str] = "evidence_collection/2.1"
+COLLECTOR_VERSION: Final[str] = "evidence_collection/2.2"
 #: 2.0: EOF 후보 반복자·유한 문단 구간·제목 오인 방지. 1.x의 저장 한도
 #: 잘림 기록을 새 완료 증명으로 재사용하지 않는다.
 PARSER_VERSION: Final[str] = "evidence_collection_segment/2.1"

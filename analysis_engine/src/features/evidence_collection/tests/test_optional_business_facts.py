@@ -30,6 +30,18 @@ def test_매출유형_복합표현과_판매경로는_직접근거일때만_선�
     )
 
 
+def test_임원성과금과_주주가치는_고객과금과_고객가치가_아니다() -> None:
+    internal = "임원의 경영성과금은 주주가치와 직무의 가치에 따라 지급합니다."
+    assert "business_model:revenue_model" not in _slots(internal)
+    assert "business_model:value_exchange" not in _slots(internal)
+    service = (
+        "회사는 급여관리 서비스를 고객사 사용량에 따라 과금하고 "
+        "고객가치를 높입니다. 경영성과금은 별도로 지급합니다."
+    )
+    assert "business_model:revenue_model" in _slots(service)
+    assert "business_model:value_exchange" in _slots(service)
+
+
 def test_판매경로_표는_머리글과_소비자도달_행이_같은표에_있을때만_선택한다() -> None:
     table = (
         "부문/제품 | 판매경로 | 판매경로 | 소비 ; "

@@ -11,6 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from features.evidence_collection import auditor_boilerplate, constants as c
+from features.evidence_collection.weak_signal_context import (
+    accounting_value_table_only,
+    future_signal_has_context,
+    pure_officer_compensation_table,
+    stock_admin_production_only,
+)
 
 def _has_revenue_type_mix(text: str) -> bool:
     """실제 매출 유형 열거만 찾고 회계정책 일반론은 제외한다."""
@@ -258,10 +264,14 @@ KEYWORD_EXCLUDED_COMPOUNDS: dict[str, tuple[str, ...]] = {
     "가치": (
         "공정가치", "현재가치", "명목가치", "장부가치", "순실현가능가치",
         "사용가치", "잔존가치", "내재가치", "부가가치", "가치변동", "가치사슬",
+        "주주가치", "직무의 가치",
         # 일반기업회계기준 유형자산 정책의 표준 문형 「내용연수를 연장시키거나
         # 가치를 실질적으로 증가시키는 지출」 — 자산 가치이지 고객 가치가 아니다.
         "가치를 실질적으로",
     ),
+    # 임원 성과급 명칭의 부분문자열은 고객에게 요금을 부과하는 과금이 아니다.
+    # 같은 문단에 별도 과금 표현이 있으면 위치별 판정으로 그 신호는 남는다.
+    "과금": ("성과금",),
     # identity:official_location은 본점·소재지를 찾는 칸이다. 웹·전자우편 주소만
     # 적힌 문단을 법인 소재지 근거로 받지 않는다.
     "주소": (
@@ -422,6 +432,8 @@ def score_fragment_slots_with_signal(
         return (), True
     if auditor_split.auditor_clause_count:
         text = auditor_split.business_text
+    if pure_officer_compensation_table(text):
+        return (), True
 
     scored: list[tuple[int, int, bool, SlotScore]] = []
     has_any_direct_signal = False
@@ -459,6 +471,18 @@ def score_fragment_slots_with_signal(
         if slot_id == "business_model:sales_channel" and not _has_sales_channel(text):
             continue
         if slot_id == "operations_partners:supply_relation" and not _has_supply_relation(text):
+            continue
+        if slot_id == "business_model:value_exchange" and accounting_value_table_only(
+            text, tuple(hits),
+        ):
+            continue
+        if slot_id == "operations_partners:operating_role" and stock_admin_production_only(
+            text, section_heading, tuple(hits),
+        ):
+            continue
+        if slot_id in c.WEAK_FUTURE_CONTEXT_SLOTS and not future_signal_has_context(
+            text, section_heading, tuple(hits),
+        ):
             continue
         section_id = c.SLOT_SECTION_OF[slot_id]
         score = min(c.RELEVANCE_MAX_SCORE_MILLIS, len(hits) * c.RELEVANCE_KEYWORD_HIT_SCORE_MILLIS)
