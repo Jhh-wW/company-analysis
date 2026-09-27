@@ -73,7 +73,7 @@ Render에는 forwarded client IP를 신뢰하지 않는 좁은 계약이 세 개
 `render-admin-real-no-forwarded-v1`과 `render-portfolio-link-v1`은 둘 다 실제 provider를
 부르는 유료 운영판이며 아래 요구를 그대로 공유한다. demo가 아니다.
 
-- Render `standard` web plan과 `/var/data`에 붙는 1GB 영속 디스크를 사용한다. 실제
+- Render `standard` web plan과 `/var/data`에 붙는 2GB 영속 디스크를 사용한다. 실제
   DART 118,747사 후보 색인이 Starter의 512MB를 넘어 `/confirm` 중 인스턴스가
   재시작된 운영 측정에 따른 최소 사양이다. 적용 직전 [Render 요금 페이지](https://render.com/pricing)와
   Dashboard의 예상 청구액을 다시 확인한다. 플랜·요금 숫자는 이 문서에 고정하지 않는다.

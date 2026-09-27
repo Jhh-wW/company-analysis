@@ -30,7 +30,7 @@ def test_Render_cutover는_영속disk_단일instance라서_old_new_writer가_겹
     assert web["disk"] == {
         "name": "company-analysis-data",
         "mountPath": "/var/data",
-        "sizeGB": 1,
+        "sizeGB": 2,
     }
     # ★ Render 는 디스크가 붙은 서비스에 이 값을 «거부»한다 (실측).
     #   넣으면 Blueprint 동기화가 실패해 배포 자체가 막힌다.
