@@ -37,7 +37,7 @@ from src.shared.report_quality.constants import (
     LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
     STRICT_QUALITY_CONTRACT_VERSION,
 )
-from src.shared.report_evidence.policy import required_slots_for
+from src.shared.report_evidence.policy import injected_slots_for, required_slots_for
 from src.shared.revenue_table_provenance import revenue_table_section_id_from_caption
 from src.shared.report_quality.generation import (
     GenerationQualityObservation,
@@ -209,6 +209,7 @@ from src.shared.report_generation.canonical import (
 from src.features.composer.quality_observation_log import (
     log_generation_quality_observation,
     record_full_safety_block,
+    record_primary_quality_stop,
 )
 from src.features.composer.quality_projection import (
     build_generation_quality_candidate,
@@ -2115,12 +2116,17 @@ def run_v2(
             # 있는 구조화 claim을 AI 호출 전에 합친다. 장별 서로 다른 의미 칸
             # 하한에 애초에 도달할 수 없다면 보충 작가를 불러도 결과는 같으므로
             # 유료 9장+재작성 뒤 실패시키지 않는다.
+            injected_slots_by_section = {
+                section_id: frozenset(injected_slots_for(section_id))
+                for section_id in SECTION_IDS
+            }
             reachable_slots_by_section = {
                 section_id: {
                     slot_id
                     for fragment in prepared_evidence.packets[section_id]
                     for slot_id in fragment.supported_claim_slots
                     if slot_id.startswith(f"{section_id}:")
+                    and slot_id not in injected_slots_by_section[section_id]
                 }
                 for section_id in SECTION_IDS
             }
@@ -2710,11 +2716,27 @@ def run_v2(
             packet_union_ids,
             stage="numeric-append",
         )
-    # ②-e 새 생성 수치 안전 경계. AI 산문에 숫자·날짜·백분율이 있으면
-    # 의미가 결속된 StructuredClaim/NumericBinding 없이는 공개 후보에서 뺀다.
-    # 산문을 역추출해 가짜 fact로 통과시키지 않는다. 프로그램이 만든 위 누적
-    # 증감률은 동일한 versioned 결속을 재검산한 뒤 그대로 남는다.
-    verified, body_numeric_filtering = enforce_public_numeric_safety(verified)
+    # ②-e 새 생성 수치 안전 경계. 구조화 수치는 NumericBinding으로 검산한다.
+    # FULL에서 검수된 공식 산문 숫자는 자기 인용 조각의 정확 표기까지 대조해
+    # 표·다른 조각에서 빌린 값만 미리 제외한다. 산문을 역추출해 가짜 fact를
+    # 만들지 않으며, 최종 출처 봉인·공개 안전 판정도 그대로 다시 거친다.
+    strict_numeric_fragments = (
+        {
+            fragment.fragment_id: fragment
+            for fragment in _normalize_fragments(verification_fragments)
+        }
+        if release_mode is ReleaseMode.FULL else None
+    )
+    strict_program_fact_ids = (
+        frozenset(fact.fact_id for fact in prepared_evidence.program_facts)
+        if release_mode is ReleaseMode.FULL and prepared_evidence is not None
+        else frozenset()
+    )
+    verified, body_numeric_filtering = enforce_public_numeric_safety(
+        verified,
+        strict_cited_fragments=strict_numeric_fragments,
+        verified_program_fact_ids=strict_program_fact_ids,
+    )
     # 공식 양사 비교는 AI 산문이 아니라 별도 다중 출처 수치 검산기가 만든다.
     # AI 수치 필터를 우회시키는 것이 아니라 그 필터가 끝난 뒤 packet에 이미
     # 봉인된 문장만 추가하고, 아래 품질 평가에서 다시 공식 재계산한다.
@@ -3002,6 +3024,12 @@ def run_v2(
             raise V2ValidationError(
                 ("report_recovery:primary_receipt_invalid",)
             ) from error
+        record_primary_quality_stop(
+            composition_diagnostics,
+            generation_assessment,
+            recovery_decision.reason_code,
+            logger=logger,
+        )
 
         if recovery_decision.action is RecoveryAction.RUN_SUPPLEMENTS:
             authorization = recovery_decision.supplement_authorization
@@ -3092,7 +3120,11 @@ def run_v2(
                 filing_meta,
             )
             supplement_verified, supplement_numeric_filtering = (
-                enforce_public_numeric_safety(supplement_verified)
+                enforce_public_numeric_safety(
+                    supplement_verified,
+                    strict_cited_fragments=strict_numeric_fragments,
+                    verified_program_fact_ids=strict_program_fact_ids,
+                )
             )
 
             base_body = verified
@@ -3104,7 +3136,9 @@ def run_v2(
             # 병합 뒤 전역 수치 안전을 다시 계산한다. 비대상 장은 값뿐 아니라
             # ComposedSection 전체(본문·도식·structured fact)가 exact 동일해야 한다.
             merged_body, merged_numeric_filtering = enforce_public_numeric_safety(
-                merged_body
+                merged_body,
+                strict_cited_fragments=strict_numeric_fragments,
+                verified_program_fact_ids=strict_program_fact_ids,
             )
             merged_body = _append_verified_program_sentences(
                 merged_body, prepared_evidence

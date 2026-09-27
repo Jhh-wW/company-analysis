@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 
 import pytest
 
@@ -18,6 +19,10 @@ from src.features.composer.port import (
     CollectedFragment,
     SectionEvidencePacket,
     SectionEvidencePacketSet,
+)
+from src.features.composer.tests.injected_program_fixture import (
+    make_numeric_performance_evidence,
+    make_stated_limitation_program,
 )
 from src.features.composer.validate import V2ValidationError
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
@@ -152,7 +157,7 @@ def test_과제근거를_대응주장의_증거로_바꿔쓸수없다() -> None:
 
     assert report.sections[0].sentences == ()
     assert "지원 주장슬롯: current_challenges:issue" in prompt
-    assert "빈 문자열이나 목록 밖 id는 허용되지 않는다" in prompt
+    assert "빈 배열이나 목록 밖 ID는 허용되지 않는다" in prompt
 
 
 def test_한조각이_과제와대응을_모두지원하면_대응주장이_남는다() -> None:
@@ -342,28 +347,57 @@ def test_run_v2_FULL도_issue근거를_response산문과표로_바꿔쓰지못�
             ensure_ascii=False,
         )
 
+    all_required_slots = {
+        section_id: required_slots_for(section_id)
+        for section_id in SECTION_IDS
+    }
+    # 패킷 전체에는 issue와 response가 모두 있어 사전 충분성은 통과한다.
+    # 하지만 실제 인용한 5번 조각은 issue만 지원하고 response는 별도 50번에 둔다.
+    all_required_slots[_CHALLENGE_SECTION] = (_ISSUE_SLOT,)
+    packets = _packet_set(
+        challenge_slots=(_ISSUE_SLOT,),
+        slot_overrides=all_required_slots,
+        challenge_extra_slots=(_RESPONSE_SLOT,),
+    )
+    table, financial_fragment, filing_meta = make_numeric_performance_evidence(
+        fragment_number=40
+    )
+    comparison_program = make_stated_limitation_program(
+        fragment_number=90,
+        company_name="테스트 회사",
+        statement="테스트 회사는 독자 기술을 보유한다고 밝혔다.",
+    )
+    packets = replace(
+        packets,
+        packets=tuple(
+            replace(
+                packet,
+                fragments=(
+                    *packet.fragments,
+                    *((financial_fragment,) if packet.section_id == "past_changes" else ()),
+                    *(comparison_program.source_fragments
+                      if packet.section_id == "competitive_position" else ()),
+                ),
+                program_evidence=(
+                    comparison_program
+                    if packet.section_id == "competitive_position"
+                    else packet.program_evidence
+                ),
+            )
+            for packet in packets.packets
+        ),
+    )
+
     with pytest.raises(V2ValidationError):
-        all_required_slots = {
-            section_id: required_slots_for(section_id)
-            for section_id in SECTION_IDS
-        }
-        # 패킷 전체에는 issue와 response가 모두 있어 사전 충분성은 통과한다.
-        # 하지만 작가가 실제로 인용한 5번 조각은 issue만 지원한다. 시험에서
-        # response 근거를 같은 조각에 손으로 주입하지 않고, 별도 50번 원문에
-        # 둬서 «패킷 도달성»과 «문장별 근거 결속»을 끝까지 갈라 검증한다.
-        all_required_slots[_CHALLENGE_SECTION] = (_ISSUE_SLOT,)
         run_v2(
             "테스트 회사",
             {},
-            None,
+            table,
             writer_ask=writer,
             reviewer_ask=reviewer,
             release_mode=ReleaseMode.FULL,
-            section_evidence_packets=_packet_set(
-                challenge_slots=(_ISSUE_SLOT,),
-                slot_overrides=all_required_slots,
-                challenge_extra_slots=(_RESPONSE_SLOT,),
-            ),
+            section_evidence_packets=packets,
+            filing_meta=filing_meta,
             company_id="00123456",
             build_identity_sha256="b" * 64,
         )

@@ -505,7 +505,7 @@ def test_FULL은_주입된_formal_collector를_캐시보다_먼저_부르고_typ
         if candidate.section_id == "competitive_position"
     )
     assert any(
-        fragment.slot_id == "competitive_position:stated_differentiator"
+        "competitive_position:stated_differentiator" in fragment.covered_slot_ids
         for fragment in competitive.fragments
     )
     assert len(calls.composers) == 1
@@ -532,9 +532,8 @@ def test_FULL은_주입된_formal_collector를_캐시보다_먼저_부르고_typ
         for raw in composer_fragments.values()
         if RAW_EVIDENCE_SECTION_IDS_KEY in raw
     ]
-    # 9장은 원래 self_context 조각과 결정론으로 승격한 자기 선언 조각을
-    # 각각 보존하므로 장 수보다 typed 조각이 하나 많다.
-    assert len(typed) == len(REQUIRED_EVIDENCE_SECTION_IDS) + 1
+    # 동일 범위가 두 칸을 지원하면 원문은 한 번만 운반한다.
+    assert len(typed) == len(REQUIRED_EVIDENCE_SECTION_IDS)
     assert {raw["종류"] for raw in typed} == {SOURCE_KIND_OFFICIAL_WEB_PAGE}
     assert {raw[RAW_EVIDENCE_COMPANY_ID_KEY] for raw in typed} == {CORP_ID}
     assert {

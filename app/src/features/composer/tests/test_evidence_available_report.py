@@ -51,6 +51,9 @@ from src.features.composer.port import (
     ComposedSection,
 )
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
+from src.features.composer.tests.injected_program_fixture import (
+    make_numeric_performance_evidence,
+)
 from src.features.composer.tests.test_pipeline import (
     _REVIEW_NUMBER_RE,
     _FakeReviewer,
@@ -522,15 +525,19 @@ def test_FULL_품질_하한_미달은_전환이_허용되면_검증_본문으로
     )
 
     writer = _StrictThinWriter()
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=9
+    )
 
     output = run_v2(
         "가나다전자",
         _strict_fragments(),
-        None,
+        performance_table,
         writer_ask=writer,
         reviewer_ask=_FakeReviewer(),
         release_mode=ReleaseMode.FULL,
         section_evidence_packets=_strict_packet_set(),
+        filing_meta=filing_meta,
         company_id="00123456",
         build_identity_sha256="b" * 64,
         evidence_available_fallback=True,
@@ -652,13 +659,8 @@ def test_전환_마무리는_프로그램_등록부_문장을_짝지어_렌더�
     }, "전환 보고서의 fact 장부가 packet 봉인 fact를 그대로 이어야 한다"
 
 
-class _MarkedEmptyRegistry(tuple):
-    """빈 등록부라 동작은 그대로지만 «어디서 온 값인지»는 식별되는 표식.
-
-    빈 tuple 두 개는 서로 같고 파이썬이 같은 객체로 돌려주기도 해서, 값 비교로는
-    «호출부가 준비값을 넘겼는지»와 «빈 값을 새로 만들었는지»를 가릴 수 없다.
-    비어 있으므로 렌더 동작에는 아무 영향이 없고 신원만 확인할 수 있다.
-    """
+class _MarkedRegistry(tuple):
+    """실제 봉인 등록부의 내용을 보존하면서 전달 객체의 신원을 식별한다."""
 
 
 def test_품질_하한_전환은_packet_프로그램_등록부를_렌더에_넘긴다(
@@ -676,13 +678,16 @@ def test_품질_하한_전환은_packet_프로그램_등록부를_렌더에_넘�
         _strict_packet_set,
     )
 
-    facts_marker = _MarkedEmptyRegistry()
-    sources_marker = _MarkedEmptyRegistry()
+    marked: dict[str, tuple] = {}
     real_prepare = composer_pipeline._prepare_section_evidence_packets  # noqa: SLF001
 
     def _prepare_with_marked_registry(*args: object, **kwargs: object):
+        prepared = real_prepare(*args, **kwargs)
+        facts_marker = _MarkedRegistry(prepared.program_facts)
+        sources_marker = _MarkedRegistry(prepared.program_sources)
+        marked.update(facts=facts_marker, sources=sources_marker)
         return replace(
-            real_prepare(*args, **kwargs),
+            prepared,
             program_facts=facts_marker,
             program_sources=sources_marker,
         )
@@ -702,14 +707,19 @@ def test_품질_하한_전환은_packet_프로그램_등록부를_렌더에_넘�
 
     monkeypatch.setattr(composer_pipeline, "render_report", _recording_render)
 
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=9
+    )
+
     output = run_v2(
         "가나다전자",
         _strict_fragments(),
-        None,
+        performance_table,
         writer_ask=_StrictThinWriter(),
         reviewer_ask=_FakeReviewer(),
         release_mode=ReleaseMode.FULL,
         section_evidence_packets=_strict_packet_set(),
+        filing_meta=filing_meta,
         company_id="00123456",
         build_identity_sha256="b" * 64,
         evidence_available_fallback=True,
@@ -721,9 +731,9 @@ def test_품질_하한_전환은_packet_프로그램_등록부를_렌더에_넘�
     assert downgrade_call["release_mode"] == "", (
         "마지막 렌더가 전환(부분 보고서) 렌더여야 한다"
     )
-    assert downgrade_call.get("verified_program_facts") is facts_marker, (
+    assert downgrade_call.get("verified_program_facts") is marked["facts"], (
         "전환 렌더가 준비 단계의 프로그램 FactRecord 등록부를 그대로 받아야 한다"
     )
-    assert downgrade_call.get("program_registry_sources") is sources_marker, (
+    assert downgrade_call.get("program_registry_sources") is marked["sources"], (
         "전환 렌더가 준비 단계의 프로그램 Source 등록부도 그대로 받아야 한다"
     )

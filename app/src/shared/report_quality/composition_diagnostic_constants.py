@@ -322,3 +322,14 @@ SAFETY_BLOCK_KINDS_FIELD = "유형별"
 SAFETY_BLOCK_SECTIONS_FIELD = "장별"
 #: «장별» 칸의 장 순서 — 보고서 장 순서 뒤에 요약.
 SAFETY_BLOCK_SECTION_ORDER = (*STRICT_REQUIRED_QUALITY_SECTION_IDS, "summary")
+
+#: FULL 1차 품질하한 중단을 SHADOW 강등 이전의 평가 그대로 남긴다. 공개 허용·
+#: 비용 판정에는 사용하지 않는다. 닫힌 코드와 장 ID만 허용하며 원문은 싣지 않는다.
+PRIMARY_QUALITY_STOP_STEP = "8_FULL1차_품질중단"
+PRIMARY_QUALITY_STOP_REASON_FIELD = "회복사유"
+PRIMARY_QUALITY_STOP_CODES_FIELD = "품질코드"
+PRIMARY_QUALITY_STOP_SECTION_FIELDS = (
+    "안내문장", "한주장장", "공개문장부족장", "의미부족장",
+)
+PRIMARY_QUALITY_STOP_SAFETY_TOTAL_FIELD = "안전문제수"
+PRIMARY_QUALITY_STOP_SAFETY_KINDS_FIELD = "안전유형"

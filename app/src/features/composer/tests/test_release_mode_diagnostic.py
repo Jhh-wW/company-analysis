@@ -15,8 +15,12 @@ from dataclasses import replace
 
 import pytest
 
+from src.features.composer import pipeline as pipeline_module
 from src.features.composer.pipeline import run_v2
 from src.features.composer.port import SectionEvidencePacketSet
+from src.features.composer.tests.injected_program_fixture import (
+    make_numeric_performance_evidence,
+)
 from src.features.composer.tests.test_evidence_available_report import (
     _PARTIAL,
     _BudgetDiesAtThirdSection,
@@ -40,6 +44,7 @@ from src.features.composer.tests.test_section_public_manifest import (
 )
 from src.features.composer.validate import V2ValidationError
 from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_quality.models import ReleaseDecision
 from src.shared.report_quality.composition_diagnostics import (
     observed_composition_steps,
 )
@@ -70,6 +75,9 @@ def _line(requested, applied, downgraded_from, review_calls, ledger_used):
 
 
 def _full(**overrides):
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=40
+    )
     arguments = {
         "writer_ask": _CompletePacketWriter(),
         "reviewer_ask": _BoundGroupedReviewer(),
@@ -78,9 +86,10 @@ def _full(**overrides):
         "section_evidence_packets": _packets(),
         "company_id": "00123456",
         "build_identity_sha256": "b" * 64,
+        "filing_meta": filing_meta,
     }
     arguments.update(overrides)
-    return run_v2("가나다전자", (), None, **arguments)
+    return run_v2("가나다전자", (), performance_table, **arguments)
 
 
 def test_FULL_재요청을_쓴_실행은_검수호출_1_1과_적용모드_FULL을_남긴다():
@@ -112,14 +121,18 @@ def test_FULL_재요청이_없던_실행은_재요청_자리를_0으로_남긴�
 
 def test_FULL_작성_뒤_강등은_장부사용_참과_강등출처_FULL을_남긴다():
     diagnostics: list[dict] = []
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=9
+    )
     output = run_v2(
         "가나다전자",
         _strict_fragments(),
-        None,
+        performance_table,
         writer_ask=_StrictThinWriter(),
         reviewer_ask=_FakeReviewer(),
         release_mode=ReleaseMode.FULL,
         section_evidence_packets=_strict_packet_set(),
+        filing_meta=filing_meta,
         company_id="00123456",
         build_identity_sha256="b" * 64,
         evidence_available_fallback=True,
@@ -168,20 +181,61 @@ def test_FULL_작성_전_강등은_장부사용_거짓과_검수호출_null을_�
     ]
 
 
-def test_출고_검증에서_멈춘_FULL은_적용모드_빈_값과_재요청_사용을_남긴다():
-    # AI 전역 장애 폴백(두 번째 검수 호출의 비강등 장애) 뒤 FULL 사후 판정이 막는
-    # 경로다. 예외가 나도 real.py 의 finally 가 이 목록을 실행 기록으로 옮긴다.
+def test_출고_검증에서_멈춘_FULL은_적용모드_빈_값과_재요청_사용을_남긴다(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # 충분한 사실과 실제 재요청 1회를 유지한 채 결속되지 않은 요약만 공격한다.
+    # 안전판정 자체는 실제 제품 코드가 수행하며, 차단 전 장부도 보존한다.
+    original = pipeline_module.build_generation_quality_candidate
+
+    def candidate_with_unbound_summary(*args: object, **kwargs: object):
+        candidate = original(*args, **kwargs)
+        assert len(candidate.facts) == 58
+        assert candidate.has_unbound_summary_content is False
+        return replace(candidate, has_unbound_summary_content=True)
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "build_generation_quality_candidate",
+        candidate_with_unbound_summary,
+    )
     diagnostics: list[dict] = []
     with pytest.raises(V2ValidationError, match="post_validation_safety_blocked"):
         _full(
             initial_reviewer_ask=_FirstRowBrokenReviewer(),
-            initial_retry_reviewer_ask=_GlobalFailureReviewer(),
-            preserve_on_ask_failure=True,
+            initial_retry_reviewer_ask=_BoundGroupedReviewer(),
             composition_diagnostics_sink=diagnostics,
         )
 
     assert _release_lines(diagnostics) == [
         _line("FULL", "", "", {"bundled": 1, "bundled_retry": 1}, True),
+    ]
+
+
+def test_공급자_실패_뒤_봉인된_프로그램_사실은_부분결과로만_남는다():
+    diagnostics: list[dict] = []
+    output = _full(
+        initial_reviewer_ask=_FirstRowBrokenReviewer(),
+        initial_retry_reviewer_ask=_GlobalFailureReviewer(),
+        preserve_on_ask_failure=True,
+        composition_diagnostics_sink=diagnostics,
+    )
+
+    assert output.effective_release_mode == "SHADOW"
+    assert output.downgraded_from_release_mode == ReleaseMode.FULL.value
+    assert output.quality_observation.release_allowed is False
+    assert output.quality_observation.safety_decision == ReleaseDecision.BLOCKED.value
+    assert output.report.public_projection is None
+    assert len(output.report.fact_records) == 4
+    assert all(fact.status == "verified" for fact in output.report.fact_records)
+    verified_ids = {fact.fact_id for fact in output.report.fact_records}
+    assert all(
+        len(section.prose_lines) == len(section.fact_ids)
+        and set(section.fact_ids).issubset(verified_ids)
+        for section in output.report.sections
+    )
+    assert _release_lines(diagnostics) == [
+        _line("FULL", "SHADOW", "FULL", {"bundled": 1, "bundled_retry": 1}, True),
     ]
 
 

@@ -24,6 +24,12 @@ from typing import Any, Callable, Final, Optional, Union
 
 from src.core.citations import citation_number
 from src.features.composer.parallel_sections import run_section_jobs, section_worker_count
+from src.features.composer.evidence_pair_selection import (
+    EvidencePairMap,
+    build_evidence_pair_map,
+    render_evidence_pair_index,
+    writer_visible_fragments,
+)
 from src.features.composer.partial_evidence import PartialEvidenceView
 from src.features.composer.partial_evidence_constants import (
     EXACT_EVIDENCE_SCOPE_GUIDE,
@@ -50,8 +56,22 @@ from src.features.composer.constants import (
     EVIDENCE_LABEL_OMIT_NUMERIC_LOCATION,
     EVIDENCE_LABEL_SHORT_KIND,
     FORBIDDEN_TOPICS_GUIDE,
+    FULL_CITATION_SLOT_GUIDE,
+    FULL_PAIR_CITATION_RULES_GUIDE,
+    FULL_PAIR_EXACT_EVIDENCE_SCOPE_GUIDE,
+    FULL_PAIR_FLOW_SCHEMA_TAIL,
+    FULL_EVIDENCE_PAIR_GUIDE,
+    FULL_LEGACY_SENTENCE_SCHEMA,
+    FULL_PAIR_SENTENCE_SCHEMA,
+    FULL_PAIR_SCHEMA_TAIL,
+    FULL_PAST_CHANGES_PAIR_CITATION_RULES_GUIDE,
+    FULL_PAST_CHANGES_SECTION_GUIDE,
+    FULL_SUPPORTED_SLOT_INDEX_HEAD,
+    FULL_VISIBLE_EVIDENCE_GUIDE,
+    FULL_VISIBLE_PAIR_LABEL,
     GRADE_CONFIRMED,
     JSON_SCHEMA_GUIDE,
+    LEGACY_SCHEMA_CITATION_TAIL,
     NOTICE_COMPOSE_FAILED,
     NOTICE_INSUFFICIENT_EVIDENCE,
     FLOW_HEADERS_BY_SECTION,
@@ -74,6 +94,7 @@ from src.features.composer.constants import (
     RESPONSE_FLOW_ROW_CITATIONS_KEY,
     RESPONSE_GRADE_KEY,
     RESPONSE_CLAIM_SLOT_KEY,
+    RESPONSE_EVIDENCE_PAIR_KEY,
     RESPONSE_SENTENCES_KEY,
     RESPONSE_TEXT_KEY,
     RETRY_REMINDER,
@@ -99,7 +120,7 @@ from src.features.composer.port import (
     VerifiedProgramEvidence,
     fragments_from_raw,
 )
-from src.shared.report_evidence.policy import required_slots_for
+from src.shared.report_evidence.policy import injected_slots_for, required_slots_for
 from src.features.composer.news_constants import NEWS_WRITER_GUIDE
 from src.features.composer.news_usage import news_metadata, parse_news_decisions
 from src.features.composer.news_block import _is_news_fragment
@@ -299,6 +320,7 @@ def _render_fragments(
     fragments: Sequence[CollectedFragment],
     *,
     show_supported_claim_slots: bool = False,
+    pair_choices: EvidencePairMap | None = None,
 ) -> str:
     """조각 전체를 id와 함께 나열한다 — 작가가 이 id로 인용한다.
 
@@ -365,6 +387,10 @@ def _render_fragments(
             lines.append(f"{symbol_by_key[key]}: {entry}\n")
         lines.append(DOCUMENT_LIST_GUIDE)
 
+    pairs_by_fragment: dict[str, list[str]] = {}
+    if pair_choices is not None:
+        for pair_id, (slot_id, fragment_id) in pair_choices.items():
+            pairs_by_fragment.setdefault(fragment_id, []).append(f"{slot_id}[{pair_id}]")
     for fragment in fragments:
         raw_kind = fragment.formal_source_kind or fragment.kind or "자료"
         if use_header:
@@ -387,6 +413,9 @@ def _render_fragments(
             label = (
                 f"{label} · {PROMPT_FRAGMENT_LOCATION_LABEL}: {fragment.location}"
             )
+        if pair_choices is not None:
+            pairs = ", ".join(pairs_by_fragment.get(fragment.fragment_id, ()))
+            label = f"{label} · {FULL_VISIBLE_PAIR_LABEL}: {pairs}"
         if show_supported_claim_slots:
             supported = ", ".join(fragment.supported_claim_slots) or "없음"
             label = f"{label} · 지원 주장슬롯: {supported}"
@@ -478,34 +507,87 @@ def build_section_prompt(
         `shared_evidence_prefix`가 False면 평범한 str, True면 `CacheablePrompt`.
     """
     minimum, maximum = SECTION_SENTENCE_RANGES[section_id]
+    writer_fragments = (
+        writer_visible_fragments(section_id, fragments)
+        if show_supported_claim_slots else tuple(fragments)
+    )
+    pair_choices = (
+        build_evidence_pair_map(section_id, writer_fragments)
+        if show_supported_claim_slots else None
+    )
     claim_slots = CLAIM_SLOTS_BY_SECTION.get(section_id, ())
+    supported_slots = (
+        frozenset(slot for fragment in writer_fragments for slot in fragment.supported_claim_slots)
+        if show_supported_claim_slots else frozenset()
+    )
+    injected_slots = (
+        injected_slots_for(section_id)
+        if show_supported_claim_slots else ()
+    )
+    writer_claim_slots = (
+        tuple(
+            slot for slot in claim_slots
+            if slot in supported_slots and slot not in injected_slots
+        )
+        if show_supported_claim_slots else claim_slots
+    )
     claim_slot_guide = (
         "\n원자 주장 계획 — 각 문장은 가장 알맞은 id를 «주장슬롯»에 넣고, "
         "id는 고유 번호가 아니라 사실의 종류다. 같은 종류의 서로 다른 원자 "
         "사실에는 같은 id를 다시 써도 되지만, 같은 사실을 말만 바꿔 반복하지 "
-        "않는다. 어느 자리에도 맞지 않으면 빈 문자열로 두며 새 id를 만들지 "
-        "않는다:\n- " + "\n- ".join(claim_slots) + "\n"
-        if claim_slots
+        "않는다. "
+        + (
+            "근거 조각이 지원하지 않는 사실은 쓰지 않으며 새 id를 만들지 않는다:\n- "
+            if show_supported_claim_slots else
+            "어느 자리에도 맞지 않으면 빈 문자열로 두며 새 id를 만들지 않는다:\n- "
+        )
+        + "\n- ".join(writer_claim_slots) + "\n"
+        if writer_claim_slots
         else ""
     )
     if show_supported_claim_slots:
-        required_claim_slots = required_slots_for(section_id)
+        if writer_claim_slots:
+            claim_slot_guide = (
+                "\n원자 주장 계획 — 같은 사실을 말만 바꿔 반복하지 않는다. "
+                "아래 의미칸은 선택할 수 있는 사실의 종류이며, 응답에 별도 "
+                "«주장슬롯» 필드로 쓰지 않는다. 근거 조각이 지원하지 않는 "
+                "사실은 쓰지 않는다:\n- "
+                + "\n- ".join(writer_claim_slots) + "\n"
+            )
+        claim_slot_guide += (
+            FULL_SUPPORTED_SLOT_INDEX_HEAD
+            + render_evidence_pair_index(section_id, writer_fragments)
+            + FULL_CITATION_SLOT_GUIDE
+            + FULL_EVIDENCE_PAIR_GUIDE
+        )
+        required_claim_slots = tuple(
+            slot for slot in required_slots_for(section_id)
+            if slot in supported_slots and slot not in injected_slots
+        )
         claim_slot_guide += (
             "\nFULL 근거 결속 규칙 — 모든 산문 문장은 «확인»·«해석» 등급과 "
-            "관계없이 이 장에 허용된 주장슬롯을 정확히 하나 선택한다. 빈 문자열이나 "
-            "목록 밖 id는 허용되지 않는다. 또한 «인용»에 넣은 조각 중 적어도 하나의 "
-            "«지원 주장슬롯» 목록에 선택한 id가 있어야 한다. 지원하지 않는 조각으로 "
+            "관계없이 이 장에 허용된 지원쌍 ID를 하나 이상 선택한다. 빈 배열이나 "
+            "목록 밖 ID는 허용되지 않는다. 한 문장의 선택지들은 같은 의미칸이어야 "
+            "한다. 지원하지 않는 조각으로 "
             "빈자리를 채우지 말고, 맞는 근거가 없으면 그 문장을 내지 않는다.\n"
-            "FULL 필수 의미칸 — 아래 칸은 자료 패킷에 존재하는 데서 끝나지 않고, "
-            "각 칸을 뒷받침하는 근거를 인용한 공개 문장으로 모두 다뤄야 한다:\n- "
-            + "\n- ".join(required_claim_slots)
-            + "\n"
+            "FULL 산문 필수 의미칸 — 아래 칸은 이 장 자료가 지원하며 작성자가 "
+            "지원쌍을 선택한 문장으로 다뤄야 한다:\n"
+            + ("- " + "\n- ".join(required_claim_slots) + "\n" if required_claim_slots else "")
+            + "자료가 지원하지 않는 필수 칸을 추측해 채우지 않는다. "
+            "그 칸은 최종 품질 검증에서 미달로 남는다.\n"
         )
+        if injected_slots:
+            claim_slot_guide += (
+                "FULL 프로그램 책임 의미칸 — 아래 칸은 별도 구조화 검증기가 "
+                "처리한다. 표 이름 인용이나 근거 없는 산문으로 대신하지 않는다:\n- "
+                + "\n- ".join(injected_slots) + "\n"
+            )
         flow_requirements = _FLOW_CELL_SUPPORTED_SLOTS_BY_SECTION.get(section_id)
         if flow_requirements is not None:
             claim_slot_guide += (
-                "FULL 표 근거 결속 규칙 — 표의 각 비어 있지 않은 칸도 같은 행의 "
-                "인용 조각이 아래 의미 중 하나를 지원해야 한다:\n"
+                "FULL 표 근거 결속 규칙 — «경로표» 행은 본문과 달리 기존 "
+                "«인용» 배열에 조각 번호를 쓴다. 각 비어 있지 않은 칸은 "
+                "같은 행의 인용 조각이 아래 의미 중 하나를 지원해야 한다:\n"
                 + "".join(
                     f"- {header}: {', '.join(sorted(slots))}\n"
                     for header, slots in zip(
@@ -521,26 +603,49 @@ def build_section_prompt(
     # ★ 회사 이름과 조각으로만 정해진다 — section_id·already_written·실적표에
     #   의존하면 앞부분이 장마다 달라져 캐시가 영영 안 맞는다.
     fragments_block = _render_fragments(
-        fragments,
+        writer_fragments,
         show_supported_claim_slots=(show_supported_claim_slots or allowed_fragment_ids is not None),
+        pair_choices=pair_choices,
     )
+    schema_guide = FLOW_PROMPT_BY_SECTION.get(section_id, JSON_SCHEMA_GUIDE)
+    if show_supported_claim_slots:
+        schema_guide = schema_guide.replace(
+            FULL_LEGACY_SENTENCE_SCHEMA,
+            FULL_PAIR_SENTENCE_SCHEMA,
+        )
+        schema_guide = schema_guide.replace(
+            LEGACY_SCHEMA_CITATION_TAIL,
+            FULL_PAIR_FLOW_SCHEMA_TAIL
+            if section_id in FLOW_HEADERS_BY_SECTION
+            else FULL_PAIR_SCHEMA_TAIL,
+        )
     section_parts = [
-        SECTION_GUIDES[section_id],
+        (
+            FULL_PAST_CHANGES_SECTION_GUIDE
+            if show_supported_claim_slots and section_id == "past_changes"
+            else SECTION_GUIDES[section_id]
+        ),
         (
             COMPETITIVE_POSITION_PARAGRAPH_PLAN
             if section_id == "competitive_position"
             else ""
         ),
         "\n\n",
-        CITATION_RULES_GUIDE,
-        EXACT_EVIDENCE_SCOPE_GUIDE,
+        (
+            FULL_PAST_CHANGES_PAIR_CITATION_RULES_GUIDE
+            if show_supported_claim_slots and section_id == "past_changes"
+            else FULL_PAIR_CITATION_RULES_GUIDE
+            if show_supported_claim_slots else CITATION_RULES_GUIDE
+        ),
+        FULL_PAIR_EXACT_EVIDENCE_SCOPE_GUIDE
+        if show_supported_claim_slots else EXACT_EVIDENCE_SCOPE_GUIDE,
         (
             PARTIAL_EVIDENCE_SCOPE_GUIDE.format(
                 fragment_ids=", ".join(sorted(allowed_fragment_ids, key=int)) or "없음",
             )
             if allowed_fragment_ids is not None else ""
         ),
-        NEWS_WRITER_GUIDE if any(_is_news_fragment(f) for f in fragments) else "",
+        NEWS_WRITER_GUIDE if any(_is_news_fragment(f) for f in writer_fragments) else "",
         FORBIDDEN_TOPICS_GUIDE,
         SENTENCE_RANGE_GUIDE.format(
             minimum=minimum,
@@ -548,13 +653,14 @@ def build_section_prompt(
             interpretation_cap=MAX_INTERPRETED_SENTENCES_PER_SECTION,
         ),
         claim_slot_guide,
+        FULL_VISIBLE_EVIDENCE_GUIDE if show_supported_claim_slots else "",
         # 7장은 «경로표»를 함께 내야 해서 스키마 안내를 통째로 바꾼다.
         # 덧붙이면 기본 안내의 「이 JSON만 출력한다」와 충돌해 작가가 경로표를
         # 빼먹는다 (소재 제조사 실측).
         # 흐름표를 내는 장(5장 대응표·7장 경로표)은 스키마 안내를 통째로 «바꾼다».
         # 덧붙이면 기본 안내의 「이 JSON만 출력한다」와 충돌해 작가가 표를
         # 빼먹는다 (소재 제조사 실측).
-        FLOW_PROMPT_BY_SECTION.get(section_id, JSON_SCHEMA_GUIDE),
+        schema_guide,
         _render_table(performance_table),
         _render_already_written(already_written),
     ]
@@ -733,6 +839,7 @@ def _sentence_from_item(
     section_id: str = "",
     *,
     reject_inline_citation_markers: bool = False,
+    evidence_pairs: EvidencePairMap | None = None,
 ) -> Optional[ComposedSentence]:
     """항목 하나를 문장으로 바꾼다. 계약(글·인용·등급)이 안 맞으면 None.
 
@@ -763,6 +870,31 @@ def _sentence_from_item(
         str(value).strip() for value in raw_citations if str(value).strip()
     )
     raw_claim_slot = str(item.get(RESPONSE_CLAIM_SLOT_KEY) or "").strip()
+    # 새 필드가 있으면 그 선택지만 정본이다. 틀린 ID를 구형 두 필드로
+    # 되살리거나 이미 고른 인용을 다른 조각으로 바꾸지 않는다.
+    if evidence_pairs is not None and RESPONSE_EVIDENCE_PAIR_KEY in item:
+        raw_pairs = item[RESPONSE_EVIDENCE_PAIR_KEY]
+        if type(raw_pairs) is not list or not raw_pairs or any(
+            type(pair_id) is not str or pair_id not in evidence_pairs
+            for pair_id in raw_pairs
+        ) or len(set(raw_pairs)) != len(raw_pairs):
+            return None
+        selected = tuple(evidence_pairs[pair_id] for pair_id in raw_pairs)
+        selected_slot = selected[0][0]
+        selected_citations = tuple(fragment_id for _, fragment_id in selected)
+        if any(slot != selected_slot for slot, _ in selected):
+            return None
+        if RESPONSE_CLAIM_SLOT_KEY in item and raw_claim_slot != selected_slot:
+            return None
+        if RESPONSE_CITATIONS_KEY in item and citations != selected_citations:
+            return None
+        return ComposedSentence(
+            text=text,
+            citations=selected_citations,
+            grade=grade,
+            planned_claim_slot=selected_slot,
+            verification_state="unverified",
+        )
     allowed_claim_slots = CLAIM_SLOTS_BY_SECTION.get(section_id, ())
     # 작가가 «장 ID:» 앞부분을 떼고 칸 이름만 적는 일이 있다(2026-09-23 실측:
     # 빈 장 복구 재요청 답의 주장슬롯이 전부 앞부분 없는 이름이었다). 이 장의
@@ -793,6 +925,7 @@ def parse_section_response(
     section_id: str = "",
     *,
     reject_inline_citation_markers: bool = False,
+    evidence_pairs: EvidencePairMap | None = None,
 ) -> Optional[tuple[ComposedSentence, ...]]:
     """작가 응답을 문장 튜플로 바꾼다.
 
@@ -819,6 +952,10 @@ def parse_section_response(
         )
         for item in items
     )
+    pair_rejected = evidence_pairs is not None and any(
+        isinstance(item, Mapping) and RESPONSE_EVIDENCE_PAIR_KEY in item
+        for item in items
+    )
     sentences = tuple(
         sentence
         for sentence in (
@@ -826,6 +963,7 @@ def parse_section_response(
                 item,
                 section_id,
                 reject_inline_citation_markers=reject_inline_citation_markers,
+                evidence_pairs=evidence_pairs,
             )
             for item in items
         )
@@ -835,7 +973,7 @@ def parse_section_response(
     if not sentences:
         # packet 모드의 inline 표기는 형식이 아니라 해당 항목만의 위반이다.
         # 모두 위반이어도 재호출하지 않고 빈 결과로 확정한다.
-        return () if inline_rejected else None
+        return () if inline_rejected or pair_rejected else None
     return sentences
 
 
@@ -940,6 +1078,7 @@ def _ask_and_parse(
     section_id: str = "",
     *,
     reject_inline_citation_markers: bool = False,
+    evidence_pairs: EvidencePairMap | None = None,
 ) -> tuple[Optional[tuple[ComposedSentence, ...]], str]:
     """AI를 부르고 파싱까지. 호출 자체가 죽어도 None으로 삼킨다(전체 중단 금지).
 
@@ -973,6 +1112,7 @@ def _ask_and_parse(
             text,
             section_id,
             reject_inline_citation_markers=reject_inline_citation_markers,
+            evidence_pairs=evidence_pairs,
         ),
         text,
     )
@@ -985,6 +1125,7 @@ def _compose_one_section(
     *,
     reject_inline_citation_markers: bool = False,
     parse_retry_limit: int = PARSE_RETRY_LIMIT,
+    evidence_pairs: EvidencePairMap | None = None,
 ) -> ComposedSection:
     """장 하나를 쓴다. 실패 시 재요청 1회, 그래도 실패면 정직한 안내문으로 남긴다."""
     sentences, raw = _ask_and_parse(
@@ -992,6 +1133,7 @@ def _compose_one_section(
         prompt,
         section_id,
         reject_inline_citation_markers=reject_inline_citation_markers,
+        evidence_pairs=evidence_pairs,
     )
     retries = 0
     while sentences is None and retries < parse_retry_limit:
@@ -1007,6 +1149,7 @@ def _compose_one_section(
             retry_prompt,
             section_id,
             reject_inline_citation_markers=reject_inline_citation_markers,
+            evidence_pairs=evidence_pairs,
         )
     # 흐름표는 정해진 장(5장 대응표·7장 경로표)에서만 읽는다.
     # 같은 응답에서 꺼내므로 추가 AI 호출이 «0회»다.
@@ -1684,6 +1827,11 @@ def compose_sections(
             # packet/FULL 호출 계약은 장마다 정확히 한 번이다. 형식 오류를
             # 재호출로 감추지 않고 해당 장을 fail-closed 안내문으로 남긴다.
             parse_retry_limit=(0 if prepared is not None else PARSE_RETRY_LIMIT),
+            evidence_pairs=(
+                build_evidence_pair_map(section_id, section_fragments)
+                if prepared is not None and prepared.enforce_claim_slot_support
+                else None
+            ),
         )
         if workers > SERIAL_SECTION_CALLS:
             jobs.append(job)
@@ -1800,6 +1948,10 @@ def compose_selected_sections(
             ask,
             reject_inline_citation_markers=True,
             parse_retry_limit=0,
+            evidence_pairs=(
+                build_evidence_pair_map(section_id, prepared.packets[section_id])
+                if prepared.enforce_claim_slot_support else None
+            ),
         )
         sections.append(section)
     return _sanitize_report_to_section_evidence(

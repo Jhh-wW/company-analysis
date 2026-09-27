@@ -19,6 +19,9 @@ from src.features.composer.constants import GRADE_CONFIRMED
 from src.features.composer.port import (
     CollectedFragment, ComposedReport, ComposedSection, ComposedSentence,
 )
+from src.features.composer.tests.injected_program_fixture import (
+    make_numeric_performance_evidence,
+)
 from src.features.composer.tests.review_evidence_fixture import review_items
 from src.features.composer.verify import (
     REWRITE_PROMPT_HEADER, verify_report, verify_sentences,
@@ -188,11 +191,15 @@ def test_full_initial_review_records_the_actual_request_and_response(monkeypatch
     recorder = pipeline._CallLedgerRecorder()
     monkeypatch.setattr(pipeline, "_CallLedgerRecorder", lambda: recorder)
     writer, initial, followup = _FakeWriter(), _FakeReviewer(), _FakeReviewer()
-    with pytest.raises(V2ValidationError, match="post_validation_safety_blocked"):
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=9
+    )
+    with pytest.raises(V2ValidationError, match="too_many_underfilled_sections"):
         pipeline.run_v2(
-            "가나다전자", {}, None,
+            "가나다전자", {}, performance_table,
             writer_ask=writer, reviewer_ask=followup, initial_reviewer_ask=initial,
             release_mode=ReleaseMode.FULL, section_evidence_packets=_strict_packet_set(),
+            filing_meta=filing_meta,
             company_id="00123456", build_identity_sha256="b" * 64,
         )
     records = recorder.freeze().records
@@ -322,13 +329,17 @@ def test_run_v2는_FULL에서_재요청_호출자만_두_자리로_감싼다(mon
 
     monkeypatch.setattr(pipeline, "_CallLedgerRecorder", _Spy)
     reviewer, initial, retry, rewrite, recheck = (_FakeReviewer() for _ in range(5))
-    with pytest.raises(V2ValidationError, match="post_validation_safety_blocked"):
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=9
+    )
+    with pytest.raises(V2ValidationError, match="too_many_underfilled_sections"):
         pipeline.run_v2(
-            "가나다전자", {}, None,
+            "가나다전자", {}, performance_table,
             writer_ask=_FakeWriter(), reviewer_ask=reviewer,
             initial_reviewer_ask=initial, initial_retry_reviewer_ask=retry,
             rewrite_ask=rewrite, recheck_ask=recheck,
             release_mode=ReleaseMode.FULL, section_evidence_packets=_strict_packet_set(),
+            filing_meta=filing_meta,
             company_id="00123456", build_identity_sha256="b" * 64,
         )
 
@@ -446,13 +457,17 @@ def test_운영_FULL의_근거_재작성은_장부자리가_없어_보내지_않
     monkeypatch.setattr(pipeline, "_CallLedgerRecorder", _Spy)
     reviewer = _packet_reviewer_class()()
     composition: list[dict] = []
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=9
+    )
     # 이 fixture 는 끝에서 품질 판정으로 막힌다 — 이 시험은 그 «전»의 호출만 본다.
     with contextlib.suppress(V2ValidationError):
         pipeline.run_v2(
-            "가나다전자", _strict_fragments(), None,
+            "가나다전자", _strict_fragments(), performance_table,
             writer_ask=_PacketWriter(), reviewer_ask=reviewer,
             rewrite_ask=rewrite, recheck_ask=recheck,
             release_mode=ReleaseMode.FULL, section_evidence_packets=_strict_packet_set(),
+            filing_meta=filing_meta,
             company_id="00123456", build_identity_sha256="b" * 64,
             grounding_rewrite_enabled=True,
             preserve_on_ask_failure=True,

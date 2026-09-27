@@ -13,7 +13,7 @@
 
 ## 2. 현재 구성이 이 문제를 막는 방식
 
-`render.yaml`은 1GB 영속 disk와 `numInstances: 1`을 함께 고정한다. Render 공식 disk
+`render.yaml`은 2GB 영속 disk와 `numInstances: 1`을 함께 고정한다. Render 공식 disk
 계약상 이 구성은 zero-downtime 교체가 꺼지고 **기존 인스턴스를 완전히 멈춘 뒤
 새 인스턴스를 시작**한다. 따라서 운영 순서는 다음 하나로 고정된다.
 
@@ -28,7 +28,7 @@ cutover snapshot은 새 프로세스의 첫 SQLite bootstrap에서 딱 한 번 �
 `app/src/features/report_access/tests/test_deployment_cutover.py`가 다음을 고정한다.
 
 - `render.yaml`의 web 서비스가 `numInstances: 1`인지
-- 1GB 영속 disk가 `/var/data`에 붙어 있는지
+- 2GB 영속 disk가 `/var/data`에 붙어 있는지
 - `maxShutdownDelaySeconds`가 **없는지** — Render는 disk가 붙은 서비스에 이 값을 거부한다.
   넣으면 Blueprint 동기화가 실패해 배포 자체가 막힌다
 - 이 문서가 위 순서와 구성 변경 조건을 숨기지 않는지

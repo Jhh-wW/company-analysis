@@ -28,8 +28,11 @@ from src.features.composer.news_block import (
     news_block_caption,
 )
 from src.features.composer.port import CollectedFragment
+from src.features.composer.tests.injected_program_fixture import (
+    make_numeric_performance_evidence,
+)
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
-from src.shared.report_evidence.constants import SOURCE_KIND_NEWS
+from src.shared.report_evidence.constants import ReleaseMode, SOURCE_KIND_NEWS
 from src.shared.report_generation.models import exact_text_sha256
 from src.shared.report_quality.source_identity import document_identity_from_parts
 
@@ -507,18 +510,22 @@ def _run_mode(release_mode, *, flow: bool):
         _NoDiagram,
     )
 
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=40
+    )
     with pytest.MonkeyPatch.context() as mp:
         news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
         mp.setenv(news_intake_switch.NEWS_INTAKE_ENV_NAME, "1")
         output = run_v2(
             "가나다전자",
             (),
-            None,
+            performance_table if release_mode is ReleaseMode.FULL else None,
             writer_ask=_CompletePacketWriter(flow=flow),
             reviewer_ask=_BoundGroupedReviewer(),
             diagram_ask=_NoDiagram(),
             release_mode=release_mode,
             section_evidence_packets=_packets_with_news(),
+            filing_meta=filing_meta if release_mode is ReleaseMode.FULL else None,
             company_id="00123456",
             build_identity_sha256="b" * 64,
         )
@@ -782,6 +789,16 @@ def _packets_with_names_and_news():
     )
 
     base = _full_packets_with_names()
+    by_section = {packet.section_id: packet for packet in base.packets}
+    assert any(
+        fragment.fragment_id == "40"
+        for fragment in by_section["past_changes"].fragments
+    )
+    assert any(
+        fragment.fragment_id == "90"
+        for fragment in by_section["competitive_position"].fragments
+    )
+    assert by_section["competitive_position"].program_evidence is not None
     rebuilt = []
     for packet in base.packets:
         if packet.section_id != PORTFOLIO_TABLE_SECTION_ID:
@@ -977,6 +994,9 @@ def test_보충_회차가_그_장을_다시_써도_보도표가_남는다() -> N
     )
     from src.shared.report_evidence.constants import ReleaseMode
 
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=40
+    )
     writer = _ThinThenFullWriter()
     with pytest.MonkeyPatch.context() as mp:
         news_intake_switch._reset_process_news_intake_switch_for_tests()  # noqa: SLF001
@@ -984,12 +1004,13 @@ def test_보충_회차가_그_장을_다시_써도_보도표가_남는다() -> N
         output = run_v2(
             "가나다전자",
             (),
-            None,
+            performance_table,
             writer_ask=writer,
             reviewer_ask=_BoundGroupedReviewer(),
             diagram_ask=_NoDiagram(),
             release_mode=ReleaseMode.FULL,
             section_evidence_packets=_packets_with_news(),
+            filing_meta=filing_meta,
             company_id="00123456",
             build_identity_sha256="b" * 64,
         )

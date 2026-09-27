@@ -498,8 +498,15 @@ class HttpEvaluation:
                    "data_absence_vs_provider_failure": "diagnostics.json을 근거로 사람이 판독",
                    "diagnostic_tables": list(diagnostics)}
         if ledger.report_id:
-            if ledger.corp_id != case.corp_code or result.status_code != 200:
-                raise EvaluationError("최종 보고서 회사 또는 결과 접근이 일치하지 않습니다")
+            if ledger.corp_id != case.corp_code:
+                raise EvaluationError("최종 보고서 회사가 평가 입력과 일치하지 않습니다")
+            if result.status_code != 200:
+                metrics["result_closed_reason"] = "result_http_non_200"
+                _preserve_existing_artifact(output / "metrics.json")
+                write_json(output / "metrics.json", metrics)
+                raise EvaluationError(
+                    f"최종 보고서 결과 접근이 차단됐습니다: HTTP {result.status_code}"
+                )
             response = self.client.get(f"/download/pdf/{run_id}")
             if response.status_code != 200 or not response.content.startswith(b"%PDF-"):
                 raise EvaluationError("공식 PDF 내려받기가 완료되지 않았습니다")

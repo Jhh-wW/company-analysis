@@ -716,8 +716,8 @@ def test_과거_Manual_Deploy_기록을_지우면_실패한다() -> None:
         )
 
 
-def test_render_reserves_only_half_the_persistent_disk_for_immutable_pdf_artifacts() -> None:
-    """1GB 공용 디스크를 PDF가 끝까지 채우지 못하게 배포값을 고정한다."""
+def test_render_preserves_pdf_capacity_when_persistent_disk_grows() -> None:
+    """디스크 증설 뒤에도 PDF 한도를 유지해 원문·DB·백업 여유를 확보한다."""
 
     blueprint = yaml.safe_load(
         (REPOSITORY_ROOT / "render.yaml").read_text(encoding="utf-8")
@@ -727,7 +727,7 @@ def test_render_reserves_only_half_the_persistent_disk_for_immutable_pdf_artifac
     )
     render_values = {item["key"]: item.get("value") for item in web_service["envVars"]}
 
-    assert web_service["disk"]["sizeGB"] == 1
+    assert web_service["disk"]["sizeGB"] == 2
     assert render_values["REPORT_ARTIFACT_CAPACITY_BYTES"] == "536870912"
     assert isinstance(render_values["REPORT_ARTIFACT_CAPACITY_BYTES"], str)
 

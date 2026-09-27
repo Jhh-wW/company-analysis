@@ -98,6 +98,7 @@ def _dart_ready_result(
                 candidate,
                 documents=(),
                 fragments=(),
+                estimated_tokens=0,
                 attempts=(
                     CollectionAttempt(
                         company_id=CORP_ID,
@@ -226,6 +227,10 @@ def test_news_on_and_bound_dart_ready_two_sections_connect_news_and_shadow_compo
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     official = _dart_ready_result()
+    assert all(
+        not candidate.fragments and candidate.estimated_tokens == 0
+        for candidate in official.candidates[2:]
+    )
     searches = 0
 
     def search_news(_query: str, **_kwargs: object) -> SimpleNamespace:

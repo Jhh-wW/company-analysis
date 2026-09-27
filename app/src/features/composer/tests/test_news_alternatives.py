@@ -19,6 +19,7 @@ from src.features.composer.news_usage import (
 from src.features.composer.pipeline import run_v2
 from src.features.composer.port import ComposedReport, ComposedSection, ComposedSentence
 from src.features.composer.tests.test_news_block_channels import _news_fragment, _ThinThenFullWriter
+from src.features.composer.tests.injected_program_fixture import make_numeric_performance_evidence
 from src.features.composer.tests.test_section_public_manifest import (
     _BoundGroupedReviewer, _CompletePacketWriter, _NoDiagram, _packets,
 )
@@ -115,9 +116,13 @@ def _full(news, *, transform=None, decide=None, supplement=False, omit_first=Fal
         return json.dumps(result, ensure_ascii=False)
 
     reviewer = SelectiveReviewer(decide or (lambda _text, _entry: "참"))
-    output = run_v2("가나다전자", (), None, writer_ask=write, reviewer_ask=reviewer,
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=40
+    )
+    output = run_v2("가나다전자", (), performance_table, writer_ask=write, reviewer_ask=reviewer,
                     diagram_ask=_NoDiagram(), release_mode=ReleaseMode.FULL,
                     section_evidence_packets=packets, company_id="00123456",
+                    filing_meta=filing_meta,
                     build_identity_sha256="b" * 64)
     return output, writer_prompts, reviewer
 
@@ -276,17 +281,30 @@ def test_뉴스원문대체후보를_공식8문서하한에_포함하지않는�
 
     monkeypatch.setattr(pipeline_module, "build_generation_quality_candidate", capture)
     output, _, _ = _full((_fragment(),))
-    assert output.quality_observation.document_sources == 9
+    # 기본 공식 문서에 검산된 4장 실적표 문서 한 건이 추가된다.
+    assert output.quality_observation.document_sources == 10
     candidate = captured[-1]
     news = tuple(source for source in candidate.sources if source.source_kind == "news")
     official = tuple(source for source in candidate.sources if source.source_kind != "news")
     assert news and all(source.counts_toward_document_floor is False for source in news)
-    # 완성된 실제 투영에서 공식 문서 두 개의 독립 신원만 같은 문서로 바꾼다.
-    # 뉴스의 검수·인용을 그대로 보존해도 공식 문서 수는 7이어야 한다.
-    repeated = tuple(replace(source, document_identity=official[0].document_identity,
-                             document_content_sha256=official[0].document_content_sha256)
-                     for source in official[-2:])
-    reduced = replace(candidate, sources=official[:-2] + repeated + news)
+    # 실적표 추가 뒤 공식 독립 문서는 열 건이다. 실제 문서로 세는 서로 다른
+    # 세 문서만 한 문서의 신원으로 묶어 일곱 건으로 만든다. 뉴스는 그대로 둔다.
+    counted_indices = tuple(
+        index for index, source in enumerate(official)
+        if source.counts_toward_document_floor and source.document_content_sha256
+    )
+    assert len(counted_indices) == 10
+    anchor = official[counted_indices[0]]
+    repeated_indices = frozenset(counted_indices[-3:])
+    reduced_official = tuple(
+        replace(
+            source,
+            document_identity=anchor.document_identity,
+            document_content_sha256=anchor.document_content_sha256,
+        ) if index in repeated_indices else source
+        for index, source in enumerate(official)
+    )
+    reduced = replace(candidate, sources=reduced_official + news)
     assessment = assess_quality(reduced, STRICT_CONTRACT)
     assert assessment.document_sources == 7
     assert any("독립 문서 출처가 7건" in reason for reason in assessment.shortfall_reasons)

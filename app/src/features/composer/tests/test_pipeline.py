@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import re
+from dataclasses import replace
 
 import pytest
 
@@ -46,6 +47,10 @@ from src.features.composer.port import (
 from src.features.composer.pipeline import V2RunOutput, run_v2
 from src.features.composer.port import FilingMeta, PerformanceTable
 from src.features.composer.render import ENGINE_V2_SCHEMA_VERSION
+from src.features.composer.tests.injected_program_fixture import (
+    make_numeric_performance_evidence,
+    make_stated_limitation_program,
+)
 from src.features.composer.validate import V2ValidationError
 from src.features.composer.tests.review_evidence_fixture import review_items
 from src.features.pipeline.port import Grade, Report
@@ -56,6 +61,7 @@ from src.shared.final_gate_diagnostics import (
 )
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_evidence.constants import ReleaseMode
+from src.shared.report_evidence.policy import injected_slots_for
 from src.shared.report_quality.source_identity import document_identity_from_parts
 
 _LOGGER_NAME = "src.features.composer.pipeline"
@@ -184,6 +190,12 @@ def _strict_packet_set(
                 supported_claim_slots=all_claim_slots,
             )
         )
+    _, financial_fragment, _ = make_numeric_performance_evidence(fragment_number=9)
+    comparison_program = make_stated_limitation_program(
+        fragment_number=90,
+        company_name="가나다전자",
+        statement="가나다전자는 독자 기술을 보유한다고 밝혔다.",
+    )
     generation = "a" * 64
     return SectionEvidencePacketSet(
         company_id="00123456",
@@ -193,11 +205,75 @@ def _strict_packet_set(
                 company_id="00123456",
                 evidence_generation_sha256=generation,
                 section_id=section_id,
-                fragments=tuple(fragments),
+                fragments=(
+                    *fragments,
+                    *((financial_fragment,) if section_id == "past_changes" else ()),
+                    *(comparison_program.source_fragments
+                      if section_id == "competitive_position" else ()),
+                ),
+                program_evidence=(
+                    comparison_program if section_id == "competitive_position"
+                    else None
+                ),
             )
             for section_id in SECTION_IDS
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("missing_numeric", "missing_program"),
+    ((True, False), (False, True), (True, True)),
+)
+def test_FULL_조각_메타만_주입칸을_표시해도_작성전에_차단한다(
+    missing_numeric: bool, missing_program: bool,
+) -> None:
+    packets = _strict_packet_set()
+    missing_ids: set[str] = set()
+    if missing_numeric:
+        missing_ids.add("9")
+    if missing_program:
+        missing_ids.add("90")
+    metadata_only = replace(
+        packets,
+        packets=tuple(
+            replace(
+                packet,
+                fragments=tuple(
+                    fragment
+                    for fragment in packet.fragments
+                    if fragment.fragment_id not in missing_ids
+                ),
+                program_evidence=None if missing_program else packet.program_evidence,
+            )
+            for packet in packets.packets
+        ),
+    )
+    writer = _FakeWriter()
+    reviewer = _FakeReviewer()
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=9
+    )
+
+    with pytest.raises(
+        V2ValidationError,
+        match="report_recovery:preflight_official_evidence_insufficient",
+    ):
+        run_v2(
+            "가나다전자",
+            _strict_fragments(),
+            None if missing_numeric else performance_table,
+            writer_ask=writer,
+            reviewer_ask=reviewer,
+            release_mode=ReleaseMode.FULL,
+            section_evidence_packets=metadata_only,
+            filing_meta=None if missing_numeric else filing_meta,
+            company_id="00123456",
+            build_identity_sha256="b" * 64,
+        )
+
+    assert writer.prompts == []
+    assert reviewer.prompts == []
 
 
 #: 8장(인재상·조직문화·일하는 방식)의 장 표시. 이 장만 원문 절 계약을 받는다.
@@ -619,16 +695,20 @@ def test_엄격모드는_AI요약을_부르지_않고_얇은_보고서를_막는
 
     writer = StrictWriter()
     reviewer = _FakeReviewer()
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=9
+    )
 
     with pytest.raises(V2ValidationError) as caught:
         run_v2(
             "가나다전자",
             _strict_fragments(),
-            None,
+            performance_table,
             writer_ask=writer,
             reviewer_ask=reviewer,
             release_mode=release_mode,
             section_evidence_packets=_strict_packet_set(),
+            filing_meta=filing_meta,
             company_id="00123456",
             build_identity_sha256="b" * 64,
         )
@@ -685,7 +765,10 @@ def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
             section_index = self.section_calls
             section_id = SECTION_IDS[section_index]
             self.section_calls += 1
-            slots = CLAIM_SLOTS_BY_SECTION[section_id]
+            slots = tuple(
+                slot for slot in CLAIM_SLOTS_BY_SECTION[section_id]
+                if slot not in injected_slots_for(section_id)
+            )
             return json.dumps(
                 {
                     "문장들": [
@@ -703,6 +786,9 @@ def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
 
     writer = CompleteWriter()
     reviewer = _FakeReviewer()
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=9
+    )
     expected_sentences = tuple(
         f"가나다전자는 {topic}의 {ending}"
         for topic in topics
@@ -711,13 +797,14 @@ def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
     output = run_v2(
         "가나다전자",
         _strict_fragments(),
-        None,
+        performance_table,
         writer_ask=writer,
         reviewer_ask=reviewer,
         release_mode=ReleaseMode.FULL,
         section_evidence_packets=_strict_packet_set(
             evidence_texts=expected_sentences
         ),
+        filing_meta=filing_meta,
         company_id="00123456",
         build_identity_sha256="b" * 64,
     )
@@ -728,7 +815,15 @@ def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
     assert output.quality_observation.quality_grade == "완성"
     assert output.quality_observation.safety_decision == "공개 가능"
     assert output.quality_observation.release_allowed is True
-    assert len(output.report.fact_records) == 54
+    assert len(output.report.fact_records) == 58
+    assert sum(
+        fact.claim_slot == "past_changes:historical_performance"
+        for fact in output.report.fact_records
+    ) == 2
+    assert sum(
+        fact.claim_slot == "competitive_position:limitation"
+        for fact in output.report.fact_records
+    ) == 1
     assert len(output.report.summary_items) == 5
     assert len(writer.prompts) == 9
     assert len(reviewer.prompts) == 1

@@ -35,7 +35,7 @@ services:
     disk:
       name: company-analysis-data
       mountPath: /var/data
-      sizeGB: 1
+      sizeGB: 2
 
     envVars:
       # 실제 provider를 쓰되, 품질 검증이 끝날 때까지 관리자 한 명으로 범위를 고정한다.
@@ -110,7 +110,7 @@ services:
       # 위 영속 디스크 안에 운영 데이터와 캐시를 모은다.
       - key: APP_DATA_ROOT
         value: /var/data
-      # 1GB 디스크의 절반만 최초 승인 PDF 원본에 배정한다. 나머지는 SQLite·
+      # 2GB 디스크 중 512MiB만 최초 승인 PDF 원본에 배정한다. 나머지는 SQLite·
       # 감사 기록·캐시의 여유다. 한도를 넘으면 과거 원본을 지우지 않고 새 출고를 막는다.
       - key: REPORT_ARTIFACT_CAPACITY_BYTES
         value: "536870912"

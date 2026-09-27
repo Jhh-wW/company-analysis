@@ -14,6 +14,10 @@ import pytest
 
 from src.features.composer import pipeline as pipeline_module
 from src.features.composer import render as render_module
+from src.features.composer.tests.injected_program_fixture import (
+    make_numeric_performance_evidence,
+    make_stated_limitation_program,
+)
 from src.features.composer.future_plan_constants import (
     FUTURE_ACTIVITY_KEY,
     FUTURE_KEY,
@@ -76,6 +80,7 @@ from src.shared.report_evidence.constants import (
     SOURCE_KIND_DART_BUSINESS_REPORT,
     SOURCE_KIND_OFFICIAL_IR_PDF,
 )
+from src.shared.report_evidence.policy import injected_slots_for
 from src.shared.report_generation.canonical import (
     assert_report_matches_generation_evidence,
     public_content_digests,
@@ -93,8 +98,10 @@ from src.shared.revenue_table_provenance import canonical_json
 
 
 _MARKS = "가나다라마바사아자"
-# 기준 보고서(진영) 실측 총 54문장을 그대로 만드는 정상 FULL 도구다.
-# 특히 9장의 정책상 필수 여섯 칸을 결과값에 맞춰 생략하지 않는다.
+_NUMERIC_FRAGMENT_NUMBER: Final[int] = 40
+_PROGRAM_FRAGMENT_NUMBER: Final[int] = 90
+# 합성 작가는 아홉 장에 여섯 문장씩 쓰고, 실제 검증 프로그램이 4장을 두 문장,
+# 9장을 두 문장 보강한다. 주입 칸을 작가가 다시 쓰지는 않는다.
 _ENDINGS = ("첫째", "둘째", "셋째", "넷째", "다섯째", "여섯째")
 _GROUPED_ITEM_RE = re.compile(
     r"\[(\d+)\] \(장: ([^,]+), 종류: ([^,]+), 인용: ([^)]+)\)"
@@ -412,9 +419,22 @@ def _document_content_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _numeric_table_and_fragment() -> tuple[PerformanceTable, CollectedFragment]:
+    """공용 fixture의 실제 검산된 표·원문 조각을 사용한다."""
+    table, fragment, _filing_meta = make_numeric_performance_evidence(
+        fragment_number=_NUMERIC_FRAGMENT_NUMBER
+    )
+    return table, fragment
+
+
 def _packets(*, two_flow_sources: bool = False):
     packets: list[SectionEvidencePacket] = []
     generation = "a" * 64
+    comparison_program = make_stated_limitation_program(
+        fragment_number=_PROGRAM_FRAGMENT_NUMBER,
+        company_name="가나다전자",
+        statement="가나다전자는 독자 기술을 보유한다고 밝혔다.",
+    )
     for index, section_id in enumerate(SECTION_IDS, start=1):
         url = f"https://manifest.example/document/{index}"
         document_text = _fragment_text(_MARKS[index - 1])
@@ -430,6 +450,10 @@ def _packets(*, two_flow_sources: bool = False):
                 supported_claim_slots=CLAIM_SLOTS_BY_SECTION[section_id],
             )
         ]
+        if section_id == "past_changes":
+            fragments.append(_numeric_table_and_fragment()[1])
+        if section_id == "competitive_position":
+            fragments.extend(comparison_program.source_fragments)
         if section_id == "business_model" and two_flow_sources:
             secondary_text = (
                 document_text
@@ -457,6 +481,9 @@ def _packets(*, two_flow_sources: bool = False):
                 evidence_generation_sha256=generation,
                 section_id=section_id,
                 fragments=tuple(fragments),
+                program_evidence=(
+                    comparison_program if section_id == "competitive_position" else None
+                ),
             )
         )
     return SectionEvidencePacketSet(
@@ -464,6 +491,23 @@ def _packets(*, two_flow_sources: bool = False):
         evidence_generation_sha256=generation,
         packets=tuple(packets),
     )
+
+
+def _writer_slots(section_id: str) -> tuple[str, ...]:
+    """합성 작가는 실제 프로그램이 담당하는 필수 칸을 다시 쓰지 않는다."""
+    injected = set(injected_slots_for(section_id))
+    slots = tuple(
+        slot for slot in CLAIM_SLOTS_BY_SECTION[section_id] if slot not in injected
+    )
+    if section_id == "competitive_position":
+        return tuple(
+            slot for slot in slots
+            if slot in {
+                "competitive_position:self_context",
+                "competitive_position:stated_differentiator",
+            }
+        )
+    return slots
 
 
 class _CompletePacketWriter:
@@ -480,7 +524,7 @@ class _CompletePacketWriter:
         self.calls += 1
         fragment_ids = re.findall(r"\[조각 (\d+)\] \(", prompt)
         assert fragment_ids
-        slots = CLAIM_SLOTS_BY_SECTION[section_id]
+        slots = _writer_slots(section_id)
         sentences = [
             {
                 "글": _section_sentence(section_id, mark, index, ending),
@@ -531,12 +575,18 @@ class _RecoveringPacketWriter:
     def __call__(self, prompt: str) -> str:
         self.prompts.append(prompt)
         fragment_ids = re.findall(r"\[조각 (\d+)\] \(", prompt)
-        assert len(fragment_ids) == 1
+        assert fragment_ids
         section_id = SECTION_IDS[int(fragment_ids[0]) - 1]
+        # 수치40은 프로그램 전용이라 작성에서 숨긴다. 비교90은 프로그램
+        # limitation 외에 작성 가능 stated 슬롯도 지원하므로 그대로 보인다.
+        expected_ids = [fragment_ids[0]]
+        if section_id == "competitive_position":
+            expected_ids.append(str(_PROGRAM_FRAGMENT_NUMBER))
+        assert fragment_ids == expected_ids
         section_call = self.section_calls.get(section_id, 0) + 1
         self.section_calls[section_id] = section_call
         mark = _MARKS[int(fragment_ids[0]) - 1]
-        slots = CLAIM_SLOTS_BY_SECTION[section_id]
+        slots = _writer_slots(section_id)
         if section_id in self.targets and (
             section_call == 1 or self.remain_thin
         ):
@@ -552,7 +602,7 @@ class _RecoveringPacketWriter:
                         "글": _section_sentence(
                             section_id, mark, ending_index, _ENDINGS[ending_index]
                         ),
-                        "인용": fragment_ids,
+                        "인용": [fragment_ids[0]],
                         "등급": GRADE_CONFIRMED,
                         "주장슬롯": slots[index % len(slots)],
                     }
@@ -639,7 +689,7 @@ def _run_full(
     output = run_v2(
         "가나다전자",
         (),
-        None,
+        _numeric_table_and_fragment()[0],
         writer_ask=writer,
         reviewer_ask=reviewer,
         diagram_ask=diagram,
@@ -647,6 +697,9 @@ def _run_full(
         section_evidence_packets=(
             packets if packets is not None else _packets(two_flow_sources=flow)
         ),
+        filing_meta=make_numeric_performance_evidence(
+            fragment_number=_NUMERIC_FRAGMENT_NUMBER
+        )[2],
         composition_tables=composition_tables,
         company_id="00123456",
         build_identity_sha256="b" * 64,
@@ -665,12 +718,15 @@ def _run_recovering_full(
     output = run_v2(
         "가나다전자",
         (),
-        None,
+        _numeric_table_and_fragment()[0],
         writer_ask=writer,
         reviewer_ask=reviewer,
         diagram_ask=_NoDiagram(),
         release_mode=ReleaseMode.FULL,
         section_evidence_packets=packets or _packets(),
+        filing_meta=make_numeric_performance_evidence(
+            fragment_number=_NUMERIC_FRAGMENT_NUMBER
+        )[2],
         company_id="00123456",
         build_identity_sha256="b" * 64,
     )
@@ -789,7 +845,7 @@ def test_FULL_첫_검수의_깨진_한_행은_재요청_자리로_다시_물어_
     output = run_v2(
         "가나다전자",
         (),
-        None,
+        _numeric_table_and_fragment()[0],
         writer_ask=writer,
         reviewer_ask=generic,
         initial_reviewer_ask=initial,
@@ -862,7 +918,7 @@ def test_FULL_재요청_자리_호출이_한도로_죽어도_실패기록과_함
     output = run_v2(
         "가나다전자",
         (),
-        None,
+        _numeric_table_and_fragment()[0],
         writer_ask=_CompletePacketWriter(),
         reviewer_ask=generic,
         initial_reviewer_ask=initial,
@@ -924,7 +980,7 @@ def test_FULL_재요청_1회와_보충_두장이_한_실행에서_승인되고_�
     output = run_v2(
         "가나다전자",
         (),
-        None,
+        _numeric_table_and_fragment()[0],
         writer_ask=writer,
         reviewer_ask=generic,
         initial_reviewer_ask=initial,
@@ -979,15 +1035,11 @@ class _GlobalFailureReviewer:
         raise AskFatalError(RuntimeError("일일 예산 소진"))
 
 
-def test_FULL_재요청_자리가_전역_장애로_죽으면_기존_폴백으로_가고_진단에_남는다(
+def test_FULL_재요청_자리가_전역_장애로_죽으면_부분보존_공개차단과_진단을_남긴다(
     caplog, monkeypatch,
 ):
-    # 2026-09-24 총괄 결정 3 — 처분은 바꾸지 않는다(전역 장애는 뒤 필수 호출도 못
-    # 나가므로 재전파). 이 시험은 그 처분을 고정하고, 멈춤이 «두 번째 검수 호출»에서
-    # 났다는 관측(판독 global_failure)이 진단에 남는지 본다.
-    # 기존 처분: pipeline 의 AI 전역 장애 갈래가 검수를 못 마친 초안을 버리고 안내뿐인
-    # 본문으로 바꾼다 → FULL 사후 판정이 안전 차단(무차감)으로 닫는다. 진단 목록은
-    # 예외가 나도 real.py 의 finally 가 실행 기록에 옮긴다.
+    # 두 번째 검수의 전역 장애 뒤 미검증 산문은 버린다. 실제 공식 프로그램
+    # 사실만 부분 결과에 보존하되 공개는 차단하고, 실패 호출을 진단에 남긴다.
     from src.shared.report_quality.composition_diagnostic_constants import (
         PROTOCOL_STEP,
         READ_GLOBAL_FAILURE,
@@ -998,27 +1050,17 @@ def test_FULL_재요청_자리가_전역_장애로_죽으면_기존_폴백으로
         observed_composition_steps,
     )
 
-    recorders = []
-
-    class _LedgerSpy(pipeline_module._CallLedgerRecorder):
-        def __init__(self):
-            super().__init__()
-            recorders.append(self)
-
-    monkeypatch.setattr(pipeline_module, "_CallLedgerRecorder", _LedgerSpy)
+    recorders = _capture_full_call_ledger(monkeypatch)
     composition: list[dict] = []
     initial = _FirstRowBrokenReviewer()
     retry = _GlobalFailureReviewer()
     generic = _BoundGroupedReviewer()
-    # 검수 기록이 2회(실패한 bundled_retry)여도 사유는 이것이어야 한다 —
-    # ``report_recovery:primary_receipt_invalid`` 로 끝나면 결함이다(D 기준 트리 탐침).
-    with caplog.at_level("WARNING"), pytest.raises(
-        V2ValidationError, match="report_recovery:post_validation_safety_blocked",
-    ):
-        run_v2(
+    # 실패 뒤 검증 프로그램 사실만 남은 부분 산출물은 보존하되 공개 차단한다.
+    with caplog.at_level("WARNING"):
+        output = run_v2(
             "가나다전자",
             (),
-            None,
+            _numeric_table_and_fragment()[0],
             writer_ask=_CompletePacketWriter(),
             reviewer_ask=generic,
             initial_reviewer_ask=initial,
@@ -1031,6 +1073,8 @@ def test_FULL_재요청_자리가_전역_장애로_죽으면_기존_폴백으로
             composition_diagnostics_sink=composition,
             preserve_on_ask_failure=True,
         )
+    _assert_program_only_publication_blocked(output)
+    _assert_failed_review_ledger(recorders, retry=True)
 
     assert (len(initial.prompts), len(retry.prompts), len(generic.prompts)) == (1, 1, 0)
     assert [
@@ -1094,7 +1138,7 @@ def _run_full_with_retry(initial, retry, composition):
     return run_v2(
         "가나다전자",
         (),
-        None,
+        _numeric_table_and_fragment()[0],
         writer_ask=_CompletePacketWriter(),
         reviewer_ask=_BoundGroupedReviewer(),
         initial_reviewer_ask=initial,
@@ -1106,6 +1150,63 @@ def _run_full_with_retry(initial, retry, composition):
         build_identity_sha256="b" * 64,
         composition_diagnostics_sink=composition,
         preserve_on_ask_failure=True,
+    )
+
+
+def _assert_program_only_publication_blocked(output) -> None:
+    """검수 장애 뒤 공개할 수 없는 초안에는 확인된 프로그램 사실만 남는다."""
+    assert output.effective_release_mode == ReleaseMode.SHADOW.value
+    assert output.quality_observation.safety_decision == "공개 차단"
+    assert output.quality_observation.release_allowed is False
+    assert output.report.grade is Grade.PARTIAL
+    assert len(output.report.fact_records) == 4
+    assert {
+        (fact.section_owner, fact.claim_slot) for fact in output.report.fact_records
+    } == {
+        ("past_changes", "past_changes:historical_performance"),
+        ("competitive_position", "competitive_position:stated_differentiator"),
+        ("competitive_position", "competitive_position:limitation"),
+    }
+    body_by_section = {
+        section.cell: tuple(text for text, _citation in section.prose_lines)
+        for section in output.report.sections
+    }
+    assert {section_id: len(lines) for section_id, lines in body_by_section.items() if lines} == {
+        "past_changes": 2,
+        "competitive_position": 2,
+    }
+    program_fact_ids = {fact.fact_id for fact in output.report.fact_records}
+    assert all(
+        item.fact_ids and set(item.fact_ids) <= program_fact_ids
+        for item in output.report.summary_items
+    )
+
+
+def _capture_full_call_ledger(monkeypatch: pytest.MonkeyPatch):
+    """부분 결과에서 생성 영수증이 없어도 실제 호출 기록을 검증한다."""
+    recorders = []
+
+    class LedgerSpy(pipeline_module._CallLedgerRecorder):
+        def __init__(self):
+            super().__init__()
+            recorders.append(self)
+
+    monkeypatch.setattr(pipeline_module, "_CallLedgerRecorder", LedgerSpy)
+    return recorders
+
+
+def _assert_failed_review_ledger(recorders, *, retry: bool) -> None:
+    assert len(recorders) == 1
+    records = recorders[0].freeze().records
+    assert [record.outcome for record in records if record.role == "writer"] == [
+        "returned"
+    ] * 9
+    assert [
+        (record.section_id, record.outcome)
+        for record in records if record.role == "reviewer"
+    ] == (
+        [("bundled", "returned"), ("bundled_retry", "failed")]
+        if retry else [("bundled", "failed")]
     )
 
 
@@ -1150,9 +1251,9 @@ def test_FULL_재요청_자리의_공급자_호출_실패는_첫_판정으로_FU
     )
 
 
-def test_FULL_재요청_자리가_billing_uncertain_뒤_차단이면_예전처럼_출고_검증_차단이다():
-    # D 탐침 표 넷째 줄 대조 — 앞선 호출이 billing-uncertain 을 만든 뒤의 호출 차단
-    # (ProviderBudgetUnavailable)은 공급자 호출 실패가 아니다. 정책 불변으로 재전파한다.
+def test_FULL_재요청_자리가_billing_uncertain_뒤_차단이면_부분보존하되_공개차단한다(monkeypatch):
+    # 미정산 호출 뒤 예산 관리자가 막은 재요청을 공급자 응답 실패와 혼동하지
+    # 않는다. 검증 프로그램 사실만 보존하고 공개를 차단하며 진단 코드를 남긴다.
     from src.features.budget.provider_budget import ProviderBudgetUnavailable
     from src.shared.report_quality.composition_diagnostic_constants import (
         PROTOCOL_STEP,
@@ -1160,13 +1261,13 @@ def test_FULL_재요청_자리가_billing_uncertain_뒤_차단이면_예전처�
     )
 
     composition: list[dict] = []
+    recorders = _capture_full_call_ledger(monkeypatch)
     retry = _CauseRaisingReviewer(ProviderBudgetUnavailable(
         "미확정 provider 호출 뒤에는 같은 요청에서 다시 호출할 수 없습니다"
     ))
-    with pytest.raises(
-        V2ValidationError, match="report_recovery:post_validation_safety_blocked",
-    ):
-        _run_full_with_retry(_FirstRowBrokenReviewer(), retry, composition)
+    output = _run_full_with_retry(_FirstRowBrokenReviewer(), retry, composition)
+    _assert_program_only_publication_blocked(output)
+    _assert_failed_review_ledger(recorders, retry=True)
 
     second, = [
         record for record in composition
@@ -1177,14 +1278,14 @@ def test_FULL_재요청_자리가_billing_uncertain_뒤_차단이면_예전처�
     )
 
 
-def test_FULL_첫_검수의_공급자_호출_실패는_강등하지_않고_출고_검증_차단이다():
-    # 첫 호출은 우아한 저하 대상이 아니다 — 재요청 자리 래퍼만 바뀌었다.
+def test_FULL_첫_검수의_공급자_호출_실패는_부분보존하되_공개를_차단한다(monkeypatch):
+    # 첫 호출 실패에는 재요청하지 않고 검증 프로그램 사실만 비공개 보존한다.
     initial = _CauseRaisingReviewer(_provider_call_failed())
     retry = _BoundGroupedReviewer()
-    with pytest.raises(
-        V2ValidationError, match="report_recovery:post_validation_safety_blocked",
-    ):
-        _run_full_with_retry(initial, retry, [])
+    recorders = _capture_full_call_ledger(monkeypatch)
+    output = _run_full_with_retry(initial, retry, [])
+    _assert_program_only_publication_blocked(output)
+    _assert_failed_review_ledger(recorders, retry=False)
 
     assert len(initial.prompts) == 1
     assert retry.prompts == []
@@ -1201,25 +1302,21 @@ class _GenericFailingReviewer:
         raise RuntimeError("공급자 연결 끊김")
 
 
-def test_FULL_첫_검수가_일반_예외로_죽으면_두번째_호출을_보내지_않고_예전_결말로_끝난다(caplog):
-    # 2026-09-24 보강 1 — 첫 «bundled» 기록이 실패면 재요청 자리를 쓰지 않는다.
-    # 재요청이 성공해 COMPLETE 까지 가면 생산 증거가 그 실패 기록을 거절해 «조립
-    # 실패»로 전체가 죽기 때문이다. 결말은 예전(재요청이 장부에 막히던 때)과 같다 —
-    # 판정이 하나도 없어 사후 판정이 안전 차단(무차감)으로 닫는다. 공급자 호출은 첫
-    # 검수 1회뿐이고, 보내지 않은 두 번째 호출의 관측·경고도 없다.
+def test_FULL_첫_검수가_일반_예외로_죽으면_두번째_호출없이_부분보존_공개차단한다(caplog, monkeypatch):
+    # 첫 묶음 검수가 실패하면 재요청은 하지 않는다. 실제 검증 프로그램 사실만
+    # 남긴 부분 결과도 공개는 차단하며, 두 번째 호출의 관측은 없어야 한다.
     from src.shared.report_quality.composition_diagnostic_constants import PROTOCOL_STEP
 
     initial = _GenericFailingReviewer()
     retry = _BoundGroupedReviewer()
     generic = _BoundGroupedReviewer()
     composition: list[dict] = []
-    with caplog.at_level("WARNING"), pytest.raises(
-        V2ValidationError, match="report_recovery:post_validation_safety_blocked",
-    ):
-        run_v2(
+    recorders = _capture_full_call_ledger(monkeypatch)
+    with caplog.at_level("WARNING"):
+        output = run_v2(
             "가나다전자",
             (),
-            None,
+            _numeric_table_and_fragment()[0],
             writer_ask=_CompletePacketWriter(),
             reviewer_ask=generic,
             initial_reviewer_ask=initial,
@@ -1232,6 +1329,8 @@ def test_FULL_첫_검수가_일반_예외로_죽으면_두번째_호출을_보�
             composition_diagnostics_sink=composition,
             preserve_on_ask_failure=True,
         )
+    _assert_program_only_publication_blocked(output)
+    _assert_failed_review_ledger(recorders, retry=False)
 
     assert len(initial.prompts) == 1
     assert retry.prompts == [] and generic.prompts == []
@@ -1428,7 +1527,7 @@ def test_보충뒤에도_얇으면_세번째호출없이_닫힌사유로_끝난�
         run_v2(
             "가나다전자",
             (),
-            None,
+            _numeric_table_and_fragment()[0],
             writer_ask=writer,
             reviewer_ask=reviewer,
             release_mode=ReleaseMode.FULL,
@@ -1463,7 +1562,7 @@ def test_보충검수의_미결속_해석을_제외한_뒤_품질미달이면_�
         run_v2(
             "가나다전자",
             (),
-            None,
+            _numeric_table_and_fragment()[0],
             writer_ask=writer,
             reviewer_ask=reviewer,
             release_mode=ReleaseMode.FULL,
@@ -1497,7 +1596,7 @@ def test_보충후보지문이_같으면_재보충없이_중단한다(monkeypatc
         run_v2(
             "가나다전자",
             (),
-            None,
+            _numeric_table_and_fragment()[0],
             writer_ask=writer,
             reviewer_ask=reviewer,
             release_mode=ReleaseMode.FULL,
@@ -1522,7 +1621,7 @@ def test_얇은장이_세개면_primary10회뒤_보충하지않는다():
         run_v2(
             "가나다전자",
             (),
-            None,
+            _numeric_table_and_fragment()[0],
             writer_ask=writer,
             reviewer_ask=reviewer,
             release_mode=ReleaseMode.FULL,
@@ -1535,16 +1634,25 @@ def test_얇은장이_세개면_primary10회뒤_보충하지않는다():
     assert len(reviewer.prompts) == 1
 
 
-def test_안전실패는_primary10회뒤_보충없이_즉시중단한다():
-    class SafetyBlockedReviewer(_BoundGroupedReviewer):
-        def __call__(self, prompt: str) -> str:
-            payload = json.loads(super().__call__(prompt))
-            for verdict in payload["판정"]:
-                verdict["결과"] = "애매"
-            return json.dumps(payload, ensure_ascii=False)
+def test_안전실패는_primary10회뒤_보충없이_즉시중단한다(monkeypatch):
+    # 9장 58개 사실의 정상 후보를 유지한 채, 공개 후보에 결속되지 않은
+    # 요약이 침투한 공격만 주입한다. 품질 하한보다 안전 분기를 직접 시험한다.
+    original = pipeline_module.build_generation_quality_candidate
 
+    def candidate_with_unbound_summary(*args, **kwargs):
+        candidate = original(*args, **kwargs)
+        assert len(candidate.sections) == len(SECTION_IDS)
+        assert len(candidate.facts) == 58
+        assert candidate.has_unbound_summary_content is False
+        return replace(candidate, has_unbound_summary_content=True)
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "build_generation_quality_candidate",
+        candidate_with_unbound_summary,
+    )
     writer = _CompletePacketWriter()
-    reviewer = SafetyBlockedReviewer()
+    reviewer = _BoundGroupedReviewer()
     with pytest.raises(
         V2ValidationError,
         match="report_recovery:post_validation_safety_blocked",
@@ -1552,7 +1660,7 @@ def test_안전실패는_primary10회뒤_보충없이_즉시중단한다():
         run_v2(
             "가나다전자",
             (),
-            None,
+            _numeric_table_and_fragment()[0],
             writer_ask=writer,
             reviewer_ask=reviewer,
             release_mode=ReleaseMode.FULL,
@@ -1576,14 +1684,17 @@ def test_독립문서수가_부족하면_primary10회뒤_보충하지않는다()
             replace(
                 packet,
                 fragments=tuple(
-                    replace(
+                    fragment
+                    if (
+                        fragment.fragment_id == str(_NUMERIC_FRAGMENT_NUMBER)
+                        or fragment.bound_source is not None
+                    )
+                    else replace(
                         fragment,
                         text=shared_text,
                         source_url=shared_url,
                         document_identity=shared_identity,
-                        document_content_sha256=_document_content_sha256(
-                            shared_text
-                        ),
+                        document_content_sha256=_document_content_sha256(shared_text),
                     )
                     for fragment in packet.fragments
                 ),
@@ -1601,7 +1712,7 @@ def test_독립문서수가_부족하면_primary10회뒤_보충하지않는다()
         run_v2(
             "가나다전자",
             (),
-            None,
+            _numeric_table_and_fragment()[0],
             writer_ask=writer,
             reviewer_ask=reviewer,
             release_mode=ReleaseMode.FULL,
@@ -1658,9 +1769,9 @@ def test_bundled_reviewer의_flow_행결과는_장과_허용근거에_결속된�
 
     reviewer = DamagedReviewer()
     output = run_v2(
-        "가나다전자",
-        (),
-        None,
+            "가나다전자",
+            (),
+            _numeric_table_and_fragment()[0],
         writer_ask=writer,
         reviewer_ask=reviewer,
         diagram_ask=_NoDiagram(),
@@ -1723,7 +1834,7 @@ def test_FULL_packet_작성응답이_전부_깨져도_기본묶음검수는_정�
         run_v2(
             "가나다전자",
             (),
-            None,
+            _numeric_table_and_fragment()[0],
             writer_ask=writer,
             reviewer_ask=reviewer,
             diagram_ask=diagram,
@@ -1838,7 +1949,7 @@ def test_최종출고검증이_실패하면_ProducerEvidence를_만들지않는�
         run_v2(
             "가나다전자",
             (),
-            None,
+            _numeric_table_and_fragment()[0],
             writer_ask=writer,
             reviewer_ask=reviewer,
             release_mode=ReleaseMode.FULL,
@@ -1869,7 +1980,7 @@ def test_packet_묶음검수응답이_깨져도_reviewer는_정확히_1회다():
         run_v2(
             "가나다전자",
             (),
-            None,
+            _numeric_table_and_fragment()[0],
             writer_ask=writer,
             reviewer_ask=reviewer,
             diagram_ask=diagram,
@@ -1912,8 +2023,10 @@ def test_typed_packet의_문서일과_전체지문은_Source와_품질평가에_
     assert {
         source.document_content_sha256 for source in output.report.citations
     } == expected_hashes
-    assert len(expected_hashes) == 9
-    assert output.quality_observation.document_sources == 9
+    # 기본 아홉 문서에 DART 표와 프로그램 원문이 더해진다. 프로그램 Source는
+    # 전체 문서 지문이 없는 봉인 경로여서 독립 문서 하한은 열 건만 센다.
+    assert len(expected_hashes) == 11
+    assert output.quality_observation.document_sources == 10
 
 
 def test_SHADOW_flat은_legacy_요약과_검수호출을_유지하고_manifest를_싣지_않는다():

@@ -15,6 +15,7 @@ from src.features.composer.news_usage import news_usage_diagnostics, supplement_
 from src.features.composer.pipeline import run_v2
 from src.features.composer.port import ComposedReport, ComposedSection
 from src.features.composer.tests.test_news_block_channels import _news_fragment
+from src.features.composer.tests.injected_program_fixture import make_numeric_performance_evidence
 from src.features.composer.tests.test_section_public_manifest import _packets, _CompletePacketWriter, _BoundGroupedReviewer, _NoDiagram
 from src.features.composer.validate import validate_v2
 from src.features.export_notion.logic import build_blocks
@@ -98,9 +99,15 @@ def _run(mode=ReleaseMode.FULL, *, verdict="참", exclude=False, fragments=None,
                 entry["결과"] = verdict
         return json.dumps(result, ensure_ascii=False)
 
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=40
+    )
+
     output = run_v2(
-        "가나다전자", (), None, writer_ask=write, reviewer_ask=review,
+        "가나다전자", (), performance_table if mode is ReleaseMode.FULL else None,
+        writer_ask=write, reviewer_ask=review,
         diagram_ask=_NoDiagram(), release_mode=mode, section_evidence_packets=packets,
+        filing_meta=filing_meta if mode is ReleaseMode.FULL else None,
         company_id="00123456", build_identity_sha256="b" * 64,
     )
     return output, writer, reviewer, packets
@@ -199,7 +206,8 @@ def test_여러_유용근거를_본문에_쓰되_작성9_검수1_호출계약을
     assert len(reviewer.prompts) == 1
     assert output.news_usage_diagnostics["본문사용기사수"] == 2
     _assert_body_evidence_survives_without_repeated_list(output, _fragments(), 2)
-    assert output.quality_observation.document_sources == 9
+    # 기본 공식 문서에 검산된 4장 실적표 문서 한 건이 추가된다. 뉴스는 세지 않는다.
+    assert output.quality_observation.document_sources == 10
     body = " ".join(text for section in output.report.sections for text, _ in section.prose_lines)
     assert "2026-09-01 가나다경제 보도에 따르면, 가나다전자는 신규 설비 공급 계약을 3건" in body
     assert "확대할 계획" in body
@@ -269,8 +277,12 @@ def test_FULL_보충작가의_뉴스_검수거절은_첫회차_목록에도_반�
             entry["결과"] = verdict
         return json.dumps(result, ensure_ascii=False)
 
-    output = run_v2("가나다전자", (), None, writer_ask=write, reviewer_ask=review,
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=40
+    )
+    output = run_v2("가나다전자", (), performance_table, writer_ask=write, reviewer_ask=review,
         diagram_ask=_NoDiagram(), release_mode=ReleaseMode.FULL, section_evidence_packets=packets,
+        filing_meta=filing_meta,
         company_id="00123456", build_identity_sha256="b" * 64)
     assert writer.section_calls["business_model"] == 2
     assert first_review == [0, 1]

@@ -81,8 +81,12 @@ INJECTED_EVIDENCE_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
 # 검수 전에 탈락했다. 엔진 사본은 analysis_engine의 evidence_collection/constants.py.
 # 「2026년」 같은 약한 낱말로 채점되는 칸을 열면 여러 장의 문단을 납치하므로,
 # 본점·소재지처럼 강한 직접 표현이 있는 칸만 좁게 넣는다.
+# 판매경로·원재료 공급관계도 실제 판매·조달 행위를 뒷받침하는 원문 문맥이
+# 확인될 때만 후보로 싣는다. 선택 칸은 FULL 합격이나 필수 자료 확보를 뜻하지 않는다.
 OPTIONAL_CANDIDATE_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
     "identity": ("identity:official_location",),
+    "business_model": ("business_model:sales_channel",),
+    "operations_partners": ("operations_partners:supply_relation",),
 }
 
 

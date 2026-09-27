@@ -31,9 +31,12 @@
 from __future__ import annotations
 
 import math
+import hashlib
+import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from datetime import date
 
 from src.features.chapter_evidence.auditor_boilerplate import is_auditor_boilerplate
 from src.features.chapter_evidence.constants import (
@@ -56,7 +59,13 @@ from src.shared.report_evidence.policy import (
     optional_candidate_slots_for,
 )
 from src.shared.report_evidence.source_kind_policy import (
+    FormalSourceKindContractError,
+    document_slots_for_formal_source_kind,
     formal_document_writer_ineligibility_reason,
+)
+from src.shared.report_quality.comparison_claims import (
+    STATED_DIFFERENTIATOR_SLOT,
+    stated_differentiator_sentences,
 )
 
 
@@ -73,14 +82,32 @@ def _estimated_tokens(char_count: int) -> int:
     return math.ceil(char_count / CHARS_PER_ESTIMATED_TOKEN)
 
 
-def _selection_priority(fragment: EvidenceFragment) -> tuple[bool, int, bool, int, str]:
+def _published_date_priority(published_on: str) -> int:
+    """검증된 ISO 달력 날짜만 최신순으로 정렬하고 불명확한 값은 뒤로 둔다."""
+    if (
+        not isinstance(published_on, str)
+        or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", published_on) is None
+    ):
+        return 0
+    try:
+        return -date.fromisoformat(published_on).toordinal()
+    except ValueError:
+        return 0
+
+
+def _selection_priority(
+    fragment: EvidenceFragment,
+    published_priorities: dict[str, int],
+) -> tuple[bool, int, bool, int, int, str]:
     """뒤쪽 취소·변경을 대표/추가 후보 단계 모두에서 보존한다."""
     is_change = SELECTION_CHANGE_CONTEXT in fragment.reason_codes
     start = fragment.location.partition("-")[0]
     source_order = int(start) if is_change and start.isdecimal() else 0
     return (not is_change, -source_order,
             SELECTION_RECENT_CONTEXT not in fragment.reason_codes,
-            -fragment.score_millis, fragment.fragment_id)
+            -fragment.score_millis,
+            published_priorities.get(fragment.document_id, 0),
+            fragment.fragment_id)
 
 
 def _dedupe_by_evidence_range(
@@ -143,12 +170,71 @@ def _auditor_judgment_scope(source_kind: str) -> bool | None:
     return False
 
 
+def _preselect_stated_differentiator_fragments(
+    *,
+    section_id: str,
+    company_id: str,
+    company_name: str,
+    company_aliases: tuple[str, ...],
+    documents_by_id: dict[str, CollectedEvidenceDocument],
+    fragments: tuple[EvidenceFragment, ...],
+) -> tuple[EvidenceFragment, ...]:
+    """장별 절단 전에 엄격한 공식 자기선언을 9장 예산 후보로 복제한다."""
+
+    stated_section = STATED_DIFFERENTIATOR_SLOT.partition(":")[0]
+    if section_id != stated_section or not company_name.strip():
+        return fragments
+    existing_ids = {fragment.fragment_id for fragment in fragments}
+    added: list[EvidenceFragment] = []
+    for fragment in fragments:
+        if fragment.company_id != company_id:
+            continue
+        document = documents_by_id.get(fragment.document_id)
+        if (
+            document is None
+            or fragment.text_sha256 not in document.exact_evidence_hashes
+            or formal_document_writer_ineligibility_reason(document)
+        ):
+            continue
+        try:
+            owned_slots = document_slots_for_formal_source_kind(document.source_kind)
+        except FormalSourceKindContractError:
+            continue
+        if STATED_DIFFERENTIATOR_SLOT not in owned_slots:
+            continue
+        sentences = stated_differentiator_sentences(
+            fragment.text,
+            company_name=company_name,
+            company_aliases=company_aliases,
+        )
+        if not sentences:
+            continue
+        suffix = hashlib.sha256(
+            f"{fragment.fragment_id}\x1f{STATED_DIFFERENTIATOR_SLOT}".encode("utf-8")
+        ).hexdigest()[:16]
+        fragment_id = f"{fragment.fragment_id}-preselect-{suffix}"
+        if fragment_id in existing_ids:
+            continue
+        existing_ids.add(fragment_id)
+        added.append(replace(
+            fragment,
+            fragment_id=fragment_id,
+            section_id=stated_section,
+            slot_id=STATED_DIFFERENTIATOR_SLOT,
+            covered_slot_ids=(STATED_DIFFERENTIATOR_SLOT,),
+            reason_codes=("deterministic.company_stated_differentiator",),
+        ))
+    return (*fragments, *added)
+
+
 def select_section_fragments(
     *,
     section_id: str,
     company_id: str,
     documents: tuple[CollectedEvidenceDocument, ...],
     fragments: tuple[EvidenceFragment, ...],
+    company_name: str = "",
+    company_aliases: tuple[str, ...] = (),
     max_chars: int = DEFAULT_MAX_CHARS_PER_SECTION,
     max_estimated_tokens: int = DEFAULT_MAX_ESTIMATED_TOKENS_PER_SECTION,
 ) -> SectionFragmentSelection:
@@ -158,6 +244,18 @@ def select_section_fragments(
         document.document_id: document
         for document in documents
         if document.company_id == company_id
+    }
+    candidate_fragments = _preselect_stated_differentiator_fragments(
+        section_id=section_id,
+        company_id=company_id,
+        company_name=company_name,
+        company_aliases=company_aliases,
+        documents_by_id=own_documents_by_id,
+        fragments=fragments,
+    )
+    published_priorities = {
+        document_id: _published_date_priority(document.published_on)
+        for document_id, document in own_documents_by_id.items()
     }
     collector_slot_order = collector_slots_for(section_id)
     collector_slot_set = set(collector_slot_order)
@@ -177,7 +275,7 @@ def select_section_fragments(
     # 사유 이름이 없어 연차 공시 문제를 홈페이지 문제로 읽었다).
     low_trust_ir_counts: Counter[str] = Counter()
     low_trust_external_page_counts: Counter[str] = Counter()
-    for fragment in fragments:
+    for fragment in candidate_fragments:
         if fragment.section_id != section_id:
             continue
         eligible_slot_ids = tuple(
@@ -250,7 +348,10 @@ def select_section_fragments(
     for items in by_slot.values():
         # 최근 문맥은 추가 몫에서 보존하며, 슬롯 대표는 변경 근거만 우선한다.
         items.sort(key=lambda fragment: (
-            *_selection_priority(fragment)[:2], -fragment.score_millis, fragment.fragment_id,
+            *_selection_priority(fragment, published_priorities)[:2],
+            -fragment.score_millis,
+            published_priorities.get(fragment.document_id, 0),
+            fragment.fragment_id,
         ))
 
     included: list[EvidenceFragment] = []
@@ -322,7 +423,7 @@ def select_section_fragments(
             if fragment.fragment_id not in included_ids
             and fragment.fragment_id not in excluded_ids
         ),
-        key=_selection_priority,
+        key=lambda fragment: _selection_priority(fragment, published_priorities),
     )
     for fragment in remaining:
         cost_chars = len(fragment.text)

@@ -18,12 +18,11 @@ Protocol을 만족하는 실제 어댑터를 ``core/dart_client.py``의 함수 �
 ``corp_code``를 항상 빈 문자열로 돌려준다 — collect.py의 identity_binding이
 「검증했다」고 거짓 주장하지 않고 정직하게 unverifiable로 남긴다(P1-4).
 
-★ 알려진 한계 2 — ``_xml_to_plain_text``는 모든 태그를 개행으로 바꾼다(줄
-구조를 보존해야 segment.py의 표제·문단 인식이 살기 때문). 실제 DART
-document.xml의 태그 어휘를 표본 조사하지 않았으므로(확인 못 함), 문장
-중간에 끼는 인라인 태그(굵게·글자색 등)가 있다면 그 문장이 줄 중간에서
-쪼개질 수 있다 — segment.py의 표제 인식이 «줄 전체»를 봐야 맞으므로 이
-경우 표제를 놓치거나 문단이 예상보다 잘게 쪼개질 수 있다(v1 한계).
+★ 알려진 한계 2 — 비표 본문과 불완전·과대 표는 종전처럼 태그를 개행으로
+바꾼다. 닫힌 작은 TABLE만 검증된 행·셀 격자에 따라 한 문단으로 묶는다.
+병합 셀의 원 텍스트는 소유 격자에 반복될 수 있으나 새 값은 계산하지 않는다.
+태그로 나뉜 숫자가 모호한 표는 기존 변환에 남기며, 이 평문 구조만으로
+최종 보고서의 출처·숫자·공개 적합성을 증명하지 않는다.
 """
 
 from __future__ import annotations
@@ -42,6 +41,7 @@ from features.evidence_collection.filing_select import (
     FilingListResult,
     RawFilingRow,
 )
+from features.evidence_collection.table_text import table_replacements
 
 #: list.json 조회 창 — 최근 N년. survey_audit_reports.py·run_pilot.py의
 #: AUDIT_WINDOW_YEARS(3년, 「잠정 3년」)와 같은 값을 그대로 따른다 —
@@ -99,15 +99,26 @@ def _decode_document_bytes(raw: bytes) -> str:
 
 
 def _xml_to_plain_text(raw: bytes) -> str:
-    """공시서류 원문 XML을 태그 없는 평문으로 바꾸되 줄 구조는 보존한다.
+    """비표 줄 구조는 보존하고 검증된 작은 표만 한 문단으로 정규화한다.
 
     인코딩 시도 순서(utf-8·cp949·euc-kr)는 survey_audit_reports.py의
     read_filing_text와 같은 방식(실측 근거 재사용). 다만 그 함수는 태그를
     스페이스로 지워 문서를 한 줄로 뭉갠다 — 정규식 키워드 검색에는 문제
     없지만, 이 feature의 segment.py는 표제·문단을 줄바꿈으로 구분하므로
-    태그는 개행으로 바꾼다(위 _TAG_PATTERN 주석 참고).
+    비표 태그는 개행으로 바꾼다(위 _TAG_PATTERN 주석 참고).
     """
     text = _decode_document_bytes(raw)
+    replacements = table_replacements(text, max_window_chars=c.MAX_CANDIDATE_WINDOW_CHARS)
+    if replacements:
+        # 표 밖의 문자열은 건드리지 않는다. 형식이 확인된 작은 표만 한 문단으로
+        # 묶으며 실패한 표는 아래의 기존 태그-개행 변환을 그대로 탄다.
+        pieces: list[str] = []
+        cursor = 0
+        for replacement in replacements:
+            pieces.extend((text[cursor:replacement.start], "\n\n", replacement.text, "\n\n"))
+            cursor = replacement.end
+        pieces.append(text[cursor:])
+        text = "".join(pieces)
     text = _TAG_PATTERN.sub("\n", text)
     text = _INLINE_WHITESPACE_PATTERN.sub(" ", text)
     text = _EXCESS_NEWLINE_PATTERN.sub("\n\n", text)

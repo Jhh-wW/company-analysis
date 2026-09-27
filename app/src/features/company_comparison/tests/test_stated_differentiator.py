@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Sequence
 
 from src.features.company_comparison.stated_differentiator import (
@@ -363,6 +363,97 @@ def test_owned_source_kind_declaration_is_still_promoted_without_skips() -> None
     assert _promoted_texts(promotion.result) == [TEXT]
     assert promotion.promoted == 1
     assert promotion.skipped_by_source_kind == ()
+
+
+def test_동일_원문이_자기맥락과_선언을_함께_지원하면_예산을_한번만_쓴다() -> None:
+    original = _result()
+    target = original.candidates[-1]
+    shared = replace(
+        target.fragments[0],
+        covered_slot_ids=(SELF_SLOT, STATED_DIFFERENTIATOR_SLOT),
+    )
+    limited = replace(
+        target,
+        fragments=(shared,),
+        max_chars=len(TEXT),
+        max_estimated_tokens=30,
+    )
+    result = replace(original, candidates=(*original.candidates[:-1], limited))
+
+    promotion = promote_stated_differentiator_fragments(result, company_name=COMPANY_NAME)
+    selected = promotion.result.candidates[-1]
+    assert promotion.promoted == 1
+    assert len(selected.fragments) == 1
+    assert selected.fragments[0].fragment_id == shared.fragment_id
+    assert selected.fragments[0].document_id == shared.document_id
+    assert selected.fragments[0].location == shared.location
+    assert selected.fragments[0].text_sha256 == shared.text_sha256
+    assert selected.fragments[0].covered_slot_ids == (
+        SELF_SLOT,
+        STATED_DIFFERENTIATOR_SLOT,
+    )
+    assert sum(len(fragment.text) for fragment in selected.fragments) == len(TEXT)
+    assert selected.estimated_tokens <= limited.max_estimated_tokens
+    assert build_section_bundle(
+        selected,
+        required_slot_ids=(SELF_SLOT, STATED_DIFFERENTIATOR_SLOT),
+    ).readiness is EvidenceReadiness.READY
+
+
+def test_잘못_태깅된_동일_원문은_선언칸을_되살리지_않는다() -> None:
+    original = _result(text="일반적인 사업 설명만 담긴 공식 원문입니다.")
+    target = original.candidates[-1]
+    shared = replace(
+        target.fragments[0],
+        covered_slot_ids=(SELF_SLOT, STATED_DIFFERENTIATOR_SLOT),
+    )
+    limited = replace(target, fragments=(shared,), max_chars=len(shared.text))
+    result = replace(original, candidates=(*original.candidates[:-1], limited))
+
+    promotion = promote_stated_differentiator_fragments(result, company_name=COMPANY_NAME)
+    selected = promotion.result.candidates[-1]
+    assert promotion.promoted == 0
+    assert len(selected.fragments) == 1
+    assert selected.fragments[0].fragment_id == shared.fragment_id
+    assert selected.fragments[0].covered_slot_ids == (SELF_SLOT,)
+    assert STATED_DIFFERENTIATOR_SLOT in build_section_bundle(
+        selected,
+        required_slot_ids=(SELF_SLOT, STATED_DIFFERENTIATOR_SLOT),
+    ).missing_slot_ids
+
+
+def test_동일선언의_최신_긴문단이_예산밖이면_짧은_예전원문을_보존한다() -> None:
+    newer = _ExtraOfficialDocument(
+        source_kind="dart_business_report",
+        section_id="identity",
+        slot_id="identity:corporate_identity",
+        text=TEXT + "\n" + "공식 자료의 별도 설명입니다. " * 8,
+        requirement=SourceRequirement.REQUIRED,
+    )
+    original = _result(extra_documents=(newer,))
+    ample = promote_stated_differentiator_fragments(
+        original, company_name=COMPANY_NAME,
+    )
+    ample_selected = [
+        fragment for fragment in ample.result.candidates[-1].fragments
+        if fragment.slot_id == STATED_DIFFERENTIATOR_SLOT
+    ]
+    assert len(ample_selected) == 1
+    assert ample_selected[0].document_id != original.candidates[-1].documents[0].document_id
+    target = original.candidates[-1]
+    limited = replace(target, max_chars=len(TEXT) * 2 + 1)
+    input_result = replace(original, candidates=(*original.candidates[:-1], limited))
+
+    promotion = promote_stated_differentiator_fragments(
+        input_result, company_name=COMPANY_NAME,
+    )
+    selected = [
+        fragment for fragment in promotion.result.candidates[-1].fragments
+        if fragment.slot_id == STATED_DIFFERENTIATOR_SLOT
+    ]
+    assert len(selected) == 1
+    assert selected[0].document_id == target.documents[0].document_id
+    assert sum(len(item.text) for item in promotion.result.candidates[-1].fragments) <= limited.max_chars
 
 
 def test_sentence_without_declaration_marker_is_not_counted_as_skipped() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import sqlite3
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -11,12 +12,20 @@ import pytest
 
 from src.features.chapter_evidence.produce import produce_from_collection_envelopes
 from src.features.chapter_evidence.select import select_section_fragments
+from src.features.company_comparison.stated_differentiator import (
+    promote_stated_differentiator_fragments,
+)
 from src.features.chapter_evidence.tests.fixtures import build_listed_fixture
 from src.features.evidence_reclassify.constants import RECLASSIFY_PROMPT_VERSION
+from src.features.evidence_reclassify.models import (
+    ReclassifyDiagnostics,
+    ReclassifyResult,
+)
 from src.features.pipeline import evidence_reclassify_step as step
 from src.features.pipeline.official_evidence_preflight import empty_collector_sections
 from src.features.storage import evidence_reclassify_cache
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
+from src.shared.report_evidence.constants import EVIDENCE_CHARS_PER_ESTIMATED_TOKEN
 
 
 COMPANY_ID = "00126380"
@@ -147,6 +156,89 @@ def _reclassifiable_result(
         dart_envelope=dart_envelope,
         wide_envelope=wide_envelope,
     )
+
+
+def test_재판정_빈응답으로_후보를_재조립해도_선택전_9장_자기선언이_남는다() -> None:
+    fixture = copy.deepcopy(build_listed_fixture(company_id=COMPANY_ID))
+    declaration_text = "당사는 국내 최초로 정밀 센서를 독자 개발했습니다."
+    declaration = copy.deepcopy(fixture["fragments"][0])
+    declaration.update({
+        "fragment_id": "preselected-stated-source",
+        "section_id": "identity",
+        "slot_id": "identity:corporate_identity",
+        "covered_slot_ids": ("identity:corporate_identity",),
+        "text": declaration_text,
+        "text_sha256": hashlib.sha256(declaration_text.encode()).hexdigest(),
+    })
+    fixture["fragments"] = [
+        fragment for fragment in fixture["fragments"]
+        if fragment["slot_id"] != "competitive_position:stated_differentiator"
+    ]
+    fixture["fragments"].append(declaration)
+    for document in fixture["documents"]:
+        if document["document_id"] == declaration["document_id"]:
+            document["exact_evidence_hashes"] = tuple(dict.fromkeys((
+                *document["exact_evidence_hashes"], declaration["text_sha256"],
+            )))
+    dart = {**fixture, "company_id": COMPANY_ID, "company_type": "listed", "unclassified_documents": [],
+            "unclassified_fragments": []}
+    wide = {"company_id": COMPANY_ID, "documents": [], "fragments": [], "attempts": []}
+    kwargs = {"company_id": COMPANY_ID, "company_type": "listed",
+              "collection_envelopes": (dart, wide)}
+    old = produce_from_collection_envelopes(**kwargs)
+    first = produce_from_collection_envelopes(
+        **kwargs, company_name="가나다전자",
+    )
+    target_old = next(item for item in old if item.section_id == "competitive_position")
+    target_first = next(item for item in first if item.section_id == "competitive_position")
+    assert not any(
+        fragment.text_sha256 == declaration["text_sha256"]
+        for fragment in target_old.fragments
+    )
+    assert any(
+        fragment.text_sha256 == declaration["text_sha256"]
+        and fragment.covered_slot_ids == ("competitive_position:stated_differentiator",)
+        for fragment in target_first.fragments
+    )
+
+    original = OfficialEvidenceCollectionResult(company_id=COMPANY_ID, candidates=first)
+    old_result = OfficialEvidenceCollectionResult(company_id=COMPANY_ID, candidates=old)
+    assert original.source_snapshot_sha256 != old_result.source_snapshot_sha256
+    source = step.ReclassifySource(
+        company_type="listed", dart_envelope=dart, wide_envelope=wide,
+        company_name="가나다전자",
+    )
+    empty = ReclassifyResult(
+        assignments=(), removals=(), rejected=(),
+        diagnostics=ReclassifyDiagnostics(),
+    )
+    rebuilt = step._merge_result(original, source, result=empty, additions=())
+    assert rebuilt.source_snapshot_sha256 == original.source_snapshot_sha256
+    target_rebuilt = next(
+        item for item in rebuilt.candidates if item.section_id == "competitive_position"
+    )
+    assert target_rebuilt.fragments == target_first.fragments
+    promoted = promote_stated_differentiator_fragments(
+        rebuilt, company_name="가나다전자",
+    )
+    target_promoted = next(
+        item for item in promoted.result.candidates
+        if item.section_id == "competitive_position"
+    )
+    matching = [
+        fragment for fragment in target_promoted.fragments
+        if fragment.text_sha256 == declaration["text_sha256"]
+    ]
+    assert len(matching) == 1
+    assert matching[0].covered_slot_ids == (
+        "competitive_position:stated_differentiator",
+    )
+    assert sum(len(fragment.text) for fragment in target_promoted.fragments) <= target_promoted.max_chars
+    assert target_promoted.estimated_tokens == sum(
+        math.ceil(len(fragment.text) / EVIDENCE_CHARS_PER_ESTIMATED_TOKEN)
+        for fragment in target_promoted.fragments
+    )
+    assert target_promoted.estimated_tokens <= target_promoted.max_estimated_tokens
 
 
 @pytest.fixture(autouse=True)

@@ -349,7 +349,7 @@ URL_VARIANT_ORDER: Final[tuple[str, ...]] = (
 MAX_URL_VARIANTS: Final[int] = 3
 
 # 새 수집 경로의 상한은 기사 수를 채우는 목표가 아니라 요청 비용의 경계다.
-COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v8"
+COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v10"
 NAME_ACRONYM_MIN_CHARS: Final[int] = 2
 NAME_ACRONYM_MAX_CHARS: Final[int] = 8
 NAME_RETAINED_SUFFIX_MIN_CHARS: Final[int] = 2
@@ -390,6 +390,10 @@ SEARCH_DESCRIPTION_CHARS: Final[int] = 2_000
 SEARCH_URL_CHARS: Final[int] = 2_000
 COMPANY_CONTEXT_CHARS: Final[int] = 4_000
 BODY_ARTICLE_BUDGET: Final[int] = 24
+# 검색 제목·요약에 공식명이 없는 신뢰 출처도 본문에서 법인을 증명할 수 있다.
+# 본문 시도 상한을 늘리지 않고 각 기간의 기본 탐색몫 안에서만 소량 조사한다.
+METADATA_MISMATCH_MAX_BODY_PROBES: Final[int] = 4
+METADATA_MISMATCH_BODY_PROBE_DIVISOR: Final[int] = 6
 BODY_CALL_BUDGET: Final[int] = 48
 BODY_CHARS_PER_ARTICLE: Final[int] = 12_000
 BODY_TOTAL_CHARS_BUDGET: Final[int] = 200_000
@@ -425,6 +429,21 @@ GROUNDED_MIN_EXCERPT_CHARS: Final[int] = 25
 GROUNDED_MAX_EXCERPT_CHARS: Final[int] = 1_000
 GROUNDED_EXCERPTS_PER_ARTICLE: Final[int] = 2
 GROUNDED_SUBJECT_CHARS: Final[int] = 100
+# 주어 결속의 첫 실패 분기만 집계한다. 원문·기사 신원은 진단에 싣지 않는다.
+SUBJECT_DIRECT_NAME_EXTRA_FIELDS: Final[str] = "direct_name_extra_subject_fields"
+SUBJECT_MISSING_OR_GENERIC: Final[str] = "subject_missing_or_generic"
+SUBJECT_NOT_IN_QUOTE_OR_RELATION: Final[str] = "subject_not_in_quote_or_relation"
+SUBJECT_RELATION_NOT_EXACT_OR_AMBIGUOUS: Final[str] = "relation_not_exact_or_ambiguous"
+SUBJECT_RELATION_TARGET_OR_MARKER_MISSING: Final[str] = "relation_target_or_marker_missing"
+SUBJECT_SPAN_LONG_OR_AMBIGUOUS: Final[str] = "combined_span_over_limit_or_ambiguous"
+SUBJECT_DIAGNOSTIC_CODES: Final[tuple[str, ...]] = (
+    SUBJECT_DIRECT_NAME_EXTRA_FIELDS,
+    SUBJECT_MISSING_OR_GENERIC,
+    SUBJECT_NOT_IN_QUOTE_OR_RELATION,
+    SUBJECT_RELATION_NOT_EXACT_OR_AMBIGUOUS,
+    SUBJECT_RELATION_TARGET_OR_MARKER_MISSING,
+    SUBJECT_SPAN_LONG_OR_AMBIGUOUS,
+)
 SUBJECT_GENERIC_TERMS: Final[frozenset[str]] = frozenset({
     "그", "그녀", "그룹", "가수", "배우", "제품", "서비스", "브랜드", "고객",
     "회사", "기업", "관계자", "대표", "사장", "회장", "사업", "계약", "이번",

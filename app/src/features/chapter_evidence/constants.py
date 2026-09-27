@@ -10,6 +10,7 @@ from enum import Enum
 from typing import Final
 
 from src.shared.report_evidence.constants import (
+    EVIDENCE_CHARS_PER_ESTIMATED_TOKEN,
     CollectionState,
     OFFICIAL_WEB_SOURCE_KINDS,
     SOURCE_KIND_DART_AUDIT_REPORT,
@@ -160,7 +161,7 @@ AUDITOR_STRUCTURE_GATED_SOURCE_KINDS: Final[frozenset[str]] = frozenset({
 # 한국어 위주 원문은 토크나이저별로 평균 1토큰≈2~2.6자 범위를 보인다. 예산을
 # 실제보다 «적게» 추정해 나중에 호출이 넘치는 사고를 피하려고 범위의 낮은 쪽인
 # 2.2자/토큰(=더 많은 토큰으로 추정)을 안전 마진으로 쓴다.
-CHARS_PER_ESTIMATED_TOKEN: Final[float] = 2.2
+CHARS_PER_ESTIMATED_TOKEN: Final[float] = EVIDENCE_CHARS_PER_ESTIMATED_TOKEN
 
 # 장 하나가 받는 근거 원문 문자 예산. 수집 슬롯이 가장 많은 장(business_model,
 # 3칸)이 슬롯당 여유 있게(약 3천자) 채워도 넘치지 않도록 잡았다.

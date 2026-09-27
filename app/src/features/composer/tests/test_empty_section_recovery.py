@@ -339,7 +339,7 @@ _ALL_CLAIM_SLOTS = tuple(
 )
 #: 8장 복구 후보로 쓸 «공식 결속» 조각. 얇은 FULL 후보(공식 홈페이지)는
 #: formal_source_kind가 없어 복구 근거가 되지 못하므로 한 개만 따로 넣는다.
-_RECOVERY_FRAGMENT_ID = "9"
+_RECOVERY_FRAGMENT_ID = "91"
 
 
 def _culture_recovery_fragment():
@@ -371,6 +371,7 @@ def _full_packets(*, culture_owns_recovery_fragment: bool):
                     if packet.section_id == "culture" and not culture_owns_recovery_fragment
                     else packet.fragments + (extra,)
                 ),
+                program_evidence=packet.program_evidence,
             )
             for packet in base.packets
         ),
@@ -409,15 +410,23 @@ def _full_writer_leaving_culture_empty():
 
 def _run_full(packets, *, can_start=True, recovery_writer, diagnostics):
     from src.features.composer import pipeline
+    from src.features.composer.tests.injected_program_fixture import (
+        make_numeric_performance_evidence,
+    )
+
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=9
+    )
 
     return pipeline.run_v2(
-        "가나다전자", {}, None,
+        "가나다전자", {}, performance_table,
         writer_ask=_full_writer_leaving_culture_empty(), reviewer_ask=_FakeReviewer(),
         empty_recovery_writer_ask=recovery_writer,
         empty_recovery_reviewer_ask=_FakeReviewer(),
         empty_recovery_can_start=lambda: can_start,
         release_mode=ReleaseMode.FULL,
         section_evidence_packets=packets,
+        filing_meta=filing_meta,
         company_id="00123456",
         build_identity_sha256="b" * 64,
         evidence_available_fallback=True,

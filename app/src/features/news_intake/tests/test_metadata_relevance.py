@@ -8,7 +8,10 @@ import pytest
 from src.features.news_intake import constants as c
 from src.features.news_intake.collection import collect_from_snapshot, collect_search_snapshot
 from src.features.news_intake.models import NewsBodyFetchResult, NewsCompanyContext
-from src.features.news_intake.search_snapshot import diverse_candidates
+from src.features.news_intake.search_snapshot import (
+    body_ranked_candidates, diverse_candidates, metadata_probe_budget, policy_digest,
+    snapshot_digest,
+)
 from src.features.news_intake.tests.test_collection import (
     AS_OF, BODY, COMPANY, POLICY, analyzer, collect, item, snapshot,
 )
@@ -57,9 +60,9 @@ def test_정상6기사에_타사검색오탐1개가_섞여도_충분성과_캐�
             else:
                 row["excerpts"][0]["topic"] = ("products", "partnerships", "strategy")[number % 3]
         return rows
-    # 기본 4개 배치로 마지막 정상 2건과 오탐 1건을 실제 함께 검수한다.
+    # 제한된 비일치 탐색몫이 오탐도 앞쪽에 섞지만 본문 검증은 그대로 막는다.
     result = collect(articles, fetch=fetch, analyze=analyzer(review))
-    assert len(fetched) == 7 and fetched[-1].endswith("99")
+    assert len(fetched) == 7 and sum(url.endswith("99") for url in fetched) == 1
     assert result.diagnostics["제외"]["body_target_name_missing"] == 1
     assert result.diagnostics["독립기사"] == 6
     assert result.diagnostics["완전성"] == "partial"
@@ -160,6 +163,118 @@ def test_이름일치가_후보상한전에_우선하며_같은순위의_주제�
     assert {row.topics[0] for row in ranked[:2]} == {"products", "partnerships"}
     limited, _ = snapshot([unnamed(4, date="2026-09-08"), item(1), item(2)], policy=replace(POLICY, max_candidates=2))
     assert all(row.metadata_name_match for row in limited.candidates)
+
+
+def test_본문계획에서_이름비일치4건을_24건안에_분산하고_검색순위와_백필은_보존한다():
+    base, _ = snapshot([item()])
+    candidate = base.candidates[0]
+    rows = [replace(candidate, id=f"news-{number:03d}",
+                    source_url=f"https://media.example/article/{number}",
+                    originallink=f"https://media.example/article/{number}",
+                    metadata_name_match=number < 65)
+            for number in range(78)]
+    original = diverse_candidates(rows, len(rows))
+    ranked = body_ranked_candidates(rows, attempt_budget=24, probe_budget=4)
+    assert len(ranked) == len(set(row.id for row in ranked)) == 78
+    assert sum(not row.metadata_name_match for row in ranked[:24]) == 4
+    assert not ranked[3].metadata_name_match
+    assert tuple(row.id for row in body_ranked_candidates(rows, attempt_budget=24, probe_budget=4,
+                                                           replacement=True)) == tuple(row.id for row in original)
+    assert tuple(row.id for row in body_ranked_candidates(rows, attempt_budget=0, probe_budget=4)) == tuple(row.id for row in original)
+    assert all(row.metadata_name_match for row in body_ranked_candidates(rows, attempt_budget=5, probe_budget=0)[:5])
+    assert all(row.metadata_name_match for row in body_ranked_candidates(rows[:65], attempt_budget=24, probe_budget=4)[:24])
+    assert all(not row.metadata_name_match for row in body_ranked_candidates(rows[65:], attempt_budget=24, probe_budget=4))
+
+
+def test_기간분할에도_기본24기사안의_메타비일치탐색몫4개를_보존한다():
+    used, probes = 0, 0
+    quotas = []
+    for window_budget in (16, 4, 4):
+        quota = metadata_probe_budget(total_budget=24, attempted=used,
+                                      window_budget=window_budget, probes_attempted=probes)
+        quotas.append(quota)
+        used += window_budget
+        probes += quota
+    assert quotas == [2, 1, 1]
+    assert metadata_probe_budget(total_budget=24, attempted=0, window_budget=24,
+                                 probes_attempted=0) == 4
+    assert metadata_probe_budget(total_budget=4, attempted=0, window_budget=4,
+                                 probes_attempted=0) == 0
+
+
+def test_실제기간16_4_4에서도_비일치4건을_상한안에서_조사한다():
+    base, _ = snapshot([item()])
+    candidate = base.candidates[0]
+    windows = ((16, "2026-08-01"), (4, "2025-04-01"), (4, "2024-04-01"))
+    rows = []
+    number = 0
+    for count, published_on in windows:
+        for index in range(count):
+            url = f"https://media.example/article/{number}"
+            rows.append(replace(candidate, id=f"news-{number:03d}", source_url=url,
+                                originallink=url, published_on=published_on,
+                                metadata_name_match=index < count - (2 if count == 16 else 1)))
+            number += 1
+    snap = replace(base, candidates=tuple(rows), digest="")
+    snap = replace(snap, digest=snapshot_digest(snap))
+    fetched = []
+
+    def fetch(url):
+        fetched.append(url)
+        return BODY + f" 이 기사에서 검증한 항목은 {url.rsplit('/', 1)[-1]}번이다."
+
+    def reject(articles, payload):
+        return [{**row, "same_company": False, "excerpts": []} for row in articles]
+
+    result = collect_from_snapshot(snap, company=COMPANY, as_of=AS_OF,
+                                   fetch_text=fetch, analyze_grounded=analyzer(reject), policy=POLICY)
+    assert tuple(row["시도"] for row in result.diagnostics["기간별"].values()) == (16, 4, 4)
+    assert result.diagnostics["메타이름비일치본문시도"] == 4
+    assert result.diagnostics["메타이름비일치본문미시도"] == 0
+    assert result.diagnostics["메타이름일치본문시도"] == 20
+    assert result.diagnostics["메타이름일치본문미시도"] == 0
+    assert result.diagnostics["본문시도기사"] == 24
+    assert result.diagnostics["본문호출"] == len(fetched) == 24
+    assert result.diagnostics["분석AI호출"] <= POLICY.max_analysis_calls
+    assert not result.fragments
+
+
+def test_초기_분석한도에도_메타비일치_신뢰기사_본문을_검증하고_상한을_늘리지_않는다():
+    base, _ = snapshot([item()])
+    candidate = base.candidates[0]
+    rows = tuple(replace(candidate, id=f"news-{number:03d}",
+                         source_url=f"https://media.example/article/{number}",
+                         originallink=f"https://media.example/article/{number}",
+                         metadata_name_match=number < 65)
+                 for number in range(78))
+    policy = replace(POLICY, max_analysis_calls=1)
+    snap = replace(base, candidates=rows, policy_digest=policy_digest(policy), digest="")
+    snap = replace(snap, digest=snapshot_digest(snap))
+    calls = []
+    fetched = []
+
+    def fetch(url):
+        fetched.append(url)
+        return BODY + f" 이 기사에서 검증한 항목은 {url.rsplit('/', 1)[-1]}번이다."
+
+    def review(articles, payload):
+        for row, article in zip(articles, payload["articles"]):
+            if int(article["url"].rsplit("/", 1)[-1]) < 65:
+                row.update(same_company=False, excerpts=[])
+        return articles
+
+    result = collect_from_snapshot(snap, company=COMPANY, as_of=AS_OF,
+                                   fetch_text=fetch, analyze_grounded=analyzer(review, calls), policy=policy)
+    assert len(calls) == result.diagnostics["분석AI호출"] == 1
+    assert any(int(article["url"].rsplit("/", 1)[-1]) >= 65 for article in calls[0]["articles"])
+    assert result.diagnostics["메타이름비일치본문시도"] >= 1
+    assert result.diagnostics["메타이름비일치본문시도"] + result.diagnostics["메타이름비일치본문미시도"] == 13
+    assert result.diagnostics["메타이름일치본문시도"] + result.diagnostics["메타이름일치본문미시도"] == 65
+    assert result.diagnostics["본문시도기사"] <= 24
+    assert result.diagnostics["본문호출"] <= 48
+    assert result.diagnostics["분석AI호출"] <= 1
+    assert len(set(fetched)) == len(fetched)
+    assert result.fragments
 
 
 def test_같은URL의_다른메타에서_관측한이름도_순위와지문에_보존한다():

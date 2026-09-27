@@ -908,6 +908,8 @@ class ProductionOfficialEvidenceCollector:
             company_id=request.company_id,
             company_type=company_type,
             collection_envelopes=(dart_envelope, wide_envelope),
+            company_name=request.company_name,
+            company_aliases=request.company_aliases,
         )
         result = OfficialEvidenceCollectionResult(
             company_id=request.company_id,
@@ -923,4 +925,6 @@ class ProductionOfficialEvidenceCollector:
             company_type=company_type,
             dart_envelope=dart_envelope,
             wide_envelope=wide_envelope,
+            company_name=request.company_name,
+            company_aliases=request.company_aliases,
         )

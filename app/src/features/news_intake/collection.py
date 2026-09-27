@@ -9,7 +9,7 @@ from collections import Counter, deque
 from concurrent.futures import CancelledError, Future
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from src.core.provider_gateway import gateway
 from src.features.news_intake import constants as c
@@ -30,7 +30,8 @@ from src.features.news_intake.models import (
     NewsCollectionResult, NewsCompanyContext, NewsSearchSnapshot,
 )
 from src.features.news_intake.search_snapshot import (  # noqa: F401 - collect_search_snapshot은 어댑터·시험이 이 모듈에서 가져간다
-    candidate_window, collect_search_snapshot, company_digest, diverse_candidates,
+    body_ranked_candidates, candidate_window, collect_search_snapshot, company_digest,
+    metadata_probe_budget,
     policy_digest, snapshot_digest,
 )
 from src.shared.report_generation.models import exact_text_sha256
@@ -47,6 +48,14 @@ class _PlannedCandidate:
     budget_code: str | None = None
     future: Future[ArticleFetchOutcome] | None = None
     lease: CallLease | None = None
+
+
+def _closed_subject_diagnostics(counts: Mapping[str, object]) -> dict[str, int]:
+    """원문·동적 열쇠를 버리고 닫힌 주어 실패 코드의 양수 개수만 남긴다."""
+    return {
+        code: count for code in c.SUBJECT_DIAGNOSTIC_CODES
+        if type(count := counts.get(code)) is int and count > 0
+    }
 
 
 def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyContext,
@@ -70,6 +79,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     failures = [code for code in snapshot.reason_codes if code not in c.SEARCH_BUDGET_REASON_CODES]
     warnings: Counter[str] = Counter()
     identity_diagnostics: Counter[str] = Counter()
+    subject_diagnostics: Counter[str] = Counter()
     role_diagnostics: Counter[str] = Counter()
     budget_codes: list[str] = [code for code in snapshot.reason_codes if code in c.SEARCH_BUDGET_REASON_CODES]
     stages: Counter[str] = Counter()
@@ -107,6 +117,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     # 기본 24건은 그대로 먼저 조사한다. 접근 거절로 본문을 한 글자도 읽지 못한
     # 기사만 기본 조사 종료 후 별도 몫으로 보충하며, 보충 실패는 다시 환급하지 않는다.
     attempted_candidate_ids: set[str] = set()
+    candidate_name_match = {item.id: item.metadata_name_match for item in snapshot.candidates}
     access_denied_articles = 0
     replacement_window_counts: dict[str, dict[str, int]] = {}
     replacement_limit = 0
@@ -194,7 +205,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                 response = None
         excerpts, rejected = validate_grounded_response(
             response, articles=batch, company=company, as_of=as_of, identity_diagnostics=identity_diagnostics,
-            role_diagnostics=role_diagnostics,
+            role_diagnostics=role_diagnostics, subject_diagnostics=subject_diagnostics,
         )
         excluded.update(rejected)
         if any(code in rejected for code in ("grounded_invalid_response", "grounded_invalid_item", "grounded_missing_result")):
@@ -258,11 +269,19 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             carried = deferred.pop(months, [])
             carried_bodies = {candidate.id: body for candidate, body in carried}
             # 원문 날짜 보정으로 넘어온 기사도 같은 기간의 이름·주제 순위를 따른다.
-            ranked_candidates = diverse_candidates(
-                candidates + [candidate for candidate, _ in carried], len(candidates) + len(carried),
-            )
             window_budget = min(reserved_window_budget + reusable_window_budget,
                                 article_attempt_limit - body_articles) if candidates else 0
+            probe_budget = 0 if is_replacement else metadata_probe_budget(
+                total_budget=policy.max_body_articles, attempted=body_articles,
+                window_budget=window_budget,
+                probes_attempted=sum(candidate_name_match.get(candidate_id) is False
+                                     for candidate_id in attempted_candidate_ids),
+            )
+            ranked_candidates = body_ranked_candidates(
+                candidates + [candidate for candidate, _ in carried],
+                attempt_budget=window_budget, probe_budget=probe_budget,
+                replacement=is_replacement,
+            )
             active_window_counts = replacement_window_counts if is_replacement else window_counts
             active_window_counts[str(months)] = {
                 "후보": len(candidates) + len(carried), "본문": len(carried), "검증기사": 0, "이월": 0,
@@ -549,10 +568,19 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         },
         "검증된이름변형": derived_company_names(company),
         "법인검증상세": dict(identity_diagnostics),
+        "주어결속상세": _closed_subject_diagnostics(subject_diagnostics),
         # 2장에 배정된 기간 실적을 4장 보조 칸으로 옮기거나 나눈 수(관측값).
         "주장역할조정": dict(role_diagnostics),
         "메타이름일치후보": sum(item.metadata_name_match for item in snapshot.candidates),
         "메타이름비일치후보": sum(not item.metadata_name_match for item in snapshot.candidates),
+        "메타이름일치본문시도": sum(item.metadata_name_match and item.id in attempted_candidate_ids
+                               for item in snapshot.candidates),
+        "메타이름일치본문미시도": sum(item.metadata_name_match and item.id not in attempted_candidate_ids
+                                 for item in snapshot.candidates),
+        "메타이름비일치본문시도": sum(not item.metadata_name_match and item.id in attempted_candidate_ids
+                                for item in snapshot.candidates),
+        "메타이름비일치본문미시도": sum(not item.metadata_name_match and item.id not in attempted_candidate_ids
+                                 for item in snapshot.candidates),
         "이름미확인후보": (
             excluded.get("grounded_identity_unverified", 0)
             + excluded.get("body_target_name_missing", 0)

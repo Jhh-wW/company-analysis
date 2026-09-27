@@ -155,11 +155,113 @@ COLLECTOR_SLOT_IDS: Final[frozenset[str]] = frozenset(
 #:   강한 직접 표현이 있는 칸만 넣는다.
 OPTIONAL_CANDIDATE_SLOTS_BY_SECTION: Final[dict[str, tuple[str, ...]]] = {
     "identity": ("identity:official_location",),
+    "business_model": ("business_model:sales_channel",),
+    "operations_partners": ("operations_partners:supply_relation",),
 }
 
 OPTIONAL_CANDIDATE_SLOT_IDS: Final[frozenset[str]] = frozenset(
     slot_id for slots in OPTIONAL_CANDIDATE_SLOTS_BY_SECTION.values() for slot_id in slots
 )
+
+# 선택 슬롯은 단어 하나로 근거를 승격하지 않는다. 재무 주석의 원재료·자본시장
+# 유통주식수와 실제 판매·조달 행위를 구분할 닫힌 문맥 어휘다.
+REVENUE_TYPE_HEADING_PATTERN: Final[re.Pattern[str]] = re.compile(r"매출(?:액)?(?:의)?\s*(?:유형|형태)")
+REVENUE_TYPE_CATEGORIES: Final[tuple[str, ...]] = ("제품", "상품", "임대", "공임", "용역", "서비스")
+REVENUE_POLICY_MARKERS: Final[tuple[str, ...]] = ("인식", "회계정책", "회계처리", "측정")
+MIN_REVENUE_TYPE_CATEGORIES: Final[int] = 2
+SALES_CHANNEL_DIRECT_MARKERS: Final[tuple[str, ...]] = ("직판", "대리점", "판매채널", "유통망")
+SALES_CHANNEL_ROUTE_MARKERS: Final[tuple[str, ...]] = ("수출", "내수", "온라인", "해외", "국내", "유통", "채널", "납품")
+SALES_CHANNEL_CONTEXT_MARKERS: Final[tuple[str, ...]] = ("판매", "납품", "고객", "거래처")
+SALES_CHANNEL_WEAK_MARKERS: Final[tuple[str, ...]] = ("유통", "채널")
+SALES_CHANNEL_EXCLUDED_COMPOUNDS: Final[tuple[str, ...]] = ("유통주식",)
+SALES_TABLE_HEADER_CELL: Final[str] = "판매경로"
+SALES_TABLE_ROW_SEPARATOR: Final[str] = ";"
+SALES_TABLE_CELL_SEPARATOR: Final[str] = "|"
+SALES_TABLE_ROUTE_MARKERS: Final[tuple[str, ...]] = (
+    "판매전문점", "도/소매", "도매", "소매", "매장", "판매법인", "대리점", "직판", "직거래",
+)
+SALES_TABLE_REACH_MARKERS: Final[tuple[str, ...]] = ("소비자", "고객")
+SALES_TABLE_ACCOUNTING_MARKERS: Final[tuple[str, ...]] = ("회계정책", "수익인식", "인식기준")
+SUPPLY_RELATION_OBJECT_MARKERS: Final[tuple[str, ...]] = ("원재료", "부품", "자재")
+SUPPLY_RELATION_ACTION_MARKERS: Final[tuple[str, ...]] = ("구매", "조달", "납품", "공급")
+SUPPLY_RELATION_PARTY_MARKERS: Final[tuple[str, ...]] = ("업체", "거래처", "협력사", "계약")
+SUPPLY_CONTRACT_EVENTS: Final[tuple[str, ...]] = ("갱신", "체결", "연장")
+SUPPLY_UNIT_BOUNDARY_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"[;\n]|(?<=[.!?。])(?:\s+|(?=[가-힣]))"
+)
+# 약한 단일어를 다른 문장이나 표 행의 계획·사업 표지와 결합하지 않는다.
+FACT_UNIT_BOUNDARY_PATTERN: Final[re.Pattern[str]] = SUPPLY_UNIT_BOUNDARY_PATTERN
+STOCK_ADMIN_HEADING_MARKERS: Final[tuple[str, ...]] = ("주식", "주주")
+STOCK_ADMIN_DOCUMENT_MARKERS: Final[tuple[str, ...]] = ("발행주식", "주식의 총수")
+STOCK_ADMIN_GOVERNANCE_MARKER: Final[str] = "이사회"
+STOCK_REAL_OPERATION_PRODUCT_MARKERS: Final[tuple[str, ...]] = ("제품", "상품", "부품")
+STOCK_REAL_OPERATION_ACTION_MARKERS: Final[tuple[str, ...]] = ("생산하여", "제조하여", "제조하고")
+STOCK_REAL_OPERATION_DELIVERY_MARKERS: Final[tuple[str, ...]] = (
+    "고객에게", "거래처에", "납품", "공급한다", "공급하고",
+)
+STOCK_ADMIN_PURPOSE_ROW_MARKERS: Final[tuple[str, ...]] = (
+    "정관", "사업목적", "사업 목적",
+)
+FUTURE_CONTEXT_ACTIVITY_MARKERS: Final[tuple[str, ...]] = (
+    "투자", "설비", "증설", "공장", "개발", "출시", "진출", "확대", "확장",
+    "신사업", "신규사업", "서비스", "제품", "프로젝트", "착공",
+)
+FUTURE_CONTEXT_INTENT_MARKERS: Final[tuple[str, ...]] = (
+    "향후", "앞으로", "예정", "추진할 계획", "계획을", "계획은", "계획이며",
+    "계획 수립", "신규 사업", "신규사업",
+)
+FUTURE_EXPLICIT_ACTION_PLAN_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"[가-힣]{2,}(?:할|하기로)\s*(?:계획|예정)"
+)
+FUTURE_CONTEXT_PLAN_HEADINGS: Final[tuple[str, ...]] = (
+    "향후 계획", "투자계획", "사업계획", "설비투자", "중장기",
+)
+FUTURE_SALES_PROCESS_HEADINGS: Final[tuple[str, ...]] = (
+    "판매경로", "판매방법", "판매 방식",
+)
+FUTURE_SALES_EXPLICIT_MARKERS: Final[tuple[str, ...]] = (
+    "향후", "앞으로", "예정", "증설", "착공", "신규 사업", "신규사업",
+)
+FUTURE_CONTEXT_INVESTMENT_TARGETS: Final[tuple[str, ...]] = (
+    "설비", "증설", "공장", "투자", "착공",
+)
+FUTURE_CONTEXT_INVESTMENT_STATUSES: Final[tuple[str, ...]] = (
+    "진행", "착수", "검토", "취소", "철회", "중단", "연기", "변경",
+)
+ACCOUNTING_TABLE_HEADER_MARKERS: Final[tuple[str, ...]] = (
+    "가치평가", "자산 가치", "금융자산",
+)
+ACCOUNTING_TABLE_SUBJECT_MARKERS: Final[tuple[str, ...]] = ("자산", "평가", "측정")
+CUSTOMER_VALUE_MARKERS: Final[tuple[str, ...]] = (
+    "고객가치", "고객에게", "사용자에게", "소비자에게",
+)
+OFFICER_PAY_HEADER_GROUPS: Final[tuple[tuple[str, ...], ...]] = (
+    ("이름", "성명"),
+    ("보수의 종류", "소득구분"),
+    ("총액", "보수총액"),
+    ("산정기준", "산정기준 및 방법"),
+)
+OFFICER_PAY_ROW_MARKERS: Final[tuple[str, ...]] = (
+    "급여", "상여", "퇴직소득", "근로소득",
+)
+OFFICER_PAY_ROLE_CELLS: Final[frozenset[str]] = frozenset({
+    "근로소득", "급여", "상여", "퇴직소득", "기타소득", "주식매수선택권",
+})
+WEAK_FUTURE_CONTEXT_SLOTS: Final[frozenset[str]] = frozenset({
+    "future_strategy:plan_status", "future_strategy:plan_timing",
+    "future_strategy:execution_signal",
+})
+SUPPLY_ACCOUNTING_MARKERS: Final[tuple[str, ...]] = (
+    "저가법", "재고자산평가", "회계정책", "회계처리", "수익인식",
+)
+STATED_PLAN_FILING_HEADINGS: Final[tuple[str, ...]] = ("생산설비", "설비투자", "시설투자", "투자계획")
+STATED_PLAN_FUTURE_MARKERS: Final[tuple[str, ...]] = ("향후", "앞으로", "내년", "차년도")
+STATED_PLAN_INVESTMENT_PATTERN: Final[re.Pattern[str]] = re.compile(r"투자\s*계획")
+STATED_PLAN_COMMITMENT_PATTERN: Final[re.Pattern[str]] = re.compile(r"(?:수행|추진|실행)\s*(?:할\s*)?예정")
+STATED_PLAN_UNCERTAIN_MARKERS: Final[tuple[str, ...]] = ("검토", "조건부", "가능성", "경우", "보류", "취소", "철회", "않", "아니", "없")
+STATED_PLAN_OTHER_COMPANY_MARKERS: Final[tuple[str, ...]] = ("타사", "경쟁사", "관계사", "자회사", "협력사")
+STATED_PLAN_ACCOUNTING_MARKERS: Final[tuple[str, ...]] = ("회계", "기준서", "수익인식")
+STATED_PLAN_QUOTE_MARKERS: Final[tuple[str, ...]] = ("“", "”", "「", "」", "인용")
 
 #: 이 엔진이 인식하는 전체 slot_id — composer 45개 어휘 ∪ 수집기 전용 신규
 #: 슬롯(self_context·stated_differentiator). EvidenceFragment·CollectionAttempt
@@ -502,10 +604,10 @@ FINANCIAL_COMPANY_REVENUE_KEYWORDS: Final[tuple[str, ...]] = (
 # 버전·출처 표기
 # ══════════════════════════════════════════════════════════
 
-COLLECTOR_VERSION: Final[str] = "evidence_collection/2.0"
+COLLECTOR_VERSION: Final[str] = "evidence_collection/2.2"
 #: 2.0: EOF 후보 반복자·유한 문단 구간·제목 오인 방지. 1.x의 저장 한도
 #: 잘림 기록을 새 완료 증명으로 재사용하지 않는다.
-PARSER_VERSION: Final[str] = "evidence_collection_segment/2.0"
+PARSER_VERSION: Final[str] = "evidence_collection_segment/2.1"
 DART_PUBLISHER_NAME: Final[str] = "금융감독원 전자공시시스템(DART)"
 #: composer/constants.py DART_DOCUMENT_URL_TEMPLATE와 같은 값(rcept_no만 다른 키 이름).
 DART_DOCUMENT_URL_TEMPLATE: Final[str] = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
