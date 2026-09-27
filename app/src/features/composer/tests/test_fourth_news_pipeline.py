@@ -16,6 +16,7 @@ from src.features.composer.tests.test_pipeline import (
     _FakeReviewer, _FakeWriter, _raw_fragments, section_id_in_prompt,
 )
 from src.features.composer.tests.review_evidence_fixture import review_items
+from src.features.composer.tests.injected_program_fixture import make_numeric_performance_evidence
 from src.features.provenance.sources import has_valid_provenance_seal
 from src.shared.report_evidence.transport_kind import TYPED_TRANSPORT_KIND_PREFIX
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
@@ -220,9 +221,13 @@ def test_FULL_전환과_보충에서도_최종_보도표와_후보진단을_보�
             payload["문장들"].append({"글": _NEWS_A, "인용": ["41"], "등급": "확인", "주장슬롯": _PAST_SLOT})
         return json.dumps(payload, ensure_ascii=False)
 
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=40
+    )
     output = run_v2(
-        "가나다전자", (), None, writer_ask=writer, reviewer_ask=_BoundGroupedReviewer(),
+        "가나다전자", (), performance_table, writer_ask=writer, reviewer_ask=_BoundGroupedReviewer(),
         release_mode=ReleaseMode.FULL, section_evidence_packets=packets,
+        filing_meta=filing_meta,
         company_id="00123456", build_identity_sha256="b" * 64,
         evidence_available_fallback=route == "fallback", as_of_date="2026-09-23",
     )

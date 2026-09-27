@@ -12,6 +12,7 @@ from src.features.composer.pipeline import run_v2
 from src.features.composer.tests.test_section_public_manifest import (
     _BoundGroupedReviewer,
     _RecoveringPacketWriter,
+    _numeric_table_and_fragment,
     _packets,
 )
 from src.features.composer.validate import V2ValidationError
@@ -51,6 +52,7 @@ def test_full_최종품질게이트_예외에도_요청로컬_관측이_남는�
 
     monkeypatch.setattr(composer_pipeline, "verify_report", recording_verify_report)
 
+    performance, _ = _numeric_table_and_fragment()
     with pytest.raises(
         V2ValidationError,
         match="report_recovery:post_supplement_quality_failed",
@@ -58,7 +60,7 @@ def test_full_최종품질게이트_예외에도_요청로컬_관측이_남는�
         run_v2(
             "가나다전자",
             (),
-            None,
+            performance,
             writer_ask=writer,
             reviewer_ask=reviewer,
             release_mode=ReleaseMode.FULL,

@@ -15,6 +15,9 @@ from __future__ import annotations
 import pytest
 
 from src.features.composer import pipeline
+from src.features.composer.tests.injected_program_fixture import (
+    make_numeric_performance_evidence,
+)
 from src.shared.report_evidence.constants import ReleaseMode
 from src.features.composer.tests.test_pipeline import (
     _FakeReviewer,
@@ -74,10 +77,13 @@ def test_run_v2가_파생비율_기록_싱크를_도식_관문에_넘긴다(
     받은 = _잡아서_기록을_남긴다(monkeypatch, 함수)
     싱크: list[dict] = []
     엄격 = release_mode is not ReleaseMode.SHADOW
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=9
+    )
     실행 = lambda: pipeline.run_v2(  # noqa: E731 - 두 갈래가 같은 인자를 쓴다
         "가나다전자",
         _strict_fragments() if 엄격 else _raw_fragments(),
-        None,
+        performance_table if 엄격 else None,
         writer_ask=_FakeWriter(),
         reviewer_ask=_FakeReviewer(),
         generated_at="2026-09-10",
@@ -89,6 +95,7 @@ def test_run_v2가_파생비율_기록_싱크를_도식_관문에_넘긴다(
                 "section_evidence_packets": _strict_packet_set(),
                 "company_id": "00123456",
                 "build_identity_sha256": "b" * 64,
+                "filing_meta": filing_meta,
             }
             if 엄격
             else {}

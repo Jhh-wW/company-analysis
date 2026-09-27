@@ -19,6 +19,7 @@ import io
 import json
 import re
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -343,38 +344,20 @@ _FULL_NAMES = ("하늘소년단", "바다소녀들", "별무리")
 
 
 def _full_packets_with_names():
-    from src.features.composer.constants import SECTION_IDS
-    from src.features.composer.port import (
-        SectionEvidencePacket,
-        SectionEvidencePacketSet,
-    )
     from src.features.composer.tests.test_section_public_manifest import (
-        _MARKS,
         _document_content_sha256,
-        _fragment_text,
+        _packets,
     )
     from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
     from src.shared.report_quality.source_identity import (
         document_identity_from_parts,
     )
 
-    generation = "a" * 64
+    base = _packets()
     packets = []
-    for index, section_id in enumerate(SECTION_IDS, start=1):
-        url = f"https://manifest.example/document/{index}"
-        document_text = _fragment_text(_MARKS[index - 1])
-        fragments = [
-            CollectedFragment(
-                fragment_id=str(index),
-                kind="회사 공식 자료",
-                text=document_text,
-                source_url=url,
-                document_title=f"공식 자료 {index}",
-                document_identity=document_identity_from_parts(url=url),
-                document_content_sha256=_document_content_sha256(document_text),
-                supported_claim_slots=CLAIM_SLOTS_BY_SECTION[section_id],
-            )
-        ]
+    for packet in base.packets:
+        fragments = list(packet.fragments)
+        section_id = packet.section_id
         if section_id == PORTFOLIO_TABLE_SECTION_ID:
             for offset, name in enumerate(_FULL_NAMES):
                 name_id = str(30 + offset)
@@ -399,19 +382,8 @@ def _full_packets_with_names():
                         supported_claim_slots=CLAIM_SLOTS_BY_SECTION[section_id],
                     )
                 )
-        packets.append(
-            SectionEvidencePacket(
-                company_id="00123456",
-                evidence_generation_sha256=generation,
-                section_id=section_id,
-                fragments=tuple(fragments),
-            )
-        )
-    return SectionEvidencePacketSet(
-        company_id="00123456",
-        evidence_generation_sha256=generation,
-        packets=tuple(packets),
-    )
+        packets.append(replace(packet, fragments=tuple(fragments)))
+    return replace(base, packets=tuple(packets))
 
 
 @pytest.fixture(scope="module")
@@ -463,27 +435,23 @@ def test_작가가_이름을_써도_표는_그대로_나간다(FULL_실행결과
 
 
 class _ThinThenFullWriter:
-    """3장만 첫 회차에 얇게 쓰고, 승인받은 재호출에서 채우는 가짜 작가.
-
-    ★ 왜 옆 파일의 `_RecoveringPacketWriter`를 못 쓰나 — 그 도구는
-      ``assert len(fragment_ids) == 1``로 «packet에 조각이 딱 하나»를 요구한다.
-      이름 조각을 넣은 3장 packet은 조각이 넷이라 그 단정에서 죽는다. 그래서
-      조각이 여럿인 packet을 받는 같은 모양의 도구를 여기 둔다.
-    """
+    """3장만 첫 회차에 얇게 쓰고, 이름 조각을 보존해 다시 채운다."""
 
     def __init__(self) -> None:
         from src.features.composer.constants import GRADE_CONFIRMED, SECTION_IDS
         from src.features.composer.tests.test_section_public_manifest import (
             _ENDINGS,
             _MARKS,
+            _writer_slots,
         )
-        from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 
         self._grade = GRADE_CONFIRMED
         self._section_ids = SECTION_IDS
         self._endings = _ENDINGS
         self._marks = _MARKS
-        self._slots_by_section = CLAIM_SLOTS_BY_SECTION
+        self._slots_by_section = {
+            section_id: _writer_slots(section_id) for section_id in SECTION_IDS
+        }
         self.section_calls: dict[str, int] = {}
 
     def __call__(self, prompt: str) -> str:
@@ -525,17 +493,24 @@ def _run_recovering_full_with_names():
         _NoDiagram,
     )
     from src.shared.report_evidence.constants import ReleaseMode
+    from src.features.composer.tests.injected_program_fixture import (
+        make_numeric_performance_evidence,
+    )
 
     writer = _ThinThenFullWriter()
+    table, _fragment, filing_meta = make_numeric_performance_evidence(
+        fragment_number=40
+    )
     output = run_v2(
         "가나다전자",
         (),
-        None,
+        table,
         writer_ask=writer,
         reviewer_ask=_BoundGroupedReviewer(),
         diagram_ask=_NoDiagram(),
         release_mode=ReleaseMode.FULL,
         section_evidence_packets=_full_packets_with_names(),
+        filing_meta=filing_meta,
         company_id="00123456",
         build_identity_sha256="b" * 64,
     )

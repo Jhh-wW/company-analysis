@@ -27,6 +27,9 @@ from src.features.composer.tests.test_section_public_manifest import (
     _packets,
     _RecoveringPacketWriter,
 )
+from src.features.composer.tests.injected_program_fixture import (
+    make_numeric_performance_evidence,
+)
 from src.features.composer.validate import V2ValidationError
 from src.shared.report_evidence.constants import (
     ReleaseMode,
@@ -100,7 +103,7 @@ def _official_packets():
     packets = _packets()
     typed_packets = []
     for index, packet in enumerate(packets.packets, start=1):
-        (fragment,) = packet.fragments
+        fragment = packet.fragments[0]
         receipt = f"2026031500{index:04d}"
         url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}"
         official = replace(
@@ -118,7 +121,9 @@ def _official_packets():
             source_collected_on="2026-09-04",
             document_date="2026-03-15",
         )
-        typed_packets.append(replace(packet, fragments=(official,)))
+        typed_packets.append(
+            replace(packet, fragments=(official, *packet.fragments[1:]))
+        )
     return replace(packets, packets=tuple(typed_packets))
 
 
@@ -132,7 +137,14 @@ def _run(release_mode: ReleaseMode):
     }
     if release_mode is not ReleaseMode.SHADOW:
         arguments.update(company_id="00123456", build_identity_sha256="b" * 64)
-    return run_v2("가나다전자", (), None, **arguments)
+    if release_mode is ReleaseMode.FULL:
+        table, _fragment, filing_meta = make_numeric_performance_evidence(
+            fragment_number=40
+        )
+        arguments["filing_meta"] = filing_meta
+    else:
+        table = None
+    return run_v2("가나다전자", (), table, **arguments)
 
 
 def _spy_safety(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, tuple[str, ...]]]:
@@ -350,15 +362,19 @@ def test_숫자_산문_FULL이_품질_하한에_걸리면_안전_차단_대신_�
 
     _install_numeric_sentences(monkeypatch)
 
+    table, _fragment, filing_meta = make_numeric_performance_evidence(
+        fragment_number=40
+    )
     output = run_v2(
         "가나다전자",
         (),
-        None,
+        table,
         writer_ask=_RecoveringPacketWriter(("business_model",), remain_thin=True),
         reviewer_ask=_BoundGroupedReviewer(),
         diagram_ask=_NoDiagram(),
         release_mode=ReleaseMode.FULL,
         section_evidence_packets=_official_packets(),
+        filing_meta=filing_meta,
         company_id="00123456",
         build_identity_sha256="b" * 64,
         preserve_on_ask_failure=True,

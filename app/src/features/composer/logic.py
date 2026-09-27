@@ -53,6 +53,8 @@ from src.features.composer.constants import (
     FORBIDDEN_TOPICS_GUIDE,
     FULL_CITATION_SLOT_GUIDE,
     FULL_CLAIM_SLOT_SCHEMA_HINT,
+    FULL_PAST_CHANGES_CITATION_RULES_GUIDE,
+    FULL_PAST_CHANGES_SECTION_GUIDE,
     FULL_SUPPORTED_SLOT_INDEX_HEAD,
     GRADE_CONFIRMED,
     JSON_SCHEMA_GUIDE,
@@ -103,7 +105,7 @@ from src.features.composer.port import (
     VerifiedProgramEvidence,
     fragments_from_raw,
 )
-from src.shared.report_evidence.policy import required_slots_for
+from src.shared.report_evidence.policy import injected_slots_for, required_slots_for
 from src.features.composer.news_constants import NEWS_WRITER_GUIDE
 from src.features.composer.news_usage import news_metadata, parse_news_decisions
 from src.features.composer.news_block import _is_news_fragment
@@ -483,6 +485,21 @@ def build_section_prompt(
     """
     minimum, maximum = SECTION_SENTENCE_RANGES[section_id]
     claim_slots = CLAIM_SLOTS_BY_SECTION.get(section_id, ())
+    supported_slots = (
+        frozenset(slot for fragment in fragments for slot in fragment.supported_claim_slots)
+        if show_supported_claim_slots else frozenset()
+    )
+    injected_slots = (
+        injected_slots_for(section_id)
+        if show_supported_claim_slots else ()
+    )
+    writer_claim_slots = (
+        tuple(
+            slot for slot in claim_slots
+            if slot in supported_slots and slot not in injected_slots
+        )
+        if show_supported_claim_slots else claim_slots
+    )
     claim_slot_guide = (
         "\n원자 주장 계획 — 각 문장은 가장 알맞은 id를 «주장슬롯»에 넣고, "
         "id는 고유 번호가 아니라 사실의 종류다. 같은 종류의 서로 다른 원자 "
@@ -493,33 +510,43 @@ def build_section_prompt(
             if show_supported_claim_slots else
             "어느 자리에도 맞지 않으면 빈 문자열로 두며 새 id를 만들지 않는다:\n- "
         )
-        + "\n- ".join(claim_slots) + "\n"
-        if claim_slots
+        + "\n- ".join(writer_claim_slots) + "\n"
+        if writer_claim_slots
         else ""
     )
     if show_supported_claim_slots:
-        by_slot: dict[str, list[str]] = {slot: [] for slot in claim_slots}
+        by_slot: dict[str, list[str]] = {slot: [] for slot in writer_claim_slots}
         for fragment in fragments:
             for slot in fragment.supported_claim_slots:
                 if slot in by_slot and fragment.fragment_id not in by_slot[slot]:
                     by_slot[slot].append(fragment.fragment_id)
         claim_slot_guide += FULL_SUPPORTED_SLOT_INDEX_HEAD + "".join(
             f"- {slot}: {', '.join(by_slot[slot])}\n"
-            for slot in claim_slots if by_slot[slot]
+            for slot in writer_claim_slots if by_slot[slot]
         )
         claim_slot_guide += FULL_CITATION_SLOT_GUIDE
-        required_claim_slots = required_slots_for(section_id)
+        required_claim_slots = tuple(
+            slot for slot in required_slots_for(section_id)
+            if slot in supported_slots and slot not in injected_slots
+        )
         claim_slot_guide += (
             "\nFULL 근거 결속 규칙 — 모든 산문 문장은 «확인»·«해석» 등급과 "
             "관계없이 이 장에 허용된 주장슬롯을 정확히 하나 선택한다. 빈 문자열이나 "
             "목록 밖 id는 허용되지 않는다. 또한 «인용»에 넣은 조각 중 적어도 하나의 "
             "«지원 주장슬롯» 목록에 선택한 id가 있어야 한다. 지원하지 않는 조각으로 "
             "빈자리를 채우지 말고, 맞는 근거가 없으면 그 문장을 내지 않는다.\n"
-            "FULL 필수 의미칸 — 아래 칸은 자료 패킷에 존재하는 데서 끝나지 않고, "
-            "각 칸을 뒷받침하는 근거를 인용한 공개 문장으로 모두 다뤄야 한다:\n- "
-            + "\n- ".join(required_claim_slots)
-            + "\n"
+            "FULL 산문 필수 의미칸 — 아래 칸은 이 장 자료가 지원하며 작성자가 "
+            "근거를 인용한 문장으로 다뤄야 한다:\n"
+            + ("- " + "\n- ".join(required_claim_slots) + "\n" if required_claim_slots else "")
+            + "자료가 지원하지 않는 필수 칸을 추측해 채우지 않는다. "
+            "그 칸은 최종 품질 검증에서 미달로 남는다.\n"
         )
+        if injected_slots:
+            claim_slot_guide += (
+                "FULL 프로그램 책임 의미칸 — 아래 칸은 별도 구조화 검증기가 "
+                "처리한다. 표 이름 인용이나 근거 없는 산문으로 대신하지 않는다:\n- "
+                + "\n- ".join(injected_slots) + "\n"
+            )
         flow_requirements = _FLOW_CELL_SUPPORTED_SLOTS_BY_SECTION.get(section_id)
         if flow_requirements is not None:
             claim_slot_guide += (
@@ -549,14 +576,22 @@ def build_section_prompt(
             CLAIM_SLOT_SCHEMA_HINT, FULL_CLAIM_SLOT_SCHEMA_HINT
         )
     section_parts = [
-        SECTION_GUIDES[section_id],
+        (
+            FULL_PAST_CHANGES_SECTION_GUIDE
+            if show_supported_claim_slots and section_id == "past_changes"
+            else SECTION_GUIDES[section_id]
+        ),
         (
             COMPETITIVE_POSITION_PARAGRAPH_PLAN
             if section_id == "competitive_position"
             else ""
         ),
         "\n\n",
-        CITATION_RULES_GUIDE,
+        (
+            FULL_PAST_CHANGES_CITATION_RULES_GUIDE
+            if show_supported_claim_slots and section_id == "past_changes"
+            else CITATION_RULES_GUIDE
+        ),
         EXACT_EVIDENCE_SCOPE_GUIDE,
         (
             PARTIAL_EVIDENCE_SCOPE_GUIDE.format(

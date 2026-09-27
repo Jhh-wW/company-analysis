@@ -18,6 +18,14 @@ CANONICAL_SCHEMA_VERSION: Final[str] = "company-report-v4-canonical"
 # 다른 도표의 최소 대상·단계 수는 완화하지 않는다.
 TREND_MIN_POINTS: Final[int] = 2
 TREND_MAX_POINTS: Final[int] = 6
+# 실제 표시 연도 수를 읽는 한국어 수사다. 기존 3년 설명의 문구도 보존한다.
+TREND_YEAR_COUNT_LABELS: Final[dict[int, str]] = {
+    2: "두",
+    3: "세",
+    4: "네",
+    5: "다섯",
+    6: "여섯",
+}
 
 # 5장 흐름표를 원·선 관계도로 바꿀 수 있는 닫힌 계약이다. ``ReportTable``에는
 # 장 id가 없으므로 composer가 실제로 내는 캡션·머리글을 함께 대조하고, 하나라도

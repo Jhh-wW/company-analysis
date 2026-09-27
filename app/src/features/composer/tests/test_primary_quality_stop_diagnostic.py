@@ -9,6 +9,9 @@ import pytest
 
 from src.features.composer.pipeline import run_v2
 from src.features.composer.quality_observation_log import record_primary_quality_stop
+from src.features.composer.tests.injected_program_fixture import (
+    make_numeric_performance_evidence,
+)
 from src.features.composer.tests.test_evidence_available_report import _StrictThinWriter
 from src.features.composer.tests.test_pipeline import (
     _FakeReviewer,
@@ -23,15 +26,19 @@ from src.shared.report_quality.models import QualityProblemCode
 
 def test_품질하한_중단_직전_닫힌_1차_원인을_남긴다() -> None:
     diagnostics: list[dict[str, object]] = []
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=9
+    )
     with pytest.raises(V2ValidationError, match="report_recovery:too_many_underfilled_sections"):
         run_v2(
             "가나다전자",
             _strict_fragments(),
-            None,
+            performance_table,
             writer_ask=_StrictThinWriter(),
             reviewer_ask=_FakeReviewer(),
             release_mode=ReleaseMode.FULL,
             section_evidence_packets=_strict_packet_set(),
+            filing_meta=filing_meta,
             company_id="00123456",
             build_identity_sha256="b" * 64,
             composition_diagnostics_sink=diagnostics,

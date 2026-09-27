@@ -37,7 +37,7 @@ from src.shared.report_quality.constants import (
     LEGACY_STRICT_QUALITY_CONTRACT_VERSION,
     STRICT_QUALITY_CONTRACT_VERSION,
 )
-from src.shared.report_evidence.policy import required_slots_for
+from src.shared.report_evidence.policy import injected_slots_for, required_slots_for
 from src.shared.revenue_table_provenance import revenue_table_section_id_from_caption
 from src.shared.report_quality.generation import (
     GenerationQualityObservation,
@@ -2116,12 +2116,17 @@ def run_v2(
             # 있는 구조화 claim을 AI 호출 전에 합친다. 장별 서로 다른 의미 칸
             # 하한에 애초에 도달할 수 없다면 보충 작가를 불러도 결과는 같으므로
             # 유료 9장+재작성 뒤 실패시키지 않는다.
+            injected_slots_by_section = {
+                section_id: frozenset(injected_slots_for(section_id))
+                for section_id in SECTION_IDS
+            }
             reachable_slots_by_section = {
                 section_id: {
                     slot_id
                     for fragment in prepared_evidence.packets[section_id]
                     for slot_id in fragment.supported_claim_slots
                     if slot_id.startswith(f"{section_id}:")
+                    and slot_id not in injected_slots_by_section[section_id]
                 }
                 for section_id in SECTION_IDS
             }

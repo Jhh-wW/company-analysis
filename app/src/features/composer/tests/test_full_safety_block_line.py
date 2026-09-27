@@ -28,6 +28,9 @@ from src.features.composer.quality_observation_log import (
     safety_block_record,
     summarize_safety_problems,
 )
+from src.features.composer.tests.injected_program_fixture import (
+    make_numeric_performance_evidence,
+)
 from src.features.composer.tests.test_evidence_available_report import _StrictThinWriter
 from src.features.composer.tests.test_pipeline import (
     _FakeReviewer,
@@ -37,8 +40,6 @@ from src.features.composer.tests.test_pipeline import (
 from src.features.composer.tests.test_release_mode_diagnostic import _full
 from src.features.composer.tests.test_section_public_manifest import (
     _BoundGroupedReviewer,
-    _FirstRowBrokenReviewer,
-    _GlobalFailureReviewer,
     _NoDiagram,
     _RecoveringPacketWriter,
     _packets,
@@ -300,31 +301,43 @@ def test_fact_id_앞부분만_겹친_다른_사실로_장을_세지_않는다() 
 # ══════════════════════════════════════════════════════════
 
 
-def _blocked_full(diagnostics: list[dict]) -> None:
-    """첫 검수 행이 깨지고 재요청 자리가 전역 장애로 멈춰 아홉 장이 안내문만 남는 실행."""
+def _blocked_full(
+    diagnostics: list[dict], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """충분히 검증된 후보의 결속 안 된 공개 요약만 실제 안전판정에 건넨다."""
+    original = pipeline_module.build_generation_quality_candidate
 
-    _full(
-        initial_reviewer_ask=_FirstRowBrokenReviewer(),
-        initial_retry_reviewer_ask=_GlobalFailureReviewer(),
-        preserve_on_ask_failure=True,
-        composition_diagnostics_sink=diagnostics,
+    def candidate_with_unbound_summary(*args: object, **kwargs: object):
+        candidate = original(*args, **kwargs)
+        assert len(candidate.sections) == 9
+        assert len(candidate.facts) == 58
+        assert candidate.has_unbound_summary_content is False
+        return replace(candidate, has_unbound_summary_content=True)
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "build_generation_quality_candidate",
+        candidate_with_unbound_summary,
     )
+    _full(composition_diagnostics_sink=diagnostics)
 
 
-def test_1차_공개안전_차단은_예외_전에_줄_하나를_남기고_정화기를_그대로_지난다() -> None:
+def test_1차_공개안전_차단은_예외_전에_줄_하나를_남기고_정화기를_그대로_지난다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     diagnostics: list[dict] = []
     with pytest.raises(
         V2ValidationError, match="report_recovery:post_validation_safety_blocked",
     ):
-        _blocked_full(diagnostics)
+        _blocked_full(diagnostics, monkeypatch)
 
-    # 공개할 claim 이 하나도 없다는 문제는 어느 장의 것도 아니라 장별이 비어 있다.
+    # 공개할 사실은 충분해도 결속되지 않은 요약이 있으면 실제 안전판정이 막는다.
     expected = {
         "step": _STEP,
         "회차": "1차",
         "문제수": 1,
-        "유형별": {"no_public_claim": 1},
-        "장별": {},
+        "유형별": {"summary_binding": 1},
+        "장별": {"summary": 1},
     }
     assert _safety_lines(diagnostics) == [expected]
     assert _safety_lines(list(observed_composition_steps(diagnostics))) == [expected]
@@ -344,17 +357,21 @@ def test_정상_FULL_출고에는_공개안전_차단_줄이_없다() -> None:
 
 def test_품질_하한_중단에는_공개안전_차단_줄이_없다() -> None:
     diagnostics: list[dict] = []
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=9
+    )
     with pytest.raises(
         V2ValidationError, match="report_recovery:too_many_underfilled_sections",
     ):
         run_v2(
             "가나다전자",
             _strict_fragments(),
-            None,
+            performance_table,
             writer_ask=_StrictThinWriter(),
             reviewer_ask=_FakeReviewer(),
             release_mode=ReleaseMode.FULL,
             section_evidence_packets=_strict_packet_set(),
+            filing_meta=filing_meta,
             company_id="00123456",
             build_identity_sha256="b" * 64,
             composition_diagnostics_sink=diagnostics,
@@ -397,18 +414,22 @@ def test_보충_회차의_공개안전_차단도_보충_줄_하나를_남긴다(
         pipeline_module, "assess_and_observe_generation", second_round_blocked,
     )
     diagnostics: list[dict] = []
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=40
+    )
     with pytest.raises(
         V2ValidationError, match="report_recovery:post_supplement_safety_blocked",
     ):
         run_v2(
             "가나다전자",
             (),
-            None,
+            performance_table,
             writer_ask=_RecoveringPacketWriter(("identity",)),
             reviewer_ask=_BoundGroupedReviewer(),
             diagram_ask=_NoDiagram(),
             release_mode=ReleaseMode.FULL,
             section_evidence_packets=_packets(),
+            filing_meta=filing_meta,
             company_id="00123456",
             build_identity_sha256="b" * 64,
             composition_diagnostics_sink=diagnostics,
@@ -442,7 +463,7 @@ def test_진단_줄을_못_만들어도_출고_검증_차단은_그대로다(
     with caplog.at_level(logging.WARNING, logger=logger_name), pytest.raises(
         V2ValidationError, match="report_recovery:post_validation_safety_blocked",
     ):
-        _blocked_full(diagnostics)
+        _blocked_full(diagnostics, monkeypatch)
 
     assert _safety_lines(diagnostics) == []
     warnings = [

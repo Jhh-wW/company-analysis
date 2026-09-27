@@ -120,6 +120,7 @@ from src.features.report_standard.constants import (
     RELATION_PAIR_MIN_ROWS,
     TREND_MAX_POINTS,
     TREND_MIN_POINTS,
+    TREND_YEAR_COUNT_LABELS,
 )
 
 
@@ -249,7 +250,8 @@ def _trend_reading(series: "tuple[ChartSeries, ...]", unit: str) -> str:
         if below and below < len(one.points):
             말 += f" (0선 아래 {below}개 해)"
         elif below == len(one.points):
-            말 += " (세 해 모두 0선 아래)"
+            year_count = TREND_YEAR_COUNT_LABELS.get(below, str(below))
+            말 += f" ({year_count} 해 모두 0선 아래)"
         parts.append(말)
     return ". ".join(parts) + "." if parts else ""
 

@@ -11,6 +11,9 @@ from src.features.composer.flow_review_binding import flow_review_problem
 from src.features.composer.port import (
     CollectedFragment, ComposedReport, ComposedSection, ComposedSentence, FlowRow,
 )
+from src.features.composer.tests.injected_program_fixture import (
+    make_numeric_performance_evidence,
+)
 from src.features.composer.tests.review_evidence_fixture import grounded_review_response
 from src.features.composer.tests.test_pipeline import _strict_packet_set
 from src.features.composer.validate import V2ValidationError
@@ -49,13 +52,17 @@ def test_부분보고서의_검수후보가_없으면_검수호출도_없다(kin
 def test_FULL_후보가_모두_비어도_최초_영수증의_9대1_호출은_유지한다(monkeypatch):
     recorder = pipeline._CallLedgerRecorder()
     monkeypatch.setattr(pipeline, "_CallLedgerRecorder", lambda: recorder)
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=9
+    )
     with pytest.raises(V2ValidationError):
         pipeline.run_v2(
-            "가나다전자", {}, None,
+            "가나다전자", {}, performance_table,
             writer_ask=lambda _prompt: '{"문장들":[],"경로표":[]}',
             reviewer_ask=lambda _prompt: '{"판정":[]}',
             release_mode=ReleaseMode.FULL,
             section_evidence_packets=_strict_packet_set(),
+            filing_meta=filing_meta,
             company_id="00123456", build_identity_sha256="b" * 64,
         )
     assert recorder.calls_for(ValidationRound.PRIMARY, role="writer") == 9

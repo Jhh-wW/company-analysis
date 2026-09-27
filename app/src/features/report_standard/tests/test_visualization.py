@@ -240,6 +240,44 @@ def test_one_year_trend_remains_plain_table() -> None:
     assert table_visualization(table) is None
 
 
+@pytest.mark.parametrize(
+    ("year_count", "count_label"),
+    ((2, "두"), (3, "세"), (4, "네"), (5, "다섯"), (6, "여섯")),
+)
+def test_모든해가_음수인_그래프의_설명도_실제_연도수를_쓴다(
+    year_count: int, count_label: str,
+) -> None:
+    table = ReportTable(
+        caption="완료 사업연도 실적",
+        headers=["사업연도", "영업손익"],
+        rows=[[str(2025 - index), str(-10 * (index + 1))] for index in range(year_count)],
+        display_unit="억원",
+        presentation="trend",
+    )
+
+    visual = table_visualization(table)
+
+    assert visual is not None
+    assert len(visual.series[0].points) == year_count
+    assert f"({count_label} 해 모두 0선 아래)" in visual.reading
+    if year_count != 3:
+        assert "세 해 모두" not in visual.reading
+
+
+def test_세해_그래프의_기존_설명문은_바이트까지_보존한다() -> None:
+    table = ReportTable(
+        caption="완료 사업연도 실적",
+        headers=["사업연도", "영업손익"],
+        rows=[["2025", "-30"], ["2024", "-20"], ["2023", "-10"]],
+        presentation="trend",
+    )
+
+    visual = table_visualization(table)
+
+    assert visual is not None
+    assert visual.reading == "「영업손익」은 2023 -10에서 2025 -30로 줄었다 (세 해 모두 0선 아래)."
+
+
 def test_trend_prefers_explicit_display_unit_and_rejects_non_numeric_series() -> None:
     explicit_unit = table_visualization(
         ReportTable(

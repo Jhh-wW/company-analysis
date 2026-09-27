@@ -45,6 +45,7 @@ from src.features.composer.tests.test_section_public_manifest import (
     _BoundGroupedReviewer,
     _CompletePacketWriter,
     _NoDiagram,
+    _numeric_table_and_fragment,
     _packets,
 )
 from src.features.composer.validate import v2_validation_problems
@@ -116,10 +117,11 @@ class _TailCellWriter(_CompletePacketWriter):
 def _full_report(tail: str) -> Report:
     """실제 FULL 파이프라인을 통과한 봉인 보고서 — 2장 끝 칸만 ``tail``."""
 
+    performance, _ = _numeric_table_and_fragment()
     output = run_v2(
         "가나다전자",
         (),
-        None,
+        performance,
         writer_ask=_TailCellWriter(tail),
         reviewer_ask=_BoundGroupedReviewer(),
         diagram_ask=_NoDiagram(),
