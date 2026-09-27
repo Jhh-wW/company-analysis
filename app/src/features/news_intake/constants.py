@@ -252,6 +252,12 @@ EXCLUDED_FETCH_TRANSPORT_ERROR: Final[str] = "fetch_transport_error"
 #: HTTP 상태별 사유 코드의 앞머리. 403·429처럼 상태마다 대응이 달라서
 #: 하나로 합치지 않고 ``fetch_http_403`` 꼴로 상태를 그대로 남긴다.
 FETCH_HTTP_CODE_PREFIX: Final[str] = "fetch_http_"
+# 접근 거절 대체시도에서만 쓰는 닫힌 최종 사유. robots 코드만으로는
+# 정책 조회 불가까지 섞이므로 콜백의 별도 명시적 거절 신호도 반드시 확인한다.
+FETCH_HTTP_FORBIDDEN_CODE: Final[str] = "fetch_http_403"
+ACCESS_DENIAL_REASONS: Final[frozenset[str]] = frozenset({
+    EXCLUDED_FETCH_ROBOTS_BLOCKED, FETCH_HTTP_FORBIDDEN_CODE,
+})
 
 #: 본문을 어느 겹에서 얻었는지 남기는 단계 코드. 「메타 설명 한 문장으로
 #: 겨우 건졌다」와 「기사 본문을 통째로 읽었다」는 근거의 두께가 다르므로
@@ -343,7 +349,7 @@ URL_VARIANT_ORDER: Final[tuple[str, ...]] = (
 MAX_URL_VARIANTS: Final[int] = 3
 
 # 새 수집 경로의 상한은 기사 수를 채우는 목표가 아니라 요청 비용의 경계다.
-COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v7"
+COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v8"
 NAME_ACRONYM_MIN_CHARS: Final[int] = 2
 NAME_ACRONYM_MAX_CHARS: Final[int] = 8
 NAME_RETAINED_SUFFIX_MIN_CHARS: Final[int] = 2

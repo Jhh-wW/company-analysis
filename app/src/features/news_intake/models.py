@@ -180,6 +180,9 @@ class NewsBodyFetchResult:
     stage: str = ""
     effective_url: str = ""
     published_on: str = ""
+    # 주소 표기 변형까지 모두 확인된 접근 거절일 때만 참이다. 구형 콜백의
+    # 단일 실패 코드는 robots 조회 장애와 실제 규칙 거절을 구별하지 못한다.
+    all_variants_access_denied: bool = False
 
     def __post_init__(self) -> None:
         for value, label in (
@@ -200,6 +203,12 @@ class NewsBodyFetchResult:
             raise ValueError("본문을 얻었으면 어느 단계에서 얻었는지 남겨야 합니다")
         if reason_code and stage:
             raise ValueError("실패한 본문 결과에는 추출 단계를 담을 수 없습니다")
+        if type(self.all_variants_access_denied) is not bool:
+            raise TypeError("접근 거절 확인 신호는 불리언이어야 합니다")
+        if self.all_variants_access_denied and reason_code not in {
+            c.EXCLUDED_FETCH_ROBOTS_BLOCKED, f"{c.FETCH_HTTP_CODE_PREFIX}403",
+        }:
+            raise ValueError("확정 접근 거절은 robots 규칙 불허 또는 기사 403에만 표시합니다")
         object.__setattr__(self, "text", text)
         object.__setattr__(self, "reason_code", reason_code)
         object.__setattr__(self, "stage", stage)

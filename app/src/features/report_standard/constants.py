@@ -14,6 +14,11 @@ from src.shared.report_quality.constants import COMPARISON_JUDGMENTS
 
 CANONICAL_SCHEMA_VERSION: Final[str] = "company-report-v4-canonical"
 
+# 완료 사업연도 두 개만 확인돼도 동일한 추세 막대로 비교할 수 있다.
+# 다른 도표의 최소 대상·단계 수는 완화하지 않는다.
+TREND_MIN_POINTS: Final[int] = 2
+TREND_MAX_POINTS: Final[int] = 6
+
 # 5장 흐름표를 원·선 관계도로 바꿀 수 있는 닫힌 계약이다. ``ReportTable``에는
 # 장 id가 없으므로 composer가 실제로 내는 캡션·머리글을 함께 대조하고, 하나라도
 # 어긋나면 기존 표로 남긴다. 긴 문구를 임의로 줄이지 않기 위해 글자 폭은

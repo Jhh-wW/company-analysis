@@ -60,13 +60,13 @@ def test_정상6기사에_타사검색오탐1개가_섞여도_충분성과_캐�
     # 기본 4개 배치로 마지막 정상 2건과 오탐 1건을 실제 함께 검수한다.
     result = collect(articles, fetch=fetch, analyze=analyzer(review))
     assert len(fetched) == 7 and fetched[-1].endswith("99")
-    assert result.diagnostics["제외"]["grounded_wrong_company"] == 1
+    assert result.diagnostics["제외"]["body_target_name_missing"] == 1
     assert result.diagnostics["독립기사"] == 6
-    assert result.diagnostics["완전성"] == "sufficient"
+    assert result.diagnostics["완전성"] == "partial"
     assert result.diagnostics["검색상태"] == "success"
     assert result.diagnostics["자료부족"] is False
-    assert not result.diagnostics["검증미완료"]
-    assert result.diagnostics["캐시재사용가능"]
+    assert "body_target_name_missing" in result.diagnostics["검증미완료"]
+    assert not result.diagnostics["캐시재사용가능"]
 
 
 @pytest.mark.parametrize("field,excluded", [("same_company", "grounded_wrong_company"), ("material", "grounded_non_material")])
@@ -97,19 +97,20 @@ def test_메타비일치의_본문접속실패는_정상빈검색으로_바뀌�
     assert not result.diagnostics["자료부족"] and not result.diagnostics["캐시재사용가능"]
 
 
-@pytest.mark.parametrize("company,body", [
+@pytest.mark.parametrize("company,body,expected_calls", [
     (NewsCompanyContext("하이브", aliases=("HYBE",), identity_context="음악 매니지먼트"),
-     "HYBE미디어코프는 영화 제작과 배급 사업에서 새로운 장편 영화의 해외 상영 계약을 체결했다."),
+     "HYBE미디어코프는 영화 제작과 배급 사업에서 새로운 장편 영화의 해외 상영 계약을 체결했다.", 0),
     (NewsCompanyContext("멀티캠퍼스", identity_context="기업교육 임직원 직무훈련"),
-     "멀티캠퍼스는 대학의 여러 캠퍼스를 연결하는 입시 제도로 신입생의 복수 전공 신청을 지원한다."),
+     "멀티캠퍼스는 대학의 여러 캠퍼스를 연결하는 입시 제도로 신입생의 복수 전공 신청을 지원한다.", 1),
     (NewsCompanyContext("제이와이피엔터테인먼트", aliases=("JYP Ent.",), identity_context="음악 매니지먼트"),
-     "JYP엔터는 음악 매니지먼트 사업에서 소속 그룹의 해외 20개 도시 공연을 제작했다."),
+     "JYP엔터는 음악 매니지먼트 사업에서 소속 그룹의 해외 20개 도시 공연을 제작했다.", 0),
 ])
-def test_메타검사를_통과해도_타법인과_증명없는접두를_본문에서_차단한다(company, body):
+def test_메타검사를_통과해도_타법인과_증명없는접두를_본문에서_차단한다(company, body, expected_calls):
     calls = []
     result = collect([unnamed()], company=company, fetch=lambda url: body, analyze=analyzer(calls=calls))
-    assert len(calls) == 1 and not result.fragments and not result.articles
-    assert "grounded_identity_unverified" in result.diagnostics["검증미완료"]
+    assert len(calls) == expected_calls and not result.fragments and not result.articles
+    expected_reason = "grounded_identity_unverified" if expected_calls else "body_target_name_missing"
+    assert expected_reason in result.diagnostics["검증미완료"]
     assert result.diagnostics["이름미확인후보"] == 1
     assert not result.diagnostics["캐시재사용가능"]
 

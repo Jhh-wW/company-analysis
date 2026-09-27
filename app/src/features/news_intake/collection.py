@@ -18,7 +18,7 @@ from src.features.news_intake.body_prefetch import (
     ArticleFetchJob, ArticleFetchOutcome, BodyFetchConcurrency, BodyFetchLane,
     CallBudgetPool, CallLease, eligible_body_urls, fetch_article_body,
 )
-from src.features.news_intake.identity_names import derived_company_names
+from src.features.news_intake.identity_names import derived_company_names, mentions_target
 from src.features.news_intake.grounded import (
     build_grounded_prompt, build_grounded_schema, validate_grounded_response,
 )
@@ -104,6 +104,16 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         for months, budget in zip(c.WINDOW_MONTHS, c.WINDOW_ARTICLE_BUDGETS)
     }
     reusable_window_budget = sum(c.WINDOW_ARTICLE_BUDGETS) - sum(reserved_window_budgets.values())
+    # 기본 24건은 그대로 먼저 조사한다. 접근 거절로 본문을 한 글자도 읽지 못한
+    # 기사만 기본 조사 종료 후 별도 몫으로 보충하며, 보충 실패는 다시 환급하지 않는다.
+    attempted_candidate_ids: set[str] = set()
+    access_denied_articles = 0
+    replacement_window_counts: dict[str, dict[str, int]] = {}
+    replacement_limit = 0
+    replacement_base_articles = 0
+    replacement_base_calls = 0
+    replacement_started = False
+    article_attempt_limit = policy.max_body_articles
     deadline = time.monotonic() + policy.max_collection_seconds
     stopped = False
     # 본문 요청 상한은 원장이 지킨다. 순차든 동시든 «실제로 보낸 요청»만 「본문호출」로 센다.
@@ -211,6 +221,12 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             return
         if len(body) != len(full_body):
             excluded["body_input_truncated"] += 1
+        # 이후의 모든 신원·주어 결속 경로는 바로 이 입력 범위 안의 공식 상호를
+        # 요구한다. 통과할 수 없는 본문에 AI 몫을 쓰거나 발행처명을 근거로 삼지 않는다.
+        if not mentions_target(body, company):
+            excluded["body_target_name_missing"] += 1
+            identity_diagnostics["identity_name_missing"] += 1
+            return
         body_chars += len(body)
         document_hashes[candidate.source_url] = exact_text_sha256(full_body)
         batch.append((candidate, body))
@@ -225,11 +241,20 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         warnings.update(outcome.warnings)
 
     try:
-        for months, reserved_window_budget in reserved_window_budgets.items():
+        window_queue = deque(
+            (months, budget, False)
+            for months, budget in reserved_window_budgets.items()
+        )
+        while window_queue:
+            months, reserved_window_budget, is_replacement = window_queue.popleft()
             if stopped or sufficient():
                 break
-            windows.append(months)
-            candidates = candidates_by_window[months]
+            if not is_replacement:
+                windows.append(months)
+            candidates = [
+                item for item in candidates_by_window[months]
+                if not is_replacement or item.id not in attempted_candidate_ids
+            ]
             carried = deferred.pop(months, [])
             carried_bodies = {candidate.id: body for candidate, body in carried}
             # 원문 날짜 보정으로 넘어온 기사도 같은 기간의 이름·주제 순위를 따른다.
@@ -237,8 +262,9 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                 candidates + [candidate for candidate, _ in carried], len(candidates) + len(carried),
             )
             window_budget = min(reserved_window_budget + reusable_window_budget,
-                                policy.max_body_articles - body_articles) if candidates else 0
-            window_counts[str(months)] = {
+                                article_attempt_limit - body_articles) if candidates else 0
+            active_window_counts = replacement_window_counts if is_replacement else window_counts
+            active_window_counts[str(months)] = {
                 "후보": len(candidates) + len(carried), "본문": len(carried), "검증기사": 0, "이월": 0,
                 "시도상한": window_budget, "시도": 0, "미시도": len(candidates), "선행미사용": 0,
             }
@@ -279,14 +305,14 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                     if examined >= window_budget:
                         budget_code = None
                         if len(candidates) > examined:
-                            budget_code = (c.BODY_BUDGET_EXHAUSTED_CODE if body_articles >= policy.max_body_articles
+                            budget_code = (c.BODY_BUDGET_EXHAUSTED_CODE if body_articles >= article_attempt_limit
                                            else "window_body_budget")
                         # 새 본문 요청은 멈추되 이미 읽어 이월한 본문은 재요청 없이 검증한다.
                         planned.append(_PlannedCandidate(candidate, c.PLANNED_SKIPPED, budget_code=budget_code))
                         plan_index += 1
                         continue
                     calls_left = call_pool.unreserved
-                    if (body_articles >= policy.max_body_articles or body_chars >= policy.max_total_body_chars
+                    if (body_articles >= article_attempt_limit or body_chars >= policy.max_total_body_chars
                             or clock() >= deadline or (calls_left <= 0 and in_flight == 0)):
                         planned.append(_PlannedCandidate(candidate, c.PLANNED_STOP))
                         plan_index += 1
@@ -298,6 +324,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                     examined += 1
                     body_articles += 1
                     if candidate.source_url in seen_urls:
+                        attempted_candidate_ids.add(candidate.id)
                         planned.append(_PlannedCandidate(candidate, c.PLANNED_DUPLICATE))
                         plan_index += 1
                         continue
@@ -343,6 +370,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                 outcome = item.future.result()
                 candidate = item.candidate
                 if body_chars >= policy.max_total_body_chars:
+                    if outcome.calls_made:
+                        attempted_candidate_ids.add(candidate.id)
                     # 앞 사슬의 본문이 글자 예산을 채웠다. 순차 규칙이면 시도 전에 멈췄을 자리다.
                     discard_outcome(outcome)
                     budget_codes.append(c.BODY_BUDGET_EXHAUSTED_CODE)
@@ -356,6 +385,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                     budget_codes.append(c.BODY_BUDGET_EXHAUSTED_CODE)
                     stopped = True
                     break
+                attempted_candidate_ids.add(candidate.id)
                 if candidate.source_url in seen_urls:
                     # 사슬이 떠난 뒤 앞 기사의 실제 주소가 이 후보와 같다고 밝혀졌다.
                     excluded["duplicate_effective_url"] += 1
@@ -373,6 +403,12 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                     excluded["duplicate_effective_url"] += 1
                     read_candidate = None
                 if read_candidate is None:
+                    if (not is_replacement and outcome.read_candidate is None
+                            and outcome.all_urls_access_denied
+                            and outcome.calls_made == len(outcome.article_failures)
+                            and all(code in c.ACCESS_DENIAL_REASONS
+                                    for code in outcome.article_failures)):
+                        access_denied_articles += 1
                     if outcome.article_failures:
                         failures.append(outcome.article_failures[-1])
                     excluded["article_body_unavailable"] += 1
@@ -384,9 +420,9 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                     # 검색 등록일이 새로워도 실제 기사는 과거 자료일 수 있다. 이미 읽은
                     # 본문을 해당 기간까지 보류하고 검색·본문 요청은 반복하지 않는다.
                     deferred.setdefault(actual_months, []).append((read_candidate, outcome.full_body))
-                    window_counts[str(months)]["이월"] += 1
+                    active_window_counts[str(months)]["이월"] += 1
                     continue
-                window_counts[str(months)]["본문"] += 1
+                active_window_counts[str(months)]["본문"] += 1
                 queue_body(read_candidate, outcome.full_body, batch)
                 if stopped:
                     break
@@ -412,19 +448,45 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                         body_articles -= 1
                         prefetch_stats["취소"] += 1
                         continue
+                    attempted_candidate_ids.add(item.candidate.id)
                     discard_outcome(outcome)
                 planned.clear()
                 lane.stop_event.clear()
             analyze_batch(batch)
             reusable_window_budget -= max(0, examined - reserved_window_budget)
-            window_counts[str(months)]["시도"] = examined
-            window_counts[str(months)]["미시도"] = len(candidates) - examined
-            window_counts[str(months)]["검증기사"] = len(relevant_articles) - relevant_before
-            window_counts[str(months)]["선행미사용"] = prefetch_stats["선행미사용"] - unused_before
+            active_window_counts[str(months)]["시도"] = examined
+            active_window_counts[str(months)]["미시도"] = len(candidates) - examined
+            active_window_counts[str(months)]["검증기사"] = len(relevant_articles) - relevant_before
+            active_window_counts[str(months)]["선행미사용"] = prefetch_stats["선행미사용"] - unused_before
+            if not window_queue and not replacement_started:
+                replacement_started = True
+                replacement_base_articles = body_articles
+                replacement_base_calls = call_pool.made
+                if not stopped and not sufficient() and clock() < deadline and (
+                    body_chars < policy.max_total_body_chars
+                    and analysis_calls < policy.max_analysis_calls
+                ):
+                    replacement_limit = min(
+                        access_denied_articles, policy.max_body_articles,
+                        call_pool.unreserved,
+                        sum(item.id not in attempted_candidate_ids
+                            for items in candidates_by_window.values() for item in items),
+                    )
+                    if replacement_limit:
+                        article_attempt_limit += replacement_limit
+                        reusable_window_budget = replacement_limit
+                        window_queue.extend(
+                            (window, 0, True) for window in c.WINDOW_MONTHS
+                            if any(item.id not in attempted_candidate_ids
+                                   for item in candidates_by_window[window])
+                        )
     finally:
         lane.request_stop()
         lane.close()
     body_calls = call_pool.made
+    if not replacement_started:
+        replacement_base_articles = body_articles
+        replacement_base_calls = body_calls
 
     chosen, selection_exclusions = select_diverse_excerpts(all_excerpts, policy)
     excluded.update(selection_exclusions)
@@ -442,6 +504,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             "grounded_subject_missing", "grounded_identity_unverified", "grounded_plan_mismatch",
             "grounded_event_date_unverified", "grounded_attribution_required",
             "article_body_unavailable", "body_input_truncated", "invalid_body_published_date",
+            "body_target_name_missing",
         }
     ))
     if snapshot.unverified_publishers and not enough:
@@ -458,6 +521,13 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         "검색": sum(attempt.returned_count for attempt in snapshot.query_attempts),
         **snapshot.transport_diagnostics, "선별": len(snapshot.candidates),
         "본문시도기사": body_articles, "본문호출": body_calls,
+        "접근거절기사": access_denied_articles,
+        "대체시도상한": replacement_limit,
+        "기본시도기사": replacement_base_articles,
+        "기본본문호출": replacement_base_calls,
+        "대체시도기사": body_articles - replacement_base_articles,
+        "대체본문호출": body_calls - replacement_base_calls,
+        "대체기간별": replacement_window_counts,
         "본문읽기": sum(stage_count for stage_count in stages.values()),
         "본문글자": body_chars, "분류AI호출": analysis_calls, "분석AI호출": analysis_calls,
         "분석호출상한": policy.max_analysis_calls, "분석잔여호출": policy.max_analysis_calls - analysis_calls,
@@ -483,7 +553,10 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         "주장역할조정": dict(role_diagnostics),
         "메타이름일치후보": sum(item.metadata_name_match for item in snapshot.candidates),
         "메타이름비일치후보": sum(not item.metadata_name_match for item in snapshot.candidates),
-        "이름미확인후보": excluded.get("grounded_identity_unverified", 0),
+        "이름미확인후보": (
+            excluded.get("grounded_identity_unverified", 0)
+            + excluded.get("body_target_name_missing", 0)
+        ),
         "기간개월": tuple(windows), "기간별": window_counts,
         "창": "확장" if any(month > c.WINDOW_MONTHS[0] for month in windows) else "기본",
         "실패": reason_codes[0] if reason_codes else None, "실패사유": reason_codes,

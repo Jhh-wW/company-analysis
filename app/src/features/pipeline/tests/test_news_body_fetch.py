@@ -21,6 +21,7 @@ from src.features.homepage.wide_fetch import (
     WideTransportError,
 )
 from src.features.news_intake import constants as news_c
+from src.features.news_intake.models import NewsBodyFetchResult
 from src.features.pipeline import real
 
 
@@ -160,6 +161,7 @@ def test_robots가_막으면_요청조차_하지_않고_robots_blocked로_남는
     결과 = real._fetch_news_article_text(ARTICLE_URL)
 
     assert 결과.reason_code == "fetch_robots_blocked"
+    assert 결과.all_variants_access_denied is False
     assert 요청 == []
 
 
@@ -177,6 +179,7 @@ def test_robots가_경로를_막아도_robots_blocked로_남는다(
     결과 = real._fetch_news_article_text(ARTICLE_URL)
 
     assert 결과.reason_code == "fetch_robots_blocked"
+    assert 결과.all_variants_access_denied is True
     assert 요청 == []
 
 
@@ -190,6 +193,7 @@ def test_비200_응답은_상태를_그대로_담은_사유가_된다(
     결과 = real._fetch_news_article_text(ARTICLE_URL)
 
     assert 결과.reason_code == f"fetch_http_{status}"
+    assert 결과.all_variants_access_denied is (status == 403)
 
 
 def test_200인데_본문이_비면_empty_body로_남는다(
@@ -321,6 +325,61 @@ def test_변형이_모두_실패하면_첫_주소의_사유를_돌려준다(
     결과 = real._fetch_news_article_text("http://media.example/news/1")
 
     assert 결과.reason_code == "fetch_http_403"
+    assert 결과.all_variants_access_denied is False
+
+
+def test_모든_표기_변형이_403이면_확정_접근_거절로_표시한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    요청 = _wire(monkeypatch, transport=lambda _url: _response(status=403))
+
+    결과 = real._fetch_news_article_text("http://media.example/news/1")
+
+    assert 결과.reason_code == "fetch_http_403"
+    assert 결과.all_variants_access_denied is True
+    assert len(요청) == len(news_c.URL_VARIANT_ORDER)
+
+
+def test_첫_403_뒤_변형에_시간초과가_섞이면_확정_거절이_아니다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def transport(url: str):
+        if url.startswith("https://"):
+            raise WideTransportError("시간 초과") from TimeoutError()
+        return _response(status=403)
+
+    _wire(monkeypatch, transport=transport)
+
+    결과 = real._fetch_news_article_text("http://media.example/news/1")
+
+    assert 결과.reason_code == "fetch_http_403"  # 기존 첫 사유 계약
+    assert 결과.all_variants_access_denied is False
+
+
+def test_robots_조회_불가와_명시_규칙_거절은_같은_공개코드여도_구별한다(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def policy_for(robots_url: str) -> WideRobotsPolicy:
+        if robots_url.startswith("http://"):
+            return _policy(blocked=True)
+        return _policy(robots_text=f"User-agent: {USER_AGENT}\nDisallow: /news/")
+
+    _wire(monkeypatch, transport=lambda _url: _response(), policy_for=policy_for)
+
+    결과 = real._fetch_news_article_text("http://media.example/news/1")
+
+    assert 결과.reason_code == "fetch_robots_blocked"
+    assert 결과.all_variants_access_denied is False
+
+
+@pytest.mark.parametrize("value", [
+    {"reason_code": "fetch_http_429", "all_variants_access_denied": True},
+    {"text": "본문", "stage": "provided", "all_variants_access_denied": True},
+    {"reason_code": "fetch_http_403", "all_variants_access_denied": 1},
+])
+def test_확정_접근_거절_신호는_성공_일시장애_비불리언에_붙일_수_없다(value):
+    with pytest.raises((TypeError, ValueError)):
+        NewsBodyFetchResult(**value)
 
 
 def test_robots가_막은_사이트를_다른_표기로_우회하지_않는다(

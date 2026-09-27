@@ -355,9 +355,19 @@ def test_alias_does_not_bypass_article_identity_or_exact_quote_and_adds_no_model
         before = baseline.value.session.collect(fetch_text=fetch, analyze_grounded=analyze)
         assert not before.fragments
         assert before.diagnostics["법인검증상세"] == {"identity_name_missing": 1}
-        assert len(calls) == len(reads) == 1
+        assert before.diagnostics["제외"]["body_target_name_missing"] == 1
+        assert "body_target_name_missing" in before.diagnostics["검증미완료"]
+        assert not before.diagnostics["캐시재사용가능"]
+        assert len(reads) == 1 and not calls
         calls.clear()
         reads.clear()
     result = outcome.value.session.collect(fetch_text=fetch, analyze_grounded=analyze)
     assert len(result.fragments) == (1 if case == "valid" else 0), result.diagnostics
-    assert len(calls) == len(reads) == 1
+    assert len(reads) == 1
+    assert len(calls) == (0 if case == "subsidiary" else 1)
+    if case == "subsidiary":
+        assert result.diagnostics["제외"]["body_target_name_missing"] == 1
+        assert "body_target_name_missing" in result.diagnostics["검증미완료"]
+        assert not result.diagnostics["캐시재사용가능"]
+    if case == "valid":
+        assert result.diagnostics["분석AI호출"] == 1

@@ -496,7 +496,9 @@ def test_하이브와_이름접두가_겹친_다른제작사는_같은법인이_
     result = collect([item(title="하이브 신작 영화제 출품", description="하이브 사업 소식")],
                      company=company, fetch=lambda url: body)
     assert not result.fragments
-    assert result.diagnostics["제외"]["grounded_identity_unverified"] == 1
+    assert result.diagnostics["제외"]["body_target_name_missing"] == 1
+    assert result.diagnostics["분석AI호출"] == 0
+    assert not result.diagnostics["캐시재사용가능"]
 
 
 @pytest.mark.parametrize("name,context,subject,relation,claim", [

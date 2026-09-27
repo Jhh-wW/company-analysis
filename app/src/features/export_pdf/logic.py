@@ -620,7 +620,7 @@ _TREND_NEGATIVE_LABEL_GAP_PT: Final[float] = 3.0
 
 
 class _TrendGraphic(Flowable):
-    """계열별 독립 0축을 쓰는 3~6시점 막대 그래프."""
+    """계열별 독립 0축을 쓰는 2~6시점 막대 그래프."""
 
     def __init__(self, visual: TableVisualization, width: float) -> None:
         super().__init__()

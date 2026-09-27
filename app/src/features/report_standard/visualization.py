@@ -118,6 +118,8 @@ from src.features.report_standard.constants import (
     RELATION_PAIR_MAX_ROWS,
     RELATION_PAIR_MAX_TEXT_LINES,
     RELATION_PAIR_MIN_ROWS,
+    TREND_MAX_POINTS,
+    TREND_MIN_POINTS,
 )
 
 
@@ -358,7 +360,9 @@ def _composition(table: ReportTable) -> TableVisualization | None:
 
 
 def _trend(table: ReportTable) -> TableVisualization | None:
-    if not (3 <= len(table.rows) <= 6) or not (2 <= len(table.headers) <= 4):
+    if not (TREND_MIN_POINTS <= len(table.rows) <= TREND_MAX_POINTS) or not (
+        2 <= len(table.headers) <= 4
+    ):
         return None
     ordered_rows = list(table.rows)
     # 표는 최신 연도 우선으로 보존될 수 있지만 추이 그래프의 시간축은 과거에서

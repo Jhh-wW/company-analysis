@@ -195,6 +195,51 @@ def test_trend_preserves_rows_calculates_ratios_marks_negative_risk_and_reads_un
     assert operating.risk is True
 
 
+def test_two_year_trend_keeps_only_observed_years_values_units_and_citations() -> None:
+    table = ReportTable(
+        caption="완료 사업연도 연결 실적",
+        headers=["사업연도", "매출", "영업손익"],
+        rows=[["2025", "300", "-30"], ["2024", "200", "20"]],
+        display_unit="억원",
+        cite="공시 [1]",
+        row_cites=[["1"], ["2"]],
+        presentation="trend",
+    )
+
+    visual = table_visualization(table)
+
+    assert visual is not None
+    assert visual.kind == "trend"
+    assert visual.unit == "억원"
+    assert visual.caption == table.caption
+    assert table.cite == "공시 [1]"
+    assert table.row_cites == [["1"], ["2"]]
+    assert len(table.rows) == 2
+    assert [[point.label for point in series.points] for series in visual.series] == [
+        ["2024", "2025"],
+        ["2024", "2025"],
+    ]
+    assert [[point.display for point in series.points] for series in visual.series] == [
+        ["200", "300"],
+        ["20", "-30"],
+    ]
+    assert [point.below for point in visual.series[1].points] == [False, True]
+    assert [point.ratio for point in visual.series[0].points] == pytest.approx(
+        [200 / 300 * 100, 100]
+    )
+
+
+def test_one_year_trend_remains_plain_table() -> None:
+    table = ReportTable(
+        caption="완료 사업연도 실적",
+        headers=["사업연도", "매출"],
+        rows=[["2025", "300"]],
+        presentation="trend",
+    )
+
+    assert table_visualization(table) is None
+
+
 def test_trend_prefers_explicit_display_unit_and_rejects_non_numeric_series() -> None:
     explicit_unit = table_visualization(
         ReportTable(

@@ -53,6 +53,18 @@ def test_unverified_short_name_and_longer_other_company_stay_rejected(name):
     result = collect(company=COMPANY, fetch=lambda url: body)
     assert not result.fragments
     assert result.diagnostics["법인검증상세"] == {"identity_name_missing": 1}
+    assert result.diagnostics["제외"]["body_target_name_missing"] == 1
+    assert result.diagnostics["분석AI호출"] == 0
+    snap, _ = snapshot([item()], company=COMPANY)
+    candidate = snap.candidates[0]
+    direct = accepted({"id": candidate.id, "body": body})
+    identity = Counter()
+    excerpts, excluded = validate_grounded_response(
+        {"items": [direct]}, articles=[(candidate, body)], company=COMPANY,
+        as_of=AS_OF, identity_diagnostics=identity,
+    )
+    assert not excerpts and excluded == {"grounded_identity_unverified": 1}
+    assert identity == {"identity_name_missing": 1}
 
 
 def test_same_name_in_unrelated_business_stays_rejected():
@@ -115,17 +127,33 @@ def test_fix_preserves_analysis_request_and_recovers_both_name_checks(monkeypatc
         # 새 조사 대안만 불가능한 패턴으로 바꾸어 기존 이름 경계를 재생한다.
         before_fix.setattr(nc, "ADDITIONAL_NAME_PARTICLE_PATTERN", r"(?!)")
         before = collect(company=COMPANY, fetch=lambda url: body, analyze=analyze)
+        snap, _ = snapshot([item()], company=COMPANY)
+        candidate = snap.candidates[0]
+        direct = accepted({"id": candidate.id, "body": body})
+        direct.update(
+            entity_evidence=identity if direct_identity else ARTICLE_TEXT,
+        )
+        direct["excerpts"][0]["text"] = ARTICLE_TEXT
+        direct["excerpts"][0]["claim_kind"] = "company_statement"
+        direct_excerpts, direct_excluded = validate_grounded_response(
+            {"items": [direct]}, articles=[(candidate, body)], company=COMPANY,
+            as_of=AS_OF,
+        )
     after = collect(company=COMPANY, fetch=lambda url: body, analyze=analyze)
 
     assert not before.fragments
     expected = "grounded_subject_missing" if direct_identity else "grounded_identity_unverified"
-    assert before.diagnostics["제외"] == {expected: 1}
+    assert not direct_excerpts and direct_excluded == {expected: 1}
+    assert before.diagnostics["제외"] == ({expected: 1} if direct_identity else {"body_target_name_missing": 1})
     assert len(after.fragments) == 1
     fragment = after.fragments[0]
     assert body[fragment.span_start:fragment.span_end] == fragment.text == ARTICLE_TEXT
-    assert before.diagnostics["분석AI호출"] == after.diagnostics["분석AI호출"] == 1
+    assert before.diagnostics["분석AI호출"] == int(direct_identity)
+    assert after.diagnostics["분석AI호출"] == 1
     assert before.diagnostics["본문호출"] == after.diagnostics["본문호출"] == 1
-    assert len(requests) == 2 and requests[0] == requests[1]
+    assert len(requests) == 1 + int(direct_identity)
+    if direct_identity:
+        assert requests[0] == requests[1]
 
 
 @pytest.mark.parametrize("rejection", ["same_company", "material"])

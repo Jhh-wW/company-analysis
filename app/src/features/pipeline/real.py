@@ -7525,9 +7525,15 @@ def _fetch_news_article_once(article_url: str) -> NewsBodyFetchResult:
         fetch=fetch,
         url_allowed=allowed_origin,
     )
-    if policy.blocked or not policy.can_fetch(article_url):
-        # robots가 막은 사이트는 «우회하지 않는다». 사유만 남기고 끝낸다.
+    if policy.blocked:
+        # robots.txt 조회 불가는 안전하게 멈추되 명시적 접근 거절로 단정하지 않는다.
         return NewsBodyFetchResult(reason_code=EXCLUDED_FETCH_ROBOTS_BLOCKED)
+    if not policy.can_fetch(article_url):
+        # 실제 규칙이 이 기사 경로를 불허했다. 다른 주소 표기도 별도로 확인한다.
+        return NewsBodyFetchResult(
+            reason_code=EXCLUDED_FETCH_ROBOTS_BLOCKED,
+            all_variants_access_denied=True,
+        )
 
     def allowed(candidate: str) -> bool:
         return allowed_origin(candidate) and policy.can_fetch(candidate)
@@ -7542,7 +7548,10 @@ def _fetch_news_article_once(article_url: str) -> NewsBodyFetchResult:
             )
         )
     if response.status != 200:
-        return NewsBodyFetchResult(reason_code=news_http_status_code(response.status))
+        return NewsBodyFetchResult(
+            reason_code=news_http_status_code(response.status),
+            all_variants_access_denied=response.status == 403,
+        )
     if news_decode_looks_broken(response.text):
         # 깨진 글자를 근거 조각으로 만들지 않는다.
         return NewsBodyFetchResult(reason_code=EXCLUDED_FETCH_DECODE_ERROR)
@@ -7574,6 +7583,7 @@ def _fetch_news_article_text(source_url: str) -> NewsBodyFetchResult:
     """
 
     first_failure: NewsBodyFetchResult | None = None
+    all_variants_access_denied = True
     for article_url in news_url_variants(source_url):
         if _NEWS_BODY_RUNTIME_ACTIVE.get():
             # HTTPS·www 변형은 collector의 domain_host(앞의 www 제거)와
@@ -7584,9 +7594,14 @@ def _fetch_news_article_text(source_url: str) -> NewsBodyFetchResult:
         if result.succeeded:
             return result
         first_failure = first_failure or result
-    return first_failure or NewsBodyFetchResult(
-        reason_code=EXCLUDED_FETCH_ORIGIN_DENIED
-    )
+        all_variants_access_denied &= result.all_variants_access_denied
+    if first_failure is not None:
+        # 원래 주소의 공개 실패 코드는 보존하되, 뒤 변형에 일시 장애가 섞였으면
+        # 대체 기사 자격을 주지 않는다. 중도 예외는 여기 오지 않아 기본 거짓이다.
+        return replace(
+            first_failure, all_variants_access_denied=all_variants_access_denied,
+        )
+    return NewsBodyFetchResult(reason_code=EXCLUDED_FETCH_ORIGIN_DENIED)
 
 
 # 함수 이름이 같거나 속성을 붙인 주입 콜백도 병렬 안전성이 검증된 것은 아니다.

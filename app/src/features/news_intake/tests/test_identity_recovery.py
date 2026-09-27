@@ -110,7 +110,10 @@ def test_verified_alias_and_business_context_must_belong_to_the_same_excerpt():
     body = "HYBE미디어코프는 음악 매니지먼트 사업에서 새로운 계약을 체결했다고 밝혔다."
     result = collect(company=company, fetch=lambda url: body, analyze=review_identity(""))
     assert not result.fragments
-    assert result.diagnostics["법인검증상세"] == {"identity_evidence_empty": 1}
+    assert result.diagnostics["법인검증상세"] == {"identity_name_missing": 1}
+    assert result.diagnostics["제외"] == {"body_target_name_missing": 1}
+    assert result.diagnostics["분석AI호출"] == 0
+    assert not result.diagnostics["캐시재사용가능"]
 
 
 @pytest.mark.parametrize("source_type", [None, {}, "advertisement", "official_release"])
