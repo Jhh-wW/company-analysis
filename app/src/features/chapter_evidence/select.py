@@ -31,9 +31,11 @@
 from __future__ import annotations
 
 import math
+import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from datetime import date
 
 from src.features.chapter_evidence.auditor_boilerplate import is_auditor_boilerplate
 from src.features.chapter_evidence.constants import (
@@ -73,14 +75,32 @@ def _estimated_tokens(char_count: int) -> int:
     return math.ceil(char_count / CHARS_PER_ESTIMATED_TOKEN)
 
 
-def _selection_priority(fragment: EvidenceFragment) -> tuple[bool, int, bool, int, str]:
+def _published_date_priority(published_on: str) -> int:
+    """검증된 ISO 달력 날짜만 최신순으로 정렬하고 불명확한 값은 뒤로 둔다."""
+    if (
+        not isinstance(published_on, str)
+        or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", published_on) is None
+    ):
+        return 0
+    try:
+        return -date.fromisoformat(published_on).toordinal()
+    except ValueError:
+        return 0
+
+
+def _selection_priority(
+    fragment: EvidenceFragment,
+    published_priorities: dict[str, int],
+) -> tuple[bool, int, bool, int, int, str]:
     """뒤쪽 취소·변경을 대표/추가 후보 단계 모두에서 보존한다."""
     is_change = SELECTION_CHANGE_CONTEXT in fragment.reason_codes
     start = fragment.location.partition("-")[0]
     source_order = int(start) if is_change and start.isdecimal() else 0
     return (not is_change, -source_order,
             SELECTION_RECENT_CONTEXT not in fragment.reason_codes,
-            -fragment.score_millis, fragment.fragment_id)
+            -fragment.score_millis,
+            published_priorities.get(fragment.document_id, 0),
+            fragment.fragment_id)
 
 
 def _dedupe_by_evidence_range(
@@ -158,6 +178,10 @@ def select_section_fragments(
         document.document_id: document
         for document in documents
         if document.company_id == company_id
+    }
+    published_priorities = {
+        document_id: _published_date_priority(document.published_on)
+        for document_id, document in own_documents_by_id.items()
     }
     collector_slot_order = collector_slots_for(section_id)
     collector_slot_set = set(collector_slot_order)
@@ -250,7 +274,10 @@ def select_section_fragments(
     for items in by_slot.values():
         # 최근 문맥은 추가 몫에서 보존하며, 슬롯 대표는 변경 근거만 우선한다.
         items.sort(key=lambda fragment: (
-            *_selection_priority(fragment)[:2], -fragment.score_millis, fragment.fragment_id,
+            *_selection_priority(fragment, published_priorities)[:2],
+            -fragment.score_millis,
+            published_priorities.get(fragment.document_id, 0),
+            fragment.fragment_id,
         ))
 
     included: list[EvidenceFragment] = []
@@ -322,7 +349,7 @@ def select_section_fragments(
             if fragment.fragment_id not in included_ids
             and fragment.fragment_id not in excluded_ids
         ),
-        key=_selection_priority,
+        key=lambda fragment: _selection_priority(fragment, published_priorities),
     )
     for fragment in remaining:
         cost_chars = len(fragment.text)

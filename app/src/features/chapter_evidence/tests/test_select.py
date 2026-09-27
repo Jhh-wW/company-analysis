@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import math
+from dataclasses import replace
 
-from src.features.chapter_evidence.constants import CHARS_PER_ESTIMATED_TOKEN
+import pytest
+
+from src.features.chapter_evidence.constants import (
+    CHARS_PER_ESTIMATED_TOKEN,
+    SELECTION_CHANGE_CONTEXT,
+    SELECTION_RECENT_CONTEXT,
+)
 from src.features.chapter_evidence.select import select_section_fragments
 from src.shared.report_evidence.constants import SourceRequirement, SourceTier
 from src.shared.report_evidence.models import (
@@ -17,6 +24,7 @@ def _document(
     *,
     company_id: str = "corp-1",
     document_id: str = "doc-1",
+    published_on: str | None = "2026-03-01",
     exact_evidence_hashes: tuple[str, ...] | None = None,
 ) -> CollectedEvidenceDocument:
     """generation=7 문서를 만든다.
@@ -39,7 +47,7 @@ def _document(
         source_kind="dart_business_report",
         publisher="예시회사",
         title="문서",
-        published_on="2026-03-01",
+        published_on=published_on,
         collected_at="2026-08-31T00:00:00+00:00",
         content_sha256="a" * 64,
         exact_evidence_hashes=hashes,
@@ -507,3 +515,143 @@ def test_필수여부를_올려_말한_보조공시_조각은_계속_버려진�
         "low_trust_external_page_fragment_ignored:1:formal_writer_trust_not_eligible"
         in selection.reason_codes
     )
+
+
+def _one_fragment_budget_selection(
+    *,
+    old_date: str | None,
+    new_date: str | None,
+    old_score: int = 800,
+    new_score: int = 800,
+    old_reason_codes: tuple[str, ...] = ("official_direct_statement",),
+    new_reason_codes: tuple[str, ...] = ("official_direct_statement",),
+    old_location: str = "본문",
+    new_location: str = "본문",
+) -> str:
+    """서로 다른 공식 문서의 같은 슬롯 후보가 하나만 들어갈 예산을 만든다."""
+    old = replace(
+        _fragment(
+            fragment_id="a-old", document_id="doc-old",
+            text="가" * 20, score_millis=old_score,
+        ),
+        reason_codes=old_reason_codes,
+        location=old_location,
+    )
+    new = replace(
+        _fragment(
+            fragment_id="z-new", document_id="doc-new",
+            text="나" * 20, score_millis=new_score,
+        ),
+        reason_codes=new_reason_codes,
+        location=new_location,
+    )
+    documents = (
+        _document(
+            document_id="doc-old", published_on=old_date,
+            exact_evidence_hashes=(old.text_sha256,),
+        ),
+        _document(
+            document_id="doc-new", published_on=new_date,
+            exact_evidence_hashes=(new.text_sha256,),
+        ),
+    )
+    selection = select_section_fragments(
+        section_id="business_model", company_id="corp-1",
+        documents=documents, fragments=(old, new),
+        max_chars=20, max_estimated_tokens=20,
+    )
+    assert len(selection.fragments) == 1
+    assert sum(len(item.text) for item in selection.fragments) <= 20
+    assert selection.estimated_tokens <= 20
+    assert "budget_truncated_fragments:1" in selection.reason_codes
+    return selection.fragments[0].fragment_id
+
+
+def test_동점_공식문서는_fragment_id보다_검증된_최신발행일을_우선한다() -> None:
+    assert _one_fragment_budget_selection(
+        old_date="2025-03-01", new_date="2026-03-01",
+    ) == "z-new"
+
+
+def test_오래된_문서의_점수가_더_높으면_최신발행일이_뒤집지_못한다() -> None:
+    assert _one_fragment_budget_selection(
+        old_date="2025-03-01", new_date="2026-03-01",
+        old_score=801,
+    ) == "a-old"
+
+
+def test_오래된_변경문맥은_최신발행일보다_앞선다() -> None:
+    assert _one_fragment_budget_selection(
+        old_date="2025-03-01", new_date="2026-03-01",
+        old_reason_codes=(SELECTION_CHANGE_CONTEXT,),
+    ) == "a-old"
+
+
+def test_변경문맥의_원문순서는_최신발행일보다_앞선다() -> None:
+    assert _one_fragment_budget_selection(
+        old_date="2025-03-01", new_date="2026-03-01",
+        old_reason_codes=(SELECTION_CHANGE_CONTEXT,),
+        new_reason_codes=(SELECTION_CHANGE_CONTEXT,),
+        old_location="20-30", new_location="10-20",
+    ) == "a-old"
+
+
+@pytest.mark.parametrize(
+    ("old_date", "new_date", "expected"),
+    (
+        ("2026-03-01", "2026-03-01", "a-old"),
+        ("", "", "a-old"),
+        (None, None, "a-old"),
+        ("2026-02-30", "2026-03-00", "a-old"),
+        ("20260301", "2026-03-01", "z-new"),
+        ("2026-03-01", "invalid", "a-old"),
+    ),
+)
+def test_발행일이_같거나_결측_무효이면_안전하게_ID순서를_쓴다(
+    old_date: str | None, new_date: str | None, expected: str,
+) -> None:
+    assert _one_fragment_budget_selection(
+        old_date=old_date, new_date=new_date,
+    ) == expected
+
+
+def test_대표선정은_기존처럼_recent를_생략하고_발행일만_동점판정한다() -> None:
+    assert _one_fragment_budget_selection(
+        old_date="2025-03-01", new_date="2026-03-01",
+        old_reason_codes=(SELECTION_RECENT_CONTEXT,),
+    ) == "z-new"
+
+
+def test_추가몫의_recent_우선순위는_발행일보다_앞선다() -> None:
+    anchor = _fragment(
+        fragment_id="m-anchor", document_id="doc-old",
+        text="가" * 20, score_millis=900,
+    )
+    old = replace(
+        _fragment(
+            fragment_id="a-old", document_id="doc-old",
+            text="나" * 20, score_millis=800,
+        ),
+        reason_codes=(SELECTION_RECENT_CONTEXT,),
+    )
+    new = _fragment(
+        fragment_id="z-new", document_id="doc-new",
+        text="다" * 20, score_millis=800,
+    )
+    documents = (
+        _document(
+            document_id="doc-old", published_on="2025-03-01",
+            exact_evidence_hashes=(anchor.text_sha256, old.text_sha256),
+        ),
+        _document(
+            document_id="doc-new", published_on="2026-03-01",
+            exact_evidence_hashes=(new.text_sha256,),
+        ),
+    )
+    selection = select_section_fragments(
+        section_id="business_model", company_id="corp-1",
+        documents=documents, fragments=(new, old, anchor),
+        max_chars=40, max_estimated_tokens=40,
+    )
+    assert [item.fragment_id for item in selection.fragments] == ["a-old", "m-anchor"]
+    assert selection.estimated_tokens <= 40
