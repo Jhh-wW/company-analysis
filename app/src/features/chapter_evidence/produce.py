@@ -41,6 +41,8 @@ def produce_from_collection_envelopes(
     company_id: str,
     company_type: CompanyType | str,
     collection_envelopes: Iterable[Mapping[str, object]],
+    company_name: str = "",
+    company_aliases: tuple[str, ...] = (),
 ) -> tuple[ChapterEvidenceCandidates, ...]:
     """회사 소유권이 봉인된 수집 envelope들을 합쳐 아홉 장 후보를 만든다.
 
@@ -89,6 +91,8 @@ def produce_from_collection_envelopes(
         documents=documents,
         fragments=fragments,
         attempts=attempts,
+        company_name=company_name,
+        company_aliases=company_aliases,
     )
 
 
@@ -99,6 +103,8 @@ def produce_chapter_evidence_candidates(
     documents: Iterable[CollectedEvidenceDocument | Mapping[str, object]],
     fragments: Iterable[EvidenceFragment | Mapping[str, object]],
     attempts: Iterable[CollectionAttempt | Mapping[str, object]],
+    company_name: str = "",
+    company_aliases: tuple[str, ...] = (),
 ) -> tuple[ChapterEvidenceCandidates, ...]:
     """회사 한 곳의 수집 결과에서 아홉 장 근거 후보를 정책 순서로 만든다.
 
@@ -175,6 +181,8 @@ def produce_chapter_evidence_candidates(
             company_id=clean_company_id,
             documents=own_documents,
             fragments=normalized_fragments,
+            company_name=company_name,
+            company_aliases=company_aliases,
             max_chars=DEFAULT_MAX_CHARS_PER_SECTION,
             max_estimated_tokens=DEFAULT_MAX_ESTIMATED_TOKENS_PER_SECTION,
         )

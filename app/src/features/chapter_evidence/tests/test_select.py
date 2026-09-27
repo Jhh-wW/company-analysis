@@ -96,6 +96,134 @@ def test_다른_장의_조각은_제외한다() -> None:
     assert selection.fragments == ()
 
 
+def test_다른장_예산에서_밀린_공식자기선언은_9장_자체예산에서_선정한다() -> None:
+    declaration = _fragment(
+        fragment_id="declaration",
+        section_id="identity",
+        slot_id="identity:corporate_identity",
+        text="당사는 국내 최초로 정밀 센서를 독자 개발했습니다.",
+        score_millis=250,
+    )
+    dominant = _fragment(
+        fragment_id="dominant",
+        section_id="identity",
+        slot_id="identity:corporate_identity",
+        text="회사의 공식 신원 근거입니다. " * 5,
+        score_millis=900,
+    )
+    document = _document(
+        exact_evidence_hashes=(declaration.text_sha256, dominant.text_sha256),
+    )
+    original = select_section_fragments(
+        section_id="identity",
+        company_id="corp-1",
+        documents=(document,),
+        fragments=(dominant, declaration),
+        company_name="가나다전자",
+        max_chars=len(dominant.text),
+    )
+    selected = select_section_fragments(
+        section_id="competitive_position",
+        company_id="corp-1",
+        documents=(document,),
+        fragments=(dominant, declaration),
+        company_name="가나다전자",
+        max_chars=100,
+        max_estimated_tokens=100,
+    )
+
+    assert all(item.text_sha256 != declaration.text_sha256 for item in original.fragments)
+    assert len(selected.fragments) == 1
+    assert selected.fragments[0].text == declaration.text
+    assert selected.fragments[0].text_sha256 == declaration.text_sha256
+    assert selected.fragments[0].location == declaration.location
+    assert selected.fragments[0].covered_slot_ids == (
+        "competitive_position:stated_differentiator",
+    )
+    assert sum(len(item.text) for item in selected.fragments) <= 100
+    assert selected.estimated_tokens <= 100
+
+
+def test_동일_자기선언은_최신_공식원문을_선택하되_다른선언은_보존한다() -> None:
+    common = "당사는 국내 최초로 정밀 센서를 독자 개발했습니다."
+    old = _fragment(
+        fragment_id="old", document_id="doc-old",
+        section_id="identity", slot_id="identity:corporate_identity",
+        text=common + "\n당사는 독자 개발 특허를 보유합니다.",
+        score_millis=900,
+    )
+    new = _fragment(
+        fragment_id="new", document_id="doc-new",
+        section_id="identity", slot_id="identity:corporate_identity",
+        text=common + "\n당사는 국내 유일의 검증 절차를 운영합니다.",
+        score_millis=250,
+    )
+    documents = (
+        _document(
+            document_id="doc-old", published_on="2025-03-01",
+            exact_evidence_hashes=(old.text_sha256,),
+        ),
+        _document(
+            document_id="doc-new", published_on="2026-03-01",
+            exact_evidence_hashes=(new.text_sha256,),
+        ),
+    )
+    selected = select_section_fragments(
+        section_id="competitive_position", company_id="corp-1",
+        company_name="가나다전자", documents=documents, fragments=(old, new),
+    )
+    assert {item.document_id for item in selected.fragments} == {"doc-old", "doc-new"}
+    assert all(item.covered_slot_ids == (
+        "competitive_position:stated_differentiator",
+    ) for item in selected.fragments)
+
+    old_same_only = replace(old, text=common, text_sha256=hashlib.sha256(common.encode()).hexdigest())
+    new_same_only = replace(new, text=common, text_sha256=old_same_only.text_sha256)
+    same_documents = (
+        replace(documents[0], exact_evidence_hashes=(old_same_only.text_sha256,)),
+        replace(documents[1], exact_evidence_hashes=(new_same_only.text_sha256,)),
+    )
+    same = select_section_fragments(
+        section_id="competitive_position", company_id="corp-1",
+        company_name="가나다전자", documents=same_documents,
+        fragments=(old_same_only, new_same_only),
+    )
+    assert {item.document_id for item in same.fragments} == {"doc-old", "doc-new"}
+    # 사전선정은 오래된 짧은 원문을 지우지 않는다. 후단 승격이 예산에 맞는
+    # 동일 선언 한 건을 고르며, 사전 단계는 출처 선택을 확정하지 않는다.
+
+
+@pytest.mark.parametrize(
+    ("text", "kind", "company_id", "expected"),
+    [
+        ("당사는 국내 최초로 정밀 센서를 독자 개발했습니다.", "dart_business_report", "corp-1", True),
+        ("당사는 국내 최초로 정밀 센서를 독자 개발했습니다.", "dart_semiannual_report", "corp-1", False),
+        ("당사는 국내 최초로 정밀 센서를 독자 개발했습니다.", "dart_business_report", "corp-2", False),
+        ("정밀 센서는 국내 최초로 개발됐습니다.", "dart_business_report", "corp-1", False),
+        ("당사는 경쟁력이 높고 국내 최초입니다.", "dart_business_report", "corp-1", False),
+    ],
+)
+def test_자기선언_사전선정은_주어_문서종류_회사결속을_좁게_지킨다(
+    text: str, kind: str, company_id: str, expected: bool,
+) -> None:
+    fragment = _fragment(
+        fragment_id="candidate", company_id=company_id,
+        section_id="identity", slot_id="identity:corporate_identity", text=text,
+    )
+    document = replace(
+        _document(exact_evidence_hashes=(fragment.text_sha256,)),
+        source_kind=kind,
+    )
+    selection = select_section_fragments(
+        section_id="competitive_position",
+        company_id="corp-1",
+        documents=(document,),
+        fragments=(fragment,),
+        company_name="가나다전자",
+    )
+    assert bool(selection.fragments) is expected
+
+
 def test_수집슬롯이_아닌_슬롯의_조각은_제외한다() -> None:
     # competitive_position 의 비교 5칸은 구조화 검증기 주입 몫이라 수집 슬롯이 아니다.
     fragment = _fragment(

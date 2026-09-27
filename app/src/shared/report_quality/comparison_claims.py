@@ -42,6 +42,7 @@ COMPARISON_JUDGMENT_SLOT = "competitive_position:comparison_judgment"
 COMPARISON_LIMITATION_SLOT = "competitive_position:limitation"
 COMPARISON_NUMERIC_METRICS = ("영업이익률", "매출 규모")
 STATED_DIFFERENTIATOR_SLOT = "competitive_position:stated_differentiator"
+MAX_STATED_DIFFERENTIATORS = 4
 STATED_DIFFERENTIATOR_MARKERS = (
     "최초", "유일", "최다", "1위", "최대", "독자 개발", "특허",
 )
@@ -281,6 +282,54 @@ def stated_differentiator_subject_prefix(
         ):
             return name
     return ""
+
+
+def stated_differentiator_sentence_is_eligible(
+    sentence: str,
+    *,
+    company_name: str,
+    company_aliases: Iterable[str] = (),
+) -> bool:
+    """선택 전·후가 공유하는 회사 주어와 닫힌 자기 선언 자격."""
+
+    clean = clean_stated_differentiator_sentence(sentence)
+    return bool(
+        clean
+        and stated_differentiator_subject_prefix(
+            clean,
+            company_name=company_name,
+            company_aliases=company_aliases,
+        )
+        and any(marker in clean for marker in STATED_DIFFERENTIATOR_MARKERS)
+        and not any(
+            term in clean for term in STATED_DIFFERENTIATOR_FORBIDDEN_JUDGMENTS
+        )
+    )
+
+
+def stated_differentiator_sentences(
+    text: str,
+    *,
+    company_name: str,
+    company_aliases: Iterable[str] = (),
+    limit: int = MAX_STATED_DIFFERENTIATORS,
+) -> tuple[str, ...]:
+    """원문을 자르지 않고 기존 문장 경계에서 적격 선언만 확인한다."""
+
+    candidates = (
+        clean_stated_differentiator_sentence(item)
+        for item in re.split(r"(?<=[.!?。！？])\s+|[\r\n]+", str(text or ""))
+    )
+    return tuple(
+        candidate
+        for candidate in candidates
+        if candidate
+        and stated_differentiator_sentence_is_eligible(
+            candidate,
+            company_name=company_name,
+            company_aliases=company_aliases,
+        )
+    )[:limit]
 
 
 def stated_differentiator_claim(

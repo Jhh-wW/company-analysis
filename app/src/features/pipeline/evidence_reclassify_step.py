@@ -48,6 +48,8 @@ class ReclassifySource:
     company_type: str
     dart_envelope: Mapping[str, object] = field(repr=False, compare=False)
     wide_envelope: Mapping[str, object] = field(repr=False, compare=False)
+    company_name: str = field(default="", repr=False, compare=False)
+    company_aliases: tuple[str, ...] = field(default=(), repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,8 @@ def attach_reclassify_source(
     company_type: str,
     dart_envelope: Mapping[str, object],
     wide_envelope: Mapping[str, object],
+    company_name: str = "",
+    company_aliases: tuple[str, ...] = (),
 ) -> OfficialEvidenceCollectionResult:
     """스위치가 켜진 수집 결과에만 검증된 원문 envelope를 붙인다."""
 
@@ -104,6 +108,8 @@ def attach_reclassify_source(
             company_type=str(company_type),
             dart_envelope=dart_envelope,
             wide_envelope=wide_envelope,
+            company_name=company_name,
+            company_aliases=company_aliases,
         ),
     )
 
@@ -389,6 +395,8 @@ def _merge_result(
         company_id=original.company_id,
         company_type=source.company_type,
         collection_envelopes=(dart_envelope, source.wide_envelope),
+        company_name=source.company_name,
+        company_aliases=source.company_aliases,
     )
     return OfficialEvidenceCollectionResult(
         company_id=original.company_id,

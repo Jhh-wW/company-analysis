@@ -7,6 +7,8 @@ from typing import Final
 
 
 EVIDENCE_CONTRACT_VERSION: Final[str] = "report-evidence-v1"
+# 장별 선택과 선택 후 공식 선언 승격이 같은 예상 토큰 장부를 사용한다.
+EVIDENCE_CHARS_PER_ESTIMATED_TOKEN: Final[float] = 2.2
 
 # 여러 feature와 실서비스 adapter가 함께 쓰는 source_kind 정본. 생산자별
 # 문자열을 소비자가 접두어로 추측하지 않게 공식 수집 경계의 닫힌 어휘를

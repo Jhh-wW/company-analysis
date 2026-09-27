@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import math
+import hashlib
 import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable
@@ -58,7 +59,13 @@ from src.shared.report_evidence.policy import (
     optional_candidate_slots_for,
 )
 from src.shared.report_evidence.source_kind_policy import (
+    FormalSourceKindContractError,
+    document_slots_for_formal_source_kind,
     formal_document_writer_ineligibility_reason,
+)
+from src.shared.report_quality.comparison_claims import (
+    STATED_DIFFERENTIATOR_SLOT,
+    stated_differentiator_sentences,
 )
 
 
@@ -163,12 +170,71 @@ def _auditor_judgment_scope(source_kind: str) -> bool | None:
     return False
 
 
+def _preselect_stated_differentiator_fragments(
+    *,
+    section_id: str,
+    company_id: str,
+    company_name: str,
+    company_aliases: tuple[str, ...],
+    documents_by_id: dict[str, CollectedEvidenceDocument],
+    fragments: tuple[EvidenceFragment, ...],
+) -> tuple[EvidenceFragment, ...]:
+    """장별 절단 전에 엄격한 공식 자기선언을 9장 예산 후보로 복제한다."""
+
+    stated_section = STATED_DIFFERENTIATOR_SLOT.partition(":")[0]
+    if section_id != stated_section or not company_name.strip():
+        return fragments
+    existing_ids = {fragment.fragment_id for fragment in fragments}
+    added: list[EvidenceFragment] = []
+    for fragment in fragments:
+        if fragment.company_id != company_id:
+            continue
+        document = documents_by_id.get(fragment.document_id)
+        if (
+            document is None
+            or fragment.text_sha256 not in document.exact_evidence_hashes
+            or formal_document_writer_ineligibility_reason(document)
+        ):
+            continue
+        try:
+            owned_slots = document_slots_for_formal_source_kind(document.source_kind)
+        except FormalSourceKindContractError:
+            continue
+        if STATED_DIFFERENTIATOR_SLOT not in owned_slots:
+            continue
+        sentences = stated_differentiator_sentences(
+            fragment.text,
+            company_name=company_name,
+            company_aliases=company_aliases,
+        )
+        if not sentences:
+            continue
+        suffix = hashlib.sha256(
+            f"{fragment.fragment_id}\x1f{STATED_DIFFERENTIATOR_SLOT}".encode("utf-8")
+        ).hexdigest()[:16]
+        fragment_id = f"{fragment.fragment_id}-preselect-{suffix}"
+        if fragment_id in existing_ids:
+            continue
+        existing_ids.add(fragment_id)
+        added.append(replace(
+            fragment,
+            fragment_id=fragment_id,
+            section_id=stated_section,
+            slot_id=STATED_DIFFERENTIATOR_SLOT,
+            covered_slot_ids=(STATED_DIFFERENTIATOR_SLOT,),
+            reason_codes=("deterministic.company_stated_differentiator",),
+        ))
+    return (*fragments, *added)
+
+
 def select_section_fragments(
     *,
     section_id: str,
     company_id: str,
     documents: tuple[CollectedEvidenceDocument, ...],
     fragments: tuple[EvidenceFragment, ...],
+    company_name: str = "",
+    company_aliases: tuple[str, ...] = (),
     max_chars: int = DEFAULT_MAX_CHARS_PER_SECTION,
     max_estimated_tokens: int = DEFAULT_MAX_ESTIMATED_TOKENS_PER_SECTION,
 ) -> SectionFragmentSelection:
@@ -179,6 +245,14 @@ def select_section_fragments(
         for document in documents
         if document.company_id == company_id
     }
+    candidate_fragments = _preselect_stated_differentiator_fragments(
+        section_id=section_id,
+        company_id=company_id,
+        company_name=company_name,
+        company_aliases=company_aliases,
+        documents_by_id=own_documents_by_id,
+        fragments=fragments,
+    )
     published_priorities = {
         document_id: _published_date_priority(document.published_on)
         for document_id, document in own_documents_by_id.items()
@@ -201,7 +275,7 @@ def select_section_fragments(
     # 사유 이름이 없어 연차 공시 문제를 홈페이지 문제로 읽었다).
     low_trust_ir_counts: Counter[str] = Counter()
     low_trust_external_page_counts: Counter[str] = Counter()
-    for fragment in fragments:
+    for fragment in candidate_fragments:
         if fragment.section_id != section_id:
             continue
         eligible_slot_ids = tuple(
