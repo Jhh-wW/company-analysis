@@ -323,6 +323,12 @@ FULL_SUPPORTED_SLOT_INDEX_HEAD: Final[str] = (
     "그 조각의 원문에 있는 사실만 문장으로 쓴다. 표시되지 않은 슬롯은 "
     "이 장의 자료가 지원하지 않으므로 쓰지 않는다:\n"
 )
+FULL_VISIBLE_PAIR_LABEL: Final[str] = "선택 가능한 지원쌍"
+FULL_VISIBLE_EVIDENCE_GUIDE: Final[str] = (
+    "FULL 작성 자료 안내 — 이 장에서 본문 지원쌍이 없는 조각은 작성 입력에서 "
+    "숨겼다. 해당 자료를 근거 없이 쓰지 않는다. 아래에 필요한 사실이 없으면 "
+    "그 사실을 만들지 않는다. 공식 수집·검수 자료의 보관 범위는 그대로다.\n"
+)
 FULL_CITATION_SLOT_GUIDE: Final[str] = (
     "FULL 수치 작성 규칙 — 확인 문장의 숫자·연도·날짜는 바로 그 문장의 "
     "근거선택 ID가 가리키는 원문 조각의 표기를 "

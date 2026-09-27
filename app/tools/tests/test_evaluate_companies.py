@@ -67,7 +67,7 @@ def harness(tmp_path, monkeypatch):
         connection.execute("CREATE TABLE reports (report_id TEXT, payload_json TEXT)")
         connection.execute("CREATE TABLE report_public_projections (report_id TEXT, projection_json TEXT)")
     calls = []
-    controls = {"mismatch": False, "fail_run": False}
+    controls = {"mismatch": False, "fail_run": False, "result_status": 200}
 
     def transport(request):
         calls.append((request.method, request.url.path))
@@ -89,7 +89,10 @@ def harness(tmp_path, monkeypatch):
         if request.url.path == f"/api/progress/{RUN_ID}":
             return httpx.Response(200, json={"finished": True, "next_url": f"/result/{RUN_ID}"})
         if request.url.path == f"/result/{RUN_ID}":
-            return httpx.Response(200, text=TOKEN, headers={"content-type": "text/html"})
+            return httpx.Response(
+                controls["result_status"], text=TOKEN,
+                headers={"content-type": "text/html"},
+            )
         if request.url.path == f"/download/pdf/{RUN_ID}":
             from pypdf import PdfWriter
             writer = PdfWriter()
@@ -427,6 +430,50 @@ def test_report_artifacts_use_official_pdf_and_same_baseline_extractor(harness, 
     assert (output / "report.json").is_file() and (output / "report.pdf").is_file()
     assert metrics["report_pdf"]["pages"] == metrics["baseline_pdf"]["pages"] == 1
     assert set(metrics["report_pdf"]) == set(metrics["baseline_pdf"])
+
+
+def test_report_corp_mismatch_has_distinct_error_and_no_pdf(harness, monkeypatch):
+    build, calls, _, _, _ = harness
+    runner = build()
+    monkeypatch.setattr(runner.bridge, "_wait_for_ledger", lambda _: LedgerResult(
+        "REPORT", 12.5, False, RUN_ID, "99999999", "d" * 64, "",
+    ))
+
+    with pytest.raises(EvaluationError, match="보고서 회사가 평가 입력과 일치"):
+        runner.operate(execute=True)
+
+    output = runner.root / "http-evaluation-artifacts" / "main" / "CUSTOM"
+    assert (output / "ledger.json").is_file()
+    assert not (output / "report.pdf").exists()
+    assert ("GET", f"/result/{RUN_ID}") in calls
+    assert ("GET", f"/download/pdf/{RUN_ID}") not in calls
+    assert runner.state["cases"]["CUSTOM"]["state"] != "complete"
+
+
+def test_blocked_result_keeps_metrics_without_completing_or_downloading_pdf(
+    harness, monkeypatch,
+):
+    build, calls, controls, _, _ = harness
+    controls["result_status"] = 503
+    runner = build()
+    monkeypatch.setattr(runner.bridge, "_wait_for_ledger", lambda _: LedgerResult(
+        "REPORT", 12.5, False, RUN_ID, "00126380", "d" * 64, "",
+    ))
+
+    with pytest.raises(EvaluationError, match="결과 접근이 차단.*HTTP 503"):
+        runner.operate(execute=True)
+
+    output = runner.root / "http-evaluation-artifacts" / "main" / "CUSTOM"
+    metrics_bytes = (output / "metrics.json").read_bytes()
+    metrics = json.loads(metrics_bytes)
+    assert metrics["result_http_status"] == 503
+    assert metrics["result_closed_reason"] == "result_http_non_200"
+    assert metrics["internal_ai_cost_krw"] == 12.5
+    assert TOKEN.encode("utf-8") not in metrics_bytes
+    assert (output / "ledger.json").is_file()
+    assert not (output / "report.pdf").exists()
+    assert ("GET", f"/download/pdf/{RUN_ID}") not in calls
+    assert runner.state["cases"]["CUSTOM"]["state"] != "complete"
 
 
 def test_unsettled_cost_saves_evidence_and_blocks_completion(harness, monkeypatch):

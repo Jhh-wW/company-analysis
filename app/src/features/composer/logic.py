@@ -28,6 +28,7 @@ from src.features.composer.evidence_pair_selection import (
     EvidencePairMap,
     build_evidence_pair_map,
     render_evidence_pair_index,
+    writer_visible_fragments,
 )
 from src.features.composer.partial_evidence import PartialEvidenceView
 from src.features.composer.partial_evidence_constants import (
@@ -66,6 +67,8 @@ from src.features.composer.constants import (
     FULL_PAST_CHANGES_PAIR_CITATION_RULES_GUIDE,
     FULL_PAST_CHANGES_SECTION_GUIDE,
     FULL_SUPPORTED_SLOT_INDEX_HEAD,
+    FULL_VISIBLE_EVIDENCE_GUIDE,
+    FULL_VISIBLE_PAIR_LABEL,
     GRADE_CONFIRMED,
     JSON_SCHEMA_GUIDE,
     LEGACY_SCHEMA_CITATION_TAIL,
@@ -317,6 +320,7 @@ def _render_fragments(
     fragments: Sequence[CollectedFragment],
     *,
     show_supported_claim_slots: bool = False,
+    pair_choices: EvidencePairMap | None = None,
 ) -> str:
     """조각 전체를 id와 함께 나열한다 — 작가가 이 id로 인용한다.
 
@@ -383,6 +387,10 @@ def _render_fragments(
             lines.append(f"{symbol_by_key[key]}: {entry}\n")
         lines.append(DOCUMENT_LIST_GUIDE)
 
+    pairs_by_fragment: dict[str, list[str]] = {}
+    if pair_choices is not None:
+        for pair_id, (slot_id, fragment_id) in pair_choices.items():
+            pairs_by_fragment.setdefault(fragment_id, []).append(f"{slot_id}[{pair_id}]")
     for fragment in fragments:
         raw_kind = fragment.formal_source_kind or fragment.kind or "자료"
         if use_header:
@@ -405,6 +413,9 @@ def _render_fragments(
             label = (
                 f"{label} · {PROMPT_FRAGMENT_LOCATION_LABEL}: {fragment.location}"
             )
+        if pair_choices is not None:
+            pairs = ", ".join(pairs_by_fragment.get(fragment.fragment_id, ()))
+            label = f"{label} · {FULL_VISIBLE_PAIR_LABEL}: {pairs}"
         if show_supported_claim_slots:
             supported = ", ".join(fragment.supported_claim_slots) or "없음"
             label = f"{label} · 지원 주장슬롯: {supported}"
@@ -496,9 +507,17 @@ def build_section_prompt(
         `shared_evidence_prefix`가 False면 평범한 str, True면 `CacheablePrompt`.
     """
     minimum, maximum = SECTION_SENTENCE_RANGES[section_id]
+    writer_fragments = (
+        writer_visible_fragments(section_id, fragments)
+        if show_supported_claim_slots else tuple(fragments)
+    )
+    pair_choices = (
+        build_evidence_pair_map(section_id, writer_fragments)
+        if show_supported_claim_slots else None
+    )
     claim_slots = CLAIM_SLOTS_BY_SECTION.get(section_id, ())
     supported_slots = (
-        frozenset(slot for fragment in fragments for slot in fragment.supported_claim_slots)
+        frozenset(slot for fragment in writer_fragments for slot in fragment.supported_claim_slots)
         if show_supported_claim_slots else frozenset()
     )
     injected_slots = (
@@ -537,7 +556,7 @@ def build_section_prompt(
             )
         claim_slot_guide += (
             FULL_SUPPORTED_SLOT_INDEX_HEAD
-            + render_evidence_pair_index(section_id, fragments)
+            + render_evidence_pair_index(section_id, writer_fragments)
             + FULL_CITATION_SLOT_GUIDE
             + FULL_EVIDENCE_PAIR_GUIDE
         )
@@ -584,8 +603,9 @@ def build_section_prompt(
     # ★ 회사 이름과 조각으로만 정해진다 — section_id·already_written·실적표에
     #   의존하면 앞부분이 장마다 달라져 캐시가 영영 안 맞는다.
     fragments_block = _render_fragments(
-        fragments,
+        writer_fragments,
         show_supported_claim_slots=(show_supported_claim_slots or allowed_fragment_ids is not None),
+        pair_choices=pair_choices,
     )
     schema_guide = FLOW_PROMPT_BY_SECTION.get(section_id, JSON_SCHEMA_GUIDE)
     if show_supported_claim_slots:
@@ -625,7 +645,7 @@ def build_section_prompt(
             )
             if allowed_fragment_ids is not None else ""
         ),
-        NEWS_WRITER_GUIDE if any(_is_news_fragment(f) for f in fragments) else "",
+        NEWS_WRITER_GUIDE if any(_is_news_fragment(f) for f in writer_fragments) else "",
         FORBIDDEN_TOPICS_GUIDE,
         SENTENCE_RANGE_GUIDE.format(
             minimum=minimum,
@@ -633,6 +653,7 @@ def build_section_prompt(
             interpretation_cap=MAX_INTERPRETED_SENTENCES_PER_SECTION,
         ),
         claim_slot_guide,
+        FULL_VISIBLE_EVIDENCE_GUIDE if show_supported_claim_slots else "",
         # 7장은 «경로표»를 함께 내야 해서 스키마 안내를 통째로 바꾼다.
         # 덧붙이면 기본 안내의 「이 JSON만 출력한다」와 충돌해 작가가 경로표를
         # 빼먹는다 (소재 제조사 실측).

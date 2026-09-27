@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
+import re
 
 import pytest
 
 from src.features.composer.constants import CLAIM_SLOTS_BY_SECTION, SECTION_IDS
-from src.features.composer.evidence_pair_selection import build_evidence_pair_map
+from src.features.composer.news_constants import NEWS_WRITER_GUIDE
+from src.features.composer.evidence_pair_selection import (
+    build_evidence_pair_map,
+    writer_visible_fragments,
+)
 from src.features.composer.logic import (
+    _FLOW_CELL_SUPPORTED_SLOTS_BY_SECTION,
     build_section_prompt,
     compose_sections,
     compose_selected_sections,
@@ -15,10 +22,12 @@ from src.features.composer.logic import (
 )
 from src.features.composer.port import (
     CollectedFragment,
+    PerformanceTable,
     SectionEvidencePacket,
     SectionEvidencePacketSet,
 )
 from src.shared.report_evidence.policy import injected_slots_for
+from src.shared.report_evidence.constants import SOURCE_KIND_NEWS
 from src.shared.report_quality.source_identity import document_identity_from_parts
 
 
@@ -68,6 +77,140 @@ def test_FULL_지원쌍은_장과_프로그램전용칸에_닫힌다() -> None:
     assert set(past).isdisjoint(position)
     assert all(slot not in injected_slots_for("past_changes") for slot, _ in past.values())
     assert all(slot not in injected_slots_for("competitive_position") for slot, _ in position.values())
+
+
+def test_full_writer_input_filters_unsupported_fragments_and_preserves_pair_ids() -> None:
+    fragments = (
+        _fragment(12, "business_model:revenue_model"),
+        _fragment(13),
+        _fragment(14, "future_strategy:stated_plan"),
+        _fragment(27, "business_model:customer_type"),
+    )
+    original_pairs = build_evidence_pair_map("business_model", fragments)
+    visible = writer_visible_fragments("business_model", fragments)
+    full = build_section_prompt(
+        "테스트", "business_model", fragments, None,
+        show_supported_claim_slots=True,
+    )
+    shadow = build_section_prompt("테스트", "business_model", fragments, None)
+
+    assert tuple(fragment.fragment_id for fragment in visible) == ("12", "27")
+    assert build_evidence_pair_map("business_model", visible) == original_pairs
+    assert "합성원문12" in full and "합성원문27" in full
+    assert "합성원문13" not in full and "합성원문14" not in full
+    assert all(fragment.text in shadow for fragment in fragments)
+    for pair_id, (slot_id, fragment_id) in original_pairs.items():
+        assert f"{slot_id}[{pair_id}]" in full
+        assert full.count(f"{slot_id}[{pair_id}]") == 1
+        assert f"[조각 {fragment_id}]" in full
+    slot_label = re.search(r"\[조각 12\] \([^)]*지원 주장슬롯: ([^)]*)\)", full)
+    assert slot_label is not None
+    assert slot_label.group(1) == "business_model:revenue_model"
+    assert "지원쌍이 없는 조각은 작성 입력에서 숨겼다" in full
+    assert "지원쌍이 없는 조각은 작성 입력에서 숨겼다" not in shadow
+
+
+def test_full_program_only_fragment_is_hidden_from_writer_but_table_remains() -> None:
+    fragments = (
+        _fragment(5, "past_changes:completed_execution"),
+        _fragment(8, "past_changes:historical_performance"),
+    )
+    table = PerformanceTable(
+        caption="합성 실적표", headers=("연도", "값"), rows=(("2025", "10"),),
+    )
+    full = build_section_prompt(
+        "테스트", "past_changes", fragments, table,
+        show_supported_claim_slots=True,
+    )
+
+    assert "합성원문5" in full
+    assert "합성원문8" not in full
+    assert "합성 실적표" in full and "2025 | 10" in full
+    assert build_evidence_pair_map("past_changes", fragments) == (
+        build_evidence_pair_map("past_changes", writer_visible_fragments("past_changes", fragments))
+    )
+
+
+def test_full_flow_fragment_with_pair_remains_visible() -> None:
+    fragments = (
+        _fragment(1, "operations_partners:value_chain"),
+        _fragment(2, "operations_partners:operating_role"),
+        _fragment(3),
+    )
+    full = build_section_prompt(
+        "테스트", "operations_partners", fragments, None,
+        show_supported_claim_slots=True,
+    )
+
+    assert "합성원문1" in full and "합성원문2" in full
+    assert "합성원문3" not in full
+    assert "«경로표» 행의 «인용»만" in full
+    assert "operations_partners:value_chain[p7-001]" in full
+
+
+def test_full_flow_cell_slots_always_have_writer_pair_eligibility() -> None:
+    for section_id, cells in _FLOW_CELL_SUPPORTED_SLOTS_BY_SECTION.items():
+        flow_slots = set().union(*cells)
+        writer_slots = set(CLAIM_SLOTS_BY_SECTION[section_id]) - set(
+            injected_slots_for(section_id)
+        )
+        assert flow_slots <= writer_slots, section_id
+
+
+def test_full_without_pairs_shows_no_raw_fragment_and_explains_shortfall() -> None:
+    fragments = (_fragment(1), _fragment(2, "future_strategy:stated_plan"))
+    full = build_section_prompt(
+        "테스트", "business_model", fragments, None,
+        show_supported_claim_slots=True,
+    )
+
+    assert "[조각 1]" not in full and "[조각 2]" not in full
+    assert "합성원문" not in full
+    assert "아래에 필요한 사실이 없으면 그 사실을 만들지 않는다" in full
+
+
+def test_full_mixed_program_and_writer_fragment_remains_visible() -> None:
+    fragments = (
+        _fragment(
+            90,
+            "competitive_position:stated_differentiator",
+            "competitive_position:limitation",
+        ),
+        _fragment(91, "competitive_position:limitation"),
+    )
+    visible = writer_visible_fragments("competitive_position", fragments)
+    full = build_section_prompt(
+        "테스트", "competitive_position", fragments, None,
+        show_supported_claim_slots=True,
+    )
+
+    assert tuple(fragment.fragment_id for fragment in visible) == ("90",)
+    assert "합성원문90" in full and "합성원문91" not in full
+    assert "competitive_position:stated_differentiator[p9-001]" in full
+    assert build_evidence_pair_map("competitive_position", fragments) == (
+        build_evidence_pair_map("competitive_position", visible)
+    )
+
+
+def test_full_news_guide_tracks_only_visible_news_fragments() -> None:
+    official = _fragment(1, "business_model:revenue_model")
+    hidden_news = replace(_fragment(2), kind=SOURCE_KIND_NEWS)
+    eligible_news = replace(
+        _fragment(3, "business_model:customer_type"), kind=SOURCE_KIND_NEWS
+    )
+    hidden_full = build_section_prompt(
+        "테스트", "business_model", (official, hidden_news), None,
+        show_supported_claim_slots=True,
+    )
+    visible_full = build_section_prompt(
+        "테스트", "business_model", (official, eligible_news), None,
+        show_supported_claim_slots=True,
+    )
+    shadow = build_section_prompt("테스트", "business_model", (official, hidden_news), None)
+
+    assert NEWS_WRITER_GUIDE not in hidden_full
+    assert NEWS_WRITER_GUIDE in visible_full
+    assert NEWS_WRITER_GUIDE in shadow
 
 
 def test_FULL_선택한_지원쌍만_기존문장필드로_해석한다() -> None:

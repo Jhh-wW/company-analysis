@@ -154,14 +154,16 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 # 2026-09-23 공용 GROUNDING_GUIDE 끝에 «인식기준» 근거 안내 177자 추가. 그 177자만
 #   되돌리면 네 해시·도식 두 해시가 모두 직전 값(a87c264a·c39e729c·73a6b9f9·
 #   c9a8489a / a370eb2b·f769528b)과 같음을 재생해 확인했다(tmp 무과금 재생 기록).
+# 2026-09-27 수치 증명 필드 축자 안내 307자를 더한 현재 builder 결과로
+#   아래 전체 프롬프트 해시 여섯 개를 재계산했다. 위 2026-09-23 값은 역사 기록이다.
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "43903829e61c77a71c4573caf71e56f1835686c0316804b5fee478e5e932b3ed"),
-    (_golden_case, True, "c4a28d93298c40d1d1cef5a86e22d54aa074fbed1ca1b7e98afa02d21135041b"),
-    (_boundary_case, False, "5272127506f6f2231bd7602712734e2c78e8e9e569e65d1bfceb29dc79104c62"),
-    (_boundary_case, True, "176a4d84585e524765c36ff3ca76199880366d1b6c0f3eef029620f72b2d2813"),
+    (_golden_case, False, "546f0dfd5c84fc631a7b1f03c15f7a1abeeaaffc225047ffb95db0010a1b0a39"),
+    (_golden_case, True, "70aa9f5345741474c2cc8e355acf940a37c2a7072e585c5acf32ea05d3d5f198"),
+    (_boundary_case, False, "a05ed45f8a4acffc1757d129947864c73b8f6bacf5742e6287f24eb20b0a6a0c"),
+    (_boundary_case, True, "028221dba6a98551334e93c3e9e1a6f53fbe3630bf4dda4f087d3668c5f2a410"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
-    # de0a68e1의 원래 builder로 재생한 전체 UTF-8 프롬프트 해시다.
+    # 현재 builder와 현재 안내문으로 재생한 전체 UTF-8 프롬프트 해시다.
     # ★ 기준값은 «스키마 포장 이전 builder»가 «현재 안내문»으로 만든 프롬프트다. 안내문이
     #   바뀌면(2026-09-14: 역할·과금 안내의 유형 이름을 「」로 교체) 값도 함께 갱신한다 —
     #   스키마 포장 자체는 이 프롬프트를 바꾸지 않음을 같은 날 문구만 되돌려 재계산해 확인했다.
@@ -175,8 +177,8 @@ def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected)
 
 
 @pytest.mark.parametrize("items,expected", (
-    ((), "4d9a30dd4be59739ee487d661b9f388d0f50bc30df1d9aa725390a86972191cc"),
-    (FLOW_ITEMS, "7a0baa2a1ca065230e04d05b2d8e56381c55c8a6ce809df65fd8112872d9a7e1"),
+    ((), "98eecee196c4923c61721f21d3a2bcb2111f003d0e5a59bcfd210a0d86d3dfc3"),
+    (FLOW_ITEMS, "53007c2d0c3a73425cda5b26022847e19e01ef217f4338c5a09f795ffbba4514"),
 ))
 def test_diagram_prompt_bytes_match_pre_schema_baseline(items, expected):
     prompt = diagram_check._review_prompt(items, {"1": TEXT})

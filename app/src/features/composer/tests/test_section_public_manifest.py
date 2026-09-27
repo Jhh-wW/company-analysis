@@ -577,10 +577,10 @@ class _RecoveringPacketWriter:
         fragment_ids = re.findall(r"\[조각 (\d+)\] \(", prompt)
         assert fragment_ids
         section_id = SECTION_IDS[int(fragment_ids[0]) - 1]
+        # 수치40은 프로그램 전용이라 작성에서 숨긴다. 비교90은 프로그램
+        # limitation 외에 작성 가능 stated 슬롯도 지원하므로 그대로 보인다.
         expected_ids = [fragment_ids[0]]
-        if section_id == "past_changes":
-            expected_ids.append(str(_NUMERIC_FRAGMENT_NUMBER))
-        elif section_id == "competitive_position":
+        if section_id == "competitive_position":
             expected_ids.append(str(_PROGRAM_FRAGMENT_NUMBER))
         assert fragment_ids == expected_ids
         section_call = self.section_calls.get(section_id, 0) + 1

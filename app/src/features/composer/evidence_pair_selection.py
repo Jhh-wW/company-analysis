@@ -39,6 +39,21 @@ def build_evidence_pair_map(
     return choices
 
 
+def writer_visible_fragments(
+    section_id: str,
+    fragments: Sequence[CollectedFragment],
+) -> tuple[CollectedFragment, ...]:
+    """FULL 작성 프롬프트에는 본문 지원쌍이 있는 원문만 원순서로 보여 준다.
+
+    준비된 전체 근거와 검수 입력은 바꾸지 않는다. 흐름표 칸의 의미칸은
+    본문 지원쌍과 같은 슬롯 집합에 속하고, 프로그램 삽입 전용칸은 제외된다.
+    """
+
+    choices = build_evidence_pair_map(section_id, fragments)
+    visible_ids = {fragment_id for _slot, fragment_id in choices.values()}
+    return tuple(fragment for fragment in fragments if fragment.fragment_id in visible_ids)
+
+
 def render_evidence_pair_index(
     section_id: str,
     fragments: Sequence[CollectedFragment],
