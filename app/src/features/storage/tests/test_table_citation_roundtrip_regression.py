@@ -28,11 +28,13 @@ from src.features.composer.port import (
 from src.features.composer.portfolio_name_table import PortfolioNameTable
 from src.features.composer.render import render_report
 from src.features.composer.tests.test_news_block_channels import _news_fragment
-from src.features.composer.tests.test_section_public_manifest import _run_full
+from src.features.composer.tests.test_section_public_manifest import _packets, _run_full
 from src.features.composer.validate import v2_validation_problems
 from src.features.export_pdf.automatic_release import report_sha256
 from src.features.export_pdf.logic import build_pdf
 from src.features.storage import db, reports
+from src.shared.report_evidence.constants import SOURCE_KIND_OFFICIAL_WEB_PAGE
+from src.shared.report_generation.canonical import PublicManifestError
 
 
 def composer_report():
@@ -189,3 +191,75 @@ def test_full_manifest_row_bindings_survive_real_database(tmp_path: Path):
             # 원본 evidence_rows는 공개 저장 대상이 아니므로 기존 규약대로 비워진다.
             assert after == replace(before, evidence_rows=[])
     assert any(table.row_cites and table.manifest_ref for section in restored.sections for table in section.tables)
+
+
+def test_typed_official_web_full_manifest_survives_first_storage(tmp_path: Path):
+    """공식 웹 내부 ID를 가진 FULL 표도 객체와 첫 JSON의 문서 신원이 같다."""
+    original_packets = _packets(two_flow_sources=True)
+    packets = replace(
+        original_packets,
+        packets=tuple(
+            replace(
+                packet,
+                fragments=tuple(
+                    replace(
+                        fragment,
+                        formal_source_kind=SOURCE_KIND_OFFICIAL_WEB_PAGE,
+                        source_document_id=f"web-collector:{fragment.fragment_id}",
+                        source_publisher="manifest.example",
+                        identity_binding="DART 기업개황의 공식 웹 도메인 확인",
+                        source_collected_on="2026-09-05",
+                        document_date="2026-09-05",
+                        location="공식 사업 소개 본문",
+                        domain_attestation_source_id="dart-company-profile-00123456",
+                        domain_attestation_evidence=json.dumps(
+                            {
+                                "corp_code": "00123456",
+                                "corp_name": "가나다전자",
+                                "hm_url": "https://manifest.example/",
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    )
+                    for fragment in packet.fragments
+                ),
+            )
+            if packet.section_id == "business_model"
+            else packet
+            for packet in original_packets.packets
+        ),
+    )
+    output, *_ = _run_full(flow=True, packets=packets)
+    original = output.report
+    assert v2_validation_problems(original) == ()
+    assert any(
+        source.formal_source_kind == SOURCE_KIND_OFFICIAL_WEB_PAGE
+        and source.document_id.startswith("web-collector:")
+        for source in original.citations
+    )
+    original_json = reports.report_to_json(original)
+    with db.connect(tmp_path / "typed-official-web-full.db") as conn:
+        assert reports.insert_new(
+            conn, "typed-web-full", "CORP-FULL", "", original,
+            engine_epoch_digest="c" * 64,
+        )
+    with db.connect(tmp_path / "typed-official-web-full.db") as conn:
+        restored = reports.load(conn, "typed-web-full")
+    assert restored is not None
+    assert v2_validation_problems(restored) == ()
+    assert reports.report_to_json(restored) == original_json
+    assert report_sha256(restored) == report_sha256(original)
+    assert restored.public_structure_manifest == original.public_structure_manifest
+    assert any(table.row_cites and table.manifest_ref for section in restored.sections for table in section.tables)
+
+    # 직렬화 호환을 위해 URL·원문 지문의 변조 검사를 풀지 않는다.
+    for field, value in (("url", "https://manifest.example/other-document"),
+                         ("exact_evidence_hashes", ["a" * 64])):
+        payload = json.loads(original_json)
+        source = next(item for item in payload["citations"]
+                      if item.get("formal_source_kind") == SOURCE_KIND_OFFICIAL_WEB_PAGE)
+        source[field] = value
+        with pytest.raises((PublicManifestError, ValueError)):
+            reports.report_from_dict(payload)

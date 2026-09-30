@@ -371,6 +371,7 @@ def _source_bindings(report: Mapping[str, object]) -> dict[str, tuple[str, str]]
                 document_id=str(_value(source, "document_id", "")),
                 host=str(_value(source, "host", "")),
                 url=str(_value(source, "url", "")),
+                formal_source_kind=str(_value(source, "formal_source_kind", "")),
             )
             if isinstance(source, Mapping)
             else document_identity(source)

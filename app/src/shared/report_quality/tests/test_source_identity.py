@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+
 from src.shared.report_evidence.constants import (
     SOURCE_KIND_DART_BUSINESS_REPORT,
     SOURCE_KIND_OFFICIAL_WEB_PAGE,
@@ -9,7 +13,36 @@ from src.shared.report_evidence.constants import (
 from src.shared.report_quality.source_identity import (
     bind_declared_document_identity_to_url,
     collected_document_identity,
+    document_identity,
+    document_identity_from_parts,
 )
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "document_id", "host", "url", "expected"),
+    (
+        (SOURCE_KIND_OFFICIAL_WEB_PAGE, "collector:page-1", "example.com",
+         "https://example.com/company", "url:https://example.com/company"),
+        (SOURCE_KIND_DART_BUSINESS_REPORT, "dart_business_report:20260330000001",
+         "dart.fss.or.kr", "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260330000001",
+         "document:dart.fss.or.kr:20260330000001"),
+        ("", "old-document", "example.com", "https://example.com/company",
+         "document:example.com:old-document"),
+        ("", "", "example.com", "https://example.com/company",
+         "url:https://example.com/company"),
+    ),
+)
+def test_객체와_JSON부분필드는_같은_문서신원을_만든다(
+    source_kind: str, document_id: str, host: str, url: str, expected: str
+) -> None:
+    fields = {
+        "formal_source_kind": source_kind,
+        "document_id": document_id,
+        "host": host,
+        "url": url,
+    }
+    assert document_identity(SimpleNamespace(**fields)) == expected
+    assert document_identity_from_parts(**fields) == expected
 
 
 def test_공식웹은_수집기내부ID가_아니라_canonical_URL이_정본이다() -> None:

@@ -75,8 +75,8 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "90777a9833600ee6d1e5ae3257da7f03a2b2191877eeec20eb8737cdf1dfa8c1"),
-    (_golden_case, True, "9e995e393310632ff6755b94aa8022ad72b1dd13e8e577b20913e0a2567ac653"),
+    (_golden_case, False, "b34b7cca702e8a31073fc109b225b56bbfa23fd6fc6a342f93978383fecd0aa6"),
+    (_golden_case, True, "17729bda28c7c68ae8f30937b0f99e6c2f5a12c1aad2f863a82c071169d5bd9d"),
     (_boundary_case, False, "856cd2d7ba3e4e8c3974df75dd8384c129bcf27bbdb586b50e9155bcb94a5e11"),
     (_boundary_case, True, "760765739100a5b8ebe838a719280f4c1cf51cd27bfa98bad02f044a577ede75"),
 ))
@@ -89,6 +89,8 @@ def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     # 후속 3장 부문 비율의 전사 확대 금지 안내 138자만 제거하면 15756e95의
     # 전체 프롬프트 바이트와 해시가 재현된다. 경계·캐시 접두부는 그대로다.
     # 증거: tmp/audit-20260930/validation/ab926-review-prompt-baseline.json.
+    # 사건 행의 주체·날짜·조치 결속 안내 127자만 빼면 a901의 전체 바이트와 같다.
+    # 증거: tmp/audit-20260930/validation/35361-review-prompt-baseline-02.json.
     monkeypatch.setenv(REVIEW_PROMPT_CACHE_ENV, "1")
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected

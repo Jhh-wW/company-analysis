@@ -166,8 +166,8 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 # 골든 전체 바이트·해시 두 값이 재현된다. 경계·도식·스키마는 바꾸지 않는다.
 # 증거: tmp/audit-20260930/validation/ab926-review-prompt-baseline.json.
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "90777a9833600ee6d1e5ae3257da7f03a2b2191877eeec20eb8737cdf1dfa8c1"),
-    (_golden_case, True, "9e995e393310632ff6755b94aa8022ad72b1dd13e8e577b20913e0a2567ac653"),
+    (_golden_case, False, "b34b7cca702e8a31073fc109b225b56bbfa23fd6fc6a342f93978383fecd0aa6"),
+    (_golden_case, True, "17729bda28c7c68ae8f30937b0f99e6c2f5a12c1aad2f863a82c071169d5bd9d"),
     (_boundary_case, False, "856cd2d7ba3e4e8c3974df75dd8384c129bcf27bbdb586b50e9155bcb94a5e11"),
     (_boundary_case, True, "760765739100a5b8ebe838a719280f4c1cf51cd27bfa98bad02f044a577ede75"),
 ))
@@ -181,6 +181,8 @@ def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected)
     #   (뤼튼 실측 요청 50·응답 20). 묶음(grouped) 안내문은 그대로라 그쪽 해시는 같다.
     # 2026-09-23 원칙/특례·제품 귀속·제외 주석·발표/실행 시점 안내 추가.
     # 추가 안내만 제거한 4개 해시는 변경 직전 프롬프트와 같음을 재생해 확인했다.
+    # 사건 행 결속 안내 127자만 제거하면 a901의 전체 바이트와 지문이 재현된다.
+    # 증거: tmp/audit-20260930/validation/35361-review-prompt-baseline-02.json.
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
 

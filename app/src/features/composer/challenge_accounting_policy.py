@@ -16,6 +16,7 @@ def _has_policy_context(text: str) -> bool:
                     and c.FINANCIAL_TREATMENT_RE.search(surface))
                 or c.FINANCIAL_RISK_SUBJECT_RE.search(surface)
                 or c.FINANCIAL_ADMINISTRATION_RE.search(surface)
+                or c.VALUATION_INPUT_RE.search(surface)
                 or c.PLANNED_BUSINESS_SERVICE_RE.search(surface))
 
 
@@ -31,11 +32,17 @@ def _has_business_fact(text: str) -> bool:
 def _policy_units(text: str) -> tuple[tuple[str, bool], ...]:
     """쉼표 앞 회계 주어를 같은 문장의 처리절에 전달한다. 실제 사건절은 보존한다."""
     result = []
+    surface = _surface(text)
+    financial_context = bool(c.FINANCIAL_CONTEXT_RE.search(surface))
+    audit_context = bool(c.AUDIT_PROCEDURE_CONTEXT_RE.search(surface))
     for sentence in c.POLICY_SENTENCE_RE.split(text):
         context = _has_policy_context(sentence)
         for unit in c.POLICY_SUBCLAUSE_RE.split(sentence):
             if unit.strip():
-                policy = (_has_policy_context(unit) or (
+                unit_surface = _surface(unit)
+                policy = (_has_policy_context(unit)
+                          or (financial_context and c.FINANCIAL_ADMIN_CONTINUATION_RE.search(unit_surface))
+                          or (audit_context and c.AUDIT_PROCEDURE_UNIT_RE.search(unit_surface)) or (
                     context and (c.POLICY_CONTINUATION_RE.search(_surface(unit))
                                  or c.POLICY_TREATMENT_RE.search(_surface(unit)))
                 ))

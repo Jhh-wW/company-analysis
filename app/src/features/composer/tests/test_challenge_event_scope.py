@@ -87,3 +87,97 @@ def test_explicit_current_completion_preserves_dated_history_without_hiding_unre
         "회사는 2023년 과태료 문제가 현재 진행 중이며 다른 설비 개선을 완료했다.",
     ):
         assert challenge_event_scope_problem(text, {"1": RECORDS}) == "time_invalid"
+
+
+MIXED_ACTOR_RECORDS = (
+    "제재조치일 | 조치대상자 | 처벌 또는 조치내용 | 이행 및 재발방지대책 ; "
+    "2025.04.10 | 가온제조 | 안전관리 위반 과태료 | 납부 완료, 교육 완료 ; "
+    "2025.09.25 | 해외설비법인 | 경쟁법 위반 과징금 | 납부 예정, 교육 완료"
+)
+
+
+def test_mixed_actor_event_cannot_omit_actor_or_borrow_another_row():
+    assert challenge_event_scope_problem(
+        "2025년 9월 경쟁법 위반 과징금을 받았고 교육을 완료했다.",
+        {"1": MIXED_ACTOR_RECORDS}) == "scope_condition_unbound"
+    assert not challenge_event_scope_problem(
+        "해외설비법인은 2025년 9월 경쟁법 위반 과징금을 받았고 교육을 완료했다.",
+        {"1": MIXED_ACTOR_RECORDS})
+    blank_actor = MIXED_ACTOR_RECORDS.replace("가온제조", "-")
+    assert challenge_event_scope_problem(
+        "해외설비법인은 2025.04.10 과태료를 받았다.",
+        {"1": blank_actor}) == "scope_condition_unbound"
+
+
+def test_single_actor_existing_self_subject_remains_valid():
+    assert not challenge_event_scope_problem(
+        "회사는 2023년 과태료를 받았고 설비 개선을 완료했다.", {"1": RECORDS})
+
+
+def test_sanction_row_cannot_support_actual_accident():
+    assert challenge_event_scope_problem(
+        "가온제조는 2025.04.10 추락사고가 발생하여 근로자가 사망했다.",
+        {"1": MIXED_ACTOR_RECORDS}) == "scope_condition_unbound"
+
+
+def test_pending_action_cannot_become_completed_but_other_completed_action_remains():
+    assert challenge_event_scope_problem(
+        "해외설비법인은 2025년 9월 과징금을 받았고 납부를 완료했다.",
+        {"1": MIXED_ACTOR_RECORDS}) == "time_invalid"
+    assert not challenge_event_scope_problem(
+        "해외설비법인은 2025년 9월 과징금을 받았고 납부 예정이며 교육을 완료했다.",
+        {"1": MIXED_ACTOR_RECORDS})
+
+
+def test_multiple_event_periods_keep_each_action_state():
+    assert not challenge_event_scope_problem(
+        "가온제조는 2025.04.10 과태료를 받았고 납부를 완료했다. "
+        "해외설비법인은 2025.09.25 과징금을 받았고 납부 예정이며 교육을 완료했다.",
+        {"1": MIXED_ACTOR_RECORDS})
+
+
+def test_possible_legal_penalty_is_not_company_response_and_prevention_is_preserved():
+    law = "회사는 경쟁법 위반 시 시정명령과 과징금을 부과받을 수 있습니다."
+    assert not challenge_event_scope_problem("회사는 경쟁법 제재 가능성에 노출되어 있다.", {"1": law})
+    assert challenge_event_scope_problem("경쟁법 준수 의무", {"1": law},
+        cells=("경쟁법 준수 의무", "시정명령, 과징금 등 제재 가능")) == "challenge_response_not_in_source"
+    preventive = "회사는 과태료 부과 가능성을 줄이기 위해 안전교육을 실시했다."
+    assert not challenge_event_scope_problem("안전관리 위험", {"1": preventive},
+        cells=("안전관리 위험", preventive))
+
+
+def test_contractor_relationship_is_preserved_and_does_not_prove_target_employee():
+    source = (
+        "재해발생회사 | 중대재해발생일자 | 발생장소 | 재해내용 | 조치 및 전망 ; "
+        "협력설비(제조사 도급사) | 2025.03.03 | 제조사 공장 | 추락사고로 근로자 사망 | 안전설비 설치"
+    )
+    assert not challenge_event_scope_problem(
+        "2025.03.03 제조사 공장에서 도급사 근로자의 추락사고가 발생했고 안전설비를 설치했다.",
+        {"1": source})
+    assert source.endswith("안전설비 설치")
+
+
+def test_completed_action_cannot_be_borrowed_from_another_event_row():
+    assert challenge_event_scope_problem(
+        "가온제조는 2025.04.10 안전관리 위반 과태료 관련 변경신고를 완료했다.",
+        {"1": MIXED_ACTOR_RECORDS.replace("납부 예정, 교육 완료", "납부 완료, 변경신고 완료")}
+    ) == "scope_condition_unbound"
+
+
+def test_conditional_penalty_cannot_prove_actual_payment_in_prose():
+    assert challenge_event_scope_problem(
+        "회사는 2025년 안전관리 위반 벌금을 납부했다.",
+        {"1": "2025년 산업안전 규정을 위반할 경우 벌금을 부과할 수 있다."}
+    ) == "scope_condition_unbound"
+
+
+def test_prevention_exception_cannot_borrow_other_actor_action_even_on_same_day():
+    source = (
+        "제재조치일 | 조치대상자 | 처벌 또는 조치내용 | 대책 ; "
+        "2025.04.10 | 가온제조 | 안전관리 위반 과태료 | 납부 완료 ; "
+        "2025.04.10 | 해외설비법인 | 환경 위반 과태료 | 안전교육 실시 완료"
+    )
+    text = "가온제조는 2025.04.10 과태료 부과 가능성을 줄이기 위해 안전교육을 실시했다."
+    assert challenge_event_scope_problem(text, {"1": source}) == "scope_condition_unbound"
+    assert challenge_event_scope_problem(text, {"1": source},
+        cells=("가온제조의 2025.04.10 안전관리 위반 과태료", text)) == "scope_condition_unbound"

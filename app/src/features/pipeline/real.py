@@ -223,6 +223,7 @@ from src.shared import runtime_failure_constants as failure_constants
 from src.shared import runtime_failure_diagnostic as runtime_failure
 from src.shared.stage_elapsed_constants import STAGE_ELAPSED_MS_KEY, STAGE_ELAPSED_STEP
 from src.features.pipeline.provider_error_diagnostics import safe_provider_error_metadata
+from src.features.pipeline.v2_writer_constants import V2_WRITER_MAX_TOKENS
 from src.features.pipeline.v2_response_constants import (
     V2_RESPONSE_STEP,
     V2_RESPONSE_UNKNOWN,
@@ -681,7 +682,6 @@ def _generation_cache_namespace(
 #: ⚠️ 다만 호출 전 예약액은 «상한»으로 계산되므로(provider_budget.reserve_call)
 #:   이 값을 올리면 그 호출의 예약액이 출력 token 당 단가만큼 확실히 커진다.
 #:   재요청 여유를 만드는 값이 «아니다» — 재요청 예약도 같이 커진다.
-V2_WRITER_MAX_TOKENS: Final[int] = 4000
 V2_REVIEWER_MAX_TOKENS: Final[int] = 16000
 
 #: 전체 본문 판정이 16,000토큰 제한으로 잘리는 경우를 위한 전용 상한.

@@ -27,3 +27,24 @@ CURRENT_COMPLETED_ACTION_RE = re.compile(
 )
 ONGOING_RECORD_RE = re.compile(r"진행(?:중|中)|미해결|미완료|해결되지않|계속되고|지속되고")
 GENERAL_EVENT_RISK_RE = re.compile(r"(?:제재|사고|재해|위반)[^.!?。;\n]{0,24}(?:위험|가능성|예방)")
+
+# 실제 공시 표의 같은 행에 있는 관계만 제한한다. 머리말 없는 본문은 추정하지 않는다.
+TABLE_UNIT_SPLIT_RE = re.compile(r"[;\n]")
+EVENT_DATE_HEADERS = frozenset({"제재조치일", "제재일", "조치일", "중대재해발생일자", "재해발생일자", "사고발생일자"})
+EVENT_ACTOR_HEADERS = frozenset({"조치대상자", "처벌또는조치대상자", "재해발생회사", "사고발생회사"})
+EVENT_RESPONSE_HEADERS = frozenset({"이행및재발방지대책", "이행및대책", "조치및전망", "조치내용", "개선대책", "대책"})
+SELF_EVENT_ACTORS = frozenset({"당사", "회사", "본사", "당사사업장"})
+UNKNOWN_EVENT_ACTORS = frozenset({"", "-", "해당없음", "미확인", "없음"})
+EVENT_MONTH_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})\s*(?:[./-]|년)\s*(\d{1,2})(?:월|[./-]\d{1,2})(?!\d)")
+ACTUAL_ACCIDENT_CLAIM_RE = re.compile(r"(?:사고|재해)[^.!?。;\n]{0,48}(?:발생|사망|부상|추락|끼임)|(?:사망|부상)[^.!?。;\n]{0,16}(?:했다|했으며|하였|발생)")
+PENALTY_RE = re.compile(r"제재|과태료|벌금|과징금|시정명령|처벌")
+CONDITIONAL_PENALTY_RE = re.compile(r"위반할경우|위반시|받을수있|부과받을수있|부과될수있|가능")
+CONTRACTOR_ACTOR_RE = re.compile(r"도급사|도급업체|협력업체|수급업체")
+ACTION_RE = re.compile(r"변경신고|납부|교육|설치|개선|수립|이행|조치|운영")
+ACTION_PENDING_RE = re.compile(r"예정|계획|진행(?:중|中)|미완료|미이행|하지않|되지않")
+ACTION_COMPLETED_RE = re.compile(r"완료|실시했|실시하였|설치했|설치하였|수립했|수립하였|이행했|이행하였|^(?:를|을)?(?:했다|하였다|했으며|하였으며|함)")
+ACTION_STATE_MAX_CHARS = 24
+PREVENTIVE_RESPONSE_RE = re.compile(r"(?:가능성|위험)[^.!?。;\n]{0,16}(?:줄이기위해|낮추기위해|방지하기위해|예방하기위해)")
+CLAIM_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[다요음함])[.!?。](?:\s+|$)|[;\n]")
+EVENT_SCOPE_PROBLEM = "scope_condition_unbound"
+RESPONSE_SCOPE_PROBLEM = "challenge_response_not_in_source"
