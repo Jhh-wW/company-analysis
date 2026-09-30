@@ -75,8 +75,8 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "1805bbc84d83a59a35aa42fad02883bca59ef8c05c4cec81f0543e15f2c5e930"),
-    (_golden_case, True, "91403a97b181ce65fc70da57c35d1fbb7db01f34f5535d3afbc035acded56ba6"),
+    (_golden_case, False, "90777a9833600ee6d1e5ae3257da7f03a2b2191877eeec20eb8737cdf1dfa8c1"),
+    (_golden_case, True, "9e995e393310632ff6755b94aa8022ad72b1dd13e8e577b20913e0a2567ac653"),
     (_boundary_case, False, "856cd2d7ba3e4e8c3974df75dd8384c129bcf27bbdb586b50e9155bcb94a5e11"),
     (_boundary_case, True, "760765739100a5b8ebe838a719280f4c1cf51cd27bfa98bad02f044a577ede75"),
 ))
@@ -86,6 +86,9 @@ def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     # 5장 발생기간·완료/진행 안내 205자만 제거하면 직전 네 지문이 재현된다.
     # 근거·번호·캐시 접두부·스키마는 그대로이며 5장 없는 경계 지문은 유지한다.
     # 증거: tmp/audit-20260930/validation/ci-flow-header-prompt-baseline.json.
+    # 후속 3장 부문 비율의 전사 확대 금지 안내 138자만 제거하면 15756e95의
+    # 전체 프롬프트 바이트와 해시가 재현된다. 경계·캐시 접두부는 그대로다.
+    # 증거: tmp/audit-20260930/validation/ab926-review-prompt-baseline.json.
     monkeypatch.setenv(REVIEW_PROMPT_CACHE_ENV, "1")
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected

@@ -59,7 +59,14 @@ def revenue_population_caption_matches(caption: str, source: str, *, header_text
 
 def revenue_population_claim_problem(candidate: str, sources: Mapping[str, str]) -> str:
     compact = "".join(candidate.split())
-    if not c.WHOLE_REVENUE_CLAIM_RE.search(compact):
+    revenue_claims = tuple(c.WHOLE_REVENUE_CLAIM_RE.finditer(compact))
+    matches = (*c.WHOLE_BUSINESS_COMPARISON_RE.finditer(compact),
+               *c.PORTFOLIO_ROLE_COMPARISON_RE.finditer(compact),
+               *c.PRIMARY_BUSINESS_ROLE_RE.finditer(compact))
+    business_claims = tuple(match for match in matches if not any(
+        other.start() < match.start() < other.end()
+        or (other.start() == match.start() and other.end() > match.end()) for other in matches))
+    if not revenue_claims and not business_claims:
         return ""
     revenue_sources = [source for source in sources.values() if (
         c.REVENUE_ROW_RE.search(source) and ("|" in source or "%" in source)
@@ -69,11 +76,38 @@ def revenue_population_claim_problem(candidate: str, sources: Mapping[str, str])
     # 전사 범위가 원문에 직접 있으면 기존 의미·수치 검수에 맡긴다.
     if any(c.WHOLE_REVENUE_CLAIM_RE.search("".join(revenue_population_source_header(source).split())) for source in revenue_sources):
         return ""
-    for source in revenue_sources:
-        heading = revenue_population_heading(revenue_population_source_header(source))
-        if heading and re.search(re.escape("".join(heading.split())) + r"(?:내|의|에서의)(?:전체)?매출", compact):
-            return ""
-    return "scope_condition_unbound"
+    if not revenue_claims and any(c.WHOLE_BUSINESS_POPULATION_RE.search(
+            "".join(revenue_population_source_header(source).split())) for source in revenue_sources):
+        return ""
+    headings = tuple(filter(None, (
+        revenue_population_heading(revenue_population_source_header(source))
+        for source in revenue_sources)))
+    for claim in revenue_claims:
+        position = claim.start() + (1 if claim.group().startswith("의") else 0)
+        if c.EXPLICIT_COMPANY_CLAIM_RE.search(claim.group()) or not _claim_bound_to_population(compact, position, headings):
+            return "scope_condition_unbound"
+    # 제품·서비스 정의의 '주력'은 구성비 추론과 다르다. 명시된 부문표만 있을 때
+    # 그 표의 비중을 회사 전체 포트폴리오/사업 순위로 승격하는 경로를 제한한다.
+    if headings:
+        direct_primary = any(c.EXPLICIT_COMPANY_PRIMARY_BUSINESS_RE.search("".join(source.split()))
+                             for source in sources.values() if source not in revenue_sources)
+        for claim in business_claims:
+            if direct_primary and not c.COMPARATIVE_MAGNITUDE_RE.search(claim.group()):
+                continue
+            if c.EXPLICIT_COMPANY_CLAIM_RE.search(claim.group()) or not _claim_bound_to_population(compact, claim.start(), headings):
+                return "scope_condition_unbound"
+    return ""
+
+
+def _claim_bound_to_population(candidate: str, position: int, headings: tuple[str, ...]) -> bool:
+    """각 비교 표현 바로 앞의 범위만 쓴다. 다른 절의 부문명으로 면제하지 않는다."""
+    for heading in headings:
+        label = "".join(heading.split())
+        prefix = candidate[max(0, position - len(label) - c.POPULATION_CLAIM_LOOKBACK_CHARS):position]
+        pattern = re.escape(label) + r"(?:내|안|의|에서는|에서의|에서)(?:전체사업|사업|전체)?" + c.LOCAL_COMPARISON_SUBJECT_PATTERN + "$"
+        if re.search(pattern, prefix):
+            return True
+    return False
 
 
 def revenue_population_source_header(source: str) -> str:

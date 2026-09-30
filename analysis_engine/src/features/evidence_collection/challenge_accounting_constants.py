@@ -66,14 +66,17 @@ FINANCIAL_TREATMENT_PATTERN: Final[str] = (
 FINANCIAL_TREATMENT_RE = re.compile(FINANCIAL_TREATMENT_PATTERN)
 FINANCIAL_RISK_SUBJECT_PATTERN: Final[str] = (
     r"유동성|(?:환율|외환|외화)(?:변동)?[^.!?。;\n]{0,32}위험|"
-    r"(?:시장|신용|이자율|금리)(?:가격)?(?:변동)?위험|(?:금융|재무)위험"
+    r"(?:시장|신용|이자율|금리|주가)(?:가격)?(?:변동)?위험|(?:금융|재무)위험|"
+    r"지분(?:상품|증권)[^.!?。;\n]{0,40}가격변동위험"
 )
 FINANCIAL_RISK_SUBJECT_RE = re.compile(FINANCIAL_RISK_SUBJECT_PATTERN)
 # 일반적인 모니터링·대응이 아니라 금리·금융원가의 관리 문형만 한정한다.
 FINANCIAL_ADMINISTRATION_PATTERN: Final[str] = (
     r"(?:금리|이자율)동향[^.!?。;\n]{0,24}(?:모니터링|점검|분석|관찰)|"
     r"금융원가[^.!?。;\n]{0,16}(?:최소화|절감)|"
-    r"(?:금리|이자율)변동[^.!?。;\n]{0,32}불확실성[^.!?。;\n]{0,16}제거"
+    r"(?:금리|이자율)변동[^.!?。;\n]{0,32}불확실성[^.!?。;\n]{0,16}제거|"
+    r"감사[^.!?。;\n]{0,80}(?:절차|진행상황|수행결과)[^.!?。;\n]{0,48}(?:보고|통제)|"
+    r"(?:금융상품|자산|부채)[^.!?。;\n]{0,64}관측(?:할수없는|불가능한)투입변수"
 )
 FINANCIAL_ADMINISTRATION_RE = re.compile(FINANCIAL_ADMINISTRATION_PATTERN)
 POLICY_CONTINUATION_PATTERN: Final[str] = (
@@ -81,7 +84,9 @@ POLICY_CONTINUATION_PATTERN: Final[str] = (
     r"[^.!?。;\n]{0,80}(?:배부|배분|인식|추정|측정|계상|산출|산정|처리|평가)|"
     r"재화[^.!?。;\n]{0,24}(?:인도|이전)[^.!?。;\n]{0,48}(?:이전|발생|수령)|"
     r"(?:수량)?할인[^.!?。;\n]{0,32}제공(?:되는|하는)경우|"
-    r"(?:위험|외화|환율|금융부채|차입금)[^.!?。;\n]{0,32}(?:관리|식별|노출|대응|평가)"
+    r"(?:위험|외화|환율|금융부채|차입금)[^.!?。;\n]{0,32}(?:관리|식별|노출|대응|평가)|"
+    r"(?:모니터링|점검|분석|관찰)[^.!?。;\n]{0,24}평가|"
+    r"핵심감사사항|내부회계관리제도감사|자금관련부정위험통제"
 )
 POLICY_CONTINUATION_RE = re.compile(POLICY_CONTINUATION_PATTERN)
 BUSINESS_OPERATION_RE = re.compile(BUSINESS_OPERATION_PATTERN)

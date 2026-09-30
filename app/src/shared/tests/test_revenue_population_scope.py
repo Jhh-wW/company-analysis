@@ -72,3 +72,36 @@ def test_부문명과_제품의_연결은_연결재무_기준이_아니다():
 def test_기간별_매출금액표는_구성비_분모검사의_대상이_아니다():
     source = "매출액 | 2022년 | 400억원\n매출액 | 2023년 | 300억원\n매출액 | 2024년 | 200억원\n매출액 | 2025년 | 100억원"
     assert not revenue_population_claim_problem("전체 매출 규모가 3년 연속 감소했다.", {"1": source})
+
+
+@pytest.mark.parametrize("candidate", [
+    "설비 부문은 전체 사업 포트폴리오에서 압도적 비중을 차지하는 주력 사업이다.",
+    "설비는 회사 전체에서 비중이 가장 큰 사업이다.",
+    "설비는 포트폴리오의 핵심이다.",
+    "설비는 주력 사업이다.",
+    "제조 부문 내 전체 매출에서 설비는 60%이고 회사 전체에서는 1위다.",
+])
+def test_부문_분모는_각_포트폴리오_비교표현에도_결속된다(candidate):
+    source = "[제조 부문] 품목 | 매출액 | 비중 ; 설비 | 600 | 60% ; 펌프 | 400 | 40%"
+    assert revenue_population_claim_problem(candidate, {"1": source})
+
+
+@pytest.mark.parametrize("candidate", [
+    "제조 부문 내 포트폴리오에서 설비는 주력 사업이다.",
+    "제조 부문 내 전체 매출에서 설비는 대부분의 비중을 차지한다.",
+    "제조 부문에서 설비는 주력 사업이다.",
+    "제조 부문에서는 설비가 핵심 사업이다.",
+    "설비는 주력 제품이며 고객에게 공급한다.",
+])
+def test_부문내_비교와_제품_정의는_유지한다(candidate):
+    source = "[제조 부문] 품목 | 매출액 | 비중 ; 설비 | 600 | 60% ; 펌프 | 400 | 40%"
+    assert not revenue_population_claim_problem(candidate, {"1": source})
+
+
+def test_전사_분모와_직접_사업정의는_유지한다():
+    whole = "회사 전체 매출 | 품목 | 비중 ; 설비 | 600 | 60%"
+    assert not revenue_population_claim_problem("설비는 전체 사업 포트폴리오의 주력 사업이다.", {"1": whole})
+    part = "[제조 부문] 품목 | 매출액 | 비중 ; 설비 | 600 | 60%"
+    definition = "회사는 산업 설비 제작을 주력 사업으로 영위한다."
+    assert not revenue_population_claim_problem("설비 제작은 주력 사업이다.", {"1": part, "2": definition})
+    assert revenue_population_claim_problem("설비 제작은 전체 사업 포트폴리오에서 압도적 비중이다.", {"1": part, "2": definition})

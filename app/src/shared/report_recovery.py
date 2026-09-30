@@ -452,18 +452,18 @@ def supplement_unchanged_sections(
     result_section_sha256s: Iterable[tuple[str, str]],
     review_diagnostics: Iterable[Mapping[str, object]],
 ) -> tuple[tuple[str, str], ...]:
-    """보충 회차가 «후보를 전부 잃어» 그대로인 장과 그 사유 코드를 모은다.
+    """보충 회차의 후보 배제·검증 본문 보존으로 그대로인 장과 사유를 모은다.
 
     보충 단계가 영수증을 만들 때 부른다. 두 조건을 «둘 다» 만족할 때만 적는다.
 
     ① 승인한 장인데 공개 내용 지문이 그대로다.
-    ② 그 장에서 근거 결속 제외가 실제로 일어났다(진단에 사유 코드가 있다).
+    ② 그 장에서 후보 배제나 검증 본문 보존이 실제로 일어났다(관측 사유가 있다).
 
     ②가 없으면 적지 않는다 — 그러면 결속 검사가 종전대로 «무동작 보충»으로
-    보고 닫는다. 즉 이 함수는 면제를 «만들지» 않고, 실제로 일어난 제외를
+    보고 닫는다. 즉 이 함수는 면제를 «만들지» 않고, 실제로 일어난 처리를
     영수증에 옮겨 적을 뿐이다.
 
-    사유 코드가 여럿이면 처음 것을 적는다. 이 값은 «왜 비었는지»를 사람이
+    사유 코드가 여럿이면 처음 것을 적는다. 이 값은 «왜 그대로인지»를 사람이
     읽으려고 남기는 것이고, 결속 검사는 기록의 유무만 본다.
     """
 
@@ -587,10 +587,21 @@ def _decide_second_validation(
         + supplement_receipt.observed_ai_calls
     )
     if supplement_receipt.candidate_sha256 == primary_receipt.candidate_sha256:
+        # 검증 본문을 그대로 보존했어도 품질 평가와 공개 안전 검사는 끝났다.
+        # 실제 품질 미달이면 그 결과를 전달해 부분 계약에서 다시 검사할 수 있게
+        # 한다. 불변 후보의 완성 승인이나 안전 실패의 부분 전환은 허용하지 않는다.
+        quality_codes = (
+            () if _is_safety_blocked(supplement_receipt.assessment)
+            else _quality_codes_of(supplement_receipt.assessment)
+        )
         return RecoveryDecision(
             action=RecoveryAction.STOP_NO_CHARGE,
-            reason_code="supplement_candidate_unchanged",
+            reason_code=(
+                "post_supplement_quality_failed" if quality_codes
+                else "supplement_candidate_unchanged"
+            ),
             observed_total_ai_calls=observed,
+            quality_problem_codes=quality_codes,
         )
     if _is_complete(supplement_receipt.assessment):
         return RecoveryDecision(

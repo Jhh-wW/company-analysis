@@ -17,6 +17,27 @@ def test_engine_app_policy_patterns_match():
         assert getattr(c, name) == value
 
 
+def test_audit_procedures_and_financial_assumptions_are_not_business_challenges():
+    for text in (
+        "연결회사는 지분상품에서 발생하는 가격변동위험에 노출되어 있습니다.",
+        "부정 및 부정위험과 관련된 감사 절차 수행결과 보고",
+        "감사 진행상황 보고 (독립성, 핵심감사사항, 내부회계관리제도감사 및 자금 관련 부정위험 통제 등)",
+        "금융상품과 같이 자산이나 부채에 대한 관측할 수 없는 투입변수의 위험을 평가한다.",
+        "금융 위험을 식별, 모니터링 및 평가하여 관리한다.",
+    ):
+        assert is_challenge_accounting_policy(text), text
+        assert accounting_policy_matched_rules(text, None, "current_challenges")
+
+
+def test_audit_customer_service_and_real_operation_mixed_with_policy_survive():
+    for text in (
+        "회사는 고객에게 공정가치 평가 서비스를 제공한다.",
+        "은행의 차주 연체율이 급증하여 신용위험에 대응했다.",
+        "감사 진행상황을 보고하며, 공장 생산이 중단되어 고객 납품 지연이 발생하여 대응했다.",
+    ):
+        assert not is_challenge_accounting_policy(text), text
+
+
 def test_policy_amount_and_sales_rights_do_not_become_challenges():
     for text in (
         "회사는 판매로 인하여 부담하는 보증책임에 대한 충당부채를 합리적으로 추정하여 인식하고 있다.",

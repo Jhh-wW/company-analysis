@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from features.evidence_collection import auditor_boilerplate, constants as c, liquidity_boilerplate
 from features.evidence_collection.liquidity_constants import CHALLENGE_POLICY_SLOTS
 from features.evidence_collection.challenge_accounting_policy import split_challenge_accounting_policy
+from features.evidence_collection.challenge_slot_scope import challenge_table_scope
 from features.evidence_collection.business_slot_scope import business_slot_scope
 from features.evidence_collection.weak_signal_context import (
     accounting_value_table_only,
@@ -455,8 +456,10 @@ def score_fragment_slots_with_signal(
 
     scored: list[tuple[int, int, bool, SlotScore]] = []
     # 가린 상용구도 관측된 신호다. 무분류 AI 재판정으로 다시 붙이지 않는다.
-    accounting_split = split_challenge_accounting_policy(liquidity_split.score_text)
-    has_any_direct_signal = bool(liquidity_split.excluded_clauses or accounting_split.excluded_clauses)
+    incident_table = challenge_table_scope(liquidity_split.score_text)
+    accounting_split = split_challenge_accounting_policy(incident_table.issue_text)
+    has_any_direct_signal = bool(liquidity_split.excluded_clauses or accounting_split.excluded_clauses
+                                 or incident_table.excluded_rows)
     for declaration_index, (slot_id, keywords) in enumerate(SLOT_KEYWORDS.items()):
         score_text = (
             accounting_split.score_text
@@ -469,6 +472,12 @@ def score_fragment_slots_with_signal(
             has_any_direct_signal = True
             score_text = business_scope.score_text
         hits = [keyword for keyword in keywords if keyword_has_direct_hit(keyword, score_text)]
+        incident_row = slot_id == "current_challenges:issue" and incident_table.has_incident_row
+        incident_response = slot_id == "current_challenges:response" and incident_table.has_response_row
+        if incident_row:
+            hits.append("business_incident_row")
+        if incident_response:
+            hits.append("business_incident_response")
         revenue_mix = (
             slot_id == "business_model:revenue_model"
             and _has_revenue_type_mix(text)
@@ -538,7 +547,7 @@ def score_fragment_slots_with_signal(
         score = min(c.RELEVANCE_MAX_SCORE_MILLIS, len(hits) * c.RELEVANCE_KEYWORD_HIT_SCORE_MILLIS)
         reason_codes = (
             [f"keyword_hit:{slot_id}"]
-            if len(hits) > int(revenue_mix) + int(sales_table) + int(supply_contract) + int(investment_plan)
+            if len(hits) > int(revenue_mix) + int(sales_table) + int(supply_contract) + int(investment_plan) + int(incident_row) + int(incident_response)
             else []
         )
         if revenue_mix:
@@ -549,6 +558,10 @@ def score_fragment_slots_with_signal(
             reason_codes.append("direct_pattern:supply_contract")
         if investment_plan:
             reason_codes.append("direct_pattern:stated_investment_plan")
+        if incident_row:
+            reason_codes.append("direct_pattern:business_incident_row")
+        if incident_response:
+            reason_codes.append("direct_pattern:business_incident_response")
         if payment_route:
             reason_codes.append("direct_pattern:payment_route")
         if direct_exchange:

@@ -49,7 +49,8 @@ from src.shared.report_quality.generation import (
     assess_and_observe_generation,
     assert_observation_matches_assessment,
 )
-from src.shared.report_quality.models import PublicationPolicy
+from src.shared.report_quality.models import PublicationPolicy, VerificationState
+from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_quality.contract import contract_for_generation
 from src.shared.report_quality.review_diagnostic_constants import REVIEW_SCOPE_ITEMS
 from src.shared.report_quality.composition_diagnostic_constants import (
@@ -120,6 +121,7 @@ from src.features.composer.constants import (
     SHORTFALL_TABLE_EVIDENCE_UNBOUND,
     SUMMARY_NOTICE_EMPTY,
     SUMMARY_NOTICE_THIN,
+    SUPPLEMENT_RETAINED_BODY_REASON,
     INDUSTRY_CONTEXT_SELECTION_STEP,
 )
 from src.features.composer.industry_context import select_industry_context_for_fragments
@@ -977,25 +979,64 @@ def _merge_selected_sections(
     base: ComposedReport,
     replacements: ComposedReport,
     section_ids: tuple[str, ...],
+    *,
+    retention_diagnostics: list[dict[str, str]] | None = None,
 ) -> ComposedReport:
-    """정책 순서의 승인 장만 교체하고 나머지 객체를 그대로 보존한다."""
+    """승인 장을 교체하되 보충에서 빠진 의미칸의 이전 검증 본문을 보존한다."""
 
     if tuple(section.section_id for section in base.sections) != SECTION_IDS:
         raise V2ValidationError(("report_recovery:base_section_order_invalid",))
     if tuple(section.section_id for section in replacements.sections) != section_ids:
         raise V2ValidationError(("report_recovery:replacement_section_order_invalid",))
     by_id = {section.section_id: section for section in replacements.sections}
-    return ComposedReport(
-        sections=tuple(
-            # 보도표는 병합 뒤 검수 결과를 반영해 다시 만든다. 이 복사는
-            # 병합 도중 표만 누락되는 것을 막으며 공개 승인으로 쓰지 않는다.
-            replace(
-                by_id[section.section_id], news_rows=section.news_rows,
+
+    def selected_section(section: ComposedSection) -> ComposedSection:
+        replacement = by_id.get(section.section_id)
+        if replacement is None:
+            return section
+        allowed_slots = frozenset(CLAIM_SLOTS_BY_SECTION[section.section_id])
+        replacement_slots = {
+            sentence.planned_claim_slot for sentence in replacement.sentences
+            if sentence.verification_state == VerificationState.VERIFIED.value
+        }
+        replacement_texts = {
+            _normalized_text(sentence.text) for sentence in replacement.sentences
+            if sentence.verification_state == VerificationState.VERIFIED.value
+        }
+        retained = tuple(
+            sentence for sentence in section.sentences
+            if sentence.verification_state == VerificationState.VERIFIED.value
+            and sentence.planned_claim_slot in allowed_slots - replacement_slots
+            and _normalized_text(sentence.text) not in replacement_texts
+        )
+        if retained:
+            # 동일 의미칸은 새 검증 본문으로 교체하되 새 본문에 없는 의미칸까지
+            # 지우지 않는다. 같은 글을 다른 의미칸으로 복제하지 않으며 병합 뒤
+            # 인용·수치·도식·공개 결속과 품질을 다시 검사한다.
+            retained_texts = {_normalized_text(sentence.text) for sentence in retained}
+            new_sentences = tuple(
+                sentence for sentence in replacement.sentences
+                if _normalized_text(sentence.text) not in retained_texts
             )
-            if section.section_id in by_id
-            else section
-            for section in base.sections
-        ),
+            replacement = replace(
+                replacement, sentences=(*new_sentences, *retained),
+                flow_rows=(replacement.flow_rows or section.flow_rows
+                           if not new_sentences else replacement.flow_rows),
+                notice=(replacement.notice if new_sentences else section.notice),
+                moved_to_sections=(replacement.moved_to_sections if new_sentences
+                                   else section.moved_to_sections),
+            )
+            if retention_diagnostics is not None:
+                retention_diagnostics.append({
+                    "section_id": section.section_id,
+                    "reason_code": SUPPLEMENT_RETAINED_BODY_REASON,
+                })
+        # 보도표는 병합 뒤 검수 결과를 반영해 다시 만든다. 기존 행 보존은
+        # 공개 승인으로 쓰지 않는다.
+        return replace(replacement, news_rows=section.news_rows)
+
+    return ComposedReport(
+        sections=tuple(selected_section(section) for section in base.sections),
         summary=(),
     )
 
@@ -3184,10 +3225,12 @@ def run_v2(
             )
 
             base_body = verified
+            supplement_retention_diagnostics: list[dict[str, str]] = []
             merged_body = _merge_selected_sections(
                 base_body,
                 supplement_verified,
                 targets,
+                retention_diagnostics=supplement_retention_diagnostics,
             )
             # 병합 뒤 전역 수치 안전을 다시 계산한다. 비대상 장은 값뿐 아니라
             # ComposedSection 전체(본문·도식·structured fact)가 exact 동일해야 한다.
@@ -3419,8 +3462,8 @@ def run_v2(
                     base_receipt_sha256=primary_receipt.receipt_sha256,
                     supplemented_section_ids=targets,
                     section_block_sha256s=supplement_block_sha256s,
-                    # 근거 결속 계약이 그 장의 후보를 «전부» 제외해 내용이
-                    # 그대로인 경우를 사유 코드와 함께 적는다. 적지 않으면
+                    # 보충 후보 배제 또는 검증 본문 보존으로 내용이 그대로인
+                    # 경우를 실제 관측 사유와 함께 적는다. 적지 않으면
                     # 결속 검사가 종전대로 «무동작 보충»으로 보고 닫는다.
                     unchanged_sections=supplement_unchanged_sections(
                         approved_section_ids=targets,
@@ -3428,7 +3471,9 @@ def run_v2(
                         result_section_sha256s=(
                             public_structure_seal.section_sha256s
                         ),
-                        review_diagnostics=review_diagnostics,
+                        review_diagnostics=(
+                            *review_diagnostics, *supplement_retention_diagnostics,
+                        ),
                     ),
                 )
                 recovery_decision = decide_post_validation(
