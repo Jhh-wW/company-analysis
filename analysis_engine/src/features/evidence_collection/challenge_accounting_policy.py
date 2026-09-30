@@ -17,6 +17,7 @@ def _has_policy_context(text: str) -> bool:
                 or (c.FINANCIAL_SUBJECT_RE.search(surface)
                     and c.FINANCIAL_TREATMENT_RE.search(surface))
                 or c.FINANCIAL_RISK_SUBJECT_RE.search(surface)
+                or c.FINANCIAL_ADMINISTRATION_RE.search(surface)
                 or c.PLANNED_BUSINESS_SERVICE_RE.search(surface))
 
 

@@ -53,6 +53,7 @@ from src.features.chapter_evidence.constants import (
 )
 from src.shared.report_evidence.models import CollectedEvidenceDocument, EvidenceFragment
 from src.shared.report_evidence.business_activity import current_business_item
+from src.shared.report_evidence.business_slot_scope import business_slot_scope_problem
 from src.shared.report_evidence.constants import (
     SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
     SOURCE_KIND_OFFICIAL_IR_PDF,
@@ -273,6 +274,7 @@ def select_section_fragments(
     missing_document_count = 0
     unbound_count = 0
     auditor_boilerplate_count = 0
+    business_slot_scope_counts: Counter[str] = Counter()
     # 「무시했다」만 남기면 다음 실행 진단에서 원인을 찾을 수 없다. 어느 닫힌
     # 사유로 Writer 자격을 잃었는지 사유별로 따로 센다(2026-09-16 운영 실측:
     # 사유 이름이 없어 연차 공시 문제를 홈페이지 문제로 읽었다).
@@ -328,6 +330,17 @@ def select_section_fragments(
             fragment.text, audit_report=_auditor_judgment_scope(document.source_kind),
         ):
             auditor_boilerplate_count += 1
+            continue
+        rejected_business_slots = tuple(
+            slot_id for slot_id in eligible_slot_ids
+            if business_slot_scope_problem(fragment.text, slot_id)
+        )
+        business_slot_scope_counts.update(rejected_business_slots)
+        eligible_slot_ids = tuple(
+            slot_id for slot_id in eligible_slot_ids
+            if not business_slot_scope_problem(fragment.text, slot_id)
+        )
+        if not eligible_slot_ids:
             continue
         eligible.append(
             replace(
@@ -469,6 +482,8 @@ def select_section_fragments(
         reason_codes.append(
             f"{AUDITOR_BOILERPLATE_FRAGMENT_IGNORED}:{auditor_boilerplate_count}"
         )
+    for slot_id, count in sorted(business_slot_scope_counts.items()):
+        reason_codes.append(f"business_slot_scope_unsupported:{count}:{slot_id}")
     # 사유 이름은 개수 «뒤»에 붙인다 — 기존 진단 읽기가 쓰는 앞부분과 개수
     # 자리를 그대로 두기 위함이다.
     for reason, count in sorted(low_trust_ir_counts.items()):

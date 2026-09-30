@@ -16,6 +16,7 @@ from src.features.news_intake import constants as c
 from src.features.news_intake.analysis_result_cache import analysis_request
 from src.features.news_intake.industry_context import extend_prompt, extend_schema, industry_candidate, split_response
 from src.features.news_intake import industry_constants as ic
+from src.features.news_intake.observation import NewsObserver, observe_news
 from src.features.news_intake.grounded import parse_grounded_payload
 from src.features.news_intake.body_prefetch import (
     ArticleFetchJob, ArticleFetchOutcome, BodyFetchConcurrency, BodyFetchLane,
@@ -65,7 +66,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                           as_of: dt.date, fetch_text: Callable[[str], object],
                           analyze_grounded: GroundedAnalyzer,
                           policy: NewsCollectionPolicy | None = None,
-                          body_fetch: BodyFetchConcurrency | None = None) -> NewsCollectionResult:
+                          body_fetch: BodyFetchConcurrency | None = None,
+                          observer: NewsObserver | None = None) -> NewsCollectionResult:
     """검색·본문 callback을 섞지 않고, 검증 실패를 예전 휴리스틱으로 보충하지 않는다.
 
     ``body_fetch``는 호출자가 «``fetch_text``를 여러 스레드에서 동시에 불러도
@@ -86,6 +88,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     role_diagnostics: Counter[str] = Counter()
     budget_codes: list[str] = [code for code in snapshot.reason_codes if code in c.SEARCH_BUDGET_REASON_CODES]
     stages: Counter[str] = Counter()
+    observed_rankings: list[dict[str, object]] = []
+    observed_ranking_failures = 0
     body_articles = 0
     body_chars = 0
     analysis_calls = 0
@@ -305,8 +309,17 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             ranked_candidates = body_ranked_candidates(
                 candidates + [candidate for candidate, _ in carried],
                 attempt_budget=window_budget, probe_budget=probe_budget,
-                replacement=is_replacement,
+                replacement=is_replacement, company=company,
             )
+            if observer is not None:
+                try:
+                    observed_rankings.append({
+                        "window_months": months, "replacement": is_replacement,
+                        "attempt_budget": window_budget, "probe_budget": probe_budget,
+                        "ranked_candidate_ids": [item.id for item in ranked_candidates],
+                    })
+                except Exception:
+                    observed_ranking_failures += 1
             active_window_counts = replacement_window_counts if is_replacement else window_counts
             active_window_counts[str(months)] = {
                 "후보": len(candidates) + len(carried), "본문": len(carried), "검증기사": 0, "이월": 0,
@@ -647,6 +660,15 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         # 회사 검색에서 찾은 기사에도 산업문제를 검수한다. 이 집계는 산업 검색 결과만의 수가 아니다.
         diagnostics["산업검수"] = {name: industry_observations[name]
                                    for name in ic.INDUSTRY_RESPONSE_OBSERVATION_FIELDS}
+    if observer is not None:
+        observe_news(observer, "body_selection", lambda: {
+            "snapshot_digest": snapshot.digest, "rankings": observed_rankings,
+            "ranking_capture_failures": observed_ranking_failures,
+            "attempted_candidate_ids": sorted(attempted_candidate_ids),
+            "industry_read_candidate_ids": sorted(industry_read_ids),
+            "industry_analysis_candidate_ids": sorted(industry_analysis_ids),
+            "document_content_sha256": dict(document_hashes),
+        })
     return NewsCollectionResult(
         fragments=fragments, document_hashes={url: document_hashes[url] for url in chosen_urls},
         diagnostics=diagnostics, snapshot_digest=snapshot.digest, articles=articles,

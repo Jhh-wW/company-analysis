@@ -29,7 +29,8 @@ PAIRS = {
 
 
 def _payload(selected):
-    return {"문장들": [{"글": "회사는 제조업 고객에게 장비를 제공한다.",
+    return {"필수내용": {"business_model:customer_type": [], "business_model:value_exchange": []},
+            "문장들": [{"글": "회사는 제조업 고객에게 장비를 제공한다.",
                      "등급": "확인", "근거선택": selected}]}
 
 
@@ -58,12 +59,56 @@ def test_schema_does_not_promote_selected_pair_to_verified_fact():
 def test_schema_keeps_empty_result_and_optional_flow_news_without_forcing_content():
     schema = build_full_writer_schema("business_model", PAIRS, news_fragment_ids=("3",))
     validator = Draft202012Validator(schema)
-    assert validator.is_valid({"문장들": []})
-    assert validator.is_valid({"문장들": [], "경로표": [], "뉴스근거판정": [
+    empty = {"문장들": [], "필수내용": {"business_model:customer_type": [], "business_model:value_exchange": []}}
+    assert validator.is_valid(empty)
+    assert not validator.is_valid({"문장들": []})
+    assert validator.is_valid({**empty, "경로표": [], "뉴스근거판정": [
         {"조각": "3", "사유": "장무관", "설명": "이 장의 사실과 관련이 없다."}]})
-    assert not validator.is_valid({"문장들": [], "뉴스근거판정": [
+    assert not validator.is_valid({**empty, "뉴스근거판정": [
         {"조각": "99", "사유": "장무관", "설명": "관련이 없다."}]})
-    assert not validator.is_valid({"문장들": [], "임의필드": []})
+    assert not validator.is_valid({**empty, "임의필드": []})
+
+
+def test_required_slot_arrays_reach_existing_unverified_parser_in_policy_order():
+    data = _payload(["p2-004"])
+    data["필수내용"]["business_model:customer_type"] = [
+        {"글": "장비의 고객은 제조업체다.", "등급": "확인", "근거선택": ["p2-001", "p2-002"]}]
+    data["필수내용"]["business_model:value_exchange"] = [
+        {"글": "회사는 장비를 납품하고 판매대금을 받는다.", "등급": "확인", "근거선택": ["p2-003"]}]
+    assert Draft202012Validator(build_full_writer_schema("business_model", PAIRS)).is_valid(data)
+    parsed = parse_section_response(json.dumps(data), "business_model", evidence_pairs=PAIRS)
+    assert [row.planned_claim_slot for row in parsed] == [
+        "business_model:customer_type", "business_model:value_exchange", "business_model:sales_channel"]
+    assert all(row.verification_state == "unverified" for row in parsed)
+    assert parsed[0].citations == ("1", "2")
+
+
+@pytest.mark.parametrize("selected", [["p2-004"], ["p2-001", "p2-003"], ["p2-999"], []])
+def test_required_array_cannot_relabel_wrong_pair_or_inject_evidence(selected):
+    data = _payload(["p2-001"])
+    data["문장들"] = []
+    data["필수내용"]["business_model:value_exchange"] = [
+        {"글": "대가 칸을 임의로 채우려는 문장이다.", "등급": "확인", "근거선택": selected}]
+    assert not Draft202012Validator(build_full_writer_schema("business_model", PAIRS)).is_valid(data)
+    assert parse_section_response(json.dumps(data), "business_model", evidence_pairs=PAIRS) == ()
+
+
+def test_required_arrays_allow_no_facts_and_legacy_replay_is_unchanged():
+    data = _payload(["p2-003"])
+    legacy = {"문장들": data["문장들"]}
+    assert parse_section_response(json.dumps(data), "business_model", evidence_pairs=PAIRS) == \
+        parse_section_response(json.dumps(legacy), "business_model", evidence_pairs=PAIRS)
+    data["문장들"] = []
+    assert parse_section_response(json.dumps(data), "business_model", evidence_pairs=PAIRS) == ()
+    data["필수내용"]["other:invented"] = []
+    assert parse_section_response(json.dumps(data), "business_model", evidence_pairs=PAIRS) is None
+
+
+def test_program_injected_and_unsupported_slots_are_not_required_in_writer_schema():
+    pairs = {"p4-001": ("past_changes:completed_execution", "1")}
+    schema = build_full_writer_schema("past_changes", pairs)
+    assert schema["properties"]["필수내용"]["required"] == ["past_changes:completed_execution"]
+    assert "past_changes:historical_performance" not in schema["properties"]["필수내용"]["properties"]
 
 
 def test_wrapper_preserves_cache_boundary_on_retry_and_disables_only_prefixed_cache():
@@ -98,6 +143,21 @@ def test_full_writer_builder_has_schema_but_legacy_and_empty_pairs_keep_old_byte
                                  show_supported_claim_slots=True, shared_evidence_prefix=shared)
     assert not hasattr(empty, "response_schema")
     assert FULL_REQUIRED_SLOT_SENTENCE_GUIDE not in empty
+
+
+@pytest.mark.parametrize("section,slot", [
+    ("business_model", "business_model:customer_type"),
+    ("current_challenges", "current_challenges:issue"),
+    ("operations_partners", "operations_partners:operating_role"),
+])
+def test_full_flow_instructions_name_all_three_keys_without_changing_legacy(section, slot):
+    fragments = (CollectedFragment("1", "공식자료", "회사는 산업용 장비를 제조한다.",
+                                   supported_claim_slots=(slot,)),)
+    full = build_section_prompt("합성회사", section, fragments, None, show_supported_claim_slots=True)
+    assert "«두 키를 모두»" not in full
+    assert "«필수내용·문장들·경로표»를 모두 넣는다" in full
+    legacy = build_section_prompt("합성회사", section, fragments, None)
+    assert "«두 키를 모두»" in legacy
 
 
 def _context():

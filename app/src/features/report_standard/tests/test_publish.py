@@ -543,7 +543,7 @@ def test_section_contract_keeps_semantic_ids_and_display_labels_separate() -> No
     assert CANONICAL_SECTION_IDS == tuple(spec.section_id for spec in SECTION_SPECS)
     assert SECTION_BY_ID["past_changes"].display_number == "4"
     assert SECTION_BY_ID["past_changes"].tag == "#과거"
-    assert SECTION_BY_ID["current_challenges"].tag == "#현재"
+    assert SECTION_BY_ID["current_challenges"].tag == "#사업과제"
     assert SECTION_BY_ID["future_strategy"].tag == "#미래"
 
 

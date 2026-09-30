@@ -112,3 +112,37 @@ def test_financial_term_does_not_override_independent_business_clause():
     ):
         assert not is_challenge_accounting_policy(text)
     assert is_challenge_accounting_policy("회사는 고객에게 대출 서비스를 제공할 예정이다.")
+
+
+def test_interest_administration_is_blocked_in_body_and_own_source_rewording():
+    from src.features.composer.challenge_business_scope import challenge_business_problem
+
+    source = (
+        "이자율과 외화위험을 관리하기 위해 필요한 경우 파생상품계약을 체결하고 있습니다."
+        "연결회사는 이자율 변동으로 인한 불확실성 제거와 금융원가 최소화를 위해, "
+        "주기적인 금리동향 모니터링과 적절한 대응방안 수립을 운용하고 있습니다."
+    )
+    candidate = (
+        "회사는 이자율과 외화위험을 관리하기 위해 파생상품계약을 체결하고 있으며, "
+        "주기적인 금리동향 모니터링과 적절한 대응방안 수립을 운용하고 있다."
+    )
+    assert is_challenge_accounting_policy(source)
+    assert is_challenge_accounting_policy(candidate)
+    assert challenge_business_problem(candidate, {"1": source})
+    assert challenge_business_problem("회사는 위험에 적절하게 대응하고 있다.", {"1": source})
+
+
+def test_interest_service_and_real_operating_issue_are_preserved():
+    from src.features.composer.challenge_business_scope import challenge_business_problem
+
+    for text in (
+        "회사는 고객에게 금리동향 모니터링 서비스를 제공한다.",
+        "회사는 기업 고객에게 이자율 분석 보고서를 발행합니다.",
+        "회사는 고객에게 파생상품 위험관리 서비스를 제공한다.",
+        "은행은 대출 고객의 연체율이 상승하여 심사 기준을 강화했다.",
+        "회사는 공장 안전센서를 모니터링하고 설비 개선을 실시했다.",
+        "회사는 금융원가를 최소화하며, 고객 납품이 중단되었다.",
+        "회사는 금리동향을 모니터링한다. 제품 결함으로 리콜을 실시했다.",
+    ):
+        assert not is_challenge_accounting_policy(text), text
+        assert not challenge_business_problem(text, {"1": text}), text

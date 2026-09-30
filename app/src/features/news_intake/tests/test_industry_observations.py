@@ -32,7 +32,8 @@ def _collect(raw, *, fetch=lambda _: BODY):
 def test_단일사업_국내세계검색을_반복하지_않고_기존총량을_유지한다():
     plan = search_plan(COMPANY, AS_OF)
     queries = [row for row in plan if row[2].startswith("industry_")]
-    assert len(queries) == 2
+    # 두 지역에 서로 다른 두 탐색 주제를 배분하되 전체 검색 수는 같다.
+    assert len(queries) == 4
     assert len(set(queries)) == len(queries)
     assert {row[2].split(":", 1)[0] for row in queries} == {"industry_domestic", "industry_global"}
     plain = search_plan(replace(COMPANY, business_anchors=()), AS_OF)

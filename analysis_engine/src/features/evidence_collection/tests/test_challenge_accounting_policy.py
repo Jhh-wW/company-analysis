@@ -116,6 +116,44 @@ def test_policy_context_does_not_cross_sentence_and_market_business_risk_remains
     assert split.excluded_clauses == 1
 
 
+def test_interest_monitoring_policy_cannot_reenter_as_a_business_response():
+    for text in (
+        "이자율과 외화위험을 관리하기 위해 필요한 경우 파생상품계약을 체결하고 있습니다."
+        "연결회사는 이자율 변동으로 인한 불확실성 제거와 금융원가 최소화를 위해, "
+        "주기적인 금리동향 모니터링과 적절한 대응방안 수립을 운용하고 있습니다.",
+        "회사는 이자율과 외화위험을 관리하기 위해 파생상품계약을 체결하고 있으며, "
+        "주기적인 금리동향 모니터링과 적절한 대응방안 수립을 운용하고 있다.",
+        "회사는 금융원가를 최소화하기 위해 금리동향을 점검한다.",
+        "이자율 변동에 따른 불확실성을 제거하고 있다.",
+    ):
+        assert is_challenge_accounting_policy(text), text
+        assert split_challenge_accounting_policy(text).score_text == ""
+        scores, observed = score_fragment_slots_with_signal(text)
+        assert observed
+        assert not any(score.slot_id.startswith("current_challenges:") for score in scores)
+
+
+def test_interest_customer_service_and_independent_operating_problem_remain():
+    for text in (
+        "회사는 고객에게 금리동향 모니터링 서비스를 제공한다.",
+        "회사는 기업 고객에게 이자율 분석 보고서를 발행합니다.",
+        "회사는 고객에게 파생상품 위험관리 서비스를 제공한다.",
+        "은행은 대출 고객의 연체율이 상승하여 심사 기준을 강화했다.",
+        "회사는 공장 안전센서를 모니터링하고 설비 개선을 실시했다.",
+    ):
+        assert not is_challenge_accounting_policy(text), text
+        assert split_challenge_accounting_policy(text).score_text == text
+    for text in (
+        "회사는 금융원가를 최소화하며, 고객 납품이 중단되었다.",
+        "회사는 금리동향을 모니터링한다. 제품 결함으로 리콜을 실시했다.",
+    ):
+        split = split_challenge_accounting_policy(text)
+        assert not is_challenge_accounting_policy(text)
+        assert split.excluded_clauses == 1
+        assert "금리동향" not in split.score_text and "금융원가" not in split.score_text
+        assert "납품이 중단" in split.score_text or "리콜을 실시" in split.score_text
+
+
 def test_customer_financial_service_and_actual_problem_are_preserved():
     for text in (
         "회사는 기업 고객에게 공정가치 평가보고서를 발행합니다.",

@@ -57,7 +57,7 @@ SECTION_SPECS: Final[tuple[SectionSpec, ...]] = (
     SectionSpec("business_model", "2", "사업 구조와 수익 모델"),
     SectionSpec("portfolio", "3", "핵심 제품·서비스와 포트폴리오 역할"),
     SectionSpec("past_changes", "4", "주요 변화와 실적", "#과거"),
-    SectionSpec("current_challenges", "5", "당면 과제와 대응", "#현재"),
+    SectionSpec("current_challenges", "5", "당면 과제와 대응", "#사업과제"),
     SectionSpec("future_strategy", "6", "성장 전략", "#미래"),
     SectionSpec("operations_partners", "7", "사업 운영과 파트너 구조"),
     SectionSpec("culture", "8", "인재상과 일하는 방식"),

@@ -30,8 +30,14 @@ from src.features.composer.evidence_pair_selection import (
     render_evidence_pair_index,
     writer_visible_fragments,
 )
-from src.features.composer.writer_schema import with_full_writer_schema
-from src.features.composer.writer_schema_constants import FULL_REQUIRED_SLOT_SENTENCE_GUIDE
+from src.features.composer.writer_schema import (
+    required_content_guide, with_full_writer_schema, writer_sentence_items,
+)
+from src.features.composer.writer_schema_constants import (
+    FULL_REQUIRED_SLOT_SENTENCE_GUIDE, RESPONSE_REQUIRED_CONTENT_KEY,
+    LEGACY_FLOW_REQUIRED_KEYS_GUIDE, FULL_REQUIRED_FLOW_KEYS_GUIDE,
+)
+from src.features.composer.supplement_feedback import supplement_feedback
 from src.features.composer.partial_evidence import PartialEvidenceView
 from src.features.composer.partial_evidence_constants import (
     EXACT_EVIDENCE_SCOPE_GUIDE,
@@ -628,6 +634,16 @@ def build_section_prompt(
             if section_id in FLOW_HEADERS_BY_SECTION
             else FULL_PAIR_SCHEMA_TAIL,
         )
+        if pair_choices:
+            required_guide = required_content_guide(section_id, pair_choices)
+            if required_guide:
+                schema_guide = schema_guide.replace(
+                    LEGACY_FLOW_REQUIRED_KEYS_GUIDE, FULL_REQUIRED_FLOW_KEYS_GUIDE,
+                )
+                schema_guide = schema_guide.replace(
+                    '"문장들": [',
+                    f'"{RESPONSE_REQUIRED_CONTENT_KEY}": {{"<아래 필수 의미칸>": []}}, "문장들": [',
+                ) + required_guide
     section_parts = [
         (
             FULL_PAST_CHANGES_SECTION_GUIDE
@@ -958,7 +974,7 @@ def parse_section_response(
     payload = extract_json_payload(raw)
     if not isinstance(payload, Mapping):
         return None
-    items = payload.get(RESPONSE_SENTENCES_KEY)
+    items = writer_sentence_items(payload, section_id, evidence_pairs)
     if not isinstance(items, list):
         return None
     if not items:
@@ -1917,6 +1933,7 @@ def compose_selected_sections(
     *,
     section_evidence_packets: SectionEvidencePacketSet,
     section_ids: tuple[str, ...],
+    missing_slots_by_section: Mapping[str, tuple[str, ...]] | None = None,
 ) -> ComposedReport:
     """승인된 FULL 장만 각자의 기존 typed packet으로 한 번씩 다시 쓴다.
 
@@ -1954,7 +1971,7 @@ def compose_selected_sections(
     for section_id in section_ids:
         section = _compose_one_section(
             section_id,
-            build_section_prompt(
+            supplement_feedback(section_id, missing_slots_by_section) + build_section_prompt(
                 company_name,
                 section_id,
                 prepared.packets[section_id],

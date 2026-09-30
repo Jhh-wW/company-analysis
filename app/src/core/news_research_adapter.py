@@ -71,6 +71,7 @@ class NewsResearchSession:
     as_of: dt.date
     snapshot: Any
     policy: Any = None
+    observer: Callable[[str, dict[str, Any]], object] | None = None
 
     def collect(
         self,
@@ -89,6 +90,7 @@ class NewsResearchSession:
             analyze_grounded=analyze_grounded,
             policy=self.policy,
             body_fetch=body_fetch,
+            observer=self.observer,
         )
 
 
@@ -104,6 +106,7 @@ def prepare_news_research(
     policy: Any = None,
     max_analysis_calls: int | None = None,
     business_anchors: tuple[BusinessActivityAnchor, ...] = (),
+    observer: Callable[[str, dict[str, Any]], object] | None = None,
 ) -> NewsResearchSession:
     """AI 없이 검색을 고정하고 나중 분석에 같은 입력을 전달한다."""
 
@@ -128,6 +131,7 @@ def prepare_news_research(
         business_anchors=business_anchors,
     )
     snapshot = collect_search_snapshot(
-        search_news=search_news, company=company, as_of=as_of, policy=policy
+        search_news=search_news, company=company, as_of=as_of, policy=policy, observer=observer
     )
-    return NewsResearchSession(company=company, as_of=as_of, snapshot=snapshot, policy=policy)
+    return NewsResearchSession(company=company, as_of=as_of, snapshot=snapshot, policy=policy,
+                               observer=observer)

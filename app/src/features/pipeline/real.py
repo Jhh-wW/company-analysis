@@ -2936,6 +2936,9 @@ def _bind_revenue_table_evidence_fragments(
 
         fragment_number = max(merged, default=0) + 1
         caption = str(raw_table.get("caption") or "").strip()
+        from src.shared.revenue_population_scope import revenue_population_caption, revenue_population_header_from_rows
+        caption = revenue_population_caption(caption, excerpt,
+            header_text=revenue_population_header_from_rows(evidence_rows))
         merged[fragment_number] = {
             "종류": LEGACY_KIND_REVENUE_AND_ORDERS,
             "원문": excerpt,
@@ -2945,6 +2948,7 @@ def _bind_revenue_table_evidence_fragments(
             "원문위치": f"매출 구성 원문 표 {table_index} · {caption}".rstrip(" ·"),
         }
         table = copy.deepcopy(raw_table)
+        table["caption"] = caption
         # ``axis``는 원문 근거를 검증하기 위한 transport 전용 값이다. 검증 뒤
         # V1 공개 ReportTable 스키마에는 넘기지 않아 기존 출력 계약을 지킨다.
         table.pop("axis", None)
@@ -6331,6 +6335,7 @@ def _run_news_search_branch(
                     as_of=business_date,
                     max_analysis_calls=news_analysis_call_budget,
                     business_anchors=business_anchors,
+                    observer=_local_news_research_observer(),
                 )
                 news_digest = news_session.snapshot.digest
                 branch_steps.append(
@@ -7743,6 +7748,28 @@ def _news_default_classifier(engine: Any, client: Any) -> Callable[[str], str]:
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     return classify
+
+
+def _local_news_research_observer() -> Callable[[str, dict[str, Any]], object] | None:
+    """로컬 평가에서만 검색 해석 행과 실제 선택 지문을 비공개 보관한다."""
+    from src.features.pipeline.private_replay import (
+        local_provider_replay_enabled, record_local_news_observation,
+    )
+    if not local_provider_replay_enabled():
+        return None
+
+    def observe(event: str, payload: dict[str, Any]) -> bool:
+        stored = record_local_news_observation(event=event, payload=payload)
+        try:
+            run_diagnostics.current_steps().append({
+                "step": "local_news_research_observation", "단계": event,
+                "시도수": 1, "저장수": int(stored), "미보관수": int(not stored),
+            })
+        except Exception:
+            pass
+        return stored
+
+    return observe
 
 
 def _record_local_news_analysis_replay(

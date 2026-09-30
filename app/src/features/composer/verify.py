@@ -4055,7 +4055,7 @@ def _filter_challenge_flow_scope(
         for row in section.flow_rows:
             sources = {fid: frag_by_id[fid].text for fid in row.citations if fid in frag_by_id}
             text = FLOW_CELL_JOIN.join(row.cells)
-            problem = challenge_business_problem(row.cells[0] if row.cells else "", sources)
+            problem = challenge_business_problem(row.cells[0] if row.cells else "", sources, cells=row.cells)
             if not problem:
                 problem = next((
                     issue for fid in row.citations if fid in frag_by_id

@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
+from src.shared.revenue_population_constants import PARENT_SECTION_RE, POPULATION_SCOPE_RE
 
 from .constants import (
     FILING_TEXT_ENCODINGS,
@@ -41,6 +42,7 @@ class FilingTable:
 
     title: str
     rows: tuple[tuple[str, ...], ...]
+    population_heading: str = ""
 
 
 def _collapse(value: str) -> str:
@@ -73,6 +75,7 @@ class _TableCollector(HTMLParser):
         self.tables: list[FilingTable] = []
         self._outside: list[str] = []
         self._previous_title: str = ""
+        self._population_heading: str = ""
         # 표가 칸 안에 또 있을 수 있어 스택으로 둔다 — 안쪽 표도 별도 표로 남긴다.
         self._stack: list[dict[str, object]] = []
 
@@ -86,6 +89,7 @@ class _TableCollector(HTMLParser):
                 "column": 0,
                 "width": 0,
                 "title": self._take_title(),
+                "population_heading": self._population_heading,
                 "cell": None,
             }
         )
@@ -98,7 +102,8 @@ class _TableCollector(HTMLParser):
         rows = self._materialize(table)
         if rows:
             title = str(table["title"])
-            self.tables.append(FilingTable(title=title, rows=rows))
+            self.tables.append(FilingTable(title=title, rows=rows,
+                                          population_heading=str(table["population_heading"])))
             if title:
                 self._previous_title = title
         self._outside.clear()
@@ -133,6 +138,14 @@ class _TableCollector(HTMLParser):
         self._outside.clear()
         if not lines:
             return self._previous_title
+        context = "\n".join(lines)
+        parents = tuple(PARENT_SECTION_RE.finditer(context))
+        if parents:
+            self._population_heading = ""
+            context = context[parents[-1].end():]
+        scopes = tuple(POPULATION_SCOPE_RE.finditer(context))
+        if scopes:
+            self._population_heading = scopes[-1].group().strip("[]")
         last = lines[-1]
         if len(last) <= MAX_TABLE_HEADING_CHARS:
             return last[:MAX_TABLE_TITLE_CHARS]

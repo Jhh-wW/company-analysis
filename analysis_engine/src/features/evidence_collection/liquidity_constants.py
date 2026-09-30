@@ -8,6 +8,8 @@ from typing import Final
 
 CHALLENGE_POLICY_SLOTS: Final[frozenset[str]] = frozenset({
     "current_challenges:issue", "current_challenges:response",
+    "current_challenges:initial_signal", "current_challenges:unresolved_gap",
+    "current_challenges:next_check",
 })
 
 # composer의 절 경계·유동성 규칙·회사 고유 면제와 동등하게 유지한다.

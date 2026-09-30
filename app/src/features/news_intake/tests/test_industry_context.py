@@ -229,8 +229,13 @@ def test_산업검수캐시는_원문대신_범위를_저장하고_앵커변경�
     assert not req.valid(damaged)
 
 
-def test_복수핵심사업도_검색총량안에서_순서대로_기회를_받는다():
+def test_우선핵심사업은_검색총량안에서_국내세계_기회를_받는다():
     anchors = tuple(replace(ANCHOR, anchor_id=f"anchor-{number}") for number in range(3))
     plan = search_plan(replace(COMPANY, business_anchors=anchors), AS_OF)
-    assert {row[2].split(":", 1)[1] for row in plan if row[2].startswith("industry_")} == {anchor.anchor_id for anchor in anchors}
+    queries = [row for row in plan if row[2].startswith("industry_")]
+    assert {row[2].split(":", 1)[1] for row in queries} == {anchor.anchor_id for anchor in anchors[:2]}
+    for anchor in anchors[:2]:
+        assert {row[2].split(":", 1)[0] for row in queries if row[2].endswith(":" + anchor.anchor_id)} == {
+            "industry_domestic", "industry_global",
+        }
     assert len(plan) == len(search_plan(NewsCompanyContext("예제법인"), AS_OF))

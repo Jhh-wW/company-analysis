@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from features.evidence_collection import auditor_boilerplate, constants as c, liquidity_boilerplate
 from features.evidence_collection.liquidity_constants import CHALLENGE_POLICY_SLOTS
 from features.evidence_collection.challenge_accounting_policy import split_challenge_accounting_policy
+from features.evidence_collection.business_slot_scope import business_slot_scope
 from features.evidence_collection.weak_signal_context import (
     accounting_value_table_only,
     future_signal_has_context,
@@ -462,6 +463,11 @@ def score_fragment_slots_with_signal(
             if slot_id in CHALLENGE_POLICY_SLOTS
             else text
         )
+        business_scope = business_slot_scope(score_text, slot_id)
+        if business_scope.excluded_clauses:
+            # 제외한 신호를 무신호 AI 재판정으로 되살리지 않는다.
+            has_any_direct_signal = True
+            score_text = business_scope.score_text
         hits = [keyword for keyword in keywords if keyword_has_direct_hit(keyword, score_text)]
         revenue_mix = (
             slot_id == "business_model:revenue_model"

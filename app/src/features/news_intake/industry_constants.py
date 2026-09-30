@@ -7,6 +7,16 @@ INDUSTRY_TOPIC_PREFIX = "industry_"
 INDUSTRY_QUERY_COUNT = 4
 INDUSTRY_COMPANY_QUERY_COUNT = 2
 INDUSTRY_BODY_DIVISOR = 6
+INDUSTRY_QUERY_THEMES = ("산업 문제", "공급난")
+INDUSTRY_QUERY_REGIONS = (("국내", "domestic"), ("세계", "global"))
+# 검색 메타데이터는 본문 조사 순위에만 쓰며 문제의 사실 여부를 증명하지 않는다.
+INDUSTRY_SEARCH_PROBLEM_RE = re.compile(
+    r"공급난|공급\s*(?:부족|지연|차질)|수요\s*(?:감소|둔화|위축)|생산\s*(?:중단|차질|감소)|"
+    r"원가\s*(?:상승|부담)|가격\s*(?:상승|급등)|인력\s*부족|납기\s*지연|"
+    r"불량|리콜|규제|과잉\s*(?:공급|생산)|경쟁\s*심화|침체|부족|차질|위기|"
+    r"shortage|disruption|recall|overcapacity|declin|regulat|rising\s+cost",
+    re.I,
+)
 INDUSTRY_MAX_PROBLEMS_PER_ARTICLE = 1
 INDUSTRY_QUOTE_MAX_CHARS = 900
 INDUSTRY_DOMESTIC_MARKERS = ("국내", "한국", "대한민국", "south korea", "republic of korea")

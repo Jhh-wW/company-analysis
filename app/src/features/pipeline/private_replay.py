@@ -18,6 +18,8 @@ from src.features.pipeline.private_replay_constants import (
     REPLAY_MAX_RECORDS, REPLAY_RETENTION_SECONDS, REPLAY_RUN_ENV, REPLAY_LOCK_FILENAME,
     REPLAY_RUN_PATTERN, REPLAY_SCHEMA_VERSION,
     REPLAY_PARSED_SCHEMA_VERSION, REPLAY_PARSED_CAPTURE_KIND, REPLAY_PARSED_CAPTURE_SCHEMA,
+    REPLAY_THREAD_LOCK_TIMEOUT_SECONDS, NEWS_OBSERVATION_SCHEMA,
+    NEWS_OBSERVATION_CAPTURE_KIND, NEWS_OBSERVATION_FILE_PATTERN, NEWS_OBSERVATION_EVENTS,
 )
 from src.shared.bounded_file_lock import BoundedFileLockError, try_exclusive_file_lock
 
@@ -92,21 +94,36 @@ def record_local_provider_replay(
         if capture_kind:
             record.update(schema_version=REPLAY_PARSED_SCHEMA_VERSION, capture_kind=capture_kind,
                           capture_schema=REPLAY_PARSED_CAPTURE_SCHEMA)
+        return _store_local_record(record, prefix="call")
+    except (OSError, ValueError, TypeError, BoundedFileLockError):
+        return False
+
+
+def _store_local_record(record: dict, *, prefix: str) -> bool:
+    """보관만 짧게 기다리며 응답·원장 계약과 별도로 실패를 반환한다."""
+    try:
+        directory = _directory()
+        if directory is None:
+            return False
+        now = record["recorded_at_unix"]
+        record_id = record["call_id"]
         payload = (json.dumps(record, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
         if len(payload) > REPLAY_MAX_RECORD_BYTES:
             return False
-        if not _WRITE_LOCK.acquire(blocking=False):
+        if not _WRITE_LOCK.acquire(timeout=REPLAY_THREAD_LOCK_TIMEOUT_SECONDS):
             return False
         try:
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             private_root = directory.parent
             # 같은 저장소의 여러 평가 프로세스도 정리와 생성을 한 번에 수행한다.
-            # 잠금 경쟁은 보관만 건너뛰며 공급자 응답을 기다리게 하지 않는다.
+            # 외부 파일 잠금 경쟁은 보관만 건너뛰며 응답·정산을 바꾸지 않는다.
             with try_exclusive_file_lock(private_root / REPLAY_LOCK_FILENAME) as acquired:
                 if not acquired:
                     return False
                 retained = []
-                for path in private_root.glob(f"*/{REPLAY_FILE_PATTERN}"):
+                # 뉴스 관측을 추가해도 기존 공급자 응답 보관 한도·정리는 건드리지 않는다.
+                pattern = REPLAY_FILE_PATTERN if prefix == "call" else NEWS_OBSERVATION_FILE_PATTERN
+                for path in private_root.glob(f"*/{pattern}"):
                     if (path.is_symlink() or path.parent.is_symlink()
                             or (hasattr(path.parent, "is_junction") and path.parent.is_junction())
                             or not path.is_file() or not path.resolve().is_relative_to(private_root)
@@ -119,7 +136,7 @@ def record_local_provider_replay(
                         retained.append((modified, path))
                 for _, path in sorted(retained)[:max(0, len(retained) - REPLAY_MAX_RECORDS + 1)]:
                     path.unlink()
-                target = directory / f"call-{call_id}.json"
+                target = directory / f"{prefix}-{record_id}.json"
                 descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(descriptor, "wb") as output:
                     output.write(payload)
@@ -128,6 +145,44 @@ def record_local_provider_replay(
         return True
     except (OSError, ValueError, TypeError, BoundedFileLockError):
         return False
+
+
+def record_local_news_observation(*, event: str, payload: dict) -> bool:
+    """로컬 평가의 검색 해석 행·선택 지문을 공급자 원응답과 구분해 보관한다."""
+    if not local_provider_replay_enabled() or event not in NEWS_OBSERVATION_EVENTS:
+        return False
+    try:
+        record = {
+            "schema_version": NEWS_OBSERVATION_SCHEMA,
+            "capture_kind": NEWS_OBSERVATION_CAPTURE_KIND,
+            "call_id": uuid.uuid4().hex, "recorded_at_unix": time.time(),
+            "event": event, "payload": payload,
+        }
+        canonical = json.dumps(record, ensure_ascii=False, sort_keys=True,
+                               separators=(",", ":"), allow_nan=False)
+        record["record_sha256"] = _sha256(canonical)
+        return _store_local_record(record, prefix="news-observation")
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def read_local_news_observation(path: Path) -> dict:
+    """별도 스키마와 전체 기록 지문이 맞는 뉴스 관측만 반환한다."""
+    if path.stat().st_size > REPLAY_MAX_RECORD_BYTES:
+        raise ValueError("뉴스 관측 파일이 보관 상한을 넘습니다")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if (not isinstance(record, dict) or record.get("schema_version") != NEWS_OBSERVATION_SCHEMA
+            or record.get("capture_kind") != NEWS_OBSERVATION_CAPTURE_KIND
+            or record.get("event") not in NEWS_OBSERVATION_EVENTS
+            or not isinstance(record.get("payload"), dict)):
+        raise ValueError("뉴스 관측 보관 계약이 맞지 않습니다")
+    digest = record.pop("record_sha256", None)
+    canonical = json.dumps(record, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":"), allow_nan=False)
+    if digest != _sha256(canonical):
+        raise ValueError("뉴스 관측 기록 지문이 맞지 않습니다")
+    record["record_sha256"] = digest
+    return record
 
 
 def read_local_provider_replay(path: Path) -> dict:
