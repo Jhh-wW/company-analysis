@@ -131,6 +131,7 @@ from src.features.composer.direct_support_constants import (
 )
 from src.features.composer.direct_support import support_entries_by_number
 from src.features.composer.role_binding import role_binding_report, role_binding_requirements
+from src.features.composer.business_relation_scope import business_relation_scope_problem
 from src.features.composer.role_binding_constants import (
     ROLE_BINDING_REASON_TEXTS, ROLE_BINDING_REVIEW_GUIDE,
 )
@@ -2120,6 +2121,17 @@ def _apply_grounding(
         if constrained.get(number) not in (VERDICT_TRUE, VERDICT_UNCLEAR):
             continue
         context = (diagnostic_contexts or {}).get(number)
+        if context and context[1] == DIAGNOSTIC_KIND_BODY:
+            # 지원쌍은 작성 후보일 뿐이다. 다른 지원쌍의 고객·OEM 관계를
+            # 빌린 산문은 자기 인용에 같은 관계가 있어야 공개로 진행한다.
+            problem = business_relation_scope_problem(
+                text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+                section_id=context[0],
+            )
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
         # ★ «확인» 산문은 본문이든 요약이든 자기 인용 원문에 걸린다. 여기서
         #   걸러야 본문·요약·부록·빈 장 안내가 «같은 판정»을 보게 된다.
         #

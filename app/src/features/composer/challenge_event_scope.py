@@ -21,13 +21,26 @@ class _EventRow:
     actor: str
     response: str
     category: str
+    event: str = ""
+    raw_row: str = ""
+    start: int = 0
+    end: int = 0
+    columns_unambiguous: bool = False
+
+
+def _table_units_with_spans(source: str):
+    start = 0
+    for match in c.TABLE_UNIT_SPLIT_RE.finditer(source):
+        yield source[start:match.start()], start
+        start = match.end()
+    yield source[start:], start
 
 
 def _event_rows(source: str) -> tuple[_EventRow, ...]:
     """원문 표의 날짜·주체·대응 열을 같은 행 그대로 읽는다."""
     mapping = None
     found = []
-    for unit in c.TABLE_UNIT_SPLIT_RE.split(source):
+    for unit, unit_start in _table_units_with_spans(source):
         parts = tuple(part.strip() for part in unit.split("|"))
         compact = tuple(_surface(part) for part in parts)
         date_columns = [i for i, value in enumerate(compact) if value in c.EVENT_DATE_HEADERS]
@@ -36,20 +49,38 @@ def _event_rows(source: str) -> tuple[_EventRow, ...]:
             actor_index = next((i for i, value in enumerate(compact) if value in c.EVENT_ACTOR_HEADERS), None)
             response_index = next((i for i, value in enumerate(compact) if value in c.EVENT_RESPONSE_HEADERS), None)
             category = "accident" if "재해" in compact[date_index] or "사고" in compact[date_index] else "sanction"
-            mapping = (len(parts), date_index, actor_index, response_index, category)
+            event_indices = tuple(i for i, value in enumerate(compact) if value in c.EVENT_CONTENT_HEADERS)
+            unambiguous = (len(date_columns) == 1
+                           and sum(value in c.EVENT_ACTOR_HEADERS for value in compact) == 1
+                           and sum(value in c.EVENT_RESPONSE_HEADERS for value in compact) == 1)
+            mapping = (len(parts), date_index, actor_index, response_index, category, event_indices, unambiguous)
             continue
         if mapping is None:
             continue
-        width, date_index, actor_index, response_index, category = mapping
+        width, date_index, actor_index, response_index, category, event_indices, unambiguous = mapping
         if len(parts) != width or not _days(parts[date_index]):
             # 다른 표/본문으로 넘어가면 이전 머리말을 빌리지 않는다.
             if "|" not in unit or not any(c.EVENT_DATE_RE.search(part) for part in parts):
                 mapping = None
             continue
+        raw_parts = unit.split("|")
+        event = ""
+        if event_indices:
+            first, last = event_indices[0], event_indices[-1]
+            # 같은 열의 원문 연속 범위만 가져오며 중간에 다른 뜻의 열이 있으면 힌트로 쓰지 않는다.
+            if event_indices == tuple(range(first, last + 1)):
+                left = sum(len(part) + 1 for part in raw_parts[:first])
+                right = sum(len(part) + 1 for part in raw_parts[:last]) + len(raw_parts[last])
+                event = unit[left:right].strip()
+        left_space = len(unit) - len(unit.lstrip())
+        raw_row = unit.strip()
         found.append(_EventRow(
             date=parts[date_index], actor=parts[actor_index] if actor_index is not None else "",
             response=parts[response_index] if response_index is not None else "",
             category=category,
+            event=event, raw_row=raw_row,
+            start=unit_start + left_space, end=unit_start + left_space + len(raw_row),
+            columns_unambiguous=unambiguous,
         ))
     return tuple(found)
 

@@ -17,6 +17,9 @@ def _has_policy_context(text: str) -> bool:
                 or c.FINANCIAL_RISK_SUBJECT_RE.search(surface)
                 or c.FINANCIAL_ADMINISTRATION_RE.search(surface)
                 or c.VALUATION_INPUT_RE.search(surface)
+                or c.ACCOUNTING_RULE_RE.search(surface)
+                or c.FINANCIAL_POLICY_HEADING_RE.search(surface)
+                or c.VALUATION_LEVEL_RE.search(surface)
                 or c.PLANNED_BUSINESS_SERVICE_RE.search(surface))
 
 
@@ -35,6 +38,8 @@ def _policy_units(text: str) -> tuple[tuple[str, bool], ...]:
     surface = _surface(text)
     financial_context = bool(c.FINANCIAL_CONTEXT_RE.search(surface))
     audit_context = bool(c.AUDIT_PROCEDURE_CONTEXT_RE.search(surface))
+    valuation_context = bool(c.VALUATION_LEVEL_RE.search(surface))
+    accounting_context = bool(c.ACCOUNTING_RULE_RE.search(surface) or valuation_context)
     for sentence in c.POLICY_SENTENCE_RE.split(text):
         context = _has_policy_context(sentence)
         for unit in c.POLICY_SUBCLAUSE_RE.split(sentence):
@@ -42,7 +47,11 @@ def _policy_units(text: str) -> tuple[tuple[str, bool], ...]:
                 unit_surface = _surface(unit)
                 policy = (_has_policy_context(unit)
                           or (financial_context and c.FINANCIAL_ADMIN_CONTINUATION_RE.search(unit_surface))
+                          or (valuation_context and c.VALUATION_LEVEL_CONTINUATION_RE.search(unit_surface))
                           or (audit_context and c.AUDIT_PROCEDURE_UNIT_RE.search(unit_surface)) or (
+                    (context or accounting_context)
+                    and c.ACCOUNTING_DEFINITION_CONTINUATION_RE.search(unit_surface)
+                ) or (
                     context and (c.POLICY_CONTINUATION_RE.search(_surface(unit))
                                  or c.POLICY_TREATMENT_RE.search(_surface(unit)))
                 ))

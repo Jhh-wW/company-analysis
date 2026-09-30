@@ -33,6 +33,7 @@ from src.features.composer.evidence_pair_selection import (
 from src.features.composer.writer_schema import (
     required_content_guide, with_full_writer_schema, writer_sentence_items,
 )
+from src.features.composer.challenge_event_writer import render_challenge_event_writer_hints
 from src.features.composer.writer_schema_constants import (
     FULL_REQUIRED_SLOT_SENTENCE_GUIDE, RESPONSE_REQUIRED_CONTENT_KEY,
     LEGACY_FLOW_REQUIRED_KEYS_GUIDE, FULL_REQUIRED_FLOW_KEYS_GUIDE,
@@ -680,6 +681,9 @@ def build_section_prompt(
         claim_slot_guide,
         FULL_REQUIRED_SLOT_SENTENCE_GUIDE if pair_choices else "",
         FULL_VISIBLE_EVIDENCE_GUIDE if show_supported_claim_slots else "",
+        render_challenge_event_writer_hints(writer_fragments, pair_choices,
+                                          allowed_fragment_ids=allowed_fragment_ids)
+        if show_supported_claim_slots and section_id == "current_challenges" and pair_choices else "",
         # 7장은 «경로표»를 함께 내야 해서 스키마 안내를 통째로 바꾼다.
         # 덧붙이면 기본 안내의 「이 JSON만 출력한다」와 충돌해 작가가 경로표를
         # 빼먹는다 (소재 제조사 실측).
