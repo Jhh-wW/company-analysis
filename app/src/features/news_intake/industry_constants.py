@@ -41,3 +41,6 @@ INDUSTRY_REQUIRED_FIELDS = (
     "anchor_id", "text", "industry", "problem", "geography", "geography_detail",
     "geography_evidence", "applicability_quote", "problem_present", "same_business", "geography_supported",
 )
+INDUSTRY_RESPONSE_OBSERVATION_FIELDS = (
+    "검수입력기사", "응답기사", "빈제안기사", "제안근거", "검증생존", "검증탈락",
+)

@@ -1128,7 +1128,7 @@ def constrain_verdicts(
         # 같은 공시의 인용 밖 제외 각주가 부정한 현재 종속·연결 단정(제약만 소비, 등급 무관).
         # 공개 사유 코드는 기존 그대로이고, 어느 단계였는지는 세부 진단에만 남긴다(원문 없음).
         entity_scope = (entity_scope_by_number or {}).get(number)
-        entity_problem = document_entity_scope_problem(text, entity_scope) if entity_scope else ""
+        entity_problem = document_entity_scope_problem(text, entity_scope, cells=cells) if entity_scope else ""
         if entity_problem and details_by_number is not None:
             details_by_number[number] = {
                 "version": GROUNDING_DETAIL_VERSION, "check_kind": "근거",

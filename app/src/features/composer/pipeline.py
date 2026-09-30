@@ -102,7 +102,6 @@ from src.features.composer.logic import (
 from src.features.composer.constants import (
     AI_STAGE_COMPOSE_VERIFY,
     AI_STAGE_DIAGRAM,
-    AI_STAGE_FULL_SUPPLEMENT,
     AI_STAGE_REWRITE,
     AI_STAGE_SUMMARY,
     DEFAULT_CITATION_STYLE,
@@ -216,6 +215,7 @@ from src.features.composer.quality_observation_log import (
     log_generation_quality_observation,
     record_full_safety_block,
     record_primary_quality_stop,
+    record_supplement_quality_stop,
 )
 from src.features.composer.quality_projection import (
     build_generation_quality_candidate,
@@ -3440,23 +3440,29 @@ def run_v2(
                     ("report_recovery:supplement_receipt_invalid",)
                 ) from error
             if recovery_decision.action is not RecoveryAction.RELEASE_COMPLETE:
+                record_supplement_quality_stop(
+                    composition_diagnostics, recovery_decision.reason_code,
+                    logger=logger,
+                )
                 if fallback_allowed and _is_quality_stop(recovery_decision):
                     return _downgrade_after_write(
                         DEGRADED_REASON_QUALITY_FLOOR,
-                        stages=(AI_STAGE_FULL_SUPPLEMENT,),
                     )
                 _raise_recovery_stop(
                     recovery_decision.reason_code,
                     recovery_decision.quality_problem_codes,
                 )
             if not supplement_summary_release_ready:
+                record_supplement_quality_stop(
+                    composition_diagnostics, "supplement_summary_insufficient",
+                    logger=logger,
+                )
                 # 두 번째 후보의 manifest·render·품질 평가·receipt·정책 결정을
                 # 모두 다시 만든 뒤에야 닫는다. 조기 예외로 파생물 재계산을
                 # 건너뛰거나 세 번째 보충으로 흐르지 않는다.
                 if fallback_allowed:
                     return _downgrade_after_write(
                         DEGRADED_REASON_QUALITY_FLOOR,
-                        stages=(AI_STAGE_FULL_SUPPLEMENT,),
                     )
                 _raise_recovery_stop("supplement_summary_insufficient")
             validation_receipts = (primary_receipt, supplement_receipt)

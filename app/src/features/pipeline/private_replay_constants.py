@@ -3,6 +3,10 @@
 REPLAY_ENABLED_ENV = "REPORT_LOCAL_REPLAY_ENABLED"
 REPLAY_RUN_ENV = "REPORT_LOCAL_REPLAY_RUN"
 REPLAY_SCHEMA_VERSION = "provider-replay-v1"
+REPLAY_PARSED_SCHEMA_VERSION = "provider-replay-parsed-v1"
+REPLAY_PARSED_CAPTURE_KIND = "parsed-provider-payload"
+REPLAY_PARSED_CAPTURE_SCHEMA = "canonical-json-utf8-v1"
+REPLAY_NEWS_STAGE = "news_grounding"
 REPLAY_FINGERPRINT_VERSION = "sha256-utf8-raw-v1"
 REPLAY_DIRECTORY = (".local_evaluation_runs", "private_replay")
 REPLAY_MAX_RECORD_BYTES = 2 * 1024 * 1024

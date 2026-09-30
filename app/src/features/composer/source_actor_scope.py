@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from src.features.composer.entity_scope_constraint_constants import (
-    SOURCE_CONTEXT_SELF_RE, SOURCE_CONTEXT_GROUP_RE,
+    SOURCE_CONTEXT_SELF_RE, SOURCE_CONTEXT_GROUP_RE, SOURCE_CONTEXT_FLOW_STATEMENT_RE,
 )
 from src.features.composer.scope_constants import SCOPE_CONDITION_UNBOUND
 from src.shared.company_identity import exact_company_names_equivalent
@@ -26,7 +26,8 @@ def _relation_recorded(actor: str, sources: Mapping[str, str]) -> bool:
     ) for source in sources.values())
 
 
-def source_actor_problem(candidate_text: str, context_json: str, sources: Mapping[str, str] | None = None) -> str:
+def source_actor_problem(candidate_text: str, context_json: str, sources: Mapping[str, str] | None = None,
+                         *, cells: Sequence[str] | None = None) -> str:
     context = parse_source_context(context_json)
     if not context:
         return ""
@@ -42,6 +43,21 @@ def source_actor_problem(candidate_text: str, context_json: str, sources: Mappin
         actor = actor[:-1]
     actor_key = _name(actor)
     source_texts = sources or {}
+    if cells is not None:
+        nonempty = tuple(cell.strip() for cell in cells if cell.strip())
+        checked = tuple(
+            "" if _name(cell) == actor_key else source_actor_problem(cell, context_json, source_texts)
+            for cell in nonempty
+        )
+        # 실제 행위자를 명시한 칸이 있어야 다른 명사형 칸의 주어 생략을 허용한다.
+        # 전체 행의 예정 단계 검사는 위에서 먼저 수행했다.
+        if nonempty and any(not issue for issue in checked):
+            if all(not issue or (
+                not SOURCE_CONTEXT_FLOW_STATEMENT_RE.search(cell)
+                and not SOURCE_CONTEXT_SELF_RE.search(cell)
+            ) for cell, issue in zip(nonempty, checked)):
+                return ""
+        return SCOPE_CONDITION_UNBOUND
     relation_recorded = _relation_recorded(actor, source_texts)
     units = re.split(r"(?<=[.。;])\s*|\s+(?=(?:회사|당사|동사|본사)(?:는|가|의)\s)", candidate_text)
     for unit in units:

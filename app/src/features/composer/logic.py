@@ -30,6 +30,8 @@ from src.features.composer.evidence_pair_selection import (
     render_evidence_pair_index,
     writer_visible_fragments,
 )
+from src.features.composer.writer_schema import with_full_writer_schema
+from src.features.composer.writer_schema_constants import FULL_REQUIRED_SLOT_SENTENCE_GUIDE
 from src.features.composer.partial_evidence import PartialEvidenceView
 from src.features.composer.partial_evidence_constants import (
     EXACT_EVIDENCE_SCOPE_GUIDE,
@@ -660,6 +662,7 @@ def build_section_prompt(
             interpretation_cap=MAX_INTERPRETED_SENTENCES_PER_SECTION,
         ),
         claim_slot_guide,
+        FULL_REQUIRED_SLOT_SENTENCE_GUIDE if pair_choices else "",
         FULL_VISIBLE_EVIDENCE_GUIDE if show_supported_claim_slots else "",
         # 7장은 «경로표»를 함께 내야 해서 스키마 안내를 통째로 바꾼다.
         # 덧붙이면 기본 안내의 「이 JSON만 출력한다」와 충돌해 작가가 경로표를
@@ -673,14 +676,22 @@ def build_section_prompt(
     ]
     if not shared_evidence_prefix:
         # 기존 순서 그대로 — 이 경로의 결과는 바이트가 예전과 같아야 한다.
-        return "".join([header, "\n", *section_parts, fragments_block])
+        prompt = "".join([header, "\n", *section_parts, fragments_block])
+        return with_full_writer_schema(
+            prompt, section_id, pair_choices,
+            news_fragment_ids=tuple(f.fragment_id for f in writer_fragments if _is_news_fragment(f)),
+        ) if pair_choices else prompt
     # 구분자는 원래 쓰던 것만 쓴다: 머리말 뒤의 "\n"은 그 자리에 두고, 조각
     # 블록 뒤에 "\n"을 하나 넣어 장별 지시와 한 줄 띄운다.
     shared_prefix = f"{header}\n{fragments_block}\n"
-    return CacheablePrompt(
+    prompt = CacheablePrompt(
         shared_prefix + "".join(section_parts),
         cache_prefix_chars=len(shared_prefix),
     )
+    return with_full_writer_schema(
+        prompt, section_id, pair_choices,
+        news_fragment_ids=tuple(f.fragment_id for f in writer_fragments if _is_news_fragment(f)),
+    ) if pair_choices else prompt
 
 
 # ══════════════════════════════════════════════════════════
@@ -1287,6 +1298,7 @@ def _normalize_packet_fragments(
             domain_redirect_from_host=fragment.domain_redirect_from_host,
             domain_redirect_to_host=fragment.domain_redirect_to_host,
             bound_source=fragment.bound_source,
+            source_context_json=fragment.source_context_json,
         )
         for fragment in normalized
     )

@@ -44,6 +44,8 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     PRIMARY_QUALITY_STOP_CODES_FIELD, PRIMARY_QUALITY_STOP_SECTION_FIELDS,
     PRIMARY_QUALITY_STOP_SAFETY_TOTAL_FIELD,
     PRIMARY_QUALITY_STOP_SAFETY_KINDS_FIELD,
+    SUPPLEMENT_QUALITY_STOP_STEP, SUPPLEMENT_QUALITY_STOP_STATE,
+    SUPPLEMENT_QUALITY_STOP_REASONS,
     SECTION_EXECUTION_STEP,
     SECTION_EXECUTION_COUNT_FIELDS,
     SECTION_EXECUTION_PARTIAL_COUNT_FIELDS,
@@ -278,6 +280,7 @@ def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], 
             _style(record) if step == STYLE_STEP else
             _safety_block(record) if step == SAFETY_BLOCK_STEP else
             _primary_quality_stop(record) if step == PRIMARY_QUALITY_STOP_STEP else
+            _supplement_quality_stop(record) if step == SUPPLEMENT_QUALITY_STOP_STEP else
             _release_mode(record) if step == RELEASE_MODE_STEP else None
         )
         if normalized is not None:
@@ -439,6 +442,17 @@ def _safety_block(record: Mapping) -> dict[str, object] | None:
 
 _QUALITY_CODES = frozenset(code.value for code in QualityProblemCode)
 _QUALITY_SECTIONS = frozenset(STRICT_REQUIRED_QUALITY_SECTION_IDS)
+
+
+def _supplement_quality_stop(record: Mapping) -> dict[str, object] | None:
+    """수행된 보충의 실패를 미수행 단계와 구분하고 닫힌 이유만 남긴다."""
+    reason = record.get("회복사유")
+    if (record.get("상태") != SUPPLEMENT_QUALITY_STOP_STATE
+            or not isinstance(reason, str)
+            or reason not in SUPPLEMENT_QUALITY_STOP_REASONS):
+        return None
+    return {"step": SUPPLEMENT_QUALITY_STOP_STEP,
+            "상태": SUPPLEMENT_QUALITY_STOP_STATE, "회복사유": reason}
 
 
 def _primary_quality_stop(record: Mapping) -> dict[str, object] | None:

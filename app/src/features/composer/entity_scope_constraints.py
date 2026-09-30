@@ -1,4 +1,4 @@
-"""같은 공시 문서의 «인용하지 않은» 관계법인 회계범위 각주를 제약으로만 운반한다.
+"""자기 인용의 법인·단계와 같은 공시의 인용 밖 관계법인 각주를 제약으로 운반한다.
 
 ★ 4차 실측 [27] — 「…Japan을 종속기업으로 두고 있으며 … 거래」는 특수관계자 조각만
   인용했다. 같은 공시의 «종속기업에서 제외» 각주가 검수 묶음에 와 있어도 후보의
@@ -18,7 +18,8 @@
     먼저 인용의 알려진 값과 어긋나는 각주를 빼고, 남은 context 전체(인용 + 각주)에서도
     알려진 값이 둘 이상이면 그 문서의 context를 만들지 않는다 — 인용 값을 모를 때
     서로 다른 각주 중 하나를 첫 값·다수결·최신 날짜로 고를 근거가 없기 때문이다.
-빈 신원(legacy 직접 호출)은 대상 밖이다 — 해결한 것처럼 신원·해시·기간을 지어내지 않는다.
+빈 신원(legacy 직접 호출)에는 인용 밖 각주를 연결하지 않는다. 자기 인용에 명시된
+법인·예정 단계는 소비하되 신원·해시·기간을 지어내지 않는다.
 """
 
 from __future__ import annotations
@@ -83,19 +84,32 @@ def _consistent(fragments: Sequence[CollectedFragment]) -> bool:
 def build_entity_scope_contexts(
     citations: Sequence[str], frag_by_id: Mapping[str, CollectedFragment],
 ) -> tuple[EntityScopeContext, ...]:
-    """후보가 인용한 DART 문서마다, 같은 문서의 인용 밖 등록 각주가 있을 때만 context를 만든다.
+    """자기 인용의 명시 문맥과, 신원이 일치하는 DART 문서의 인용 밖 각주를 운반한다.
 
-    인용 순서대로 문서를 한 번씩 본다. 제약 각주가 없으면 그 문서의 context는 없다.
+    명시 문맥과 제약 각주가 모두 없으면 context를 만들지 않는다.
     인용·조각 객체는 읽기만 한다.
     """
 
     cited_ids = tuple(dict.fromkeys(fid for fid in citations if fid in frag_by_id))
     cited_set = frozenset(cited_ids)
+    actor_relation_sources = {cid: frag_by_id[cid].text for cid in cited_ids}
     contexts: list[EntityScopeContext] = []
     seen: set[str] = set()
     for fid in cited_ids:
         identity = frag_by_id[fid].document_identity
-        if identity in seen or not is_canonical_dart_identity(identity):
+        if not is_canonical_dart_identity(identity):
+            # 자기 인용의 명시 법인·단계는 문서 신원을 추정하지 않는 제약이다.
+            # 빈/비정규 신원에서도 소비하되 인용 밖 각주는 추가하지 않는다.
+            fragment = frag_by_id[fid]
+            if fragment.source_context_json:
+                contexts.append(EntityScopeContext(
+                    document_identity=identity,
+                    cited_sources={fid: fragment.text}, constraint_sources={},
+                    source_contexts=(fragment.source_context_json,),
+                    actor_relation_sources=actor_relation_sources,
+                ))
+            continue
+        if identity in seen:
             continue
         seen.add(identity)
         cited = [frag_by_id[cid] for cid in cited_ids if frag_by_id[cid].document_identity == identity]
@@ -110,13 +124,16 @@ def build_entity_scope_contexts(
         }
         # 인용 값과 맞는 각주만 남긴 뒤에도 context 전체에 알려진 값이 둘 이상이면
         # (인용 값을 몰라 각주끼리 어긋남) 이 문서의 제약은 만들지 않는다.
-        if (not constraints and not actor_contexts) or not _consistent((*cited, *constraints.values())):
+        if not _consistent((*cited, *constraints.values())):
+            # 문서 전체 신원의 충돌은 각주 결속을 막지만 자기 인용 제약을 지우지 않는다.
+            constraints = {}
+        if not constraints and not actor_contexts:
             continue
         contexts.append(EntityScopeContext(
             document_identity=identity,
             cited_sources={fragment.fragment_id: fragment.text for fragment in cited},
             constraint_sources={other_id: fragment.text for other_id, fragment in constraints.items()},
             source_contexts=actor_contexts,
-            actor_relation_sources={cid: frag_by_id[cid].text for cid in cited_ids} if actor_contexts else {},
+            actor_relation_sources=actor_relation_sources if actor_contexts else {},
         ))
     return tuple(contexts)

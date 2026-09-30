@@ -110,6 +110,7 @@ def search_plan(company: NewsCompanyContext, as_of: dt.date) -> tuple[tuple[str,
             industry_queries.append((f"{anchor.business_item} {region} 산업 문제", "sim",
                                      f"industry_{topic}:{anchor.anchor_id}", recent_months))
         # 회사 검색 두 개를 유지하고 기존 뒤쪽 탐색을 대체한다. 총 호출은 늘리지 않는다.
+        industry_queries = list(dict.fromkeys(industry_queries))
         plan = plan[:ic.INDUSTRY_COMPANY_QUERY_COUNT] + industry_queries + plan[ic.INDUSTRY_COMPANY_QUERY_COUNT:]
         plan = plan[:original_length]
     return tuple(plan)

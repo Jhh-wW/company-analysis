@@ -603,6 +603,7 @@ def _context_texts(value: Mapping[str, str] | None) -> tuple[str, ...]:
 
 def document_entity_scope_problem(
     candidate_text: str, contexts: Sequence[EntityScopeContext],
+    *, cells: Sequence[str] | None = None,
 ) -> str:
     """같은 공시 문서의 등록된 제외 각주를 «제약으로만» 소비하는 진입점.
 
@@ -626,7 +627,7 @@ def document_entity_scope_problem(
     from src.features.composer.source_actor_scope import source_actor_problem
     for context in contexts:
         for source_context in context.source_contexts:
-            problem = source_actor_problem(candidate_text, source_context, context.actor_relation_sources)
+            problem = source_actor_problem(candidate_text, source_context, context.actor_relation_sources, cells=cells)
             if problem:
                 return problem
     known_sources: dict[str, str] = {}

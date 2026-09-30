@@ -97,7 +97,8 @@ def extend_prompt(prompt: str, company: NewsCompanyContext) -> str:
 
 def split_response(raw: object, *, articles: list[tuple[NewsCandidate, str]],
                    company: NewsCompanyContext, as_of: dt.date,
-                   full_body_hashes: dict[str, str]) -> tuple[object, tuple[IndustryProblemEvidence, ...], dict[str, int]]:
+                   full_body_hashes: dict[str, str],
+                   observations: Counter[str] | None = None) -> tuple[object, tuple[IndustryProblemEvidence, ...], dict[str, int]]:
     if not company.business_anchors:
         return raw, (), {}
     items = parse_grounded_payload(raw)
@@ -132,6 +133,10 @@ def split_response(raw: object, *, articles: list[tuple[NewsCandidate, str]],
             rejected["industry_invalid_item"] += 1
             continue
         candidate, body = candidate_body
+        if observations is not None:
+            observations["응답기사"] += 1
+            observations["빈제안기사"] += int(not entries)
+            observations["제안근거"] += len(entries)
         for entry in entries:
             try:
                 if type(entry) is not dict or set(entry) != set(ic.INDUSTRY_REQUIRED_FIELDS):
@@ -161,6 +166,10 @@ def split_response(raw: object, *, articles: list[tuple[NewsCandidate, str]],
                     applicability_quote=entry["applicability_quote"],
                     document_content_sha256=full_body_hashes[candidate.source_url], analysis_response_sha256=response_hash,
                 ))
+                if observations is not None:
+                    observations["검증생존"] += 1
             except (KeyError, TypeError, ValueError):
                 rejected["industry_unbound_problem"] += 1
+                if observations is not None:
+                    observations["검증탈락"] += 1
     return {"items": direct}, tuple(problems), dict(rejected)

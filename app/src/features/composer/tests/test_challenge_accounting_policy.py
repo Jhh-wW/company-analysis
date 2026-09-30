@@ -61,3 +61,54 @@ def test_hypothetical_events_and_planned_service_are_not_current_problems():
         "고객에게 대출 관리 플랫폼을 제공할 계획이며 충당부채를 인식한다.",
     ):
         assert is_challenge_accounting_policy(text)
+
+
+def test_comma_cannot_remove_accounting_subject_from_final_guard():
+    for text in (
+        "운송용역의 거래가격을 배분하며, 발생한 원가를 기준으로 진행률을 산정하고 추정치를 매년 검토한다.",
+        "회사는 외화 거래를 수행하므로 환율변동으로 인한 위험에 노출되어 있다.",
+        "회사는 신용위험을 관리하며, 위험을 식별하여 정기적으로 대응한다.",
+    ):
+        assert is_challenge_accounting_policy(text)
+        assert all(accounting_policy_matched_rules(text, None, "current_challenges"))
+
+
+def test_actual_business_event_and_fx_customer_service_remain():
+    for text in (
+        "환율변동 위험이 커져 원재료 조달이 중단되었다.",
+        "회사는 고객에게 외환 위험관리 솔루션을 제공한다.",
+        "거래가격을 배분하며, 제품 결함으로 리콜을 실시했다.",
+        "환율위험을 정기적으로 관리하며, 고객 납품이 중단되었다.",
+    ):
+        assert not is_challenge_accounting_policy(text)
+
+
+def test_customer_financial_services_and_real_customer_pressure_are_preserved():
+    for text in (
+        "회사는 기업 고객에게 공정가치 평가보고서를 발행합니다.",
+        "회사는 고객을 대상으로 대출 서비스를 제공한다.",
+        "회사는 고객에게 신용위험 평가 서비스를 제공한다.",
+        "회사는 차주에게 대출 서비스를 제공합니다.",
+        "회사는 대출 고객 확보에 어려움을 겪고 있다.",
+        "고객 대출 연체율이 높아 회사가 심사 기준을 강화했다.",
+        "고객 대출에서 부실률이 급등했고 회사는 신규 심사모형을 도입했다.",
+        "회사는 반품 충당부채를 추정하며, 불량을 줄이기 위해 검사 공정을 자동화했다.",
+    ):
+        assert not is_challenge_accounting_policy(text), text
+
+
+def test_conditional_discovered_defect_is_not_an_actual_event():
+    text = "회사는 제품 보증기간 중 결함이 발견되었을 때 수익을 인식하지 않고 보증충당부채를 추정합니다."
+    assert is_challenge_accounting_policy(text)
+    assert all(accounting_policy_matched_rules(text, None, "current_challenges"))
+
+
+def test_financial_term_does_not_override_independent_business_clause():
+    for text in (
+        "은행은 대출 신청 고객의 긴 대기시간을 줄이기 위해 비대면 심사를 도입했다.",
+        "회사는 금융부채를 측정하며, 반도체 고객 수요가 줄어 생산라인 가동률이 떨어졌다.",
+        "회사는 장비 납기 지연을 해결하기 위해 대출을 받아 신규 조립라인을 설치했다.",
+        "회사는 공급 지연에 대응하기 위해 차입금으로 신규 생산설비를 도입했다.",
+    ):
+        assert not is_challenge_accounting_policy(text)
+    assert is_challenge_accounting_policy("회사는 고객에게 대출 서비스를 제공할 예정이다.")

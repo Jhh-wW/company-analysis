@@ -15,6 +15,7 @@ from src.core.provider_gateway import gateway
 from src.features.news_intake import constants as c
 from src.features.news_intake.analysis_result_cache import analysis_request
 from src.features.news_intake.industry_context import extend_prompt, extend_schema, industry_candidate, split_response
+from src.features.news_intake import industry_constants as ic
 from src.features.news_intake.grounded import parse_grounded_payload
 from src.features.news_intake.body_prefetch import (
     ArticleFetchJob, ArticleFetchOutcome, BodyFetchConcurrency, BodyFetchLane,
@@ -104,6 +105,9 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     seen_urls: set[str] = set()
     all_excerpts: list[GroundedNewsExcerpt] = []
     industry_problems = []
+    industry_observations: Counter[str] = Counter()
+    industry_read_ids: set[str] = set()
+    industry_analysis_ids: set[str] = set()
     windows: list[int] = []
     window_counts: dict[str, dict[str, int]] = {}
     deferred: dict[int, list[tuple[NewsCandidate, str]]] = {}
@@ -170,6 +174,9 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             return
         analysis_calls += 1
         prompt_chars += len(prompt)
+        if company.business_anchors:
+            industry_observations["검수입력기사"] += len(batch)
+            industry_analysis_ids.update(candidate.id for candidate, _ in batch if industry_candidate(candidate))
         try:
             schema = extend_schema(build_grounded_schema(batch), company)
             with analysis_request(
@@ -208,6 +215,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                 response = None
         direct_response, industry_found, industry_rejected = split_response(
             response, articles=batch, company=company, as_of=as_of, full_body_hashes=document_hashes,
+            observations=industry_observations,
         )
         industry_problems.extend(industry_found)
         excluded.update(industry_rejected)
@@ -450,6 +458,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                     excluded["article_body_unavailable"] += 1
                     continue
                 stages[outcome.stage] += 1
+                if industry_candidate(read_candidate):
+                    industry_read_ids.add(read_candidate.id)
                 seen_urls.add(read_candidate.source_url)
                 actual_months = candidate_window(read_candidate, as_of)
                 if actual_months > months:
@@ -621,6 +631,22 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         "캐시재사용가능": snapshot.cache_eligible and not reason_codes and not budgets and not incomplete_codes,
         "장별조각": dict(Counter(item.section_id for item in chosen)),
     }
+    if company.business_anchors:
+        industry_candidates = tuple(item for item in snapshot.candidates if industry_candidate(item))
+        industry_attempts = tuple(attempt for attempt in snapshot.query_attempts
+                                  if attempt.topic.startswith(ic.INDUSTRY_TOPIC_PREFIX))
+        diagnostics["산업탐색"] = {
+            "검색호출": len(industry_attempts),
+            "검색반환행": sum(attempt.returned_count for attempt in industry_attempts),
+            "신뢰후보기사": len(industry_candidates),
+            "본문시도기사": sum(item.id in attempted_candidate_ids for item in industry_candidates),
+            "본문미시도기사": sum(item.id not in attempted_candidate_ids for item in industry_candidates),
+            "본문읽기사": len(industry_read_ids),
+            "분석입력기사": len(industry_analysis_ids),
+        }
+        # 회사 검색에서 찾은 기사에도 산업문제를 검수한다. 이 집계는 산업 검색 결과만의 수가 아니다.
+        diagnostics["산업검수"] = {name: industry_observations[name]
+                                   for name in ic.INDUSTRY_RESPONSE_OBSERVATION_FIELDS}
     return NewsCollectionResult(
         fragments=fragments, document_hashes={url: document_hashes[url] for url in chosen_urls},
         diagnostics=diagnostics, snapshot_digest=snapshot.digest, articles=articles,

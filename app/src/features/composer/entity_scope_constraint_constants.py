@@ -24,3 +24,8 @@ ENTITY_SCOPE_CONFLICT_FIELDS: Final[tuple[str, ...]] = ("document_content_sha256
 ENTITY_SCOPE_EXCLUSION_STAGE: Final[str] = "entity_scope_exclusion"
 SOURCE_CONTEXT_SELF_RE = re.compile(r"(?:^|[.。;]\s*)(?:회사|당사|동사|본사)(?:는|가|의)\s")
 SOURCE_CONTEXT_GROUP_RE = re.compile(r"^(?:연결회사|연결그룹|연결기업)(?:는|은|가|이|의)\s")
+# 표의 짧은 명사형 칸만 앞뒤 칸의 명시 행위자와 함께 읽는다. 새 서술문은 면제하지 않는다.
+SOURCE_CONTEXT_FLOW_STATEMENT_RE = re.compile(
+    r"[.!?。;]|(?:^|\s)\S+(?:은|는|가)\s|"
+    r"(?:한다|했다|하였다|되었다|됩니다|합니다|입니다|있다|없다|했음|하였음|되었음)\s*$"
+)

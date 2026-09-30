@@ -23,30 +23,73 @@ ACTUAL_EVENT_PATTERN: Final[str] = (
     r"(?:제품|생산|품질|서비스)[^.!?。;\n]{0,40}(?:결함이발견|사고가발생)"
 )
 BUSINESS_SERVICE_PATTERN: Final[str] = (
-    r"(?:고객|고객사|기업|거래처)(?:에게|에|대상으로|을위해|를위해)"
-    r"[^.!?。;\n]{0,80}(?:회계|감사|세무|수익인식|반품관리|보증관리|금융|대출|유동성)"
+    r"(?:고객|고객사|기업|거래처|차주)(?:에게|에|을대상으로|를대상으로|대상으로|을위해|를위해)"
+    r"[^.!?。;\n]{0,80}(?:회계|감사|세무|수익인식|반품관리|보증관리|금융|대출|유동성|외환|환율|외화|공정가치|신용위험평가)"
     r"[^.!?。;\n]{0,40}(?:서비스|자문|솔루션|플랫폼|시스템|상품|보고서)"
     r"[^.!?。;\n]{0,16}(?:제공|판매|운영|개발|발행)(?:한다|합니다|하며|하고있|했|하였|중|해왔)"
 )
+PLANNED_BUSINESS_SERVICE_PATTERN: Final[str] = (
+    r"(?:고객|고객사|기업|거래처|차주)(?:에게|에|을대상으로|를대상으로|대상으로|을위해|를위해)"
+    r"[^.!?。;\n]{0,80}(?:회계|감사|세무|금융|대출|유동성|외환|환율|공정가치)"
+    r"[^.!?。;\n]{0,40}(?:서비스|자문|솔루션|플랫폼|시스템|상품|보고서)"
+    r"[^.!?。;\n]{0,16}(?:제공|판매|운영|개발|발행)(?:할|예정|계획)"
+)
+PLANNED_BUSINESS_SERVICE_RE = re.compile(PLANNED_BUSINESS_SERVICE_PATTERN)
 POLICY_SUBJECT_RE = re.compile(POLICY_SUBJECT_PATTERN)
-FINANCIAL_SUBJECT_PATTERN: Final[str] = r"유동성|금융부채|공정가치|차입금|차입이자|대출|부채상환|충당부채"
+FINANCIAL_SUBJECT_PATTERN: Final[str] = (
+    r"유동성|금융부채|공정가치|차입금|차입이자|대출|부채상환|충당부채|"
+    r"(?:환율|외환|외화)(?:변동)?[^.!?。;\n]{0,32}위험|"
+    r"(?:시장|신용|이자율|금리)(?:가격)?(?:변동)?위험|"
+    r"(?:금융|재무)위험"
+)
 BUSINESS_OPERATION_PATTERN: Final[str] = (
-    r"(?:생산|납품|공장|주문|판매|공급|제품|고객|차주)"
+    r"(?:생산|납품|공장|주문|판매|공급|조달|제품|고객|차주)"
     r"[^.!?。;\n]{0,48}(?:중단|지연|취소|차질|피해|연체|불량|결함|손실|이탈)"
     r"(?:했|하였|됐|되었|하여|하고있|이발생|가발생|율이상승|가증가|이증가|으로|로)|"
     r"(?:고객|차주)[^.!?。;\n]{0,32}(?:연체율|부실률|대출손실률)"
-    r"[^.!?。;\n]{0,16}(?:상승|급증|증가)"
+    r"[^.!?。;\n]{0,16}(?:상승|급증|급등|증가|높아|높다|높은)|"
+    r"(?:고객|차주)[^.!?。;\n]{0,32}(?:확보|유치)"
+    r"[^.!?。;\n]{0,24}어려움(?:을)?겪(?:고있|었|고있었)"
 )
+BUSINESS_RESPONSE_PATTERN: Final[str] = (
+    r"(?:불량|결함|품질|반품|생산차질|납품지연)[^.!?。;\n]{0,48}"
+    r"(?:검사|검수|생산|제조|품질관리)(?:공정|체계|설비|시스템)?"
+    r"[^.!?。;\n]{0,24}(?:자동화|개선|교체|증설|개편|강화|도입)"
+    r"(?:했|하였|하여|하고있)"
+)
+BUSINESS_RESPONSE_RE = re.compile(BUSINESS_RESPONSE_PATTERN)
 FINANCIAL_SUBJECT_RE = re.compile(FINANCIAL_SUBJECT_PATTERN)
+FINANCIAL_TREATMENT_PATTERN: Final[str] = (
+    r"잔액|상환|공정가치|측정|평가|회계|인식|충당|차입이자|헤지|"
+    r"위험[^.!?。;\n]{0,32}(?:관리|식별|노출|대응|변경)"
+)
+FINANCIAL_TREATMENT_RE = re.compile(FINANCIAL_TREATMENT_PATTERN)
+FINANCIAL_RISK_SUBJECT_PATTERN: Final[str] = (
+    r"유동성|(?:환율|외환|외화)(?:변동)?[^.!?。;\n]{0,32}위험|"
+    r"(?:시장|신용|이자율|금리)(?:가격)?(?:변동)?위험|(?:금융|재무)위험"
+)
+FINANCIAL_RISK_SUBJECT_RE = re.compile(FINANCIAL_RISK_SUBJECT_PATTERN)
+POLICY_CONTINUATION_PATTERN: Final[str] = (
+    r"(?:원가|손익|수익|매출|반품|할인|보증|충당|계약|거래가격|회계|변동대가|수행의무|인도)"
+    r"[^.!?。;\n]{0,80}(?:배부|배분|인식|추정|측정|계상|산출|산정|처리|평가)|"
+    r"재화[^.!?。;\n]{0,24}(?:인도|이전)[^.!?。;\n]{0,48}(?:이전|발생|수령)|"
+    r"(?:수량)?할인[^.!?。;\n]{0,32}제공(?:되는|하는)경우|"
+    r"(?:위험|외화|환율|금융부채|차입금)[^.!?。;\n]{0,32}(?:관리|식별|노출|대응|평가)"
+)
+POLICY_CONTINUATION_RE = re.compile(POLICY_CONTINUATION_PATTERN)
 BUSINESS_OPERATION_RE = re.compile(BUSINESS_OPERATION_PATTERN)
 HYPOTHETICAL_EVENT_PATTERN: Final[str] = (
     r"(?:결함|사고|손실|반품|연체율|불량률)[^.!?。;\n]{0,48}"
     r"(?:발견되면|발생할|상승할|증가할|급증할|중단할)|"
-    r"(?:발생|발견|상승|증가|중단)(?:하는|되는|한|된)경우"
+    r"(?:발생|발견|상승|증가|급등|중단)(?:하는|되는|한|된)경우|"
+    r"(?:발생|발견|상승|증가|급등|중단)(?:되었|했|하였|한|된|될|할)?(?:을|는)?때|"
+    r"(?:연체율|부실률|대출손실률)[^.!?。;\n]{0,24}(?:높을|높은)경우"
 )
 HYPOTHETICAL_EVENT_RE = re.compile(HYPOTHETICAL_EVENT_PATTERN)
 POLICY_SUBCLAUSE_PATTERN: Final[str] = r"(?<!\d),(?!\d)\s*|(?<=으며)\s+"
 POLICY_SUBCLAUSE_RE = re.compile(POLICY_SUBCLAUSE_PATTERN)
+POLICY_SENTENCE_PATTERN: Final[str] = r"(?<!\d)\.|\.(?!\d)|[;!?。\n]"
+POLICY_SENTENCE_RE = re.compile(POLICY_SENTENCE_PATTERN)
 POLICY_TREATMENT_RE = re.compile(POLICY_TREATMENT_PATTERN)
 ACTUAL_EVENT_RE = re.compile(ACTUAL_EVENT_PATTERN)
 BUSINESS_SERVICE_RE = re.compile(BUSINESS_SERVICE_PATTERN)

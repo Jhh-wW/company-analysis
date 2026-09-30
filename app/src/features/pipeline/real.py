@@ -7745,6 +7745,40 @@ def _news_default_classifier(engine: Any, client: Any) -> Callable[[str], str]:
     return classify
 
 
+def _record_local_news_analysis_replay(
+    *, prompt: str, payload: Any, schema: dict[str, Any], model: str,
+    usage: Any, max_tokens: int, started: float,
+) -> None:
+    """명시적인 로컬 평가에서 실제 호출의 해석된 JSON만 보관한다."""
+    from src.features.pipeline.private_replay import (
+        local_provider_replay_enabled, record_local_provider_replay,
+    )
+    from src.features.pipeline.private_replay_constants import (
+        MILLISECONDS_PER_SECOND, REPLAY_DIAGNOSTIC_STEP, REPLAY_NEWS_STAGE, REPLAY_PARSED_CAPTURE_KIND,
+    )
+    if not local_provider_replay_enabled():
+        return
+    stored = False
+    try:
+        response = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        stored = record_local_provider_replay(
+            prompt=prompt, response=response, stage=REPLAY_NEWS_STAGE,
+            model=model, response_schema=schema,
+            output_limit=max_tokens, stop_reason=str(usage.get("stop_reason", "")) if isinstance(usage, dict) else "",
+            elapsed_ms=max(0, int((time.monotonic() - started) * MILLISECONDS_PER_SECOND)),
+            capture_kind=REPLAY_PARSED_CAPTURE_KIND,
+        ) is True
+    except Exception:  # noqa: BLE001 — 보관 실패는 완료된 호출과 정산을 바꾸지 않는다
+        pass
+    try:
+        run_diagnostics.current_steps().append({
+            "step": REPLAY_DIAGNOSTIC_STEP, "단계": REPLAY_NEWS_STAGE,
+            "시도수": 1, "저장수": int(stored), "미보관수": int(not stored),
+        })
+    except Exception:  # noqa: BLE001 — 진단 실패도 실제 결과에 전파하지 않는다
+        pass
+
+
 def _news_grounded_analyzer(
     engine: Any, client: Any
 ) -> Callable[[str, dict[str, Any], int], Any]:
@@ -7760,6 +7794,7 @@ def _news_grounded_analyzer(
         def provider() -> ProviderAnalysis:
             before_calls, before_usage = metered._provider_call_count, len(metered.usages)
             before_dispatch = metered._provider_dispatch_count
+            started = time.monotonic()
             try:
                 payload, usage = engine._ask(client, prompt, schema, max_tokens=max_tokens)
             finally:
@@ -7775,6 +7810,12 @@ def _news_grounded_analyzer(
                 and not usage.get("parse_failed") and not usage.get("output_limit_reached")
                 and not usage.get("truncation_suspected")
             )
+            if metered._provider_dispatch_count - before_dispatch == 1:
+                _record_local_news_analysis_replay(
+                    prompt=prompt, payload=payload, schema=schema, usage=usage,
+                    model=str(events[0].get(USAGE_MODEL_KEY) or engine.MODEL) if len(events) == 1 else str(engine.MODEL),
+                    max_tokens=max_tokens, started=started,
+                )
             return ProviderAnalysis(payload, complete=complete)
 
         namespace = AnalysisNamespace(

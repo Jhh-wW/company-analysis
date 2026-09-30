@@ -23,6 +23,7 @@ from src.shared.report_quality.composition_diagnostic_constants import (
     PRIMARY_QUALITY_STOP_CODES_FIELD, PRIMARY_QUALITY_STOP_SECTION_FIELDS,
     PRIMARY_QUALITY_STOP_SAFETY_TOTAL_FIELD,
     PRIMARY_QUALITY_STOP_SAFETY_KINDS_FIELD,
+    SUPPLEMENT_QUALITY_STOP_STEP, SUPPLEMENT_QUALITY_STOP_STATE,
     SAFETY_BLOCK_KINDS_FIELD,
     SAFETY_BLOCK_ROUND_FIELD,
     SAFETY_BLOCK_SECTION_ORDER,
@@ -330,6 +331,22 @@ def primary_quality_stop_record(
     }
 
 
+def record_supplement_quality_stop(
+    sink: list[dict[str, object]], reason_code: str, *, logger: logging.Logger,
+) -> None:
+    """이미 수행한 보충의 결과를 기록하며 품질·출고 판정에는 관여하지 않는다."""
+    try:
+        normalized = observed_composition_steps(({
+            "step": SUPPLEMENT_QUALITY_STOP_STEP,
+            "상태": SUPPLEMENT_QUALITY_STOP_STATE, "회복사유": reason_code,
+        },))
+        if normalized:
+            sink.append(normalized[0])
+    except Exception as error:  # noqa: BLE001 - 진단 실패는 제품 판정과 독립이다.
+        logger.warning("FULL 보충 품질 중단 진단을 남기지 못했습니다(%s)",
+                       type(error).__name__)
+
+
 def record_primary_quality_stop(
     sink: list[dict[str, object]],
     assessment: GenerationAssessment,
@@ -355,6 +372,7 @@ __all__ = [
     "log_generation_quality_observation",
     "record_full_safety_block",
     "record_primary_quality_stop",
+    "record_supplement_quality_stop",
     "primary_quality_stop_record",
     "safety_block_record",
     "summarize_safety_problems",

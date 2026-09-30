@@ -81,6 +81,7 @@ from src.features.composer.constants import (
 from src.features.composer.logic import extract_json_payload
 from src.features.composer.flow_generic_cells import is_generic_flow_cell
 from src.features.composer.flow_review_binding import bind_reviewed_flow_row
+from src.features.composer.entity_scope_constraints import build_entity_scope_contexts
 from src.features.composer.flow_review_constants import FLOW_REVIEW_BINDING_INVALID
 from src.shared.report_generation.models import exact_text_sha256
 from src.features.composer.verdict_number import coerce_verdict_number
@@ -1147,6 +1148,11 @@ def _review_rows(
         # ★ 보고서 기준일. 안 넘기면 executive_status_guard 가 날짜 문턱 없이
         #   이탈 «표지» 존재만으로 판정한다(가드 머리말 참고).
         baseline_date=baseline_date,
+        # 본문·묶음 검수와 같은 인용 법인·예정 단계 및 제약 각주를 소비한다.
+        entity_scope_by_number={
+            number: build_entity_scope_contexts(row.citations, fragments_by_id or {})
+            for number, _section, row in items
+        },
     )
     # 같은 파서로 미래 근거를 읽고, 중복 번호는 근거 없음으로 처리한다.
     future_evidence = future_plan_entries_by_number(raw)

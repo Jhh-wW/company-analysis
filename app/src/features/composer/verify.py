@@ -42,6 +42,8 @@ from src.features.composer.accounting_policy_constants import (
 from src.features.composer.accounting_policy_guard import (
     accounting_policy_mixed, accounting_policy_problem,
 )
+from src.features.composer.challenge_business_scope import challenge_business_problem
+from src.features.composer.source_actor_scope import source_actor_problem
 from src.features.composer.competitive_scope_guard import competitive_section_evidence_problem
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_accounting_policy_problem,
@@ -248,25 +250,10 @@ class _SectionMove:
 def _challenge_section_prose_problem(
     text: str, sources: Mapping[str, str], *, culture_candidate: bool
 ) -> str:
-    """5장(당면 과제와 대응) «본문 산문»에 걸리는 장별 검사만 모은다.
-
-    ★ 왜 이 목록이 전부인가 — `_apply_grounding` 에서 장을 보고 거는 검사는
-      ① 8장(culture) 본문 ② 6장(future_strategy) 본문 ③ 도식 칸이 있는 후보
-      ④ 문화 슬롯 후보의 `culture_problem` 네 갈래뿐이다. 5장 본문 산문은
-      ①②③에 들어가지 않으므로 ④만 남는다. 5장의 대응 검사
-      (`challenge_response_*`)는 «도식 칸»에만 걸린다 — 산문에는 걸리지 않는다.
-    ★ 장과 무관한 검사(자기 근거·부재 단언·수치·추세·시점)는 이미 같은 후보에
-      그대로 걸렸다. 장을 옮긴다고 다시 걸 것이 없다.
-    ★ 회계정책 상용구 가드(`accounting_policy_problem`)도 이 목록에 «없다» —
-      culture 를 뺀 모든 장 본문에 «같은 잣대»로 걸리고, 거기 걸린 후보는 6장
-      이동 분기에 닿기 전에 이미 제외된다. 출발 장과 도착 장의 답이 같으므로
-      도착 장에서 다시 볼 것이 없다.
-    ⚠️ 이 목록이 `_apply_grounding` 과 어긋나면 옮긴 문장만 검사를 덜 받는다.
-      두 벌이 되지 않게 `test_future_section_contract.py` 의 대조 시험이 실제
-      `_apply_grounding` 을 5장 문맥으로 돌려 같은 판정이 나오는지 확인한다.
-    """
-
-    return culture_problem(text, sources) if culture_candidate else ""
+    """5장 직접 작성과 다른 장에서의 이동에 같은 범위 검사를 적용한다."""
+    own_sources = {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID}
+    return (challenge_business_problem(text, own_sources)
+            or (culture_problem(text, own_sources) if culture_candidate else ""))
 
 
 def _append_grounding_diagnostic(
@@ -1776,7 +1763,7 @@ def _ask_grouped_verdicts(
         verdicts,
         candidates,
         entity_scope_by_number=_entity_scope_by_number(
-            ((item.number, item.citations) for item in items if item.sentence is not None),
+            ((item.number, item.citations) for item in items),
             frag_by_id,
         ),
         diagnostics=diagnostics,
@@ -2163,8 +2150,8 @@ def _apply_grounding(
         #   총평균법·유동성 관리 상용구로 채워졌다.
         # ⚠️ culture 장은 «건드리지 않는다» — 아래 전용 경로가 그대로 맡아야
         #   기존 사유 코드(culture_accounting_policy_misplaced)가 유지된다.
-        # ⚠️ 요약·도식에는 걸지 않는다. 요약은 본문 문장을 다시 쓰는 것이라
-        #   본문에서 걸리면 충분하고, 도식 칸은 자기 계약이 따로 있다.
+        # 요약은 본문 문장에서 만든다. 5장 표의 동일 범위 검사는 검수 입구의
+        # _filter_challenge_flow_scope가 legacy와 packet 모두에 적용한다.
         if (context and context[1] == DIAGNOSTIC_KIND_BODY
                 and context[0] != "culture"):
             # ★ 2장(사업 모델) 본문에만 자기 인용 원문을 넘긴다 — 실제 수익원과
@@ -2178,6 +2165,10 @@ def _apply_grounding(
             problem = accounting_policy_problem(
                 text, policy_sources, section_id=context[0]
             )
+            if context[0] == CHALLENGE_FLOW_SECTION_ID:
+                problem = problem or challenge_business_problem(text, {
+                    key: value for key, value in sources.items() if key != TABLE_SOURCE_ID
+                })
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
@@ -4045,6 +4036,44 @@ def _warn_if_interpretation_heavy(
         )
 
 
+def _filter_challenge_flow_scope(
+    report: ComposedReport,
+    frag_by_id: Mapping[str, CollectedFragment],
+    diagnostics: Optional[list[dict]],
+) -> ComposedReport:
+    """문장 검수만 하는 경로에서도 5장 표의 사업 범위·원문 주어를 검사한다.
+
+    이것은 표 전체의 의미 검수 완료 표시가 아니다. 응답 칸에 재무 수단이
+    있더라도 실제 제품·고객 문제에 대응하는 행이면 보존한다.
+    """
+    sections = []
+    for section in report.sections:
+        if section.section_id != CHALLENGE_FLOW_SECTION_ID:
+            sections.append(section)
+            continue
+        kept = []
+        for row in section.flow_rows:
+            sources = {fid: frag_by_id[fid].text for fid in row.citations if fid in frag_by_id}
+            text = FLOW_CELL_JOIN.join(row.cells)
+            problem = challenge_business_problem(row.cells[0] if row.cells else "", sources)
+            if not problem:
+                problem = next((
+                    issue for fid in row.citations if fid in frag_by_id
+                    if (issue := source_actor_problem(
+                        text, frag_by_id[fid].source_context_json, sources, cells=row.cells
+                    ))
+                ), "")
+            if problem:
+                _append_grounding_diagnostic(
+                    diagnostics, section_id=section.section_id, kind=DIAGNOSTIC_KIND_FLOW,
+                    reason_code=problem, candidate_text=" ".join(row.cells), sources=sources,
+                )
+            else:
+                kept.append(row)
+        sections.append(replace(section, flow_rows=tuple(kept)))
+    return replace(report, sections=tuple(sections))
+
+
 def _fail_closed_report(
     report: ComposedReport,
     *,
@@ -4061,12 +4090,11 @@ def _fail_closed_report(
                 if section.sentences
                 else section.notice
             ),
-            # ★ legacy에서는 도식 재료를 «반드시» 함께 넘긴다. 안 넘기면
-            #   기본값 ()로 떨어져 7장 경로표가 검증 단계에서 사라진다 —
-            #   작가가 정상적으로 냈는데도 화면에 흐름도가 안 나온
-            #   진짜 원인이었다. packet 엄격 경로는 같은 bundled 검수 자체가
-            #   실패한 경우라 관계도 안전 미확인이고, 그때만 행을 비운다.
-            flow_rows=section.flow_rows if preserve_flow_rows else (),
+            # legacy의 다른 장 표는 기존 계약을 유지한다. 5장 범위 검사 자체가
+            # 실패했을 수도 있으므로 그 장의 미검사 행은 복원하지 않는다.
+            # packet은 묶음 검수가 실패하면 모든 표의 관계도 확인되지 않았다.
+            flow_rows=(section.flow_rows if preserve_flow_rows
+                       and section.section_id != CHALLENGE_FLOW_SECTION_ID else ()),
             news_decisions=section.news_decisions,
         )
         for section in report.sections
@@ -4329,6 +4357,12 @@ def verify_report(
         장 개수·순서는 입력 그대로다 (장 삭제 없음).
     """
     try:
+        # 표를 반환하는 모든 경로가 같은 범위 검사를 거친다. 아래 검수가
+        # 예외로 끝나도 원래의 재무·회계 과제 행을 복원하지 않는다.
+        report = _filter_challenge_flow_scope(
+            report, {item.fragment_id: item for item in _normalize_fragments(fragments)},
+            diagnostics,
+        )
         if (allowed_fragment_ids_by_section is None and diagnostics is None
                 and initial_ask is None and initial_retry_ask is None
                 and protocol_diagnostics is None

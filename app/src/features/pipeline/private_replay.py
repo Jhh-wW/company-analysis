@@ -17,6 +17,7 @@ from src.features.pipeline.private_replay_constants import (
     REPLAY_FILE_PATTERN, REPLAY_FINGERPRINT_VERSION, REPLAY_MAX_RECORD_BYTES,
     REPLAY_MAX_RECORDS, REPLAY_RETENTION_SECONDS, REPLAY_RUN_ENV, REPLAY_LOCK_FILENAME,
     REPLAY_RUN_PATTERN, REPLAY_SCHEMA_VERSION,
+    REPLAY_PARSED_SCHEMA_VERSION, REPLAY_PARSED_CAPTURE_KIND, REPLAY_PARSED_CAPTURE_SCHEMA,
 )
 from src.shared.bounded_file_lock import BoundedFileLockError, try_exclusive_file_lock
 
@@ -59,6 +60,7 @@ def record_local_provider_replay(
     *, prompt: str, response: str, stage: str, model: str,
     response_schema: object = None, output_limit: int, stop_reason: str = "",
     elapsed_ms: int = 0,
+    capture_kind: str = "",
 ) -> bool:
     """보관 실패는 이미 완료된 호출의 응답·정산을 바꾸지 않는다.
 
@@ -68,6 +70,11 @@ def record_local_provider_replay(
     try:
         directory = _directory()
         if directory is None:
+            return False
+        if capture_kind not in {"", REPLAY_PARSED_CAPTURE_KIND}:
+            return False
+        if capture_kind and json.dumps(json.loads(response), ensure_ascii=False, sort_keys=True,
+                                       separators=(",", ":"), allow_nan=False) != response:
             return False
         now = time.time()
         call_id = uuid.uuid4().hex
@@ -82,6 +89,9 @@ def record_local_provider_replay(
             "response_schema_sha256": _sha256(schema_text),
             "response_schema": response_schema, "prompt": prompt, "response": response,
         }
+        if capture_kind:
+            record.update(schema_version=REPLAY_PARSED_SCHEMA_VERSION, capture_kind=capture_kind,
+                          capture_schema=REPLAY_PARSED_CAPTURE_SCHEMA)
         payload = (json.dumps(record, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
         if len(payload) > REPLAY_MAX_RECORD_BYTES:
             return False
@@ -125,13 +135,25 @@ def read_local_provider_replay(path: Path) -> dict:
     if path.stat().st_size > REPLAY_MAX_RECORD_BYTES:
         raise ValueError("재현 파일이 보관 상한을 넘습니다")
     record = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(record, dict) or record.get("schema_version") != REPLAY_SCHEMA_VERSION:
+    if not isinstance(record, dict) or record.get("schema_version") not in {
+        REPLAY_SCHEMA_VERSION, REPLAY_PARSED_SCHEMA_VERSION,
+    }:
         raise ValueError("재현 파일 계약 버전이 다릅니다")
+    if record["schema_version"] == REPLAY_PARSED_SCHEMA_VERSION:
+        if (record.get("capture_kind") != REPLAY_PARSED_CAPTURE_KIND
+                or record.get("capture_schema") != REPLAY_PARSED_CAPTURE_SCHEMA):
+            raise ValueError("재현 파일의 분석 응답 표현이 확인되지 않습니다")
+    elif "capture_kind" in record or "capture_schema" in record:
+        raise ValueError("기존 원응답 계약에 다른 분석 응답 표현이 섞였습니다")
     if record.get("fingerprint_version") != REPLAY_FINGERPRINT_VERSION:
         raise ValueError("재현 지문 방식이 다릅니다")
     for key in ("prompt", "response"):
         if not isinstance(record.get(key), str) or _sha256(record[key]) != record.get(f"{key}_sha256"):
             raise ValueError("재현 원문의 지문이 일치하지 않습니다")
+    if record["schema_version"] == REPLAY_PARSED_SCHEMA_VERSION:
+        if json.dumps(json.loads(record["response"]), ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False) != record["response"]:
+            raise ValueError("재현 분석 응답이 정해진 JSON 표현과 다릅니다")
     schema_text = json.dumps(record.get("response_schema"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     if _sha256(schema_text) != record.get("response_schema_sha256"):
         raise ValueError("재현 응답 스키마의 지문이 일치하지 않습니다")
