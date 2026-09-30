@@ -181,6 +181,8 @@ def test_아홉_장이_정본_순서와_번호로_전부_나온다():
     ]
     for section in report.sections:
         assert section.title == SECTION_TITLES[section.cell]
+    assert next(section for section in report.sections
+                if section.cell == "current_challenges").tag == "#사업과제"
 
 
 def test_자료부족_장은_사실본문과_분리된_안내문으로_남는다():

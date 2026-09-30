@@ -131,7 +131,7 @@ _SOURCE_LABEL_FALLBACK: Final[str] = "수집 자료"
 _FILING_LABEL_PREFIX: Final[str] = "전자공시"
 _SECTION_TAGS: Final[dict[str, str]] = {
     "past_changes": "#과거",
-    "current_challenges": "#현재",
+    "current_challenges": "#사업과제",
     "future_strategy": "#미래",
 }
 _BINDING_KEYS: Final[frozenset[str]] = frozenset(

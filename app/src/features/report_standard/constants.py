@@ -36,6 +36,14 @@ RELATION_PAIR_HEADERS: Final[tuple[str, str]] = (
     "지금 겪는 과제",
     "회사가 밝힌 대응",
 )
+RELATION_PAIR_TIME_STATUS_HEADERS: Final[tuple[str, str]] = (
+    "사업 과제·확인 시점",
+    "회사가 밝힌 대응·상태",
+)
+RELATION_PAIR_HEADER_VARIANTS: Final[tuple[tuple[str, str], ...]] = (
+    RELATION_PAIR_HEADERS,
+    RELATION_PAIR_TIME_STATUS_HEADERS,
+)
 RELATION_PAIR_MIN_ROWS: Final[int] = 2
 RELATION_PAIR_MAX_ROWS: Final[int] = 5
 RELATION_PAIR_MAX_TEXT_LINES: Final[int] = 2
@@ -57,7 +65,7 @@ SECTION_SPECS: Final[tuple[SectionSpec, ...]] = (
     SectionSpec("business_model", "2", "사업 구조와 수익 모델"),
     SectionSpec("portfolio", "3", "핵심 제품·서비스와 포트폴리오 역할"),
     SectionSpec("past_changes", "4", "주요 변화와 실적", "#과거"),
-    SectionSpec("current_challenges", "5", "당면 과제와 대응", "#사업과제"),
+    SectionSpec("current_challenges", "5", "당면 과제와 대응", "#현재"),
     SectionSpec("future_strategy", "6", "성장 전략", "#미래"),
     SectionSpec("operations_partners", "7", "사업 운영과 파트너 구조"),
     SectionSpec("culture", "8", "인재상과 일하는 방식"),

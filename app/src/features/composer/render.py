@@ -142,11 +142,11 @@ PERFORMANCE_TABLE_SECTION_ID: Final[str] = "past_changes"
 #: 표 모양을 함께 보고 100% 누적 막대를 그릴지 정한다.
 COMPOSITION_PRESENTATION: Final[str] = "composition"
 
-#: 시간 장 표시 태그 — report_standard SECTION_SPECS와 같은 값을 «복사»했다.
-#: (composer→report_standard import 금지 규칙. 정본이 바뀌면 같이 바꾼다.)
+#: 새 v2 보고서의 장 태그. 5장의 과거 사건을 현재 미해결 문제로 표시하지 않는다.
+#: 독립 public_manifest의 태그와 일치시킨다. 저장된 v1·v2 정본은 다시 쓰지 않는다.
 SECTION_TAGS: Final[dict[str, str]] = {
     "past_changes": "#과거",
-    "current_challenges": "#현재",
+    "current_challenges": "#사업과제",
     "future_strategy": "#미래",
 }
 

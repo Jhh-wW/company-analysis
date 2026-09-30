@@ -159,9 +159,12 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 # 2026-09-30: 5장 정책241자와 5·8장 범위 안내 변경만 되돌려 직전 네 해시를
 # 재현한 뒤 본문 기준값만 갱신했다. JSON schema·도식 기준값은 그대로다.
 # 재현 증거: tmp/audit-20260930/review-policy-snapshots.json.
+# 2026-10-01: 5장 사건 발생기간·완료/진행 안내 205자만 제거해 기존 네 해시를
+# 재현했다. 전체 원문·번호·스키마·경계/도식 해시는 유지하고 골든 두 값만 갱신한다.
+# 증거: tmp/audit-20260930/validation/ci-flow-header-prompt-baseline.json.
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "74bb06c6182408c06c68139a6c51b844e611780252b42596d3ac99af5d211c24"),
-    (_golden_case, True, "3155d05b7088092ec7d504b4fd2df05ee082f19b725edac857b29936e0851a3f"),
+    (_golden_case, False, "1805bbc84d83a59a35aa42fad02883bca59ef8c05c4cec81f0543e15f2c5e930"),
+    (_golden_case, True, "91403a97b181ce65fc70da57c35d1fbb7db01f34f5535d3afbc035acded56ba6"),
     (_boundary_case, False, "856cd2d7ba3e4e8c3974df75dd8384c129bcf27bbdb586b50e9155bcb94a5e11"),
     (_boundary_case, True, "760765739100a5b8ebe838a719280f4c1cf51cd27bfa98bad02f044a577ede75"),
 ))

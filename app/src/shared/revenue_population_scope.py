@@ -62,7 +62,8 @@ def revenue_population_claim_problem(candidate: str, sources: Mapping[str, str])
     if not c.WHOLE_REVENUE_CLAIM_RE.search(compact):
         return ""
     revenue_sources = [source for source in sources.values() if (
-        c.REVENUE_ROW_RE.search(source) and ("|" in source or "%" in source))]
+        c.REVENUE_ROW_RE.search(source) and ("|" in source or "%" in source)
+        and revenue_population_source_header(source))]
     if not revenue_sources:
         return ""
     # 전사 범위가 원문에 직접 있으면 기존 의미·수치 검수에 맡긴다.

@@ -67,3 +67,8 @@ def test_품목명의_부문표시는_집계범위가_아니다():
 def test_부문명과_제품의_연결은_연결재무_기준이_아니다():
     caption = revenue_population_caption("매출 비중", "[연결솔루션사업부문] 제품별 매출액 2025년 누적")
     assert caption.endswith("표 합계 기준 · 2025년 · 누적")
+
+
+def test_기간별_매출금액표는_구성비_분모검사의_대상이_아니다():
+    source = "매출액 | 2022년 | 400억원\n매출액 | 2023년 | 300억원\n매출액 | 2024년 | 200억원\n매출액 | 2025년 | 100억원"
+    assert not revenue_population_claim_problem("전체 매출 규모가 3년 연속 감소했다.", {"1": source})
