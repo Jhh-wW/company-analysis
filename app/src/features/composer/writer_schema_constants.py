@@ -8,6 +8,19 @@ FULL_REQUIRED_SLOT_SENTENCE_GUIDE = (
 )
 
 RESPONSE_REQUIRED_CONTENT_KEY = "필수내용"
+RESPONSE_FIRST_EVIDENCE_KEY = "첫근거"
+RESPONSE_ADDITIONAL_EVIDENCE_KEY = "추가근거"
+FULL_FINITE_SELECTION_SCHEMA_HINT = (
+    '"근거선택": {"첫근거": "<지원쌍 ID>", "추가근거": ""}'
+)
+FULL_FINITE_SELECTION_GUIDE = (
+    "근거선택은 배열이 아니라 {\"첫근거\": \"지원쌍 ID\", \"추가근거\": \"\"} 객체다. "
+    "한 문장은 직접 뒷받침하는 서로 다른 근거를 1~2개만 선택한다. "
+    "첫근거는 반드시 고르고 두 번째 근거가 없으면 추가근거는 빈 문자열로 둔다. "
+    "두 근거는 같은 의미칸이어야 하며 같은 ID를 반복하지 않는다. "
+    "세 개 이상이 필요한 복합 설명은 각 사실과 근거가 대응하는 별도 문장으로 나눈다. "
+    "선택지 목록 전체를 복사하거나 근거 개수를 늘려 문장을 채우지 않는다.\n"
+)
 LEGACY_FLOW_REQUIRED_KEYS_GUIDE = "«두 키를 모두» 넣는다:"
 FULL_REQUIRED_FLOW_KEYS_GUIDE = "«필수내용·문장들·경로표»를 모두 넣는다:"
 REQUIRED_CONTENT_ARRAY_DESCRIPTION = "이 칸에 직접 답하는 근거가 없으면 빈 배열로 둔다."

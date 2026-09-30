@@ -16,7 +16,7 @@ from src.features.composer.logic import (
     parse_section_response,
 )
 from src.features.composer.port import CollectedFragment, fragments_from_raw
-from src.features.composer.writer_schema import build_full_writer_schema, with_full_writer_schema
+from src.features.composer.writer_schema import build_full_writer_schema, with_full_writer_schema, writer_sentence_items
 from src.features.composer.writer_schema_constants import FULL_REQUIRED_SLOT_SENTENCE_GUIDE
 
 
@@ -31,7 +31,12 @@ PAIRS = {
 def _payload(selected):
     return {"필수내용": {"business_model:customer_type": [], "business_model:value_exchange": []},
             "문장들": [{"글": "회사는 제조업 고객에게 장비를 제공한다.",
-                     "등급": "확인", "근거선택": selected}]}
+                     "등급": "확인", "근거선택": _selection(selected)}]}
+
+
+def _selection(selected):
+    return {"첫근거": selected[0] if selected else "",
+            "추가근거": selected[1] if len(selected) > 1 else ""}
 
 
 @pytest.mark.parametrize("selected,allowed", [
@@ -72,9 +77,9 @@ def test_schema_keeps_empty_result_and_optional_flow_news_without_forcing_conten
 def test_required_slot_arrays_reach_existing_unverified_parser_in_policy_order():
     data = _payload(["p2-004"])
     data["필수내용"]["business_model:customer_type"] = [
-        {"글": "장비의 고객은 제조업체다.", "등급": "확인", "근거선택": ["p2-001", "p2-002"]}]
+        {"글": "장비의 고객은 제조업체다.", "등급": "확인", "근거선택": _selection(["p2-001", "p2-002"])}]
     data["필수내용"]["business_model:value_exchange"] = [
-        {"글": "회사는 장비를 납품하고 판매대금을 받는다.", "등급": "확인", "근거선택": ["p2-003"]}]
+        {"글": "회사는 장비를 납품하고 판매대금을 받는다.", "등급": "확인", "근거선택": _selection(["p2-003"])}]
     assert Draft202012Validator(build_full_writer_schema("business_model", PAIRS)).is_valid(data)
     parsed = parse_section_response(json.dumps(data), "business_model", evidence_pairs=PAIRS)
     assert [row.planned_claim_slot for row in parsed] == [
@@ -88,7 +93,7 @@ def test_required_array_cannot_relabel_wrong_pair_or_inject_evidence(selected):
     data = _payload(["p2-001"])
     data["문장들"] = []
     data["필수내용"]["business_model:value_exchange"] = [
-        {"글": "대가 칸을 임의로 채우려는 문장이다.", "등급": "확인", "근거선택": selected}]
+        {"글": "대가 칸을 임의로 채우려는 문장이다.", "등급": "확인", "근거선택": _selection(selected)}]
     assert not Draft202012Validator(build_full_writer_schema("business_model", PAIRS)).is_valid(data)
     assert parse_section_response(json.dumps(data), "business_model", evidence_pairs=PAIRS) == ()
 
@@ -183,3 +188,72 @@ def test_mapping_packet_reconstruction_keeps_exact_actor_status_context(context)
     expected["document_date"] = "2026-09-30"
     assert asdict(normalized) == expected
     assert normalized.source_context_json.encode() == context.encode()
+
+
+@pytest.mark.parametrize("selection", [
+    {"첫근거": "p2-001"},
+    {"첫근거": "p2-001", "추가근거": "", "다른근거": "p2-002"},
+    {"첫근거": ["p2-001"] * 841, "추가근거": ""},
+    {"첫근거": "p2-001", "추가근거": 2},
+    {"첫근거": "p2-001", "추가근거": "p2-003"},
+    {"첫근거": "p2-001", "추가근거": "p2-999"},
+    {"첫근거": ",".join(["p2-001"] * 841), "추가근거": ""},
+    ["p2-001"] * 841,
+])
+def test_new_provider_selection_is_finite_and_malformed_objects_are_not_repaired(selection):
+    data = _payload(["p2-001"])
+    data["문장들"][0]["근거선택"] = selection
+    assert not Draft202012Validator(build_full_writer_schema("business_model", PAIRS)).is_valid(data)
+    if isinstance(selection, dict):
+        original = json.dumps(data, sort_keys=True)
+        assert parse_section_response(json.dumps(data), "business_model", evidence_pairs=PAIRS) == ()
+        assert json.dumps(data, sort_keys=True) == original
+
+
+def test_finite_selection_reuses_legacy_verification_without_inventing_or_repeating_facts():
+    data = _payload(["p2-001", "p2-002"])
+    original = json.dumps(data, sort_keys=True)
+    rows = writer_sentence_items(data, "business_model", PAIRS)
+    assert rows[0]["근거선택"] == ["p2-001", "p2-002"]
+    assert json.dumps(data, sort_keys=True) == original
+    assert len(parse_section_response(json.dumps(data), "business_model", evidence_pairs=PAIRS)) == 1
+    data["문장들"][0]["근거선택"] = _selection(["p2-001", "p2-001"])
+    assert writer_sentence_items(data, "business_model", PAIRS)[0]["근거선택"] == ["p2-001"]
+
+
+def test_legacy_three_distinct_supports_remain_readable_and_truncation_is_not_recovered():
+    pairs = {**PAIRS, "p2-005": ("business_model:customer_type", "5")}
+    legacy = {"문장들": [{"글": "기업 고객에게 산업장비를 공급한다.", "등급": "확인",
+                           "근거선택": ["p2-001", "p2-002", "p2-005"]}]}
+    parsed = parse_section_response(json.dumps(legacy), "business_model", evidence_pairs=pairs)
+    assert parsed[0].citations == ("1", "2", "5")
+    assert parse_section_response(json.dumps(legacy)[:-4], "business_model", evidence_pairs=pairs) is None
+
+
+def test_finite_prompt_is_scoped_to_supported_full_and_instructs_splitting_complex_claims():
+    from src.features.composer.writer_schema_constants import FULL_FINITE_SELECTION_GUIDE
+    fragments = (CollectedFragment("1", "공식자료", "기업 고객에게 장비를 공급한다.",
+                                   supported_claim_slots=("business_model:customer_type",)),)
+    full = build_section_prompt("합성회사", "business_model", fragments, None, show_supported_claim_slots=True)
+    assert FULL_FINITE_SELECTION_GUIDE in full
+    assert '"근거선택": {"첫근거": "<지원쌍 ID>", "추가근거": ""}' in full
+    assert "«근거선택» 배열" not in full
+    assert "세 개 이상" in full
+    empty = build_section_prompt("합성회사", "business_model", (), None, show_supported_claim_slots=True)
+    assert FULL_FINITE_SELECTION_GUIDE not in empty
+    assert '"근거선택": ["<지원쌍 ID>"]' in empty
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_finite_prompt_changes_only_instructions_and_keeps_source_and_previous_text(shared):
+    exact = "원문에 «근거선택» 배열이라는 표현이 있다."
+    previous = "이전 작성의 «근거선택» 배열 표현도 보존한다."
+    fragments = (CollectedFragment("1", "공식자료", exact,
+                                   supported_claim_slots=("business_model:customer_type",)),)
+    prompt = build_section_prompt("합성회사", "business_model", fragments, None,
+                                  already_written=(previous,), show_supported_claim_slots=True,
+                                  shared_evidence_prefix=shared)
+    assert exact in prompt and previous in prompt
+    assert fragments[0].text == exact
+    if shared:
+        assert exact in prompt[:prompt.cache_prefix_chars]

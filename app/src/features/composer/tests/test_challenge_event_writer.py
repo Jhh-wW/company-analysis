@@ -68,9 +68,11 @@ def test_exact_row_limit_does_not_claim_an_omitted_row():
     assert len(hint_rows(result)) == 2 and c.EVENT_WRITER_OMISSION not in result
 
 def test_character_budget_keeps_whole_rows_and_never_truncates_json():
-    with patch.object(c,'EVENT_WRITER_MAX_CHARS',1200):
+    one_row = json.dumps(hint_rows(render([fragment()]))[0], ensure_ascii=False, separators=(',', ':')) + '\n'
+    budget = len(c.EVENT_WRITER_HEADER + c.EVENT_WRITER_GUIDE + c.EVENT_WRITER_OMISSION + one_row)
+    with patch.object(c,'EVENT_WRITER_MAX_CHARS',budget):
         result=render([fragment(),fragment('2')])
-    assert len(result) <= 1200
+    assert len(result) <= budget
     assert hint_rows(result)
     assert c.EVENT_WRITER_OMISSION in result
 
@@ -94,3 +96,14 @@ def test_additive_row_metadata_does_not_relax_event_verification():
     rows=_event_rows(TABLE)
     assert rows[0].date=='2024.04.10' and rows[0].actor=='가온제조㈜'
     assert challenge_event_scope_problem('2024.04.10 가온제조㈜의 과태료 납부가 현재 진행 중이다.',{'1':TABLE})=='time_invalid'
+
+def test_nominal_actions_keep_the_exact_text_and_do_not_gain_completion():
+    raw = TABLE.replace('납부 완료, 안전센서 설치 완료', '납부 완료설비 점검 및 개선')
+    source = fragment(text=raw)
+    before = asdict(source)
+    prompt = render([source])
+    row = hint_rows(prompt)[0]
+    assert row['조치와상태원문'] == '납부 완료설비 점검 및 개선'
+    assert '«이행했다»나 «완료했다»를 추가하지 마세요' in prompt
+    assert '뒤에 나열된 다른 조치의 완료를 뜻하지 않습니다' in prompt
+    assert asdict(source) == before

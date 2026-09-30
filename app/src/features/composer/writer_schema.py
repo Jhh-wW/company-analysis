@@ -14,6 +14,7 @@ from src.features.composer.news_constants import NEWS_DECISIONS_KEY, NEWS_VALID_
 from src.features.composer.prompt_metadata import PromptMetadata
 from src.features.composer.writer_schema_constants import (
     FULL_REQUIRED_CONTENT_GUIDE, REQUIRED_CONTENT_ARRAY_DESCRIPTION, RESPONSE_REQUIRED_CONTENT_KEY,
+    RESPONSE_FIRST_EVIDENCE_KEY, RESPONSE_ADDITIONAL_EVIDENCE_KEY,
 )
 from src.shared.report_evidence.policy import injected_slots_for, required_slots_for
 
@@ -54,6 +55,26 @@ def required_content_guide(section_id: str, pairs: EvidencePairMap) -> str:
     return FULL_REQUIRED_CONTENT_GUIDE + json.dumps(shape, ensure_ascii=False) + "\n"
 
 
+def _normalized_writer_item(item, pairs: EvidencePairMap | None):
+    """새 유한 선택만 기존 파서 입력으로 바꾼다. 과거 배열은 그대로 둔다."""
+    if not isinstance(item, Mapping) or pairs is None:
+        return item
+    selection = item.get(RESPONSE_EVIDENCE_PAIR_KEY)
+    if not isinstance(selection, Mapping):
+        return item
+    if set(selection) != {RESPONSE_FIRST_EVIDENCE_KEY, RESPONSE_ADDITIONAL_EVIDENCE_KEY}:
+        return item
+    first = selection[RESPONSE_FIRST_EVIDENCE_KEY]
+    additional = selection[RESPONSE_ADDITIONAL_EVIDENCE_KEY]
+    if (type(first) is not str or type(additional) is not str or first not in pairs
+            or (additional and (additional not in pairs or pairs[additional][0] != pairs[first][0]))):
+        return item
+    ids = [first]
+    if additional and additional != first:
+        ids.append(additional)
+    return {**item, RESPONSE_EVIDENCE_PAIR_KEY: ids}
+
+
 def writer_sentence_items(payload: Mapping, section_id: str, pairs: EvidencePairMap | None):
     """새 응답의 칸별 배열을 기존 검수 입력으로 합친다. 사실을 추가하지 않는다.
 
@@ -63,6 +84,7 @@ def writer_sentence_items(payload: Mapping, section_id: str, pairs: EvidencePair
     items = payload.get(RESPONSE_SENTENCES_KEY)
     if not isinstance(items, list):
         return None
+    items = [_normalized_writer_item(item, pairs) for item in items]
     if RESPONSE_REQUIRED_CONTENT_KEY not in payload:
         return items
     if pairs is None or section_id not in SECTION_IDS:
@@ -77,6 +99,7 @@ def writer_sentence_items(payload: Mapping, section_id: str, pairs: EvidencePair
         if not isinstance(rows, list):
             return None
         for item in rows:
+            item = _normalized_writer_item(item, pairs)
             if not isinstance(item, Mapping):
                 continue
             ids = item.get(RESPONSE_EVIDENCE_PAIR_KEY)
@@ -99,10 +122,10 @@ def build_full_writer_schema(section_id: str, pairs: EvidencePairMap, *, news_fr
         slot: _object({
             RESPONSE_TEXT_KEY: {"type": "string"},
             RESPONSE_GRADE_KEY: {"type": "string", "enum": sorted(VALID_GRADES)},
-            RESPONSE_EVIDENCE_PAIR_KEY: {
-                "type": "array", "minItems": 1,
-                "items": {"type": "string", "enum": ids},
-            },
+            RESPONSE_EVIDENCE_PAIR_KEY: _object({
+                RESPONSE_FIRST_EVIDENCE_KEY: {"type": "string", "enum": ids},
+                RESPONSE_ADDITIONAL_EVIDENCE_KEY: {"type": "string", "enum": ["", *ids]},
+            }),
         })
         for slot, ids in by_slot.items()
     }

@@ -191,8 +191,15 @@ def test_full_writer_schema_reaches_actual_sdk_with_slot_enums_and_original_cach
     assert counted["output_config"] == sent["output_config"] == {
         "format": {"type": "json_schema", "schema": expected}}
     branches = sent["output_config"]["format"]["schema"]["properties"]["문장들"]["items"]["anyOf"]
-    assert [branch["properties"]["근거선택"]["items"]["enum"] for branch in branches] == [
+    assert [branch["properties"]["근거선택"]["properties"]["첫근거"]["enum"] for branch in branches] == [
         ["p2-001"], ["p2-002"]]
+    for branch in branches:
+        selection = branch["properties"]["근거선택"]
+        assert selection["type"] == "object"
+        assert selection["additionalProperties"] is False
+        assert selection["required"] == ["첫근거", "추가근거"]
+        assert selection["properties"]["추가근거"]["enum"] == [
+            "", *selection["properties"]["첫근거"]["enum"]]
     # SDK는 지원되지 않는 셀 수 상한을 설명으로 옮기고 parser의 검사는 유지한다.
     cells = expected["properties"]["경로표"]["items"]["properties"]["칸"]
     assert "maxItems" not in cells and "minItems" not in cells

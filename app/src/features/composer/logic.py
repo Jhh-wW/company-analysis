@@ -35,7 +35,8 @@ from src.features.composer.writer_schema import (
 )
 from src.features.composer.challenge_event_writer import render_challenge_event_writer_hints
 from src.features.composer.writer_schema_constants import (
-    FULL_REQUIRED_SLOT_SENTENCE_GUIDE, RESPONSE_REQUIRED_CONTENT_KEY,
+    FULL_REQUIRED_SLOT_SENTENCE_GUIDE, RESPONSE_REQUIRED_CONTENT_KEY, FULL_FINITE_SELECTION_GUIDE,
+    FULL_FINITE_SELECTION_SCHEMA_HINT,
     LEGACY_FLOW_REQUIRED_KEYS_GUIDE, FULL_REQUIRED_FLOW_KEYS_GUIDE,
 )
 from src.features.composer.supplement_feedback import supplement_feedback
@@ -71,7 +72,7 @@ from src.features.composer.constants import (
     FULL_PAIR_FLOW_SCHEMA_TAIL,
     FULL_EVIDENCE_PAIR_GUIDE,
     FULL_LEGACY_SENTENCE_SCHEMA,
-    FULL_PAIR_SENTENCE_SCHEMA,
+    FULL_PAIR_SENTENCE_SCHEMA, FULL_EVIDENCE_PAIR_SCHEMA_HINT,
     FULL_PAIR_SCHEMA_TAIL,
     FULL_PAST_CHANGES_PAIR_CITATION_RULES_GUIDE,
     FULL_PAST_CHANGES_SECTION_GUIDE,
@@ -636,6 +637,9 @@ def build_section_prompt(
             else FULL_PAIR_SCHEMA_TAIL,
         )
         if pair_choices:
+            schema_guide = schema_guide.replace(
+                FULL_EVIDENCE_PAIR_SCHEMA_HINT, FULL_FINITE_SELECTION_SCHEMA_HINT,
+            )
             required_guide = required_content_guide(section_id, pair_choices)
             if required_guide:
                 schema_guide = schema_guide.replace(
@@ -645,6 +649,16 @@ def build_section_prompt(
                     '"문장들": [',
                     f'"{RESPONSE_REQUIRED_CONTENT_KEY}": {{"<아래 필수 의미칸>": []}}, "문장들": [',
                 ) + required_guide
+    citation_rules_guide = (
+        FULL_PAST_CHANGES_PAIR_CITATION_RULES_GUIDE
+        if show_supported_claim_slots and section_id == "past_changes"
+        else FULL_PAIR_CITATION_RULES_GUIDE
+        if show_supported_claim_slots else CITATION_RULES_GUIDE
+    )
+    if pair_choices:
+        # 작성 지침만 바꾼다. 원문·실적표·이전 작성 내용을 치환하지 않는다.
+        citation_rules_guide = citation_rules_guide.replace("«근거선택» 배열", "«근거선택» 객체")
+        claim_slot_guide = claim_slot_guide.replace("«근거선택» 배열", "«근거선택» 객체")
     section_parts = [
         (
             FULL_PAST_CHANGES_SECTION_GUIDE
@@ -657,12 +671,7 @@ def build_section_prompt(
             else ""
         ),
         "\n\n",
-        (
-            FULL_PAST_CHANGES_PAIR_CITATION_RULES_GUIDE
-            if show_supported_claim_slots and section_id == "past_changes"
-            else FULL_PAIR_CITATION_RULES_GUIDE
-            if show_supported_claim_slots else CITATION_RULES_GUIDE
-        ),
+        citation_rules_guide,
         FULL_PAIR_EXACT_EVIDENCE_SCOPE_GUIDE
         if show_supported_claim_slots else EXACT_EVIDENCE_SCOPE_GUIDE,
         (
@@ -680,6 +689,7 @@ def build_section_prompt(
         ),
         claim_slot_guide,
         FULL_REQUIRED_SLOT_SENTENCE_GUIDE if pair_choices else "",
+        FULL_FINITE_SELECTION_GUIDE if pair_choices else "",
         FULL_VISIBLE_EVIDENCE_GUIDE if show_supported_claim_slots else "",
         render_challenge_event_writer_hints(writer_fragments, pair_choices,
                                           allowed_fragment_ids=allowed_fragment_ids)
@@ -912,20 +922,30 @@ def _sentence_from_item(
     # 되살리거나 이미 고른 인용을 다른 조각으로 바꾸지 않는다.
     if evidence_pairs is not None and RESPONSE_EVIDENCE_PAIR_KEY in item:
         raw_pairs = item[RESPONSE_EVIDENCE_PAIR_KEY]
-        if type(raw_pairs) is not list or not raw_pairs or any(
+        if (type(raw_pairs) is not list or not raw_pairs or any(
             type(pair_id) is not str or pair_id not in evidence_pairs
             for pair_id in raw_pairs
-        ) or len(set(raw_pairs)) != len(raw_pairs):
+        )):
             return None
-        selected = tuple(evidence_pairs[pair_id] for pair_id in raw_pairs)
+        # 같은 선택 ID의 반복은 새로운 근거가 아니다. 원 응답을 바꾸지 않고
+        # 첫 출현 순서만 남긴다. 다른 ID나 의미칸을 합치는 정규화는 하지 않는다.
+        unique_pairs = tuple(dict.fromkeys(raw_pairs))
+        selected = tuple(evidence_pairs[pair_id] for pair_id in unique_pairs)
         selected_slot = selected[0][0]
         selected_citations = tuple(fragment_id for _, fragment_id in selected)
         if any(slot != selected_slot for slot, _ in selected):
             return None
         if RESPONSE_CLAIM_SLOT_KEY in item and raw_claim_slot != selected_slot:
             return None
-        if RESPONSE_CITATIONS_KEY in item and citations != selected_citations:
+        if RESPONSE_CITATIONS_KEY in item and citations != tuple(
+                evidence_pairs[pair_id][1] for pair_id in raw_pairs):
             return None
+        repeated_count = len(raw_pairs) - len(unique_pairs)
+        if repeated_count:
+            logger.info(
+                "작성 근거선택 동일 ID 반복 정리 section=%s 반복개수=%d",
+                section_id, repeated_count,
+            )
         return ComposedSentence(
             text=text,
             citations=selected_citations,
