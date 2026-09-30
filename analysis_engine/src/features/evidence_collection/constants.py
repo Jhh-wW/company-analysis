@@ -681,7 +681,8 @@ FINANCIAL_COMPANY_REVENUE_KEYWORDS: Final[tuple[str, ...]] = (
 # 버전·출처 표기
 # ══════════════════════════════════════════════════════════
 
-COLLECTOR_VERSION: Final[str] = "evidence_collection/2.4"
+#: 2.5: 법인·표 행 문맥과 사업 문제에 연결된 5장 근거를 구별한다.
+COLLECTOR_VERSION: Final[str] = "evidence_collection/2.5"
 DOCUMENT_IDENTITY_HEADER_MAX_BYTES: Final[int] = 16 * 1024
 #: 2.0: EOF 후보 반복자·유한 문단 구간·제목 오인 방지. 1.x의 저장 한도
 #: 잘림 기록을 새 완료 증명으로 재사용하지 않는다.

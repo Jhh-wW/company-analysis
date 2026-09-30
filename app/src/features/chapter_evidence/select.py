@@ -3,6 +3,8 @@
 우선순위는 세 단계다.
 1) 슬롯 커버리지 — 정책이 정한 순서로 각 수집 슬롯의 최고점 조각을 먼저 담는다.
    슬롯 하나가 예산 때문에 통째로 비지 않도록 하기 위함이다.
+   사업 정의 대표는 변경·취소 다음으로 대상 회사의 구체적인 현재 사업 명시를
+   우선한다. 단어 점수가 높은 인수 설명·임원 경력이 사업 설명을 밀지 않게 한다.
 1.5) 선택 사실 다양성 — 필수 대표가 아직 덮지 않은 선택 후보 칸(policy의
    OPTIONAL_CANDIDATE_SLOTS_BY_SECTION)의 대표를 같은 예산 안에서 담는다. 고득점
    반복 근거가 2단계에서 원문이 뒷받침하는 선택 사실을 밀어내지 않게 한다. 선택
@@ -50,6 +52,7 @@ from src.features.chapter_evidence.constants import (
     SELECTION_RECENT_CONTEXT,
 )
 from src.shared.report_evidence.models import CollectedEvidenceDocument, EvidenceFragment
+from src.shared.report_evidence.business_activity import current_business_item
 from src.shared.report_evidence.constants import (
     SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
     SOURCE_KIND_OFFICIAL_IR_PDF,
@@ -345,10 +348,18 @@ def select_section_fragments(
         for slot_id in fragment.covered_slot_ids:
             if slot_id in carried_slot_set:
                 by_slot[slot_id].append(fragment)
-    for items in by_slot.values():
-        # 최근 문맥은 추가 몫에서 보존하며, 슬롯 대표는 변경 근거만 우선한다.
+    explicit_business_ids = {
+        fragment.fragment_id
+        for fragment in by_slot.get("identity:business_definition", ())
+        if current_business_item(fragment, company_name)
+    }
+    for slot_id, items in by_slot.items():
+        # 최근 문맥은 추가 몫에서 보존한다. 변경 근거를 먼저 지키고 사업 정의의
+        # 대표에만 명시적인 현재 사업을 우선한다. 지원 칸과 예산은 바꾸지 않는다.
         items.sort(key=lambda fragment: (
             *_selection_priority(fragment, published_priorities)[:2],
+            slot_id == "identity:business_definition"
+            and fragment.fragment_id not in explicit_business_ids,
             -fragment.score_millis,
             published_priorities.get(fragment.document_id, 0),
             fragment.fragment_id,

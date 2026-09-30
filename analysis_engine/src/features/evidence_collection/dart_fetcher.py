@@ -42,6 +42,7 @@ from features.evidence_collection.filing_select import (
     RawFilingRow,
 )
 from features.evidence_collection.table_text import table_replacements
+from features.evidence_collection.source_context import table_source_contexts, SourceContextBudgetExceeded
 
 #: list.json 조회 창 — 최근 N년. survey_audit_reports.py·run_pilot.py의
 #: AUDIT_WINDOW_YEARS(3년, 「잠정 3년」)와 같은 값을 그대로 따른다 —
@@ -98,7 +99,7 @@ def _decode_document_bytes(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _document_header_corp_code(raw: bytes) -> str:
+def _document_header_identity(raw: bytes) -> tuple[str, str]:
     """실제 DOCUMENT 직속의 닫힌 법인 선언만 읽고 본문 파싱 전에 멈춘다."""
     prefix = raw[:c.DOCUMENT_IDENTITY_HEADER_MAX_BYTES]
     encodings = ('utf-16',) if prefix.startswith((b'\xff\xfe', b'\xfe\xff')) else ('utf-8-sig', 'cp949', 'euc-kr')
@@ -114,7 +115,7 @@ def _document_header_corp_code(raw: bytes) -> str:
     if re.search(r'<!\s*(?:DOCTYPE|ENTITY)\b', decoded, flags=re.IGNORECASE):
         raise dart_client.DartResponseError('DART 법인 선언에 DTD 또는 엔터티 정의가 있습니다')
     if '<COMPANY-NAME' not in decoded and len(raw) <= c.DOCUMENT_IDENTITY_HEADER_MAX_BYTES:
-        return ''
+        return '', ''
     parser = ET.XMLPullParser(events=('start', 'end'))
     stack: list[str] = []
     company_element = None
@@ -131,7 +132,7 @@ def _document_header_corp_code(raw: bytes) -> str:
                         if element.tag != 'DOCUMENT':
                             if '<COMPANY-NAME' in decoded:
                                 raise dart_client.DartResponseError('DART 법인 선언의 문서 루트가 다릅니다')
-                            return ''
+                            return '', ''
                     if element.tag == 'BODY' and stack == ['DOCUMENT']:
                         stopped = True
                         break
@@ -160,11 +161,15 @@ def _document_header_corp_code(raw: bytes) -> str:
     if company_count and company_element is None:
         raise dart_client.DartResponseError('DART 법인 선언이 닫히지 않았습니다')
     if company_element is None or 'AREGCIK' not in company_element.attrib:
-        return ''
+        return '', ''
     code = company_element.attrib['AREGCIK']
     if re.fullmatch(r'[0-9]{8}', code) is None or not (company_element.text or '').strip():
         raise dart_client.DartResponseError('DART 법인 선언의 코드 또는 법인명이 유효하지 않습니다')
-    return code
+    return code, (company_element.text or '').strip()
+
+
+def _document_header_corp_code(raw: bytes) -> str:
+    return _document_header_identity(raw)[0]
 
 
 def _xml_to_plain_text(raw: bytes) -> str:
@@ -371,8 +376,14 @@ class DartRuntimeFetcher:
             raise dart_client.DartResponseError(
                 "DART 공시 대표 cache가 XML 문서 형식이 아닙니다"
             )
-        corp_code = _document_header_corp_code(raw)
+        corp_code, document_actor = _document_header_identity(raw)
         text = _xml_to_plain_text(raw)
+        # 코드 검증을 통과한 같은 표제의 원문 법인명만 읽는다. 본문 이름은 빌리지 않는다.
+        markup = _decode_document_bytes(raw)
+        try:
+            source_contexts = table_source_contexts(markup, text, document_actor=document_actor)
+        except SourceContextBudgetExceeded:
+            return DocumentFetchResult(state=c.ATTEMPT_STATE_FAILED, elapsed_ms=max(0, int((self._clock() - started) * 1000)), bytes_downloaded=len(raw), source_context_complete=False)
         sidecar_candidates = _load_document_url_sidecar(
             path,
             rcept_no=rcept_no,
@@ -400,4 +411,6 @@ class DartRuntimeFetcher:
             bytes_downloaded=len(raw),
             corp_code=corp_code,
             official_url_candidates=tuple(official_url_candidates),
+            document_actor=document_actor,
+            source_contexts=source_contexts,
         )

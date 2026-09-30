@@ -414,11 +414,8 @@ def test_verify_report가_모든_장_본문에서_회계정책_상용구를_뺀�
     assert blocked not in repr(diagnostics)
 
 
-def test_금액이_든_회사_고유_문장은_실제_경로에서도_살아남는다():
-    """5장 「당면 과제」의 유동성위험 «노출액» 문장이 실제로 이 모양이다.
-
-    단위 판정만 초록이고 운영 경로에서 그대로 빠지면 아무것도 고쳐지지 않는다.
-    """
+def test_금액만_있는_재무위험은_사업_과제에_승격되지_않는다():
+    """사용자 새 5장 계약: 금액 면제는 사업상 문제의 직접 근거가 아니다."""
 
     text = EXEMPT_CASES[0][0]
     report = ComposedReport((ComposedSection("current_challenges", (
@@ -429,8 +426,8 @@ def test_금액이_든_회사_고유_문장은_실제_경로에서도_살아남�
     checked = verify_report(
         report, fragments, None, _approval(calls), diagnostics=diagnostics,
     )
-    assert [s.text for s in checked.sections[0].sentences] == [text]
-    assert [d["reason_code"] for d in diagnostics] == []
+    assert [s.text for s in checked.sections[0].sentences] == []
+    assert "accounting_policy_boilerplate" in repr(diagnostics)
 
 
 def test_8장은_기존_경로와_기존_사유코드를_그대로_쓴다():

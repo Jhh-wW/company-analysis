@@ -286,6 +286,8 @@ def _source_snapshot(
             # 구형/DART 지문은 보존하고, 현행 웹 위치의 해석에 필요한 값을 묶는다.
             if fragment.range_index != -1 or fragment.item_url:
                 fragment_row.update(range_index=fragment.range_index, item_url=fragment.item_url)
+            if fragment.source_context_json:
+                fragment_row["source_context_json"] = fragment.source_context_json
             previous_fragment = fragment_rows_by_id.setdefault(
                 fragment.fragment_id,
                 fragment_row,
@@ -360,6 +362,7 @@ def _source_snapshot(
                 "requirement": item.requirement.value,
                 "location": item.location,
                 "evidence_sha256": item.evidence_sha256,
+                **({"source_context_json": item.source_context_json} if item.source_context_json else {}),
             }
             for item in comparison_candidates
         ],
@@ -440,8 +443,11 @@ class OfficialComparisonCandidateEvidence:
     location: str
     evidence_text: str
     evidence_sha256: str
+    source_context_json: str = ""
 
     def __post_init__(self) -> None:
+        from src.shared.report_evidence.source_context import parse_source_context
+        parse_source_context(self.source_context_json)
         for value, label in (
             (self.company_id, "비교 후보 회사 식별자"),
             (self.candidate_id, "비교 후보 식별자"),

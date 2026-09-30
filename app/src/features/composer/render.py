@@ -179,6 +179,7 @@ class _FragmentMeta:
     #: 검수에 실제로 건넨 조각 바이트. 공개 부록에는 싣지 않고 정확한
     #: 증거 해시와 일반 산문 FactRecord를 만들 때만 쓴다.
     text: str = ""
+    source_context_json: str = ""
     source_url: str = ""
     document_title: str = ""
     item_title: str = ""
@@ -241,6 +242,7 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
                     fragment_id=str(number),
                     kind=str(item.get("종류") or "").strip(),
                     text=text,
+                    source_context_json=str(item.get("source_context_json") or ""),
                     source_url=source_url,
                     document_title=str(item.get("문서명") or "").strip(),
                     item_title=str(item.get("item_title") or "").strip(),
@@ -259,6 +261,7 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
             fragment_id=str(fragment.fragment_id),
             kind=str(getattr(fragment, "kind", "") or ""),
             text=str(getattr(fragment, "text", "") or ""),
+            source_context_json=str(getattr(fragment, "source_context_json", "") or ""),
             source_url=str(getattr(fragment, "source_url", "") or ""),
             document_title=str(getattr(fragment, "document_title", "") or ""),
             item_title=fragment.item_title,
@@ -1262,6 +1265,7 @@ def render_report(
                                 filing_meta,
                             ),
                             exact_text=meta.text,
+                            source_context_json=meta.source_context_json,
                         )
                     )
                 fact = build_verified_prose_fact(

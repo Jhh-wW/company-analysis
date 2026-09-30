@@ -61,14 +61,21 @@ def test_policy_risk_word_alone_cannot_supply_issue_in_mixed_paragraph() -> None
     assert "current_challenges:issue" not in slots
 
 
-def test_actual_money_event_and_qualitative_pressure_keep_issue() -> None:
+def test_financial_amount_and_pressure_without_business_effect_do_not_fill_issue() -> None:
     for text in (
         "유동성 위험에 노출된 금융부채 잔액은 1.5억원입니다.",
         "신용등급 하락으로 유동성위험이 증가했습니다.",
     ):
         slots, signal = _slot_ids(text)
         assert signal
-        assert "current_challenges:issue" in slots
+        # 5장은 사업 과제다. 금액이나 신용등급 사건만으로 필수칸을 채우지 않는다.
+        assert "current_challenges:issue" not in slots
+
+
+def test_financial_pressure_with_actual_delivery_effect_keeps_issue() -> None:
+    slots, signal = _slot_ids("유동성 위험 증가로 실제 고객 납품을 중단하였습니다.")
+    assert signal
+    assert "current_challenges:issue" in slots
 
 
 def test_collector_policy_is_not_retained_for_ai_reclassification() -> None:
@@ -78,7 +85,7 @@ def test_collector_policy_is_not_retained_for_ai_reclassification() -> None:
 
 
 def test_collector_mixed_actual_fact_keeps_exact_source_hash_and_location() -> None:
-    fact = "실제 신용등급 하락으로 유동성위험이 증가하여 대응 조치를 완료했습니다."
+    fact = "실제 신용등급 하락으로 유동성위험이 증가하여 고객 납품을 중단하였습니다."
     source = POLICY + "\n" + fact
     harvest = _collect(source)
     retained = [fragment for fragment in harvest.fragments if fact in fragment.text]

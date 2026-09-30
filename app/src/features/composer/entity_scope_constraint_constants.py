@@ -22,3 +22,5 @@ ENTITY_SCOPE_CONFLICT_FIELDS: Final[tuple[str, ...]] = ("document_content_sha256
 #: ``SCOPE_CONDITION_UNBOUND`` 그대로다. ``shared.report_quality.review_diagnostic_constants
 #: .GROUNDING_DETAIL_STAGES``에 같은 글자가 있어야 진단에서 버려지지 않는다.
 ENTITY_SCOPE_EXCLUSION_STAGE: Final[str] = "entity_scope_exclusion"
+SOURCE_CONTEXT_SELF_RE = re.compile(r"(?:^|[.。;]\s*)(?:회사|당사|동사|본사)(?:는|가|의)\s")
+SOURCE_CONTEXT_GROUP_RE = re.compile(r"^(?:연결회사|연결그룹|연결기업)(?:는|은|가|이|의)\s")

@@ -75,15 +75,16 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "6b5755001aefd23f257b550856f9546dd2e7887ca90b2dcb46cebe554d24dc01"),
-    (_golden_case, True, "4eeecd5d515e389cffdc82e0f87b4745eed495d24d366998f25701d2af97e454"),
+    (_golden_case, False, "74bb06c6182408c06c68139a6c51b844e611780252b42596d3ac99af5d211c24"),
+    (_golden_case, True, "3155d05b7088092ec7d504b4fd2df05ee082f19b725edac857b29936e0851a3f"),
     (_boundary_case, False, "856cd2d7ba3e4e8c3974df75dd8384c129bcf27bbdb586b50e9155bcb94a5e11"),
     (_boundary_case, True, "760765739100a5b8ebe838a719280f4c1cf51cd27bfa98bad02f044a577ede75"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
 ):
-    # test_review_schema와 같은 현재 안내문 기준이다. 캐시 포장은 원문을 바꾸지 않는다.
+    # 5장 재무·회계조건 안내만 복원하면 직전 커밋의 네 지문이 재현된다.
+    # 캐시 접두부와 개별 인용 원문은 그대로다(postpaid-prompt-baseline.json).
     monkeypatch.setenv(REVIEW_PROMPT_CACHE_ENV, "1")
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected

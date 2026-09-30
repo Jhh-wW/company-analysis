@@ -172,8 +172,11 @@ class EvidenceFragment:
     period_end: str = ""
     unit: str = ""
     company_scope: str = ""
+    source_context_json: str = ""
 
     def __post_init__(self) -> None:
+        from features.evidence_collection.source_context import validate_source_context
+        validate_source_context(self.source_context_json)
         for value, name in (
             (self.company_id, "company_id"),
             (self.fragment_id, "fragment_id"),

@@ -6287,8 +6287,10 @@ def _run_news_search_branch(
                 profile, official_evidence, existing_aliases=profile_aliases
             )
             try:
+                business_anchor_diagnostics: dict[str, Any] = {}
                 business_anchors = build_business_activity_anchors(
                     official_evidence, profile=profile,
+                    diagnostics=business_anchor_diagnostics,
                 )
                 # FULL의 기본 작성·검수와 허용된 보충 검수 몫을 먼저 보호한다.
                 # 부분 모드도 같은 여유를 남기되 기존 선택적 다듬기 한도 저하는
@@ -6341,6 +6343,7 @@ def _run_news_search_branch(
                         "본문작성예약호출": COMPOSER_RUNTIME_CALL_RESERVE,
                         "빈장복구예약호출": EMPTY_RECOVERY_AI_CALLS,
                         "공식사업조사앵커": len(business_anchors),
+                        "공식사업조사앵커판정": business_anchor_diagnostics,
                         **({"공식약칭근거": [item.diagnostic() for item in alias_evidence]}
                            if alias_evidence else {}),
                         **news_session.snapshot.transport_diagnostics,

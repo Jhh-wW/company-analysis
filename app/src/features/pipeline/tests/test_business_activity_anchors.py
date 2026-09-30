@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 
 import pytest
@@ -163,9 +164,15 @@ def test_only_named_product_brand_segment_and_ip_labels_are_accepted():
 
 def test_no_or_wrong_identity_returns_no_anchor():
     text = "당사는 정밀부품을 제조합니다."
-    assert build_business_activity_anchors(None, profile=PROFILE) == ()
+    diagnostics = {}
+    assert build_business_activity_anchors(None, profile=PROFILE, diagnostics=diagnostics) == ()
+    assert diagnostics["status"] == "company_binding_unavailable"
+    assert diagnostics["selected_fragments"] == 0
     assert build_business_activity_anchors(_evidence((text,)), profile={**PROFILE, "corp_code": "00888888"}) == ()
-    assert build_business_activity_anchors(_evidence((text,), identity_binding="확인하지 않은 문서"), profile=PROFILE) == ()
+    assert build_business_activity_anchors(_evidence((text,), identity_binding="확인하지 않은 문서"), profile=PROFILE, diagnostics=diagnostics) == ()
+    assert diagnostics["selected_fragments"] == 1
+    assert diagnostics["verified_fragments"] == 0
+    assert diagnostics["accepted_anchors"] == 0
 
 
 def test_current_company_heading_and_filing_list_identity_preserve_whole_text():
@@ -183,8 +190,65 @@ def test_dedup_cap_and_corrupted_source_hash_fail_closed():
             "당사는 의료기기를 판매합니다.", "당사는 분석 서비스를 제공합니다.",
             "당사는 온라인 광고 사업을 영위합니다.")
     evidence = _evidence(rows)
-    anchors = build_business_activity_anchors(evidence, profile=PROFILE)
+    diagnostics = {}
+    anchors = build_business_activity_anchors(evidence, profile=PROFILE, diagnostics=diagnostics)
     assert [anchor.business_item for anchor in anchors] == ["정밀부품", "의료기기", "분석 서비스"]
+    assert diagnostics["current_business_matches"] == 4
+    assert diagnostics["accepted_anchors"] == 3
     corrupt = _evidence((rows[0],))
     object.__setattr__(corrupt.candidates[2].fragments[0], "text", "당사는 다른 상품을 판매합니다.")
-    assert build_business_activity_anchors(corrupt, profile=PROFILE) == ()
+    assert build_business_activity_anchors(corrupt, profile=PROFILE, diagnostics=diagnostics) == ()
+    assert diagnostics["status"] == "collection_contract_invalid"
+
+
+@pytest.mark.parametrize("actor,owner,status,accepted", (
+    ("가온기업", "가온기업", "", True),
+    ("다온제조", "가온기업", "", False),
+    ("가온기업", "다온제조", "", False),
+    ("가온기업", "가온기업", "양산 적용 예정", False),
+))
+def test_source_row_actor_and_status_constrain_industry_anchor(actor, owner, status, accepted):
+    text = "당사는 정밀부품을 제조합니다."
+    evidence = _evidence((text,))
+    candidate = evidence.candidates[2]
+    row = " | ".join(filter(None, ("정밀부품", actor, text, status)))
+    context = json.dumps({
+        "version": "source-context-v1", "origin": "table_row", "text": row,
+        "location": f"0-{len(row)}", "text_sha256": _sha(row),
+        "actor": actor, "document_actor": owner, "status": status,
+        "document_actor_location": f"0-{len(owner)}", "document_actor_sha256": _sha(owner),
+        "item": "정밀부품",
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    fragment = replace(candidate.fragments[0], source_context_json=context)
+    evidence = replace(evidence, candidates=tuple(
+        replace(current, fragments=(fragment,)) if current is candidate else current
+        for current in evidence.candidates
+    ))
+    anchors = build_business_activity_anchors(evidence, profile=PROFILE)
+    assert len(anchors) == int(accepted)
+    if accepted:
+        assert anchors[0].exact_text == text
+        assert anchors[0].text_sha256 == _sha(text)
+
+
+@pytest.mark.parametrize("actor,accepted", (("(주)가온기업의", True), ("(주)다온제조의", False)))
+def test_heading_possessive_keeps_company_identity_without_altering_original(actor, accepted):
+    text = "당사는 정밀부품을 제조합니다."
+    evidence = _evidence((text,))
+    candidate = evidence.candidates[2]
+    heading = "[부품부문]\n(1) 영업개황\n" + actor + " 매출은 공시에 기재되어 있습니다."
+    owner = "가온기업"
+    context = json.dumps({
+        "version": "source-context-v1", "origin": "company_heading", "text": heading,
+        "location": f"0-{len(heading)}", "text_sha256": _sha(heading),
+        "actor": actor, "document_actor": owner, "status": "",
+        "document_actor_location": f"0-{len(owner)}", "document_actor_sha256": _sha(owner),
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    fragment = replace(candidate.fragments[0], source_context_json=context)
+    evidence = replace(evidence, candidates=tuple(
+        replace(current, fragments=(fragment,)) if current is candidate else current
+        for current in evidence.candidates
+    ))
+    anchors = build_business_activity_anchors(evidence, profile=PROFILE)
+    assert len(anchors) == int(accepted)
+    assert fragment.source_context_json == context

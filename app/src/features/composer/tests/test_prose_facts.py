@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
+import hashlib
+import json
 
 from src.features.composer.constants import GRADE_CONFIRMED
 from src.features.composer.port import ComposedReport, ComposedSection, ComposedSentence
@@ -80,6 +82,81 @@ def test_검증된_일반문장은_모든_인용의_신원과_원문해시에_�
         exact_evidence_text_hash(item.exact_text) for item in _evidence()
     ]
     assert fact.evidence_binding == fact_evidence_binding(fact)
+
+
+def _actor_evidence() -> ProseEvidence:
+    exact = "정밀 센서모듈을 제조하여 고객에게 공급한다."
+    context_text = "센서모듈 | 다온제조 | " + exact
+    owner = "예시회사"
+    start = len(owner) + 1
+    sha = lambda value: hashlib.sha256(value.encode("utf-8")).hexdigest()
+    context = json.dumps({
+        "version": "source-context-v1", "origin": "table_row",
+        "text": context_text, "location": f"{start}-{start + len(context_text)}",
+        "text_sha256": sha(context_text), "actor": "다온제조", "status": "",
+        "document_actor": owner, "document_actor_location": f"0-{len(owner)}",
+        "document_actor_sha256": sha(owner),
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return ProseEvidence("1", _source(1, exact), exact, context)
+
+
+def test_explicit_source_actor_survives_fact_scope_and_binding():
+    evidence = _actor_evidence()
+    sentence = replace(_sentence(), text="다온제조는 " + evidence.exact_text,
+                       citations=("1",), planned_claim_slot="operations_partners:operating_role")
+    fact = build_verified_prose_fact(
+        sentence, section_id="operations_partners", company_name="예시회사",
+        as_of_date="2026-09-30", evidence=(evidence,),
+    )
+    assert fact is not None
+    assert fact.legal_entity == "예시회사"
+    assert fact.subject_scope == "다온제조"
+    assert fact.evidence_binding == fact_evidence_binding(fact)
+    record, = json.loads(fact.state_evidence)
+    assert record["source_context_sha256"] == hashlib.sha256(evidence.source_context_json.encode()).hexdigest()
+    assert record["exact_sha256"] == exact_evidence_text_hash(evidence.exact_text)
+
+
+def test_target_or_omitted_subject_cannot_reenter_during_fact_build():
+    evidence = _actor_evidence()
+    for prefix in ("회사는 ", "예시회사는 ", "", "계열사 다온제조는 "):
+        result = evaluate_verified_prose_fact(
+            replace(_sentence(), text=prefix + evidence.exact_text, citations=("1",),
+                    planned_claim_slot="operations_partners:operating_role"),
+            section_id="operations_partners", company_name="예시회사",
+            as_of_date="2026-09-30", evidence=(evidence,),
+        )
+        assert result.fact is None
+        assert result.reason_code == "prose_source_actor_scope_unbound"
+
+
+def test_empty_context_keeps_existing_fact_bytes():
+    arguments = dict(section_id="business_model", company_name="예시회사", as_of_date="2026-08-31")
+    original = build_verified_prose_fact(_sentence(), evidence=_evidence(), **arguments)
+    # 문맥 필드 추가 전 817606 구현으로 만든 동일 fixture의 정본 바이트다.
+    payload = json.dumps(asdict(original), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    assert hashlib.sha256(payload.encode()).hexdigest() == "1d60051ff70c6ea53c764511904f9c70df7c5567ecc1da27cae66c38d5490175"
+    assert "source_context" not in original.state_evidence
+
+
+def test_render_carries_actual_actor_into_published_fact():
+    from src.features.composer.port import CollectedFragment
+    evidence = _actor_evidence()
+    sentence = replace(_sentence(), text="다온제조는 " + evidence.exact_text,
+                       citations=("1",), planned_claim_slot="operations_partners:operating_role")
+    fragment = CollectedFragment(
+        "1", "공시", evidence.exact_text,
+        source_url="https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260102000001",
+        document_title="사업보고서", source_context_json=evidence.source_context_json,
+    )
+    report = render_report(
+        "예시회사", ComposedReport((ComposedSection("operations_partners", (sentence,)),)),
+        (fragment,), None,
+    )
+    fact, = report.fact_records
+    assert fact.subject_scope == "다온제조"
+    assert fact.claim == sentence.text
+    assert json.loads(fact.state_evidence)[0]["source_context_sha256"]
 
 
 def test_prose_builder_reports_missing_slot_without_inventing_one():

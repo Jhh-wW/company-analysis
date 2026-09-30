@@ -749,6 +749,8 @@ def discover_official_source_candidates(
     cap = max(1, min(int(limit), MAX_COMPARATORS))
     for _row_index, item in enumerate(evidence_rows):
         source = item.source
+        if item.source_context_problem:
+            continue
         sentences = _evidence_sentences(item.evidence_text)
         if (
             source_counts.get(source.source_id.strip()) != 1

@@ -623,6 +623,12 @@ def document_entity_scope_problem(
     """
 
     text = unicodedata.normalize("NFKC", candidate_text)
+    from src.features.composer.source_actor_scope import source_actor_problem
+    for context in contexts:
+        for source_context in context.source_contexts:
+            problem = source_actor_problem(candidate_text, source_context, context.actor_relation_sources)
+            if problem:
+                return problem
     known_sources: dict[str, str] = {}
     labels: set[str] = set()
     for index, context in enumerate(contexts):

@@ -11,6 +11,7 @@ GROUNDING_DETAIL_GUIDES = {
     "candidate_value_missing": "후보 숫자 표기가 없거나 둘 이상이라 결속할 수 없습니다.",
     "candidate_value_scope": "후보 숫자가 해당 항목·표현의 범위에 결속되지 않습니다.",
     "source_value_scope": "원문 숫자를 해당 항목·원문 구절에서 확인하지 못했습니다.",
+    "value_constraint_mismatch": "후보와 원문의 숫자 상한·하한 또는 연결·별도 기준이 다릅니다.",
     "value_mismatch": "후보 숫자가 원문 값과 허용된 환산·반올림으로 일치하지 않습니다.",
     "dimension_mismatch": "후보의 금액·수량·외화·비율 차원이 원문과 다릅니다.",
     "period_mismatch": "후보 숫자의 기간과 원문 숫자의 기간이 다릅니다.",

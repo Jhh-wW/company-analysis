@@ -419,6 +419,13 @@ def _render_fragments(
         if show_supported_claim_slots:
             supported = ", ".join(fragment.supported_claim_slots) or "없음"
             label = f"{label} · 지원 주장슬롯: {supported}"
+        if fragment.source_context_json:
+            from src.shared.report_evidence.source_context import parse_source_context
+            context = parse_source_context(fragment.source_context_json)
+            label += " · 원문 행위주체: " + json.dumps(context["actor"], ensure_ascii=False)
+            if context["status"]:
+                label += " · 원문 진행상태: " + json.dumps(context["status"], ensure_ascii=False)
+            label += " · 주어와 예정 상태를 대상 회사의 직접 행위나 완료로 바꾸지 마세요"
         evidence_text = json.dumps(fragment.text, ensure_ascii=False) if _is_news_fragment(fragment) else fragment.text
         lines.append(f"[조각 {fragment.fragment_id}] ({label}) {evidence_text}\n")
     return "".join(lines)

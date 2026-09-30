@@ -419,6 +419,8 @@ def build_stated_differentiator_result(
     seen: set[str] = set()
     for candidate in official_candidate_sentences:
         source = candidate.source
+        if candidate.source_context_problem:
+            continue
         sentence = _clean_sentence(candidate.evidence_text)
         if (
             sentence in seen

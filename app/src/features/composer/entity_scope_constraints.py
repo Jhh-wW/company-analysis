@@ -24,7 +24,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from src.features.composer.constants import DART_DOCUMENT_HOST
@@ -48,10 +48,13 @@ class EntityScopeContext:
     document_identity: str
     cited_sources: Mapping[str, str]
     constraint_sources: Mapping[str, str]
+    source_contexts: tuple[str, ...] = ()
+    actor_relation_sources: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "cited_sources", MappingProxyType(dict(self.cited_sources)))
         object.__setattr__(self, "constraint_sources", MappingProxyType(dict(self.constraint_sources)))
+        object.__setattr__(self, "actor_relation_sources", MappingProxyType(dict(self.actor_relation_sources)))
 
 
 def is_canonical_dart_identity(identity: str) -> bool:
@@ -96,6 +99,7 @@ def build_entity_scope_contexts(
             continue
         seen.add(identity)
         cited = [frag_by_id[cid] for cid in cited_ids if frag_by_id[cid].document_identity == identity]
+        actor_contexts = tuple(dict.fromkeys(fragment.source_context_json for fragment in cited if fragment.source_context_json))
         constraints = {
             other_id: fragment
             for other_id, fragment in frag_by_id.items()
@@ -106,11 +110,13 @@ def build_entity_scope_contexts(
         }
         # 인용 값과 맞는 각주만 남긴 뒤에도 context 전체에 알려진 값이 둘 이상이면
         # (인용 값을 몰라 각주끼리 어긋남) 이 문서의 제약은 만들지 않는다.
-        if not constraints or not _consistent((*cited, *constraints.values())):
+        if (not constraints and not actor_contexts) or not _consistent((*cited, *constraints.values())):
             continue
         contexts.append(EntityScopeContext(
             document_identity=identity,
             cited_sources={fragment.fragment_id: fragment.text for fragment in cited},
             constraint_sources={other_id: fragment.text for other_id, fragment in constraints.items()},
+            source_contexts=actor_contexts,
+            actor_relation_sources={cid: frag_by_id[cid].text for cid in cited_ids} if actor_contexts else {},
         ))
     return tuple(contexts)

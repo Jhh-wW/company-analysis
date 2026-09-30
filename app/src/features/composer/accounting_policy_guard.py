@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import unicodedata
+from src.features.composer.challenge_accounting_policy import is_challenge_accounting_policy
 from collections.abc import Mapping, Sequence
 
 from src.features.composer.accounting_policy_constants import (
@@ -304,6 +305,10 @@ def _matched_rule(
       호출자가 2장 본문에만 원문을 넘기므로 다른 장의 판정은 종전 그대로다.
     """
 
+    # 금액·수익원 이름이 있어도 평상시 인식 기준은 당면 사업 과제가 아니다.
+    # 실제 사건·회계 서비스 제공은 좁은 절 판정에서 먼저 보존한다.
+    if section_id == "current_challenges" and is_challenge_accounting_policy(clause):
+        return "사업문제미결속재무회계조건"
     if _exemption_with_sources(clause, sources, section_id):
         return ""
     return _rule_hit(clause, section_id)

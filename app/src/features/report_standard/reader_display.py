@@ -10,7 +10,11 @@ from src.core.source_display_adapter import (
 )
 from src.features.report_standard.reader_display_constants import (
     COLLECTION_SOURCE_LABELS, LEGACY_SECTION_NOTICES, PARTIAL_REPORT_NOTE,
+    INCOMPLETE_REPORT_NOTE,
     SOURCE_STATUS_LABELS, VERIFICATION_LABELS,
+    EVIDENCE_AVAILABLE_POLICY, NUMERIC_SCOPE_REASON_PREFIXES,
+    SEMANTIC_SCOPE_REASON_PREFIX, UNVERIFIED_TABLE_REASON_PREFIX,
+    NUMERIC_SCOPE_NOTE, SEMANTIC_SCOPE_NOTE, UNVERIFIED_TABLE_NOTE,
 )
 from src.features.report_standard.constants import SECTION_BY_ID
 from src.features.report_standard.section_content import source_verification_label
@@ -59,8 +63,11 @@ def reader_notes(report: object) -> tuple[str, ...]:
     """SHADOW 관측값을 출고 권한으로 해석하지 않고 자료 범위만 알린다."""
     notes = []
     grade = getattr(report, "grade", "")
-    if getattr(grade, "value", grade) in {"부분 완성", "미완성"}:
+    grade_value = getattr(grade, "value", grade)
+    if grade_value == "부분 완성":
         notes.append(PARTIAL_REPORT_NOTE)
+    elif grade_value == "미완성":
+        notes.append(INCOMPLETE_REPORT_NOTE)
     failed = tuple(dict.fromkeys(
         COLLECTION_SOURCE_LABELS[source.name]
         for source in getattr(report, "sources", ())
@@ -68,6 +75,19 @@ def reader_notes(report: object) -> tuple[str, ...]:
     ))
     if failed:
         notes.append(f"수집 범위: {'·'.join(failed)} 수집을 끝까지 완료하지 못했습니다. 확보한 자료만 반영했으며, 해당 자료 전체가 없다는 뜻은 아닙니다.")
+    if getattr(report, "publication_policy", "") == EVIDENCE_AVAILABLE_POLICY:
+        # 저장된 사유 중 독자가 인용 범위를 판단하는 데 필요한 항목만 옮긴다.
+        # 임의 오류 문자열·SHADOW 판정은 공개 안내나 출고 권한으로 바꾸지 않는다.
+        reasons = tuple(
+            reason for reason in getattr(report, "shortfall_reasons", ())
+            if isinstance(reason, str)
+        )
+        if any(reason.startswith(NUMERIC_SCOPE_REASON_PREFIXES) for reason in reasons):
+            notes.append(NUMERIC_SCOPE_NOTE)
+        if any(reason.startswith(SEMANTIC_SCOPE_REASON_PREFIX) for reason in reasons):
+            notes.append(SEMANTIC_SCOPE_NOTE)
+        if any(reason.startswith(UNVERIFIED_TABLE_REASON_PREFIX) for reason in reasons):
+            notes.append(UNVERIFIED_TABLE_NOTE)
     return tuple(notes)
 
 

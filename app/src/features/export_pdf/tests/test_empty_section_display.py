@@ -68,3 +68,23 @@ def test_sealed_notice_paragraph_keeps_the_sealed_number():
     )
 
     assert f"1.{''.join(notice.split())}" in _text(_flowables_pdf(story))
+
+
+def test_available_pdf_shows_missing_prose_and_table_verification_limits():
+    reasons = [
+        "숫자·날짜 문장의 항목·기간·계산 관계를 원문과 맞춰 확인하지 못해 제외했습니다 (본문 2개). 자료 자체가 없다는 뜻은 아닙니다.",
+        "원문과 계획·조건·공식 설명의 범위가 일치하는지 확인하지 못한 문장을 제외했습니다 (도식 1개). 자료 자체가 없다는 뜻은 아닙니다.",
+        "표와 도식은 아직 하나씩 확인하지 못했습니다. 숫자를 그대로 인용하기 전에 부록의 원문을 함께 확인해 주세요.",
+        "SECRET 내부 임계값",
+    ]
+    report = replace(_report(), publication_policy="evidence-available-v1", shortfall_reasons=reasons)
+    original_lines = [list(section.prose_lines) for section in report.sections]
+    text = _text(pdf_logic.build_pdf(report))
+    assert "부분완성보고서" in text
+    assert "일부숫자·날짜설명은원문의항목·기간·계산관계" in text
+    assert "일부계획·조건·공식설명은원문과설명범위" in text
+    assert "표·도식확인범위:개별항목의검증은완료되지않았습니다" in text
+    assert "부록의원문과대조해" in text
+    assert "SECRET" not in text
+    assert [section.prose_lines for section in report.sections] == original_lines
+    assert report.shortfall_reasons == reasons

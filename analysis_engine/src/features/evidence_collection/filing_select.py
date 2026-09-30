@@ -113,6 +113,9 @@ class DocumentFetchResult:
     #: raw document.xml 안의 href/표시 문자열에서 찾은 URL 후보. 회사 공식
     #: 여부는 여기서 판단하지 않고 app의 법인명+등록번호 검증기가 다시 확인한다.
     official_url_candidates: tuple[DiscoveredDocumentUrl, ...] = ()
+    document_actor: str = ""
+    source_contexts: tuple[str, ...] = ()
+    source_context_complete: bool = True
 
     def __post_init__(self) -> None:
         _validate_fetch_result_common(
@@ -120,8 +123,10 @@ class DocumentFetchResult:
             elapsed_ms=self.elapsed_ms,
             bytes_downloaded=self.bytes_downloaded,
         )
-        if type(self.text) is not str or type(self.corp_code) is not str:
+        if type(self.text) is not str or type(self.corp_code) is not str or type(self.document_actor) is not str:
             raise TypeError("DART 문서 fetch 결과의 text·corp_code는 문자열이어야 합니다")
+        if type(self.source_context_complete) is not bool or type(self.source_contexts) is not tuple or any(type(raw) is not str for raw in self.source_contexts):
+            raise TypeError("회사 주어 문맥 완료 상태·자료 형식이 다릅니다")
         if type(self.official_url_candidates) is not tuple or any(
             type(candidate) is not DiscoveredDocumentUrl
             for candidate in self.official_url_candidates
@@ -130,7 +135,7 @@ class DocumentFetchResult:
                 "DART 문서 fetch 결과 URL 후보는 DiscoveredDocumentUrl tuple이어야 합니다"
             )
         if self.state != c.ATTEMPT_STATE_OK and (
-            self.text or self.corp_code or self.official_url_candidates
+            self.text or self.corp_code or self.official_url_candidates or self.document_actor or self.source_contexts
         ):
             raise ValueError(
                 "실패·부재 DART 문서 fetch 결과에는 문서 payload를 실을 수 없습니다"
