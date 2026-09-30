@@ -18,6 +18,7 @@ else:
     AiCostEvent = Any
 
 from src.core.constants import COUNTED_CELLS
+from src.shared.business_challenge_context import IndustryChallengeContext
 from src.shared.report_generation.models import (
     GenerationProducerEvidence,
     GenerationRunMetrics,
@@ -298,6 +299,10 @@ class ReportSection:
     tag: str = ""
     #: 이 섹션이 표시하는 잠긴 사실 장부의 ID. canonical 출력의 근거 단위다.
     fact_ids: list[str] = field(default_factory=list)
+    #: 산업 문제는 회사 직접 사실·준비 상태·공식 근거 수를 채우지 않는다.
+    industry_contexts: tuple["IndustryChallengeContext", ...] = field(
+        default=(), metadata={"canonical_omit_empty": True},
+    )
 
     @property
     def is_filled(self) -> bool:

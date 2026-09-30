@@ -31,3 +31,4 @@ GENERIC_COMPANY_REFERENCES: Final[frozenset[str]] = frozenset({
 DART_FRAGMENT_LOCATION_PATTERN: Final[str] = r"([0-9]{1,10})-([0-9]{1,10})"
 WEB_FRAGMENT_INDEX_PATTERN: Final[str] = r"[0-9]{1,10}"
 DART_VERIFIED_IDENTITY_CHECK: Final[str] = "verified_match"
+DART_FILING_LIST_IDENTITY_CHECK: Final[str] = "verified_filing_list_match"

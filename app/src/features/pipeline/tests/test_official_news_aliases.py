@@ -216,6 +216,21 @@ def test_dart_requires_verified_current_company_receipt_and_exact_range():
     assert official_news_aliases(PROFILE, evidence('뤼튼테크놀로지스(이하 "회사")', kind=SOURCE_KIND_DART_AUDIT_REPORT)) == ()
 
 
+@pytest.mark.parametrize("check", ("verified_match", "verified_filing_list_match"))
+def test_document_and_actual_filing_list_identity_require_exact_fields(check):
+    result = evidence(DEFINITION, kind=SOURCE_KIND_DART_AUDIT_REPORT)
+    binding = result.candidates[0].documents[0].identity_binding.replace("verified_match", check)
+    assert official_news_aliases(PROFILE, change_document(result, identity_binding=binding))
+    for bad in (
+        binding.replace(CORP_ID, "00999999"),
+        binding.replace(RECEIPT, "20260414000009"),
+        binding.replace(SOURCE_KIND_DART_AUDIT_REPORT, "dart_business_report"),
+        binding.replace(check, "unverifiable_no_fetcher_metadata"),
+        binding.replace(check, "arbitrary_verified_marker"),
+    ):
+        assert official_news_aliases(PROFILE, change_document(result, identity_binding=bad)) == ()
+
+
 def test_cross_domain_keeps_exact_company_and_registration_number_binding():
     def proof_for(company_id):
         provenance = build_dart_filing_url_provenance(

@@ -16,6 +16,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from src.features.news_intake import constants as c
+from src.features.news_intake import industry_constants as ic
 from src.features.news_intake.identity_names import company_query_names, mentions_target
 from src.features.news_intake.models import (
     NewsCandidate, NewsCollectionPolicy, NewsCompanyContext, NewsQueryAttempt,
@@ -30,7 +31,10 @@ def stable_digest(value: object) -> str:
 
 
 def company_digest(company: NewsCompanyContext) -> str:
-    return stable_digest(asdict(company))
+    value = asdict(company)
+    if not company.business_anchors:
+        value.pop("business_anchors", None)
+    return stable_digest(value)
 
 
 def policy_digest(policy: NewsCollectionPolicy) -> str:
@@ -95,7 +99,20 @@ def search_plan(company: NewsCompanyContext, as_of: dt.date) -> tuple[tuple[str,
     # 실제 기간은 모든 응답의 발행일로 다시 검사한다.
     for years in range(1, len(c.WINDOW_MONTHS) + 1):
         plan.append((f"{primary} {as_of.year - years}", "sim", "archive", archive_months))
-    return tuple(dict.fromkeys(plan))
+    plan = list(dict.fromkeys(plan))
+    if company.business_anchors:
+        original_length = len(plan)
+        industry_queries = []
+        query_count = min(ic.INDUSTRY_QUERY_COUNT, original_length - ic.INDUSTRY_COMPANY_QUERY_COUNT)
+        for index in range(query_count):
+            anchor = company.business_anchors[index % len(company.business_anchors)]
+            region, topic = ("국내", "domestic") if index % ic.INDUSTRY_COMPANY_QUERY_COUNT == 0 else ("세계", "global")
+            industry_queries.append((f"{anchor.business_item} {region} 산업 문제", "sim",
+                                     f"industry_{topic}:{anchor.anchor_id}", recent_months))
+        # 회사 검색 두 개를 유지하고 기존 뒤쪽 탐색을 대체한다. 총 호출은 늘리지 않는다.
+        plan = plan[:ic.INDUSTRY_COMPANY_QUERY_COUNT] + industry_queries + plan[ic.INDUSTRY_COMPANY_QUERY_COUNT:]
+        plan = plan[:original_length]
+    return tuple(plan)
 
 
 def _value(item: object, field: str) -> str:
@@ -184,7 +201,12 @@ def diverse_candidates(candidates: list[NewsCandidate], limit: int) -> tuple[New
                     del groups[topic]
                 if len(selected) >= limit:
                     break
-    return tuple(selected)
+    industry = [item for item in ordered if any(topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) for topic in item.topics)]
+    reserved = min(len(industry), limit // ic.INDUSTRY_BODY_DIVISOR)
+    if reserved:
+        first = industry[:reserved]
+        selected = first + [item for item in selected if item.id not in {candidate.id for candidate in first}]
+    return tuple(selected[:limit])
 
 
 def metadata_probe_budget(*, total_budget: int, attempted: int,
@@ -226,6 +248,11 @@ def body_ranked_candidates(candidates: list[NewsCandidate], *, attempt_budget: i
         selected.append((preferred if preferred else fallback).popleft())
     selected.extend(matched)
     selected.extend(unmatched)
+    industry = [item for item in ranked if any(topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) for topic in item.topics)]
+    reserved = min(len(industry), budget // ic.INDUSTRY_BODY_DIVISOR)
+    if reserved:
+        first = industry[:reserved]
+        selected = first + [item for item in selected if item.id not in {candidate.id for candidate in first}]
     return tuple(selected)
 
 

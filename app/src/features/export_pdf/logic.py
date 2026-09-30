@@ -56,6 +56,7 @@ from reportlab.platypus import (
 )
 
 from src.core import clock
+from src.shared.business_challenge_context import industry_context_displays
 from src.core.citations import citation_marker, citation_display_style, location_display
 from src.core.constants import section_display_heading
 from src.core.report_display import (
@@ -2454,6 +2455,7 @@ def _add_section(
         story.extend(_lead_with_heading(
             heading_flowables, [Paragraph(_escape(empty_notice), styles["small"])]
         ))
+        _add_unsealed_industry_contexts(story, report, section, styles)
         return
     if report.schema_version == ENGINE_V2_SCHEMA_VERSION:
         paragraphs, guidance = reader_section_content(section)
@@ -2476,6 +2478,7 @@ def _add_section(
             table_start = 0
         for table in section.tables[table_start:]:
             _add_report_table(story, table, styles, width)
+        _add_unsealed_industry_contexts(story, report, section, styles)
         return
     if not section.is_filled:
         story.extend(heading_flowables)
@@ -2798,6 +2801,7 @@ def _add_projection_section(
     heading_flowables.extend(Paragraph(_escape(text), styles["small"]) for text in display.guidance_lines)
     if not (display.paragraphs or display.tables):
         story.extend(_lead_with_heading(heading_flowables, []))
+        _add_industry_contexts(story, display, styles)
         return
 
     visuals_by_index = {visual.table_index: visual for visual in display.visuals}
@@ -2834,6 +2838,19 @@ def _add_projection_section(
         _add_projection_table(
             story, display.tables[index], visuals_by_index.get(index), styles, width
         )
+    _add_industry_contexts(story, display, styles)
+
+
+def _add_industry_contexts(story: list[Flowable], display: PublicSectionDisplay, styles: dict[str, ParagraphStyle]) -> None:
+    for item in display.industry_contexts:
+        story.append(Paragraph("공식 자료에 나온 사업과 관련된 산업 과제 · 해석", styles["small"]))
+        story.extend(Paragraph(_escape(text), styles["body"]) for text in item.lines)
+
+
+def _add_unsealed_industry_contexts(story: list[Flowable], report: Report, section: ReportSection, styles: dict[str, ParagraphStyle]) -> None:
+    for item in industry_context_displays(section.industry_contexts, tuple(report.citations)):
+        story.append(Paragraph("공식 자료에 나온 사업과 관련된 산업 과제 · 해석", styles["small"]))
+        story.extend(Paragraph(_escape(text), styles["body"]) for text in item.lines)
 
 
 def _section_heading(section: ReportSection | PublicSectionDisplay) -> str:

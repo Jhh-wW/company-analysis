@@ -193,7 +193,7 @@ def build_public_projection(report: Report) -> PublicReportProjection:
     sections = tuple(
         PublicSectionContentBlock(
             version=PUBLIC_PROJECTION_VERSION,
-            display=_section_display(section),
+            display=_section_display(section, tuple(report.citations)),
             ledger=ledgers.section_ledgers[section.cell],
         )
         for section in report.sections
@@ -302,7 +302,7 @@ def _grade_notice(report: Report) -> tuple[str, str]:
 # ══════════════════════════════════════════════════════════
 
 
-def _section_display(section: ReportSection) -> PublicSectionDisplay:
+def _section_display(section: ReportSection, citations: tuple[object, ...] = ()) -> PublicSectionDisplay:
     tables = tuple(_table_block(table) for table in section.tables)
     visuals: list[PublicVisualBlock] = []
     period_summary: Optional[PublicPeriodSummaryBlock] = None
@@ -329,7 +329,16 @@ def _section_display(section: ReportSection) -> PublicSectionDisplay:
         tables=tables,
         visuals=tuple(visuals),
         period_summary=period_summary,
+        industry_contexts=_industry_context_displays(section, citations),
     )
+
+
+def _industry_context_displays(section: ReportSection, citations: tuple[object, ...]) -> tuple:
+    from src.shared.business_challenge_context import industry_context_displays
+    try:
+        return industry_context_displays(section.industry_contexts, citations)
+    except (KeyError, ValueError) as error:
+        raise PublicProjectionError("산업 과제 표시의 두 공개 출처가 등록부와 다릅니다") from error
 
 
 def _paragraphs(section: ReportSection) -> tuple[tuple[str, str], ...]:

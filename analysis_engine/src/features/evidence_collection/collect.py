@@ -147,12 +147,16 @@ def _deadline_attempt(company_id: str, filing: SelectedFiling) -> CollectionAtte
 def _identity_binding(company_id: str, filing: SelectedFiling, fetch_result: DocumentFetchResult) -> str:
     """요청 corp_code와 fetcher 메타를 정직하게 대조한 결과까지 문자열에 남긴다(P1-4).
 
-    fetcher가 corp_code를 돌려주지 못하면(메타 없음) 「검증했다」고 거짓으로
-    주장하지 않고 unverifiable로 남긴다 — 실제 mismatch는 이 함수 호출 전에
-    이미 걸러졌으므로 여기 도달했다면 일치하거나 확인 불가한 경우뿐이다.
+    문서 메타와 실제 목록 응답 행의 회사 코드 검증을 구분한다. 문서 메타가
+    없더라도 선택한 접수번호의 목록 행이 같은 회사임을 증명하면 별도 상태를
+    남긴다. 둘 다 없으면 unverifiable이며 요청 코드를 증거로 대신하지 않는다.
     """
-    verified = bool(fetch_result.corp_code)
-    check = c.IDENTITY_CHECK_VERIFIED if verified else c.IDENTITY_CHECK_UNVERIFIED
+    if fetch_result.corp_code:
+        check = c.IDENTITY_CHECK_VERIFIED
+    elif filing.filing_list_corp_code and filing.filing_list_corp_code == company_id:
+        check = c.IDENTITY_CHECK_FILING_LIST_VERIFIED
+    else:
+        check = c.IDENTITY_CHECK_UNVERIFIED
     return (
         f"corp_code={company_id};rcept_no={filing.rcept_no};source_kind={filing.source_kind};"
         f"identity_check={check}"

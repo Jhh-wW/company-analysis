@@ -32,8 +32,12 @@ from collections.abc import Mapping, Sequence
 
 from src.features.composer.accounting_policy_constants import (
     ACCOUNTING_POLICY_BOILERPLATE,
+    ACCOUNTING_POLICY_CLAUSE_SPLIT_RE,
     ACCOUNTING_POLICY_EXEMPTIONS,
     ACCOUNTING_POLICY_RULES,
+    LIQUIDITY_ACTUAL_PRESSURE_RE,
+    LIQUIDITY_BUSINESS_OFFERING_RE,
+    LIQUIDITY_BUSINESS_EVENT_RE,
     PROGRESS_ALLOCATION_EVENT_RE,
     PROGRESS_ALLOCATION_BUSINESS_RELATION_RE,
     PROGRESS_ALLOCATION_ACTION_RE,
@@ -215,6 +219,14 @@ def _exemption_with_sources(
     if name:
         return name
     rule = _rule_hit(clause, section_id)
+    if rule == "유동성관리":
+        # 회계 상용구와 실제 압박·판매 서비스를 구분한다. 회사 주어·시점·
+        # 조건·인용 결속 검사는 이후의 의미 검수가 그대로 맡는다.
+        surface_clause = _surface(clause)
+        if (LIQUIDITY_ACTUAL_PRESSURE_RE.search(surface_clause)
+                or LIQUIDITY_BUSINESS_OFFERING_RE.search(surface_clause)
+                or LIQUIDITY_BUSINESS_EVENT_RE.search(surface_clause)):
+            return "유동성실제사업사실"
     if (
         rule in {PROGRESS_ALLOCATION_RULE_NAME, PROGRESS_COST_RULE_NAME}
         and (
@@ -308,7 +320,7 @@ def _clause_verdicts(
 
     return tuple(
         bool(_matched_rule(clause, sources, section_id))
-        for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
+        for clause in ACCOUNTING_POLICY_CLAUSE_SPLIT_RE.split(text)
         if _surface(clause)
     )
 
@@ -361,7 +373,7 @@ def accounting_policy_matched_rules(
 
     return tuple(
         _matched_rule(clause, sources, section_id)
-        for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
+        for clause in ACCOUNTING_POLICY_CLAUSE_SPLIT_RE.split(text)
         if _surface(clause)
     )
 
@@ -377,7 +389,7 @@ def accounting_policy_exemptions(
 
     return tuple(
         _exemption_with_sources(clause, sources, section_id)
-        for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
+        for clause in ACCOUNTING_POLICY_CLAUSE_SPLIT_RE.split(text)
         if _surface(clause)
     )
 
@@ -393,6 +405,6 @@ def accounting_policy_rules_ignoring_exemptions(
 
     return tuple(
         _rule_hit(clause, section_id)
-        for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
+        for clause in ACCOUNTING_POLICY_CLAUSE_SPLIT_RE.split(text)
         if _surface(clause)
     )

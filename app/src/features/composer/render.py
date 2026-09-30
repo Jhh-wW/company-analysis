@@ -23,6 +23,13 @@ from typing import Final, Optional
 from urllib.parse import urlsplit
 
 from src.core.citations import citation_number
+from src.shared.business_challenge_context import (
+    BusinessActivityAnchor, IndustryProblemEvidence, INDUSTRY_CONTEXT_SECTION,
+)
+from src.features.composer.industry_context import (
+    bind_industry_context_sources, assert_industry_context_sources,
+    has_verified_direct_business_issue,
+)
 from src.features.composer.constants import (
     CITATION_STYLE_MERGED,
     PARAGRAPH_MAX_SENTENCES,
@@ -1140,6 +1147,8 @@ def render_report(
     program_registry_sources: Sequence[Source] = (),
     name_table: Optional[PortfolioNameTable] = None,
     style_diagnostics: dict[str, int] | None = None,
+    industry_anchors: tuple[BusinessActivityAnchor, ...] = (),
+    industry_problems: tuple[IndustryProblemEvidence, ...] = (),
 ) -> Report:
     """검증 끝난 ComposedReport를 웹·PDF 공용 pipeline Report로 바꾼다.
 
@@ -1176,7 +1185,7 @@ def render_report(
         (번호는 본문 [n]과 1:1), 핵심 요약. schema_version은
         ENGINE_V2_SCHEMA_VERSION — canonical(v4) 게이트 대상이 아니다.
     """
-    metas = _fragment_metas(fragments)
+    metas = _fragment_metas(_normalize_fragments(fragments) if industry_problems else fragments)
     numbers = _citation_numbers(metas)
     meta_by_number = {numbers[meta.fragment_id]: meta for meta in metas}
     metas_by_fragment = {meta.fragment_id: meta for meta in metas}
@@ -1627,12 +1636,23 @@ def render_report(
         citations.append(source)
         citations_by_id[source.source_id] = source
         used_numbers.add(source.number)
+    industry_contexts, citations = bind_industry_context_sources(
+        anchors=industry_anchors, problems=industry_problems, fragments=metas,
+        sources=citations, numbers=numbers, company_id=company_id,
+        reference_date=as_of_date, has_direct_issue=has_verified_direct_business_issue(report),
+        build_official_source=lambda meta, number: _build_source(
+            meta, number, company_name, [INDUSTRY_CONTEXT_SECTION], filing_meta,
+        ),
+    )
+    sections = [replace(section, industry_contexts=industry_contexts)
+                if section.cell == INDUSTRY_CONTEXT_SECTION else section for section in sections]
     complete_registry = ensure_dart_profile_attesters(
         citations,
         company_name=company_name,
     )
     citations = sorted(complete_registry, key=lambda source: source.number)
     complete_registry = tuple(citations)
+    assert_industry_context_sources(industry_contexts, company_id=company_id, sources=complete_registry, reference_date=as_of_date)
     for source in complete_registry:
         if problem := full_typed_source_registry_problem(
             source,

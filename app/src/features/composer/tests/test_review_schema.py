@@ -156,11 +156,14 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 #   c9a8489a / a370eb2b·f769528b)과 같음을 재생해 확인했다(tmp 무과금 재생 기록).
 # 2026-09-27 수치 증명 필드 축자 안내 307자를 더한 현재 builder 결과로
 #   아래 전체 프롬프트 해시 여섯 개를 재계산했다. 위 2026-09-23 값은 역사 기록이다.
+# 2026-09-30: 5장 정책241자와 5·8장 범위 안내 변경만 되돌려 직전 네 해시를
+# 재현한 뒤 본문 기준값만 갱신했다. JSON schema·도식 기준값은 그대로다.
+# 재현 증거: tmp/audit-20260930/review-policy-snapshots.json.
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "546f0dfd5c84fc631a7b1f03c15f7a1abeeaaffc225047ffb95db0010a1b0a39"),
-    (_golden_case, True, "70aa9f5345741474c2cc8e355acf940a37c2a7072e585c5acf32ea05d3d5f198"),
-    (_boundary_case, False, "a05ed45f8a4acffc1757d129947864c73b8f6bacf5742e6287f24eb20b0a6a0c"),
-    (_boundary_case, True, "028221dba6a98551334e93c3e9e1a6f53fbe3630bf4dda4f087d3668c5f2a410"),
+    (_golden_case, False, "6b5755001aefd23f257b550856f9546dd2e7887ca90b2dcb46cebe554d24dc01"),
+    (_golden_case, True, "4eeecd5d515e389cffdc82e0f87b4745eed495d24d366998f25701d2af97e454"),
+    (_boundary_case, False, "856cd2d7ba3e4e8c3974df75dd8384c129bcf27bbdb586b50e9155bcb94a5e11"),
+    (_boundary_case, True, "760765739100a5b8ebe838a719280f4c1cf51cd27bfa98bad02f044a577ede75"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
     # 현재 builder와 현재 안내문으로 재생한 전체 UTF-8 프롬프트 해시다.

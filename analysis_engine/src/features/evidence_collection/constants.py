@@ -235,6 +235,83 @@ ACCOUNTING_TABLE_SUBJECT_MARKERS: Final[tuple[str, ...]] = ("자산", "평가", 
 CUSTOMER_VALUE_MARKERS: Final[tuple[str, ...]] = (
     "고객가치", "고객에게", "사용자에게", "소비자에게",
 )
+VALUE_EXCHANGE_RECIPIENT_MARKERS: Final[tuple[str, ...]] = (
+    "고객", "소비자", "이용자", "사용자", "구매자", "거래처", "수요자",
+    "가입자", "회원", "환자",
+)
+VALUE_EXCHANGE_OBJECT_MARKERS: Final[tuple[str, ...]] = (
+    "제품", "상품", "서비스", "용역", "재화", "콘텐츠", "플랫폼", "대출",
+)
+VALUE_EXCHANGE_DELIVERY_MARKERS: Final[tuple[str, ...]] = (
+    "제공", "전달", "판매", "공급", "납품", "임대", "중개", "실행", "이용",
+)
+VALUE_EXCHANGE_CONSIDERATION_MARKERS: Final[tuple[str, ...]] = (
+    "대가", "대금", "요금", "수수료", "가격", "결제", "과금", "매출",
+    "수익", "이자", "구독료", "이용료", "사용료",
+)
+VALUE_EXCHANGE_BENEFIT_MARKERS: Final[tuple[str, ...]] = (
+    "고객가치", "고객 가치", "편익", "혜택", "편의", "효용",
+)
+VALUE_EXCHANGE_BENEFIT_ACTION_MARKERS: Final[tuple[str, ...]] = (
+    "높", "개선", "향상", "절감", "해결", "창출", "제공",
+)
+VALUE_EXCHANGE_CONCRETE_BENEFIT_MARKERS: Final[tuple[str, ...]] = (
+    "절감", "단축", "개선", "향상", "해결",
+)
+VALUE_EXCHANGE_SALE_PROCEEDS_MARKERS: Final[tuple[str, ...]] = (
+    "판매대금", "매출대금", "거래대금",
+)
+VALUE_EXCHANGE_ACCOUNTING_ONLY_MARKERS: Final[tuple[str, ...]] = (
+    "금융부채", "금융자산", "현금성자산", "상각후원가", "공정가치", "손상검사", "손상평가",
+)
+VALUE_EXCHANGE_ACCOUNTING_TREATMENT_MARKERS: Final[tuple[str, ...]] = (
+    "측정", "평가", "상각", "손상",
+)
+VALUE_EXCHANGE_SEPARATE_CLAUSE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?:와|과)\s*별개로"
+)
+VALUE_EXCHANGE_EXTERNAL_AUDITOR_MARKERS: Final[tuple[str, ...]] = (
+    "외부감사인", "감사인은", "감사인이",
+)
+VALUE_EXCHANGE_ROUTE_MARKERS: Final[tuple[str, ...]] = (
+    "판매경로", "판매방법", "판매조건", "판매 조건",
+)
+VALUE_EXCHANGE_SELLER_MARKERS: Final[tuple[str, ...]] = ("당사", "자사", "회사")
+VALUE_EXCHANGE_ROUTE_DIRECTION_MARKERS: Final[tuple[str, ...]] = (
+    "내수", "수출", "→", "⇒", "->",
+)
+VALUE_EXCHANGE_PAYMENT_MARKERS: Final[tuple[str, ...]] = (
+    "현금", "어음", "대금", "결제", "회수", "송금", "T/T", "D/A", "D/P", "L/C",
+)
+VALUE_EXCHANGE_PAYMENT_ACTION_MARKERS: Final[tuple[str, ...]] = (
+    "회수", "수취", "받", "청구", "결제",
+)
+VALUE_EXCHANGE_PAYMENT_CONTEXT_MARKERS: Final[tuple[str, ...]] = (
+    "판매방법 및 조건", "판매방법·조건", "판매대금", "매출대금", "거래대금",
+    "대금회수", "결제조건", "판매조건", "외상매출",
+)
+VALUE_EXCHANGE_CUSTOMER_PAYER_MARKERS: Final[tuple[str, ...]] = (
+    "고객이", "고객은", "이용자가", "이용자는", "소비자가", "소비자는",
+    "구매자가", "구매자는", "가입자가", "가입자는",
+)
+VALUE_EXCHANGE_NAMED_FEE_MARKERS: Final[tuple[str, ...]] = (
+    "구독료", "이용료", "사용료", "수수료", "요금", "보험료", "회비", "이자", "대금",
+)
+VALUE_EXCHANGE_CUSTOMER_PAYMENT_MARKERS: Final[tuple[str, ...]] = (
+    "결제", "납부", "지급", "부담",
+)
+VALUE_EXCHANGE_POLICY_CONDITION_MARKERS: Final[tuple[str, ...]] = (
+    "할 때", "하는 때", "경우에", "시점에", "수행의무", "인식기준", "회계정책",
+)
+VALUE_EXCHANGE_POLICY_TREATMENT_MARKERS: Final[tuple[str, ...]] = (
+    "수익으로 인식", "수익을 인식", "매출로 인식", "매출을 인식", "거래가격",
+)
+VALUE_EXCHANGE_COMPLETED_EVENT_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?:제공|납품|판매|수취|회수|수주|체결)(?:했|하였|되었|받았)"
+)
+VALUE_EXCHANGE_LOAN_EXECUTION_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"대출(?:상품|금)?(?:을|를)?\s*실행(?:했|하였|하고|하여|합니다|한다)"
+)
 OFFICER_PAY_HEADER_GROUPS: Final[tuple[tuple[str, ...], ...]] = (
     ("이름", "성명"),
     ("보수의 종류", "소득구분"),
@@ -604,7 +681,8 @@ FINANCIAL_COMPANY_REVENUE_KEYWORDS: Final[tuple[str, ...]] = (
 # 버전·출처 표기
 # ══════════════════════════════════════════════════════════
 
-COLLECTOR_VERSION: Final[str] = "evidence_collection/2.2"
+COLLECTOR_VERSION: Final[str] = "evidence_collection/2.4"
+DOCUMENT_IDENTITY_HEADER_MAX_BYTES: Final[int] = 16 * 1024
 #: 2.0: EOF 후보 반복자·유한 문단 구간·제목 오인 방지. 1.x의 저장 한도
 #: 잘림 기록을 새 완료 증명으로 재사용하지 않는다.
 PARSER_VERSION: Final[str] = "evidence_collection_segment/2.1"
@@ -659,6 +737,7 @@ REASON_DOCUMENT_FRAGMENT_CHARS_EXCEEDED: Final[str] = (
 #: 소유 회사 메타를 실제로 돌려줘 대조했는지, 메타가 아예 없어 대조하지
 #: 못했는지를 정직하게 구분한다(«검증했다»고 거짓 주장하지 않는다).
 IDENTITY_CHECK_VERIFIED: Final[str] = "verified_match"
+IDENTITY_CHECK_FILING_LIST_VERIFIED: Final[str] = "verified_filing_list_match"
 IDENTITY_CHECK_UNVERIFIED: Final[str] = "unverifiable_no_fetcher_metadata"
 
 # ══════════════════════════════════════════════════════════

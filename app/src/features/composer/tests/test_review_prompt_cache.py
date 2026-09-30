@@ -48,7 +48,10 @@ def test_explicit_opt_in_only_attaches_metadata(monkeypatch, configured):
 # 2026-09-23: 공용 GROUNDING_GUIDE «인식기준» 안내 177자 → 11142→11319, 12196→12373.
 #   그 177자만 되돌리면 옛 값이 그대로 재현되고, 아래 분할 표식 단정은 값과 무관하다.
 # 2026-09-27: 수치 증명 필드 축자 결속 안내 307자 → 11626/12680.
-@pytest.mark.parametrize("grouped,prefix_chars", ((False, 11626), (True, 12680)))
+# 2026-09-30: 5장 사업 과제 검수 안내 241자 → 11867/12921.
+# 정책과 변경된 5·8장 범위 안내만 되돌리면 직전 해시 네 개를 재현한다.
+# tmp/audit-20260930/review-policy-snapshots.json에 무과금 비교를 보존했다.
+@pytest.mark.parametrize("grouped,prefix_chars", ((False, 11867), (True, 12921)))
 @pytest.mark.parametrize("factory", (_golden_case, _large_case, _boundary_case))
 def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
     monkeypatch, grouped, prefix_chars, factory,
@@ -72,10 +75,10 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "546f0dfd5c84fc631a7b1f03c15f7a1abeeaaffc225047ffb95db0010a1b0a39"),
-    (_golden_case, True, "70aa9f5345741474c2cc8e355acf940a37c2a7072e585c5acf32ea05d3d5f198"),
-    (_boundary_case, False, "a05ed45f8a4acffc1757d129947864c73b8f6bacf5742e6287f24eb20b0a6a0c"),
-    (_boundary_case, True, "028221dba6a98551334e93c3e9e1a6f53fbe3630bf4dda4f087d3668c5f2a410"),
+    (_golden_case, False, "6b5755001aefd23f257b550856f9546dd2e7887ca90b2dcb46cebe554d24dc01"),
+    (_golden_case, True, "4eeecd5d515e389cffdc82e0f87b4745eed495d24d366998f25701d2af97e454"),
+    (_boundary_case, False, "856cd2d7ba3e4e8c3974df75dd8384c129bcf27bbdb586b50e9155bcb94a5e11"),
+    (_boundary_case, True, "760765739100a5b8ebe838a719280f4c1cf51cd27bfa98bad02f044a577ede75"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,

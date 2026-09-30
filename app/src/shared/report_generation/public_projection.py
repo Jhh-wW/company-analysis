@@ -33,6 +33,10 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Final, Optional
+from src.shared.business_challenge_context import (
+    IndustryContextDisplay, INDUSTRY_CONTEXT_SECTION, INDUSTRY_CONTEXT_MAX_ITEMS,
+    industry_display_from_dict,
+)
 
 from src.shared.report_evidence.policy import (
     REQUIRED_EVIDENCE_SECTION_IDS as SECTION_IDS,
@@ -692,6 +696,9 @@ class PublicSectionDisplay:
     tables: tuple[PublicTableBlock, ...]
     visuals: tuple[PublicVisualBlock, ...]
     period_summary: Optional[PublicPeriodSummaryBlock]
+    industry_contexts: tuple[IndustryContextDisplay, ...] = field(
+        default=(), metadata={"canonical_omit_empty": True},
+    )
 
     def __post_init__(self) -> None:
         if self.cell not in SECTION_IDS:
@@ -699,6 +706,11 @@ class PublicSectionDisplay:
         for name in ("display_number", "title", "tag", "empty_reason"):
             _require_str(getattr(self, name), label=f"장 표시 {name}")
         _require_str_tuple(self.guidance_lines, label="장 표시 guidance_lines")
+        if (type(self.industry_contexts) is not tuple
+                or len(self.industry_contexts) > INDUSTRY_CONTEXT_MAX_ITEMS
+                or any(type(value) is not IndustryContextDisplay for value in self.industry_contexts)
+                or (self.industry_contexts and self.cell != INDUSTRY_CONTEXT_SECTION)):
+            raise PublicProjectionError("산업 과제 보조블록의 장·개수·타입이 계약과 다릅니다")
         if type(self.paragraphs) is not tuple or any(
             type(item) is not tuple
             or len(item) != 2
@@ -768,7 +780,7 @@ def public_section_display_from_dict(data: Mapping[str, object]) -> PublicSectio
         "visuals",
         "period_summary",
     }
-    if type(data) is not dict or set(data) != expected:
+    if type(data) is not dict or set(data) not in (expected, expected | {"industry_contexts"}):
         raise PublicProjectionError("장 표시의 key 또는 객체 형식이 계약과 다릅니다")
     tables_raw = data["tables"]
     visuals_raw = data["visuals"]
@@ -793,6 +805,7 @@ def public_section_display_from_dict(data: Mapping[str, object]) -> PublicSectio
         tables=tuple(public_table_block_from_dict(item) for item in tables_raw),
         visuals=tuple(public_visual_block_from_dict(item) for item in visuals_raw),
         period_summary=period_summary,
+        industry_contexts=tuple(industry_display_from_dict(value) for value in data.get("industry_contexts", [])),
     )
     if public_section_display_to_dict(value) != data:
         raise PublicProjectionError("장 표시가 canonical wire 왕복과 다릅니다")
@@ -1070,6 +1083,12 @@ class PublicReportProjection:
         # 완전한 병합 동치는 이 타입이 원본 source_grades를 들고 있지 않아
         # S2 builder가 원본 Report로 검사한다.
         citation_numbers = {str(row.number) for row in self.citations}
+        citation_ids = {str(row.source.get("source_id", "")): row.number for row in self.citations}
+        for block in self.sections:
+            for item in block.display.industry_contexts:
+                if (citation_ids.get(item.context.anchor.source_id) != item.business_source_number
+                        or citation_ids.get(item.context.problem.source_id) != item.industry_source_number):
+                    raise PublicProjectionError("산업 과제 표시의 두 출처 번호가 봉인 부록과 다릅니다")
         for number, grades in self.summary_source_grade_contribution:
             if number not in citation_numbers:
                 raise PublicProjectionError(

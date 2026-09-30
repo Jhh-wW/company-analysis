@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Callable, Iterator
 
+from src.shared.business_challenge_context import BusinessActivityAnchor
+
 if TYPE_CHECKING:
     from src.features.news_intake.body_prefetch import BodyFetchConcurrency
 
@@ -101,6 +103,7 @@ def prepare_news_research(
     as_of: dt.date,
     policy: Any = None,
     max_analysis_calls: int | None = None,
+    business_anchors: tuple[BusinessActivityAnchor, ...] = (),
 ) -> NewsResearchSession:
     """AI 없이 검색을 고정하고 나중 분석에 같은 입력을 전달한다."""
 
@@ -122,6 +125,7 @@ def prepare_news_research(
         domain=domain,
         executive_names=executive_names,
         identity_context=identity_context,
+        business_anchors=business_anchors,
     )
     snapshot = collect_search_snapshot(
         search_news=search_news, company=company, as_of=as_of, policy=policy

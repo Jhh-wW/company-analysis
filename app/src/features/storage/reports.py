@@ -23,6 +23,7 @@ import sqlite3
 from dataclasses import fields, replace
 from typing import Any, Optional
 from src.shared.report_generation.table_citations import validated_row_cites
+from src.shared.business_challenge_context import industry_context_from_dict, industry_context_to_dict
 
 from src.core.constants import COUNTED_CELLS, HIDDEN_CELLS
 from src.core.persisted_json import validate_persisted_json_text
@@ -223,6 +224,8 @@ def _section_to_dict(section: ReportSection) -> dict[str, Any]:
     #   그대로 유지돼야 한다(결속 검사).
     if section.prose_paragraphs:
         payload["prose_paragraphs"] = list(section.prose_paragraphs)
+    if section.industry_contexts:
+        payload["industry_contexts"] = [industry_context_to_dict(value) for value in section.industry_contexts]
     return payload
 
 
@@ -250,6 +253,7 @@ def _section_from_dict(data: dict[str, Any], *, is_v2: bool) -> ReportSection:
         ],
         empty_reason=data.get("empty_reason", ""),
         tables=[_table_from_dict(t) for t in data.get("tables", [])],
+        industry_contexts=tuple(industry_context_from_dict(value) for value in data.get("industry_contexts", [])),
     )
 
 

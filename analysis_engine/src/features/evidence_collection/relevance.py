@@ -10,12 +10,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from features.evidence_collection import auditor_boilerplate, constants as c
+from features.evidence_collection import auditor_boilerplate, constants as c, liquidity_boilerplate
+from features.evidence_collection.liquidity_constants import CHALLENGE_POLICY_SLOTS
 from features.evidence_collection.weak_signal_context import (
     accounting_value_table_only,
     future_signal_has_context,
     pure_officer_compensation_table,
     stock_admin_production_only,
+    value_exchange_has_payment_route,
+    value_exchange_has_direct_relation,
+    value_exchange_policy_observed,
+    value_exchange_supported_hits,
 )
 
 def _has_revenue_type_mix(text: str) -> bool:
@@ -421,6 +426,10 @@ def score_fragment_slots_with_signal(
     AI 재판정이 감사인의 감사 행위 문장에 사업 칸을 다시 붙일 수 있기 때문이다
     (2026-09-23 5차 실측: 「감사인의 책임」 단락이 「위험」·「대응」으로 5장
     과제·대응 칸을 받았다). 회사 서술이 섞인 문단은 그 절만으로 채점한다.
+
+    유동성 회계 상용구는 5장 과제·대응 채점에서 해당 절만 제외한다. 전절이
+    상용구면 다른 장의 약신호로 이주시키지 않고 신호 관측만 남긴다. 혼합
+    원문은 다른 장의 직접 채점 입력을 바꾸지 않으며 1차 장 재선택은 가능하다.
     """
 
     # 절 제목도 구조 표지를 볼 자리로 넘긴다 — 머리말 없이 잘린 감사인 책임 문단이
@@ -435,10 +444,23 @@ def score_fragment_slots_with_signal(
     if pure_officer_compensation_table(text):
         return (), True
 
+    # 혼합 조각에서는 5장 과제·대응 두 칸의 채점에서만 절을 제외한다.
+    # 실제 조각 원문·좌표·지문과 다른 장의 신호는 그대로 보존한다.
+    liquidity_split = liquidity_boilerplate.split_liquidity_clauses(text)
+    if liquidity_split.only_boilerplate:
+        # 전절이 상용구인 조각은 다른 약신호 장으로 이주시키지 않는다.
+        return (), True
+
     scored: list[tuple[int, int, bool, SlotScore]] = []
-    has_any_direct_signal = False
+    # 가린 상용구도 관측된 신호다. 무분류 AI 재판정으로 다시 붙이지 않는다.
+    has_any_direct_signal = bool(liquidity_split.excluded_clauses)
     for declaration_index, (slot_id, keywords) in enumerate(SLOT_KEYWORDS.items()):
-        hits = [keyword for keyword in keywords if keyword_has_direct_hit(keyword, text)]
+        score_text = (
+            liquidity_split.score_text
+            if slot_id in CHALLENGE_POLICY_SLOTS
+            else text
+        )
+        hits = [keyword for keyword in keywords if keyword_has_direct_hit(keyword, score_text)]
         revenue_mix = (
             slot_id == "business_model:revenue_model"
             and _has_revenue_type_mix(text)
@@ -463,6 +485,26 @@ def score_fragment_slots_with_signal(
         )
         if investment_plan:
             hits.append("stated_investment_plan")
+        payment_route = (
+            slot_id == "business_model:value_exchange"
+            and value_exchange_has_payment_route(text)
+        )
+        direct_exchange = (
+            slot_id == "business_model:value_exchange"
+            and value_exchange_has_direct_relation(text)
+        )
+        if slot_id == "business_model:value_exchange":
+            raw_hits = tuple(hits)
+            hits = list(value_exchange_supported_hits(
+                text, keywords, keyword_has_direct_hit,
+            ))
+            if raw_hits or payment_route or direct_exchange or value_exchange_policy_observed(text):
+                # 부적격 약신호는 재판정용 무신호 자료가 되지 않도록 관측만 남긴다.
+                has_any_direct_signal = True
+            if payment_route:
+                hits.append("payment_route")
+            if direct_exchange and not hits:
+                hits.append("customer_exchange")
         if not hits:
             continue
         has_any_direct_signal = True
@@ -499,6 +541,10 @@ def score_fragment_slots_with_signal(
             reason_codes.append("direct_pattern:supply_contract")
         if investment_plan:
             reason_codes.append("direct_pattern:stated_investment_plan")
+        if payment_route:
+            reason_codes.append("direct_pattern:payment_route")
+        if direct_exchange:
+            reason_codes.append("direct_pattern:customer_exchange")
         for hint in SECTION_HEADING_HINTS.get(section_id, ()):
             if hint in section_heading:
                 score = min(c.RELEVANCE_MAX_SCORE_MILLIS, score + c.RELEVANCE_HEADING_BONUS_MILLIS)

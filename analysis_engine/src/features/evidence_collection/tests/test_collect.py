@@ -929,6 +929,38 @@ def test_P1_4_메타가_없으면_검증했다고_거짓_주장하지_않는다(
     assert f"identity_check={c.IDENTITY_CHECK_UNVERIFIED}" in harvest.documents[0].identity_binding
 
 
+@pytest.mark.parametrize('row_code,document_code,expected', [
+    ('00126380', '', c.IDENTITY_CHECK_FILING_LIST_VERIFIED),
+    ('', '', c.IDENTITY_CHECK_UNVERIFIED),
+    ('00126380', '00126380', c.IDENTITY_CHECK_VERIFIED),
+    ('', '00126380', c.IDENTITY_CHECK_VERIFIED),
+])
+def test_실제_목록행과_문서메타의_법인검증_상태를_구분한다(row_code, document_code, expected):
+    row = RawFilingRow('20250315000001', '사업보고서 (2025.03)', '20250315', corp_code=row_code)
+    fetcher = FakeFetcher(
+        list_responses_by_pblntf_ty={'A': FilingListResult(state='OK', rows=(row,))},
+        document_responses_by_rcept_no={row.rcept_no: DocumentFetchResult(
+            state='OK', text=LISTED_BUSINESS_REPORT_TEXT, corp_code=document_code)},
+    )
+    harvest = collect_dart_evidence(fetcher, '00126380', now=_NOW)
+    assert len(harvest.documents) == 1
+    assert harvest.documents[0].identity_binding == (
+        f'corp_code=00126380;rcept_no={row.rcept_no};source_kind=dart_business_report;identity_check={expected}'
+    )
+
+
+def test_목록행이_맞아도_다른법인_문서메타를_덮지_않는다():
+    row = RawFilingRow('20250315000001', '사업보고서 (2025.03)', '20250315', corp_code='00126380')
+    fetcher = FakeFetcher(
+        list_responses_by_pblntf_ty={'A': FilingListResult(state='OK', rows=(row,))},
+        document_responses_by_rcept_no={row.rcept_no: DocumentFetchResult(
+            state='OK', text=LISTED_BUSINESS_REPORT_TEXT, corp_code='00999999')},
+    )
+    harvest = collect_dart_evidence(fetcher, '00126380', now=_NOW)
+    assert not harvest.documents
+    assert any(attempt.reason_code == c.REASON_DOCUMENT_IDENTITY_MISMATCH for attempt in harvest.attempts)
+
+
 # ══════════════════════════════════════════════════════════
 # P1-5 — 누적 바이트 상한 TRUNCATED 경로 + 중복 유령 소비
 # ══════════════════════════════════════════════════════════

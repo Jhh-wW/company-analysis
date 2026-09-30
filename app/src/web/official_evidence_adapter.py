@@ -126,7 +126,7 @@ def _dart_requirement_is_honest(source_kind: str, requirement: str) -> bool:
         return policy_requirement == SourceRequirement.REQUIRED.value
     return True
 _DART_IDENTITY_CHECK_STATES: Final[frozenset[str]] = frozenset(
-    {"verified_match", "unverifiable_no_fetcher_metadata"}
+    {"verified_match", "verified_filing_list_match", "unverifiable_no_fetcher_metadata"}
 )
 _OFFICIAL_WEB_DOCUMENT_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
     {
