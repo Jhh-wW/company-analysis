@@ -14,8 +14,8 @@ from src.core.pricing import usage_cost_krw
 from src.core.provider_gateway import attempt_context, gateway
 from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.core.provider_gateway.types import BillingDisposition
-from src.features.composer.logic import CacheablePrompt
-from src.features.composer.port import AskFatalError
+from src.features.composer.logic import CacheablePrompt, build_section_prompt
+from src.features.composer.port import AskFatalError, CollectedFragment
 from src.features.pipeline import real
 from src.features.pipeline.v2_response_constants import V2_RESPONSE_STEP
 
@@ -156,6 +156,60 @@ def test_pinned_sdk_counts_and_sends_the_same_normalized_schema(attempts):
     assert source == original
     assert attempts[0] == [("anthropic", "v2_review", estimated)]
     assert len(attempts[1]) == len(engine.usages) == 1
+
+
+@pytest.mark.parametrize("suffix", ["", "\n다시 같은 의미칸으로 작성한다."])
+def test_full_writer_schema_reaches_actual_sdk_with_slot_enums_and_original_cache(suffix, attempts):
+    """실제 작성 builder부터 SDK 직렬화까지 외부 호출 없이 확인한다."""
+    fragments = (
+        CollectedFragment("1", "공식자료", "회사는 제조업 고객에게 장비를 공급한다.",
+                          supported_claim_slots=("business_model:customer_type",)),
+        CollectedFragment("2", "공식자료", "장비 판매대금은 고객에게 현금으로 받는다.",
+                          supported_claim_slots=("business_model:value_exchange",)),
+    )
+    original = build_section_prompt("합성회사", "business_model", fragments, None,
+                                    show_supported_claim_slots=True, shared_evidence_prefix=True)
+    prompt = original + suffix
+    requests = []
+
+    def handle(request):
+        body = json.loads(request.content)
+        requests.append((request.url.path, body))
+        if request.url.path == "/v1/messages/count_tokens":
+            return httpx.Response(200, json={"input_tokens": COUNTED_INPUT})
+        assert request.url.path == "/v1/messages"
+        return httpx.Response(200, json=response_body(text='{"문장들": []}'))
+
+    with anthropic.Anthropic(api_key="offline-test", max_retries=0,
+                              http_client=httpx.Client(transport=httpx.MockTransport(handle))) as sdk:
+        with provider_budget.activate(1000):
+            engine, ask = make_ask(sdk.messages, stage="v2_compose")
+            assert ask(prompt) == '{"문장들": []}'
+
+    counted, sent = [body for _, body in requests]
+    expected = anthropic.transform_schema(copy.deepcopy(original.response_schema))
+    assert counted["output_config"] == sent["output_config"] == {
+        "format": {"type": "json_schema", "schema": expected}}
+    branches = sent["output_config"]["format"]["schema"]["properties"]["문장들"]["items"]["anyOf"]
+    assert [branch["properties"]["근거선택"]["properties"]["첫근거"]["enum"] for branch in branches] == [
+        ["p2-001"], ["p2-002"]]
+    for branch in branches:
+        selection = branch["properties"]["근거선택"]
+        assert selection["type"] == "object"
+        assert selection["additionalProperties"] is False
+        assert selection["required"] == ["첫근거", "추가근거"]
+        assert selection["properties"]["추가근거"]["enum"] == [
+            "", *selection["properties"]["첫근거"]["enum"]]
+    # SDK는 지원되지 않는 셀 수 상한을 설명으로 옮기고 parser의 검사는 유지한다.
+    cells = expected["properties"]["경로표"]["items"]["properties"]["칸"]
+    assert "maxItems" not in cells and "minItems" not in cells
+    assert "maxItems" in cells["description"] and "minItems" in cells["description"]
+    content = sent["messages"][0]["content"]
+    assert content[0]["text"] == str(prompt)[:original.cache_prefix_chars]
+    assert content[0]["cache_control"] == {"type": "ephemeral"}
+    assert content[1]["text"] == str(prompt)[original.cache_prefix_chars:]
+    assert counted["messages"] == sent["messages"]
+    assert len(attempts[0]) == len(attempts[1]) == len(engine.usages) == 1
 
 
 @pytest.mark.parametrize("cache", [False, True])

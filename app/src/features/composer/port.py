@@ -338,10 +338,13 @@ class CollectedFragment:
     item_title: str = ""
     item_published_on: str = ""
     item_url: str = ""
+    source_context_json: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.financial_api_disclosed_at, str):
             raise TypeError("재무 API 공시일은 문자열이어야 합니다")
+        from src.shared.report_evidence.source_context import parse_source_context
+        parse_source_context(self.source_context_json)
         if self.financial_api_disclosed_at:
             try:
                 canonical = date.fromisoformat(self.financial_api_disclosed_at).isoformat()
@@ -1110,6 +1113,7 @@ class SectionEvidencePacket:
                     "document_title": fragment.document_title,
                     "location": fragment.location,
                     "document_date": fragment.document_date,
+                    **({"source_context_json": fragment.source_context_json} if fragment.source_context_json else {}),
                     **({
                         "item_title": fragment.item_title,
                         "item_published_on": fragment.item_published_on,
@@ -1242,6 +1246,7 @@ def fragments_from_raw(
                 item_url=str(item.get("item_url") or "").strip(),
                 location=str(item.get("원문위치") or "").strip(),
                 financial_api_disclosed_at=str(item.get("financial_api_disclosed_at") or ""),
+                source_context_json=str(item.get("source_context_json") or ""),
             )
         )
     return tuple(out)

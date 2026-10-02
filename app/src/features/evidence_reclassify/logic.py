@@ -53,6 +53,7 @@ from src.features.evidence_reclassify.models import (
     ReclassifyResult,
 )
 from src.shared.report_generation.models import exact_text_sha256
+from src.shared.report_evidence.business_slot_scope import business_slot_scope_problem
 
 
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -471,6 +472,8 @@ def parse_and_verify(
                 reason_code = REJECT_QUOTE_NOT_FOUND
             elif section_id != "future_strategy" and _has_plan_term(quote_span[0]):
                 reason_code = REJECT_PLAN_TERM_OUTSIDE_FUTURE
+            elif business_slot_scope_problem(quote_span[0], slot_id):
+                reason_code = business_slot_scope_problem(quote_span[0], slot_id)
         if reason_code:
             rejected.append(
                 _rejected(

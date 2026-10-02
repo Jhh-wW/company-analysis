@@ -628,6 +628,9 @@ def parse_product_service_tables(
         segment_index = _named_index(headers, SEGMENT_HEADERS)
         for row_index, cells in _table_data_rows(table, header_index):
             excerpt = _row_excerpt(cells, headers)
+            if table.population_heading:
+                # 행의 비중은 이 부문 표의 분모에 속한다. 이름행에서도 그 범위를 남긴다.
+                excerpt = f"[{table.population_heading}]\n{table.title}\n{' | '.join(headers)}\n{excerpt}"
             location = _row_location(table, row_index)
             if segment_index is not None and segment_index != name_index:
                 segment_name = cells[segment_index]

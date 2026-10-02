@@ -64,9 +64,12 @@ class AnalysisRequest:
             if not hashes or any(type(value) is not str or not re.fullmatch(r"[0-9a-f]{64}", value)
                                  for value in hashes):
                 return None
+            company_payload = asdict(self.company)
+            if not self.company.business_anchors:
+                company_payload.pop("business_anchors", None)
             return _hash(_bytes({
                 "version": c.ANALYSIS_CACHE_VERSION, "model": namespace.model,
-                "build": namespace.build.wire, "company": asdict(self.company),
+                "build": namespace.build.wire, "company": company_payload,
                 "as_of": self.as_of.isoformat(), "policy": asdict(self.policy),
                 "articles": [{"candidate": asdict(candidate), "full_body_sha256": full_hash,
                               "input_body_sha256": _hash(body.encode("utf-8"))}
@@ -81,6 +84,25 @@ class AnalysisRequest:
         if type(payload) is not dict:
             return False
         try:
+            if self.company.business_anchors:
+                from src.features.news_intake.industry_context import split_response
+                from src.features.news_intake.identity_names import mentions_target
+                from src.features.news_intake.grounded import parse_grounded_payload
+                items = parse_grounded_payload(payload)
+                if (items is None or len(items) != len(self.articles)
+                        or {item.get("id") for item in items if type(item) is dict}
+                        != {candidate.id for candidate, _ in self.articles}):
+                    return False
+                direct, problems, industry_rejected = split_response(
+                    payload, articles=self.articles, company=self.company, as_of=self.as_of,
+                    full_body_hashes=self.full_body_hashes,
+                )
+                named = [(candidate, body) for candidate, body in self.articles if mentions_target(body, self.company)]
+                named_ids = {candidate.id for candidate, _ in named}
+                direct["items"] = [item for item in direct["items"] if item["id"] in named_ids]
+                excerpts, rejected = validate_grounded_response(direct, articles=named, company=self.company, as_of=self.as_of)
+                covered = {item.candidate.id for item in excerpts} | {item.document_id for item in problems}
+                return not rejected and not industry_rejected and covered == {candidate.id for candidate, _ in self.articles}
             excerpts, rejected = validate_grounded_response(
                 payload, articles=self.articles, company=self.company, as_of=self.as_of,
             )
@@ -149,6 +171,11 @@ def _project(payload: dict, request: AnalysisRequest, *, restore: bool) -> dict:
                         excerpt[name] = convert(raw)
                 elif raw and raw in body:
                     excerpt[name] = convert(raw)
+        if request.company.business_anchors:
+            from src.features.news_intake.industry_constants import INDUSTRY_CACHE_SOURCE_FIELDS
+            for problem in item["industry_problems"]:
+                for name in INDUSTRY_CACHE_SOURCE_FIELDS:
+                    problem[name] = convert(problem[name])
     return value
 
 

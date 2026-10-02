@@ -111,8 +111,11 @@ def _section_guide_text() -> str:
 
 
 def build_grounded_prompt(company: NewsCompanyContext, articles: list[tuple[NewsCandidate, str]], as_of: dt.date) -> str:
+    company_payload = asdict(company)
+    # 비활성 경로는 기존 프롬프트·지문 계약을 유지한다. 활성 앵커는 별도 안내에 담는다.
+    company_payload.pop("business_anchors", None)
     payload = {
-        "company": asdict(company), "verified_company_names": company_query_names(company),
+        "company": company_payload, "verified_company_names": company_query_names(company),
         "as_of": as_of.isoformat(), "allowed_slots": ALLOWED_SLOTS,
         "articles": [{"id": item.id, "title": item.title, "url": item.source_url,
                       "publisher": item.publisher, "source_category": item.source_category,

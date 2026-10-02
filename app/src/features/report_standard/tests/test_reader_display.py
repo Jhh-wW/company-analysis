@@ -13,6 +13,9 @@ from src.features.report_standard.reader_display import audit_notes, citation_gr
 from src.shared.report_generation.models import canonical_sha256, canonical_value
 from src.shared.report_generation.public_projection import PublicProjectionError, build_report_digest, public_report_projection_from_dict, public_report_projection_to_dict
 from src.shared.report_generation.constants import ENGINE_V2_SCHEMA_VERSION
+from src.features.report_standard.reader_display_constants import (
+    NUMERIC_SCOPE_NOTE, SEMANTIC_SCOPE_NOTE, UNVERIFIED_TABLE_NOTE,
+)
 
 
 def _report() -> Report:
@@ -49,6 +52,44 @@ def test_reader_failure_notice_is_fixed_text_without_internal_diagnostics():
     notes = " ".join(reader_notes(report))
     assert "일부 항목" in notes and "수집을 끝까지 완료하지 못했습니다" in notes
     assert "전체가 없다는 뜻은 아닙니다" in notes and "SECRET" not in notes
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("숫자·날짜 문장의 항목·기간·계산 관계를 원문과 맞춰 확인하지 못해 제외했습니다 (본문 2개). 자료 자체가 없다는 뜻은 아닙니다.", NUMERIC_SCOPE_NOTE),
+    ("원문과 맞춰 보지 못한 숫자·날짜 문장 1개를 뺐습니다 (실적).", NUMERIC_SCOPE_NOTE),
+    ("핵심 요약에서도 같은 이유로 숫자 문장 1개를 뺐습니다.", NUMERIC_SCOPE_NOTE),
+    ("원문과 계획·조건·공식 설명의 범위가 일치하는지 확인하지 못한 문장을 제외했습니다 (도식 1개). 자료 자체가 없다는 뜻은 아닙니다.", SEMANTIC_SCOPE_NOTE),
+    ("표와 도식은 아직 하나씩 확인하지 못했습니다. 숫자를 그대로 인용하기 전에 부록의 원문을 함께 확인해 주세요.", UNVERIFIED_TABLE_NOTE),
+])
+def test_evidence_available_limits_show_scope_without_exposing_internal_reason(reason, expected):
+    report = replace(_report(), publication_policy="evidence-available-v1", shortfall_reasons=[reason, reason, "SECRET 내부 오류 코드"])
+    before = canonical_sha256(report)
+    notes = reader_notes(report)
+    assert notes.count(expected) == 1
+    assert "부분 완성" in notes[0]
+    assert "SECRET" not in " ".join(notes)
+    assert canonical_sha256(report) == before
+
+
+def test_missing_scope_reason_and_other_publication_policy_do_not_invent_limits():
+    reason = "표와 도식은 아직 하나씩 확인하지 못했습니다."
+    assert UNVERIFIED_TABLE_NOTE not in reader_notes(replace(_report(), publication_policy="evidence-available-v1"))
+    assert UNVERIFIED_TABLE_NOTE not in reader_notes(replace(_report(), publication_policy="structured-safety-v1", shortfall_reasons=[reason]))
+
+
+def test_reader_grade_notice_matches_actual_grade():
+    partial = " ".join(reader_notes(_report()))
+    incomplete = " ".join(reader_notes(replace(_report(), grade="미완성")))
+    complete = " ".join(reader_notes(replace(_report(), grade=Grade.COMPLETE)))
+    assert "부분 완성 보고서" in partial
+    assert "미완성 보고서" in incomplete and "부분 완성 보고서" not in incomplete
+    assert "자료 범위:" not in complete
+
+
+def test_old_sealed_reader_notes_remain_exact_even_when_current_reasons_exist():
+    projection = replace(build_public_projection(_report()), reader_notes=("발행 당시 안내입니다.",))
+    report = replace(_report(), public_projection=projection, publication_policy="evidence-available-v1", shortfall_reasons=["표와 도식은 아직 하나씩 확인하지 못했습니다."])
+    assert reader_scope_notes(report) == ("발행 당시 안내입니다.",)
 
 
 def test_legacy_projection_omits_new_fields_and_preserves_canonical_digest():

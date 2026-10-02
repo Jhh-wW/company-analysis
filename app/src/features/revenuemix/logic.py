@@ -15,6 +15,9 @@ from decimal import Decimal, InvalidOperation
 from typing import Final, Iterable, Optional, TypedDict
 
 from src.core.revenue_table_switch import revenue_table_v2_enabled
+from src.shared.revenue_population_scope import (
+    revenue_population_caption, revenue_population_context_start, revenue_population_heading, revenue_product_name_span,
+)
 from src.features.revenuemix.constants import (
     AMOUNT_ONLY_CAPTION_BY_AXIS,
     AMOUNT_ONLY_HEADING_LOOKBACK,
@@ -564,7 +567,7 @@ def _v2_zone_start(filing_text: str, ratio_start: int) -> int:
 
 
 def _source_row_v2(
-    match: re.Match[str], rows_start: int, source_index: int
+    match: re.Match[str], rows_start: int, source_index: int, header: str = ""
 ) -> _SourceRow:
     """v2 행 하나를 원문 좌표째로 봉인한다.
 
@@ -574,13 +577,20 @@ def _source_row_v2(
     """
 
     match_start = match.start()
+    name_span = (match.start(1) - match_start, match.end(1) - match_start)
+    name = clean_name(match.group(1))
+    if not is_revenue_total_name_v2(name):
+        product_span = revenue_product_name_span(match.group(1), header)
+        if product_span:
+            name_span = (name_span[0] + product_span[0], name_span[0] + product_span[1])
+            name = clean_name(match.group(0)[name_span[0]:name_span[1]])
     return _SourceRow(
-        public=(clean_name(match.group(1)), match.group(2), f"{match.group(3)}%"),
+        public=(name, match.group(2), f"{match.group(3)}%"),
         raw_match=match.group(0),
         start=rows_start + match.start(),
         end=rows_start + match.end(),
         field_spans={
-            "name": (match.start(1) - match_start, match.end(1) - match_start),
+            "name": name_span,
             "amount": (match.start(2) - match_start, match.end(2) - match_start),
             "ratio": (match.start(3) - match_start, match.end(3) - match_start),
         },
@@ -588,7 +598,7 @@ def _source_row_v2(
     )
 
 
-def _parse_rows_v2(block: str, rows_start: int) -> _ParsedRows:
+def _parse_rows_v2(block: str, rows_start: int, header: str = "") -> _ParsedRows:
     """머리말 뒤 덩어리에서 구성 행과 «첫» 합계 행을 뽑는다.
 
     ⚠️ v1과 달리 «이름이 같다고 버리지 않는다» — 소재 제조사 매출표에는 「기타」가
@@ -600,7 +610,7 @@ def _parse_rows_v2(block: str, rows_start: int) -> _ParsedRows:
     total: Optional[_SourceRow] = None
     overflow = False
     for source_index, match in enumerate(ROW_RE_V2.finditer(block)):
-        source_row = _source_row_v2(match, rows_start, source_index)
+        source_row = _source_row_v2(match, rows_start, source_index, header)
         name = source_row.public[0]
         if not name or _is(name, SUBTOTAL_WORDS):
             continue
@@ -752,7 +762,7 @@ def _v2_candidate(
     ratio_start, header_end = run
     header_start = _v2_zone_start(filing_text, ratio_start)
     header = filing_text[header_start:header_end]
-    parsed = _parse_rows_v2(filing_text[header_end:block_end], header_end)
+    parsed = _parse_rows_v2(filing_text[header_end:block_end], header_end, filing_text[header_start:header_end])
     if len(parsed.rows) < V2_MIN_ROWS:
         reject("행 부족")
         return None
@@ -1331,7 +1341,7 @@ def _amount_only_payload(
     headers = revenue_amount_only_headers(candidate.unit)
     source_rows = candidate.rows + (candidate.total,)
     rows = [[row.name, row.amounts[0].text] for row in source_rows]
-    excerpt_start = candidate.header_start
+    excerpt_start = revenue_population_context_start(filing_text, candidate.header_start)
     excerpt_end = candidate.total.amounts[0].end
     evidence_rows = [
         build_revenue_amount_only_row_evidence(
@@ -1362,7 +1372,9 @@ def _amount_only_payload(
     return {
         "axis": candidate.axis,
         "caption": (
-            f"{caption}{f' ({해}년)' if 해 else ''} · {FOOTNOTE_WITHOUT_RATIO}"
+            revenue_population_caption(f"{caption}{f' ({해}년)' if 해 else ''} · {FOOTNOTE_WITHOUT_RATIO}", filing_text[excerpt_start:excerpt_end], header_text=filing_text[excerpt_start:candidate.header_end])
+            if revenue_population_heading(filing_text[excerpt_start:candidate.header_end])
+            else f"{caption}{f' ({해}년)' if 해 else ''} · {FOOTNOTE_WITHOUT_RATIO}"
         ),
         "headers": list(headers),
         "rows": rows,
@@ -1453,7 +1465,7 @@ def _v2_payload(
     headers = revenue_table_headers(candidate.unit)
     source_rows = parsed.rows + (parsed.total,)
     rows = [list(row.public) for row in source_rows]
-    excerpt_start = candidate.header_start
+    excerpt_start = revenue_population_context_start(filing_text, candidate.header_start)
     excerpt_end = parsed.total.end
     evidence_rows = [
         build_revenue_row_evidence(
@@ -1490,7 +1502,8 @@ def _v2_payload(
     )
     return {
         "axis": candidate.axis,
-        "caption": f"{caption}{f' ({해}년)' if 해 else ''}",
+        "caption": (revenue_population_caption(f"{caption}{f' ({해}년)' if 해 else ''}", filing_text[excerpt_start:excerpt_end], header_text=filing_text[excerpt_start:candidate.header_end])
+                    if revenue_population_heading(filing_text[excerpt_start:candidate.header_end]) else f"{caption}{f' ({해}년)' if 해 else ''}"),
         # 금액 열 이름만 단위를 따라간다 — 캡션·비중 열·표 하단 문구는 그대로다.
         "headers": list(headers),
         "rows": rows,
@@ -1597,7 +1610,7 @@ def _multi_year_payload(
         ]
         for row in source_rows
     ]
-    excerpt_start = candidate.header_start
+    excerpt_start = revenue_population_context_start(filing_text, candidate.header_start)
     excerpt_end = parsed.total.end
 
     def period_spans(row: _MultiYearSourceRow) -> tuple[dict[str, tuple[int, int]], ...]:
@@ -1639,7 +1652,8 @@ def _multi_year_payload(
     caption = MULTI_YEAR_CAPTION_BY_AXIS[candidate.axis]
     return {
         "axis": candidate.axis,
-        "caption": f"{caption} ({selected_years[0]}~{selected_years[-1]})",
+        "caption": (revenue_population_caption(f"{caption} ({selected_years[0]}~{selected_years[-1]})", filing_text[excerpt_start:excerpt_end], header_text=filing_text[excerpt_start:candidate.header_end])
+                    if revenue_population_heading(filing_text[excerpt_start:candidate.header_end]) else f"{caption} ({selected_years[0]}~{selected_years[-1]})"),
         "headers": headers,
         "rows": rows,
         "cite": cite,

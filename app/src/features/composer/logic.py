@@ -30,6 +30,16 @@ from src.features.composer.evidence_pair_selection import (
     render_evidence_pair_index,
     writer_visible_fragments,
 )
+from src.features.composer.writer_schema import (
+    required_content_guide, with_full_writer_schema, writer_sentence_items,
+)
+from src.features.composer.challenge_event_writer import render_challenge_event_writer_hints
+from src.features.composer.writer_schema_constants import (
+    FULL_REQUIRED_SLOT_SENTENCE_GUIDE, RESPONSE_REQUIRED_CONTENT_KEY, FULL_FINITE_SELECTION_GUIDE,
+    FULL_FINITE_SELECTION_SCHEMA_HINT,
+    LEGACY_FLOW_REQUIRED_KEYS_GUIDE, FULL_REQUIRED_FLOW_KEYS_GUIDE,
+)
+from src.features.composer.supplement_feedback import supplement_feedback
 from src.features.composer.partial_evidence import PartialEvidenceView
 from src.features.composer.partial_evidence_constants import (
     EXACT_EVIDENCE_SCOPE_GUIDE,
@@ -62,7 +72,7 @@ from src.features.composer.constants import (
     FULL_PAIR_FLOW_SCHEMA_TAIL,
     FULL_EVIDENCE_PAIR_GUIDE,
     FULL_LEGACY_SENTENCE_SCHEMA,
-    FULL_PAIR_SENTENCE_SCHEMA,
+    FULL_PAIR_SENTENCE_SCHEMA, FULL_EVIDENCE_PAIR_SCHEMA_HINT,
     FULL_PAIR_SCHEMA_TAIL,
     FULL_PAST_CHANGES_PAIR_CITATION_RULES_GUIDE,
     FULL_PAST_CHANGES_SECTION_GUIDE,
@@ -419,6 +429,13 @@ def _render_fragments(
         if show_supported_claim_slots:
             supported = ", ".join(fragment.supported_claim_slots) or "없음"
             label = f"{label} · 지원 주장슬롯: {supported}"
+        if fragment.source_context_json:
+            from src.shared.report_evidence.source_context import parse_source_context
+            context = parse_source_context(fragment.source_context_json)
+            label += " · 원문 행위주체: " + json.dumps(context["actor"], ensure_ascii=False)
+            if context["status"]:
+                label += " · 원문 진행상태: " + json.dumps(context["status"], ensure_ascii=False)
+            label += " · 주어와 예정 상태를 대상 회사의 직접 행위나 완료로 바꾸지 마세요"
         evidence_text = json.dumps(fragment.text, ensure_ascii=False) if _is_news_fragment(fragment) else fragment.text
         lines.append(f"[조각 {fragment.fragment_id}] ({label}) {evidence_text}\n")
     return "".join(lines)
@@ -619,6 +636,29 @@ def build_section_prompt(
             if section_id in FLOW_HEADERS_BY_SECTION
             else FULL_PAIR_SCHEMA_TAIL,
         )
+        if pair_choices:
+            schema_guide = schema_guide.replace(
+                FULL_EVIDENCE_PAIR_SCHEMA_HINT, FULL_FINITE_SELECTION_SCHEMA_HINT,
+            )
+            required_guide = required_content_guide(section_id, pair_choices)
+            if required_guide:
+                schema_guide = schema_guide.replace(
+                    LEGACY_FLOW_REQUIRED_KEYS_GUIDE, FULL_REQUIRED_FLOW_KEYS_GUIDE,
+                )
+                schema_guide = schema_guide.replace(
+                    '"문장들": [',
+                    f'"{RESPONSE_REQUIRED_CONTENT_KEY}": {{"<아래 필수 의미칸>": []}}, "문장들": [',
+                ) + required_guide
+    citation_rules_guide = (
+        FULL_PAST_CHANGES_PAIR_CITATION_RULES_GUIDE
+        if show_supported_claim_slots and section_id == "past_changes"
+        else FULL_PAIR_CITATION_RULES_GUIDE
+        if show_supported_claim_slots else CITATION_RULES_GUIDE
+    )
+    if pair_choices:
+        # 작성 지침만 바꾼다. 원문·실적표·이전 작성 내용을 치환하지 않는다.
+        citation_rules_guide = citation_rules_guide.replace("«근거선택» 배열", "«근거선택» 객체")
+        claim_slot_guide = claim_slot_guide.replace("«근거선택» 배열", "«근거선택» 객체")
     section_parts = [
         (
             FULL_PAST_CHANGES_SECTION_GUIDE
@@ -631,12 +671,7 @@ def build_section_prompt(
             else ""
         ),
         "\n\n",
-        (
-            FULL_PAST_CHANGES_PAIR_CITATION_RULES_GUIDE
-            if show_supported_claim_slots and section_id == "past_changes"
-            else FULL_PAIR_CITATION_RULES_GUIDE
-            if show_supported_claim_slots else CITATION_RULES_GUIDE
-        ),
+        citation_rules_guide,
         FULL_PAIR_EXACT_EVIDENCE_SCOPE_GUIDE
         if show_supported_claim_slots else EXACT_EVIDENCE_SCOPE_GUIDE,
         (
@@ -653,7 +688,12 @@ def build_section_prompt(
             interpretation_cap=MAX_INTERPRETED_SENTENCES_PER_SECTION,
         ),
         claim_slot_guide,
+        FULL_REQUIRED_SLOT_SENTENCE_GUIDE if pair_choices else "",
+        FULL_FINITE_SELECTION_GUIDE if pair_choices else "",
         FULL_VISIBLE_EVIDENCE_GUIDE if show_supported_claim_slots else "",
+        render_challenge_event_writer_hints(writer_fragments, pair_choices,
+                                          allowed_fragment_ids=allowed_fragment_ids)
+        if show_supported_claim_slots and section_id == "current_challenges" and pair_choices else "",
         # 7장은 «경로표»를 함께 내야 해서 스키마 안내를 통째로 바꾼다.
         # 덧붙이면 기본 안내의 「이 JSON만 출력한다」와 충돌해 작가가 경로표를
         # 빼먹는다 (소재 제조사 실측).
@@ -666,14 +706,22 @@ def build_section_prompt(
     ]
     if not shared_evidence_prefix:
         # 기존 순서 그대로 — 이 경로의 결과는 바이트가 예전과 같아야 한다.
-        return "".join([header, "\n", *section_parts, fragments_block])
+        prompt = "".join([header, "\n", *section_parts, fragments_block])
+        return with_full_writer_schema(
+            prompt, section_id, pair_choices,
+            news_fragment_ids=tuple(f.fragment_id for f in writer_fragments if _is_news_fragment(f)),
+        ) if pair_choices else prompt
     # 구분자는 원래 쓰던 것만 쓴다: 머리말 뒤의 "\n"은 그 자리에 두고, 조각
     # 블록 뒤에 "\n"을 하나 넣어 장별 지시와 한 줄 띄운다.
     shared_prefix = f"{header}\n{fragments_block}\n"
-    return CacheablePrompt(
+    prompt = CacheablePrompt(
         shared_prefix + "".join(section_parts),
         cache_prefix_chars=len(shared_prefix),
     )
+    return with_full_writer_schema(
+        prompt, section_id, pair_choices,
+        news_fragment_ids=tuple(f.fragment_id for f in writer_fragments if _is_news_fragment(f)),
+    ) if pair_choices else prompt
 
 
 # ══════════════════════════════════════════════════════════
@@ -874,20 +922,30 @@ def _sentence_from_item(
     # 되살리거나 이미 고른 인용을 다른 조각으로 바꾸지 않는다.
     if evidence_pairs is not None and RESPONSE_EVIDENCE_PAIR_KEY in item:
         raw_pairs = item[RESPONSE_EVIDENCE_PAIR_KEY]
-        if type(raw_pairs) is not list or not raw_pairs or any(
+        if (type(raw_pairs) is not list or not raw_pairs or any(
             type(pair_id) is not str or pair_id not in evidence_pairs
             for pair_id in raw_pairs
-        ) or len(set(raw_pairs)) != len(raw_pairs):
+        )):
             return None
-        selected = tuple(evidence_pairs[pair_id] for pair_id in raw_pairs)
+        # 같은 선택 ID의 반복은 새로운 근거가 아니다. 원 응답을 바꾸지 않고
+        # 첫 출현 순서만 남긴다. 다른 ID나 의미칸을 합치는 정규화는 하지 않는다.
+        unique_pairs = tuple(dict.fromkeys(raw_pairs))
+        selected = tuple(evidence_pairs[pair_id] for pair_id in unique_pairs)
         selected_slot = selected[0][0]
         selected_citations = tuple(fragment_id for _, fragment_id in selected)
         if any(slot != selected_slot for slot, _ in selected):
             return None
         if RESPONSE_CLAIM_SLOT_KEY in item and raw_claim_slot != selected_slot:
             return None
-        if RESPONSE_CITATIONS_KEY in item and citations != selected_citations:
+        if RESPONSE_CITATIONS_KEY in item and citations != tuple(
+                evidence_pairs[pair_id][1] for pair_id in raw_pairs):
             return None
+        repeated_count = len(raw_pairs) - len(unique_pairs)
+        if repeated_count:
+            logger.info(
+                "작성 근거선택 동일 ID 반복 정리 section=%s 반복개수=%d",
+                section_id, repeated_count,
+            )
         return ComposedSentence(
             text=text,
             citations=selected_citations,
@@ -940,7 +998,7 @@ def parse_section_response(
     payload = extract_json_payload(raw)
     if not isinstance(payload, Mapping):
         return None
-    items = payload.get(RESPONSE_SENTENCES_KEY)
+    items = writer_sentence_items(payload, section_id, evidence_pairs)
     if not isinstance(items, list):
         return None
     if not items:
@@ -1280,6 +1338,7 @@ def _normalize_packet_fragments(
             domain_redirect_from_host=fragment.domain_redirect_from_host,
             domain_redirect_to_host=fragment.domain_redirect_to_host,
             bound_source=fragment.bound_source,
+            source_context_json=fragment.source_context_json,
         )
         for fragment in normalized
     )
@@ -1898,6 +1957,7 @@ def compose_selected_sections(
     *,
     section_evidence_packets: SectionEvidencePacketSet,
     section_ids: tuple[str, ...],
+    missing_slots_by_section: Mapping[str, tuple[str, ...]] | None = None,
 ) -> ComposedReport:
     """승인된 FULL 장만 각자의 기존 typed packet으로 한 번씩 다시 쓴다.
 
@@ -1935,7 +1995,7 @@ def compose_selected_sections(
     for section_id in section_ids:
         section = _compose_one_section(
             section_id,
-            build_section_prompt(
+            supplement_feedback(section_id, missing_slots_by_section) + build_section_prompt(
                 company_name,
                 section_id,
                 prepared.packets[section_id],

@@ -15,6 +15,7 @@ from types import ModuleType
 from typing import Final
 
 from src.core import paths
+from src.shared.report_evidence.source_context import parse_source_context, source_context_fingerprint
 from src.core.evidence_reclassify_switch import evidence_reclassify_enabled
 from src.features.chapter_evidence.produce import produce_from_collection_envelopes
 from src.features.homepage.wide_collect import collect_official_web_documents
@@ -126,7 +127,7 @@ def _dart_requirement_is_honest(source_kind: str, requirement: str) -> bool:
         return policy_requirement == SourceRequirement.REQUIRED.value
     return True
 _DART_IDENTITY_CHECK_STATES: Final[frozenset[str]] = frozenset(
-    {"verified_match", "unverifiable_no_fetcher_metadata"}
+    {"verified_match", "verified_filing_list_match", "unverifiable_no_fetcher_metadata"}
 )
 _OFFICIAL_WEB_DOCUMENT_SOURCE_KINDS: Final[frozenset[str]] = frozenset(
     {
@@ -248,11 +249,13 @@ def _classified_evidence_location_bindings(
             "ranges": tuple(ranges),
             "hashes": frozenset(hashes),
             "declared_bindings": frozenset(declared_bindings),
+            "source_context_bindings": raw_document.get("exact_source_context_bindings", []),
         }
 
     actual_by_document: dict[str, set[tuple[str, str]]] = {
         document_id: set() for document_id in documents
     }
+    context_by_document: dict[str, list[dict[str, str]]] = {key: [] for key in documents}
     for raw_fragment in raw_fragments:
         if not isinstance(raw_fragment, Mapping):
             raise ValueError("typed 공식 근거 조각이 Mapping이 아닙니다")
@@ -303,8 +306,17 @@ def _classified_evidence_location_bindings(
             if index >= len(ranges) or ranges[index][1] - ranges[index][0] != len(text):
                 raise ValueError("typed 공식 웹 근거 위치가 usable range와 다릅니다")
         actual_by_document[document_id].add((location, text_sha256))
+        source_context_json = raw_fragment.get("source_context_json", "")
+        if source_context_json:
+            parse_source_context(source_context_json)
+            context_by_document[document_id].append({
+                "location": location, "text_sha256": text_sha256,
+                "source_context_sha256": source_context_fingerprint(source_context_json),
+            })
 
     for document_id, document in documents.items():
+        if context_by_document[document_id] != document["source_context_bindings"]:
+            raise ValueError("typed 공식 근거의 회사 주어 문맥 결속이 다릅니다")
         if actual_by_document[document_id] != set(document["declared_bindings"]):
             raise ValueError("typed 공식 근거 location↔hash 결속 목록이 일치하지 않습니다")
 
@@ -335,6 +347,7 @@ def _unclassified_evidence_observation(
     document_rows: list[dict[str, object]] = []
     document_ids: set[str] = set()
     ranges_by_document_id: dict[str, tuple[tuple[int, int], ...]] = {}
+    declared_contexts_by_document_id: dict[str, object] = {}
     for raw in raw_documents:
         if not isinstance(raw, Mapping):
             raise ValueError("typed DART 무분류 문서가 Mapping이 아닙니다")
@@ -433,6 +446,7 @@ def _unclassified_evidence_observation(
             raise ValueError("typed DART 무분류 문서에 근거 hash를 넣을 수 없습니다")
         document_ids.add(document_id)
         ranges_by_document_id[document_id] = tuple(parsed_ranges)
+        declared_contexts_by_document_id[document_id] = raw.get("exact_source_context_bindings", [])
         document_rows.append(
             {
                 "document_id": document_id,
@@ -444,6 +458,7 @@ def _unclassified_evidence_observation(
 
     fragment_rows: list[dict[str, object]] = []
     fragment_ids: set[str] = set()
+    actual_contexts_by_document_id: dict[str, list[dict[str, str]]] = {key: [] for key in document_ids}
     used_ranges_by_document_id: dict[str, set[tuple[int, int]]] = {
         document_id: set() for document_id in document_ids
     }
@@ -495,6 +510,13 @@ def _unclassified_evidence_observation(
         ):
             raise ValueError("typed DART 무분류 조각의 관측 사유가 없습니다")
         fragment_ids.add(fragment_id)
+        source_context_json = raw.get("source_context_json", "")
+        parse_source_context(source_context_json)
+        if source_context_json:
+            actual_contexts_by_document_id[document_id].append({
+                "location": location, "text_sha256": text_sha256,
+                "source_context_sha256": source_context_fingerprint(source_context_json),
+            })
         fragment_rows.append(
             {
                 "fragment_id": fragment_id,
@@ -502,9 +524,12 @@ def _unclassified_evidence_observation(
                 "location": location,
                 "text_sha256": text_sha256,
                 "reason_codes": sorted(code.strip() for code in reason_codes),
+                **({"source_context_json": source_context_json} if source_context_json else {}),
             }
         )
 
+    if any(actual_contexts_by_document_id[key] != declared_contexts_by_document_id[key] for key in document_ids):
+        raise ValueError("typed DART 무분류 회사 주어 문맥 결속이 다릅니다")
     if any(
         used_ranges_by_document_id[document_id]
         != set(ranges_by_document_id[document_id])
@@ -618,6 +643,7 @@ def _comparison_candidate_evidence(
                     ),
                     evidence_text=sentence,
                     evidence_sha256=evidence_sha256,
+                    source_context_json=str(raw_fragment.get("source_context_json", "")),
                 )
             )
     return tuple(candidates)

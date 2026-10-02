@@ -326,6 +326,11 @@ SAFETY_BLOCK_SECTION_ORDER = (*STRICT_REQUIRED_QUALITY_SECTION_IDS, "summary")
 #: FULL 1차 품질하한 중단을 SHADOW 강등 이전의 평가 그대로 남긴다. 공개 허용·
 #: 비용 판정에는 사용하지 않는다. 닫힌 코드와 장 ID만 허용하며 원문은 싣지 않는다.
 PRIMARY_QUALITY_STOP_STEP = "8_FULL1차_품질중단"
+SUPPLEMENT_QUALITY_STOP_STEP = "8_FULL보충_품질중단"
+SUPPLEMENT_QUALITY_STOP_STATE = "수행후품질하한미달"
+SUPPLEMENT_QUALITY_STOP_REASONS = frozenset((
+    "post_supplement_quality_failed", "supplement_summary_insufficient",
+))
 PRIMARY_QUALITY_STOP_REASON_FIELD = "회복사유"
 PRIMARY_QUALITY_STOP_CODES_FIELD = "품질코드"
 PRIMARY_QUALITY_STOP_SECTION_FIELDS = (

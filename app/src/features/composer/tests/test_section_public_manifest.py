@@ -2602,6 +2602,10 @@ def test_storage는_evidence_source_cites_manifest를_왕복하고_누락은_닫
     output, _writer, _reviewer, _diagram = _run_full(flow=True)
     original = output.report
     restored = report_from_json(report_to_json(original))
+    assert next(section for section in original.sections
+                if section.cell == "current_challenges").tag == "#사업과제"
+    assert next(section for section in restored.sections
+                if section.cell == "current_challenges").tag == "#사업과제"
     original_flow = next(
         table
         for section in original.sections

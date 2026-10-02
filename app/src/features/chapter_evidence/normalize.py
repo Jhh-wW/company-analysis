@@ -216,6 +216,7 @@ def to_fragment(
             company_scope=_coerce_str(
                 value.get("company_scope", ""), label="회사 범위"
             ),
+            source_context_json=_coerce_str(value.get("source_context_json", ""), label="회사 주어 문맥"),
             covered_slot_ids=_coerce_str_tuple(
                 value.get("covered_slot_ids", (value["slot_id"],)),
                 label="근거 조각이 채우는 의미 칸",

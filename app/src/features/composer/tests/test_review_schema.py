@@ -103,7 +103,7 @@ def _schema_sha(schema):
     (FLAT_REVIEW_SCHEMA,
      "ec40152ca2ad8aa43192180dd0583bff4a6c3f5e52042ac1f2b915bc7fd0b94d",
      "ff4e031accf5776e3f189483531e5c5270bea8c8d1ec8cd6da75008384f901ab",
-     "bb974f18bc5d33def32725d9d6a401a3eb0265f878af6ac624bcb7ff2af966cf"),
+     "971e6a1d87c3292025b973121577bd91b8fabd07077e7f28614407093ac17c89"),
     (DIAGRAM_REVIEW_SCHEMA,
      "ba1d778829286673bd6cde6ebb5d559274c78f0202b92d6e4128891736dfc1c8",
      "43db498656efc5545d712fcc1f0c9893fe69fbd1f2dcca8a42a470c03e4bcb8a",
@@ -116,6 +116,12 @@ def test_retry_schema_hash_matches_provider_accepted_schema(schema, accepted, re
     assert relation["required"] == ["근거", "원문", "유형"]
     assert relation["additionalProperties"] is False
     previous = deepcopy(schema)
+    if schema is FLAT_REVIEW_SCHEMA:
+        # 새 본문 스키마는 선택 문자열 하나만 추가했다. 종전 정본 전체를 복원한다.
+        assert previous["$defs"]["grounding"]["properties"].pop("수치선택") == {"type": "string"}
+        assert _schema_sha(previous) == "bb974f18bc5d33def32725d9d6a401a3eb0265f878af6ac624bcb7ff2af966cf"
+    else:
+        assert "수치선택" not in previous["$defs"]["grounding"]["properties"]
     for key in ("범위", "관계"):
         del previous["$defs"]["grounding"]["properties"]["관계"]["items"]["properties"][key]
     assert _schema_sha(previous) == recognition
@@ -156,11 +162,20 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 #   c9a8489a / a370eb2b·f769528b)과 같음을 재생해 확인했다(tmp 무과금 재생 기록).
 # 2026-09-27 수치 증명 필드 축자 안내 307자를 더한 현재 builder 결과로
 #   아래 전체 프롬프트 해시 여섯 개를 재계산했다. 위 2026-09-23 값은 역사 기록이다.
+# 2026-09-30: 5장 정책241자와 5·8장 범위 안내 변경만 되돌려 직전 네 해시를
+# 재현한 뒤 본문 기준값만 갱신했다. JSON schema·도식 기준값은 그대로다.
+# 재현 증거: tmp/audit-20260930/review-policy-snapshots.json.
+# 2026-10-01: 5장 사건 발생기간·완료/진행 안내 205자만 제거해 기존 네 해시를
+# 재현했다. 전체 원문·번호·스키마·경계/도식 해시는 유지하고 골든 두 값만 갱신한다.
+# 증거: tmp/audit-20260930/validation/ci-flow-header-prompt-baseline.json.
+# 후속 3장 부문 비율의 전사 확대 금지 안내 138자만 제거하면 15756e95의
+# 골든 전체 바이트·해시 두 값이 재현된다. 경계·도식·스키마는 바꾸지 않는다.
+# 증거: tmp/audit-20260930/validation/ab926-review-prompt-baseline.json.
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "546f0dfd5c84fc631a7b1f03c15f7a1abeeaaffc225047ffb95db0010a1b0a39"),
-    (_golden_case, True, "70aa9f5345741474c2cc8e355acf940a37c2a7072e585c5acf32ea05d3d5f198"),
-    (_boundary_case, False, "a05ed45f8a4acffc1757d129947864c73b8f6bacf5742e6287f24eb20b0a6a0c"),
-    (_boundary_case, True, "028221dba6a98551334e93c3e9e1a6f53fbe3630bf4dda4f087d3668c5f2a410"),
+    (_golden_case, False, "b34b7cca702e8a31073fc109b225b56bbfa23fd6fc6a342f93978383fecd0aa6"),
+    (_golden_case, True, "17729bda28c7c68ae8f30937b0f99e6c2f5a12c1aad2f863a82c071169d5bd9d"),
+    (_boundary_case, False, "856cd2d7ba3e4e8c3974df75dd8384c129bcf27bbdb586b50e9155bcb94a5e11"),
+    (_boundary_case, True, "760765739100a5b8ebe838a719280f4c1cf51cd27bfa98bad02f044a577ede75"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
     # 현재 builder와 현재 안내문으로 재생한 전체 UTF-8 프롬프트 해시다.
@@ -172,6 +187,8 @@ def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected)
     #   (뤼튼 실측 요청 50·응답 20). 묶음(grouped) 안내문은 그대로라 그쪽 해시는 같다.
     # 2026-09-23 원칙/특례·제품 귀속·제외 주석·발표/실행 시점 안내 추가.
     # 추가 안내만 제거한 4개 해시는 변경 직전 프롬프트와 같음을 재생해 확인했다.
+    # 사건 행 결속 안내 127자만 제거하면 a901의 전체 바이트와 지문이 재현된다.
+    # 증거: tmp/audit-20260930/validation/35361-review-prompt-baseline-02.json.
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
 

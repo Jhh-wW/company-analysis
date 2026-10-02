@@ -14,6 +14,10 @@ from typing import Any, Callable, Mapping
 from src.core.provider_gateway import gateway
 from src.features.news_intake import constants as c
 from src.features.news_intake.analysis_result_cache import analysis_request
+from src.features.news_intake.industry_context import extend_prompt, extend_schema, industry_candidate, split_response
+from src.features.news_intake import industry_constants as ic
+from src.features.news_intake.observation import NewsObserver, observe_news
+from src.features.news_intake.grounded import parse_grounded_payload
 from src.features.news_intake.body_prefetch import (
     ArticleFetchJob, ArticleFetchOutcome, BodyFetchConcurrency, BodyFetchLane,
     CallBudgetPool, CallLease, eligible_body_urls, fetch_article_body,
@@ -62,7 +66,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                           as_of: dt.date, fetch_text: Callable[[str], object],
                           analyze_grounded: GroundedAnalyzer,
                           policy: NewsCollectionPolicy | None = None,
-                          body_fetch: BodyFetchConcurrency | None = None) -> NewsCollectionResult:
+                          body_fetch: BodyFetchConcurrency | None = None,
+                          observer: NewsObserver | None = None) -> NewsCollectionResult:
     """검색·본문 callback을 섞지 않고, 검증 실패를 예전 휴리스틱으로 보충하지 않는다.
 
     ``body_fetch``는 호출자가 «``fetch_text``를 여러 스레드에서 동시에 불러도
@@ -83,6 +88,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     role_diagnostics: Counter[str] = Counter()
     budget_codes: list[str] = [code for code in snapshot.reason_codes if code in c.SEARCH_BUDGET_REASON_CODES]
     stages: Counter[str] = Counter()
+    observed_rankings: list[dict[str, object]] = []
+    observed_ranking_failures = 0
     body_articles = 0
     body_chars = 0
     analysis_calls = 0
@@ -101,6 +108,10 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     republished_urls: set[str] = set()
     seen_urls: set[str] = set()
     all_excerpts: list[GroundedNewsExcerpt] = []
+    industry_problems = []
+    industry_observations: Counter[str] = Counter()
+    industry_read_ids: set[str] = set()
+    industry_analysis_ids: set[str] = set()
     windows: list[int] = []
     window_counts: dict[str, dict[str, int]] = {}
     deferred: dict[int, list[tuple[NewsCandidate, str]]] = {}
@@ -155,7 +166,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             budget_codes.append(c.ANALYSIS_BUDGET_EXHAUSTED_CODE)
             stopped = True
             return
-        prompt = build_grounded_prompt(company, batch, as_of)
+        prompt = extend_prompt(build_grounded_prompt(company, batch, as_of), company)
         if len(prompt) > policy.max_prompt_chars:
             if len(batch) > 1:
                 middle = len(batch) // 2
@@ -167,8 +178,11 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             return
         analysis_calls += 1
         prompt_chars += len(prompt)
+        if company.business_anchors:
+            industry_observations["검수입력기사"] += len(batch)
+            industry_analysis_ids.update(candidate.id for candidate, _ in batch if industry_candidate(candidate))
         try:
-            schema = build_grounded_schema(batch)
+            schema = extend_schema(build_grounded_schema(batch), company)
             with analysis_request(
                 company=company, as_of=as_of, policy=policy, articles=batch,
                 full_body_hashes=document_hashes, prompt=prompt, schema=schema,
@@ -203,8 +217,23 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                     response = None
             except (TypeError, ValueError):
                 response = None
+        direct_response, industry_found, industry_rejected = split_response(
+            response, articles=batch, company=company, as_of=as_of, full_body_hashes=document_hashes,
+            observations=industry_observations,
+        )
+        industry_problems.extend(industry_found)
+        excluded.update(industry_rejected)
+        direct_batch = batch
+        if company.business_anchors:
+            direct_batch = [(candidate, body) for candidate, body in batch if mentions_target(body, company)]
+            direct_ids = {candidate.id for candidate, _ in direct_batch}
+            direct_items = parse_grounded_payload(direct_response)
+            if direct_items is not None:
+                direct_response = {"items": [item for item in direct_items
+                                             if type(item) is not dict or type(item.get("id")) is not str
+                                             or item.get("id") in direct_ids]}
         excerpts, rejected = validate_grounded_response(
-            response, articles=batch, company=company, as_of=as_of, identity_diagnostics=identity_diagnostics,
+            direct_response, articles=direct_batch, company=company, as_of=as_of, identity_diagnostics=identity_diagnostics,
             role_diagnostics=role_diagnostics, subject_diagnostics=subject_diagnostics,
         )
         excluded.update(rejected)
@@ -234,7 +263,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             excluded["body_input_truncated"] += 1
         # 이후의 모든 신원·주어 결속 경로는 바로 이 입력 범위 안의 공식 상호를
         # 요구한다. 통과할 수 없는 본문에 AI 몫을 쓰거나 발행처명을 근거로 삼지 않는다.
-        if not mentions_target(body, company):
+        if not mentions_target(body, company) and not (company.business_anchors and industry_candidate(candidate)):
             excluded["body_target_name_missing"] += 1
             identity_diagnostics["identity_name_missing"] += 1
             return
@@ -280,8 +309,17 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             ranked_candidates = body_ranked_candidates(
                 candidates + [candidate for candidate, _ in carried],
                 attempt_budget=window_budget, probe_budget=probe_budget,
-                replacement=is_replacement,
+                replacement=is_replacement, company=company,
             )
+            if observer is not None:
+                try:
+                    observed_rankings.append({
+                        "window_months": months, "replacement": is_replacement,
+                        "attempt_budget": window_budget, "probe_budget": probe_budget,
+                        "ranked_candidate_ids": [item.id for item in ranked_candidates],
+                    })
+                except Exception:
+                    observed_ranking_failures += 1
             active_window_counts = replacement_window_counts if is_replacement else window_counts
             active_window_counts[str(months)] = {
                 "후보": len(candidates) + len(carried), "본문": len(carried), "검증기사": 0, "이월": 0,
@@ -433,6 +471,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                     excluded["article_body_unavailable"] += 1
                     continue
                 stages[outcome.stage] += 1
+                if industry_candidate(read_candidate):
+                    industry_read_ids.add(read_candidate.id)
                 seen_urls.add(read_candidate.source_url)
                 actual_months = candidate_window(read_candidate, as_of)
                 if actual_months > months:
@@ -518,7 +558,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     ) for url in chosen_urls)
     enough = sufficient()
     incomplete_codes = tuple(code for code in excluded if excluded[code] and (
-        code.startswith("grounded_invalid_") or code in {
+        code.startswith("grounded_invalid_") or code.startswith("industry_invalid_") or code in {
             "grounded_text_not_exact", "grounded_missing_result", "grounded_unknown_or_duplicate_id",
             "grounded_subject_missing", "grounded_identity_unverified", "grounded_plan_mismatch",
             "grounded_event_date_unverified", "grounded_attribution_required",
@@ -556,6 +596,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         "분석provider미관측": analysis_provider_unobserved,
         "분류프롬프트글자": prompt_chars, "분석입력글자": prompt_chars, "분석응답글자": response_chars,
         "관련성통과": len(relevant_articles), "조각": len(fragments),
+        "산업과제근거": len(industry_problems),
+        "산업과제지역": dict(Counter(item.geography for item in industry_problems)),
         "조각글자": sum(len(item.text) for item in fragments), "독립기사": len(articles),
         "실질사건": len(chosen), "주제": dict(Counter(item.topic for item in chosen)),
         "발행처": dict(Counter(article.candidate.publisher for article in articles)),
@@ -602,7 +644,33 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         "캐시재사용가능": snapshot.cache_eligible and not reason_codes and not budgets and not incomplete_codes,
         "장별조각": dict(Counter(item.section_id for item in chosen)),
     }
+    if company.business_anchors:
+        industry_candidates = tuple(item for item in snapshot.candidates if industry_candidate(item))
+        industry_attempts = tuple(attempt for attempt in snapshot.query_attempts
+                                  if attempt.topic.startswith(ic.INDUSTRY_TOPIC_PREFIX))
+        diagnostics["산업탐색"] = {
+            "검색호출": len(industry_attempts),
+            "검색반환행": sum(attempt.returned_count for attempt in industry_attempts),
+            "신뢰후보기사": len(industry_candidates),
+            "본문시도기사": sum(item.id in attempted_candidate_ids for item in industry_candidates),
+            "본문미시도기사": sum(item.id not in attempted_candidate_ids for item in industry_candidates),
+            "본문읽기사": len(industry_read_ids),
+            "분석입력기사": len(industry_analysis_ids),
+        }
+        # 회사 검색에서 찾은 기사에도 산업문제를 검수한다. 이 집계는 산업 검색 결과만의 수가 아니다.
+        diagnostics["산업검수"] = {name: industry_observations[name]
+                                   for name in ic.INDUSTRY_RESPONSE_OBSERVATION_FIELDS}
+    if observer is not None:
+        observe_news(observer, "body_selection", lambda: {
+            "snapshot_digest": snapshot.digest, "rankings": observed_rankings,
+            "ranking_capture_failures": observed_ranking_failures,
+            "attempted_candidate_ids": sorted(attempted_candidate_ids),
+            "industry_read_candidate_ids": sorted(industry_read_ids),
+            "industry_analysis_candidate_ids": sorted(industry_analysis_ids),
+            "document_content_sha256": dict(document_hashes),
+        })
     return NewsCollectionResult(
         fragments=fragments, document_hashes={url: document_hashes[url] for url in chosen_urls},
         diagnostics=diagnostics, snapshot_digest=snapshot.digest, articles=articles,
+        industry_problems=tuple(industry_problems),
     )

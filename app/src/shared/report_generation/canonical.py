@@ -15,6 +15,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
 from src.core.citations import citation_number
+from src.shared.business_challenge_context import industry_context_to_dict, industry_context_from_dict
 from src.shared.report_generation.table_citations import validated_row_cites
 from src.shared.report_generation.models import (
     GenerationProducerEvidence,
@@ -96,7 +97,7 @@ def table_public_projection(table: object) -> dict[str, object]:
 
 
 def section_public_projection(section: object) -> dict[str, object]:
-    return {
+    payload = {
         "cell": str(_value(section, "cell", "")),
         "title": str(_value(section, "title", "")),
         "empty_reason": str(_value(section, "empty_reason", "")),
@@ -117,6 +118,13 @@ def section_public_projection(section: object) -> dict[str, object]:
             for table in _value(section, "tables", ())
         ],
     }
+    contexts = _value(section, "industry_contexts", ())
+    if contexts:
+        payload["industry_contexts"] = [
+            industry_context_to_dict(industry_context_from_dict(value) if isinstance(value, Mapping) else value)
+            for value in contexts
+        ]
+    return payload
 
 
 def _summary_public_projection(item: object) -> dict[str, object]:
@@ -363,6 +371,7 @@ def _source_bindings(report: Mapping[str, object]) -> dict[str, tuple[str, str]]
                 document_id=str(_value(source, "document_id", "")),
                 host=str(_value(source, "host", "")),
                 url=str(_value(source, "url", "")),
+                formal_source_kind=str(_value(source, "formal_source_kind", "")),
             )
             if isinstance(source, Mapping)
             else document_identity(source)

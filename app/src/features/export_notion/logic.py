@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from typing import Any
+from src.shared.business_challenge_context import industry_context_displays
 
 from src.core.citations import citation_marker, citation_display_style, citation_number
 from src.core.report_display import reader_citation_groups, reader_scope_notes, reader_section_content, reader_summary_notes
@@ -471,6 +472,9 @@ def _v2_section_blocks(display: PublicSectionDisplay) -> list[NotionBlock]:
         visual = visual_by_table.get(index)
         if visual is not None and visual.reading:
             blocks.append(_paragraph(visual.reading))
+    for item in display.industry_contexts:
+        blocks.append(_paragraph("공식 자료에 나온 사업과 관련된 산업 과제 · 해석"))
+        blocks.extend(_paragraph(text) for text in item.lines)
     return blocks
 
 
@@ -674,6 +678,9 @@ def _unsealed_v2_blocks(report: Report) -> list[NotionBlock]:
             markers = " ".join(table.source_cites)
             if markers:
                 blocks.append(_paragraph(markers))
+        for item in industry_context_displays(section.industry_contexts, tuple(report.citations)):
+            blocks.append(_paragraph("공식 자료에 나온 사업과 관련된 산업 과제 · 해석"))
+            blocks.extend(_paragraph(text) for text in item.lines)
     source_blocks = _source_list_blocks(report)
     if source_blocks:
         blocks.extend([_heading_2(constants.SOURCES_HEADING), _paragraph(constants.SOURCES_SUBTITLE), *source_blocks])

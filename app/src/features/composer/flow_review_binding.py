@@ -37,26 +37,30 @@ def _binding(
         if (type(fragment) is not CollectedFragment or fragment.fragment_id != fid
                 or not fragment.text or not fragment.text.strip()):
             raise ValueError("도식 검수 행이 인용한 정확 원문을 찾지 못했습니다")
+        source_scope = {
+            "source_url": fragment.source_url,
+            "source_document_id": fragment.source_document_id,
+            "document_title": fragment.document_title,
+            "location": fragment.location,
+            "kind": fragment.kind,
+            "formal_source_kind": fragment.formal_source_kind,
+            "source_publisher": fragment.source_publisher,
+            "supported_claim_slots": fragment.supported_claim_slots,
+            "identity_binding": fragment.identity_binding,
+            "news_grounded": fragment.news_grounded,
+            "news_event_on": fragment.news_event_on,
+            "news_temporal_status": fragment.news_temporal_status,
+        }
+        # 기존 빈 문맥의 봉인 값은 유지하며, 검수에 쓰인 법인·단계 문맥을 묶는다.
+        if fragment.source_context_json:
+            source_scope["source_context_json"] = fragment.source_context_json
         refs.append(FlowEvidenceRef(
             fragment_id=fid,
             document_identity=fragment.document_identity,
             document_content_sha256=fragment.document_content_sha256,
             exact_evidence_sha256=exact_text_sha256(fragment.text),
             document_date=fragment.document_date,
-            source_scope_sha256=canonical_sha256({
-                "source_url": fragment.source_url,
-                "source_document_id": fragment.source_document_id,
-                "document_title": fragment.document_title,
-                "location": fragment.location,
-                "kind": fragment.kind,
-                "formal_source_kind": fragment.formal_source_kind,
-                "source_publisher": fragment.source_publisher,
-                "supported_claim_slots": fragment.supported_claim_slots,
-                "identity_binding": fragment.identity_binding,
-                "news_grounded": fragment.news_grounded,
-                "news_event_on": fragment.news_event_on,
-                "news_temporal_status": fragment.news_temporal_status,
-            }),
+            source_scope_sha256=canonical_sha256(source_scope),
         ))
     candidate_sha256 = canonical_sha256({
         "rule_version": FLOW_REVIEW_RULE_VERSION,

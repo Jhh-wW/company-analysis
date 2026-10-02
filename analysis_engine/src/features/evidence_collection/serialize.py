@@ -22,6 +22,7 @@ company_id와 다르면 그보다 앞서 ``DartEvidenceHarvest.__post_init__``�
 
 from __future__ import annotations
 from dataclasses import asdict
+import hashlib
 
 from features.evidence_collection.models import (
     CollectedDocument,
@@ -41,6 +42,7 @@ def _document_to_mapping(
     document: CollectedDocument,
     exact_evidence_hashes: list[str],
     exact_evidence_bindings: list[dict[str, str]],
+    source_context_bindings: list[dict[str, str]] | None = None,
 ) -> dict[str, object]:
     return {
         "company_id": document.company_id,
@@ -63,6 +65,7 @@ def _document_to_mapping(
         # 못한다. 원문을 복제하지 않고도 location↔hash 쌍을 앱 경계가 exact
         # 비교할 수 있게 생산 자리에서 함께 봉인한다.
         "exact_evidence_bindings": exact_evidence_bindings,
+        **({"exact_source_context_bindings": source_context_bindings} if source_context_bindings else {}),
     }
 
 
@@ -83,6 +86,7 @@ def _fragment_to_mapping(fragment: EvidenceFragment) -> dict[str, object]:
         "period_end": fragment.period_end,
         "unit": fragment.unit,
         "company_scope": fragment.company_scope,
+        **({"source_context_json": fragment.source_context_json} if fragment.source_context_json else {}),
     }
 
 
@@ -157,6 +161,20 @@ def harvest_to_mapping(harvest: DartEvidenceHarvest) -> dict[str, object]:
     """
     exact_hashes_by_document_id = _exact_evidence_hashes_by_document_id(harvest)
     exact_bindings_by_document_id = _exact_evidence_bindings_by_document_id(harvest)
+    context_bindings: dict[str, list[dict[str, str]]] = {}
+    for fragment in harvest.fragments:
+        if fragment.source_context_json:
+            context_bindings.setdefault(fragment.document_id, []).append({
+                "location": fragment.location, "text_sha256": fragment.text_sha256,
+                "source_context_sha256": hashlib.sha256(fragment.source_context_json.encode("utf-8")).hexdigest(),
+            })
+    unclassified_context_bindings: dict[str, list[dict[str, str]]] = {}
+    for fragment in harvest.unclassified_fragments:
+        if fragment.source_context_json:
+            unclassified_context_bindings.setdefault(fragment.document_id, []).append({
+                "location": fragment.location, "text_sha256": fragment.text_sha256,
+                "source_context_sha256": hashlib.sha256(fragment.source_context_json.encode("utf-8")).hexdigest(),
+            })
     return {
         "company_id": harvest.company_id,
         "company_type": harvest.company_type,
@@ -165,6 +183,7 @@ def harvest_to_mapping(harvest: DartEvidenceHarvest) -> dict[str, object]:
                 document,
                 exact_hashes_by_document_id.get(document.document_id, []),
                 exact_bindings_by_document_id.get(document.document_id, []),
+                context_bindings.get(document.document_id),
             )
             for document in harvest.documents
         ],
@@ -173,7 +192,7 @@ def harvest_to_mapping(harvest: DartEvidenceHarvest) -> dict[str, object]:
         # 원문을 별도 차선으로 보존해, 뒤 단계가 자료 부족과 분류기 결함을
         # 구분하거나 다음 분류기 버전으로 다시 판정할 수 있게 한다.
         "unclassified_documents": [
-            _document_to_mapping(document, [], [])
+            _document_to_mapping(document, [], [], unclassified_context_bindings.get(document.document_id))
             for document in harvest.unclassified_documents
         ],
         "unclassified_fragments": [

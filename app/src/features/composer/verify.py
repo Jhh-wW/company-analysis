@@ -42,6 +42,14 @@ from src.features.composer.accounting_policy_constants import (
 from src.features.composer.accounting_policy_guard import (
     accounting_policy_mixed, accounting_policy_problem,
 )
+from src.features.composer.challenge_business_scope import challenge_business_problem
+from src.features.composer.numeric_proof_selection import (
+    NumericProofCandidate, NumericProofOption, prepare_numeric_proof_options,
+    numeric_proof_option_hint, restore_numeric_proof_selections,
+)
+from src.features.composer.numeric_proof_selection_constants import NUMERIC_SELECTION_STAGE
+from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_VERSION
+from src.features.composer.source_actor_scope import source_actor_problem
 from src.features.composer.competitive_scope_guard import competitive_section_evidence_problem
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_accounting_policy_problem,
@@ -129,6 +137,7 @@ from src.features.composer.direct_support_constants import (
 )
 from src.features.composer.direct_support import support_entries_by_number
 from src.features.composer.role_binding import role_binding_report, role_binding_requirements
+from src.features.composer.business_relation_scope import business_relation_scope_problem
 from src.features.composer.role_binding_constants import (
     ROLE_BINDING_REASON_TEXTS, ROLE_BINDING_REVIEW_GUIDE,
 )
@@ -177,6 +186,7 @@ from src.features.composer.grounding_constants import (
     MAGNITUDE_TOKENS,
     REVIEW_GROUNDING_REJECTED,
     GROUNDING_SOURCE_FIELD,
+    GROUNDING_INVALID,
     NUMERIC_KEY,
     TABLE_RAW_VALUE_ROW_SUFFIX,
     TABLE_SOURCE_ID,
@@ -248,25 +258,10 @@ class _SectionMove:
 def _challenge_section_prose_problem(
     text: str, sources: Mapping[str, str], *, culture_candidate: bool
 ) -> str:
-    """5장(당면 과제와 대응) «본문 산문»에 걸리는 장별 검사만 모은다.
-
-    ★ 왜 이 목록이 전부인가 — `_apply_grounding` 에서 장을 보고 거는 검사는
-      ① 8장(culture) 본문 ② 6장(future_strategy) 본문 ③ 도식 칸이 있는 후보
-      ④ 문화 슬롯 후보의 `culture_problem` 네 갈래뿐이다. 5장 본문 산문은
-      ①②③에 들어가지 않으므로 ④만 남는다. 5장의 대응 검사
-      (`challenge_response_*`)는 «도식 칸»에만 걸린다 — 산문에는 걸리지 않는다.
-    ★ 장과 무관한 검사(자기 근거·부재 단언·수치·추세·시점)는 이미 같은 후보에
-      그대로 걸렸다. 장을 옮긴다고 다시 걸 것이 없다.
-    ★ 회계정책 상용구 가드(`accounting_policy_problem`)도 이 목록에 «없다» —
-      culture 를 뺀 모든 장 본문에 «같은 잣대»로 걸리고, 거기 걸린 후보는 6장
-      이동 분기에 닿기 전에 이미 제외된다. 출발 장과 도착 장의 답이 같으므로
-      도착 장에서 다시 볼 것이 없다.
-    ⚠️ 이 목록이 `_apply_grounding` 과 어긋나면 옮긴 문장만 검사를 덜 받는다.
-      두 벌이 되지 않게 `test_future_section_contract.py` 의 대조 시험이 실제
-      `_apply_grounding` 을 5장 문맥으로 돌려 같은 판정이 나오는지 확인한다.
-    """
-
-    return culture_problem(text, sources) if culture_candidate else ""
+    """5장 직접 작성과 다른 장에서의 이동에 같은 범위 검사를 적용한다."""
+    own_sources = {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID}
+    return (challenge_business_problem(text, own_sources)
+            or (culture_problem(text, own_sources) if culture_candidate else ""))
 
 
 def _append_grounding_diagnostic(
@@ -459,6 +454,12 @@ REVIEW_PROMPT_RULES: Final[str] = (
     "보고 조직문화나 의사결정 절차를 만들어서는 안 된다. 그 회사가 실제로 "
     "밝힌 사람·권한·절차·원칙에 관한 근거인지 확인한다. 사실들이 각각 "
     "맞아도 그 사실 사이에 없는 관계를 붙인 «확인» 문장은 «거짓»이다.\n"
+    "12. 5장에서는 핵심 제품·서비스·사업과 문제의 연결을 대조한다. 단순한 "
+    "재무지표 증감이나 유동성·환율·신용위험 관리 상용구는 사업 과제의 "
+    "근거가 아니다. 산업 일반의 문제를 이 회사가 실제로 겪는 사건·피해·"
+    "대응으로 바꿨으면 «거짓»이다. 산업과 회사 사업의 관계를 읽은 «해석»은 "
+    "산업 문제와 회사의 해당 사업 참여가 모두 인용 근거에 있어야 한다. "
+    "국내외 적용 범위·시점을 넓히거나 근거 없는 회사 대응을 추가하지 않는다.\n"
 )
 REVIEW_JSON_GUIDE: Final[str] = (
     "\n출력 형식 — 설명 없이 아래 모양의 JSON만 출력한다:\n"
@@ -1223,6 +1224,7 @@ def _build_grouped_review_prompt(
     table: Optional[PerformanceTable],
     *,
     verbatim_by_number: Optional[Mapping[int, VerbatimNewsSource]] = None,
+    numeric_options_by_number: Optional[Mapping[int, tuple[NumericProofOption, ...]]] = None,
 ) -> str:
     """장별 후보와 그 장이 실제 인용한 원문만 한 블록에 묶는다.
 
@@ -1346,6 +1348,7 @@ def _build_grouped_review_prompt(
                 cells=item.flow_row.cells if item.flow_row is not None else None,
                 verbatim_source=(verbatim_by_number or {}).get(item.number),
             ))
+            parts.append(numeric_proof_option_hint((numeric_options_by_number or {}).get(item.number, ())))
         parts.append("===== 장별 검수 블록 끝 =====\n")
     parts.append(REVIEW_TRUSTED_TAIL)
     return with_review_prompt_cache("".join(parts), fixed_prefix_chars=fixed_prefix_chars)
@@ -1530,6 +1533,15 @@ def _packet_review_prompt(text: str) -> str:
     return text
 
 
+def _prepare_review_numeric_options(rows, frag_by_id):
+    """한 검수 요청의 번호·장·자기 조각을 함께 결속한다. 추가 호출은 없다."""
+    return prepare_numeric_proof_options({
+        number: NumericProofCandidate(number, section_id, text, tuple(
+            frag_by_id[fid] for fid in citations if fid in frag_by_id
+        )) for number, section_id, text, citations in rows
+    })
+
+
 def _ask_grouped_verdicts(
     ask: AskFn,
     items: Sequence[_GroupedReviewItem],
@@ -1597,8 +1609,13 @@ def _ask_grouped_verdicts(
         frag_by_id,
         allowed_fragment_ids_by_section,
     )
+    numeric_options_by_number = _prepare_review_numeric_options(
+        ((item.number, item.section_id, item.sentence.text, item.citations)
+         for item in items if item.sentence is not None), frag_by_id,
+    )
     prompt = _build_grouped_review_prompt(
         items, frag_by_id, table, verbatim_by_number=verbatim_by_number,
+        numeric_options_by_number=numeric_options_by_number,
     )
     owners = {item.number: item.section_id for item in items}
     evidence_ids_by_number = {
@@ -1688,6 +1705,7 @@ def _ask_grouped_verdicts(
                 _build_grouped_review_prompt(
                     missing_items, frag_by_id, table,
                     verbatim_by_number=verbatim_by_number,
+                    numeric_options_by_number=numeric_options_by_number,
                 ) + MISSING_VERDICTS_REMINDER
             )
             try:
@@ -1769,8 +1787,9 @@ def _ask_grouped_verdicts(
         raw,
         verdicts,
         candidates,
+        numeric_options_by_number=numeric_options_by_number,
         entity_scope_by_number=_entity_scope_by_number(
-            ((item.number, item.citations) for item in items if item.sentence is not None),
+            ((item.number, item.citations) for item in items),
             frag_by_id,
         ),
         diagnostics=diagnostics,
@@ -2049,6 +2068,7 @@ def _apply_grounding(
     section_moves: Optional[list[_SectionMove]] = None,
     grounding_problems: Optional[dict[int, str]] = None,
     entity_scope_by_number: Optional[Mapping[int, Sequence[EntityScopeContext]]] = None,
+    numeric_options_by_number: Optional[Mapping[int, tuple[NumericProofOption, ...]]] = None,
 ) -> dict[int, str]:
     # ★ 보고서 기준일을 그대로 넘긴다. 안 넘기면 executive_status_guard 가 날짜
     #   문턱 없이 이탈 «표지» 존재만으로 판정해, 「기준일 이후에 물러날 예정」인
@@ -2073,6 +2093,15 @@ def _apply_grounding(
     #   판정들을 건너뛴다(fail-open). 읽히는 응답은 원문 그대로다. 부르는 쪽이
     #   원문을 넘기든 구제 문자열을 넘기든 결과가 같도록 이 한 곳에서 맞춘다.
     raw = _review_binding_text(raw)
+    original_binding_raw = raw
+    raw, invalid_numeric_selections = restore_numeric_proof_selections(
+        raw, numeric_options_by_number or {}, candidates,
+        {number: context[0] for number, context in (diagnostic_contexts or {}).items()},
+    )
+    if raw != original_binding_raw:
+        logger.info("수치 선택 파생 검수 입력: 원입력지문 %s, 파생지문 %s, 결속 실패 %d개",
+                    hashlib.sha256((original_binding_raw or '').encode()).hexdigest(),
+                    hashlib.sha256((raw or '').encode()).hexdigest(), len(invalid_numeric_selections))
     grounding_details: dict[int, dict[str, object]] = {}
     constrained, problems = constrain_verdicts(
         raw, verdicts, candidates, cells_by_number=flow_cells_by_number,
@@ -2081,6 +2110,15 @@ def _apply_grounding(
         details_by_number=grounding_details,
         entity_scope_by_number=entity_scope_by_number,
     )
+    for number in invalid_numeric_selections:
+        if verdicts.get(number) not in (VERDICT_TRUE, VERDICT_UNCLEAR):
+            continue
+        constrained[number] = REVIEW_GROUNDING_REJECTED
+        problems[number] = GROUNDING_INVALID
+        grounding_details[number] = {
+            "version": GROUNDING_DETAIL_VERSION, "check_kind": "수치",
+            "stage": NUMERIC_SELECTION_STAGE,
+        }
     # ★ 결속 요구를 «제외»한 자리는 진단 목록에 남지 않는다(제외는 탈락이 아니다).
     #   그래서 개수·규칙 버전·후보지문만 로그로 남겨 «어느 표지의 요구가 빠졌는지»를
     #   되짚을 수 있게 한다. 원문·응답 본문은 넣지 않는다.
@@ -2127,6 +2165,17 @@ def _apply_grounding(
         if constrained.get(number) not in (VERDICT_TRUE, VERDICT_UNCLEAR):
             continue
         context = (diagnostic_contexts or {}).get(number)
+        if context and context[1] == DIAGNOSTIC_KIND_BODY:
+            # 지원쌍은 작성 후보일 뿐이다. 다른 지원쌍의 고객·OEM 관계를
+            # 빌린 산문은 자기 인용에 같은 관계가 있어야 공개로 진행한다.
+            problem = business_relation_scope_problem(
+                text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+                section_id=context[0],
+            )
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
         # ★ «확인» 산문은 본문이든 요약이든 자기 인용 원문에 걸린다. 여기서
         #   걸러야 본문·요약·부록·빈 장 안내가 «같은 판정»을 보게 된다.
         #
@@ -2157,8 +2206,8 @@ def _apply_grounding(
         #   총평균법·유동성 관리 상용구로 채워졌다.
         # ⚠️ culture 장은 «건드리지 않는다» — 아래 전용 경로가 그대로 맡아야
         #   기존 사유 코드(culture_accounting_policy_misplaced)가 유지된다.
-        # ⚠️ 요약·도식에는 걸지 않는다. 요약은 본문 문장을 다시 쓰는 것이라
-        #   본문에서 걸리면 충분하고, 도식 칸은 자기 계약이 따로 있다.
+        # 요약은 본문 문장에서 만든다. 5장 표의 동일 범위 검사는 검수 입구의
+        # _filter_challenge_flow_scope가 legacy와 packet 모두에 적용한다.
         if (context and context[1] == DIAGNOSTIC_KIND_BODY
                 and context[0] != "culture"):
             # ★ 2장(사업 모델) 본문에만 자기 인용 원문을 넘긴다 — 실제 수익원과
@@ -2172,6 +2221,10 @@ def _apply_grounding(
             problem = accounting_policy_problem(
                 text, policy_sources, section_id=context[0]
             )
+            if context[0] == CHALLENGE_FLOW_SECTION_ID:
+                problem = problem or challenge_business_problem(text, {
+                    key: value for key, value in sources.items() if key != TABLE_SOURCE_ID
+                })
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
@@ -2473,6 +2526,7 @@ def _build_review_prompt(
     table_source: str = "",
     *,
     verbatim_by_number: Optional[Mapping[int, VerbatimNewsSource]] = None,
+    numeric_options_by_number: Optional[Mapping[int, tuple[NumericProofOption, ...]]] = None,
 ) -> str:
     """문장과 근거를 «나란히» 놓는 대조 지시문 (writer/verify.py의 핵심 철학).
 
@@ -2551,6 +2605,7 @@ def _build_review_prompt(
             ),
             verbatim_source=(verbatim_by_number or {}).get(item.number),
         ))
+        parts.append(numeric_proof_option_hint((numeric_options_by_number or {}).get(item.number, ())))
     parts.append(REVIEW_TRUSTED_TAIL)
     return with_review_prompt_cache("".join(parts), fixed_prefix_chars=fixed_prefix_chars)
 
@@ -2721,9 +2776,14 @@ def _ask_verdicts(
         frag_by_id,
         None,
     )
+    numeric_options_by_number = _prepare_review_numeric_options(
+        ((item.number, item.section_id, item.sentence.text, item.sentence.citations)
+         for item in items), frag_by_id,
+    )
     prompt = _build_review_prompt(
         items, frag_by_id, table_evidence, table_source,
         verbatim_by_number=verbatim_by_number,
+        numeric_options_by_number=numeric_options_by_number,
     )
     # 초기 재검수 호출자 선택은 위에서 함께 설정한다.
     # 재요청은 «최초 본문 검수»일 때만 전용 호출자를 쓴다. 후속 검수(재검수
@@ -2827,6 +2887,7 @@ def _ask_verdicts(
                 _build_review_prompt(
                     missing_items, frag_by_id, table_evidence, table_source,
                     verbatim_by_number=verbatim_by_number,
+                    numeric_options_by_number=numeric_options_by_number,
                 ) + MISSING_VERDICTS_REMINDER,
                 FLAT_REVIEW_SCHEMA,
             )
@@ -2880,6 +2941,7 @@ def _ask_verdicts(
         raw,
         verdicts,
         candidates,
+        numeric_options_by_number=numeric_options_by_number,
         entity_scope_by_number=_entity_scope_by_number(
             ((item.number, item.sentence.citations) for item in items), frag_by_id,
         ),
@@ -4039,6 +4101,44 @@ def _warn_if_interpretation_heavy(
         )
 
 
+def _filter_challenge_flow_scope(
+    report: ComposedReport,
+    frag_by_id: Mapping[str, CollectedFragment],
+    diagnostics: Optional[list[dict]],
+) -> ComposedReport:
+    """문장 검수만 하는 경로에서도 5장 표의 사업 범위·원문 주어를 검사한다.
+
+    이것은 표 전체의 의미 검수 완료 표시가 아니다. 응답 칸에 재무 수단이
+    있더라도 실제 제품·고객 문제에 대응하는 행이면 보존한다.
+    """
+    sections = []
+    for section in report.sections:
+        if section.section_id != CHALLENGE_FLOW_SECTION_ID:
+            sections.append(section)
+            continue
+        kept = []
+        for row in section.flow_rows:
+            sources = {fid: frag_by_id[fid].text for fid in row.citations if fid in frag_by_id}
+            text = FLOW_CELL_JOIN.join(row.cells)
+            problem = challenge_business_problem(row.cells[0] if row.cells else "", sources, cells=row.cells)
+            if not problem:
+                problem = next((
+                    issue for fid in row.citations if fid in frag_by_id
+                    if (issue := source_actor_problem(
+                        text, frag_by_id[fid].source_context_json, sources, cells=row.cells
+                    ))
+                ), "")
+            if problem:
+                _append_grounding_diagnostic(
+                    diagnostics, section_id=section.section_id, kind=DIAGNOSTIC_KIND_FLOW,
+                    reason_code=problem, candidate_text=" ".join(row.cells), sources=sources,
+                )
+            else:
+                kept.append(row)
+        sections.append(replace(section, flow_rows=tuple(kept)))
+    return replace(report, sections=tuple(sections))
+
+
 def _fail_closed_report(
     report: ComposedReport,
     *,
@@ -4055,12 +4155,11 @@ def _fail_closed_report(
                 if section.sentences
                 else section.notice
             ),
-            # ★ legacy에서는 도식 재료를 «반드시» 함께 넘긴다. 안 넘기면
-            #   기본값 ()로 떨어져 7장 경로표가 검증 단계에서 사라진다 —
-            #   작가가 정상적으로 냈는데도 화면에 흐름도가 안 나온
-            #   진짜 원인이었다. packet 엄격 경로는 같은 bundled 검수 자체가
-            #   실패한 경우라 관계도 안전 미확인이고, 그때만 행을 비운다.
-            flow_rows=section.flow_rows if preserve_flow_rows else (),
+            # legacy의 다른 장 표는 기존 계약을 유지한다. 5장 범위 검사 자체가
+            # 실패했을 수도 있으므로 그 장의 미검사 행은 복원하지 않는다.
+            # packet은 묶음 검수가 실패하면 모든 표의 관계도 확인되지 않았다.
+            flow_rows=(section.flow_rows if preserve_flow_rows
+                       and section.section_id != CHALLENGE_FLOW_SECTION_ID else ()),
             news_decisions=section.news_decisions,
         )
         for section in report.sections
@@ -4323,6 +4422,12 @@ def verify_report(
         장 개수·순서는 입력 그대로다 (장 삭제 없음).
     """
     try:
+        # 표를 반환하는 모든 경로가 같은 범위 검사를 거친다. 아래 검수가
+        # 예외로 끝나도 원래의 재무·회계 과제 행을 복원하지 않는다.
+        report = _filter_challenge_flow_scope(
+            report, {item.fragment_id: item for item in _normalize_fragments(fragments)},
+            diagnostics,
+        )
         if (allowed_fragment_ids_by_section is None and diagnostics is None
                 and initial_ask is None and initial_retry_ask is None
                 and protocol_diagnostics is None

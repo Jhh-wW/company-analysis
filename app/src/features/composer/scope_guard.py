@@ -48,6 +48,7 @@ from src.features.composer.scope_constants import (
 from src.features.composer.direct_support_constants import SELF_REFERENCE_SUBJECTS
 # 감사인 표준 문구의 둔갑 — 검수 후보 전부가 지나는 이 진입점에서 먼저 본다.
 from src.features.composer.audit_boilerplate_guard import audit_boilerplate_problem
+from src.shared.revenue_population_scope import revenue_population_claim_problem
 
 _NAME_CHAR_RE = re.compile(r"[A-Za-z가-힣]")
 #: 지분 보유 단정 — 소속(종속기업·자회사) 단정과 달리 후보가 제외를 함께 적으면 막지 않는다.
@@ -603,6 +604,7 @@ def _context_texts(value: Mapping[str, str] | None) -> tuple[str, ...]:
 
 def document_entity_scope_problem(
     candidate_text: str, contexts: Sequence[EntityScopeContext],
+    *, cells: Sequence[str] | None = None,
 ) -> str:
     """같은 공시 문서의 등록된 제외 각주를 «제약으로만» 소비하는 진입점.
 
@@ -623,6 +625,12 @@ def document_entity_scope_problem(
     """
 
     text = unicodedata.normalize("NFKC", candidate_text)
+    from src.features.composer.source_actor_scope import source_actor_problem
+    for context in contexts:
+        for source_context in context.source_contexts:
+            problem = source_actor_problem(candidate_text, source_context, context.actor_relation_sources, cells=cells)
+            if problem:
+                return problem
     known_sources: dict[str, str] = {}
     labels: set[str] = set()
     for index, context in enumerate(contexts):
@@ -654,6 +662,9 @@ def scope_problem(candidate_text: str, sources_mapping: Mapping[str, str]) -> st
       (공유 닫힌 목록의 «장별 작성범위» 코드 — 새 코드를 만들지 않았다).
     """
     text = unicodedata.normalize("NFKC", candidate_text)
+    population_problem = revenue_population_claim_problem(text, sources_mapping)
+    if population_problem:
+        return population_problem
     audit_problem = audit_boilerplate_problem(text, sources_mapping)
     if audit_problem:
         return audit_problem

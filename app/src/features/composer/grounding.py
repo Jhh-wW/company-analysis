@@ -16,6 +16,7 @@ from src.features.composer.combined_relation_guard import (
 )
 from src.features.composer.future_plan_constants import FUTURE_KEY
 from src.features.composer.grounding_constants import REVIEW_SUPPORT_CANDIDATE_VERDICTS
+from src.features.composer.grounding_constants import BOUND_VALUE_RE, BOUND_TAIL_RE, RATIO_BASIS_RE
 from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_VERSION
 
 from collections import Counter
@@ -222,6 +223,11 @@ def _quote(entry: Mapping, sources: Mapping[str, str]) -> str | None:
         if (match.end() < len(source) and quote[-1].isdigit()
             and VALUE_CONTINUATION_RE.fullmatch(source[match.end()])):
             continue
+        # 숫자 단위 바로 뒤의 상한·하한을 잘라 등가의 실제 값처럼 증명하지 못한다.
+        if BOUND_TAIL_RE.match(source, match.end()):
+            amounts = _amount_spans(quote)
+            if amounts and amounts[-1].end == len(quote.rstrip()):
+                continue
         return quote
     return None
 
@@ -249,6 +255,8 @@ class _BoundAmount:
     text: str
     value: Decimal
     dimension: str
+    comparison_bound: str = ""
+    ratio_basis: str = ""
 
 
 def _unit_header_scale(text: str, position: int) -> Decimal | None:
@@ -414,23 +422,48 @@ def _period_at(text: str, position: int) -> tuple[int, int | None] | None:
     return year, int(quarters[-1].group(1)) if quarters else None
 
 
+def _adjacent_ratio_bases(text: str, position: int) -> tuple[str, ...]:
+    """지표나 숫자 바로 앞의 기준만 읽고 다른 내용은 건너지 않는다."""
+    return tuple(
+        _surface(match.group())
+        for match in RATIO_BASIS_RE.finditer(text, 0, position)
+        if not PAIR_SEPARATOR_RE.sub("", RATIO_BASIS_RE.sub("", text[match.end():position]))
+    )
+
+
 def _metric_value_spans(metric: str, value: str, text: str) -> tuple[_BoundAmount, ...]:
     """다년도 열거를 허용하되 중간에 새 항목이 나오면 결속을 끊는다."""
     from src.features.composer.verify import _DATE_EXPR_RE
 
+    bounded_value = BOUND_VALUE_RE.fullmatch(value.strip())
+    numeric_value = bounded_value["value"] if bounded_value else value
+    declared_bound = bounded_value["bound"] if bounded_value else ""
     results: list[_BoundAmount] = []
     for clause_match in re.finditer(r"[^;\n]+", text):
         clause = clause_match.group()
         for anchor in re.finditer(re.escape(metric), clause):
             if anchor.start() and WORD_CHARACTER_RE.fullmatch(clause[anchor.start() - 1]):
                 continue
+            # 지표 바로 앞의 '(연결기준) 부채비율'도 같은 지표의 조건이다.
+            # 사이에 다른 지표·숫자·서술이 있으면 그 기준을 빌리지 않는다.
+            prefix_bases = _adjacent_ratio_bases(clause, anchor.start())
+            if len(set(prefix_bases)) > 1:
+                continue
             for number in _amount_spans(clause):
-                if _surface(number.text) != _surface(value):
+                if _surface(number.text) != _surface(numeric_value):
+                    continue
+                tail = BOUND_TAIL_RE.match(clause, number.end)
+                actual_bound = tail[1] if tail else ""
+                if declared_bound and declared_bound != actual_bound:
                     continue
                 if number.end <= anchor.start():
                     # '37.02% 점유율'처럼 단위값 바로 뒤에 지표를 쓰는
                     # 도식·명사구도 정상이다. 다른 명사나 숫자는 건너지 않는다.
                     between = clause[number.end:anchor.start()]
+                    number_bases = (_adjacent_ratio_bases(clause, number.start)
+                                    if number.dimension == DIMENSION_RATIO else ())
+                    if len(set(number_bases)) > 1:
+                        continue
                     following = [item for item in _amount_spans(clause) if item.start >= anchor.end()]
                     own_following_value = any(not PAIR_SEPARATOR_RE.sub("", NUMERIC_BRIDGE_RE.sub(
                         "", _DATE_EXPR_RE.sub("", clause[anchor.end():item.start])
@@ -439,11 +472,17 @@ def _metric_value_spans(metric: str, value: str, text: str) -> tuple[_BoundAmoun
                         and not PAIR_SEPARATOR_RE.sub("", PARTICLE_RE.sub("", between.strip()))):
                         offset = clause_match.start()
                         results.append(_BoundAmount(number.start + offset, number.end + offset,
-                                                    number.text, number.value, number.dimension))
+                                                    number.text, number.value, number.dimension,
+                                                    comparison_bound=actual_bound,
+                                                    ratio_basis=number_bases[0] if number_bases else ""))
                     continue
                 if number.start < anchor.end():
                     continue
                 between = clause[anchor.end():number.start]
+                bases = prefix_bases + tuple(_surface(match.group()) for match in RATIO_BASIS_RE.finditer(between))
+                if len(set(bases)) > 1:
+                    continue
+                ratio_basis = bases[0] if bases else ""
                 remainder = _DATE_EXPR_RE.sub("", between)
                 remainder = QUARTER_RE.sub("", remainder)
                 for previous in reversed(_amount_spans(remainder)):
@@ -451,13 +490,16 @@ def _metric_value_spans(metric: str, value: str, text: str) -> tuple[_BoundAmoun
                 remainder = ORDINAL_RE.sub("", remainder)
                 if number.dimension == DIMENSION_RATIO:
                     remainder = RATIO_QUALIFIER_RE.sub("", remainder)
+                    remainder = RATIO_BASIS_RE.sub("", remainder)
                 remainder = NUMERIC_BRIDGE_RE.sub("", remainder)
                 remainder = PAIR_SEPARATOR_RE.sub("", remainder)
                 if remainder:
                     continue
                 offset = clause_match.start()
                 results.append(_BoundAmount(number.start + offset, number.end + offset,
-                                            number.text, number.value, number.dimension))
+                                            number.text, number.value, number.dimension,
+                                            comparison_bound=actual_bound,
+                                            ratio_basis=ratio_basis))
     return tuple(dict.fromkeys(results))
 
 
@@ -585,6 +627,13 @@ def _numeric_valid(
         value = _bound_value(entry, quote)
         if value is None:
             return fail("source_value_scope", index)
+        source_bounds = _metric_value_spans(source_metric, entry["원문값"], quote)
+        if source_bounds and not any(
+            number.comparison_bound == candidate.comparison_bound
+            and number.ratio_basis == candidate.ratio_basis
+            for number in source_bounds
+        ):
+            return fail("value_constraint_mismatch", index)
         values = _amount_values(candidate_value)
         from src.features.composer.verify import _number_matches_by_math
         # 차원은 «검수가 적어 낸 글자»가 아니라 원문에서 그 수가 무엇이었나로 본다.
@@ -1079,7 +1128,7 @@ def constrain_verdicts(
         # 같은 공시의 인용 밖 제외 각주가 부정한 현재 종속·연결 단정(제약만 소비, 등급 무관).
         # 공개 사유 코드는 기존 그대로이고, 어느 단계였는지는 세부 진단에만 남긴다(원문 없음).
         entity_scope = (entity_scope_by_number or {}).get(number)
-        entity_problem = document_entity_scope_problem(text, entity_scope) if entity_scope else ""
+        entity_problem = document_entity_scope_problem(text, entity_scope, cells=cells) if entity_scope else ""
         if entity_problem and details_by_number is not None:
             details_by_number[number] = {
                 "version": GROUNDING_DETAIL_VERSION, "check_kind": "근거",

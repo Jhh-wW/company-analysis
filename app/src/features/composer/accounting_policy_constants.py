@@ -190,7 +190,33 @@ ACCOUNTING_TREATMENT_CONTEXT_RE: Final[re.Pattern[str]] = re.compile(
 # 그대로 싣는 문장이다.
 LIQUIDITY_SUBJECT_RE: Final[re.Pattern[str]] = re.compile(r"유동성")
 LIQUIDITY_BOILERPLATE_RE: Final[re.Pattern[str]] = re.compile(
-    r"영업자금수요|예측하고관리|부채상환|자금수요를충당|유동성위험"
+    r"영업자금수요|예측하고관리|부채상환|자금수요를충당|"
+    r"유동성위험(?:을|를|의)?(?:지속적으로|정기적으로|적절히)?관리"
+)
+LIQUIDITY_ACTUAL_PRESSURE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:유동성|자금)(?:위험)?(?:이|가|의|에)?"
+    r"(?:악화|부족|고갈|급감)|"
+    r"(?:자금조달|부채상환)(?:에|이|가)?(?:차질|어려움)|"
+    r"(?:차질|부족)(?:이|가)?(?:발생|심화)|"
+    r"신용등급[^.!?。\n]{0,40}하락|"
+    r"채무[^.!?。\n]{0,40}연체|"
+    r"유동성위험[^.!?。\n]{0,40}(?:증가|확대|커졌|커지|급증)"
+)
+LIQUIDITY_BUSINESS_OFFERING_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:서비스|상품|대출|자문)(?:를|을|의)?(?:제공|운영|판매|취급)|"
+    r"(?:제공|운영|판매|취급)(?:하는|한)?(?:서비스|상품|대출|자문)|"
+    r"(?:고객|거래처|이용자|회원|차주)(?:에게|에|을위해|를위해|대상으로)"
+    r"[^.!?。\n;|]{1,80}(?:을|를)(?:제공|공급|판매|발행)"
+)
+LIQUIDITY_BUSINESS_EVENT_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:생산|수주|납품|공장|주문|판매|서비스|공급|사업)"
+    r"[^.!?。\n;|]{0,48}(?:중단|취소|지연|재개|폐쇄|축소)"
+    r"(?:했(?:다|습니다)|하였(?:다|습니다)|됐(?:다|습니다)|"
+    r"되었(?:다|습니다)|(?:하고|되어)있(?:다|습니다))"
+)
+# 숫자 사이의 소수점으로 금액 절을 분리하면 면제와 혼합 진단이 달라진다.
+ACCOUNTING_POLICY_CLAUSE_SPLIT_RE: Final[re.Pattern[str]] = re.compile(
+    "(?:[;!?。\\n]|(?<!\\d)\\.|\\.(?!\\d))+(?!['\\\"’”」』])"
 )
 
 #: 범주 이름 → (대상어, 처리 표지). 한 절이 어느 한 쌍을 «둘 다» 만족하면

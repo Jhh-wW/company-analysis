@@ -178,7 +178,7 @@ def test_document_xml_태그를_벗기고_평문으로_돌려주고_corp_code는
     assert "<" not in result.text and ">" not in result.text
     assert "회사의 개요" in result.text
     assert "당사는 주식회사다." in result.text
-    assert result.corp_code == ""  # DART document.xml에는 구조화된 corp_code가 없다(확인 못 함)
+    assert result.corp_code == ""  # 이 합성 원문에는 법인 표제 선언이 없다.
     assert result.bytes_downloaded == doc_path.stat().st_size
 
 

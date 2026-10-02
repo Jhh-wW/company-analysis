@@ -138,9 +138,10 @@ CANDIDATE_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 CANDIDATE_FINGERPRINT_VERSION = "candidate-raw-utf8-v1"
 GROUNDING_DETAIL_VERSION = "grounding-detail-v1"
 GROUNDING_DETAIL_STAGES = frozenset({
+    "numeric_selection_unbound",
     "entries_missing", "entry_type", "expression_fields", "expression_not_in_candidate",
     "quote_not_bound", "metric_mismatch", "candidate_value_missing", "candidate_value_scope",
-    "source_value_scope", "value_mismatch", "dimension_mismatch", "period_mismatch",
+    "source_value_scope", "value_constraint_mismatch", "value_mismatch", "dimension_mismatch", "period_mismatch",
     "parenthetical_scope", "numeric_coverage", "grounding_missing", "grounding_shape",
     "trend_invalid", "time_invalid", "recognition_invalid",
     # 같은 공시의 인용 밖 관계법인 회계범위 각주가 막은 현재 종속·연결 단정 —

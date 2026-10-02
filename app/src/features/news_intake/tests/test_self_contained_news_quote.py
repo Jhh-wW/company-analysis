@@ -177,6 +177,6 @@ def test_publisher_name_does_not_bind_another_company_action() -> None:
 def test_prompt_change_invalidates_old_policy_cache_namespace(monkeypatch) -> None:
     policy = NewsCollectionPolicy()
     current = policy_digest(policy)
-    assert c.COLLECTION_POLICY_VERSION == "news-grounded-v10"
-    monkeypatch.setattr(c, "COLLECTION_POLICY_VERSION", "news-grounded-v9")
+    assert c.COLLECTION_POLICY_VERSION == "news-grounded-v11"
+    monkeypatch.setattr(c, "COLLECTION_POLICY_VERSION", "news-grounded-v10")
     assert policy_digest(policy) != current

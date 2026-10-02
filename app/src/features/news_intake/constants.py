@@ -349,7 +349,7 @@ URL_VARIANT_ORDER: Final[tuple[str, ...]] = (
 MAX_URL_VARIANTS: Final[int] = 3
 
 # 새 수집 경로의 상한은 기사 수를 채우는 목표가 아니라 요청 비용의 경계다.
-COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v10"
+COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v11"
 NAME_ACRONYM_MIN_CHARS: Final[int] = 2
 NAME_ACRONYM_MAX_CHARS: Final[int] = 8
 NAME_RETAINED_SUFFIX_MIN_CHARS: Final[int] = 2
@@ -605,8 +605,11 @@ GROUNDED_SECTION_GUIDE: Final[tuple[tuple[str, str], ...]] = (
                      "change_context(여러 해 누적이면 cumulative_change), 완료된 투자·출시·"
                      "조직 개편은 completed_execution, 변화의 한계는 change_limit. "
                      "공식 실적표 칸은 뉴스로 채우지 않습니다."),
-    ("current_challenges", "지금 겪는 문제(issue)와 회사가 밝힌 대응(response). "
-                           "회사·대표에게 귀속된 발언만."),
+    ("current_challenges", "핵심 제품·서비스·사업이 지금 겪는 문제(issue)와 회사가 "
+                           "밝힌 대응(response). 회사·대표에게 귀속된 발언만. "
+                           "재무지표 증감이나 일반적인 재무 위험 관리 규정으로 "
+                           "채우지 않고 산업 일반의 문제를 회사 직접 사실로 "
+                           "승격하지 않음."),
     ("future_strategy", "회사가 밝힌 미실현 계획(stated_plan)과 진행 상태(plan_status). "
                         "완료 실적과 섞거나 본문에 없는 계획을 추측하지 않습니다."),
     ("operations_partners", "가치사슬·운영 역할·공급·유통 관계·제휴."),

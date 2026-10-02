@@ -83,7 +83,7 @@ def test_diagram_cap_reaches_real_metered_boundary_without_changing_budget_or_mo
     assert engine.MODEL == "claude-haiku-4-5"
     assert engine.current_stage == "unspecified" and not engine.prompt_cache_enabled
     assert MAX_AI_CALLS_PER_REQUEST == 20
-    assert real.V2_WRITER_MAX_TOKENS == 4000 and real.V2_REVIEWER_MAX_TOKENS == 16000
+    assert real.V2_WRITER_MAX_TOKENS == 6000 and real.V2_REVIEWER_MAX_TOKENS == 16000
     if should_send:
         request, = messages.requests
         assert request["model"] == messages.counts[0]["model"] == "claude-haiku-4-5"
@@ -211,7 +211,7 @@ def test_body_cap_reaches_reservation_and_request_with_actual_only_settlement(
                                       if prior_state == "none" else [])
     assert engine.MODEL == model and engine.current_stage == "unspecified"
     assert not engine.prompt_cache_enabled
-    assert real.V2_WRITER_MAX_TOKENS == 4000 and real.V2_DIAGRAM_MAX_TOKENS == 4096
+    assert real.V2_WRITER_MAX_TOKENS == 6000 and real.V2_DIAGRAM_MAX_TOKENS == 4096
     assert MAX_AI_CALLS_PER_REQUEST == 20
 
 
@@ -222,6 +222,48 @@ def body_review_steps():
         yield collector
     finally:
         collector.finish()
+
+
+@pytest.mark.parametrize("reservation_shortfall", [0, 0.01])
+def test_writer_cap_reserves_full_output_before_send_and_settles_only_usage(
+    reservation_shortfall,
+):
+    model, input_tokens, output_tokens = "claude-haiku-4-5", 1234, 4200
+    messages = RecordingMessages(
+        "end_turn", input_tokens=input_tokens, output_tokens=output_tokens,
+    )
+    engine = real._MeteredEngine(SimpleNamespace(MODEL=model))
+    client = real._metered_client(engine, SimpleNamespace(messages=messages))
+    reservations, observations = [], []
+    callbacks = ProviderAttemptCallbacks(
+        lambda provider, stage, reserved: reservations.append((provider, stage, reserved)) or 1,
+        lambda _: None, lambda _: None,
+        lambda _, observation: observations.append(observation),
+    )
+    expected_reserve = usage_cost_krw(
+        model, input_tokens + provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS, 6000,
+    )
+    ask = real._v2_ask_via_provider(
+        engine, client, stage="v2_compose", max_tokens=real.V2_WRITER_MAX_TOKENS,
+    )
+    with provider_budget.activate(expected_reserve - reservation_shortfall) as budget:
+        with attempt_context.activate(callbacks):
+            if reservation_shortfall:
+                with pytest.raises(Exception) as error:
+                    ask("장별 작성 예약 경계")
+                assert isinstance(error.value.cause, provider_budget.ProviderBudgetExceeded)
+                assert error.value.request_budget and error.value.degradable
+                assert messages.requests == reservations == observations == engine.usages == []
+                assert budget.accounted_krw == 0
+            else:
+                assert ask("장별 작성 예약 경계") == '{"판정": []}'
+                assert messages.requests[0]["max_tokens"] == 6000
+                assert reservations == [("anthropic", "v2_compose", expected_reserve)]
+                actual = usage_cost_krw(model, input_tokens, output_tokens)
+                assert budget.accounted_krw == observations[0].known_cost_krw == actual
+                assert actual < expected_reserve
+                assert engine.usages[0]["out"] == output_tokens
+    assert len(messages.counts) == 1
 
 
 @pytest.mark.parametrize("cap,should_send,expected_reserve", [

@@ -52,9 +52,8 @@ class RawFilingRow:
 
     ★ item 3 — ``corp_code``·``corp_name``은
     fetcher가 방어적으로(``.get``) 읽어 실어 주면 요청 회사와 대조하는 데
-    쓴다. 필드가 실제로 list.json 응답에 오는지는 실측하지 못했다(확인 못
-    함 — live smoke 필요) — 그래서 기본값은 빈 문자열이고, 비어 있으면
-    지금처럼 대조 없이 통과시킨다(«불일치»가 아니라 «확인 못 함»).
+    쓴다. 실제 응답 행의 코드를 보존하며 필드가 없으면 요청 코드로 채우지
+    않는다. 비어 있으면 «확인 못 함» 상태로 남기고, 다른 회사면 제외한다.
     """
 
     rcept_no: str
@@ -106,14 +105,17 @@ class DocumentFetchResult:
     elapsed_ms: int = 0
     bytes_downloaded: int = 0
     #: fetcher가 실제로 확인한 문서 소유 회사 corp_code(P1-4). fetcher가 이
-    #: 신원을 돌려주지 못하면(예: DART document.xml 응답 자체에는 구조화된
-    #: corp_code가 없다) 빈 문자열로 둔다 — 「대조했다」고 거짓 주장하지
+    #: 신원을 돌려주지 못하면(예: XML 표제의 법인 선언이 없다) 빈 문자열로
+    #: 둔다 — 「대조했다」고 거짓 주장하지
     #: 않기 위함이다. 값이 있고 요청 corp_code와 다르면 collect.py가 그
     #: 문서를 버린다.
     corp_code: str = ""
     #: raw document.xml 안의 href/표시 문자열에서 찾은 URL 후보. 회사 공식
     #: 여부는 여기서 판단하지 않고 app의 법인명+등록번호 검증기가 다시 확인한다.
     official_url_candidates: tuple[DiscoveredDocumentUrl, ...] = ()
+    document_actor: str = ""
+    source_contexts: tuple[str, ...] = ()
+    source_context_complete: bool = True
 
     def __post_init__(self) -> None:
         _validate_fetch_result_common(
@@ -121,8 +123,10 @@ class DocumentFetchResult:
             elapsed_ms=self.elapsed_ms,
             bytes_downloaded=self.bytes_downloaded,
         )
-        if type(self.text) is not str or type(self.corp_code) is not str:
+        if type(self.text) is not str or type(self.corp_code) is not str or type(self.document_actor) is not str:
             raise TypeError("DART 문서 fetch 결과의 text·corp_code는 문자열이어야 합니다")
+        if type(self.source_context_complete) is not bool or type(self.source_contexts) is not tuple or any(type(raw) is not str for raw in self.source_contexts):
+            raise TypeError("회사 주어 문맥 완료 상태·자료 형식이 다릅니다")
         if type(self.official_url_candidates) is not tuple or any(
             type(candidate) is not DiscoveredDocumentUrl
             for candidate in self.official_url_candidates
@@ -131,7 +135,7 @@ class DocumentFetchResult:
                 "DART 문서 fetch 결과 URL 후보는 DiscoveredDocumentUrl tuple이어야 합니다"
             )
         if self.state != c.ATTEMPT_STATE_OK and (
-            self.text or self.corp_code or self.official_url_candidates
+            self.text or self.corp_code or self.official_url_candidates or self.document_actor or self.source_contexts
         ):
             raise ValueError(
                 "실패·부재 DART 문서 fetch 결과에는 문서 payload를 실을 수 없습니다"
@@ -158,6 +162,8 @@ class SelectedFiling:
     report_nm: str
     rcept_dt: str
     lineage_original_rcept_no: str = ""
+    #: 실제로 선택한 목록 응답 행의 회사 코드. 요청 코드로 채우지 않는다.
+    filing_list_corp_code: str = ""
 
 
 @dataclass(frozen=True)
@@ -428,6 +434,7 @@ def select_related_filings(
             report_nm=chosen.report_nm,
             rcept_dt=chosen.rcept_dt,
             lineage_original_rcept_no=lineage_original,
+            filing_list_corp_code=chosen.corp_code,
         ))
 
     def inspect_kind(source_kind: str) -> list[RawFilingRow]:
@@ -478,6 +485,7 @@ def select_related_filings(
                 report_nm=previous_row.report_nm,
                 rcept_dt=previous_row.rcept_dt,
                 lineage_original_rcept_no=lineage_original,
+                filing_list_corp_code=previous_row.corp_code,
             ))
 
     for source_kind in c.SUPPLEMENT_LOOKUP_ORDER:

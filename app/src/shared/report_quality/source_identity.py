@@ -89,21 +89,11 @@ def canonical_url(value: str) -> str:
 def document_identity(source: DocumentIdentityInput) -> str:
     """같은 문서의 여러 조각이 하나로 세어지는 안정 신원."""
 
-    formal_source_kind = str(
-        getattr(source, "formal_source_kind", "") or ""
-    ).strip()
-    if formal_source_kind:
-        formal_identity = collected_document_identity(
-            source_kind=formal_source_kind,
-            document_id=source.document_id,
-            url=source.url,
-        )
-        if formal_identity:
-            return formal_identity
     return document_identity_from_parts(
         document_id=source.document_id,
         host=source.host,
         url=source.url,
+        formal_source_kind=str(getattr(source, "formal_source_kind", "") or ""),
     )
 
 
@@ -255,9 +245,20 @@ def document_identity_from_parts(
     document_id: str = "",
     host: str = "",
     url: str = "",
+    formal_source_kind: str = "",
 ) -> str:
     """기존 자료형을 import하지 않고 같은 독립 문서 신원을 만든다."""
 
+    # 객체와 저장된 JSON 모두 수집 종류를 같은 규칙에 결속한다.
+    # 종류가 없는 기존 출처의 문서 ID·host·URL 우선순위는 그대로 유지한다.
+    if str(formal_source_kind or "").strip():
+        formal_identity = collected_document_identity(
+            source_kind=formal_source_kind,
+            document_id=document_id,
+            url=url,
+        )
+        if formal_identity:
+            return formal_identity
     normalized_document_id = _normalized(document_id)
     normalized_host = _normalized(host).rstrip(".")
     normalized_url = canonical_url(url)

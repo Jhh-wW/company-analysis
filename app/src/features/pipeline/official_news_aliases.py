@@ -94,11 +94,13 @@ def _document_matches_profile(document: CollectedEvidenceDocument, profile: Mapp
         return False
     if document.source_kind not in OFFICIAL_WEB_SOURCE_KINDS:
         receipt = document.document_id.rpartition(":")[2]
-        # fetcher 메타 없는 unverifiable 기록을 검증된 법인 약칭으로 승격하지 않는다.
-        return document.identity_binding == (
+        # 문서 소유 메타 또는 실제 공식 목록 행의 법인·접수번호 결속만 받는다.
+        # 메타 없는 unverifiable 기록을 검증된 법인 약칭으로 승격하지 않는다.
+        return document.identity_binding in {
             f"corp_code={profile['corp_code']};rcept_no={receipt};"
-            f"source_kind={document.source_kind};identity_check={c.DART_VERIFIED_IDENTITY_CHECK}"
-        )
+            f"source_kind={document.source_kind};identity_check={check}"
+            for check in (c.DART_VERIFIED_IDENTITY_CHECK, c.DART_FILING_LIST_IDENTITY_CHECK)
+        }
     attestation = parse_dart_profile_domain_attestation(document.domain_attestation_evidence)
     if document.domain_attestation_evidence and (
         attestation is None

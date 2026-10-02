@@ -17,6 +17,7 @@ from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
 from src.features.composer.future_plan_constants import FUTURE_SECTION_FORWARD_RE
 from src.features.composer.port import ComposedSentence
 from src.features.composer.prose_own_source import own_source_support_terms
+from src.features.composer.source_actor_scope import source_actor_subject_scope
 from src.features.pipeline.port import FactRecord
 from src.features.provenance.sources import Source, SourceKind, exact_evidence_text_hash
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
@@ -29,6 +30,7 @@ from src.shared.report_quality.constants import (
 )
 from src.shared.report_quality.numeric_detection import has_public_numeric_token
 from src.shared.report_quality.source_identity import document_identity
+from src.shared.report_evidence.source_context import source_context_fingerprint
 
 
 PROSE_FACT_BINDING_VERSION: Final[str] = "verified-prose-binding-v1"
@@ -47,6 +49,7 @@ class ProseEvidence:
     fragment_id: str
     source: Source
     exact_text: str
+    source_context_json: str = ""
 
 
 @dataclass(frozen=True)
@@ -133,6 +136,14 @@ def evaluate_verified_prose_fact(
         if failed:
             return ProseFactBuildResult(None, reason)
 
+    subject_scope = source_actor_subject_scope(
+        claim, tuple(item.source_context_json for item in evidence if item.source_context_json),
+        company_name=_normalized_text(company_name),
+        sources={item.fragment_id: item.exact_text for item in evidence},
+    )
+    if not subject_scope:
+        return ProseFactBuildResult(None, "prose_source_actor_scope_unbound")
+
     # FULL에서 확인 등급 산문에 숫자 토큰이 있으면 공식 출처 조각의 원문을 함께 싣는다.
     # 싣는 조건은 안전 판정이 수치 결속을 요구하는 조건(공개 숫자 감지)과 같은 술어다.
     numeric_confirmed_claim = (
@@ -166,6 +177,8 @@ def evaluate_verified_prose_fact(
                 "exact_sha256": evidence_hash,
             }
         )
+        if item.source_context_json:
+            manifest[-1]["source_context_sha256"] = source_context_fingerprint(item.source_context_json)
         if source.kind is SourceKind.NEWS:
             # 보도 수치는 계산값이 아니다. 최종 품질 검사가 날짜·출처와 함께
             # 실제 숫자·단위를 재대조할 정확 원문을 사실 결속 안에 남긴다.
@@ -210,7 +223,7 @@ def evaluate_verified_prose_fact(
             ],
         ),
         legal_entity=_normalized_text(company_name),
-        subject_scope=_normalized_text(company_name),
+        subject_scope=subject_scope,
         relationship_or_action=claim_slot.split(":", 1)[-1],
         claim=claim,
         claim_type=(

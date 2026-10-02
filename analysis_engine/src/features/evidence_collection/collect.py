@@ -12,6 +12,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import date
+from dataclasses import replace
 
 from core.dart_client import DartAuthenticationError, DartLimitReached
 from features.evidence_collection import classify, constants as c, filing_select, relevance, segment
@@ -20,6 +21,9 @@ from features.evidence_collection.fetch_failure import (
 )
 from features.evidence_collection.filing_select import DartFetcher, DocumentFetchResult, SelectedFiling
 from features.evidence_collection.retention import CandidateRetention
+from features.evidence_collection.source_context import context_for_candidate, heading_source_scopes, different_document_actor, validate_source_context, prepare_table_contexts
+from features.evidence_collection.source_context import SourceContextBudgetExceeded
+from features.evidence_collection.source_context_constants import CONTEXT_BUDGET_REASON
 from features.evidence_collection.scan_contract import DocumentScan
 from features.evidence_collection.models import (
     CollectedDocument,
@@ -147,12 +151,16 @@ def _deadline_attempt(company_id: str, filing: SelectedFiling) -> CollectionAtte
 def _identity_binding(company_id: str, filing: SelectedFiling, fetch_result: DocumentFetchResult) -> str:
     """요청 corp_code와 fetcher 메타를 정직하게 대조한 결과까지 문자열에 남긴다(P1-4).
 
-    fetcher가 corp_code를 돌려주지 못하면(메타 없음) 「검증했다」고 거짓으로
-    주장하지 않고 unverifiable로 남긴다 — 실제 mismatch는 이 함수 호출 전에
-    이미 걸러졌으므로 여기 도달했다면 일치하거나 확인 불가한 경우뿐이다.
+    문서 메타와 실제 목록 응답 행의 회사 코드 검증을 구분한다. 문서 메타가
+    없더라도 선택한 접수번호의 목록 행이 같은 회사임을 증명하면 별도 상태를
+    남긴다. 둘 다 없으면 unverifiable이며 요청 코드를 증거로 대신하지 않는다.
     """
-    verified = bool(fetch_result.corp_code)
-    check = c.IDENTITY_CHECK_VERIFIED if verified else c.IDENTITY_CHECK_UNVERIFIED
+    if fetch_result.corp_code:
+        check = c.IDENTITY_CHECK_VERIFIED
+    elif filing.filing_list_corp_code and filing.filing_list_corp_code == company_id:
+        check = c.IDENTITY_CHECK_FILING_LIST_VERIFIED
+    else:
+        check = c.IDENTITY_CHECK_UNVERIFIED
     return (
         f"corp_code={company_id};rcept_no={filing.rcept_no};source_kind={filing.source_kind};"
         f"identity_check={check}"
@@ -224,6 +232,9 @@ def collect_dart_evidence(
             continue
 
         fetch_result = _safe_fetch_document(fetcher, filing.rcept_no)
+        if not fetch_result.source_context_complete:
+            attempts.append(_document_attempt(company_id, filing, c.ATTEMPT_STATE_TRUNCATED, CONTEXT_BUDGET_REASON, fetch_result))
+            continue
 
         if fetch_result.state == c.ATTEMPT_STATE_MISSING:
             # 확인된 부재 — 전송 장애(FAILED)와 분리해서 남긴다.
@@ -321,16 +332,32 @@ def collect_dart_evidence(
         # 커버리지 주장은 아래·위 _document_attempt가 계속 필수 칸만 쓴다.
         allowed_slot_ids = frozenset(c.SOURCE_KIND_CANDIDATE_SLOT_SCOPE[filing.source_kind])
         retention = CandidateRetention(allowed_slot_ids)
+        try:
+            source_scopes = heading_source_scopes(fetch_result.text, document_actor=fetch_result.document_actor)
+        except SourceContextBudgetExceeded:
+            attempts.append(_document_attempt(company_id, filing, c.ATTEMPT_STATE_TRUNCATED, CONTEXT_BUDGET_REASON, fetch_result))
+            continue
+        table_scopes = prepare_table_contexts(fetch_result.source_contexts, document_text=fetch_result.text)
         for candidate_index, candidate in enumerate(segment.iter_document_candidates(
             fetch_result.text, progress=progress, deadline_at=deadline_at,
             short_filter=short_observation_filter,
         )):
+            context_json = context_for_candidate(
+                text=candidate.text, start=candidate.start, end=candidate.end,
+                table_contexts=table_scopes, scopes=source_scopes,
+            )
+            validate_source_context(context_json, document_text=fetch_result.text)
+            candidate = replace(candidate, source_context_json=context_json)
             if candidate.is_short:
                 retention.offer_unclassified(candidate_index, candidate)
                 continue
             slot_scores, has_any_direct_signal = relevance.score_fragment_slots_with_signal(
                 candidate.text, candidate.section_heading, allowed_slot_ids=allowed_slot_ids,
             )
+            # 다른 법인의 사업 소개를 대상 회사의 정체성 준비 칸으로 세지 않는다.
+            # 해당 원문과 다른 장의 그룹·관계 근거는 그대로 남는다.
+            if different_document_actor(context_json):
+                slot_scores = tuple(score for score in slot_scores if score.section_id != "identity")
             if slot_scores:
                 retention.offer_scored(candidate_index, candidate, slot_scores)
             elif not has_any_direct_signal:
@@ -399,6 +426,7 @@ def collect_dart_evidence(
                             candidate.text.encode("utf-8")
                         ).hexdigest(),
                         text=candidate.text,
+                        source_context_json=candidate.source_context_json,
                         section_id="",
                         slot_id="",
                         score_millis=0,
@@ -490,6 +518,7 @@ def collect_dart_evidence(
                         location=f"{candidate.start}-{candidate.end}",
                         text_sha256=hashlib.sha256(candidate.text.encode("utf-8")).hexdigest(),
                         text=candidate.text,
+                        source_context_json=candidate.source_context_json,
                         section_id=primary_score.section_id,
                         slot_id=primary_score.slot_id,
                         score_millis=primary_score.score_millis,

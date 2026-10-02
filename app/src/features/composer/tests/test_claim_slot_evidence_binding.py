@@ -191,7 +191,8 @@ def test_과제만지원하는조각으로_가짜대응표를_만들수없다() 
     )
 
     assert report.sections[0].flow_rows == ()
-    assert "회사가 밝힌 대응: current_challenges:response" in prompt
+    # 신규 5장 표는 대응의 완료·진행 상태를 함께 표시한다. 지원 슬롯은 같다.
+    assert "회사가 밝힌 대응·상태: current_challenges:response" in prompt
 
 
 def test_과제와대응근거가_모두있으면_대응표가_남는다() -> None:

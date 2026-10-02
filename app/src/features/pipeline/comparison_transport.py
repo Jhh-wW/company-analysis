@@ -327,6 +327,10 @@ def build_typed_comparison_candidate_inputs(
     if result.company_id != corp_code:
         raise ValueError("typed 비교 후보 묶음의 회사 식별자가 다릅니다")
     documents = _document_registry(result)
+    expected_contexts: dict[tuple[str, str], set[str]] = {}
+    for candidate in result.candidates:
+        for fragment in candidate.fragments:
+            expected_contexts.setdefault((fragment.document_id, fragment.text_sha256), set()).add(fragment.source_context_json)
     copied = {int(number): dict(raw) for number, raw in fragments.items()}
 
     sources: list[Source] = []
@@ -358,6 +362,13 @@ def build_typed_comparison_candidate_inputs(
             url=source_url,
         )
         raw_text = str(raw.get("원문") or "")
+        raw_digest = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+        context_values = expected_contexts.get((document_id, raw_digest), set())
+        raw_context = raw.get("source_context_json", "")
+        if type(raw_context) is not str:
+            raise ValueError("typed 비교 후보의 회사 주어 문맥은 문자열이어야 합니다")
+        if (context_values and context_values != {raw_context}) or (raw_context and not context_values):
+            raise ValueError("typed 비교 후보가 회사 주어 문맥을 삭제하거나 바꿨습니다")
         if (
             str(raw.get(RAW_EVIDENCE_COMPANY_ID_KEY) or "").strip() != corp_code
             or document.company_id != corp_code
@@ -464,6 +475,7 @@ def build_typed_comparison_candidate_inputs(
                 evidence_text=item.evidence_text,
                 document_identity=document_identity,
                 document_content_sha256=item.document_content_sha256,
+                source_context_json=item.source_context_json,
             )
         )
         existing_candidate_keys.add((document_identity, exact_hash))

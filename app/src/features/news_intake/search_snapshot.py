@@ -16,7 +16,9 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from src.features.news_intake import constants as c
+from src.features.news_intake import industry_constants as ic
 from src.features.news_intake.identity_names import company_query_names, mentions_target
+from src.features.news_intake.observation import NewsObserver, observe_news
 from src.features.news_intake.models import (
     NewsCandidate, NewsCollectionPolicy, NewsCompanyContext, NewsQueryAttempt,
     NewsSearchSnapshot,
@@ -30,7 +32,10 @@ def stable_digest(value: object) -> str:
 
 
 def company_digest(company: NewsCompanyContext) -> str:
-    return stable_digest(asdict(company))
+    value = asdict(company)
+    if not company.business_anchors:
+        value.pop("business_anchors", None)
+    return stable_digest(value)
 
 
 def policy_digest(policy: NewsCollectionPolicy) -> str:
@@ -95,7 +100,24 @@ def search_plan(company: NewsCompanyContext, as_of: dt.date) -> tuple[tuple[str,
     # 실제 기간은 모든 응답의 발행일로 다시 검사한다.
     for years in range(1, len(c.WINDOW_MONTHS) + 1):
         plan.append((f"{primary} {as_of.year - years}", "sim", "archive", archive_months))
-    return tuple(dict.fromkeys(plan))
+    plan = list(dict.fromkeys(plan))
+    if company.business_anchors:
+        original_length = len(plan)
+        industry_queries = []
+        query_count = min(ic.INDUSTRY_QUERY_COUNT, original_length - ic.INDUSTRY_COMPANY_QUERY_COUNT)
+        for index in range(query_count):
+            region_count = len(ic.INDUSTRY_QUERY_REGIONS)
+            group = index // region_count
+            anchor = company.business_anchors[group % len(company.business_anchors)]
+            region, topic = ic.INDUSTRY_QUERY_REGIONS[index % region_count]
+            theme = ic.INDUSTRY_QUERY_THEMES[(group // len(company.business_anchors)) % len(ic.INDUSTRY_QUERY_THEMES)]
+            industry_queries.append((f"{anchor.business_item} {region} {theme}", "sim",
+                                     f"industry_{topic}:{anchor.anchor_id}", recent_months))
+        # 회사 검색 두 개를 유지하고 기존 뒤쪽 탐색을 대체한다. 총 호출은 늘리지 않는다.
+        industry_queries = list(dict.fromkeys(industry_queries))
+        plan = plan[:ic.INDUSTRY_COMPANY_QUERY_COUNT] + industry_queries + plan[ic.INDUSTRY_COMPANY_QUERY_COUNT:]
+        plan = plan[:original_length]
+    return tuple(plan)
 
 
 def _value(item: object, field: str) -> str:
@@ -167,7 +189,33 @@ def _candidate(metadata: dict[str, str], *, company: NewsCompanyContext,
     )
 
 
-def diverse_candidates(candidates: list[NewsCandidate], limit: int) -> tuple[NewsCandidate, ...]:
+def _industry_candidates(candidates: list[NewsCandidate], *,
+                         company: NewsCompanyContext | None = None) -> list[NewsCandidate]:
+    """문제 신호가 있는 산업 검색 후보에 본문 조사 기회를 먼저 준다.
+
+    제목·요약 신호가 없어도 후보는 보존한다. 회사 관련성·산업 적용 관계·지역은
+    기존 본문 검증에서 판정하며 검색 주제나 이 순위로 승인하지 않는다.
+    """
+    industry = [item for item in candidates if any(
+        topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) for topic in item.topics)]
+    anchors = {anchor.anchor_id: anchor.business_item for anchor in company.business_anchors} if company else {}
+
+    def problem_opportunity(item: NewsCandidate) -> bool:
+        metadata = item.title + " " + item.description
+        linked = [anchors.get(topic.split(":", 1)[1], "") for topic in item.topics
+                  if topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) and ":" in topic]
+        return bool(any(business_item and business_item.casefold() in metadata.casefold()
+                        for business_item in linked)
+                    and ic.INDUSTRY_SEARCH_PROBLEM_RE.search(metadata))
+
+    return sorted(industry, key=lambda item: (
+        problem_opportunity(item),
+        item.published_on, item.source_url,
+    ), reverse=True)
+
+
+def diverse_candidates(candidates: list[NewsCandidate], limit: int, *,
+                       company: NewsCompanyContext | None = None) -> tuple[NewsCandidate, ...]:
     """같은 기간 안에서 이름 관측을 우선하고 각 순위의 주제를 번갈아 읽는다."""
 
     ordered = sorted(candidates, key=lambda item: (item.published_on, item.source_url), reverse=True)
@@ -184,7 +232,12 @@ def diverse_candidates(candidates: list[NewsCandidate], limit: int) -> tuple[New
                     del groups[topic]
                 if len(selected) >= limit:
                     break
-    return tuple(selected)
+    industry = _industry_candidates(ordered, company=company)
+    reserved = min(len(industry), limit // ic.INDUSTRY_BODY_DIVISOR)
+    if reserved:
+        first = industry[:reserved]
+        selected = first + [item for item in selected if item.id not in {candidate.id for candidate in first}]
+    return tuple(selected[:limit])
 
 
 def metadata_probe_budget(*, total_budget: int, attempted: int,
@@ -201,13 +254,14 @@ def metadata_probe_budget(*, total_budget: int, attempted: int,
 
 def body_ranked_candidates(candidates: list[NewsCandidate], *, attempt_budget: int,
                            probe_budget: int,
-                           replacement: bool = False) -> tuple[NewsCandidate, ...]:
+                           replacement: bool = False,
+                           company: NewsCompanyContext | None = None) -> tuple[NewsCandidate, ...]:
     """기본 본문 탐색에서 메타 이름 비일치 후보를 제한적으로 분산한다.
 
     검색 예비집합과 접근 거절 보충 순위는 바꾸지 않는다. 비일치 후보도 기존
     신뢰 출처·기간·본문 법인 검증을 그대로 거쳐야만 조각이 된다.
     """
-    ranked = diverse_candidates(candidates, len(candidates))
+    ranked = diverse_candidates(candidates, len(candidates), company=company)
     budget = min(max(attempt_budget, 0), len(ranked))
     if replacement or budget == 0:
         return ranked
@@ -226,6 +280,11 @@ def body_ranked_candidates(candidates: list[NewsCandidate], *, attempt_budget: i
         selected.append((preferred if preferred else fallback).popleft())
     selected.extend(matched)
     selected.extend(unmatched)
+    industry = _industry_candidates(list(ranked), company=company)
+    reserved = min(len(industry), budget // ic.INDUSTRY_BODY_DIVISOR)
+    if reserved:
+        first = industry[:reserved]
+        selected = first + [item for item in selected if item.id not in {candidate.id for candidate in first}]
     return tuple(selected)
 
 
@@ -303,13 +362,16 @@ def _transport_observation(result: object, *, supported: bool, remaining: int) -
 
 
 def collect_search_snapshot(*, search_news: Callable[..., Any], company: NewsCompanyContext,
-                            as_of: dt.date, policy: NewsCollectionPolicy | None = None) -> NewsSearchSnapshot:
+                            as_of: dt.date, policy: NewsCollectionPolicy | None = None,
+                            observer: NewsObserver | None = None) -> NewsSearchSnapshot:
     policy = policy or NewsCollectionPolicy()
     attempts: list[NewsQueryAttempt] = []
     excluded: Counter[str] = Counter()
     unverified_publishers: Counter[str] = Counter()
     reasons: list[str] = []
     by_url: dict[str, NewsCandidate] = {}
+    observed_queries: list[dict[str, object]] = []
+    observed_query_failures = 0
     deadline = time.monotonic() + policy.max_search_seconds
     plan = search_plan(company, as_of)
     budget_supported = _supports_transport_budget(search_news)
@@ -354,6 +416,17 @@ def collect_search_snapshot(*, search_news: Callable[..., Any], company: NewsCom
             **observation,
         )
         attempts.append(attempt)
+        if observer is not None:
+            try:
+                observed_queries.append({
+                    "attempt": asdict(attempt),
+                    # 검색 제공자가 해석한 허용 필드만 보관한다. HTTP 원응답이 아니다.
+                    "parsed_rows": [{field: _value(item, field) for field in
+                                     ("title", "description", "originallink", "link", "pubDate")}
+                                    for item in items],
+                })
+            except Exception:
+                observed_query_failures += 1
         if state != "success":
             reasons.append(reason)
             # 인증·미설정·제공자 장애는 쿼리를 바꿔 반복하지 않는다.
@@ -381,7 +454,7 @@ def collect_search_snapshot(*, search_news: Callable[..., Any], company: NewsCom
     # 과거 예비후보가 최신 메타데이터 양에 밀려 통째로 사라지지 않게 기간별로 배분한다.
     buckets = {months: [item for item in by_url.values() if candidate_window(item, as_of) == months]
                for months in c.WINDOW_MONTHS}
-    ordered = [list(diverse_candidates(buckets[months], policy.max_candidates)) for months in c.WINDOW_MONTHS]
+    ordered = [list(diverse_candidates(buckets[months], policy.max_candidates, company=company)) for months in c.WINDOW_MONTHS]
     candidates: list[NewsCandidate] = []
     while any(ordered) and len(candidates) < policy.max_candidates:
         for bucket in ordered:
@@ -404,4 +477,21 @@ def collect_search_snapshot(*, search_news: Callable[..., Any], company: NewsCom
         exclusion_counts={key: count for key, count in excluded.items() if count},
         unverified_publishers=dict(unverified_publishers),
     )
-    return replace(snapshot, digest=snapshot_digest(snapshot))
+    snapshot = replace(snapshot, digest=snapshot_digest(snapshot))
+    if observer is not None:
+        observe_news(observer, "search_snapshot", lambda: {
+            "queries": observed_queries, "query_capture_failures": observed_query_failures,
+            "snapshot": {
+                "digest": snapshot.digest, "company_digest": snapshot.company_digest,
+                "policy_digest": snapshot.policy_digest, "as_of": snapshot.as_of,
+                "window_months": snapshot.window_months,
+                "status": snapshot.status, "reason_codes": snapshot.reason_codes,
+                "cache_eligible": snapshot.cache_eligible,
+                "candidates": [asdict(item) for item in snapshot.candidates],
+                "query_attempts": [asdict(item) for item in snapshot.query_attempts],
+                "exclusion_counts": dict(snapshot.exclusion_counts),
+                "unverified_publishers": dict(snapshot.unverified_publishers),
+            },
+            "business_anchors": [asdict(anchor) for anchor in company.business_anchors],
+        })
+    return snapshot

@@ -37,6 +37,10 @@ from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Callable, Final, Iterable, Mapping, Optional
 
+from src.shared.business_challenge_context import (
+    BusinessActivityAnchor,
+    IndustryProblemEvidence,
+)
 from src.core import (
     news_intake_switch,
     news_research_adapter,
@@ -219,6 +223,7 @@ from src.shared import runtime_failure_constants as failure_constants
 from src.shared import runtime_failure_diagnostic as runtime_failure
 from src.shared.stage_elapsed_constants import STAGE_ELAPSED_MS_KEY, STAGE_ELAPSED_STEP
 from src.features.pipeline.provider_error_diagnostics import safe_provider_error_metadata
+from src.features.pipeline.v2_writer_constants import V2_WRITER_MAX_TOKENS
 from src.features.pipeline.v2_response_constants import (
     V2_RESPONSE_STEP,
     V2_RESPONSE_UNKNOWN,
@@ -677,7 +682,6 @@ def _generation_cache_namespace(
 #: ⚠️ 다만 호출 전 예약액은 «상한»으로 계산되므로(provider_budget.reserve_call)
 #:   이 값을 올리면 그 호출의 예약액이 출력 token 당 단가만큼 확실히 커진다.
 #:   재요청 여유를 만드는 값이 «아니다» — 재요청 예약도 같이 커진다.
-V2_WRITER_MAX_TOKENS: Final[int] = 4000
 V2_REVIEWER_MAX_TOKENS: Final[int] = 16000
 
 #: 전체 본문 판정이 16,000토큰 제한으로 잘리는 경우를 위한 전용 상한.
@@ -2932,6 +2936,9 @@ def _bind_revenue_table_evidence_fragments(
 
         fragment_number = max(merged, default=0) + 1
         caption = str(raw_table.get("caption") or "").strip()
+        from src.shared.revenue_population_scope import revenue_population_caption, revenue_population_header_from_rows
+        caption = revenue_population_caption(caption, excerpt,
+            header_text=revenue_population_header_from_rows(evidence_rows))
         merged[fragment_number] = {
             "종류": LEGACY_KIND_REVENUE_AND_ORDERS,
             "원문": excerpt,
@@ -2941,6 +2948,7 @@ def _bind_revenue_table_evidence_fragments(
             "원문위치": f"매출 구성 원문 표 {table_index} · {caption}".rstrip(" ·"),
         }
         table = copy.deepcopy(raw_table)
+        table["caption"] = caption
         # ``axis``는 원문 근거를 검증하기 위한 transport 전용 값이다. 검증 뒤
         # V1 공개 ReportTable 스키마에는 넘기지 않아 기존 출력 계약을 지킨다.
         table.pop("axis", None)
@@ -4399,6 +4407,7 @@ class RealPipeline:
             comparison_branch, news_branch
         )
         news_session: news_research_adapter.NewsResearchSession | None = None
+        industry_problems: list[IndustryProblemEvidence] = []
         news_preparation_failed = False
         if comparison_outcome is not None:
             steps.extend(comparison_outcome.steps)
@@ -4765,6 +4774,7 @@ class RealPipeline:
                     ),
                     collected_on=business_date.isoformat(),
                     steps=steps,
+                    industry_problem_sink=industry_problems,
                 )
             except (gateway.ProviderCallFailed, provider_budget.ProviderBudgetExceeded, provider_budget.ProviderBudgetUnavailable) as error:
                 raise_if_request_interrupted(error)
@@ -4808,6 +4818,10 @@ class RealPipeline:
                 performance_table=performance_table, revenue_tables=revenue_tables,
                 sources=sources, business_date=business_date, model=model,
                 steps=steps, reason_code=reason_code, official_evidence=official_evidence,
+                industry_anchors=tuple(
+                    getattr(getattr(news_session, "company", None), "business_anchors", ())
+                ),
+                industry_problems=tuple(industry_problems),
             )
             return replace(
                 result, dart_receipt_numbers=source_identity.dart_receipt_numbers,
@@ -4858,6 +4872,10 @@ class RealPipeline:
                     official_evidence if supplementary_research_required else None
                 ),
                 official_evidence_context=official_evidence,
+                industry_anchors=tuple(
+                    getattr(getattr(news_session, "company", None), "business_anchors", ())
+                ),
+                industry_problems=tuple(industry_problems),
             )
             return replace(
                 v2_result,
@@ -6256,6 +6274,8 @@ def _run_news_search_branch(
     """뉴스 검색 스냅샷 갈래. 뉴스 장애는 예전처럼 보고서를 멈추지 않는다."""
 
     branch_steps: list[dict[str, Any]] = []
+    from src.features.pipeline.business_activity_anchors import build_business_activity_anchors
+
     news_session: news_research_adapter.NewsResearchSession | None = None
     news_preparation_failed = False
     # 두 갈래 모두 값을 채우지 못하는 경로가 생기면 «뉴스 없음»이 아니라
@@ -6271,6 +6291,11 @@ def _run_news_search_branch(
                 profile, official_evidence, existing_aliases=profile_aliases
             )
             try:
+                business_anchor_diagnostics: dict[str, Any] = {}
+                business_anchors = build_business_activity_anchors(
+                    official_evidence, profile=profile,
+                    diagnostics=business_anchor_diagnostics,
+                )
                 # FULL의 기본 작성·검수와 허용된 보충 검수 몫을 먼저 보호한다.
                 # 부분 모드도 같은 여유를 남기되 기존 선택적 다듬기 한도 저하는
                 # 유지한다. 재시도가 많은 모든 입력의 성공을 보장하는 값은 아니다.
@@ -6309,6 +6334,8 @@ def _run_news_search_branch(
                     identity_context=identity_context,
                     as_of=business_date,
                     max_analysis_calls=news_analysis_call_budget,
+                    business_anchors=business_anchors,
+                    observer=_local_news_research_observer(),
                 )
                 news_digest = news_session.snapshot.digest
                 branch_steps.append(
@@ -6320,6 +6347,8 @@ def _run_news_search_branch(
                         "AI분석호출상한": news_session.policy.max_analysis_calls,
                         "본문작성예약호출": COMPOSER_RUNTIME_CALL_RESERVE,
                         "빈장복구예약호출": EMPTY_RECOVERY_AI_CALLS,
+                        "공식사업조사앵커": len(business_anchors),
+                        "공식사업조사앵커판정": business_anchor_diagnostics,
                         **({"공식약칭근거": [item.diagnostic() for item in alias_evidence]}
                            if alias_evidence else {}),
                         **news_session.snapshot.transport_diagnostics,
@@ -6605,6 +6634,8 @@ def _run_v2_composer(
     supplementary_research_required: bool = False,
     supplementary_official_evidence: OfficialEvidenceCollectionResult | None = None,
     official_evidence_context: OfficialEvidenceCollectionResult | None = None,
+    industry_anchors: tuple[BusinessActivityAnchor, ...] = (),
+    industry_problems: tuple[IndustryProblemEvidence, ...] = (),
 ) -> RunResult:
     """엔진 v2: composer 경로로 보고서를 만든다.
 
@@ -6966,6 +6997,8 @@ def _run_v2_composer(
             # 모드 때문에 버리지 않는다. 링크 표시명과 별개로 보고서 자체의
             # 회사 신원을 보존한다. corp_id를 확인하지 못했으면 빈 값이다.
             company_id=corp_id,
+            industry_anchors=industry_anchors,
+            industry_problems=industry_problems,
             build_identity_sha256=build_identity_sha256,
             review_diagnostics_sink=review_diagnostics_sink,
             composition_diagnostics_sink=composition_diagnostics_sink,
@@ -7208,7 +7241,12 @@ def _run_v2_composer(
             "step": "v2_composer_완료",
             "생성문장": output.composed_sentences,
             "생존문장": output.verified_sentences,
-            "인용조각": len(report.citations),
+            "인용조각": (
+                output.generation_metrics.fragments_cited
+                if output.generation_metrics is not None else len(report.citations)
+            ),
+            "공개출처": len(report.citations),
+            **_industry_context_diagnostics(report),
         }
     )
     result = RunResult(
@@ -7290,6 +7328,8 @@ def _run_available_evidence_report(
     sources: list[SourceStatus], business_date: Any, model: str,
     steps: list[dict[str, Any]], reason_code: str,
     official_evidence: OfficialEvidenceCollectionResult | None = None,
+    industry_anchors: tuple[BusinessActivityAnchor, ...] = (),
+    industry_problems: tuple[IndustryProblemEvidence, ...] = (),
 ) -> RunResult:
     """v1의 재료 부족 출구도 검증된 동일 자료로 결정론 보고서를 만든다."""
     from src.features.composer.pipeline import compose_evidence_available_report
@@ -7322,6 +7362,8 @@ def _run_available_evidence_report(
         analysis_period=analysis_period, latest_performance_period=latest_period,
         filing_meta=filing_meta, composition_tables=tuple(composition_tables),
         table_presentation=str(getattr(performance_table, "presentation", "") or "table"),
+        industry_anchors=industry_anchors,
+        industry_problems=industry_problems,
     )
     report = replace(output.report, sources=list(sources))
     steps.append({
@@ -7331,12 +7373,34 @@ def _run_available_evidence_report(
     })
     return RunResult(
         outcome=Outcome.REPORT, report=report, sources=sources, corp_type=corp_type,
-        fragments_collected=len(conversion.fragments), fragments_cited=len(report.citations),
+        fragments_collected=(
+            output.generation_metrics.fragments_collected
+            if output.generation_metrics is not None else len(conversion.fragments)
+        ),
+        fragments_cited=(
+            output.generation_metrics.fragments_cited
+            if output.generation_metrics is not None else len(report.citations)
+        ),
         sentences_made=output.composed_sentences, sentences_passed=output.verified_sentences,
         cost_krw=_request_spent_krw(engine), model=model, generation_cache_eligible=False,
         generation_evidence=output.generation_evidence,
         generation_metrics=output.generation_metrics, quality_observation=output.quality_observation,
     )
+
+
+def _industry_context_diagnostics(report: Report) -> dict[str, int]:
+    """산업 문제·기사·회사 사업 근거를 회사 직접 기사와 별도로 센다."""
+    contexts = tuple(
+        context for section in report.sections
+        for context in getattr(section, "industry_contexts", ())
+    )
+    if not contexts:
+        return {}
+    return {
+        "공개산업과제": len(contexts),
+        "공개산업자료": len({item.problem.document_id for item in contexts}),
+        "공개사업연결근거": len({item.anchor.anchor_id for item in contexts}),
+    }
 
 
 def _write_prose(
@@ -7686,6 +7750,62 @@ def _news_default_classifier(engine: Any, client: Any) -> Callable[[str], str]:
     return classify
 
 
+def _local_news_research_observer() -> Callable[[str, dict[str, Any]], object] | None:
+    """로컬 평가에서만 검색 해석 행과 실제 선택 지문을 비공개 보관한다."""
+    from src.features.pipeline.private_replay import (
+        local_provider_replay_enabled, record_local_news_observation,
+    )
+    if not local_provider_replay_enabled():
+        return None
+
+    def observe(event: str, payload: dict[str, Any]) -> bool:
+        stored = record_local_news_observation(event=event, payload=payload)
+        try:
+            run_diagnostics.current_steps().append({
+                "step": "local_news_research_observation", "단계": event,
+                "시도수": 1, "저장수": int(stored), "미보관수": int(not stored),
+            })
+        except Exception:
+            pass
+        return stored
+
+    return observe
+
+
+def _record_local_news_analysis_replay(
+    *, prompt: str, payload: Any, schema: dict[str, Any], model: str,
+    usage: Any, max_tokens: int, started: float,
+) -> None:
+    """명시적인 로컬 평가에서 실제 호출의 해석된 JSON만 보관한다."""
+    from src.features.pipeline.private_replay import (
+        local_provider_replay_enabled, record_local_provider_replay,
+    )
+    from src.features.pipeline.private_replay_constants import (
+        MILLISECONDS_PER_SECOND, REPLAY_DIAGNOSTIC_STEP, REPLAY_NEWS_STAGE, REPLAY_PARSED_CAPTURE_KIND,
+    )
+    if not local_provider_replay_enabled():
+        return
+    stored = False
+    try:
+        response = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        stored = record_local_provider_replay(
+            prompt=prompt, response=response, stage=REPLAY_NEWS_STAGE,
+            model=model, response_schema=schema,
+            output_limit=max_tokens, stop_reason=str(usage.get("stop_reason", "")) if isinstance(usage, dict) else "",
+            elapsed_ms=max(0, int((time.monotonic() - started) * MILLISECONDS_PER_SECOND)),
+            capture_kind=REPLAY_PARSED_CAPTURE_KIND,
+        ) is True
+    except Exception:  # noqa: BLE001 — 보관 실패는 완료된 호출과 정산을 바꾸지 않는다
+        pass
+    try:
+        run_diagnostics.current_steps().append({
+            "step": REPLAY_DIAGNOSTIC_STEP, "단계": REPLAY_NEWS_STAGE,
+            "시도수": 1, "저장수": int(stored), "미보관수": int(not stored),
+        })
+    except Exception:  # noqa: BLE001 — 진단 실패도 실제 결과에 전파하지 않는다
+        pass
+
+
 def _news_grounded_analyzer(
     engine: Any, client: Any
 ) -> Callable[[str, dict[str, Any], int], Any]:
@@ -7701,6 +7821,7 @@ def _news_grounded_analyzer(
         def provider() -> ProviderAnalysis:
             before_calls, before_usage = metered._provider_call_count, len(metered.usages)
             before_dispatch = metered._provider_dispatch_count
+            started = time.monotonic()
             try:
                 payload, usage = engine._ask(client, prompt, schema, max_tokens=max_tokens)
             finally:
@@ -7716,6 +7837,12 @@ def _news_grounded_analyzer(
                 and not usage.get("parse_failed") and not usage.get("output_limit_reached")
                 and not usage.get("truncation_suspected")
             )
+            if metered._provider_dispatch_count - before_dispatch == 1:
+                _record_local_news_analysis_replay(
+                    prompt=prompt, payload=payload, schema=schema, usage=usage,
+                    model=str(events[0].get(USAGE_MODEL_KEY) or engine.MODEL) if len(events) == 1 else str(engine.MODEL),
+                    max_tokens=max_tokens, started=started,
+                )
             return ProviderAnalysis(payload, complete=complete)
 
         namespace = AnalysisNamespace(
@@ -7737,6 +7864,7 @@ def _collect_grounded_news(
     official_web_documents: int,
     collected_on: str,
     steps: list[dict[str, Any]],
+    industry_problem_sink: list[IndustryProblemEvidence] | None = None,
 ) -> list[dict[str, object]]:
     """같은 검색 snapshot에서 검증된 뉴스만 보고서 입력으로 옮긴다."""
 
@@ -7779,6 +7907,10 @@ def _collect_grounded_news(
                 }
             )
             steps.append(diagnostics)
+            # 산업 근거는 회사 기사 조각과 분리해 운반한다. 회사 준비 판정과
+            # 공식 근거 수에 들어가는 raw_fragments에는 섞지 않는다.
+            if industry_problem_sink is not None:
+                industry_problem_sink.extend(getattr(result, "industry_problems", ()))
             return raw_fragments
         except gateway.ProviderCallFailed as error:
             observation = error.observation
