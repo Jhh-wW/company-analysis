@@ -74,3 +74,62 @@ def test_pure_excluded_policy_is_not_retained_for_ai_reclassification():
     harvest = _collect(text)
     assert not harvest.fragments
     assert not harvest.unclassified_fragments
+
+
+@pytest.mark.parametrize("text", [
+    "한빛대학교(학사) 가람제조 제조기술팀 팀장",
+    "학력: 공학 석사 / 주요 경력: 생산기술본부 본부장",
+    "주요경력 | 제조사업부 담당 임원 | 공학 박사",
+])
+def test_학위와_개인경력의_조직명은_직접운영역할이_아니다(text):
+    original = text
+    scores, observed = score_fragment_slots_with_signal(text)
+    assert observed
+    assert ROLE not in {score.slot_id for score in scores}
+    assert business_slot_scope_problem(text, ROLE) == "business_slot_scope_unsupported"
+    assert business_slot_scope(text, "culture:leadership").score_text == original
+    harvest = _collect(text)
+    assert not harvest.fragments
+    assert not harvest.unclassified_fragments
+    assert text == original
+
+
+@pytest.mark.parametrize("text", [
+    "공학 학사 출신 제조 담당 임원은 현재 제품 생산을 총괄한다.",
+    "석사 출신 공장장은 현재 부품 제조를 담당한다.",
+    "회사는 제조기술팀을 운영하며 제품을 생산한다.",
+    "회사는 생산팀에서 산업장비를 제조하고 고객사에 공급한다.",
+    "학교의 팀장은 공학 학사 교육 서비스를 고객에게 제공한다.",
+])
+def test_현재_임원의_실제운영책임과_현행조직업무는_보존한다(text):
+    assert not business_slot_scope_problem(text, ROLE)
+    scores, _ = score_fragment_slots_with_signal(text, allowed_slot_ids=frozenset({ROLE}))
+    if "생산" in text or "제조" in text:
+        assert ROLE in {score.slot_id for score in scores}
+
+
+def test_경력절만_가리고_현재제조절과_리더십소개_원문을_보존한다():
+    career = "주요 경력은 공학 학사 출신 제조기술팀 팀장이다."
+    current = "현재 회사는 산업장비를 제조하고 생산한다."
+    text = career + " " + current
+    scoped = business_slot_scope(text, ROLE)
+    assert scoped.excluded_clauses
+    assert current.rstrip(".") in scoped.score_text
+    assert not business_slot_scope_problem(text, ROLE)
+    harvest = _collect(text)
+    assert any(fragment.text == text for fragment in harvest.fragments)
+    for fragment in harvest.fragments:
+        start, end = map(int, fragment.location.split("-"))
+        assert text[start:end] == fragment.text
+        assert fragment.text_sha256 == hashlib.sha256(fragment.text.encode()).hexdigest()
+    leadership = "대표이사 주요 경력: 제조기술팀 팀장, 공학 학사"
+    scores, observed = score_fragment_slots_with_signal(leadership)
+    assert observed
+    assert {score.slot_id for score in scores} == {"culture:leadership"}
+
+
+def test_새분류의_캐시는_갱신하고_원문파서버전은_유지한다():
+    from features.evidence_collection import constants as c
+    # 운영 역할의 의미칸 변경은 새 수집 결과로 구분하며 추출 원문은 같은 계약이다.
+    assert c.COLLECTOR_VERSION == "evidence_collection/3.1"
+    assert c.PARSER_VERSION == "evidence_collection_segment/2.1"

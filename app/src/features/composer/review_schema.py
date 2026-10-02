@@ -45,6 +45,7 @@ from src.features.composer.grounding_constants import (
     TREND_KEY,
 )
 from src.features.composer.numeric_quote_refs import NUMERIC_QUOTE_REF_KEY
+from src.features.composer.numeric_proof_selection_constants import NUMERIC_SELECTION_KEY
 from src.features.composer.prompt_metadata import PromptMetadata
 from src.features.composer.role_binding_constants import RELATION_KEY
 
@@ -91,7 +92,7 @@ def _array(items: dict[str, Any]) -> dict[str, Any]:
     return {"type": "array", "items": items}
 
 
-def _grounding_schema() -> dict[str, Any]:
+def _grounding_schema(*, numeric_selection: bool = False) -> dict[str, Any]:
     # 원문/원문참조는 키가 동시에 존재해도 실패한다. 두 닫힌 객체로 나누고
     # 후보값은 단일 수치에서 추론 가능하므로 생략을 허용한다.
     numeric_common = _strings("표현", "항목", "근거", "원문항목", "원문값")
@@ -130,7 +131,7 @@ def _grounding_schema() -> dict[str, Any]:
         **_strings(*FUTURE_FIELD_KEYS),
         FUTURE_MODE_KEY: {"type": "string", "enum": list(FUTURE_MODES)},
     })
-    return _object({
+    properties = {
         NUMERIC_KEY: _array(numeric),
         TREND_KEY: _array(trend),
         TIME_KEY: _array(_object(_strings("표현", "근거", "원문", "기간"))),
@@ -139,7 +140,11 @@ def _grounding_schema() -> dict[str, Any]:
         # 정성 수익 인식 기준 단정의 정확 인용(4차 채택안). 최소 세 칸만 두고
         # 배열 자체는 선택이다 — 요구가 없는 후보에 빈 근거를 만들게 하지 않는다.
         RECOGNITION_KEY: _array(_object(_strings("표현", "근거", "원문"))),
-    }, required=())
+    }
+    if numeric_selection:
+        # 본문만 지원한다. 실제 선택 자격·번호·원문 결속은 요청 로컬 코드가 검사한다.
+        properties[NUMERIC_SELECTION_KEY] = {"type": "string"}
+    return _object(properties, required=())
 
 
 def _review_schema(*, diagram: bool = False) -> dict[str, Any]:
@@ -164,7 +169,7 @@ def _review_schema(*, diagram: bool = False) -> dict[str, Any]:
     return {
         **_object({REVIEW_ENTRIES_KEY: _array(_object(properties, required=required))}),
         # 후보 내용이나 인용 목록을 넣지 않는 고정 스키마다.
-        "$defs": {"grounding": _grounding_schema()},
+        "$defs": {"grounding": _grounding_schema(numeric_selection=not diagram)},
     }
 
 

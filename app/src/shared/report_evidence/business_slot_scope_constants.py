@@ -13,6 +13,14 @@ CUSTOMER_ADMIN_ACTION_RE = re.compile(
 OPERATING_ADMIN_RE = re.compile(
     r"제조물책임(?:법|보험)|손해배상책임|보험계약|(?:공정거래위원회|공정위).*(?:조사|과징금)"
     r"|(?:제조|생산|위탁).*(?:조사결과|과징금|지연이자)|(?:제조|생산).*관련.*소송")
+CAREER_PROFILE_RE = re.compile(r"학사|석사|박사|졸업|학력|주요경력|경력사항|경력")
+PERSONAL_POSITION_RE = re.compile(r"팀장|부장|본부장|공장장|담당임원|임원|이사|대표이사|수석|책임연구원")
+# 개인의 학위·이력과 함께 있어도 실제 현재 맡은 생산·운영 행동은 보존한다.
+CURRENT_OPERATING_RESPONSIBILITY_RE = re.compile(
+    r"(?:제품|부품|장비|설비|공장|제조|생산|공정).{0,45}"
+    r"(?:생산|제조|운영|공정|품질관리)(?:을|를)?(?:직접)?"
+    r"(?:담당|총괄|수행|책임)(?:한다|합니다|하고있|지고있|진다|집니다)"
+)
 CUSTOMER_DEFINITION_RE = re.compile(r"(?:주요|핵심)?고객(?:사)?(?:는|은|이|가).+")
 BUSINESS_SERVICE_RE = re.compile(
     r"(?:고객(?:사)?|거래처|수요처|구매자|이용자).{0,80}(?:에게|에|로부터|의).{0,80}"

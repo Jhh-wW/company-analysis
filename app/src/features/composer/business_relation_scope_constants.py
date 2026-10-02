@@ -48,3 +48,34 @@ NEGATED_ACTION_RE = re.compile(r"(?:하지않|하지못|되지않|되지못|한�
 PENDING_ACTION_RE = re.compile(r"예정|할계획|계획(?:이다|입니다|중)|계획을세|검토중|할경우|하는경우|된다면|한다면")
 ACTUAL_ACTION_RE = re.compile(r"(?:하|해|합|있|제공|판매|공급|고객|생산|제작|제조)")
 SUBJECT_SUFFIX_RE = re.compile(r"(?:사업부문|사업부|부문|사업|분야)$")
+
+# 회계 실재성 확인을 제품 품질관리의 목적으로 바꾼 명시적 관계만 대조한다.
+ACCOUNTING_INSPECTION_RE = re.compile(r"재고(?:자산)?(?:의)?실사|재무제표(?:의)?외부감사|회계감사")
+PRODUCT_QUALITY_RE = re.compile(r"(?:제품|상품|부품|장비|생산품)?품질(?:관리|검사|검증|보증|점검)")
+QUALITY_PURPOSE_LINK_RE = re.compile(
+    r"품질(?:관리|검사|검증|보증|점검).{0,12}(?:위해|위한|목적).{0,90}(?:실사|감사)|"
+    r"(?:실사|감사).{0,18}(?:통해|통한|하여|함으로써).{0,30}품질(?:관리|검사|검증|보증|점검)|"
+    r"(?:실사|감사).{0,8}(?:는|를|가|이).{0,20}품질(?:관리|검사|검증|보증|점검)(?:의)?(?:절차|목적)"
+)
+QUALITY_PURPOSE_DENIAL_RE = re.compile(
+    r"(?:실사|감사)(?:가|는|이)?아니|"
+    r"품질(?:관리|검사|검증|보증|점검)(?:의)?목적(?:이|은)?아니|"
+    r"(?:실사|감사)(?:를|을)?(?:실시|수행|진행)(?:하지않|하지못)"
+)
+# 서로 반대인 제공 방향을 확인할 수 있는 동작만 읽는다. 판매·수탁 등의 전체 동의어는 추정하지 않는다.
+PROVISION_ACTION_RE = re.compile(r"제공(?P<receive>받|을받)?|수령")
+PROVISION_ITEM_FAMILIES = (
+    ("재무", re.compile(r"재무")), ("회계", re.compile(r"회계")),
+    ("법무", re.compile(r"법무")), ("기획", re.compile(r"기획")),
+    ("투자", re.compile(r"투자")), ("정보시스템", re.compile(r"정보시스템|전산시스템")),
+    ("기술지원", re.compile(r"기술지원|기술서비스")),
+    ("라이선스", re.compile(r"라이선스|라이센스|사용권|실시권")),
+    ("업무지원", re.compile(r"업무지원|경영지원")),
+    ("서비스", re.compile(r"서비스")), ("제품", re.compile(r"제품|상품")),
+    ("부품", re.compile(r"부품")), ("장비", re.compile(r"장비|설비")),
+)
+PROVISION_GENERIC_ITEMS = frozenset({"업무지원", "서비스"})
+PROVISION_COMPANY_SUBJECT_RE = re.compile(r"^(?:당사|회사|본사|해당회사|그회사|연결회사)$")
+PROVISION_UNCONFIRMED_TAIL_RE = re.compile(
+    r"^(?:하지않|하지못|지않|지못|할예정|할계획|을예정|을계획|받을예정|받을계획|받는경우|하는경우)"
+)

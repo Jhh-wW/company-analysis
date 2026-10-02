@@ -103,7 +103,7 @@ def _schema_sha(schema):
     (FLAT_REVIEW_SCHEMA,
      "ec40152ca2ad8aa43192180dd0583bff4a6c3f5e52042ac1f2b915bc7fd0b94d",
      "ff4e031accf5776e3f189483531e5c5270bea8c8d1ec8cd6da75008384f901ab",
-     "bb974f18bc5d33def32725d9d6a401a3eb0265f878af6ac624bcb7ff2af966cf"),
+     "971e6a1d87c3292025b973121577bd91b8fabd07077e7f28614407093ac17c89"),
     (DIAGRAM_REVIEW_SCHEMA,
      "ba1d778829286673bd6cde6ebb5d559274c78f0202b92d6e4128891736dfc1c8",
      "43db498656efc5545d712fcc1f0c9893fe69fbd1f2dcca8a42a470c03e4bcb8a",
@@ -116,6 +116,12 @@ def test_retry_schema_hash_matches_provider_accepted_schema(schema, accepted, re
     assert relation["required"] == ["근거", "원문", "유형"]
     assert relation["additionalProperties"] is False
     previous = deepcopy(schema)
+    if schema is FLAT_REVIEW_SCHEMA:
+        # 새 본문 스키마는 선택 문자열 하나만 추가했다. 종전 정본 전체를 복원한다.
+        assert previous["$defs"]["grounding"]["properties"].pop("수치선택") == {"type": "string"}
+        assert _schema_sha(previous) == "bb974f18bc5d33def32725d9d6a401a3eb0265f878af6ac624bcb7ff2af966cf"
+    else:
+        assert "수치선택" not in previous["$defs"]["grounding"]["properties"]
     for key in ("범위", "관계"):
         del previous["$defs"]["grounding"]["properties"]["관계"]["items"]["properties"][key]
     assert _schema_sha(previous) == recognition

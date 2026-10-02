@@ -25,3 +25,18 @@ def test_같은문단의_유효사업_정확인용은_재분류할_수_있다():
                               [_candidate(text=text)])
     assert len(result.assignments) == 1
     assert result.assignments[0].exact_quote == quote
+
+
+def test_경력행은_다른절의_현행제조행동을_빌려_운영역할을_받지_못한다():
+    career = "공학 학사 / 주요 경력: 제조기술팀 팀장"
+    current = "회사는 산업장비를 제조하고 생산한다."
+    result = parse_and_verify(_response(_assignment(section_id="operations_partners",
+        slot_id="operations_partners:operating_role", quote=career)),
+        [_candidate(text=career + ". " + current)])
+    assert result.assignments == ()
+    assert result.rejected[0].reason_code == "business_slot_scope_unsupported"
+    positive = parse_and_verify(_response(_assignment(section_id="operations_partners",
+        slot_id="operations_partners:operating_role", quote=current)),
+        [_candidate(text=career + ". " + current)])
+    assert len(positive.assignments) == 1
+    assert positive.assignments[0].exact_quote == current

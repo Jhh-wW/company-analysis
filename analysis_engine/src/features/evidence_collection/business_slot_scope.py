@@ -13,7 +13,8 @@ def _administration(text: str, slot_id: str) -> bool:
     surface = _surface(text)
     if slot_id == c.CUSTOMER_SLOT:
         return bool(c.CUSTOMER_ADMIN_RE.search(surface) and c.CUSTOMER_ADMIN_ACTION_RE.search(surface))
-    return bool(c.OPERATING_ADMIN_RE.search(surface))
+    return bool(c.OPERATING_ADMIN_RE.search(surface) or (
+        c.CAREER_PROFILE_RE.search(surface) and c.PERSONAL_POSITION_RE.search(surface)))
 
 
 def _business_fact(text: str, slot_id: str) -> bool:
@@ -21,7 +22,9 @@ def _business_fact(text: str, slot_id: str) -> bool:
     return bool(c.BUSINESS_SERVICE_RE.search(surface) or (
         slot_id == c.CUSTOMER_SLOT and c.CUSTOMER_DEFINITION_RE.search(surface)
         and not _administration(text, slot_id)) or (
-        slot_id == c.OPERATING_ROLE_SLOT and c.OPERATING_ACTION_RE.search(surface)))
+        slot_id == c.OPERATING_ROLE_SLOT and (
+            c.OPERATING_ACTION_RE.search(surface)
+            or c.CURRENT_OPERATING_RESPONSIBILITY_RE.search(surface))))
 
 
 @dataclass(frozen=True)

@@ -76,3 +76,95 @@ def test_기존_검수_반환과_재구성_경로에서도_같은_본문을_차�
         diagnostic_contexts={1: ("operations_partners", "본문", "확인")}) == result
     assert _apply_grounding(raw, verdicts, candidates,
         diagnostic_contexts={1: ("portfolio", "본문", "확인")})[1] == "참"
+
+
+@pytest.mark.parametrize("claim,source", [
+    ("회사는 제품 품질 관리를 위해 정기 재고자산 실사를 실시한다.",
+     "회사는 재고자산 실사를 실시하며 재무상태표일의 재고 실재성을 확인한다."),
+    ("회사는 재고실사를 통해 제품 품질관리를 수행한다.",
+     "회사는 재고실사를 실시한다. 회사는 납품검수를 통해 제품 품질관리를 수행한다."),
+    ("회사는 재무, 회계, 법무 업무지원을 제공받는 계약을 체결했다.",
+     "회사는 기획, 투자 업무지원을 제공받는 계약과 재무, 회계, 법무 업무지원을 제공하는 계약을 체결했다."),
+    ("회사는 회계 업무지원을 제공한다.", "회사는 회계 업무지원을 제공받는다."),
+    ("회사는 정보시스템 서비스를 제공받는다.",
+     "회사 | 정보시스템 서비스 | 제공한다 ; 다른 법인 | 정보시스템 서비스 | 제공받는다"),
+])
+def test_회계실사의_품질목적승격과_지원거래_반대방향을_차단한다(claim, source):
+    assert business_relation_scope_problem(claim, {"a": source},
+        section_id="operations_partners") == "scope_condition_unbound"
+
+
+@pytest.mark.parametrize("claim,source", [
+    ("회사는 품질 관리를 위해 납품검수를 실시한다.",
+     "회사는 재고실사를 실시한다. 회사는 품질 관리를 위해 납품검수를 실시한다."),
+    ("회사는 제품 품질 관리를 위해 재고실사를 실시한다.",
+     "회사는 제품 품질 관리를 위해 재고실사를 실시한다."),
+    ("회사는 재고실사와 제품 품질검사를 실시한다.",
+     "회사는 재고실사와 제품 품질검사를 실시한다."),
+    ("회계회사는 고객의 재무제표 외부감사 서비스를 제공한다.",
+     "회계회사는 고객의 재무제표 외부감사 서비스를 제공한다."),
+    ("회사는 기획, 투자 업무지원을 제공받으며 재무, 회계, 법무 업무지원을 제공한다.",
+     "회사는 기획, 투자 업무지원을 제공받으며 재무, 회계, 법무 업무지원을 제공한다."),
+    ("회사는 정보시스템 위탁관리를 제공받는다.",
+     "회사는 정보시스템 위탁관리를 제공받는다."),
+    ("회사는 지원사로부터 회계 서비스를 제공받는다.",
+     "지원사는 회사에게 회계 서비스를 제공한다."),
+    ("지원사는 회사에게 회계 서비스를 제공한다.",
+     "회사는 지원사로부터 회계 서비스를 제공받는다."),
+    ("회사는 장비 서비스를 제공받는다.", "지원사는 장비 서비스를 제공한다."),
+    ("회사는 기술지원 서비스를 제공한다.", "회사는 기술지원 서비스를 제공하며 향후 장비를 개발할 계획이다."),
+    ("회사는 재고실사를 통해 재무제표 신뢰성을 확인한다.",
+     "회사는 재고실사를 통해 재무제표 신뢰성을 확인한다."),
+])
+def test_정상품질_회계서비스_명시방향과_관점전환을_보존한다(claim, source):
+    assert business_relation_scope_problem(claim, {"a": source},
+        section_id="operations_partners") == ""
+
+
+@pytest.mark.parametrize("claim,source", [
+    ("회사는 제품 품질 관리를 위해 재고실사를 실시한다.",
+     "회사는 재고실사로 재무상태표의 재고 실재성을 확인한다."),
+    ("회사는 회계 업무지원을 제공받는다.", "회사는 회계 업무지원을 제공한다."),
+])
+def test_모델의_참_승인후에도_회계목적과_거래방향을_같은입구에서_검사한다(claim, source):
+    sources = {"a": source}
+    raw = json.dumps({"판정": [{"번호": 1, "결과": "참", "근거": ["a"]}]}, ensure_ascii=False)
+    problems = {}
+    result = _apply_grounding(raw, {1: "참"}, {1: (claim, sources)},
+        diagnostic_contexts={1: ("operations_partners", "본문", "확인")},
+        grounding_problems=problems)
+    assert result[1] != "참"
+    assert problems[1] == "scope_condition_unbound"
+    assert sources == {"a": source}
+    assert _apply_grounding(raw, {1: "참"}, {1: (claim, sources)},
+        diagnostic_contexts={1: ("business_model", "본문", "확인")})[1] == "참"
+
+
+@pytest.mark.parametrize("claim,source", [
+    ("회사는 회계 지원을 제공받지 않는다.", "회사는 회계 지원을 제공한다."),
+    ("회사는 회계 지원을 제공할 계획이다.", "회사는 회계 지원을 제공받는다."),
+    ("회사는 회계 지원을 제공받는다.", "회사는 회계 지원을 제공하지 않는다."),
+    ("회사는 회계 지원을 제공한다.", "회사는 회계 지원을 제공받을 계획이다."),
+])
+def test_부정계획은_실제_반대방향의_증거로_추정하지_않는다(claim, source):
+    # 부정·계획의 참 여부는 기존 의미 검수가 판단하며 이 가드의 실제 방향 증거가 아니다.
+    assert business_relation_scope_problem(claim, {"a": source},
+        section_id="operations_partners") == ""
+
+
+@pytest.mark.parametrize("claim,source", [
+    ("회사는 품질관리를 위한 재고실사를 한다.", "회사는 품질관리를 위한 재고실사가 아니다."),
+    ("회사는 회계 서비스를 제공한다.", "회사는 회계 서비스를 제공하지 않는다."),
+    ("회사는 회계 서비스를 제공한다.", "회사는 회계 서비스를 제공할 계획이다."),
+    ("회사는 회계 서비스를 수령한다.", "회사는 회계 서비스를 수령하지 않는다."),
+])
+def test_같은관계의_명시부정과_예정을_실제관계로_승격하지_않는다(claim, source):
+    assert business_relation_scope_problem(claim, {"a": source},
+        section_id="operations_partners") == "scope_condition_unbound"
+
+
+def test_실사의_품질목적을_부정하는_정상설명은_남긴다():
+    claim = "회사는 품질관리를 위한 재고실사가 아니다."
+    source = "회사는 재고실사로 재무제표의 재고 실재성을 확인한다."
+    assert business_relation_scope_problem(claim, {"a": source},
+        section_id="operations_partners") == ""
