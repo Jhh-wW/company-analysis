@@ -125,8 +125,14 @@ def test_cold_warm_actual_ask_no_fake_usage_or_attempts_and_news_cost_decreases(
             spend.append(budget.accounted_krw)
         engines.append((engine, messages))
     cold, warm = results
+    cold_traces = cold.diagnostics["원문선택변환"]
+    warm_traces = warm.diagnostics["원문선택변환"]
+    assert len(cold_traces) == len(warm_traces) == 1
+    assert cold_traces[0]["캐시복원"] is False and warm_traces[0]["캐시복원"] is True
+    # 캐시 적중 여부만 달라지며 원응답·복원 응답·기사 본문의 지문은 같다.
+    assert cold_traces[0] == {**warm_traces[0], "캐시복원": False}
     assert cold == replace(warm, diagnostics={**warm.diagnostics, "분석캐시적중": 0, "분석캐시보존호출": 0,
-        "분석provider호출": 1})
+        "분석provider호출": 1, "원문선택변환": cold_traces})
     assert cold.diagnostics["분석provider호출"] == 1 and warm.diagnostics["분석provider호출"] == 0
     assert cold.diagnostics["분석논리호출"] == warm.diagnostics["분석논리호출"] == 1
     assert cold.diagnostics["분석provider미관측"] == warm.diagnostics["분석provider미관측"] == 0
