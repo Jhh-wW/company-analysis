@@ -24,6 +24,7 @@ from typing import Any, Callable, Iterator
 from src.features.news_intake import analysis_cache_constants as c
 from src.features.news_intake.grounded import validate_grounded_response
 from src.features.news_intake.models import NewsCandidate, NewsCollectionPolicy, NewsCompanyContext
+from src.features.news_intake.quote_selection import quote_response_sha256, restore_quote_response
 from src.shared.news_analysis_port import (
     AnalysisNamespace, ProviderAnalysis, analyze_with_cache, news_analysis_scope,
 )
@@ -55,6 +56,7 @@ class AnalysisRequest:
     max_tokens: int
     cache_hits: int = 0
     provider_calls: int | None = None
+    source_response_sha256: str | None = None
 
     def key(self, namespace: AnalysisNamespace | None) -> str | None:
         if type(namespace) is not AnalysisNamespace or not namespace.usable():
@@ -129,10 +131,12 @@ class _Entry:
     expires_at: float
     encoded: bytes
     checksum: str
+    source_response_sha256: str | None = None
 
 
-def _entry_checksum(key: str, expires_at: float, encoded: bytes) -> str:
-    return _hash(_bytes([key, expires_at]) + encoded)
+def _entry_checksum(key: str, expires_at: float, encoded: bytes, source_response_sha256: str | None = None) -> str:
+    metadata = [key, expires_at] if source_response_sha256 is None else [key, expires_at, source_response_sha256]
+    return _hash(_bytes(metadata) + encoded)
 
 
 def _span(text: str, body: str) -> list[int]:
@@ -226,7 +230,9 @@ class AnalysisResultCache:
                 return None
             try:
                 if (type(entry.encoded) is not bytes or len(entry.encoded) > self._entry_max_bytes
-                        or _entry_checksum(key, entry.expires_at, entry.encoded) != entry.checksum):
+                        or (entry.source_response_sha256 is not None and
+                            not re.fullmatch(r"[0-9a-f]{64}", entry.source_response_sha256))
+                        or _entry_checksum(key, entry.expires_at, entry.encoded, entry.source_response_sha256) != entry.checksum):
                     raise ValueError("손상된 분석 캐시")
                 payload = _project(json.loads(entry.encoded), request, restore=True)
             except (TypeError, ValueError, KeyError, IndexError, AttributeError, RecursionError):
@@ -236,6 +242,7 @@ class AnalysisResultCache:
         if not request.valid(payload):
             self.discard(key)
             return None
+        request.source_response_sha256 = entry.source_response_sha256
         return payload
 
     def _put(self, key: str, request: AnalysisRequest, payload: dict) -> None:
@@ -253,7 +260,8 @@ class AnalysisResultCache:
         with self._lock:
             self._prune()
             expires_at = self._clock() + self._ttl
-            self._entries[key] = _Entry(expires_at, encoded, _entry_checksum(key, expires_at, encoded))
+            self._entries[key] = _Entry(expires_at, encoded,
+                _entry_checksum(key, expires_at, encoded, request.source_response_sha256), request.source_response_sha256)
             self._entries.move_to_end(key)
             while (len(self._entries) > self._max_entries
                    or sum(len(item.encoded) for item in self._entries.values()) > self._max_bytes):
@@ -271,8 +279,12 @@ class AnalysisResultCache:
                 request.cache_hits += 1
                 return payload
         result = provider()
-        if key is not None and result.complete is True and request.valid(result.payload):
-            self._put(key, request, result.payload)
+        request.source_response_sha256 = quote_response_sha256(result.payload)
+        item_properties = request.schema.get("properties", {}).get("items", {}).get("items", {}).get("properties", {})
+        restored = restore_quote_response(result.payload, articles=request.articles, company=request.company,
+                                          selection_enabled="entity_evidence_quote_id" in item_properties)
+        if key is not None and result.complete is True and request.valid(restored):
+            self._put(key, request, restored)
         return result.payload
 
 

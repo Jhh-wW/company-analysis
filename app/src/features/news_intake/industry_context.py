@@ -11,6 +11,7 @@ import json
 from src.features.news_intake import industry_constants as ic
 from src.features.news_intake.grounded import parse_grounded_payload, GROUNDED_ANALYSIS_SCHEMA
 from src.features.news_intake.models import NewsCandidate, NewsCompanyContext
+from src.features.news_intake.quote_selection import quote_response_sha256, restore_quote_response
 from src.shared.business_challenge_context import IndustryProblemEvidence, INDUSTRY_GEOGRAPHIES
 from src.shared.report_generation.models import exact_text_sha256
 
@@ -64,10 +65,15 @@ def extend_schema(schema: dict, company: NewsCompanyContext) -> dict:
     properties["geography"] = {"type": "string", "enum": sorted(INDUSTRY_GEOGRAPHIES)}
     for name in ("problem_present", "same_business", "geography_supported"):
         properties[name] = {"type": "boolean"}
+    required = list(ic.INDUSTRY_REQUIRED_FIELDS)
+    if "entity_evidence_quote_id" in item["properties"]:
+        properties.pop("text")
+        properties["text_quote_id"] = deepcopy(item["properties"]["excerpts"]["items"]["properties"]["text_quote_id"])
+        required[required.index("text")] = "text_quote_id"
     item["properties"]["industry_problems"] = {
         "type": "array", "maxItems": ic.INDUSTRY_MAX_PROBLEMS_PER_ARTICLE,
         "items": {"type": "object", "additionalProperties": False,
-                  "properties": properties, "required": list(ic.INDUSTRY_REQUIRED_FIELDS)},
+                  "properties": properties, "required": required},
     }
     item["required"].append("industry_problems")
     return schema
@@ -98,10 +104,12 @@ def extend_prompt(prompt: str, company: NewsCompanyContext) -> str:
 def split_response(raw: object, *, articles: list[tuple[NewsCandidate, str]],
                    company: NewsCompanyContext, as_of: dt.date,
                    full_body_hashes: dict[str, str],
-                   observations: Counter[str] | None = None) -> tuple[object, tuple[IndustryProblemEvidence, ...], dict[str, int]]:
+                   observations: Counter[str] | None = None,
+                   source_response_sha256: str | None = None) -> tuple[object, tuple[IndustryProblemEvidence, ...], dict[str, int]]:
     if not company.business_anchors:
         return raw, (), {}
-    items = parse_grounded_payload(raw)
+    source_response_sha256 = source_response_sha256 or quote_response_sha256(raw)
+    items = parse_grounded_payload(restore_quote_response(raw, articles=articles, company=company))
     if items is None:
         return raw, (), {"industry_invalid_response": 1}
     by_id = {candidate.id: (candidate, body) for candidate, body in articles}
@@ -111,7 +119,7 @@ def split_response(raw: object, *, articles: list[tuple[NewsCandidate, str]],
     missing = set(by_id) - set(counts)
     if missing:
         rejected["industry_invalid_missing_result"] += len(missing)
-    response_hash = exact_text_sha256(json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    response_hash = source_response_sha256 or exact_text_sha256(json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
     for item in items:
         if type(item) is not dict:
             direct.append(item)
@@ -124,7 +132,7 @@ def split_response(raw: object, *, articles: list[tuple[NewsCandidate, str]],
             continue
         candidate_body = by_id.get(item.get("id"))
         expected_keys = set(GROUNDED_ANALYSIS_SCHEMA["properties"]["items"]["items"]["required"]) | {"industry_problems"}
-        if (set(item) != expected_keys or candidate_body is None or counts[item.get("id")] != 1 or type(entries) is not list
+        if (set(item) - {"invalid_quote_selection"} != expected_keys or candidate_body is None or counts[item.get("id")] != 1 or type(entries) is not list
                 or type(item.get("same_company")) is not bool or type(item.get("material")) is not bool
                 or type(item.get("entity_evidence")) is not str or type(item.get("excerpts")) is not list
                 or type(item.get("source_type")) is not str

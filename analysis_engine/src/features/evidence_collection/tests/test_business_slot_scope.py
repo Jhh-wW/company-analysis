@@ -80,6 +80,14 @@ def test_pure_excluded_policy_is_not_retained_for_ai_reclassification():
     "한빛대학교(학사) 가람제조 제조기술팀 팀장",
     "학력: 공학 석사 / 주요 경력: 생산기술본부 본부장",
     "주요경력 | 제조사업부 담당 임원 | 공학 박사",
+    "한빛대학교(학사) 가람산업 동부공장 제조담당",
+    "다솔대학교(학사) 가람산업 해외공장 생산담당",
+    "공학 학사 주요경력 가람산업 동부공장에서 제품 제조를 담당",
+    "공학 학사 가람산업 생산기술본부 제조부문 담당",
+    "주요 경력 가람산업 동부공장 제조 수행 담당자",
+    "공학 학사 출신으로 이전 직장에서 공장 생산을 담당했다.",
+    "주요 경력: 가람산업 동부공장 생산을 담당하였다.",
+    "주요 경력: 공학 박사, 가람산업 동부공장 생산을 담당하였다.",
 ])
 def test_학위와_개인경력의_조직명은_직접운영역할이_아니다(text):
     original = text
@@ -100,6 +108,12 @@ def test_학위와_개인경력의_조직명은_직접운영역할이_아니다(
     "회사는 제조기술팀을 운영하며 제품을 생산한다.",
     "회사는 생산팀에서 산업장비를 제조하고 고객사에 공급한다.",
     "학교의 팀장은 공학 학사 교육 서비스를 고객에게 제공한다.",
+    "공학 학사 출신 제조담당은 현재 공장에서 제품을 제조한다.",
+    "공학 학사 출신 제조담당은 현재 제조를 담당한다.",
+    "공학 학사 출신 생산담당은 현재 생산을 수행하고 있다.",
+    "학사 출신 제조담당은 현재 회사의 제품 제조를 담당하며 생산을 수행한다.",
+    "공학 학사 경력을 가진 임원이 있으며, 회사는 공장 생산을 담당했다.",
+    "주요 경력: 공학 학사 임원이 있으며, 회사는 공장에서 제품을 제조했다.",
 ])
 def test_현재_임원의_실제운영책임과_현행조직업무는_보존한다(text):
     assert not business_slot_scope_problem(text, ROLE)
@@ -128,8 +142,31 @@ def test_경력절만_가리고_현재제조절과_리더십소개_원문을_보
     assert {score.slot_id for score in scores} == {"culture:leadership"}
 
 
+@pytest.mark.parametrize("separator", [", ", "\n", "; ", ". "])
+@pytest.mark.parametrize("current", [
+    "회사는 현재 공장에서 산업장비를 제조한다.",
+    "제조담당은 현재 제품 제조를 담당하고 있다.",
+])
+def test_제조담당_경력과_실제업무가_섞여도_원문과_현재업무를_보존한다(separator, current):
+    career = "한빛대학교(학사) 가람산업 동부공장 제조담당"
+    text = career + separator + current
+    scoped = business_slot_scope(text, ROLE)
+    assert scoped.excluded_clauses
+    assert career not in scoped.score_text
+    assert current.rstrip(".") in scoped.score_text
+    assert not business_slot_scope_problem(text, ROLE)
+    scores, observed = score_fragment_slots_with_signal(text)
+    assert observed
+    assert ROLE in {score.slot_id for score in scores}
+    harvest = _collect(text)
+    for fragment in harvest.fragments:
+        start, end = map(int, fragment.location.split("-"))
+        assert text[start:end] == fragment.text
+        assert fragment.text_sha256 == hashlib.sha256(fragment.text.encode()).hexdigest()
+
+
 def test_새분류의_캐시는_갱신하고_원문파서버전은_유지한다():
     from features.evidence_collection import constants as c
     # 운영 역할의 의미칸 변경은 새 수집 결과로 구분하며 추출 원문은 같은 계약이다.
-    assert c.COLLECTOR_VERSION == "evidence_collection/3.1"
+    assert c.COLLECTOR_VERSION == "evidence_collection/3.2"
     assert c.PARSER_VERSION == "evidence_collection_segment/2.1"

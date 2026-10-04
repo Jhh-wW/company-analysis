@@ -83,6 +83,14 @@ def test_별도배포_수집기와_공통판정이_일치한다():
     "한빛대학교(학사) 가람제조 제조기술팀 팀장",
     "학력 공학 석사 / 주요 경력 생산부문 담당 임원",
     "주요경력 | 제조본부 본부장 | 공학 박사",
+    "한빛대학교(학사) 가람산업 동부공장 제조담당",
+    "다솔대학교(학사) 가람산업 해외공장 생산담당",
+    "공학 학사 주요경력 가람산업 동부공장에서 제품 제조를 담당",
+    "공학 학사 가람산업 생산기술본부 제조부문 담당",
+    "주요 경력 가람산업 동부공장 제조 수행 담당자",
+    "공학 학사 출신으로 이전 직장에서 공장 생산을 담당했다.",
+    "주요 경력: 가람산업 동부공장 생산을 담당하였다.",
+    "주요 경력: 공학 박사, 가람산업 동부공장 생산을 담당하였다.",
 ])
 def test_학력경력만으로_운영역할_재분류를_허용하지_않는다(career):
     assert business_slot_scope_problem(career, ROLE) == "business_slot_scope_unsupported"
@@ -94,6 +102,12 @@ def test_학력경력만으로_운영역할_재분류를_허용하지_않는다(
     "석사 출신 공장장은 부품 제조를 담당한다.",
     "회사는 제조기술팀을 운영하며 제품을 생산한다.",
     "학교의 팀장은 공학 학사 교육 서비스를 고객에게 제공한다.",
+    "공학 학사 출신 제조담당은 현재 공장에서 제품을 제조한다.",
+    "공학 학사 출신 제조담당은 현재 제조를 담당한다.",
+    "공학 학사 출신 생산담당은 현재 생산을 수행하고 있다.",
+    "학사 출신 제조담당은 현재 회사의 제품 제조를 담당하며 생산을 수행한다.",
+    "공학 학사 경력을 가진 임원이 있으며, 회사는 공장 생산을 담당했다.",
+    "주요 경력: 공학 학사 임원이 있으며, 회사는 공장에서 제품을 제조했다.",
 ])
 def test_현재_임원역할과_실제조직행동_교육서비스를_보존한다(current):
     assert not business_slot_scope_problem(current, ROLE)
@@ -105,6 +119,22 @@ def test_혼합원문_현재제조절과_리더십_슬롯은_원문을_유지한
     text = career + " " + current
     scoped = business_slot_scope(text, ROLE)
     assert scoped.excluded_clauses
+    assert current.rstrip(".") in scoped.score_text
+    assert not business_slot_scope_problem(text, ROLE)
+    assert business_slot_scope(text, "culture:leadership").score_text == text
+
+
+@pytest.mark.parametrize("separator", [", ", "\n", "; ", ". "])
+@pytest.mark.parametrize("current", [
+    "회사는 현재 공장에서 산업장비를 제조한다.",
+    "제조담당은 현재 제품 제조를 담당하고 있다.",
+])
+def test_제조담당_경력절만_제외하고_혼합원문의_현재업무는_보존한다(separator, current):
+    career = "한빛대학교(학사) 가람산업 동부공장 제조담당"
+    text = career + separator + current
+    scoped = business_slot_scope(text, ROLE)
+    assert scoped.excluded_clauses
+    assert career not in scoped.score_text
     assert current.rstrip(".") in scoped.score_text
     assert not business_slot_scope_problem(text, ROLE)
     assert business_slot_scope(text, "culture:leadership").score_text == text

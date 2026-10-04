@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping
 from src.core.provider_gateway import gateway
 from src.features.news_intake import constants as c
 from src.features.news_intake.analysis_result_cache import analysis_request
+from src.features.news_intake.quote_selection import quote_candidates, quote_response_sha256, restore_quote_response
 from src.features.news_intake.industry_context import extend_prompt, extend_schema, industry_candidate, split_response
 from src.features.news_intake import industry_constants as ic
 from src.features.news_intake.observation import NewsObserver, observe_news
@@ -98,6 +99,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     analysis_cache_hits = 0
     analysis_provider_calls = 0
     analysis_provider_unobserved = 0
+    analysis_quote_traces: list[dict[str, object]] = []
     relevant_articles: set[str] = set()
     document_hashes: dict[str, str] = {}
     # 본문 중복의 신원은 (정규화 본문, 발행일)이다 — 같은 본문도 발행일이 다르면
@@ -166,7 +168,12 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             budget_codes.append(c.ANALYSIS_BUDGET_EXHAUSTED_CODE)
             stopped = True
             return
-        prompt = extend_prompt(build_grounded_prompt(company, batch, as_of), company)
+        legacy_prompt = extend_prompt(build_grounded_prompt(company, batch, as_of), company)
+        prompt = extend_prompt(build_grounded_prompt(company, batch, as_of, selection=True), company)
+        selection = len(prompt) <= policy.max_prompt_chars and all(quote_candidates(candidate, body, company) for candidate, body in batch)
+        if not selection:
+            # 선택표가 기존 배치를 나눠 호출 수를 늘리지 않도록 구형 계약으로 돌린다.
+            prompt = legacy_prompt
         if len(prompt) > policy.max_prompt_chars:
             if len(batch) > 1:
                 middle = len(batch) // 2
@@ -182,7 +189,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             industry_observations["검수입력기사"] += len(batch)
             industry_analysis_ids.update(candidate.id for candidate, _ in batch if industry_candidate(candidate))
         try:
-            schema = extend_schema(build_grounded_schema(batch), company)
+            schema = extend_schema(build_grounded_schema(batch, selection=selection, company=company), company)
             with analysis_request(
                 company=company, as_of=as_of, policy=policy, articles=batch,
                 full_body_hashes=document_hashes, prompt=prompt, schema=schema,
@@ -217,9 +224,19 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                     response = None
             except (TypeError, ValueError):
                 response = None
+        source_response_sha256 = request.source_response_sha256 or quote_response_sha256(response)
+        response = restore_quote_response(response, articles=batch, company=company,
+                                          selection_enabled=selection)
+        analysis_quote_traces.append({
+            "선택프로토콜": selection, "캐시복원": bool(request.cache_hits),
+            "원응답정규JSON_SHA256": source_response_sha256,
+            "복원응답정규JSON_SHA256": quote_response_sha256(response),
+            "입력기사본문SHA256": {candidate.id: exact_text_sha256(body) for candidate, body in batch},
+        })
         direct_response, industry_found, industry_rejected = split_response(
             response, articles=batch, company=company, as_of=as_of, full_body_hashes=document_hashes,
             observations=industry_observations,
+            source_response_sha256=source_response_sha256,
         )
         industry_problems.extend(industry_found)
         excluded.update(industry_rejected)
@@ -591,6 +608,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         "본문글자": body_chars, "분류AI호출": analysis_calls, "분석AI호출": analysis_calls,
         "분석호출상한": policy.max_analysis_calls, "분석잔여호출": policy.max_analysis_calls - analysis_calls,
         "분석캐시적중": analysis_cache_hits, "분석캐시보존호출": analysis_cache_hits,
+        "원문선택변환": analysis_quote_traces,
         "분석논리호출": analysis_calls,
         "분석provider호출": None if analysis_provider_unobserved else analysis_provider_calls,
         "분석provider미관측": analysis_provider_unobserved,
