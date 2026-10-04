@@ -896,6 +896,9 @@ class _MeteredEngine:
         object.__setattr__(self, "_call_context", contextvars.ContextVar(
             "pipeline_provider_call_context", default=_ProviderCallContext(),
         ))
+        object.__setattr__(self, "_private_news_request", contextvars.ContextVar(
+            "pipeline_private_news_request", default=None,
+        ))
         object.__setattr__(self, "_provider_call_count", 0)
         object.__setattr__(self, "_provider_dispatch_count", 0)
         object.__setattr__(self, "_cached_provider_call_slots", 0)
@@ -917,6 +920,7 @@ class _MeteredEngine:
             "_model",
             "_billing_uncertain",
             "_call_context",
+            "_private_news_request",
             "_provider_call_count",
             "_provider_dispatch_count",
             "_cached_provider_call_slots",
@@ -1409,6 +1413,7 @@ class _MeteredMessages:
             # 캐시와 admission 거절은 실제 provider 전송 진단에 섞지 않는다.
             with self._metered._provider_call_lock:
                 self._metered._provider_dispatch_count += 1
+            _capture_local_news_request(self._metered, call_kwargs)
             return self._messages.create(*args, **call_kwargs)
 
         try:
@@ -7806,6 +7811,74 @@ def _record_local_news_analysis_replay(
         pass
 
 
+def _capture_local_news_request(metered: _MeteredEngine, kwargs: dict[str, Any]) -> None:
+    """명시적 뉴스 평가 문맥에서 전송할 네 필드만 복사한다. 요청 객체는 보유하지 않는다."""
+    capture = metered._private_news_request.get()
+    if capture is None:
+        return
+    try:
+        messages = kwargs.get("messages")
+        if not isinstance(messages, list) or len(messages) != 1 or not isinstance(messages[0], dict):
+            return
+        if messages[0].get("role") != "user":
+            return
+        prompt = messages[0].get("content")
+        if isinstance(prompt, list) and len(prompt) == 1 and isinstance(prompt[0], dict):
+            prompt = prompt[0].get("text") if prompt[0].get("type") == "text" else None
+        output = kwargs.get("output_config")
+        output = output.get("format") if isinstance(output, dict) else None
+        schema = output.get("schema") if isinstance(output, dict) and output.get("type") == "json_schema" else None
+        if type(prompt) is not str or not isinstance(schema, dict) or type(kwargs.get("model")) is not str:
+            return
+        if type(kwargs.get("max_tokens")) is not int:
+            return
+        request = {"prompt": prompt, "response_schema": schema,
+                   "model": kwargs["model"], "output_limit": kwargs["max_tokens"]}
+        capture.append(json.loads(json.dumps(request, ensure_ascii=False, allow_nan=False)))
+    except Exception:  # noqa: BLE001 — 선택적 복사가 실제 전송을 막지 않는다
+        pass
+
+
+def _record_local_news_analysis_failure(
+    *, request: dict[str, Any] | None, cause: BaseException | None,
+    provider_request_id: object, started: float,
+) -> None:
+    """실제 단회 실패의 요청과 SDK body.error 세 필드만 로컬 비공개 보관에 넘긴다."""
+    from src.features.pipeline.private_replay import (
+        local_provider_replay_enabled, record_local_provider_failure,
+    )
+    from src.features.pipeline.private_replay_constants import (
+        MILLISECONDS_PER_SECOND, REPLAY_FAILURE_DIAGNOSTIC_STEP, REPLAY_NEWS_STAGE,
+    )
+    if not local_provider_replay_enabled():
+        return
+    stored = False
+    try:
+        body = getattr(cause, "body", None)
+        error = body.get("error") if type(body) is dict else None
+        error = error if type(error) is dict else {}
+        if request is not None:
+            stored = record_local_provider_failure(
+                **request, stage=REPLAY_NEWS_STAGE,
+                error_type=error.get("type"), error_message=error.get("message"),
+                status_code=getattr(cause, "status_code", None),
+                provider_request_id_sha256=(
+                    hashlib.sha256(provider_request_id.encode("utf-8")).hexdigest()
+                    if type(provider_request_id) is str and provider_request_id else None
+                ),
+                elapsed_ms=max(0, int((time.monotonic() - started) * MILLISECONDS_PER_SECOND)),
+            ) is True
+    except Exception:  # noqa: BLE001 — 보관은 원래 실패·cause·정산에 영향을 주지 않는다
+        pass
+    try:
+        run_diagnostics.current_steps().append({
+            "step": REPLAY_FAILURE_DIAGNOSTIC_STEP, "단계": REPLAY_NEWS_STAGE,
+            "시도수": 1, "저장수": int(stored), "미보관수": int(not stored),
+        })
+    except Exception:  # noqa: BLE001 — 원문·SDK 메시지는 일반 진단에 넣지 않는다
+        pass
+
+
 def _news_grounded_analyzer(
     engine: Any, client: Any
 ) -> Callable[[str, dict[str, Any], int], Any]:
@@ -7819,12 +7892,28 @@ def _news_grounded_analyzer(
         metered = engine
 
         def provider() -> ProviderAnalysis:
+            from src.features.pipeline.private_replay import local_provider_replay_enabled
+
             before_calls, before_usage = metered._provider_call_count, len(metered.usages)
             before_dispatch = metered._provider_dispatch_count
             started = time.monotonic()
+            capture: list[dict[str, Any]] | None = [] if local_provider_replay_enabled() else None
+            capture_token = metered._private_news_request.set(capture)
             try:
                 payload, usage = engine._ask(client, prompt, schema, max_tokens=max_tokens)
+            except gateway.ProviderCallFailed as error:
+                if metered._provider_dispatch_count - before_dispatch == 1:
+                    try:
+                        _record_local_news_analysis_failure(
+                            request=capture[0] if capture is not None and len(capture) == 1 else None,
+                            cause=error.__cause__, provider_request_id=error.observation.request_id,
+                            started=started,
+                        )
+                    except Exception:  # noqa: BLE001 — 보관 배선 장애도 원래 예외를 가리지 않는다
+                        pass
+                raise
             finally:
+                metered._private_news_request.reset(capture_token)
                 record_news_provider_calls(metered._provider_dispatch_count - before_dispatch)
             events = metered.usages[before_usage:]
             # retry·미관측 전송·부분 응답은 저장하지 않는다. 기존 _ask는 1회 전송이다.

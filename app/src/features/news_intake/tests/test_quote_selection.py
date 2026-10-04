@@ -4,12 +4,13 @@ from copy import deepcopy
 from dataclasses import replace
 import json
 import hashlib
+import re
 
 import pytest
 
 from src.features.news_intake import quote_selection_constants as qc
 from src.features.news_intake.grounded import build_grounded_prompt, build_grounded_schema, validate_grounded_response
-from src.features.news_intake.quote_selection import quote_candidates, restore_quote_response
+from src.features.news_intake.quote_selection import quote_candidates, quote_schema, restore_quote_response
 from src.features.news_intake.quote_selection import quote_response_sha256
 from src.features.news_intake.tests.test_collection import AS_OF, BODY, COMPANY, POLICY, accepted, collect, item, snapshot
 from src.features.news_intake.tests import test_industry_context as industry
@@ -269,7 +270,123 @@ def test_sdk_normalizes_selection_schema_without_mutating_closed_contract():
     assert schema == before
     item_schema = normalized["properties"]["items"]["items"]
     assert item_schema["additionalProperties"] is False
-    assert item_schema["properties"]["entity_evidence_quote_id"]["enum"]
+    entity_field = item_schema["properties"]["entity_evidence_quote_id"]
+    assert entity_field["type"] == "string" and "enum" not in entity_field and "pattern" not in entity_field
+    assert qc.QUOTE_EMPTY_ID_PATTERN in entity_field["description"]
     excerpt_schema = item_schema["properties"]["excerpts"]["items"]
-    assert excerpt_schema["properties"]["text_quote_id"]["enum"]
+    text_field = excerpt_schema["properties"]["text_quote_id"]
+    assert text_field["type"] == "string" and "enum" not in text_field and "pattern" not in text_field
+    assert qc.QUOTE_ID_PATTERN in text_field["description"]
     assert "subject_is_target" in excerpt_schema["required"]
+
+
+def quote_fields(schema):
+    item_fields = schema["properties"]["items"]["items"]["properties"]
+    result = {"entity_evidence_quote_id": item_fields["entity_evidence_quote_id"]}
+    result.update(item_fields["excerpts"]["items"]["properties"])
+    if "industry_problems" in item_fields:
+        result["industry_text_quote_id"] = item_fields["industry_problems"]["items"]["properties"]["text_quote_id"]
+    return {name: field for name, field in result.items() if name.endswith("_quote_id")}
+
+
+def test_quote_schema_is_stable_when_body_ids_change_and_preserves_original():
+    snap, _ = snapshot([item()])
+    candidate = snap.candidates[0]
+    original = build_grounded_schema([(candidate, BODY)])
+    before = deepcopy(original)
+    selected_schema = quote_schema(original, [(candidate, BODY)], COMPANY)
+    changed_body = BODY.replace("120", "121")
+    assert quote_candidates(candidate, BODY, COMPANY) != quote_candidates(candidate, changed_body, COMPANY)
+    assert selected_schema == quote_schema(original, [(candidate, changed_body)], COMPANY)
+    assert original == before
+    other_candidate = replace(candidate, id=candidate.id + "-other")
+    other_schema = build_grounded_schema([(other_candidate, BODY)], selection=True, company=COMPANY)
+    assert quote_fields(selected_schema) == quote_fields(other_schema)
+    assert selected_schema["properties"]["items"]["items"]["properties"]["id"] != other_schema["properties"]["items"]["items"]["properties"]["id"]
+    company = replace(COMPANY, business_anchors=(industry.ANCHOR,))
+    extended = industry.extend_schema(selected_schema, company)
+    fields = quote_fields(extended)
+    assert len(fields) == 5
+    for name, field in fields.items():
+        expected = qc.QUOTE_ID_PATTERN if name in ("text_quote_id", "industry_text_quote_id") else qc.QUOTE_EMPTY_ID_PATTERN
+        assert field == {"type": "string", "pattern": expected}
+
+
+@pytest.mark.parametrize("pattern,empty_allowed", [(qc.QUOTE_ID_PATTERN, False), (qc.QUOTE_EMPTY_ID_PATTERN, True)])
+def test_quote_pattern_only_describes_id_shape(pattern, empty_allowed):
+    assert re.fullmatch(pattern, qc.QUOTE_ID_PREFIX + "0" * qc.QUOTE_ID_HASH_CHARS)
+    assert bool(re.fullmatch(pattern, "")) is empty_allowed
+    for invalid in ("quote-unknown", "quote-" + "A" * qc.QUOTE_ID_HASH_CHARS,
+                    "quote-" + "0" * (qc.QUOTE_ID_HASH_CHARS + 1), "other-" + "0" * qc.QUOTE_ID_HASH_CHARS):
+        assert re.fullmatch(pattern, invalid) is None
+
+
+def unavailable_id(source, candidate, body, company=COMPANY):
+    if source == "unoffered":
+        result = qc.QUOTE_ID_PREFIX + "0" * qc.QUOTE_ID_HASH_CHARS
+    elif source == "other_article":
+        result = quote_candidates(replace(candidate, id=candidate.id + "-other"), body, company)[0]["id"]
+    else:
+        result = quote_candidates(candidate, body + " 원문이 변경됐다.", company)[0]["id"]
+    assert re.fullmatch(qc.QUOTE_ID_PATTERN, result)
+    assert result not in {entry["id"] for entry in quote_candidates(candidate, body, company)}
+    return result
+
+
+@pytest.mark.parametrize("source", ["unoffered", "other_article", "other_body"])
+@pytest.mark.parametrize("field", ["entity_evidence_quote_id", "text_quote_id", "time_evidence_quote_id", "subject_evidence_quote_id"])
+def test_pattern_valid_unoffered_ids_fail_every_direct_source_field(source, field):
+    snap, _ = snapshot([item()])
+    candidate = snap.candidates[0]
+    raw = selected(candidate, BODY)
+    target = raw["items"][0] if field == "entity_evidence_quote_id" else raw["items"][0]["excerpts"][0]
+    target[field] = unavailable_id(source, candidate, BODY)
+    articles = [(candidate, BODY), (replace(candidate, id=candidate.id + "-other"), BODY)]
+    result, rejected = validate_grounded_response(raw, articles=articles, company=COMPANY, as_of=AS_OF)
+    assert not result and rejected
+
+
+@pytest.mark.parametrize("source", ["unoffered", "other_article", "other_body"])
+def test_pattern_valid_unoffered_industry_id_is_rejected(source):
+    raw = industry.response()
+    row = raw["items"][0]
+    row.pop("entity_evidence")
+    row["entity_evidence_quote_id"] = ""
+    problem = row["industry_problems"][0]
+    problem.pop("text")
+    problem["text_quote_id"] = unavailable_id(source, industry.CANDIDATE, industry.BODY, industry.COMPANY)
+    assert not industry.split(raw)[1]
+
+
+@pytest.mark.parametrize("field", ["text_quote_id", "time_evidence_quote_id", "subject_evidence_quote_id"])
+def test_pattern_valid_bad_id_preserves_other_valid_excerpt(field):
+    snap, _ = snapshot([item()])
+    candidate = snap.candidates[0]
+    raw = selected(candidate, BODY)
+    bad = deepcopy(raw["items"][0]["excerpts"][0])
+    bad[field] = unavailable_id("unoffered", candidate, BODY)
+    raw["items"][0]["excerpts"].append(bad)
+    result, rejected = validate(raw, candidate, BODY)
+    assert len(result) == 1 and rejected["grounded_invalid_excerpt"] == 1
+
+
+def test_sdk_wire_removes_repeated_quote_enums_but_server_still_owns_membership():
+    from src.features.pipeline.real import _provider_output_config
+    snap, _ = snapshot([item()])
+    company = replace(COMPANY, business_anchors=(industry.ANCHOR,))
+    body = " ".join(BODY for _ in range(40))
+    articles = [(replace(snap.candidates[0], id=f"synthetic-{number}"), body) for number in range(4)]
+    assert sum(len(quote_candidates(candidate, text, company)) for candidate, text in articles) == 192
+    schema = industry.extend_schema(build_grounded_schema(articles, selection=True, company=company), company)
+    before = deepcopy(schema)
+    wire = _provider_output_config({"format": {"type": "json_schema", "schema": schema}})["format"]["schema"]
+    assert schema == before
+    fields = quote_fields(wire)
+    assert len(fields) == 5
+    for name, field in fields.items():
+        assert field["type"] == "string" and "enum" not in field and "pattern" not in field
+        expected = qc.QUOTE_ID_PATTERN if name in ("text_quote_id", "industry_text_quote_id") else qc.QUOTE_EMPTY_ID_PATTERN
+        assert expected in field["description"]
+    excerpt = wire["properties"]["items"]["items"]["properties"]["excerpts"]["items"]
+    assert excerpt["properties"]["subject_is_target"] == {"type": "boolean"}
+    assert "subject_is_target" in excerpt["required"]

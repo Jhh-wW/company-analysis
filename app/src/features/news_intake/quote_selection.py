@@ -83,10 +83,8 @@ def quote_candidates(candidate: NewsCandidate, body: str,
 
 def quote_schema(schema: dict, articles: list[tuple[NewsCandidate, str]],
                  company: NewsCompanyContext | None = None) -> dict:
-    """긴 직접 인용 필드만 ID로 바꾸고 회사·사건·주어 판단 필드는 보존한다."""
+    """ID 형식만 안내한다. 실제 허용 ID는 복원 시 기사별 원문 표에서 검사한다."""
     result = deepcopy(schema)
-    ids = [row["id"] for candidate, body in articles
-           for row in quote_candidates(candidate, body, company)]
     item = result["properties"]["items"]["items"]
     excerpt = item["properties"]["excerpts"]["items"]
     excerpt["properties"]["subject_is_target"] = {"type": "boolean"}
@@ -96,7 +94,9 @@ def quote_schema(schema: dict, articles: list[tuple[NewsCandidate, str]],
         for name in names:
             fields["properties"].pop(name)
             selected_name = name + c.QUOTE_FIELD_SUFFIX
-            fields["properties"][selected_name] = {"type": "string", "enum": ids + ([""] if name != "text" else [])}
+            fields["properties"][selected_name] = {
+                "type": "string", "pattern": c.QUOTE_ID_PATTERN if name == "text" else c.QUOTE_EMPTY_ID_PATTERN,
+            }
             fields["required"][fields["required"].index(name)] = selected_name
     return result
 
