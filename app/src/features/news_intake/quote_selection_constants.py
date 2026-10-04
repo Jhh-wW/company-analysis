@@ -2,7 +2,7 @@
 
 import re
 
-QUOTE_SELECTION_VERSION = "news-quote-selection-v1"
+QUOTE_SELECTION_VERSION = "news-quote-selection-v2"
 QUOTE_ID_PREFIX = "quote-"
 QUOTE_ID_HASH_CHARS = 20
 QUOTE_ID_PATTERN = rf"^{re.escape(QUOTE_ID_PREFIX)}[0-9a-f]{{{QUOTE_ID_HASH_CHARS}}}$"
@@ -30,6 +30,13 @@ QUOTE_REVERSED_SUBJECT_RE = re.compile(
     r"(?:기업|회사|업체)(?:은|는|이|가)\s*(?P<subject>[가-힣A-Za-z0-9 ]+?)(?:이다|였다|입니다)(?:[.!?。]|$)"
 )
 QUOTE_COMPANY_PRONOUNS = frozenset({"회사", "이회사", "동사"})
+QUOTE_UI_PANEL_MARKERS = ("기사 듣기", "선호매체 추가", "URL공유", "가장작게", "가장크게")
+QUOTE_UI_PANEL_MIN_MARKERS = 3
+QUOTE_UI_PANEL_END_RE = re.compile(r"가장작게[^.!?。\n]{0,80}가장크게\s*")
+QUOTE_UI_PREFIX_PROBLEM_RE = re.compile(
+    r"(?:기능|서비스|이용자|고객|결제|설비|생산|납품|공급)[^.!?。\n]{0,48}"
+    r"(?:장애|고장|지연|차질|중단|결함|불량|피해)"
+)
 QUOTE_PUBLISHER_RE = re.compile(r"(?:기사\s*제공|발행처|저작권|기자)\s*[:：©]?")
 QUOTE_SUBSIDIARY_RE = re.compile(r"\s*의\s*(?:자회사|계열사)(?:인|\s)")
 QUOTE_PAST_EMPLOYMENT_RE = re.compile(r"(?:과거|이전|전직)[^.。\n]*(?:근무|재직|출신)")

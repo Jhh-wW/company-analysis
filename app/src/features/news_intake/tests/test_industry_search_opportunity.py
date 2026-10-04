@@ -96,5 +96,6 @@ def test_일반문제낱말만으로_다른사업기사를_우선하지_않는�
 def test_질의에_문제조건을_여럿_AND로_쌓지_않는다():
     queries = [row[0] for row in search_plan(COMPANY, AS_OF)
                if row[2].startswith(ic.INDUSTRY_TOPIC_PREFIX)]
-    assert all(query.endswith(("산업 문제", "공급난")) for query in queries)
+    # 첫 문제 주제는 현재 수요 둔화로 구체화했으며 조건을 여러 개 AND로 붙이지 않는다.
+    assert all(query.endswith(ic.INDUSTRY_QUERY_THEMES) for query in queries)
     assert not any("공급 수요" in query or "차질 규제" in query for query in queries)

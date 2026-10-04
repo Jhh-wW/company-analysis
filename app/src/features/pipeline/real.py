@@ -9644,7 +9644,15 @@ def _collect(
     # ★ 매출 구성 비중 표 — 사용자가 리포트 11건에서 고른 항목 ①.
     #   **11건이 «전부» 실은 유일한 만장일치 항목**이다.
     #   ⚠️ 지어낼 자리가 없다 — 공시가 비중을 이미 계산해 놓았고 우리는 베낄 뿐이다.
-    revenue_tables, revenue_diagnostics = revenuemix.build_with_diagnostics(filing_text)
+    revenue_input_text = filing_text
+    if filing_raw_path:
+        # 이름 수집에도 쓰는 같은 다운로드 원XML의 셀 구조를 전달한다.
+        # 신규 숫자 근거의 좌표·지문은 실제 파서 입력에 결속한다.
+        revenue_input_text = revenuemix.revenue_input_from_tables(filing_text, [
+            {"population_heading": table.population_heading, "title": table.title, "rows": table.rows}
+            for table in read_filing_tables(filing_raw_path)
+        ])
+    revenue_tables, revenue_diagnostics = revenuemix.build_with_diagnostics(revenue_input_text)
     typed_name_sources: tuple[dict[str, object], ...] = tuple(
         dict(raw) for raw in frags.values()
     )
@@ -9668,12 +9676,12 @@ def _collect(
     )
     dart_fragment_count += name_fragment_count
     multi_year_tables, multi_year_diagnostics = (
-        revenuemix.build_multi_year_with_diagnostics(filing_text)
+        revenuemix.build_multi_year_with_diagnostics(revenue_input_text)
     )
     revenue_tables.extend(multi_year_tables)
     try:
         frags, revenue_tables = _bind_revenue_table_evidence_fragments(
-            frags, revenue_tables, filing=filing, filing_text=filing_text,
+            frags, revenue_tables, filing=filing, filing_text=revenue_input_text,
         )
     except RevenueTableEvidenceBindingError as error:
         revenue_tables = []

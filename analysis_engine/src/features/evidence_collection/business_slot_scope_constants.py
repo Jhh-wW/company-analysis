@@ -18,6 +18,10 @@ PERSONAL_POSITION_RE = re.compile(
     r"팀장|부장|본부장|공장장|담당임원|임원|이사|대표이사|수석|책임연구원"
     r"|(?:개발|제조|생산|공급|운영|공정|품질(?:관리)?)(?:부문|부서|본부|사업부|공장|팀)?"
     r"(?:을|를)?(?:담당|수행)")
+PERSONAL_POSITION_MODIFIER_MAX_CHARS = 12
+COMPOUND_PERSONAL_POSITION_RE = re.compile(
+    rf"(?:개발|제조|생산|공급|운영|공정|품질)[가-힣]{{1,{PERSONAL_POSITION_MODIFIER_MAX_CHARS}}}"
+    r"(?:담당|수행)(?=$|[|/(),])")
 # 개인의 학위·이력과 함께 있어도 실제 현재 맡은 생산·운영 행동은 보존한다.
 CURRENT_OPERATING_RESPONSIBILITY_RE = re.compile(
     r"(?:제품|부품|장비|설비|공장|제조|생산|공정).{0,45}"
@@ -29,6 +33,11 @@ PERSONAL_PAST_RESPONSIBILITY_RE = re.compile(
     r"(?:개발|제조|생산|공급|운영|공정|품질(?:관리)?)(?:을|를)?"
     r"(?:담당|총괄|수행|책임)(?:했다|했습니다|하였다|하였습니다|하였음|했던|하던)")
 COMPANY_ACTION_SUBJECT_RE = re.compile(r"(?:회사|당사)(?:는|가|에서)")
+OPERATING_PLAN_WINDOW_CHARS = 80
+COMPANY_OPERATING_PLAN_RE = re.compile(
+    rf"(?:제품|상품|부품|장비|설비|공장).{{0,{OPERATING_PLAN_WINDOW_CHARS}}}"
+    r"(?:개발|제조|생산|공급|운영)(?:을|를)?(?:할|하려는|하려고|추진할)"
+    rf".{{0,{OPERATING_PLAN_WINDOW_CHARS}}}(?:계획|예정)")
 CUSTOMER_DEFINITION_RE = re.compile(r"(?:주요|핵심)?고객(?:사)?(?:는|은|이|가).+")
 BUSINESS_SERVICE_RE = re.compile(
     r"(?:고객(?:사)?|거래처|수요처|구매자|이용자).{0,80}(?:에게|에|로부터|의).{0,80}"

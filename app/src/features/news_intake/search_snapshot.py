@@ -200,16 +200,23 @@ def _industry_candidates(candidates: list[NewsCandidate], *,
         topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) for topic in item.topics)]
     anchors = {anchor.anchor_id: anchor.business_item for anchor in company.business_anchors} if company else {}
 
-    def problem_opportunity(item: NewsCandidate) -> bool:
-        metadata = item.title + " " + item.description
+    def business_linked(item: NewsCandidate, metadata: str | None = None) -> bool:
+        if metadata is None:
+            metadata = item.title + " " + item.description
         linked = [anchors.get(topic.split(":", 1)[1], "") for topic in item.topics
                   if topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) and ":" in topic]
-        return bool(any(business_item and business_item.casefold() in metadata.casefold()
-                        for business_item in linked)
-                    and ic.INDUSTRY_SEARCH_PROBLEM_RE.search(metadata))
+        return bool(any(business_item and re.search(
+            r"(?<![가-힣A-Za-z0-9])" + re.escape(business_item)
+            + ic.INDUSTRY_BUSINESS_TOKEN_END, metadata, re.I) for business_item in linked))
+
+    # 산업 query topic만 붙은 타산업 후보가 예약 몫을 소비하지 않게 한다.
+    # 후보 자체는 전체 목록에 남고, 본문 의미와 지역은 기존 검수에서 확인한다.
+    if anchors:
+        industry = [item for item in industry if business_linked(item)]
 
     return sorted(industry, key=lambda item: (
-        problem_opportunity(item),
+        any(business_linked(item, clause) and ic.INDUSTRY_SEARCH_PROBLEM_RE.search(clause)
+            for clause in ic.INDUSTRY_SEARCH_CLAUSE_RE.split(item.title + "\n" + item.description)),
         item.published_on, item.source_url,
     ), reverse=True)
 

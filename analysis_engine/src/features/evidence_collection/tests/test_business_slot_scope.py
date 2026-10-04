@@ -88,6 +88,9 @@ def test_pure_excluded_policy_is_not_retained_for_ai_reclassification():
     "공학 학사 출신으로 이전 직장에서 공장 생산을 담당했다.",
     "주요 경력: 가람산업 동부공장 생산을 담당하였다.",
     "주요 경력: 공학 박사, 가람산업 동부공장 생산을 담당하였다.",
+    "한빛대학교(학사/석사) 가람제조 생산기획담당",
+    "학력 및 주요 경력: 공학 박사 가람제조 제조기술기획담당",
+    "학력 및 주요 경력: 공학 학사 가람산업 공정개선담당",
 ])
 def test_학위와_개인경력의_조직명은_직접운영역할이_아니다(text):
     original = text
@@ -114,6 +117,8 @@ def test_학위와_개인경력의_조직명은_직접운영역할이_아니다(
     "학사 출신 제조담당은 현재 회사의 제품 제조를 담당하며 생산을 수행한다.",
     "공학 학사 경력을 가진 임원이 있으며, 회사는 공장 생산을 담당했다.",
     "주요 경력: 공학 학사 임원이 있으며, 회사는 공장에서 제품을 제조했다.",
+    "학사 출신 생산기획담당은 현재 공장에서 제품 생산을 담당한다.",
+    "학사 출신 생산기획담당은 설비를 개발하고 있다.",
 ])
 def test_현재_임원의_실제운영책임과_현행조직업무는_보존한다(text):
     assert not business_slot_scope_problem(text, ROLE)
@@ -168,5 +173,17 @@ def test_제조담당_경력과_실제업무가_섞여도_원문과_현재업무
 def test_새분류의_캐시는_갱신하고_원문파서버전은_유지한다():
     from features.evidence_collection import constants as c
     # 운영 역할의 의미칸 변경은 새 수집 결과로 구분하며 추출 원문은 같은 계약이다.
-    assert c.COLLECTOR_VERSION == "evidence_collection/3.2"
+    assert c.COLLECTOR_VERSION == "evidence_collection/3.3"
     assert c.PARSER_VERSION == "evidence_collection_segment/2.1"
+
+
+@pytest.mark.parametrize("activity", [
+    "회사는 공장에서 제품을 생산할 계획이다.",
+    "회사는 제조 설비를 개발할 예정이다.",
+])
+def test_학위복합직함과_섞인_회사의_생산계획은_보존한다(activity):
+    text = "공학 학사 가람제조 생산기획담당, " + activity
+    scoped = business_slot_scope(text, ROLE)
+    assert scoped.excluded_clauses
+    assert activity.rstrip(".") in scoped.score_text
+    assert not business_slot_scope_problem(text, ROLE)

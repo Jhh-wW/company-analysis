@@ -91,11 +91,20 @@ def test_missing_response_is_not_supplied_from_header_or_other_row():
 
 def test_sanction_is_supported_by_actual_row_not_incidental_law_name():
     header = "제재조치일 | 처벌 또는 조치대상자 | 처벌 또는 조치내용 | 사유 및 근거법령 | 이행 및 재발방지대책"
-    actual = "2024.04.10 | 가온제조 | 과태료 100만원 | 위험물안전관리법 | 과태료 납부 완료"
+    actual = "2024.04.10 | 가온제조 | 과태료 100만원 | 위험물안전관리법 | 과태료 납부 완료, 고객 납품 지연이 지속되고 있다"
     supported, _ = slots(header + "; " + actual)
     assert {"current_challenges:issue", "current_challenges:response"} <= supported
     noise = actual.replace("과태료 100만원", "해당없음")
     assert not slots(header + "; " + noise)[0]
+
+
+def test_completed_sanction_history_keeps_raw_and_observation_without_current_slots():
+    header = "제재조치일 | 처벌 또는 조치대상자 | 처벌 또는 조치내용 | 사유 및 근거법령 | 이행 및 재발방지대책"
+    row = "2024.04.10 | 가온제조 | 과태료 100만원 | 위험물안전관리법 | 과태료 납부 완료"
+    raw = header + "; " + row
+    assert slots(raw) == (set(), True)
+    assert not challenge_table_scope(raw).has_incident_row
+    assert raw == header + "; " + row
 
 
 def test_contractors_identity_is_preserved_in_score_text():
@@ -114,10 +123,25 @@ def test_named_accident_with_same_row_date_actor_and_place_is_valid(event):
     assert not hypothetical.has_incident_row and not hypothetical.has_response_row
 
 
-@pytest.mark.parametrize("response", ["안전장치 설치 완료", "다음 분기 안전장치 도입 예정"])
-def test_improvement_response_column_preserves_actual_and_planned_actions(response):
+@pytest.mark.parametrize("response,expected", [
+    ("안전장치 설치 완료", False),
+    ("안전장치 설치 완료, 고객 납품 지연이 지속되고 있다", True),
+    ("다음 분기 안전장치 도입 예정", True),
+    ("납부 완료, 사고 후 안전장치 설치 중", True),
+])
+def test_improvement_response_column_requires_unresolved_or_planned_operations(response, expected):
     text = HEADER.replace("조치 및 전망", "개선대책") + "; " + ROW.replace("안전센서 설치 예정", response)
-    assert challenge_table_scope(text).has_response_row
+    assert challenge_table_scope(text).has_response_row is expected
+
+
+def test_completed_history_and_current_incident_keep_separate_rows():
+    historical = ROW.replace("안전센서 설치 예정", "안전장치 설치 완료")
+    current = ROW.replace("2024.07.12", "2026.10.04").replace("성형공정 끼임사고", "화재로 생산 중단")
+    raw = HEADER + "; " + historical + "; " + current
+    scoped = challenge_table_scope(raw)
+    assert scoped.has_incident_row and scoped.has_response_row
+    assert current in scoped.issue_text and historical not in scoped.issue_text
+    assert slots(raw)[1] is True
 
 
 @pytest.mark.parametrize("text", [
@@ -139,3 +163,29 @@ def test_audit_and_financial_management_signals_remain_observed_without_five_slo
 def test_real_services_and_mixed_operations_survive(text):
     supported, _ = slots(text)
     assert "current_challenges:response" in supported or "current_challenges:issue" in supported
+
+
+@pytest.mark.parametrize("text", [
+    "기업은 지연공시로 공시위반 제재금을 납부하고 공시교육으로 대응했다.",
+    "우수기업으로 선정돼 성과를 거뒀으며 대응했다.",
+])
+def test_raw_challenge_signal_remains_observed_but_ineligible_slots_are_removed(text):
+    assert slots(text) == (set(), True)
+
+
+def test_original_scope_before_accounting_keeps_current_row_header_and_binding():
+    header = "제재조치일 | 처벌 또는 조치대상자 | 처벌 또는 조치내용 | 사유 및 근거법령 | 이행 및 재발방지대책"
+    closed = "2024.04.10 | 가온제조 | 과태료 100만원 | 안전관리 위반 | 과태료 납부 완료"
+    current = "2026.10.04 | 가온제조 | 과태료 200만원 | 공장 화재로 생산이 중단됐다. | 과태료 납부 완료, 복구 진행 중"
+    raw = header + "; " + closed + "; " + current
+    supported, observed = slots(raw)
+    assert {"current_challenges:issue", "current_challenges:response"} <= supported
+    assert observed and raw == header + "; " + closed + "; " + current
+
+
+@pytest.mark.parametrize("text", [
+    "회계정책과 공시의 변경에 따라 기업회계기준서를 적용했다. 해당 개정이 재무제표의 유동성위험 정보에 미치는 중요한 영향은 없다.",
+    "회사의 재무부문은 금융위험을 감시하고 관리한다. 이러한 시장위험과 신용위험 정책은 전기말 이후 변동이 없다.",
+])
+def test_policy_context_is_checked_before_older_accounting_split_removes_context(text):
+    assert slots(text) == (set(), True)

@@ -91,6 +91,9 @@ def test_별도배포_수집기와_공통판정이_일치한다():
     "공학 학사 출신으로 이전 직장에서 공장 생산을 담당했다.",
     "주요 경력: 가람산업 동부공장 생산을 담당하였다.",
     "주요 경력: 공학 박사, 가람산업 동부공장 생산을 담당하였다.",
+    "한빛대학교(학사/석사) 가람제조 생산기획담당",
+    "공학 박사 가람제조 제조기술기획담당",
+    "주요 경력: 가람산업 공정개선담당",
 ])
 def test_학력경력만으로_운영역할_재분류를_허용하지_않는다(career):
     assert business_slot_scope_problem(career, ROLE) == "business_slot_scope_unsupported"
@@ -108,6 +111,11 @@ def test_학력경력만으로_운영역할_재분류를_허용하지_않는다(
     "학사 출신 제조담당은 현재 회사의 제품 제조를 담당하며 생산을 수행한다.",
     "공학 학사 경력을 가진 임원이 있으며, 회사는 공장 생산을 담당했다.",
     "주요 경력: 공학 학사 임원이 있으며, 회사는 공장에서 제품을 제조했다.",
+    "학사 출신 생산기획담당은 현재 공장에서 제품 생산을 담당한다.",
+    "학사 출신 생산기획담당은 설비를 개발하고 있다.",
+    "회사의 생산기획담당 조직은 제조 설비 개발을 추진할 계획이다.",
+    "생산기획담당 연구개발 조직",
+    "회사는 공장 생산기획 활동을 수행할 계획이다.",
 ])
 def test_현재_임원역할과_실제조직행동_교육서비스를_보존한다(current):
     assert not business_slot_scope_problem(current, ROLE)
@@ -122,6 +130,18 @@ def test_혼합원문_현재제조절과_리더십_슬롯은_원문을_유지한
     assert current.rstrip(".") in scoped.score_text
     assert not business_slot_scope_problem(text, ROLE)
     assert business_slot_scope(text, "culture:leadership").score_text == text
+
+
+@pytest.mark.parametrize("activity", [
+    "회사는 공장에서 제품을 생산할 계획이다.",
+    "회사는 제조 설비를 개발할 예정이다.",
+])
+def test_학위복합직함과_섞인_회사의_생산계획은_보존한다(activity):
+    text = "공학 학사 가람제조 생산기획담당, " + activity
+    scoped = business_slot_scope(text, ROLE)
+    assert scoped.excluded_clauses
+    assert activity.rstrip(".") in scoped.score_text
+    assert not business_slot_scope_problem(text, ROLE)
 
 
 @pytest.mark.parametrize("separator", [", ", "\n", "; ", ". "])

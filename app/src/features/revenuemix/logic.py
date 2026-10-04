@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import re
+import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Final, Iterable, Optional, TypedDict
@@ -19,6 +21,7 @@ from src.shared.revenue_population_scope import (
     revenue_population_caption, revenue_population_context_start, revenue_population_heading, revenue_product_name_span,
 )
 from src.features.revenuemix.constants import (
+    STRUCTURED_HEADER_ROWS, STRUCTURED_ITEM_HEADER_RE, STRUCTURED_AMOUNT_HEADER_RE, STRUCTURED_PERIOD_RES,
     AMOUNT_ONLY_CAPTION_BY_AXIS,
     AMOUNT_ONLY_HEADING_LOOKBACK,
     AMOUNT_ONLY_HEADING_STOPS,
@@ -1775,3 +1778,104 @@ def build(filing_text: str, cite: str = "") -> list[RevenueTablePayload]:
     """
 
     return build_with_diagnostics(filing_text, cite)[0]
+
+
+def revenue_input_from_tables(filing_text: str, tables: Sequence[Mapping]) -> str:
+    """선택된 제품 표만 원XML의 품목·금액·비율 셀 입력으로 바꾼다.
+
+    호출자는 같은 다운로드 원XML에서 읽은 표를 전달한다. 기존 공시 평문과
+    같은 부문·모든 행의 수치·합계가 유일하게 연결되어야 한다. 신규 근거의
+    filing_sha256와 좌표는 이 반환 입력에 대한 값이며 원XML bytes 지문이 아니다.
+    지역표와 다른 원문은 그대로 두며, 불명확한 셀은 기존 평문 입력을 유지한다.
+    """
+    if not filing_text or not tables or not revenue_table_v2_enabled():
+        return filing_text
+    original_tables, _ = _build_v2(filing_text)
+    replacements = []
+    for selected in original_tables:
+        if selected["axis"] != REVENUE_AXIS_PRODUCT:
+            continue
+        first = json.loads(selected["evidence_rows"][0])
+        source, header = first["source"], first["table"]["header"]
+        prefix = filing_text[source["start"]:header["start"]]
+        population = revenue_population_heading(prefix)
+        expected_pairs = [tuple(row[1:]) for row in selected["rows"]]
+        # 같은 수치의 두 행은 다른 품목을 가리킬 수 있어 순서만으로 붙이지 않는다.
+        if len(set(expected_pairs[:-1])) != len(expected_pairs) - 1:
+            continue
+        candidates = []
+        for grid in tables:
+            if not isinstance(grid, Mapping):
+                continue
+            if "".join(str(grid.get("population_heading", "")).split()) != "".join(population.split()):
+                continue
+            rows = grid.get("rows")
+            title = grid.get("title", "")
+            if type(title) is not str or not isinstance(rows, (tuple, list)) or not rows:
+                continue
+            for header_index, labels in enumerate(rows[:STRUCTURED_HEADER_ROWS]):
+                if not isinstance(labels, (tuple, list)) or any(type(cell) is not str for cell in labels):
+                    continue
+                items = [i for i, label in enumerate(labels) if STRUCTURED_ITEM_HEADER_RE.fullmatch(label.strip())]
+                if (len(items) != 1 or len(labels) < 3 or items[0] >= len(labels) - 2
+                        or not STRUCTURED_AMOUNT_HEADER_RE.search(labels[-2])
+                        or not RATIO_HEAD_RE.search(labels[-1])):
+                    continue
+                # 명시 기간끼리만 비교한다. 한쪽에 기간이 없다는 사실을 동일 기간의 증거로 쓰지 않는다.
+                header_rows = rows[:header_index + 1]
+                if any(not isinstance(row, (tuple, list)) or any(type(cell) is not str for cell in row) for row in header_rows):
+                    continue
+                old_context = prefix + header["text"]
+                grid_context = title + " " + " ".join(cell for row in header_rows for cell in row)
+                if any(old_periods and grid_periods and old_periods != grid_periods
+                       for period_re in STRUCTURED_PERIOD_RES
+                       for old_periods, grid_periods in [(set(period_re.findall(old_context)), set(period_re.findall(grid_context)))]):
+                    continue
+                old_units, grid_units = set(revenue_units_in(old_context)), set(revenue_units_in(grid_context))
+                if grid_units and old_units and grid_units != old_units:
+                    continue
+                item_index = items[0]
+                data = rows[header_index + 1:]
+                if (len(data) != len(expected_pairs) or any(
+                        not isinstance(row, (tuple, list)) or len(row) != len(labels)
+                        or any(type(cell) is not str for cell in row) for row in data)):
+                    continue
+                if [tuple(row[-2:]) for row in data] != expected_pairs:
+                    continue
+                names = [row[item_index].strip() for row in data[:-1]]
+                if (any(not name or "|" in name or "\n" in name or clean_name(name) != name for name in names)
+                        or not is_revenue_total_name_v2(clean_name(data[-1][item_index]))):
+                    continue
+                raw_names = [json.loads(e)["row"]["raw_match"] for e in selected["evidence_rows"][:-1]]
+                if any(name not in raw for name, raw in zip(names, raw_names, strict=True)):
+                    continue
+                # 단위·보고기간을 포함한 기존 머리말 앞부분을 그대로 보존한다.
+                initial_label = labels[0].strip()
+                label_positions = list(re.finditer(re.escape(initial_label), header["text"]))
+                if len(label_positions) != 1:
+                    continue
+                unit_prefix = header["text"][:label_positions[0].start()]
+                new_header = " | ".join((labels[item_index], *labels[-2:]))
+                body = [f"{name} {pair[0]} {pair[1]}" for name, pair in zip(names, expected_pairs[:-1], strict=True)]
+                total = first["table"]["total"]["raw_match"]
+                replacement = prefix + unit_prefix + new_header + "\n" + "\n".join((*body, total))
+                candidates.append((replacement, names))
+        # 중복된 동일 표도 한 표의 출처를 확정하지 못하므로 기존 입력을 쓴다.
+        if len(candidates) != 1:
+            continue
+        replacement, names = candidates[0]
+        replacements.append((source["start"], source["end"], replacement, names, expected_pairs))
+    if not replacements:
+        return filing_text
+    updated = filing_text
+    for start, end, replacement, _, _ in sorted(replacements, reverse=True):
+        updated = updated[:start] + replacement + updated[end:]
+    # 기존 파서·검산 경로가 원XML의 정확 품목과 모든 수치를 그대로 읽어야 한다.
+    parsed, _ = _build_v2(updated)
+    for _, _, _, names, pairs in replacements:
+        matching = [table for table in parsed if table["axis"] == REVENUE_AXIS_PRODUCT
+                    and [tuple(row[1:]) for row in table["rows"]] == pairs
+                    and [row[0] for row in table["rows"][:-1]] == names]
+        if len(matching) != 1:
+            return filing_text
+    return updated

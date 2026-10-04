@@ -29,6 +29,17 @@ from __future__ import annotations
 import re
 from typing import Final
 
+STRUCTURED_HEADER_ROWS: Final[int] = 4
+STRUCTURED_ITEM_HEADER_RE: Final[re.Pattern[str]] = re.compile(r"품\s*목|제품(?:명)?|상품(?:명)?|서비스(?:명)?")
+STRUCTURED_AMOUNT_HEADER_RE: Final[re.Pattern[str]] = re.compile(r"매\s*출\s*액|영업\s*수익")
+#: 양쪽 머리말에 명시된 같은 종류의 기간 표기가 충돌하면 구조 입력을 쓰지 않는다.
+STRUCTURED_PERIOD_RES: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(r"(?<!\d)((?:19|20)\d{2})\s*년"),
+    re.compile(r"제\s*(\d+)\s*기(?![가-힣])"),
+    re.compile(r"(?<!\d)([1-4])\s*분기"),
+    re.compile(r"(상|하)\s*반기"),
+)
+
 from src.shared.revenue_table_provenance import (
     REVENUE_AMOUNT_ONLY_CAPTION_BY_AXIS,
     REVENUE_AMOUNT_ONLY_FOOTNOTE,

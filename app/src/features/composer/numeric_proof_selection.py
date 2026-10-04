@@ -90,7 +90,8 @@ def prepare_numeric_proof_options(
         match = candidate_metrics[0]
         metric, value = match.group('metric', 'value')
         own = {fragment.fragment_id: fragment.text for fragment in item.fragments}
-        if len(own) != len(item.fragments) or challenge_business_problem(item.text, own):
+        # 과거 사건의 정확 수치도 선택할 수 있다. 당면 과제 적격은 최종 5장 검사에서 별도로 닫는다.
+        if len(own) != len(item.fragments) or challenge_business_problem(item.text, own, require_current=False):
             continue
         if any(fragment.source_context_json and source_actor_problem(
             item.text, fragment.source_context_json, own,

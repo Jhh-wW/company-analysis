@@ -1,0 +1,130 @@
+"""원문을 유지하고 당면 과제의 지원칸·배치에만 닫힌 부정 경계를 적용한다."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import unicodedata
+
+from features.evidence_collection import challenge_eligibility_constants as c
+
+
+def _surface(text: str) -> str:
+    return "".join(unicodedata.normalize("NFKC", text).split())
+
+
+@dataclass(frozen=True)
+class ChallengeEligibilityScope:
+    score_text: str
+    excluded_spans: tuple[tuple[int, int, str], ...] = ()
+
+    @property
+    def excluded_clauses(self) -> int:
+        return len(self.excluded_spans)
+
+
+def _reason(text: str, *, table_record: bool = False, positive_context: bool = False,
+            policy_units: tuple = ()) -> str:
+    surface = _surface(text)
+    if (c.FINANCIAL_EXPOSURE_RE.search(surface)
+            or any(pattern.search(surface) for pattern in policy_units)) and not c.POLICY_BUSINESS_PROBLEM_RE.search(surface):
+        return c.ADMINISTRATIVE_EVENT_ONLY
+    if c.ADMINISTRATIVE_RE.search(surface) and not c.BUSINESS_PROBLEM_RE.search(surface):
+        return c.ADMINISTRATIVE_EVENT_ONLY
+    if (table_record and c.DATE_RE.search(surface) and c.INCIDENT_RE.search(surface)
+            and c.COMPLETED_ACTION_RE.search(surface)
+            and not c.CONTINUING_PROBLEM_RE.search(surface)
+            and not c.ACTIVE_IMPACT_RE.search(surface)
+            and not c.OPERATING_RESPONSE_RE.search(surface)):
+        return c.HISTORICAL_EVENT_ONLY
+    if (c.POSITIVE_RE.search(surface) or (
+            positive_context and c.POSITIVE_FOLLOWUP_RE.search(surface))) and not c.PROBLEM_RE.search(surface):
+        return c.POSITIVE_RESPONSE_ONLY
+    return ""
+
+
+def challenge_eligibility_scope(text: str) -> ChallengeEligibilityScope:
+    """섞인 원문은 적격 절만 채점한다. 원문 자체와 다른 장의 근거는 바꾸지 않는다.
+
+    임의 자연어의 사업 관련성을 증명하지 않는다. 닫힌 모순이 없는 나머지는
+    기존 자기 인용·의미 검수로 판단한다. 교육·납부의 진행은 문제 지속의 증거가 아니다.
+    """
+    kept = []
+    excluded = []
+    start = 0
+    table_record = False
+    pending_header = None
+    saw_header = False
+    positive_context = False
+    full_surface = _surface(text)
+    policy_units = tuple(unit for first, second, unit in c.POLICY_CONTEXT_RULES
+                         if first.search(full_surface) and second.search(full_surface))
+    bounds = [(match.start(), match.end()) for match in c.UNIT_RE.finditer(text)]
+    cursor = 0
+    extra_bounds = []
+    for end, next_start in (*bounds, (len(text), len(text))):
+        unit = text[cursor:end]
+        # 긍정 서술 뒤의 독립 문제 절을 남긴다. 사건 표의 같은 행은 나누지 않는다.
+        if "|" not in unit:
+            for match in c.POSITIVE_CLAUSE_BOUNDARY_RE.finditer(unit):
+                if c.POSITIVE_RE.search(_surface(unit[:match.start()])):
+                    extra_bounds.append((cursor + match.start(), cursor + match.end()))
+        cursor = next_start
+    bounds = sorted((*bounds, *extra_bounds))
+    for end, next_start in (*bounds, (len(text), len(text))):
+        unit = text[start:end]
+        if unit.strip():
+            header = "|" in unit and bool(c.TABLE_HEADER_RE.search(_surface(unit)))
+            if header:
+                table_record = True
+                saw_header = True
+                pending_header = (start, next_start)
+            elif "|" not in unit:
+                table_record = False
+                pending_header = None
+            reason = _reason(unit, table_record=table_record and not header,
+                             positive_context=positive_context, policy_units=policy_units)
+            positive_context = reason == c.POSITIVE_RESPONSE_ONLY
+            if reason:
+                excluded.append((start, end, reason))
+            elif not header:
+                if "|" in unit and pending_header is not None:
+                    kept.append(pending_header)
+                    pending_header = None
+                kept.append((start, next_start))
+        start = next_start
+    if saw_header and not kept and not excluded:
+        excluded.append((0, len(text), c.HISTORICAL_EVENT_ONLY))
+    # 원문 연결자를 보존해 살아남은 사건 행 안의 문장을 다른 행으로 나누지 않는다.
+    score_text = "".join(text[begin:finish] for begin, finish in kept)
+    return ChallengeEligibilityScope(score_text if excluded or saw_header else text, tuple(excluded))
+
+
+def challenge_eligibility_problem(text: str) -> str:
+    scope = challenge_eligibility_scope(text)
+    return scope.excluded_spans[0][2] if scope.excluded_spans and not scope.score_text.strip() else ""
+
+
+def challenge_incident_row_problem(row: str) -> str:
+    """호출자가 같은 행 관계를 확인한 사건 표 행의 현재 지원칸만 제한한다."""
+    return _reason(row, table_record=True)
+
+
+def challenge_eligibility_quote_problem(quote: str, source: str, slot_id: str) -> str:
+    """같은 원문의 제외 절만 잘라 지원칸을 되살리는 것을 막는다."""
+    if slot_id not in c.CHALLENGE_SLOTS:
+        return ""
+    problem = challenge_eligibility_problem(quote)
+    if problem:
+        return problem
+    scoped = challenge_eligibility_scope(source)
+    if not scoped.excluded_spans:
+        return ""
+    if not scoped.score_text.strip():
+        return scoped.excluded_spans[0][2]
+    at = 0
+    while quote and (at := source.find(quote, at)) >= 0:
+        end = at + len(quote)
+        for start, stop, reason in scoped.excluded_spans:
+            if start <= at and end <= stop:
+                return reason
+        at += 1
+    return ""

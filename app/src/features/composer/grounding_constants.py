@@ -103,12 +103,27 @@ RETROSPECTIVE_RE = re.compile(
     r"(?:재임기간|평가(?:대상기간|결과)?|성과급|경영성과|사업성과|실적|"
     r"완료|달성|출시|신설|개선|시행|수행)"
 )
+# 개발 과제 표는 날짜가 과제명 뒤에 오고, 연도도 19.01~20.03처럼 축약된다.
+# 한 행의 완료 실적과 날짜를 함께 읽으며 날짜 없는 일반 연구 업무는 건드리지 않는다.
+ACTIVITY_DATE_RE = re.compile(
+    r"(?<!\d)(?:(?:19|20)\d{2}(?:년|[./-]\d{1,2}(?:[./-]\d{1,2})?)"
+    r"|\d{2}[.]\d{2}\s*[~～–-]\s*\d{2}[.]\d{2})(?!\d)"
+)
+HISTORICAL_ACTIVITY_RE = re.compile(r"개발|특허\s*(?:출원|등록)|완료|달성|출시|신설|개선|시행|수행")
+HISTORICAL_OVERLAP_MIN_LENGTH = 3
+HISTORICAL_OVERLAP_MIN_TOKENS = 2
+ACTIVITY_SUBJECT_RE = re.compile(r"[가-힣A-Za-z][가-힣A-Za-z0-9]{2,}(?:은|는|이|가)(?=\s)")
+HISTORICAL_GENERIC_TOPIC_WORDS = frozenset({
+    "생산성", "효율화", "생산설비", "설비", "시스템", "서비스", "제품", "상품",
+    "향상", "기술혁신", "연구개발", "특허등록", "특허출원", "과제", "기대효과",
+})
 PARENTHETICAL_RE = re.compile(r"(?P<label>[가-힣A-Za-z]+)\s*\((?P<body>[^()]*)\)")
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[다요])[.!?]\s+|[;\n]")
 PARTICLE_RE = re.compile(r"(?:으로|에서|은|는|이|가|의|을|를)$")
 PAIR_SEPARATOR_RE = re.compile(r"[\s:：|,=()·\-]")
 PRESENT_RE = re.compile(
-    r"현재|지금|(?:추진|확대|강화|구축|운영|제공|진행|개선|출시|신설)"
+    r"현재|지금|이루고\s*(?:있다|있으며|있는|있음)|"
+    r"(?:추진|확대|강화|구축|운영|제공|진행|개선|출시|신설|개발|연구|생산|제조|등록)"
     r"(?:하고|되고|중이고|중이며)?\s*(?:있다|있으며|있는|있음|중이다|중)"
 )
 TOKEN_RE = re.compile(r"[가-힣A-Za-z][가-힣A-Za-z0-9]{2,}")

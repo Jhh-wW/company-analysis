@@ -20,17 +20,24 @@ def test_dated_record_cannot_lose_its_period_or_borrow_other_period_progress(tex
 
 
 @pytest.mark.parametrize("text", [
-    "회사는 2023년 안전관리 위반으로 과태료를 받았고 설비 개선을 완료했다.",
-    "회사는 2025년 환경 변경신고 위반으로 과태료를 받았고 변경신고를 진행 중이다.",
     "회사는 고객 수요 감소로 납품에 어려움을 겪고 있다.",
 ])
 def test_actual_period_and_independent_current_business_are_preserved(text):
-    assert not challenge_business_problem(text, {"1": RECORDS})
+    assert not challenge_business_problem(text, {"1": RECORDS + "; " + text})
+
+
+@pytest.mark.parametrize("text", [
+    "회사는 2023년 안전관리 위반으로 과태료를 받았고 설비 개선을 완료했다.",
+    "회사는 2025년 환경 변경신고 위반으로 과태료를 받았고 변경신고를 진행 중이다.",
+])
+def test_event_period_truth_does_not_automatically_fill_current_business_slot(text):
+    assert not challenge_event_scope_problem(text, {"1": RECORDS})
+    assert challenge_business_problem(text, {"1": RECORDS}) == "challenge_current_problem_unbound"
 
 
 def test_flow_reads_period_from_whole_row_and_financial_guard_remains_issue_only():
     assert challenge_business_problem("안전관리 위반 과태료", {"1": RECORDS},
-        cells=("2023년 안전관리 위반 과태료", "납부와 개선 완료")) == ""
+        cells=("2023년 안전관리 위반 과태료", "납부와 개선 완료")) == "challenge_current_problem_unbound"
     assert challenge_business_problem("안전관리 위반 과태료", {"1": RECORDS},
         cells=("안전관리 위반 과태료", "납부와 개선 완료")) == "time_invalid"
     assert challenge_business_problem("안전관리 위반 과태료", {"1": RECORDS},

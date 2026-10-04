@@ -14,7 +14,8 @@ from src.features.news_intake import constants as c
 from src.features.news_intake.claim_role import plan_role_parts
 from src.features.news_intake.models import GroundedNewsExcerpt, NewsCandidate, NewsCompanyContext
 from src.features.news_intake.identity_names import company_query_names, mentions_target
-from src.features.news_intake.quote_selection import quote_candidates, quote_schema, restore_quote_response
+from src.features.news_intake.article_identity import article_company_context
+from src.features.news_intake.quote_selection import quote_candidates, quote_schema, restore_quote_response, _fact_start
 from src.features.news_intake import quote_selection_constants as qc
 from src.features.news_intake.select import normalize_company_name
 from src.shared.report_claim_policy import claim_slots_for
@@ -25,6 +26,7 @@ from src.shared.report_evidence.policy import (
 )
 from src.shared.report_evidence.source_kind_policy import supplementary_slots_for_source_kind
 from src.shared.report_quality.supplementary_prose import NEWS_PROTECTED_SECTIONS
+from src.shared.report_evidence.challenge_eligibility import challenge_eligibility_quote_problem
 
 
 ELIGIBLE_SECTIONS = tuple(section for section in REQUIRED_EVIDENCE_SECTION_IDS if section not in c.NEWS_EXCLUDED_SECTIONS)
@@ -161,6 +163,9 @@ def build_grounded_prompt(company: NewsCompanyContext, articles: list[tuple[News
         "협찬·광고·블로그·커뮤니티·타사 소식은 제외하세요. 널리 알려진 출처라도 이 조건을 면제하지 않습니다.\n"
         "3. same_company와 material이 모두 true일 때만 excerpts를 고르세요. 최대 두 개이며 서로 다른 "
         "실질 내용을 담아야 합니다. 각 text는 아래 body에 있는 연속 범위를 한 글자도 바꾸지 않고 복사하고, "
+        "핵심 사실과 주어·시제를 증명하는 가장 짧은 자기완결 범위를 선택하세요. "
+        "수상·실적·평가 배경을 통째로 여러 장에 반복하지 마세요. 두 인용은 서로 다른 새 사실이 있어야 하며 "
+        "같은 수상 설명을 반복하거나 앞 인용을 더 길게 늘린 범위만으로 다른 장을 채우지 마세요. "
         "완결된 사업 사실 문장을 고르세요. 각 text 인용 범위 자체에 검증된 대상 법인명과 그 법인의 "
         "실제 사업 행동이 함께 있는 자기완결 연속 문장을 우선 고르세요. 본문의 다른 문장이나 발행처에만 "
         "회사명이 있는 것으로는 부족하며, '이 회사' 같은 대명사만 남긴 문장은 고르지 마세요. "
@@ -177,6 +182,9 @@ def build_grounded_prompt(company: NewsCompanyContext, articles: list[tuple[News
         + _section_guide_text() + " "
         "한 연속 원문에 서로 다른 장의 사실(예: 회사 전체의 지난해 실적과 특정 제품의 성과)이 "
         "함께 있으면 각 사실을 별도 범위로 나누세요. "
+        "current_challenges의 issue/response는 같은 인용 안에 구체 현재 사업 문제가 있고 "
+        "response는 바로 그 문제와 회사 대응의 연결이 명시될 때만 선택하세요. "
+        "긍정 수상·매출 성장·ESG 평가·PPA 체결 자체는 사업 문제나 그 문제의 대응을 증명하지 않습니다. "
         "reported_fact(기자가 확인한 외부사실), company_statement(회사/대표의 명시 발언), "
         "company_plan(아직 실현되지 않은 회사 계획)을 구별하세요. 미래 계획은 temporal_status=planned이며 "
         "실행완료로 바꾸지 마세요. 5·6·8장의 발언은 대상 회사에 명시 귀속된 원문만 사용하세요. "
@@ -292,7 +300,8 @@ def _bound_subject(raw: dict[str, str], body: str, company: NewsCompanyContext,
     """회사명이 생략된 대상은 명시 관계 원문까지 하나의 연속 범위로 보존한다."""
     text = raw["text"]
     subject, evidence = raw["subject"], raw["subject_evidence"]
-    if mentions_target(text, company):
+    article_context = article_company_context(body, company)
+    if mentions_target(text, article_context):
         return (text, start) if not subject and not evidence else _subject_rejected(
             diagnostics, c.SUBJECT_DIRECT_NAME_EXTRA_FIELDS
         )
@@ -342,6 +351,9 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
         excluded["grounded_subject_missing"] += 1
         return None
     text, start = bound
+    if _fact_start(text, 0, len(text), article_context := article_company_context(body, company)) > 0:
+        excluded["grounded_ui_prefix"] += 1
+        return None
     if any(marker in text for marker in c.NON_ARTICLE_TEXT_MARKERS + c.MARKET_COMMENTARY_MARKERS):
         excluded["grounded_non_material"] += 1
         return None
@@ -352,6 +364,9 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
     section, slot = raw["section_id"], raw["claim_slot"]
     if section not in ALLOWED_SLOTS or slot not in ALLOWED_SLOTS[section]:
         excluded["grounded_invalid_slot"] += 1
+        return None
+    if challenge_problem := challenge_eligibility_quote_problem(text, body, slot):
+        excluded[challenge_problem] += 1
         return None
     kind, temporal = raw["claim_kind"], raw["temporal_status"]
     if kind not in c.GROUNDED_CLAIM_KINDS or temporal not in c.GROUNDED_TEMPORAL_STATES:

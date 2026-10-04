@@ -11,6 +11,28 @@ from src.features.news_intake import quote_selection_constants as c
 from src.features.news_intake.identity_names import company_query_names, mentions_target
 from src.features.news_intake.select import normalize_company_name
 from src.features.news_intake.models import NewsCandidate, NewsCompanyContext
+from src.features.news_intake.article_identity import article_company_context
+
+
+def _fact_start(body: str, start: int, end: int, company: NewsCompanyContext | None) -> int:
+    """닫힌 UI 패널 뒤의 전체 회사명 시작 위치만 후보 경계로 추가한다."""
+    if company is None:
+        return start
+    for name in company_query_names(company):
+        compact = re.sub(r"\s+", "", name)
+        pattern = r"(?<!\w)" + r"\s*".join(re.escape(char) for char in compact)
+        pattern += c.QUOTE_KNOWN_NAME_BOUNDARY
+        for match in re.finditer(pattern, body[start:end], re.I):
+            prefix = body[start:start + match.start()]
+            if (sum(marker in prefix for marker in c.QUOTE_UI_PANEL_MARKERS) >= c.QUOTE_UI_PANEL_MIN_MARKERS
+                    and not c.QUOTE_EXPLICIT_BUSINESS_ACTION_RE.search(prefix)):
+                if not c.QUOTE_UI_PREFIX_PROBLEM_RE.search(prefix):
+                    return start + match.start()
+                # 명확한 글자크기 패널 끝 뒤의 실제 문제 서술도 함께 보존한다.
+                panel = c.QUOTE_UI_PANEL_END_RE.search(prefix)
+                if panel and c.QUOTE_UI_PREFIX_PROBLEM_RE.search(prefix[panel.end():]):
+                    return start + panel.end()
+    return start
 
 
 def quote_response_sha256(raw: object) -> str | None:
@@ -31,6 +53,8 @@ def quote_candidates(candidate: NewsCandidate, body: str,
                      company: NewsCompanyContext | None = None) -> list[dict]:
     """문장·문단과 인접 범위만 제시하며 본문 문자열을 복제하지 않는다."""
     body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    if company is not None:
+        company = article_company_context(body, company)
     units = []
     # 소수점·상호의 점은 문장 경계로 보지 않는다.
     for match in c.QUOTE_SENTENCE_RE.finditer(body):
@@ -39,6 +63,7 @@ def quote_candidates(candidate: NewsCandidate, body: str,
             start += 1
         while end > start and body[end - 1].isspace():
             end -= 1
+        start = _fact_start(body, start, end, company)
         if start < end:
             units.append((start, end))
     # 앞쪽 회사명에만 후보를 소비하지 않도록 단문 몫을 본문 전체에 고르게 둔다.
@@ -67,6 +92,7 @@ def quote_candidates(candidate: NewsCandidate, body: str,
                       for i in range(len(units) - width + 1))
     output, seen = [], set()
     for start, end in ranges:
+        start = _fact_start(body, start, end, company)
         if (start, end) in seen or not 0 < end - start <= c.QUOTE_MAX_CHARS:
             continue
         seen.add((start, end))
@@ -101,8 +127,9 @@ def quote_schema(schema: dict, articles: list[tuple[NewsCandidate, str]],
     return result
 
 
-def _selection_subject_supported(text: str, company: NewsCompanyContext) -> bool:
+def _selection_subject_supported(text: str, company: NewsCompanyContext, body: str | None = None) -> bool:
     """회사명 존재를 행동 주어로 승격시키는 명시 모순만 신규 선택에서 제외한다."""
+    company = article_company_context(body if body is not None else text, company)
     if not mentions_target(text, company):
         return True  # 제품·인물의 명시 관계는 기존 주어 결속 검사에서 판정한다.
     names = company_query_names(company)
@@ -200,7 +227,7 @@ def restore_quote_response(raw: object, *, articles: list[tuple[NewsCandidate, s
                         raise ValueError("인용별 대상 주어 판정 또는 원문 선택 계약이 누락됐습니다")
                     subject_is_target = excerpt.pop("subject_is_target")
                     restore(excerpt, source_fields, body, table)
-                    if not subject_is_target or not _selection_subject_supported(excerpt["text"], company):
+                    if not subject_is_target or not _selection_subject_supported(excerpt["text"], company, body):
                         excerpt["invalid_quote_subject"] = True
                 except (KeyError, TypeError, ValueError):
                     fail_selection(excerpt, c.QUOTE_EXCERPT_SOURCE_FIELDS)

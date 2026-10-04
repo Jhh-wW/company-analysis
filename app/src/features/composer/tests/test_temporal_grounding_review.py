@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.features.composer.grounding import (
     grounding_problem,
     grounding_requirements,
@@ -23,6 +25,85 @@ from src.features.composer.grounding_constants import (
 
 SOURCE_ID = "공시"
 REVENUE_METRIC = "영업수익"
+
+
+@pytest.mark.parametrize("source", [
+    "성형기 개발 | 19.01~20.03 | 생산성 향상 설비 개발",
+    "성형기 개발 | 2020.06.05 | 생산성 향상 설비 개발",
+    "2020년 성형기 개발 완료로 생산성 향상",
+    "성형기 특허 등록 | 2020-06-05 | 생산성 향상",
+])
+@pytest.mark.parametrize("text", [
+    "성형기 개발을 통해 생산성 향상을 추진하고 있다.",
+    "성형기 개발을 통해 생산성 향상을 이루고 있다.",
+    "성형기를 개발하고 있다.",
+    "성형기를 연구 중이다.",
+    "성형기를 생산하고 있다.",
+])
+def test_날짜가_앞뒤에_있는_완료실적을_현재화하면_시점결속을_요구한다(source, text):
+    assert TIME_KEY in grounding_requirements(text, (source,))
+    assert grounding_problem(text, {SOURCE_ID: source}, {}) == GROUNDING_MISSING
+
+
+@pytest.mark.parametrize("text,source", [
+    ("성형기 개발로 생산성 향상을 이루었다.", "성형기 개발 | 19.01~20.03 | 생산성 향상"),
+    ("성형기 개발로 생산성 향상을 이룰 계획이다.", "성형기 개발 | 19.01~20.03 | 생산성 향상"),
+    ("현재 성형기 개발로 생산성 향상을 이룰 계획이다.", "성형기 개발 | 19.01~20.03 | 생산성 향상"),
+    ("성형기 개발로 생산성 향상을 추진하고 있다.", "성형기 개발로 생산성 향상을 추진하고 있다."),
+    ("연구개발센터에서 성형기 개발을 추진하고 있다.", "연구개발센터의 성형기 개발 업무"),
+    ("현재 고객지원 상담센터 운영을 이어가고 있다.", "성형기 개발 | 19.01~20.03 | 생산성 향상; 현재 고객지원 상담센터 운영을 이어가고 있다."),
+])
+def test_과거형_계획_정상현재_날짜없는업무_별개활동을_보존한다(text, source):
+    assert TIME_KEY not in grounding_requirements(text, (source,))
+
+
+def test_같은과제의_현재업무는_별도현재원문에_결속하면_보존한다():
+    text = "현재 성형기 개발로 생산성 향상을 추진하고 있다."
+    current = text.rstrip(".")
+    source = "성형기 개발 | 19.01~20.03 | 생산성 향상; " + current
+    assert grounding_problem(text, {SOURCE_ID: source}, {
+        "검증근거": {TIME_KEY: [_time_entry(current, current)]}
+    }) == ""
+
+
+def test_다른_계획을_덧붙여도_완료과제_현재화를_면제하지_않는다():
+    text = "성형기 개발로 생산성 향상을 추진하고 있으며, 고객지원은 확대할 계획이다."
+    source = "성형기 개발 | 19.01~20.03 | 생산성 향상"
+    assert TIME_KEY in grounding_requirements(text, (source,))
+
+
+@pytest.mark.parametrize("text", [
+    "성형기를 개발하고 있다.",
+    "성형기를 연구 중이다.",
+    "성형기를 생산하고 있다.",
+])
+def test_실제_진행과제의_현재서술은_그대로_보존한다(text):
+    source = "성형기 개발 | 19.01~20.03 | " + text
+    assert TIME_KEY not in grounding_requirements(text, (source,))
+
+
+def test_일반결과어만_겹친_다른현재업무는_과거개발에_묶지_않는다():
+    source = "성형기 개발 | 19.01~20.03 | 생산성 향상"
+    text = "상담센터는 생산성을 개선하고 있다."
+    assert TIME_KEY not in grounding_requirements(text, (source,))
+
+
+def test_공통회사주어_하나로_별개현재활동을_과거실적에_묶지_않는다():
+    source = "2020년 가람산업은 신형장비 개발을 완료했다. 현재 가람산업은 고객상담센터 운영을 이어가고 있다."
+    text = "가람산업은 고객상담센터를 운영하고 있다."
+    assert TIME_KEY not in grounding_requirements(text, (source,))
+
+
+def test_과거개발_대상이_현재문장의_주어이면_시점요구를_보존한다():
+    source = "성형기 개발 | 19.01~20.03 | 생산성 향상"
+    text = "성형기는 연구 중이다."
+    assert TIME_KEY in grounding_requirements(text, (source,))
+
+
+def test_공통회사주어와_일반결과어를_합쳐_별개활동을_현재화로_세지_않는다():
+    source = "2020년 가람산업은 성형기 개발을 완료해 생산성이 향상됐다. 현재 가람산업은 고객상담센터 운영을 이어가고 있다."
+    text = "가람산업은 고객상담센터의 생산성을 개선하고 있다."
+    assert TIME_KEY not in grounding_requirements(text, (source,))
 
 
 def _numeric_entry(

@@ -131,13 +131,35 @@ def test_grouped_and_flat_requests_use_one_local_option_without_extra_calls():
         return selected(option_id)
     sentence = ComposedSentence(TEXT, ('1',), '확인', planned_claim_slot='current_challenges:issue')
     grouped = verify._GroupedReviewItem(1, 'current_challenges', '문장', ('1',), sentence=sentence)
-    result = verify._ask_grouped_verdicts(ask, [grouped], {'1': fragment()}, None)
+    current = fragment(SOURCE + ', 고객 납품 지연이 지속되고 있다')
+    result = verify._ask_grouped_verdicts(ask, [grouped], {'1': current}, None)
     assert result == {1: '참'} and len(calls) == 1 and not hasattr(calls[0], 'response_schema')
     calls.clear()
     item = verify._ReviewItem(1, sentence, section_id='current_challenges', kind='문장')
-    assert verify._ask_verdicts(ask, [item], {'1': fragment()}, '') == {1: '참'}
+    assert verify._ask_verdicts(ask, [item], {'1': current}, '') == {1: '참'}
     assert len(calls) == 1
     assert FLAT_REVIEW_SCHEMA['$defs']['grounding']['properties'][NUMERIC_SELECTION_KEY] == {'type': 'string'}
+
+
+@pytest.mark.parametrize('grouped', [False, True])
+def test_historical_numeric_selection_never_bypasses_final_current_challenge_guard(grouped):
+    calls = []
+    source = fragment()
+    original = (source.text, source.document_content_sha256)
+    def ask(prompt):
+        calls.append(prompt)
+        option_id = re.search(r'np1_[0-9a-f]{64}', prompt).group()
+        return selected(option_id)
+    sentence = ComposedSentence(TEXT, ('1',), '확인', planned_claim_slot='current_challenges:issue')
+    if grouped:
+        item = verify._GroupedReviewItem(1, 'current_challenges', '문장', ('1',), sentence=sentence)
+        result = verify._ask_grouped_verdicts(ask, [item], {'1': source}, None)
+    else:
+        item = verify._ReviewItem(1, sentence, section_id='current_challenges')
+        result = verify._ask_verdicts(ask, [item], {'1': source}, '')
+    assert result == {1: verify.REVIEW_GROUNDING_REJECTED}
+    assert len(calls) == 1
+    assert (source.text, source.document_content_sha256) == original
 
 
 def test_invalid_selection_is_diagnosed_without_overriding_false():
@@ -163,13 +185,14 @@ def test_missing_verdict_followup_keeps_the_original_request_choices(grouped):
         assert choices_by_number == {2: first_ids[2]}
         return selected(choices_by_number[2], number=2)
     sentence = ComposedSentence(TEXT, ('1',), '확인', planned_claim_slot='current_challenges:issue')
+    current = fragment(SOURCE + ', 고객 납품 지연이 지속되고 있다')
     if grouped:
         items = [verify._GroupedReviewItem(number, 'current_challenges', '문장', ('1',), sentence=sentence)
                  for number in (1, 2)]
-        result = verify._ask_grouped_verdicts(ask, items, {'1': fragment()}, None, initial_ask=ask)
+        result = verify._ask_grouped_verdicts(ask, items, {'1': current}, None, initial_ask=ask)
     else:
         items = [verify._ReviewItem(number, sentence, section_id='current_challenges') for number in (1, 2)]
-        result = verify._ask_verdicts(ask, items, {'1': fragment()}, '', initial_ask=ask)
+        result = verify._ask_verdicts(ask, items, {'1': current}, '', initial_ask=ask)
     assert result == {1:'참', 2:'참'} and len(calls) == 2
 
 

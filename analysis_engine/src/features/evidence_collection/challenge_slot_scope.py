@@ -7,6 +7,7 @@ import re
 import unicodedata
 
 from features.evidence_collection import challenge_slot_constants as c
+from features.evidence_collection.challenge_eligibility import challenge_incident_row_problem
 
 
 def _surface(text: str) -> str:
@@ -95,6 +96,9 @@ def challenge_table_scope(text: str) -> ChallengeTableScope:
                            and not c.HYPOTHETICAL_RE.search(event_text))
         place_valid = not is_accident or bool(place is not None and cells[place] not in ("", "-"))
         if actor_valid and date_valid and event_valid and place_valid:
+            if challenge_incident_row_problem(row):
+                excluded += 1
+                continue
             found = True
             response_found |= bool(response is not None and response < len(cells)
                                    and c.RESPONSE_ACTION_RE.search(cells[response]))

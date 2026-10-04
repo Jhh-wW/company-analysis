@@ -35,6 +35,9 @@ def test_transport_contract_matches_the_actual_producer():
         ACCOUNTING_POLICY_BOILERPLATE,
     )
     from src.features.composer.challenge_constants import CHALLENGE_RESPONSE_MISSING
+    from src.shared.report_evidence.challenge_eligibility_constants import (
+        HISTORICAL_EVENT_ONLY, ADMINISTRATIVE_EVENT_ONLY, POSITIVE_RESPONSE_ONLY,
+    )
     from src.features.composer.future_plan_constants import (
         FUTURE_REASON_CODES, FUTURE_SECTION_NO_FORWARD_STATEMENT,
     )
@@ -66,6 +69,7 @@ def test_transport_contract_matches_the_actual_producer():
         # 6장 장 계약 — 근거 결속 사유가 아니라 «작성 범위» 사유다.
         FUTURE_SECTION_NO_FORWARD_STATEMENT,
         CHALLENGE_RESPONSE_MISSING,
+        HISTORICAL_EVENT_ONLY, ADMINISTRATIVE_EVENT_ONLY, POSITIVE_RESPONSE_ONLY,
         CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,
         # 8장 «원문 절» 긍정 계약과 장 무관 부재 단언 가드가 더해졌다 —
         # 둘 다 새 사유 코드를 쓰므로 이 전송 계약에도 함께 등록한다.

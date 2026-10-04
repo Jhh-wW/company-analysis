@@ -47,6 +47,8 @@ from src.features.composer.quantified_relation_guard import quantified_dividend_
 from src.features.composer.verbatim_news import VerbatimNewsSource
 
 from src.features.composer.grounding_constants import (
+    ACTIVITY_DATE_RE, HISTORICAL_ACTIVITY_RE, HISTORICAL_OVERLAP_MIN_LENGTH,
+    HISTORICAL_OVERLAP_MIN_TOKENS, HISTORICAL_GENERIC_TOPIC_WORDS, ACTIVITY_SUBJECT_RE,
     COMPARATIVE_RE, CONTINUOUS_RE, COUNTED_CONTINUOUS_RE,
     CONTINUOUS_POINTS_OVER_PERIODS, DOWN_RE, GROUNDING_INVALID, GROUNDING_KEY,
     GROUNDING_SOURCE_FIELD,
@@ -164,6 +166,38 @@ def _retrospective_years(text: str, sources: Sequence[str]) -> frozenset[str]:
     return frozenset(years)
 
 
+def _dated_activity_requires_time(text: str, sources: Sequence[str]) -> bool:
+    """날짜가 앞뒤로 붙은 완료 실적을 현재 활동으로 옮긴 주장만 발동한다."""
+    current_matches = tuple(PRESENT_RE.finditer(text))
+    if not current_matches or (PLANNED_END_RE.search(text) and not any(
+            match.group() not in ("현재", "지금") for match in current_matches)):
+        return False
+    claim_tokens = _content_tokens(text)
+    for source in sources:
+        for clause in SENTENCE_SPLIT_RE.split(source):
+            if (not ACTIVITY_DATE_RE.search(clause) or not HISTORICAL_ACTIVITY_RE.search(clause)
+                    or PRESENT_RE.search(clause) or PLANNED_END_RE.search(clause)):
+                continue
+            source_tokens = _content_tokens(clause)
+            source_subjects = {_label(match.group()) for match in ACTIVITY_SUBJECT_RE.finditer(clause)}
+            claim_subjects = {_label(match.group()) for match in ACTIVITY_SUBJECT_RE.finditer(text)}
+            matched = {
+                token for token in claim_tokens if any(
+                    min(len(token), len(other)) >= HISTORICAL_OVERLAP_MIN_LENGTH
+                    and (token.startswith(other) or other.startswith(token))
+                    for other in source_tokens
+                )
+            }
+            matched -= source_subjects & claim_subjects
+            # 같은 대상의 과거 개발을 현재 연구·생산으로 바꾸면 동사 어휘는
+            # 달라져도 시점 증명이 필요하다. 일반 결과어 하나만 겹친 경우는 제외한다.
+            topics = {token for token in matched
+                      if not any(token.startswith(word) for word in HISTORICAL_GENERIC_TOPIC_WORDS)}
+            if len(matched) >= HISTORICAL_OVERLAP_MIN_TOKENS or topics:
+                return True
+    return False
+
+
 def _recognition_basis_clauses(text: str) -> tuple[str, ...]:
     """수익 인식 기준(완료·진행)을 단정한 절 — 정성 인식 주장의 닫힌 발동 범위.
 
@@ -202,8 +236,9 @@ def grounding_requirements(text: str, sources: Sequence[str]) -> tuple[str, ...]
         and not direct and not PLANNED_END_RE.search(text)):
         required.append(TREND_KEY)
     years = _retrospective_years(text, sources)
-    if (years and not direct
-        and (not years.intersection(YEAR_RE.findall(text)) or PRESENT_RE.search(text))):
+    if (not direct and ((years
+        and (not years.intersection(YEAR_RE.findall(text)) or PRESENT_RE.search(text)))
+        or _dated_activity_requires_time(text, sources))):
         required.append(TIME_KEY)
     return tuple(required)
 
