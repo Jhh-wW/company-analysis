@@ -49,9 +49,10 @@ def test_explicit_opt_in_only_attaches_metadata(monkeypatch, configured):
 #   그 177자만 되돌리면 옛 값이 그대로 재현되고, 아래 분할 표식 단정은 값과 무관하다.
 # 2026-09-27: 수치 증명 필드 축자 결속 안내 307자 → 11626/12680.
 # 2026-09-30: 5장 사업 과제 검수 안내 241자 → 11867/12921.
+# 2026-10-04: 검수 13항의 현재 사업 영향·진행 대응 안내 211자 → 12078/13132.
 # 정책과 변경된 5·8장 범위 안내만 되돌리면 직전 해시 네 개를 재현한다.
 # tmp/audit-20260930/review-policy-snapshots.json에 무과금 비교를 보존했다.
-@pytest.mark.parametrize("grouped,prefix_chars", ((False, 11867), (True, 12921)))
+@pytest.mark.parametrize("grouped,prefix_chars", ((False, 12078), (True, 13132)))
 @pytest.mark.parametrize("factory", (_golden_case, _large_case, _boundary_case))
 def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
     monkeypatch, grouped, prefix_chars, factory,
@@ -75,10 +76,10 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "b34b7cca702e8a31073fc109b225b56bbfa23fd6fc6a342f93978383fecd0aa6"),
-    (_golden_case, True, "17729bda28c7c68ae8f30937b0f99e6c2f5a12c1aad2f863a82c071169d5bd9d"),
-    (_boundary_case, False, "856cd2d7ba3e4e8c3974df75dd8384c129bcf27bbdb586b50e9155bcb94a5e11"),
-    (_boundary_case, True, "760765739100a5b8ebe838a719280f4c1cf51cd27bfa98bad02f044a577ede75"),
+    (_golden_case, False, "f4c65e2e3785acd1419629d7ec11bd71fb055e50c60472c42927c752a8481e00"),
+    (_golden_case, True, "9c11f82990d3282e4b0b9705421ba885d2fce3f9a473ecf5312f95543ca9a91d"),
+    (_boundary_case, False, "ec94b55f182c6c756c4783c7a54f4a513aa0b4e892accef3712d5d80dba59462"),
+    (_boundary_case, True, "0505f109f67c016d4a3e78777be31fb68ee3fee3c87c170cb6e9afe37dfe42ae"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
@@ -91,6 +92,8 @@ def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     # 증거: tmp/audit-20260930/validation/ab926-review-prompt-baseline.json.
     # 사건 행의 주체·날짜·조치 결속 안내 127자만 빼면 a901의 전체 바이트와 같다.
     # 증거: tmp/audit-20260930/validation/35361-review-prompt-baseline-02.json.
+    # 2026-10-04 검수 13항 211자와 5장 작성범위 안내 182자를 제거하면 직전
+    # 네 지문이 재현된다. 5장이 없는 경계 fixture에는 211자만 추가됐다.
     monkeypatch.setenv(REVIEW_PROMPT_CACHE_ENV, "1")
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected

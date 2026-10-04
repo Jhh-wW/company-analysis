@@ -172,10 +172,10 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 # 골든 전체 바이트·해시 두 값이 재현된다. 경계·도식·스키마는 바꾸지 않는다.
 # 증거: tmp/audit-20260930/validation/ab926-review-prompt-baseline.json.
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "b34b7cca702e8a31073fc109b225b56bbfa23fd6fc6a342f93978383fecd0aa6"),
-    (_golden_case, True, "17729bda28c7c68ae8f30937b0f99e6c2f5a12c1aad2f863a82c071169d5bd9d"),
-    (_boundary_case, False, "856cd2d7ba3e4e8c3974df75dd8384c129bcf27bbdb586b50e9155bcb94a5e11"),
-    (_boundary_case, True, "760765739100a5b8ebe838a719280f4c1cf51cd27bfa98bad02f044a577ede75"),
+    (_golden_case, False, "f4c65e2e3785acd1419629d7ec11bd71fb055e50c60472c42927c752a8481e00"),
+    (_golden_case, True, "9c11f82990d3282e4b0b9705421ba885d2fce3f9a473ecf5312f95543ca9a91d"),
+    (_boundary_case, False, "ec94b55f182c6c756c4783c7a54f4a513aa0b4e892accef3712d5d80dba59462"),
+    (_boundary_case, True, "0505f109f67c016d4a3e78777be31fb68ee3fee3c87c170cb6e9afe37dfe42ae"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
     # 현재 builder와 현재 안내문으로 재생한 전체 UTF-8 프롬프트 해시다.
@@ -189,6 +189,8 @@ def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected)
     # 추가 안내만 제거한 4개 해시는 변경 직전 프롬프트와 같음을 재생해 확인했다.
     # 사건 행 결속 안내 127자만 제거하면 a901의 전체 바이트와 지문이 재현된다.
     # 증거: tmp/audit-20260930/validation/35361-review-prompt-baseline-02.json.
+    # 2026-10-04 검수 13항 211자와 5장 작성범위 안내 182자를 제거하면 직전
+    # 네 지문이 재현된다. 스키마·근거 원문·번호·캐시 표식은 변경하지 않는다.
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
 
