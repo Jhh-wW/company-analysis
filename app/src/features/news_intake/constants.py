@@ -264,6 +264,7 @@ ACCESS_DENIAL_REASONS: Final[frozenset[str]] = frozenset({
 #: steps에 단계별 수를 남겨 사람이 가를 수 있게 한다.
 BODY_STAGE_USABLE_RANGES: Final[str] = "usable_ranges"
 BODY_STAGE_JSON_LD: Final[str] = "json_ld_article_body"
+BODY_STAGE_BOUND_DOM: Final[str] = "bound_article_body_dom"
 BODY_STAGE_ARTICLE_TAG: Final[str] = "article_tag"
 BODY_STAGE_META_DESCRIPTION: Final[str] = "meta_description"
 #: 파이프라인 밖에서 본문 글자를 그대로 주입받은 경우(시험·대체 수집기).
@@ -316,6 +317,15 @@ BODY_TEXT_BLOCK_TAGS: Final[frozenset[str]] = frozenset({
     "article", "div", "section", "p", "br", "li", "ul", "ol", "blockquote",
     "h1", "h2", "h3", "h4", "h5", "h6", "table", "tr", "td", "th",
 })
+# JSON-LD의 생략된 본문은 유일한 명시 구획의 실제 문단으로만 복구한다.
+BODY_DOM_PARAGRAPH_TAGS: Final[frozenset[str]] = frozenset({"p"})
+BODY_DOM_HEADING_TAGS: Final[frozenset[str]] = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
+BODY_DOM_MIN_PARAGRAPHS: Final[int] = 2
+BODY_DOM_RELATED_MIN_LINKS: Final[int] = 2
+BODY_DOM_RELATED_CONTAINER_TAGS: Final[frozenset[str]] = frozenset({"div", "section", "nav", "aside"})
+BODY_DOM_RELATED_HEADINGS: Final[frozenset[str]] = frozenset({
+    "관련기사", "추천기사", "주요뉴스", "함께보면좋은기사", "꼭봐야할주요뉴스",
+})
 #: 해독이 깨졌다고 볼 대체문자 비율. 정상 문서에도 U+FFFD가 한두 개 섞일 수
 #: 있으므로 개수가 아니라 비율로 본다.
 DECODE_REPLACEMENT_RATIO_LIMIT: Final[float] = 0.02
@@ -349,7 +359,7 @@ URL_VARIANT_ORDER: Final[tuple[str, ...]] = (
 MAX_URL_VARIANTS: Final[int] = 3
 
 # 새 수집 경로의 상한은 기사 수를 채우는 목표가 아니라 요청 비용의 경계다.
-COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v13"
+COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v14"
 NAME_ACRONYM_MIN_CHARS: Final[int] = 2
 NAME_ACRONYM_MAX_CHARS: Final[int] = 8
 NAME_RETAINED_SUFFIX_MIN_CHARS: Final[int] = 2

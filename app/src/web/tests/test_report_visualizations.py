@@ -268,7 +268,8 @@ def test_진영_도표는_값_단위_출처_계산안내와_숫자_style을_접�
         "trend": _descendants(trend, tag="p", class_name="chart-note"),
     }
     assert len(notes["composition"]) == len(notes["trend"]) == 1
-    assert "원문 비율을 소수 첫째 자리로 반올림해 표시" in notes[
+    # 그래프 display는 공개 표의 비율 문자열을 유지한다. 추가 반올림을 안내하지 않는다.
+    assert "공개 표의 비율을 그대로 표시" in notes[
         "composition"
     ][0].text
     assert "원값을 억원 단위로 환산해 표시" in notes["trend"][0].text
