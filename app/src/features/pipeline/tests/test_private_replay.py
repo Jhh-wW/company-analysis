@@ -153,7 +153,7 @@ def test_공급자_배선에서_원문_보관과_실제_정산이_독립적이�
         with lock_context, real.provider_budget.activate(1000) as budget, attempt_context.activate(callbacks):
             result = ask(prompt)
             assert result == '{"판정": []}'
-            assert budget.accounted_krw == usage_cost_krw("claude-haiku-4-5", 1234, 1200)
+            assert budget.accounted_krw == usage_cost_krw(real.V2_REVIEW_MODEL, 1234, 1200)
         replay_steps = [step for step in collector.steps if step["step"] == REPLAY_DIAGNOSTIC_STEP]
         if failure_mode in {"disabled", "deployment", "invalid_run"}:
             assert replay_steps == []
@@ -174,6 +174,7 @@ def test_공급자_배선에서_원문_보관과_실제_정산이_독립적이�
         record = replay.read_local_provider_replay(paths[0])
         assert record["prompt"] == prompt and record["response"] == result
         assert record["stage"] == "v2_review" and record["output_limit"] == 2048
+        assert record["model"] == real.V2_REVIEW_MODEL
         assert record["stop_reason"] == "end_turn"
     assert prompt not in caplog.text and result not in caplog.text
 

@@ -25,10 +25,19 @@ def _reason(text: str, *, table_record: bool = False, positive_context: bool = F
             policy_units: tuple = ()) -> str:
     surface = _surface(text)
     if (c.FINANCIAL_EXPOSURE_RE.search(surface)
+            or c.GENERAL_LEGAL_MANAGEMENT_RE.search(surface)
+            or c.CONDITIONAL_SANCTION_RULE_RE.search(surface)
             or any(pattern.search(surface) for pattern in policy_units)) and not c.POLICY_BUSINESS_PROBLEM_RE.search(surface):
         return c.ADMINISTRATIVE_EVENT_ONLY
     if c.ADMINISTRATIVE_RE.search(surface) and not c.BUSINESS_PROBLEM_RE.search(surface):
         return c.ADMINISTRATIVE_EVENT_ONLY
+    if (table_record and c.DATE_RE.search(surface) and c.ACCIDENT_RE.search(surface)
+            and c.REMEDIAL_RECORD_RE.search(surface)
+            and not c.CONTINUING_PROBLEM_RE.search(surface)
+            and not c.ACTIVE_IMPACT_RE.search(surface)
+            and not c.OPERATING_RESPONSE_RE.search(surface)):
+        # 조치 목록은 완료 판정이 아니다. 같은 행의 현재 영향이 미확인된 이력이다.
+        return c.HISTORICAL_EVENT_ONLY
     if (table_record and c.DATE_RE.search(surface) and c.INCIDENT_RE.search(surface)
             and c.COMPLETED_ACTION_RE.search(surface)
             and not c.CONTINUING_PROBLEM_RE.search(surface)
@@ -57,7 +66,18 @@ def challenge_eligibility_scope(text: str) -> ChallengeEligibilityScope:
     full_surface = _surface(text)
     policy_units = tuple(unit for first, second, unit in c.POLICY_CONTEXT_RULES
                          if first.search(full_surface) and second.search(full_surface))
-    bounds = [(match.start(), match.end()) for match in c.UNIT_RE.finditer(text)]
+    # 표의 재해 내용 끝 마침표가 같은 행의 조치 열을 분리하지 않게 한다.
+    bounds = []
+    record_start = 0
+    records = [(match.start(), match.end()) for match in c.RECORD_BOUNDARY_RE.finditer(text)]
+    for record_end, next_record in (*records, (len(text), len(text))):
+        record = text[record_start:record_end]
+        if "|" not in record:
+            bounds.extend((record_start + match.start(), record_start + match.end())
+                          for match in c.UNIT_RE.finditer(record))
+        if record_end != len(text):
+            bounds.append((record_end, next_record))
+        record_start = next_record
     cursor = 0
     extra_bounds = []
     for end, next_start in (*bounds, (len(text), len(text))):

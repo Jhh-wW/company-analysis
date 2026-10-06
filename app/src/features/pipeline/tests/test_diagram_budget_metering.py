@@ -31,7 +31,7 @@ class RecordingMessages:
     def create(self, **kwargs):
         self.requests.append(kwargs)
         return SimpleNamespace(
-            model="claude-haiku-4-5-20251001",
+            model=kwargs["model"],
             stop_reason=self.stop_reason,
             content=[SimpleNamespace(text='{"판정": []}')],
             usage=SimpleNamespace(input_tokens=self.input_tokens, output_tokens=self.output_tokens,
@@ -53,7 +53,7 @@ def attempt_observations():
 
 
 @pytest.mark.parametrize("budget_amount,should_send", [(1000, True), (1, False)])
-def test_diagram_cap_reaches_real_metered_boundary_without_changing_budget_or_model(budget_amount, should_send):
+def test_diagram_cap_reaches_real_metered_boundary_with_review_model(budget_amount, should_send):
     messages = RecordingMessages()
     engine = real._MeteredEngine(SimpleNamespace(MODEL="claude-haiku-4-5"))
     client = real._metered_client(engine, SimpleNamespace(messages=messages))
@@ -69,7 +69,7 @@ def test_diagram_cap_reaches_real_metered_boundary_without_changing_budget_or_mo
     with provider_budget.activate(budget_amount) as budget, attempt_context.activate(callbacks):
         if should_send:
             assert ask("시험용 도식 입력") == '{"판정": []}'
-            assert budget.accounted_krw == usage_cost_krw("claude-haiku-4-5", 1234, 1200)
+            assert budget.accounted_krw == usage_cost_krw(real.V2_REVIEW_MODEL, 1234, 1200)
         else:
             with pytest.raises(Exception) as error:
                 ask("시험용 도식 입력")
@@ -86,17 +86,17 @@ def test_diagram_cap_reaches_real_metered_boundary_without_changing_budget_or_mo
     assert real.V2_WRITER_MAX_TOKENS == 6000 and real.V2_REVIEWER_MAX_TOKENS == 16000
     if should_send:
         request, = messages.requests
-        assert request["model"] == messages.counts[0]["model"] == "claude-haiku-4-5"
+        assert request["model"] == messages.counts[0]["model"] == real.V2_REVIEW_MODEL
         assert request["max_tokens"] == 4096
         assert request["messages"] == messages.counts[0]["messages"]
         assert isinstance(request["messages"][0]["content"], str)
         # 예약액은 «실제 출력»이 아니라 상한으로 잡힌다 — 상한을 올리면 이 값이
         # 출력 token 단가만큼 확실히 커진다는 계약을 그대로 못 박는다.
         assert reservations == [("anthropic", "v2_diagram", usage_cost_krw(
-            "claude-haiku-4-5", 1234 + provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS, 4096))]
+            real.V2_REVIEW_MODEL, 1234 + provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS, 4096))]
         assert engine.usages[0]["stage"] == "v2_diagram"
         assert engine.usages[0]["out"] == 1200
-        assert engine.usages[0]["model"] == "claude-haiku-4-5-20251001"
+        assert engine.usages[0]["model"] == real.V2_REVIEW_MODEL
 
 
 @pytest.mark.parametrize("stop_reason,expected", [
@@ -115,7 +115,7 @@ def test_success_response_records_only_allowlisted_metadata(
         ask = real._v2_ask_via_provider(engine, client, stage="v2_diagram", max_tokens=2048)
         with provider_budget.activate(1000) as budget:
             assert ask("저장하지 않는 시험 입력") == '{"판정": []}'
-            assert budget.accounted_krw == usage_cost_krw("claude-haiku-4-5", 1234, 1200)
+            assert budget.accounted_krw == usage_cost_krw(real.V2_REVIEW_MODEL, 1234, 1200)
         assert collector.steps == [{"step": V2_RESPONSE_STEP, "단계": "v2_diagram",
                                     "출력상한": 2048, "종료사유": expected}]
         assert len(messages.requests) == len(engine.usages) == len(attempt_observations) == 1
@@ -137,7 +137,7 @@ def test_observation_failure_does_not_change_success_or_metering(monkeypatch, at
     ask = real._v2_ask_via_provider(engine, client, stage="v2_diagram", max_tokens=2048)
     with provider_budget.activate(1000) as budget:
         assert ask("시험 입력") == '{"판정": []}'
-        assert budget.accounted_krw == usage_cost_krw("claude-haiku-4-5", 1234, 1200)
+        assert budget.accounted_krw == usage_cost_krw(real.V2_REVIEW_MODEL, 1234, 1200)
     assert len(messages.requests) == len(engine.usages) == len(attempt_observations) == 1
 
 
@@ -151,6 +151,8 @@ def test_body_cap_reaches_reservation_and_request_with_actual_only_settlement(
 ):
     # 입력은 과거 사용량을 사용한 시험값이며 현재 프롬프트를 실제 계수하지 않는다.
     model, input_tokens = "claude-haiku-4-5", 119943
+    # 옛 1,000원 경계 회귀는 당시 모델을 명시한다. 새 모델의 경계는 아래 별도 검사한다.
+    monkeypatch.setattr(real, "V2_REVIEW_MODEL", model)
     messages = RecordingMessages("end_turn", input_tokens=input_tokens, output_tokens=output_tokens)
     engine = real._MeteredEngine(SimpleNamespace(MODEL=model))
     client = real._metered_client(engine, SimpleNamespace(messages=messages))
@@ -270,9 +272,11 @@ def test_writer_cap_reserves_full_output_before_send_and_settles_only_usage(
     (real.V2_REVIEWER_MAX_TOKENS, True, 136.77),
     (real.V2_INITIAL_REVIEWER_MAX_TOKENS, False, 192.77),
 ])
-def test_saved_sm_followup_reserves_with_margin_before_provider_send(cap, should_send, expected_reserve):
+def test_saved_sm_followup_reserves_with_margin_before_provider_send(cap, should_send, expected_reserve, monkeypatch):
     # 보존된 SM 후속 검수 직전 원가와 사용량이다. 새 생성 비용 예측은 아니다.
     model, input_tokens, output_tokens, prior_cost = "claude-haiku-4-5", 13593, 322, 829.72
+    # 보존 실행의 수치를 새 모델의 예상 비용인 것처럼 바꾸지 않는다.
+    monkeypatch.setattr(real, "V2_REVIEW_MODEL", model)
     messages = RecordingMessages("end_turn", input_tokens=input_tokens, output_tokens=output_tokens)
     engine = real._MeteredEngine(SimpleNamespace(MODEL=model))
     client = real._metered_client(engine, SimpleNamespace(messages=messages))
@@ -304,3 +308,28 @@ def test_saved_sm_followup_reserves_with_margin_before_provider_send(cap, should
         reserve = usage_cost_krw(model, input_tokens + provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS, cap)
         assert reserve == pytest.approx(expected_reserve, abs=0.01)
         assert (prior_cost + reserve <= 1000) == should_send
+
+
+@pytest.mark.parametrize("cap", [16000, 24000])
+@pytest.mark.parametrize("budget_amount", [1000, 2000])
+def test_현재_검수모델의_큰_입력도_정확한_예약_가능_여부를_따른다(
+    cap, budget_amount, attempt_observations,
+):
+    model, input_tokens, output_tokens = real.V2_REVIEW_MODEL, 119943, 8357
+    messages = RecordingMessages("end_turn", input_tokens=input_tokens, output_tokens=output_tokens)
+    engine = real._MeteredEngine(SimpleNamespace(MODEL="claude-haiku-4-5"))
+    client = real._metered_client(engine, SimpleNamespace(messages=messages))
+    ask = real._v2_ask_via_provider(engine, client, stage="v2_review", max_tokens=cap)
+    reserve = usage_cost_krw(model, input_tokens + provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS, cap)
+    with provider_budget.activate(budget_amount) as budget:
+        if reserve <= budget_amount:
+            assert ask("큰 입력의 검수 예약 경계") == '{"판정": []}'
+            assert messages.requests[0]["model"] == messages.counts[0]["model"] == model
+            assert budget.accounted_krw == usage_cost_krw(model, input_tokens, output_tokens)
+        else:
+            with pytest.raises(Exception) as caught:
+                ask("큰 입력의 검수 예약 경계")
+            assert isinstance(caught.value.cause, provider_budget.ProviderBudgetExceeded)
+            assert messages.requests == attempt_observations == []
+            assert budget.accounted_krw == 0
+    assert engine.MODEL == "claude-haiku-4-5"

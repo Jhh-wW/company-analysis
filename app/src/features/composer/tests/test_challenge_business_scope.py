@@ -83,3 +83,23 @@ def test_mixed_original_and_actual_financial_service_are_preserved():
     assert not challenge_business_problem('대출 고객의 연체율이 상승하였다.', {
         '1': '회사는 고객에게 대출 관리 서비스를 제공한다. 대출 고객의 연체율이 상승하였다.',
     })
+
+
+def test_final_guard_rejects_accident_history_with_nominal_measures_without_inventing_completion():
+    header = "재해발생회사 | 중대재해발생일자 | 발생장소 | 재해내용 | 조치 및 전망"
+    row = "가온제조 | 2026.10.04 | 가온제조 공장 | 성형공정 끼임사고 | 안전센서 설치, 연속 동작 금지"
+    source = header + "; " + row
+    candidate = "가온제조는 2026.10.04 성형공정 끼임사고와 안전센서 설치 조치를 기재했다."
+    assert challenge_business_problem(candidate, {"1": source}) == "challenge_current_problem_unbound"
+    # 순수 수치 선택지는 같은 행·날짜 검사만 받고 최종 현재 과제 승인은 얻지 않는다.
+    assert not challenge_business_problem(candidate, {"1": source}, require_current=False)
+    current = row.replace("안전센서 설치, 연속 동작 금지", "안전센서 설치 진행 중")
+    assert not challenge_business_problem(candidate, {"1": header + "; " + current})
+
+
+def test_model_true_cannot_restore_general_legal_management_in_final_table(monkeypatch):
+    monkeypatch.setattr(v, '_semantic_review', lambda groups, *args, **kwargs: groups)
+    source = "법률 리스크 관리는 국내법무팀에서 발생할 수 있는 법률적 분쟁을 미연에 방지하고, 분쟁 발생 시 소송 수행을 지원하는 업무를 다룬다."
+    row = FlowRow(("일반 법률 분쟁 위험", "법무팀의 소송 지원"), ("1",))
+    result = v.verify_report(_report(row), (CollectedFragment("1", "DART", source),), None, lambda *args: '')
+    assert not result.sections[0].flow_rows

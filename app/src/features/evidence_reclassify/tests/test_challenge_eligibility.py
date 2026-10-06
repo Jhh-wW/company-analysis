@@ -41,3 +41,19 @@ def test_current_business_and_unlisted_problem_in_mixed_raw_keep_exact_binding(q
     assert typed["text_sha256"] == candidate["text_sha256"]
     assert typed["location"] == candidate["location"]
     assert result.assignments[0].exact_quote == quote
+
+
+@pytest.mark.parametrize("slot", ["current_challenges:issue", "current_challenges:response"])
+@pytest.mark.parametrize("source,quote", [
+    ("법률 리스크 관리는 국내법무팀에서 사업 수행 과정에서 발생할 수 있는 법률적 분쟁을 미연에 방지하고, 분쟁 발생 시 소송 수행을 지원하는 업무를 다룬다.",
+     "분쟁 발생 시 소송 수행을 지원하는 업무"),
+    ("리스제공자로서 회사는 리스를 금융리스와 운용리스로 분류한다. 리스수익은 리스기간에 걸쳐 정액기준으로 인식한다.",
+     "리스수익은 리스기간에 걸쳐 정액기준으로 인식한다."),
+    ("재해발생회사 | 중대재해발생일자 | 발생장소 | 재해내용 | 조치 및 전망; 가온제조 | 2026.10.04 | 가온제조 공장 | 끼임사고 | 안전센서 설치, 연속 동작 금지",
+     "안전센서 설치"),
+])
+def test_cropped_management_and_nominal_measures_cannot_restore_current_slots(slot, source, quote):
+    candidate = _candidate(text=source)
+    result = parse_and_verify(_response(_assignment(section_id="current_challenges", slot_id=slot, quote=quote)), [candidate])
+    assert not result.assignments
+    assert candidate["text"] == source

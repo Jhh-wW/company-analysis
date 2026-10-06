@@ -353,11 +353,7 @@ def _composition(table: ReportTable) -> TableVisualization | None:
         caption=table.caption,
         reading=_composition_reading(items),
         unit="%",
-        note=(
-            f"원문 비율을 {_decimal_place_label(table.scale_places)}로 반올림해 표시"
-            if table.raw_rows
-            else "공개 표의 비율을 계산 없이 표시"
-        ),
+        note="공개 표의 비율을 그대로 표시",
         items=items,
     )
 

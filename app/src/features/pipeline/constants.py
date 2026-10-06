@@ -2,6 +2,13 @@
 
 from typing import Final
 
+# 본문 검수는 원문의 대상·시점·계약 범위를 대조할 별도 모델을 쓴다.
+# 요청/모듈 MODEL을 바꾸지 않고 계량 경계에서 단계별로 고정한다.
+V2_REVIEW_MODEL: Final[str] = "claude-sonnet-4-6"
+V2_REVIEW_MODEL_STAGES: Final[frozenset[str]] = frozenset({
+    "v2_review", "v2_diagram",
+})
+
 #: DART OpenAPI가 요청을 정상 처리했음을 뜻하는 상태 코드.
 #: 목록이 비어 있는 정상 응답과 한도·인증·서버 오류를 가르려면 반드시 확인한다.
 DART_SUCCESS_STATUS: Final[str] = "000"

@@ -459,7 +459,8 @@ def test_유료_호출은_없고_가짜_ask_횟수만_증가한다(
     assert engine.generate_ai_calls == 0
     # 모든 호출이 가짜 계량 client 경계를 지났다 — 네트워크 SDK가 아예 없다
     assert messages.calls >= sum(messages.section_calls.values()) + messages.review_calls
-    assert result.model == "가짜모델"
+    # 기본 가짜 모델과 별도 검수 모델 모두 무료 계량 모형이 반환한 실제 사용 모델이다.
+    assert result.model == real.MODEL_LABEL_SEPARATOR.join(("가짜모델", real.V2_REVIEW_MODEL))
 
 
 # ══════════════════════════════════════════════════════════

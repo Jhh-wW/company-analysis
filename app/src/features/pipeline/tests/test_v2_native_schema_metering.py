@@ -20,7 +20,9 @@ from src.features.pipeline import real
 from src.features.pipeline.v2_response_constants import V2_RESPONSE_STEP
 
 provider_budget = real.provider_budget
-MODEL = "claude-haiku-4-5"
+# 이 모형은 v2_review의 계수·전송·정산 계약을 검증한다.
+# 운영 검수 모델과 다른 모형 단가를 쓰면 정상 예약이 부족해지는 거짓 실패다.
+MODEL = real.V2_REVIEW_MODEL
 CAP = 700
 COUNTED_INPUT = 1350
 

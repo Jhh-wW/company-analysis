@@ -189,6 +189,23 @@ def _candidate(metadata: dict[str, str], *, company: NewsCompanyContext,
     )
 
 
+def _industry_business_linked(item: NewsCandidate, company: NewsCompanyContext | None,
+                              metadata: str | None = None) -> bool:
+    if metadata is None:
+        metadata = item.title + " " + item.description
+    anchors = {anchor.anchor_id: anchor.business_item for anchor in company.business_anchors} if company else {}
+    linked = [anchors.get(topic.split(":", 1)[1], "") for topic in item.topics
+              if topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) and ":" in topic]
+    return any(business_item and re.search(
+        r"(?<![가-힣A-Za-z0-9])" + re.escape(business_item)
+        + ic.INDUSTRY_BUSINESS_TOKEN_END, metadata, re.I) for business_item in linked)
+
+
+def _industry_problem_linked(item: NewsCandidate, company: NewsCompanyContext | None) -> bool:
+    return any(_industry_business_linked(item, company, clause) and ic.INDUSTRY_SEARCH_PROBLEM_RE.search(clause)
+               for clause in ic.INDUSTRY_SEARCH_CLAUSE_RE.split(item.title + "\n" + item.description))
+
+
 def _industry_candidates(candidates: list[NewsCandidate], *,
                          company: NewsCompanyContext | None = None) -> list[NewsCandidate]:
     """문제 신호가 있는 산업 검색 후보에 본문 조사 기회를 먼저 준다.
@@ -198,27 +215,39 @@ def _industry_candidates(candidates: list[NewsCandidate], *,
     """
     industry = [item for item in candidates if any(
         topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) for topic in item.topics)]
-    anchors = {anchor.anchor_id: anchor.business_item for anchor in company.business_anchors} if company else {}
-
-    def business_linked(item: NewsCandidate, metadata: str | None = None) -> bool:
-        if metadata is None:
-            metadata = item.title + " " + item.description
-        linked = [anchors.get(topic.split(":", 1)[1], "") for topic in item.topics
-                  if topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) and ":" in topic]
-        return bool(any(business_item and re.search(
-            r"(?<![가-힣A-Za-z0-9])" + re.escape(business_item)
-            + ic.INDUSTRY_BUSINESS_TOKEN_END, metadata, re.I) for business_item in linked))
-
     # 산업 query topic만 붙은 타산업 후보가 예약 몫을 소비하지 않게 한다.
     # 후보 자체는 전체 목록에 남고, 본문 의미와 지역은 기존 검수에서 확인한다.
-    if anchors:
-        industry = [item for item in industry if business_linked(item)]
+    if company and company.business_anchors:
+        industry = [item for item in industry if _industry_business_linked(item, company)]
 
     return sorted(industry, key=lambda item: (
-        any(business_linked(item, clause) and ic.INDUSTRY_SEARCH_PROBLEM_RE.search(clause)
-            for clause in ic.INDUSTRY_SEARCH_CLAUSE_RE.split(item.title + "\n" + item.description)),
+        _industry_problem_linked(item, company) and _industry_business_linked(item, company, item.title),
+        _industry_problem_linked(item, company),
+        _industry_business_linked(item, company, item.title),
         item.published_on, item.source_url,
     ), reverse=True)
+
+
+def _reserved_industry_candidates(industry: list[NewsCandidate], reserved: int, *,
+                                  company: NewsCompanyContext | None) -> list[NewsCandidate]:
+    """같은 예약 몫에서 사업·문제 신호가 있는 국내/세계 탐색군을 먼저 분산한다.
+
+    query 주제는 탐색 기회에만 사용한다. 실제 지역과 현재 문제는 본문 검수가
+    판정하며, 타산업 후보나 부족한 지역의 근거를 보충하지 않는다.
+    """
+    chosen: list[NewsCandidate] = []
+    covered: set[str] = set()
+    for item in industry:
+        regions = {region for _, region in ic.INDUSTRY_QUERY_REGIONS
+                   if any(topic.startswith(f"{ic.INDUSTRY_TOPIC_PREFIX}{region}:")
+                          and _industry_problem_linked(replace(item, topics=(topic,)), company)
+                          for topic in item.topics)}
+        if len(chosen) < reserved and regions - covered:
+            chosen.append(item)
+            covered.update(regions)
+    selected_ids = {item.id for item in chosen}
+    chosen.extend(item for item in industry if item.id not in selected_ids)
+    return chosen[:reserved]
 
 
 def diverse_candidates(candidates: list[NewsCandidate], limit: int, *,
@@ -242,7 +271,7 @@ def diverse_candidates(candidates: list[NewsCandidate], limit: int, *,
     industry = _industry_candidates(ordered, company=company)
     reserved = min(len(industry), limit // ic.INDUSTRY_BODY_DIVISOR)
     if reserved:
-        first = industry[:reserved]
+        first = _reserved_industry_candidates(industry, reserved, company=company)
         selected = first + [item for item in selected if item.id not in {candidate.id for candidate in first}]
     return tuple(selected[:limit])
 
@@ -290,7 +319,7 @@ def body_ranked_candidates(candidates: list[NewsCandidate], *, attempt_budget: i
     industry = _industry_candidates(list(ranked), company=company)
     reserved = min(len(industry), budget // ic.INDUSTRY_BODY_DIVISOR)
     if reserved:
-        first = industry[:reserved]
+        first = _reserved_industry_candidates(industry, reserved, company=company)
         selected = first + [item for item in selected if item.id not in {candidate.id for candidate in first}]
     return tuple(selected)
 

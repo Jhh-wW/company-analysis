@@ -189,3 +189,23 @@ def test_original_scope_before_accounting_keeps_current_row_header_and_binding()
 ])
 def test_policy_context_is_checked_before_older_accounting_split_removes_context(text):
     assert slots(text) == (set(), True)
+
+
+@pytest.mark.parametrize("text", [
+    "법률 리스크 관리는 국내법무팀에서 사업 수행 과정에서 발생할 수 있는 법률적 분쟁을 미연에 방지하고, 분쟁 발생 시 소송 수행을 지원하는 업무를 다룬다.",
+    "동 위험은 회사의 투자 및 재무활동에서 발생하는 이자수익과 이자비용이 변동될 위험을 의미한다.",
+    "리스제공자로서 회사는 리스를 금융리스와 운용리스로 분류한다. 리스수익은 리스기간에 걸쳐 정액기준으로 인식한다.",
+    "회사는 시장지배적사업자로 추정된다. 위반할 경우 시정조치와 과징금을 부과받을 수 있다.",
+    HEADER + "; " + ROW.replace("안전센서 설치 예정", "안전센서 설치, 연속 동작 금지"),
+])
+def test_management_definitions_and_accident_measures_do_not_reenter_collection(text):
+    assert slots(text) == (set(), True)
+
+
+def test_current_incident_after_nominal_measures_keeps_its_own_header_and_slots():
+    history = ROW.replace("안전센서 설치 예정", "안전센서 설치, 연속 동작 금지")
+    current = ROW.replace("2024.07.12", "2026.10.04").replace("안전센서 설치 예정", "안전센서 설치 진행 중")
+    text = HEADER + "; " + history + "; " + current
+    supported, observed = slots(text)
+    assert {"current_challenges:issue", "current_challenges:response"} <= supported
+    assert observed

@@ -16,7 +16,7 @@ from src.core.constants import (
     MODEL_PRICES_USD_PER_MTOK,
     UNKNOWN_MODEL_PRICE_USD_PER_MTOK,
 )
-from src.core.pricing import AI_COST_KRW_PER_USD
+from src.core.pricing import AI_COST_KRW_PER_USD, usage_cost_krw
 from src.core.provider_gateway import attempt_context
 from src.core.provider_gateway.attempt_context import ProviderAttemptCallbacks
 from src.core.provider_gateway.types import BillingDisposition, ProviderObservation
@@ -128,6 +128,54 @@ class FakeRawEngine:
 
 def _client(metered: real._MeteredEngine):
     return real._metered_client(metered, metered._client())
+
+
+@pytest.mark.parametrize("stage", sorted(real.V2_REVIEW_MODEL_STAGES))
+def test_검수_모델은_예약과_전송에_같이_적용하고_다른_단계로_새지_않는다(stage):
+    messages = FakeMessages()
+    raw = FakeRawEngine(messages)
+    metered = real._MeteredEngine(raw)
+    client = _client(metered)
+    budget = provider_budget.current()
+    before = budget.accounted_krw
+    with metered.stage_context(stage):
+        client.messages.create(model="잘못된 호출자 모델", max_tokens=700)
+    review_cost = budget.accounted_krw - before
+    with metered.stage_context("v2_compose"):
+        client.messages.create(model="잘못된 호출자 모델", max_tokens=700)
+    compose_cost = budget.accounted_krw - before - review_cost
+
+    assert messages.calls == [real.V2_REVIEW_MODEL, _HAIKU]
+    assert review_cost == usage_cost_krw(real.V2_REVIEW_MODEL, 1_000_000, 100_000)
+    assert compose_cost == usage_cost_krw(_HAIKU, 1_000_000, 100_000)
+    assert metered.MODEL == raw.MODEL == _HAIKU
+
+
+def test_검수_실패_후에도_요청_모델은_원래대로_유지한다():
+    messages = FakeMessages(fail_on_call=1)
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+    client = _client(metered)
+    with pytest.raises(real.gateway.ProviderCallFailed):
+        with metered.stage_context("v2_review"):
+            client.messages.create(model=_HAIKU, max_tokens=700)
+    assert messages.calls == [real.V2_REVIEW_MODEL]
+    assert metered.MODEL == _HAIKU
+
+
+def test_검수도_자기_모델의_예약액이_부족하면_전송하지_않는다(monkeypatch):
+    messages = FakeMessages()
+    metered = real._MeteredEngine(FakeRawEngine(messages))
+    client = _client(metered)
+    monkeypatch.setattr(provider_budget, "count_input_tokens", lambda *a, **kw: 100)
+    input_bound = 100 + provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS
+    cheap = usage_cost_krw(_HAIKU, input_bound, 700)
+    review = usage_cost_krw(real.V2_REVIEW_MODEL, input_bound, 700)
+    assert review > cheap
+    with provider_budget.activate((cheap + review) / 2):
+        with pytest.raises(provider_budget.ProviderBudgetExceeded):
+            with metered.stage_context("v2_review"):
+                client.messages.create(model=_HAIKU, max_tokens=700)
+    assert messages.calls == []
 
 
 _ISOLATED_ENGINE_SOURCE = """

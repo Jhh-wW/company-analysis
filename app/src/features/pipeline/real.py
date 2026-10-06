@@ -285,6 +285,8 @@ from src.features.grading.logic import is_accounting_policy, is_table_dump
 from src.features.cost_tracking.store import AiCostEvent
 from src.features.pipeline.constants import (
     ANTHROPIC_TIMEOUT_SEC,
+    V2_REVIEW_MODEL,
+    V2_REVIEW_MODEL_STAGES,
     CORPCODE_REFRESH_INTERVAL_DAYS,
     DART_SUCCESS_STATUS,
     STAGE_BOOT,
@@ -659,12 +661,15 @@ def _generation_cache_namespace(
         # OFF namespace는 예전 열쇠 그대로 둔다. ON만 별도 열쇠를 써서
         # 뉴스가 없던 저장본을 새 보조 근거 결과처럼 재사용하지 않는다.
         settings["news_intake"] = "1"
+    requested_models = {"pipeline": model}
+    if generation_mode is engine_mode.EngineMode.V2:
+        requested_models["reviewer"] = V2_REVIEW_MODEL
     return GenerationCacheNamespace.create(
         product="company-analysis",
         schema_version=schema_version,
         deployment_revision=revision,
         image_digest=image_digest,
-        requested_models={"pipeline": model},
+        requested_models=requested_models,
         output_settings=settings,
     )
 
@@ -1325,7 +1330,9 @@ class _MeteredMessages:
         call_kwargs = dict(kwargs)
         # 1판 `_ask`는 모듈 전역 MODEL을 읽지만 그 값은 다른 요청과 공유된다.
         # provider에 나가는 마지막 경계에서 이 요청의 로컬 모델로 바로잡는다.
-        if self._metered.MODEL:
+        if call_context.stage in V2_REVIEW_MODEL_STAGES:
+            call_kwargs["model"] = V2_REVIEW_MODEL
+        elif self._metered.MODEL:
             call_kwargs["model"] = self._metered.MODEL
         if "output_config" in call_kwargs:
             call_kwargs["output_config"] = _provider_output_config(
@@ -5939,6 +5946,10 @@ def _v2_ask_via_provider(
 
     def ask(prompt: str) -> str:
         replay_started = time.monotonic()
+        requested_model = (
+            V2_REVIEW_MODEL if stage in V2_REVIEW_MODEL_STAGES
+            else (getattr(engine, "MODEL", "") or GENERATION_MODEL)
+        )
         # 출력 상한은 «보내기 직전»에 확정한다 — 1차 검수 재요청의 상한은 첫
         # 답의 실제 출력에 달려 있어 이 클로저를 만들 때는 아직 모른다.
         cap = max_tokens() if callable(max_tokens) else max_tokens
@@ -5990,7 +6001,7 @@ def _v2_ask_via_provider(
                 wait_for_pending=getattr(ask, "parallel_safe", False) is True,
             ):
                 response = client.messages.create(
-                    model=getattr(engine, "MODEL", "") or GENERATION_MODEL,
+                    model=requested_model,
                     max_tokens=cap,
                     temperature=0,  # 원문 인용 충실도 우선 (1판 _ask와 동일)
                     messages=[{"role": "user", "content": content}],
@@ -6079,7 +6090,7 @@ def _v2_ask_via_provider(
             try:
                 stored = record_local_provider_replay(
                     prompt=text, response=response_text, stage=stage,
-                    model=str(getattr(response, "model", "") or getattr(engine, "MODEL", "") or GENERATION_MODEL),
+                    model=str(getattr(response, "model", "") or requested_model),
                     response_schema=dict(response_schema) if response_schema is not None else None,
                     output_limit=cap, stop_reason=str(getattr(response, "stop_reason", "") or ""),
                     elapsed_ms=max(0, int((time.monotonic() - replay_started) * MILLISECONDS_PER_SECOND)),

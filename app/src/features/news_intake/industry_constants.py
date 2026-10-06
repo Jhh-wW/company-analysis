@@ -14,7 +14,8 @@ INDUSTRY_QUERY_REGIONS = (("국내", "domestic"), ("세계", "global"))
 # 검색 메타데이터는 본문 조사 순위에만 쓰며 문제의 사실 여부를 증명하지 않는다.
 INDUSTRY_SEARCH_PROBLEM_RE = re.compile(
     r"공급난|공급\s*(?:부족|지연|차질)|수요\s*(?:감소|둔화|위축)|생산\s*(?:중단|차질|감소)|"
-    r"원가\s*(?:상승|부담)|(?:가격|유가)\s*(?:상승|급등)|인력\s*부족|납기\s*지연|"
+    r"원가\s*(?:상승|부담)|(?:가격|유가|운임)\s*(?:상승|급등)|"
+    r"관세\s*(?:부담|인상|부과|파고)|복병|인력\s*부족|납기\s*지연|"
     r"불량|리콜|규제|과잉\s*(?:공급|생산)|경쟁\s*심화|침체|부족|차질|위기|"
     r"shortage|disruption|recall|overcapacity|declin|regulat|rising\s+cost",
     re.I,

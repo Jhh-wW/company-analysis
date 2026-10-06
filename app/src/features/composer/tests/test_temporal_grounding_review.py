@@ -66,6 +66,61 @@ def test_같은과제의_현재업무는_별도현재원문에_결속하면_보�
     }) == ""
 
 
+@pytest.mark.parametrize("text", [
+    "성형기 개발과 특허 등록을 수행하고 있다.",
+    "성형기 개발과 특허 등록을 수행하고 있습니다.",
+    "성형기 개발과 특허 등록을 거듭하고 있으며 품질을 높인다.",
+    "성형기 개발과 특허 등록을 이어가고 있다.",
+    "성형기 개발과 특허 등록을 실행 중이다.",
+])
+def test_날짜있는_실적의_현재_진행상은_동사목록에_의존하지_않는다(text):
+    source = "성형기 개발 | 19.01~20.03 | 설비 개발; 성형기 특허 등록 | 2020.06.05"
+    assert TIME_KEY in grounding_requirements(text, (source,))
+    assert grounding_problem(text, {SOURCE_ID: source}, {}) == GROUNDING_MISSING
+
+
+@pytest.mark.parametrize("text", [
+    "성형기 개발과 특허 등록을 수행하고 있었다.",
+    "성형기 개발과 특허 등록을 이어가고 있었다.",
+    "성형기 개발과 특허 등록을 수행하고 있을 계획이다.",
+    "성형기 개발과 특허 등록을 실행할 예정이다.",
+])
+def test_과거_진행상과_미래_계획을_현재_계속행위로_읽지_않는다(text):
+    source = "성형기 개발 | 19.01~20.03 | 설비 개발; 성형기 특허 등록 | 2020.06.05"
+    assert TIME_KEY not in grounding_requirements(text, (source,))
+
+
+@pytest.mark.parametrize("current", [
+    "성형기 개발과 특허 등록을 수행하고 있다",
+    "성형기 개발과 특허 등록을 이어가고 있다",
+    "성형기 개발과 특허 등록을 실행 중이다",
+])
+def test_현재_진행상이_원문에_있으면_과거실적_혼합에서도_보존한다(current):
+    source = "성형기 개발 | 19.01~20.03 | 설비 개발; " + current
+    assert grounding_problem(current + ".", {SOURCE_ID: source}, {}) == ""
+
+
+def test_제삼자의_완료실적과_회사의_별개_현재업무를_혼동하지_않는다():
+    source = (
+        "협력사는 2020년 성형기 개발을 완료했다. "
+        "당사는 고객상담센터의 지원 업무를 이어가고 있다."
+    )
+    text = "당사는 고객상담센터의 지원 업무를 수행하고 있다."
+    assert TIME_KEY not in grounding_requirements(text, (source,))
+
+
+def test_다른_현재업무의_진행상으로_과거개발을_현재화할수_없다():
+    source = (
+        "성형기 개발 | 19.01~20.03 | 설비 개발; "
+        "고객상담센터의 지원 업무를 수행하고 있다"
+    )
+    text = "성형기 개발을 수행하고 있다."
+    current = "고객상담센터의 지원 업무를 수행하고 있다"
+    assert grounding_problem(text, {SOURCE_ID: source}, {
+        "검증근거": {TIME_KEY: [_time_entry(current, current)]}
+    }) == GROUNDING_INVALID
+
+
 def test_다른_계획을_덧붙여도_완료과제_현재화를_면제하지_않는다():
     text = "성형기 개발로 생산성 향상을 추진하고 있으며, 고객지원은 확대할 계획이다."
     source = "성형기 개발 | 19.01~20.03 | 생산성 향상"
