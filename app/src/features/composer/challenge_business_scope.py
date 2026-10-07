@@ -13,11 +13,12 @@ from src.features.composer.challenge_event_scope import (
 from src.shared.report_evidence.challenge_eligibility import (
     challenge_eligibility_problem, challenge_eligibility_quote_problem,
     challenge_incident_row_problem,
+    challenge_issue_problem,
 )
 
 
 def challenge_business_problem(text: str, sources: Mapping[str, str], *, cells: Sequence[str] | None = None,
-                               require_current: bool = True) -> str:
+                               require_current: bool = True, claim_slot: str = "") -> str:
     """자기 인용 전체가 재무 조건뿐인 경우 표현을 바꿔도 사업 과제가 되지 않는다.
 
     혼합 원문은 그대로 보존한다. 사건표는 같은 행의 날짜·주체·사건 종류·대응 상태를
@@ -33,6 +34,12 @@ def challenge_business_problem(text: str, sources: Mapping[str, str], *, cells: 
     problem = challenge_event_scope_problem(text, sources, cells=cells)
     if problem or not require_current:
         return problem
+    # 표의 대응 셀이나 같은 인용의 다른 절에서 문제 관계를 빌리지 않는다.
+    issue_text = cells[0] if cells else text
+    if cells is not None or claim_slot == "current_challenges:issue":
+        problem = challenge_issue_problem(issue_text)
+        if problem:
+            return problem
     candidate = " ".join(cells) if cells is not None else text
     problem = challenge_eligibility_problem(candidate)
     if problem:
@@ -47,6 +54,7 @@ def challenge_business_problem(text: str, sources: Mapping[str, str], *, cells: 
         return row_problems[0]
     # 긍정 성과 원문이나 제외된 사건 절의 인용만으로 실제 대응을 만들지 않는다.
     source_problems = tuple(challenge_eligibility_quote_problem(
-        candidate, source, "current_challenges:issue",
+        candidate, source, ("current_challenges:issue" if claim_slot == "current_challenges:issue"
+                            else "current_challenges:response"),
     ) for source in own_texts)
     return source_problems[0] if source_problems and all(source_problems) else ""

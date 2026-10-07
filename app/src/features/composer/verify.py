@@ -1804,6 +1804,8 @@ def _ask_grouped_verdicts(
         ),
         diagnostics=diagnostics,
         diagnostic_contexts=contexts,
+        claim_slots_by_number={item.number: item.sentence.planned_claim_slot
+                               for item in items if item.sentence is not None},
         culture_candidate_numbers=frozenset(
             item.number for item in items
             if item.sentence is not None
@@ -2065,6 +2067,7 @@ def _apply_grounding(
     *,
     diagnostics: Optional[list[dict]] = None,
     diagnostic_contexts: Optional[Mapping[int, tuple[str, str, str]]] = None,
+    claim_slots_by_number: Optional[Mapping[int, str]] = None,
     culture_candidate_numbers: frozenset[int] = frozenset(),
     flow_cells_by_number: Optional[Mapping[int, Sequence[str]]] = None,
     confirmed_prose_numbers: frozenset[int] = frozenset(),
@@ -2181,6 +2184,7 @@ def _apply_grounding(
             problem = business_relation_scope_problem(
                 text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
                 section_id=context[0],
+                claim_slot=(claim_slots_by_number or {}).get(number, ""),
             )
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED
@@ -2234,7 +2238,7 @@ def _apply_grounding(
             if context[0] == CHALLENGE_FLOW_SECTION_ID:
                 problem = problem or challenge_business_problem(text, {
                     key: value for key, value in sources.items() if key != TABLE_SOURCE_ID
-                })
+                }, claim_slot=(claim_slots_by_number or {}).get(number, ""))
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
@@ -2960,6 +2964,7 @@ def _ask_verdicts(
             item.number: (item.section_id, item.kind, item.sentence.text)
             for item in items
         },
+        claim_slots_by_number={item.number: item.sentence.planned_claim_slot for item in items},
         culture_candidate_numbers=frozenset(
             item.number for item in items
             if item.sentence.planned_claim_slot.startswith("culture:")

@@ -12,6 +12,8 @@ from typing import Any
 
 from src.features.news_intake import constants as c
 from src.features.news_intake.claim_role import plan_role_parts
+from src.features.news_intake.partnership_role import partnership_role_parts
+from src.shared.report_evidence import partnership_scope_constants as pc
 from src.features.news_intake.models import GroundedNewsExcerpt, NewsCandidate, NewsCompanyContext
 from src.features.news_intake.identity_names import company_query_names, mentions_target
 from src.features.news_intake.article_identity import article_company_context
@@ -407,6 +409,17 @@ def _apply_claim_role(excerpt: GroundedNewsExcerpt, time_evidence: str,
     나눈 부분의 사건일은 그 부분 안에 날짜 원문이 있을 때만 남긴다.
     """
 
+    partnership_parts = partnership_role_parts(
+        excerpt.text, claim_slot=excerpt.claim_slot, company=company,
+        temporal_status=excerpt.temporal_status,
+    )
+    if partnership_parts is not None:
+        if role_diagnostics is not None:
+            role_diagnostics[pc.PARTNERSHIP_REROUTED if partnership_parts
+                             else pc.PARTNERSHIP_EXCLUDED] += 1
+        if not partnership_parts:
+            return ()
+        return (replace(excerpt, claim_slot=partnership_parts[0].claim_slot),)
     parts = plan_role_parts(
         excerpt.text, section_id=excerpt.section_id, claim_slot=excerpt.claim_slot,
         temporal_status=excerpt.temporal_status, company=company,

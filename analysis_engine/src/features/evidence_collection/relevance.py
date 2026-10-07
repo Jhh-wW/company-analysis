@@ -456,7 +456,8 @@ def score_fragment_slots_with_signal(
 
     scored: list[tuple[int, int, bool, SlotScore]] = []
     # 가린 상용구도 관측된 신호다. 무분류 AI 재판정으로 다시 붙이지 않는다.
-    challenge_business_scope = business_slot_scope(text, "current_challenges:issue")
+    # 공통 전처리에서 issue 전용 경계로 정상 대응까지 지우지 않는다.
+    challenge_business_scope = business_slot_scope(text, "current_challenges:response")
     challenge_liquidity = liquidity_boilerplate.split_liquidity_clauses(challenge_business_scope.score_text)
     incident_table = challenge_table_scope(challenge_liquidity.score_text)
     accounting_split = split_challenge_accounting_policy(incident_table.issue_text)

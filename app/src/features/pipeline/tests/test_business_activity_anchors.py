@@ -49,7 +49,8 @@ def _evidence(rows, *, section="portfolio", label=None, identity_binding=None):
         requirement=SourceRequirement.REQUIRED,
     )
     slot = {"portfolio": "portfolio:product_role", "identity": "identity:business_definition",
-            "business_model": "business_model:value_exchange"}[section]
+            "business_model": "business_model:value_exchange",
+            "operations_partners": "operations_partners:operating_role"}[section]
     fragments = tuple(EvidenceFragment(
         company_id=PROFILE["corp_code"], fragment_id=f"anchor-{section}-{index}",
         document_id=document.document_id,
@@ -101,6 +102,32 @@ def test_actual_business_preserves_whole_source_and_provenance(text, item):
     assert anchor.document_content_sha256 == document.content_sha256
     assert anchor.identity_binding == document.identity_binding
     assert anchor.source_id == ""
+
+
+def test_운영칸의_명시적_현재생산도_공식원문앵커로_조사한다():
+    text = ("콘텐츠 사업이란 콘텐츠의 기획, 제작, 유통, 판매, 소비와 관련된 사업을 통칭하는 것으로 "
+            "당사는 기사를 중심으로 한 뉴스콘텐츠를 직접 생산 가공하고 있으며, "
+            "생산 가공된 콘텐츠를 다시 당사 매체 및 타 매체를 통해 유통판매하고 있습니다.")
+    evidence = _evidence((text,), section="operations_partners")
+    diagnostics = {}
+    anchor, = build_business_activity_anchors(evidence, profile=PROFILE, diagnostics=diagnostics)
+    assert anchor.business_item == "뉴스콘텐츠"
+    assert anchor.exact_text == text
+    assert anchor.text_sha256 == _sha(text)
+    assert anchor.location == f"0-{len(text)}"
+    assert diagnostics["verified_fragments"] == diagnostics["current_business_matches"] == 1
+
+
+@pytest.mark.parametrize("text", (
+    "미디어사업은 광고사업 및 다양한 창구의 콘텐츠 판매 사업으로 나뉩니다.",
+    "회사는 임직원에게 회계관리 서비스를 제공합니다.",
+    "콘텐츠 사업이란 상품 유통을 통칭하는 것으로 고객사는 뉴스콘텐츠를 생산 가공합니다.",
+    "콘텐츠 사업이란 상품 유통을 통칭하는 것으로 당사의 자회사는 뉴스콘텐츠를 생산 가공합니다.",
+    "당사는 산업용 센서를 생산 가공할 계획입니다.",
+    "당사는 내부 업무시스템을 운영합니다.",
+))
+def test_운영칸_자체는_회사사업_앵커의_양성근거가_아니다(text):
+    assert build_business_activity_anchors(_evidence((text,), section="operations_partners"), profile=PROFILE) == ()
 
 
 @pytest.mark.parametrize("text", (

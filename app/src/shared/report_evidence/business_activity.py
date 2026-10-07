@@ -49,10 +49,15 @@ def current_business_item(fragment: EvidenceFragment, company_name: str) -> str:
         or context["status"]
     ):
         return ""
-    if not set(fragment.covered_slot_ids) & c.BUSINESS_ACTIVITY_SLOT_IDS:
+    business_slots = set(fragment.covered_slot_ids) & c.BUSINESS_ACTIVITY_SLOT_IDS
+    operating_slots = set(fragment.covered_slot_ids) & c.BUSINESS_ACTIVITY_OPERATING_SLOT_IDS
+    if not business_slots and not operating_slots:
         return ""
+    operating_only = bool(operating_slots and not business_slots)
     named = parse_name_location(fragment.location)
     if named is not None:
+        if operating_only:
+            return ""  # 운영 칸의 제품명만으로 현재 생산·제공 관계를 확정하지 않는다.
         label, item = named
         if (
             label in c.BUSINESS_ACTIVITY_NAME_LABELS
@@ -70,6 +75,9 @@ def current_business_item(fragment: EvidenceFragment, company_name: str) -> str:
         unit = c.BUSINESS_ACTIVITY_OVERVIEW_PREFIX_RE.sub("", unit.strip())
         if not unit or c.BUSINESS_ACTIVITY_EXCLUDED_RE.search(unit):
             continue
+        definition = c.BUSINESS_ACTIVITY_DEFINITION_PREFIX_RE.match(unit)
+        if definition is not None:
+            unit = unit[definition.end():]
         matched_subject = subject.match(unit)
         if matched_subject is None:
             continue
@@ -81,15 +89,25 @@ def current_business_item(fragment: EvidenceFragment, company_name: str) -> str:
             continue
         business_text = unit[matched_subject.end():]
         business_text = c.BUSINESS_ACTIVITY_OVERVIEW_TAIL_RE.split(business_text)[-1].lstrip(" ,，")
+        if operating_only and c.BUSINESS_ACTIVITY_OPERATING_INTERNAL_RE.search(business_text):
+            continue
+        if operating_only and c.BUSINESS_ACTIVITY_OPERATING_NESTED_ACTOR_RE.match(business_text):
+            continue
         business_text = c.BUSINESS_ACTIVITY_RECIPIENT_RE.sub("", business_text)
-        for pattern in (
+        business_text = c.BUSINESS_ACTIVITY_PRODUCTION_FOCUS_RE.sub("", business_text)
+        patterns = (
+            c.BUSINESS_ACTIVITY_COMPOUND_PRODUCTION_RE,
             c.BUSINESS_ACTIVITY_DELIVERY_RE,
             c.BUSINESS_ACTIVITY_SEGMENT_COMPOSITION_RE,
             c.BUSINESS_ACTIVITY_SINGLE_MANUFACTURING_RE,
             c.BUSINESS_ACTIVITY_MANUFACTURING_RE,
             c.BUSINESS_ACTIVITY_BUSINESS_RE,
             c.BUSINESS_ACTIVITY_PRIMARY_BUSINESS_RE,
-        ):
+        ) if not operating_only else (
+            c.BUSINESS_ACTIVITY_COMPOUND_PRODUCTION_RE,
+            c.BUSINESS_ACTIVITY_OPERATING_DELIVERY_RE,
+        )
+        for pattern in patterns:
             match = pattern.match(business_text)
             if match is not None:
                 item = match["item"].strip()

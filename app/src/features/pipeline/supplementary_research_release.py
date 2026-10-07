@@ -8,6 +8,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from src.core.report_style_adapter import styled_report_claim
+from src.shared.report_quality.constants import INTERPRETATION_CLAIM_TYPE, VERIFIED_PROSE_CLAIM_TYPE
 
 from src.core.citations import (
     citation_number,
@@ -80,6 +83,27 @@ class _CollectedDocument:
 
 def _normalized(value: object) -> str:
     return " ".join(str(value or "").split()).casefold()
+
+
+def _display_claims(fact: FactRecord, *, reference_date: str = "") -> set[str]:
+    """검증 원문과 실제 표시기의 닫힌 변환만 대응한다. 의미 유사도는 쓰지 않는다."""
+    claims = {_normalized(fact.claim)}
+    if fact.claim_type in {VERIFIED_PROSE_CLAIM_TYPE, INTERPRETATION_CLAIM_TYPE}:
+        news_exact_text = ""
+        if len(fact.supporting_source_ids) == 1:
+            try:
+                manifest = json.loads(fact.state_evidence)
+            except (TypeError, ValueError):
+                manifest = None
+            if type(manifest) is list and len(manifest) == 1 and type(manifest[0]) is dict:
+                value = manifest[0].get("news_exact_text")
+                if type(value) is str:
+                    news_exact_text = value
+        claims.add(_normalized(styled_report_claim(
+            fact.claim, as_of_date=reference_date, news_exact_text=news_exact_text,
+            source_date=fact.source_date, source_publisher=fact.source_publisher,
+        )))
+    return claims
 
 
 def _is_notice_only_section(section: object) -> bool:
@@ -216,6 +240,8 @@ def _visible_fact_ids(
     source_by_number: dict[
         str, tuple[object, SourceVerification]
     ],
+    *,
+    reference_date: str = "",
 ) -> tuple[tuple[str, bool], ...]:
     """실제 공개 본문에 대응한 ``(fact_id, 뉴스 허용 여부)``.
 
@@ -241,7 +267,7 @@ def _visible_fact_ids(
             fact
             for fact in candidates
             if fact.fact_id not in {fact_id for fact_id, _allowed in visible}
-            and _normalized(fact.claim) in normalized
+            and bool(_display_claims(fact, reference_date=reference_date) & normalized)
             and set(fact.supporting_source_ids) == source_ids
         ]
         if len(matches) == 1:
@@ -392,7 +418,9 @@ def _assess(
                 False, SUPPLEMENTARY_RELEASE_INVALID_REPORT_DTO, detail="section_duplicate_cell",
             )
         seen_sections.add(section.cell)
-        visible_ids = _visible_fact_ids(section, facts, source_by_number)
+        visible_ids = _visible_fact_ids(
+            section, facts, source_by_number, reference_date=report.as_of_date,
+        )
         bound_sources: list[SourceVerification] = []
         for fact_id, news_allowed in visible_ids:
             fact = facts[fact_id]

@@ -57,7 +57,7 @@ class BusinessSlotScope:
 def business_slot_scope(text: str, slot_id: str) -> BusinessSlotScope:
     """전체 원문을 바꾸지 않고 해당 칸의 채점 입력만 따로 만든다."""
     if slot_id in CHALLENGE_SLOTS:
-        scoped = challenge_eligibility_scope(text)
+        scoped = challenge_eligibility_scope(text, slot_id)
         return BusinessSlotScope(
             scoped.score_text,
             tuple(text[start:end] for start, end, _ in scoped.excluded_spans),
@@ -110,7 +110,7 @@ def business_slot_scope(text: str, slot_id: str) -> BusinessSlotScope:
 
 def business_slot_scope_problem(text: str, slot_id: str) -> str:
     if slot_id in CHALLENGE_SLOTS:
-        return challenge_eligibility_problem(text)
+        return challenge_eligibility_problem(text, slot_id)
     scoped = business_slot_scope(text, slot_id)
     remaining = c.REMAINING_SUPPORT_RE.get(slot_id)
     return c.REJECT_BUSINESS_SLOT_SCOPE if scoped.excluded_clauses and not (

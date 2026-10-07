@@ -22,12 +22,20 @@ class ChallengeEligibilityScope:
 
 
 def _reason(text: str, *, table_record: bool = False, positive_context: bool = False,
-            policy_units: tuple = ()) -> str:
+            policy_units: tuple = (), credit_context: bool = False) -> str:
     surface = _surface(text)
+    credit_business = bool(any(not c.CREDIT_HYPOTHETICAL_TAIL_RE.match(surface[match.end():])
+                               for match in c.CREDIT_ACTUAL_BUSINESS_RE.finditer(surface))
+                           or c.CUSTOMER_CREDIT_SERVICE_RE.search(surface)
+                           or c.CUSTOMER_LEGAL_FINANCIAL_SERVICE_RE.search(surface))
+    if (c.CREDIT_POLICY_RE.search(surface) or (
+            credit_context and c.CREDIT_MEASUREMENT_UNIT_RE.search(surface))) and not credit_business:
+        return c.ADMINISTRATIVE_EVENT_ONLY
     business_exception = bool(
         c.POLICY_BUSINESS_PROBLEM_RE.search(surface)
         or c.CUSTOMER_LEGAL_FINANCIAL_SERVICE_RE.search(surface)
         or c.PRODUCT_REGULATION_RESPONSE_RE.search(surface)
+        or credit_business
     )
     if (c.FINANCIAL_EXPOSURE_RE.search(surface)
             or c.GENERAL_LEGAL_MANAGEMENT_RE.search(surface)
@@ -57,7 +65,23 @@ def _reason(text: str, *, table_record: bool = False, positive_context: bool = F
     return ""
 
 
-def challenge_eligibility_scope(text: str) -> ChallengeEligibilityScope:
+
+def challenge_issue_problem(text: str) -> str:
+    """닫힌 일반 설명만 제한한다. 나머지 문장의 문제성을 승인하지 않는다."""
+    units = tuple(unit for unit in c.UNIT_RE.split(text) if unit.strip())
+    if not units:
+        return ""
+    def ordinary(unit: str) -> bool:
+        surface = _surface(unit)
+        if (c.PROBLEM_RE.search(surface) or c.POLICY_BUSINESS_PROBLEM_RE.search(surface)
+                or c.ISSUE_RELATION_VETO_RE.search(surface)):
+            return False
+        return bool(c.ROUTINE_OPERATION_ISSUE_RE.fullmatch(surface)
+                    or c.INDUSTRY_TREND_ISSUE_RE.fullmatch(surface))
+    return c.ADMINISTRATIVE_EVENT_ONLY if all(ordinary(unit) for unit in units) else ""
+
+
+def challenge_eligibility_scope(text: str, slot_id: str = "") -> ChallengeEligibilityScope:
     """섞인 원문은 적격 절만 채점한다. 원문 자체와 다른 장의 근거는 바꾸지 않는다.
 
     임의 자연어의 사업 관련성을 증명하지 않는다. 닫힌 모순이 없는 나머지는
@@ -71,6 +95,7 @@ def challenge_eligibility_scope(text: str) -> ChallengeEligibilityScope:
     saw_header = False
     positive_context = False
     full_surface = _surface(text)
+    credit_context = bool(c.CREDIT_MEASUREMENT_CONTEXT_RE.search(full_surface))
     policy_units = tuple(unit for first, second, unit in c.POLICY_CONTEXT_RULES
                          if first.search(full_surface) and second.search(full_surface))
     # 표의 재해 내용 끝 마침표가 같은 행의 조치 열을 분리하지 않게 한다.
@@ -107,8 +132,10 @@ def challenge_eligibility_scope(text: str) -> ChallengeEligibilityScope:
             elif "|" not in unit:
                 table_record = False
                 pending_header = None
-            reason = _reason(unit, table_record=table_record and not header,
+            reason = _reason(unit, credit_context=credit_context, table_record=table_record and not header,
                              positive_context=positive_context, policy_units=policy_units)
+            if not reason and slot_id == "current_challenges:issue":
+                reason = challenge_issue_problem(unit)
             positive_context = reason == c.POSITIVE_RESPONSE_ONLY
             if reason:
                 excluded.append((start, end, reason))
@@ -125,8 +152,8 @@ def challenge_eligibility_scope(text: str) -> ChallengeEligibilityScope:
     return ChallengeEligibilityScope(score_text if excluded or saw_header else text, tuple(excluded))
 
 
-def challenge_eligibility_problem(text: str) -> str:
-    scope = challenge_eligibility_scope(text)
+def challenge_eligibility_problem(text: str, slot_id: str = "") -> str:
+    scope = challenge_eligibility_scope(text, slot_id)
     return scope.excluded_spans[0][2] if scope.excluded_spans and not scope.score_text.strip() else ""
 
 
@@ -139,10 +166,15 @@ def challenge_eligibility_quote_problem(quote: str, source: str, slot_id: str) -
     """같은 원문의 제외 절만 잘라 지원칸을 되살리는 것을 막는다."""
     if slot_id not in c.CHALLENGE_SLOTS:
         return ""
-    problem = challenge_eligibility_problem(quote)
+    problem = challenge_eligibility_problem(quote, slot_id)
     if problem:
         return problem
-    scoped = challenge_eligibility_scope(source)
+    # 같은 절에 실제 사건이 있어도 측정 방법만 고른 인용은 그 사건을 빌리지 않는다.
+    if c.CREDIT_MEASUREMENT_CONTEXT_RE.search(_surface(source)):
+        problem = _reason(quote, credit_context=True)
+        if problem:
+            return problem
+    scoped = challenge_eligibility_scope(source, slot_id)
     if not scoped.excluded_spans:
         return ""
     if not scoped.score_text.strip():

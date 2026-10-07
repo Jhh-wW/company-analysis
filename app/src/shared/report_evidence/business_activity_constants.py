@@ -14,6 +14,9 @@ BUSINESS_ACTIVITY_SLOT_IDS: Final[frozenset[str]] = frozenset({
     "business_model:revenue_model", "business_model:value_exchange",
     "identity:business_definition", "identity:corporate_identity",
 })
+BUSINESS_ACTIVITY_OPERATING_SLOT_IDS: Final[frozenset[str]] = frozenset({
+    "operations_partners:operating_role",
+})
 BUSINESS_ACTIVITY_UNIT_RE: Final[re.Pattern[str]] = re.compile(
     r"[;\n]|(?<=[.!?。])(?:\s+|(?=[가-힣(]))"
 )
@@ -76,6 +79,33 @@ BUSINESS_ACTIVITY_SEGMENT_COMPOSITION_RE: Final[re.Pattern[str]] = re.compile(
 )
 BUSINESS_ACTIVITY_RECIPIENT_RE: Final[re.Pattern[str]] = re.compile(
     r"^(?:고객|사용자|소비자|거래처|기업\s*고객)(?:에게|에)\s*"
+)
+# 정의 앞절만으로 사업을 확정하지 않고, 같은 문장의 명시적 자기 생산절을 검사한다.
+BUSINESS_ACTIVITY_DEFINITION_PREFIX_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[가-힣A-Za-z0-9 ()·/&_-]{2,70}\s*사업이란\s*"
+    r"[^.;\n]{2,180}?(?:통칭하는|의미하는)\s*것으로\s*"
+)
+BUSINESS_ACTIVITY_PRODUCTION_FOCUS_RE: Final[re.Pattern[str]] = re.compile(
+    r"^[가-힣A-Za-z0-9·/_-]{1,20}(?:을|를)\s*중심으로\s*한\s*"
+)
+BUSINESS_ACTIVITY_COMPOUND_PRODUCTION_RE: Final[re.Pattern[str]] = re.compile(
+    BUSINESS_ACTIVITY_ITEM_PATTERN + r"(?:을|를)\s*(?:직접\s*)?"
+    r"(?:생산\s*가공|유통\s*판매)" + BUSINESS_ACTIVITY_PRESENT_MODIFIER
+    + r"(?![가-힣A-Za-z0-9])"
+)
+BUSINESS_ACTIVITY_OPERATING_DELIVERY_RE: Final[re.Pattern[str]] = re.compile(
+    BUSINESS_ACTIVITY_ITEM_PATTERN + r"(?:을|를)\s*(?:직접\s*)?"
+    r"(?:제조|생산|판매|공급|제공)"
+    r"(?:(?:·|\s*및\s*)\s*(?:제조|생산|판매|공급|제공))?"
+    + BUSINESS_ACTIVITY_PRESENT_MODIFIER
+    + r"(?![가-힣A-Za-z0-9])"
+)
+BUSINESS_ACTIVITY_OPERATING_NESTED_ACTOR_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:고객사|고객|거래처|협력사|공급사|제조사|경쟁사)(?:는|은|가|이)\s*"
+)
+BUSINESS_ACTIVITY_OPERATING_INTERNAL_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:사내|내부|임직원|직원|종업원)(?:에게|에|을|를|의|\s)|"
+    r"(?:회계|재무|법무|준법|공시|내부통제)\s*(?:업무|관리|정책|절차|활동)"
 )
 BUSINESS_ACTIVITY_GENERIC_ITEMS: Final[frozenset[str]] = frozenset({
     "제품", "상품", "서비스", "사업", "사업부문", "플랫폼", "콘텐츠",

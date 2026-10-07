@@ -4,6 +4,7 @@
 기존 역할 결속·법인·의미 검수가 계속 맡는다. 빈 결과는 전체 사실의 승인이 아니다.
 """
 from collections.abc import Mapping
+from src.shared.report_evidence.partnership_scope import research_partnership_claim_problem
 import re
 import unicodedata
 
@@ -158,11 +159,15 @@ def _provision_direction_problem(claim: str, source_units: tuple[str, ...]) -> b
 
 
 def business_relation_scope_problem(
-    text: str, own_sources: Mapping[str, str], *, section_id: str,
+    text: str, own_sources: Mapping[str, str], *, section_id: str, claim_slot: str = "",
 ) -> str:
     """2·7장 산문의 명시적 거래·고객 관계만 자기 인용의 절/표행과 대조한다."""
     if section_id not in BUSINESS_RELATION_SECTIONS or not own_sources:
         return ""
+    if section_id == "operations_partners":
+        problem = research_partnership_claim_problem(text, own_sources, claim_slot=claim_slot)
+        if problem:
+            return problem
     source_units = tuple(unit for value in own_sources.values() for unit in _units(value))
     for claim in _units(text):
         candidate = _surface(claim)

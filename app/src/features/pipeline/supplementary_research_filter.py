@@ -13,7 +13,7 @@ from src.features.pipeline.constants import EVIDENCE_AVAILABLE_PUBLICATION_POLIC
 from src.features.pipeline.port import Grade, Report, ReportSection, ReportTable
 from src.features.pipeline.supplementary_fact_binding import bound_supplementary_fact_sources
 from src.features.pipeline.supplementary_research_release import (
-    _citation_registry, _collected_documents, _normalized, _row_citation_numbers,
+    _citation_registry, _collected_documents, _display_claims, _normalized, _row_citation_numbers,
     _source_can_ground_body, _visible_fact_ids,
 )
 from src.features.pipeline.supplementary_research_runtime_constants import (
@@ -115,7 +115,7 @@ def reconcile_supplementary_citations(
             claim = _normalized("".join(part.text for part in parts))
             ids = {fact_id for fact_id in section.fact_ids
                    if fact_id in facts and facts[fact_id].section_owner == section.cell
-                   and _normalized(facts[fact_id].claim) == claim}
+                   and claim in _display_claims(facts[fact_id], reference_date=report.as_of_date)}
             if not numbers and not citation_number(cite) and len(ids) == 1:
                 bindings = bound_supplementary_fact_sources(
                     facts[next(iter(ids))], registry=registry, source_verifier=source_verifier,
@@ -197,7 +197,7 @@ def filter_supplementary_research_report(
         ids = {
             fact_id for fact_id in section.fact_ids
             if fact_id in governed and facts[fact_id].section_owner == section.cell
-            and _normalized(facts[fact_id].claim) == claim
+            and claim in _display_claims(facts[fact_id], reference_date=report.as_of_date)
         }
         numbers = {str(part.number) for part in parts if part.number > 0}
         return ids, numbers
@@ -210,6 +210,7 @@ def filter_supplementary_research_report(
                 numbers.add(legacy)
             visible = _visible_fact_ids(
                 replace(section, prose_lines=[(text, cite)], tables=[]), facts, by_number,
+                reference_date=report.as_of_date,
             )
             # 같은 출처를 이어 쓰는 문장은 공개 번호를 생략할 수 있다. 본문과
             # 잠긴 사실이 일치해야 하고, 명시한 번호는 정확히 맞아야 한다.
@@ -234,7 +235,8 @@ def filter_supplementary_research_report(
             break
         invalid_ids.update(dependants)
 
-    invalid_claims = {_normalized(facts[fact_id].claim) for fact_id in invalid_ids}
+    invalid_claims = {claim for fact_id in invalid_ids
+                      for claim in _display_claims(facts[fact_id], reference_date=report.as_of_date)}
 
     def filter_table(section: ReportSection, table: ReportTable) -> ReportTable | None:
         keep: list[int] = []
@@ -246,7 +248,8 @@ def filter_supplementary_research_report(
             )}
             matching = {
                 fact_id for fact_id in section.fact_ids
-                if fact_id in governed and _normalized(facts[fact_id].claim) in claims
+                if fact_id in governed
+                and bool(_display_claims(facts[fact_id], reference_date=report.as_of_date) & claims)
                 and facts[fact_id].section_owner == section.cell
             }
             expected_sources = {
