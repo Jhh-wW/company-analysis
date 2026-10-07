@@ -823,6 +823,12 @@ OPERATIONS_FLOW_MAX_CELL_CHARS: Final[int] = 24
 #:   숨긴 주장이 된다. 근거 인용이 필수인 이유도 같다.
 CHALLENGE_FLOW_SECTION_ID: Final[str] = "current_challenges"
 
+CHALLENGE_RESPONSE_CLAIM_SLOT: Final[str] = "current_challenges:response"
+NOTICE_CHALLENGE_RESPONSE_ONLY: Final[str] = (
+    "확보한 자료에서 회사의 구체적인 사업 문제는 확인하지 못했습니다. "
+    "아래에는 공식 자료에 나온 대응 설명만 담았습니다."
+)
+
 CHALLENGE_FLOW_HEADERS: Final[tuple[str, str]] = (
     "사업 과제·확인 시점",
     "회사가 밝힌 대응·상태",

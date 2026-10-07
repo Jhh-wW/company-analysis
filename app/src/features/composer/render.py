@@ -30,6 +30,7 @@ from src.features.composer.industry_context import (
     bind_industry_context_sources, assert_industry_context_sources,
     has_verified_direct_business_issue,
 )
+from src.features.composer.challenge_presentation import challenge_response_only_notice
 from src.features.composer.constants import (
     CITATION_STYLE_MERGED,
     PARAGRAPH_MAX_SENTENCES,
@@ -1668,7 +1669,15 @@ def render_report(
             meta, number, company_name, [INDUSTRY_CONTEXT_SECTION], filing_meta,
         ),
     )
-    sections = [replace(section, industry_contexts=industry_contexts)
+    response_notice = challenge_response_only_notice(
+        report, has_industry_context=bool(industry_contexts),
+    )
+    sections = [replace(
+                    section, industry_contexts=industry_contexts,
+                    guidance_lines=list(dict.fromkeys([
+                        *section.guidance_lines, *([response_notice] if response_notice else []),
+                    ])),
+                )
                 if section.cell == INDUSTRY_CONTEXT_SECTION else section for section in sections]
     complete_registry = ensure_dart_profile_attesters(
         citations,

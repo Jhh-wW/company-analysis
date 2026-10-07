@@ -29,6 +29,7 @@ from src.features.composer.industry_context import (
     bind_industry_context_sources, assert_industry_context_sources,
     has_verified_direct_business_issue,
 )
+from src.features.composer.challenge_presentation import challenge_response_only_notice
 from src.features.composer.constants import (
     DART_DOCUMENT_HOST,
     DART_DOCUMENT_URL_TEMPLATE,
@@ -1692,10 +1693,15 @@ def _expected_public_content_projection(
             used_in=[INDUSTRY_CONTEXT_SECTION], filing_meta=filing_meta,
         ),
     )
-    if industry_contexts:
-        for section in public_sections:
-            if section["cell"] == INDUSTRY_CONTEXT_SECTION:
+    response_notice = challenge_response_only_notice(
+        report, has_industry_context=bool(industry_contexts),
+    )
+    for section in public_sections:
+        if section["cell"] == INDUSTRY_CONTEXT_SECTION:
+            if industry_contexts:
                 section["industry_contexts"] = [industry_context_to_dict(value) for value in industry_contexts]
+            if response_notice and response_notice not in section["guidance_lines"]:
+                section["guidance_lines"].append(response_notice)
     try:
         complete_registry = ensure_dart_profile_attesters(
             citations,

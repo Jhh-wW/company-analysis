@@ -206,6 +206,13 @@ def _industry_problem_linked(item: NewsCandidate, company: NewsCompanyContext | 
                for clause in ic.INDUSTRY_SEARCH_CLAUSE_RE.split(item.title + "\n" + item.description))
 
 
+def _industry_problem_signal(item: NewsCandidate, *, title_only: bool = False) -> bool:
+    """사업명 exact 신호가 없어도 문제 논점이 있는 본문의 조사 기회를 먼저 준다."""
+    metadata = item.title if title_only else item.title + "\n" + item.description
+    return bool(ic.INDUSTRY_SEARCH_PROBLEM_RE.search(metadata)
+                or ic.INDUSTRY_SEARCH_QUESTION_RE.search(metadata))
+
+
 def _industry_candidates(candidates: list[NewsCandidate], *,
                          company: NewsCompanyContext | None = None) -> list[NewsCandidate]:
     """문제 신호가 있는 산업 검색 후보에 본문 조사 기회를 먼저 준다.
@@ -229,6 +236,8 @@ def _industry_candidates(candidates: list[NewsCandidate], *,
         _industry_problem_linked(item, company) and _industry_business_linked(item, company, item.title),
         _industry_problem_linked(item, company),
         _industry_business_linked(item, company, item.title),
+        _industry_problem_signal(item, title_only=True),
+        _industry_problem_signal(item),
         item.published_on, item.source_url,
     ), reverse=True)
 

@@ -74,6 +74,28 @@ def _report(section_ids: tuple[str, ...]) -> tuple[ComposedReport, list[FactReco
     return ComposedReport(tuple(sections)), facts
 
 
+def test_원장에_검증된_대응도_현재과제_요약을_채우지_않는다():
+    report, facts = _report(("identity", "business_model", "portfolio", "current_challenges"))
+    response = replace(report.sections[-1].sentences[0],
+        planned_claim_slot="current_challenges:response")
+    report = replace(report, sections=report.sections[:-1] + (
+        replace(report.sections[-1], sentences=(response,)),
+    ))
+    facts[-1] = _fact("current_challenges", response)
+    selected = select_extractive_summary(report, facts)
+    assert "current_challenges" not in selected.section_ids
+    assert len(selected.items) == 3
+    assert report.sections[-1].sentences == (response,)
+
+    issue = _sentence("current_challenges", "과제")
+    report = replace(report, sections=report.sections[:-1] + (
+        replace(report.sections[-1], sentences=(response, issue)),
+    ))
+    selected = select_extractive_summary(report, facts + [_fact("current_challenges", issue)])
+    assert any(item.sentence is issue for item in selected.items)
+    assert all(item.sentence is not response for item in selected.items)
+
+
 def test_지원동기에_필요한_서로_다른_다섯_장에서_글자그대로_고른다() -> None:
     report, facts = _report(tuple(reversed(tuple(_SLOTS))))
 

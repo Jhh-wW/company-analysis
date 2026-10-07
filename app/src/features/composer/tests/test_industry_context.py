@@ -154,3 +154,51 @@ def test_사전_manifest와_최종renderer는_동일한_두근거_출처를_봉�
     seal = build_public_structure_seal(composed, (fragment,), None, **options)
     rendered, _ = _render(public_structure_seal=seal, citation_style="inline")
     assert_report_matches_public_structure(rendered, seal)
+
+
+@pytest.mark.parametrize("with_industry", [False, True])
+def test_대응만_있는_장의_범위안내도_공개봉인과_저장에_같이_남는다(with_industry):
+    from src.features.composer.constants import NOTICE_CHALLENGE_RESPONSE_ONLY
+
+    company, fragment, anchor, problem, composed = _materials()
+    response_text = "가상센서기업은 제품 공급을 위한 생산 설비를 구축하고 있다."
+    document_hash = _sha(fragment.text + response_text)
+    fragment = replace(fragment, document_content_sha256=document_hash)
+    anchor = replace(anchor, document_content_sha256=document_hash)
+    response_fragment = replace(
+        fragment, fragment_id="12", text=response_text, location="생산 설비",
+        supported_claim_slots=("current_challenges:response",),
+    )
+    sentence = ComposedSentence(response_text, ("12",), "확인",
+        planned_claim_slot="current_challenges:response", verification_state="verified")
+    composed = replace(composed, sections=tuple(
+        replace(section, sentences=(sentence,)) if section.section_id == "current_challenges"
+        else section for section in composed.sections
+    ))
+    fragments = (fragment, response_fragment)
+    problems = (problem,) if with_industry else ()
+    options = dict(
+        filing_meta=None, composition_tables=(), table_presentation="table", company_id="00000001",
+        evidence_generation_sha256="a" * 64, evidence_packet_sha256s=tuple((sid, "b" * 64) for sid in SECTION_IDS),
+        company_name=company, corp_type="", generated_at="", as_of_date="2026-09-30",
+        analysis_period="", latest_performance_period="", citation_style="inline",
+        industry_anchors=(anchor,), industry_problems=problems,
+    )
+    seal = build_public_structure_seal(composed, fragments, None, **options)
+    rendered = render_report(company, composed, fragments, None,
+        company_id="00000001", as_of_date="2026-09-30", citation_style="inline",
+        industry_anchors=(anchor,), industry_problems=problems, public_structure_seal=seal)
+    assert_report_matches_public_structure(rendered, seal)
+    section = rendered.sections[4]
+    assert (NOTICE_CHALLENGE_RESPONSE_ONLY in section.guidance_lines) is not with_industry
+    assert response_text in section.prose_lines[0][0]
+    assert section.fact_ids and len(section.fact_ids) == 1
+    # 부분 보고서의 저장 검사는 실제 부분 렌더 경로로 한다. FULL 사전 봉인만
+    # 붙인 중간 산출물은 출고 계약이 없어 저장 재열기에서 정당하게 차단된다.
+    partial = render_report(company, composed, fragments, None,
+        company_id="00000001", as_of_date="2026-09-30", citation_style="inline",
+        industry_anchors=(anchor,), industry_problems=problems)
+    assert partial.sections[4].guidance_lines == section.guidance_lines
+    restored = report_from_dict(report_to_dict(partial))
+    assert restored.sections[4].guidance_lines == section.guidance_lines
+    assert restored.fact_records == rendered.fact_records

@@ -59,6 +59,8 @@ from src.features.composer.constants import (
     ALREADY_WRITTEN_HEAD,
     ALREADY_WRITTEN_MAX_SENTENCES,
     CITATION_RULES_GUIDE,
+    CHALLENGE_FLOW_SECTION_ID,
+    CHALLENGE_RESPONSE_CLAIM_SLOT,
     CLAIM_SLOTS_BY_SECTION,
     DOCUMENT_LIST_GUIDE,
     DOCUMENT_LIST_HEAD,
@@ -2136,6 +2138,10 @@ def summary_candidates(
     seen: set[str] = set()
     for section in report.sections:
         for sentence in section.sentences:
+            # 대응 설명 자체를 표지의 '현재과제'로 승격하지 않는다.
+            if (section.section_id == CHALLENGE_FLOW_SECTION_ID
+                    and sentence.planned_claim_slot == CHALLENGE_RESPONSE_CLAIM_SLOT):
+                continue
             key = _normalized_text(sentence.text)
             if not key or key in seen:
                 continue

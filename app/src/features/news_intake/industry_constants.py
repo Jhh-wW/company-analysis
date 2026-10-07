@@ -21,6 +21,9 @@ INDUSTRY_SEARCH_PROBLEM_RE = re.compile(
     r"shortage|disruption|recall|overcapacity|declin|regulat|rising\s+cost",
     re.I,
 )
+# 공식 앵커 질의의 예비 후보를 읽는 순위에만 쓰는 일반 논점 표지다.
+# 이 표지는 같은 사업·현재 문제·지역 또는 회사의 피해를 증명하지 않는다.
+INDUSTRY_SEARCH_QUESTION_RE = re.compile(r"문제|쟁점|숙제")
 INDUSTRY_MAX_PROBLEMS_PER_ARTICLE = 1
 INDUSTRY_QUOTE_MAX_CHARS = 900
 INDUSTRY_DOMESTIC_MARKERS = ("국내", "한국", "대한민국", "south korea", "republic of korea")
