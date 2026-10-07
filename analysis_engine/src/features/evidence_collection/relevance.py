@@ -15,6 +15,7 @@ from features.evidence_collection.liquidity_constants import CHALLENGE_POLICY_SL
 from features.evidence_collection.challenge_accounting_policy import split_challenge_accounting_policy
 from features.evidence_collection.challenge_slot_scope import challenge_table_scope
 from features.evidence_collection.business_slot_scope import business_slot_scope
+from features.evidence_collection.business_activity_declaration import declared_business_item
 from features.evidence_collection.weak_signal_context import (
     accounting_value_table_only,
     future_signal_has_context,
@@ -476,6 +477,11 @@ def score_fragment_slots_with_signal(
             has_any_direct_signal = True
             score_text = business_scope.score_text
         hits = [keyword for keyword in keywords if keyword_has_direct_hit(keyword, score_text)]
+        business_declaration = (
+            slot_id == "identity:business_definition" and bool(declared_business_item(score_text))
+        )
+        if business_declaration:
+            hits.append("current_company_business_declaration")
         incident_row = slot_id == "current_challenges:issue" and incident_table.has_incident_row
         incident_response = slot_id == "current_challenges:response" and incident_table.has_response_row
         if incident_row:
@@ -556,6 +562,8 @@ def score_fragment_slots_with_signal(
         )
         if revenue_mix:
             reason_codes.append("direct_pattern:revenue_type_mix")
+        if business_declaration:
+            reason_codes.append("direct_pattern:current_company_business_declaration")
         if sales_table:
             reason_codes.append("direct_pattern:sales_channel_table")
         if supply_contract:

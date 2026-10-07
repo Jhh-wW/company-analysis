@@ -74,6 +74,7 @@ def build_business_activity_anchors(
         diagnostics["status"] = "checked_selected_candidates"
     anchors: list[BusinessActivityAnchor] = []
     seen: set[str] = set()
+    verified: list[tuple[EvidenceFragment, CollectedEvidenceDocument, str]] = []
     candidates = sorted(
         (candidate for candidate in official_evidence.candidates
          if candidate.section_id in c.BUSINESS_ACTIVITY_SECTION_PRIORITY),
@@ -98,6 +99,7 @@ def build_business_activity_anchors(
                 continue
             counts["verified_fragments"] += 1
             item = current_business_item(fragment, company_name)
+            verified.append((fragment, document, item))
             counts["current_business_matches"] += bool(item)
             if diagnostics is not None:
                 diagnostics.update(counts)
@@ -111,4 +113,20 @@ def build_business_activity_anchors(
             seen.add(key)
             if len(anchors) == c.MAX_BUSINESS_ACTIVITY_ANCHORS:
                 return tuple(anchors)
+    # 기존 생산·제공 관계를 먼저 유지하고 현재 구성 선언을 보충한다.
+    # 한 원조각에서 하나의 항목만 골라 ID·원문·SHA·좌표 결속을 그대로 유지한다.
+    for fragment, document, original_item in verified:
+        if original_item:
+            continue
+        item = current_business_item(fragment, company_name, include_declaration=True)
+        counts["current_business_matches"] += bool(item)
+        key = " ".join(item.casefold().split())
+        if item and key not in seen:
+            anchors.append(_anchor(fragment, document, item))
+            seen.add(key)
+            counts["accepted_anchors"] = len(anchors)
+        if diagnostics is not None:
+            diagnostics.update(counts)
+        if len(anchors) == c.MAX_BUSINESS_ACTIVITY_ANCHORS:
+            break
     return tuple(anchors)

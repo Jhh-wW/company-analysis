@@ -21,7 +21,7 @@
   앞 두 글자가 같아도 서로 다른 3-그램이 된다. **문장끼리 비교(dedupe)에는
   맞지만, 짧은 딱지를 긴 문장에 대보는 일에는 못 쓰는 도구**였다.
 
-  더 근본적으로 — 흐름도의 첫 칸(무엇으로 시작하나)과 끝 칸(누구에게 닿나)은
+  더 근본적으로 — 흐름도의 첫 칸(무엇으로 시작하나)과 끝 칸(전달 대상·경로)은
   **원래 작가가 요약해 붙이는 이름**이다. 원문에 「음악 소비자」·「데뷔
   아티스트」가 글자 그대로 있을 리 없다. 글자 일치를 요구하는 것은
   흐름도라는 물건의 성질과 어긋난다.
@@ -138,6 +138,7 @@ from src.features.composer.portfolio_name_constants import (
 from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
 from src.features.composer.scope_guard import flow_scope_problem
 from src.features.composer.identity_flow_scope import identity_flow_scope_problem
+from src.features.composer.role_binding import company_flow_actor_problem
 from src.features.composer.absence_claim_guard import absence_claim_problem
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_financial_risk_goal_problem,
@@ -952,7 +953,7 @@ def _review_prompt(
         FUTURE_PLAN_REVIEW_GUIDE,
         "아래는 보고서에 실릴 «사업 경로 도식»의 각 줄이다.",
         "칸마다 «칸 이름: 값» 꼴로 준다. 칸 이름은 장마다 다르다 — 「무엇으로",
-        "시작하나 → 회사가 하는 일 → 누구에게 닿나」인 장도 있고, 「지금 겪는",
+        "시작하나 → 회사가 하는 일 → 전달 대상·경로」인 장도 있고, 「지금 겪는",
         "과제 → 회사가 밝힌 대응」처럼 두 칸인 장도 있다. 칸 이름을 보고 그",
         "칸이 무엇을 주장하는지 판단하라.",
         "★ 값이 없는 칸은 «아예 주지 않는다». 보고서에도 인쇄되지 않으므로",
@@ -1186,6 +1187,8 @@ def _review_rows(
             )
             if not flow_problem and section_id == IDENTITY_TABLE_SECTION_ID:
                 flow_problem = identity_flow_scope_problem(row.cells, sources)
+            if not flow_problem and section_id == OPERATIONS_FLOW_SECTION_ID:
+                flow_problem = company_flow_actor_problem(row.cells, sources)
             if not flow_problem and section_id == CHALLENGE_FLOW_SECTION_ID:
                 # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 앞의 검사가
                 # 「비었는가」만 보므로, 채워졌지만 원문에 없는 말은 여기서만

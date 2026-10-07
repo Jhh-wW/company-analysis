@@ -392,8 +392,43 @@ ROLE_BINDING_REVIEW_GUIDE: Final[str] = (
     "원문이 「그 수수료는 주로 A 부문에서 발생한다」라고 적은 것을 「A의 주요 수익원은 "
     "수수료」로 뒤집지 마라. 방향이 다른 주장이다.\n"
     "역할·대가·반복을 적지 않은 후보에는 이 항목을 넣지 않는다. 「제작하지 않는다」처럼 "
-    "«부정»한 문장도 단언이 아니므로 필요 없다. 기존 수치·추세·시점·인과 배열과 판정 "
-    "규칙은 그대로다.\n"
+    "역할을 부정한 문장에는 긍정 역할의 추가 관계 항목을 요구하지 않지만, 부정 사실도 "
+    "자기 인용에서 같은 대상·주체·범위가 확인돼야 한다. 외주·위탁이나 공시 기재 생략만으로 "
+    "특정 공정을 전혀 직접 수행하지 않는다고 확대하지 마라. 같은 대상의 전량 외주나 "
+    "직접 수행하지 않는다는 명시 원문은 그 범위대로 보존한다. "
+    "기존 수치·추세·시점·인과 배열과 판정 규칙은 그대로다.\n"
+    "7장 경로표는 칸의 주체도 따로 대조한다. 가운데 ‘회사가 하는 일’은 "
+    "회사 자신의 행위여야 한다. 고객의 구매·이용, 고객이 할 수 있도록 만든 "
+    "시스템의 목적·능력을 회사가 구매·이용하는 행동으로 바꾸지 마라. "
+    "앞뒤 칸이나 다른 인용에 같은 낱말이 있다는 이유로 주체를 빌리지 않는다. "
+    "회사가 실제로 구매·구독하는 원문은 그 회사 행위대로 보존한다.\n"
+)
+
+# 7장 가운데 칸의 명시 주어·목적 구문만 대조한다. 업종·상품 목록이 아니다.
+COMPANY_FLOW_ACTION_INDEX: Final[int] = 1
+COMPANY_FLOW_SELF_ACTORS: Final[frozenset[str]] = frozenset({
+    "회사", "당사", "동사", "본사", "연결회사", "연결기업", "우리회사",
+})
+COMPANY_FLOW_SENTENCE_RE: Final[re.Pattern[str]] = re.compile(r"(?<=[다요])[.!?。]\s*|[;|]")
+COMPANY_FLOW_PARTICLE_RE: Final[str] = r"(?:\s*(?:을|를|의))?\s*"
+# 행동의 결과로 만든 능력·목적을 그 행동의 실행으로 올리지 않는다.
+COMPANY_FLOW_NONACTION_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*(?:할\s*수\s*(?:있|없|있도록|없도록)|(?:하|할|하는)\s*(?:도록|게)|하기\s*위(?:해|하여))"
+)
+COMPANY_FLOW_NEGATIVE_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*(?:하|해|했)?\s*지\s*(?:않|못)|^\s*(?:하지|하지는)\s*(?:않|못)"
+)
+COMPANY_FLOW_WORD_EDGE: Final[str] = r"[A-Za-z0-9가-힣]"
+COMPANY_FLOW_ACTION_TAIL_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:하|해|했|한|할|합|함|되|돼|됐|된|을|를|의|은|는|이|가)"
+)
+COMPANY_FLOW_CUSTOMER_ACTORS: Final[frozenset[str]] = frozenset({
+    "고객", "고객사", "소비자", "사용자", "이용자", "구독자", "독자", "구매자",
+})
+# 관형절의 ‘-하는’ 등을 명사 주어의 조사로 오독하지 않는다.
+COMPANY_FLOW_ATTRIBUTIVE_ACTOR_TAILS: Final[tuple[str, ...]] = ("하", "되", "있", "없")
+COMPANY_FLOW_RELATIVE_PREDICATE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:한|하는|된|되는|받은|도록|게)\s*$"
 )
 
 # ══════════════════════════════════════════════════════════

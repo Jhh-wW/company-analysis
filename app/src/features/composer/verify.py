@@ -122,7 +122,10 @@ from src.features.composer.challenge_guard import challenge_response_problem
 from src.features.composer.challenge_response_evidence import (
     challenge_response_evidence_problem,
 )
-from src.features.composer.constants import CHALLENGE_FLOW_SECTION_ID, STRATEGY_TABLE_SECTION_ID, IDENTITY_TABLE_SECTION_ID
+from src.features.composer.constants import (
+    CHALLENGE_FLOW_SECTION_ID, STRATEGY_TABLE_SECTION_ID, IDENTITY_TABLE_SECTION_ID,
+    OPERATIONS_FLOW_SECTION_ID,
+)
 from src.features.composer.future_plan_constants import (
     FUTURE_PLAN_REVIEW_GUIDE,
     FUTURE_SECTION_NO_FORWARD_STATEMENT,
@@ -137,7 +140,9 @@ from src.features.composer.direct_support_constants import (
     FLOW_CELL_JOIN, PURPOSE_INTERPRETATION_UNSUPPORTED, RELATION_REVIEW_GUIDE,
 )
 from src.features.composer.direct_support import support_entries_by_number
-from src.features.composer.role_binding import role_binding_report, role_binding_requirements
+from src.features.composer.role_binding import (
+    company_flow_actor_problem, role_binding_report, role_binding_requirements,
+)
 from src.features.composer.business_relation_scope import business_relation_scope_problem
 from src.features.composer.role_binding_constants import (
     ROLE_BINDING_REASON_TEXTS, ROLE_BINDING_REVIEW_GUIDE,
@@ -2342,6 +2347,8 @@ def _apply_grounding(
             problem = problem or flow_scope_problem(cells, sources)
             if not problem and context and context[0] == IDENTITY_TABLE_SECTION_ID:
                 problem = identity_flow_scope_problem(cells, sources)
+            if not problem and context and context[0] == OPERATIONS_FLOW_SECTION_ID:
+                problem = company_flow_actor_problem(cells, sources)
             if not problem and context and context[0] == CHALLENGE_FLOW_SECTION_ID:
                 # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 묶음 검수 경로와
                 # flat 경로가 «같은» 두 검사를 쓴다 — 한쪽만 걸면 그 경로로만

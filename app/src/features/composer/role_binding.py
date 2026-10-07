@@ -27,6 +27,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from src.features.composer.role_binding_constants import (
+    COMPANY_FLOW_ACTION_INDEX, COMPANY_FLOW_SELF_ACTORS, COMPANY_FLOW_SENTENCE_RE,
+    COMPANY_FLOW_PARTICLE_RE, COMPANY_FLOW_NONACTION_RE, COMPANY_FLOW_NEGATIVE_RE,
+    COMPANY_FLOW_WORD_EDGE,
+    COMPANY_FLOW_ACTION_TAIL_RE, COMPANY_FLOW_CUSTOMER_ACTORS,
+    COMPANY_FLOW_ATTRIBUTIVE_ACTOR_TAILS, COMPANY_FLOW_RELATIVE_PREDICATE_RE,
     ADJACENCY_BREAK_RE,
     BENEFIT_PREDICATE_RE,
     CELL_SPLIT_RE,
@@ -947,3 +952,59 @@ def role_binding_problem(
     """`role_binding_report` 의 사유 코드만. 빈 문자열은 «문제 없음»이지 승인이 아니다."""
 
     return role_binding_report(text, own_sources, entries, cells, verbatim_source).problem
+
+
+def company_flow_actor_problem(cells: Sequence[str], own_sources: Mapping[str, str]) -> str:
+    """7장 회사행위 칸에서 명시 주어·목적이 뒤바뀐 같은 표현만 거절한다.
+
+    회사 문서의 문단 주어가 회사여도 그 안의 고객 행위는 회사의 것이 아니다.
+    같은 행위의 한 정상 회사 구절이 있으면 그 구절로 보존한다. 동의어·생략 주어
+    등 이 닫힌 구문으로 확정하지 못한 경우의 빈 결과는 의미 승인이 아니다.
+    앞뒤 칸은 행위의 주어를 증명하는 근거로 쓰지 않는다.
+    """
+    from src.features.composer.constants import OPERATIONS_FLOW_HEADERS
+
+    if len(cells) != len(OPERATIONS_FLOW_HEADERS):
+        return ""
+    action = unicodedata.normalize("NFKC", cells[COMPANY_FLOW_ACTION_INDEX]).strip()
+    header = OPERATIONS_FLOW_HEADERS[COMPANY_FLOW_ACTION_INDEX]
+    action = re.sub(r"^" + re.escape(header) + r"\s*[:：]\s*", "", action)
+    words = action.casefold().split()
+    if not words:
+        return ""
+    # 후보의 실제 낱말 경계에서만 조사 생략을 허용한다. 단어 중간은 빌리지 않는다.
+    terms = [r"\s*".join(re.escape(char) for char in word) for word in words]
+    pattern = re.compile(r"(?<!" + COMPANY_FLOW_WORD_EDGE + r")"
+                         + COMPANY_FLOW_PARTICLE_RE.join(terms))
+    mismatched = False
+    for source in own_sources.values():
+        for sentence in COMPANY_FLOW_SENTENCE_RE.split(unicodedata.normalize("NFKC", source).casefold()):
+            for occurrence in pattern.finditer(sentence):
+                tail = sentence[occurrence.end():]
+                # 같은 명사 앞부분만 잘라 다른 행위명·구독 서비스로 쓰지 못한다.
+                if tail and re.match(COMPANY_FLOW_WORD_EDGE, tail) and not COMPANY_FLOW_ACTION_TAIL_RE.match(tail):
+                    continue
+                if COMPANY_FLOW_NONACTION_RE.match(tail) or COMPANY_FLOW_NEGATIVE_RE.match(tail):
+                    mismatched = True
+                    continue
+                subjects = tuple(item for item in SUBJECT_TOKEN_RE.finditer(sentence[:occurrence.start()])
+                                 if not item.group(1).endswith(COMPANY_FLOW_ATTRIBUTIVE_ACTOR_TAILS))
+                if not subjects:
+                    # 명사 목록·생략 주어는 기존 의미 검수가 판단한다.
+                    return ""
+                last = _surface(subjects[-1].group(1))
+                known_self = any(_surface(item.group(1)) in COMPANY_FLOW_SELF_ACTORS for item in subjects)
+                if last in COMPANY_FLOW_SELF_ACTORS:
+                    return ""
+                # ‘회사는 고객이 요청한 …을 공급’의 회사 주절을 고객에게 넘기지 않는다.
+                bridge = sentence[subjects[-1].end():occurrence.start()]
+                if (known_self and subjects[-1].group().strip().endswith(("이", "가"))
+                        and COMPANY_FLOW_RELATIVE_PREDICATE_RE.search(bridge)):
+                    return ""
+                # 회사의 주어가 먼저 나온 문장 안의 다른 명시 주어를 빌리지 않는다.
+                # 원문이 이름만 쓴 회사일 수도 있으므로 모든 이름을 제3자로 취급하지 않는다.
+                if known_self or last in COMPANY_FLOW_CUSTOMER_ACTORS:
+                    mismatched = True
+                    continue
+                return ""
+    return ROLE_BINDING_ACTOR_BOUNDARY if mismatched else ""

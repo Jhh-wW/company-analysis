@@ -173,7 +173,7 @@ def test_제조담당_경력과_실제업무가_섞여도_원문과_현재업무
 def test_새분류의_캐시는_갱신하고_원문파서버전은_유지한다():
     from features.evidence_collection import constants as c
     # 운영 역할의 의미칸 변경은 새 수집 결과로 구분하며 추출 원문은 같은 계약이다.
-    assert c.COLLECTOR_VERSION == "evidence_collection/3.7"
+    assert c.COLLECTOR_VERSION == "evidence_collection/3.8"
     assert c.PARSER_VERSION == "evidence_collection_segment/2.2"
 
 

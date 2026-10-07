@@ -9,6 +9,7 @@ from src.shared.name_fragments.constants import parse_name_location
 from src.shared.report_evidence import business_activity_constants as c
 from src.shared.report_evidence.models import EvidenceFragment
 from src.shared.report_evidence.source_context import parse_source_context
+from src.shared.report_evidence.business_activity_declaration import declared_business_item
 
 
 def _valid_item(item: str) -> bool:
@@ -35,7 +36,9 @@ def _has_other_company_reference(text: str, company_name: str) -> bool:
     return False
 
 
-def current_business_item(fragment: EvidenceFragment, company_name: str) -> str:
+def current_business_item(
+    fragment: EvidenceFragment, company_name: str, *, include_declaration: bool = False,
+) -> str:
     """회사 자신의 현재 구체 사업이 명시된 경우에만 원문 속 항목을 돌려준다."""
     if not company_name.strip():
         return ""
@@ -115,4 +118,11 @@ def current_business_item(fragment: EvidenceFragment, company_name: str) -> str:
                     return item
                 # '제품'이 일반적이라 제외된 뒤 다른 문법으로 다시 받지 않는다.
                 break
+    if (
+        include_declaration and business_slots
+        and not _has_other_company_reference(fragment.text, company_name)
+    ):
+        item = declared_business_item(fragment.text)
+        if _valid_item(item):
+            return item
     return ""

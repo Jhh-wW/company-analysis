@@ -171,11 +171,14 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 # 후속 3장 부문 비율의 전사 확대 금지 안내 138자만 제거하면 15756e95의
 # 골든 전체 바이트·해시 두 값이 재현된다. 경계·도식·스키마는 바꾸지 않는다.
 # 증거: tmp/audit-20260930/validation/ab926-review-prompt-baseline.json.
+# 2026-10-08: 역할 안내 +347자만 HEAD로 역치환하면 본문 네 지문이 정확 복구된다.
+# 도식은 같은 안내와 경로 헤더 +1자만 역치환했다. 원문·번호·schema는 바뀌지 않았다.
+# 증거: tmp/audit-20260930/paid/514031-schema-six-baseline-private.json.
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "09fa8dd38caceb86b0481947d2e5b38b5e308116dbb776c5504f0c283f47ab19"),
-    (_golden_case, True, "e058a83384880117804d51928a3d23d6feb9e4ef614eea337ede2146efbca74f"),
-    (_boundary_case, False, "7442bdaacc7fe5cea4f1c575ee9e8219c14c018d83fe5806fa7ccc30e494e6ed"),
-    (_boundary_case, True, "2a0e552bae3ec55c2d0d4677c1f377635f24f621b7520c992c250dc0bdad4021"),
+    (_golden_case, False, "68aedc7566cc3a824402c30915c6ef85dcf30c53c9ef7cf31779832b63848d05"),
+    (_golden_case, True, "d65b477a9cad6ea92ac8d472a16783504040ec1f78509d16d7de1222c3acd3ea"),
+    (_boundary_case, False, "51e1a6248b3e48fef7b89780eed8a26d339afbd3f3b30785ee2b84bb2946098c"),
+    (_boundary_case, True, "8f8d80576ec2a40ecbb8e26e3a84942a9951f4bc81d7d0a7a2a66e9d2d58c40e"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
     # 현재 builder와 현재 안내문으로 재생한 전체 UTF-8 프롬프트 해시다.
@@ -199,8 +202,8 @@ def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected)
 
 
 @pytest.mark.parametrize("items,expected", (
-    ((), "98eecee196c4923c61721f21d3a2bcb2111f003d0e5a59bcfd210a0d86d3dfc3"),
-    (FLOW_ITEMS, "53007c2d0c3a73425cda5b26022847e19e01ef217f4338c5a09f795ffbba4514"),
+    ((), "43f0cef0feb02a669ae0cb72daa0a6094ddde8ab412c2af4a11e3c08068dc677"),
+    (FLOW_ITEMS, "ed7d53d41dba2557e9aeaec1454b880be16781dd3cb2152f5c3bb05d4d4a2720"),
 ))
 def test_diagram_prompt_bytes_match_pre_schema_baseline(items, expected):
     prompt = diagram_check._review_prompt(items, {"1": TEXT})

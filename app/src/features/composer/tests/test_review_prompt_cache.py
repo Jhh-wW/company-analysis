@@ -54,7 +54,9 @@ def test_explicit_opt_in_only_attaches_metadata(monkeypatch, configured):
 # tmp/audit-20260930/review-policy-snapshots.json에 무과금 비교를 보존했다.
 # 2026-10-07: 검수 12항 +253자·근거대조 안내 +182자 → 12513/13567.
 # 세 신규 5장 안내만 HEAD로 역치환한 증거는 paid/8f3e-review-prompt-baseline-complete-private.json.
-@pytest.mark.parametrize("grouped,prefix_chars", ((False, 12513), (True, 13567)))
+# 2026-10-07 회사·고객 행위와 외주 부정 범위 지침 +347자. 원문·번호·스키마는 동일하다.
+# paid/514031-prompt-baseline-private.json에서 지침 역치환으로 직전 네 지문을 확인했다.
+@pytest.mark.parametrize("grouped,prefix_chars", ((False, 12860), (True, 13914)))
 @pytest.mark.parametrize("factory", (_golden_case, _large_case, _boundary_case))
 def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
     monkeypatch, grouped, prefix_chars, factory,
@@ -78,10 +80,10 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "09fa8dd38caceb86b0481947d2e5b38b5e308116dbb776c5504f0c283f47ab19"),
-    (_golden_case, True, "e058a83384880117804d51928a3d23d6feb9e4ef614eea337ede2146efbca74f"),
-    (_boundary_case, False, "7442bdaacc7fe5cea4f1c575ee9e8219c14c018d83fe5806fa7ccc30e494e6ed"),
-    (_boundary_case, True, "2a0e552bae3ec55c2d0d4677c1f377635f24f621b7520c992c250dc0bdad4021"),
+    (_golden_case, False, "68aedc7566cc3a824402c30915c6ef85dcf30c53c9ef7cf31779832b63848d05"),
+    (_golden_case, True, "d65b477a9cad6ea92ac8d472a16783504040ec1f78509d16d7de1222c3acd3ea"),
+    (_boundary_case, False, "51e1a6248b3e48fef7b89780eed8a26d339afbd3f3b30785ee2b84bb2946098c"),
+    (_boundary_case, True, "8f8d80576ec2a40ecbb8e26e3a84942a9951f4bc81d7d0a7a2a66e9d2d58c40e"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
@@ -151,8 +153,8 @@ def test_diagram_cache_excludes_card_switch_sources_and_rows(monkeypatch, items)
     cached = diagram_check._review_prompt(items, texts)
     reference = diagram_check._review_prompt((), {})
     assert cached.encode("utf-8") == plain.encode("utf-8")
-    # 2026-09-27 수치 증명 필드 축자 안내 307자: 8503 → 8810.
-    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 8810
+    # 역할 지침 +347자와 경로 헤더 +1자: 8810 → 9158. 개별 원문은 캐시 밖이다.
+    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 9158
     assert cached[:cached.cache_prefix_chars] == reference[:reference.cache_prefix_chars]
     assert texts["2"] not in cached[:cached.cache_prefix_chars]
     assert getattr(cached, "response_schema", None) is None
