@@ -204,10 +204,11 @@ def test_산업주제만달린_타산업후보는_예약기회를_독점하지�
                     topics=("industry_domestic:" + anchor_id,), published_on="2026-09-05")
     problem = replace(wrong, id="problem", title="산업설비 제조 부품 공급 지연", description="현재 생산 차질", published_on="2026-09-01")
     ordinary = [replace(wrong, id=f"normal-{index}", topics=("business",)) for index in range(4)]
-    assert [row.id for row in _industry_candidates([wrong, problem], company=industry.COMPANY)] == ["problem"]
+    assert [row.id for row in _industry_candidates([wrong, problem], company=industry.COMPANY)] == ["problem", "wrong"]
     ranked = body_ranked_candidates([wrong, problem, *ordinary], attempt_budget=6, probe_budget=1, company=industry.COMPANY)
     assert ranked[0].id == "problem" and {row.id for row in ranked} == {"wrong", "problem", *(row.id for row in ordinary)}
-    assert _industry_candidates([wrong], company=industry.COMPANY) == []
+    # 메타가 약한 후보도 제한된 탐색 대상이며 본문 관련성 승인은 별도다.
+    assert _industry_candidates([wrong], company=industry.COMPANY) == [wrong]
 
 
 def test_사업명과문제는_메타의같은절에_있어야_문제우선순위를준다():

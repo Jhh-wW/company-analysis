@@ -215,12 +215,17 @@ def _industry_candidates(candidates: list[NewsCandidate], *,
     """
     industry = [item for item in candidates if any(
         topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) for topic in item.topics)]
-    # 산업 query topic만 붙은 타산업 후보가 예약 몫을 소비하지 않게 한다.
-    # 후보 자체는 전체 목록에 남고, 본문 의미와 지역은 기존 검수에서 확인한다.
-    if company and company.business_anchors:
-        industry = [item for item in industry if _industry_business_linked(item, company)]
+    # 검색 요약에 공식 사업명의 통단어가 없어도 제한된 본문 탐색은 가능하다.
+    # 실제 공식 앵커에 연결된 질의만 탐색하며, 사업·문제·지역 승인은 본문 검수에 남긴다.
+    if company is not None:
+        anchor_ids = {anchor.anchor_id for anchor in company.business_anchors}
+        industry = [item for item in industry if any(
+            topic == f"{ic.INDUSTRY_TOPIC_PREFIX}{region}:{anchor_id}"
+            for topic in item.topics for _, region in ic.INDUSTRY_QUERY_REGIONS
+            for anchor_id in anchor_ids)]
 
     return sorted(industry, key=lambda item: (
+        _industry_business_linked(item, company),
         _industry_problem_linked(item, company) and _industry_business_linked(item, company, item.title),
         _industry_problem_linked(item, company),
         _industry_business_linked(item, company, item.title),
@@ -230,7 +235,7 @@ def _industry_candidates(candidates: list[NewsCandidate], *,
 
 def _reserved_industry_candidates(industry: list[NewsCandidate], reserved: int, *,
                                   company: NewsCompanyContext | None) -> list[NewsCandidate]:
-    """같은 예약 몫에서 사업·문제 신호가 있는 국내/세계 탐색군을 먼저 분산한다.
+    """같은 예약 몫에서 강한 후보를 우선하고 국내/세계 탐색군의 빈 기회를 채운다.
 
     query 주제는 탐색 기회에만 사용한다. 실제 지역과 현재 문제는 본문 검수가
     판정하며, 타산업 후보나 부족한 지역의 근거를 보충하지 않는다.
@@ -246,6 +251,22 @@ def _reserved_industry_candidates(industry: list[NewsCandidate], reserved: int, 
             chosen.append(item)
             covered.update(regions)
     selected_ids = {item.id for item in chosen}
+    # 강한 메타 신호가 없어서 탐색군 전체가 읽히지 않는 것을 막는다.
+    # query 지역은 읽기 기회일 뿐이며 실제 인용의 지리 근거가 아니다.
+    anchor_ids = {anchor.anchor_id for anchor in company.business_anchors} if company else None
+    for _, region in ic.INDUSTRY_QUERY_REGIONS:
+        if region in covered or len(chosen) >= reserved:
+            continue
+        for item in industry:
+            if item.id in selected_ids:
+                continue
+            if any(topic.startswith(f"{ic.INDUSTRY_TOPIC_PREFIX}{region}:")
+                   and (anchor_ids is None or topic.split(":", 1)[1] in anchor_ids)
+                   for topic in item.topics):
+                chosen.append(item)
+                selected_ids.add(item.id)
+                covered.add(region)
+                break
     chosen.extend(item for item in industry if item.id not in selected_ids)
     return chosen[:reserved]
 

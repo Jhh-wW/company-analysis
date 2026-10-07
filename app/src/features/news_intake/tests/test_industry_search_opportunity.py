@@ -74,7 +74,8 @@ def test_문제신호없는_산업후보도_기존순위로_조사하며_회사�
     candidates = [replace(item, title="산업설비 소식", description="새 소식")
                   for item in _candidates()]
     ranked = diverse_candidates(candidates, len(candidates), company=COMPANY)
-    assert ranked[0].id == "award"
+    # 실제 앵커에 연결된 약한 산업 후보에도 기존 예약 몫을 준다.
+    assert ranked[0].id == "problem"
     ordinary = [replace(item, topics=("business",)) for item in candidates]
     assert list(diverse_candidates(ordinary, len(ordinary))) == sorted(
         ordinary, key=lambda item: (item.published_on, item.source_url), reverse=True)
@@ -96,7 +97,7 @@ def test_일반문제낱말만으로_다른사업기사를_우선하지_않는�
 def test_질의에_문제조건을_여럿_AND로_쌓지_않는다():
     queries = [row[0] for row in search_plan(COMPANY, AS_OF)
                if row[2].startswith(ic.INDUSTRY_TOPIC_PREFIX)]
-    # 첫 문제 주제는 현재 수요 둔화로 구체화했으며 조건을 여러 개 AND로 붙이지 않는다.
+    # 특정 공급·수요 문제를 미리 단정하거나 조건을 여러 개 AND로 붙이지 않는다.
     assert all(query.endswith(ic.INDUSTRY_QUERY_THEMES) for query in queries)
     assert not any("공급 수요" in query or "차질 규제" in query for query in queries)
 

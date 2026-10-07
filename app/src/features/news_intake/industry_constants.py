@@ -7,7 +7,8 @@ INDUSTRY_TOPIC_PREFIX = "industry_"
 INDUSTRY_QUERY_COUNT = 4
 INDUSTRY_COMPANY_QUERY_COUNT = 2
 INDUSTRY_BODY_DIVISOR = 6
-INDUSTRY_QUERY_THEMES = ("산업 수요 둔화", "공급난")
+# 업종에 특정 문제를 미리 부여하지 않고 현재 문제·시장 변화의 본문을 찾는다.
+INDUSTRY_QUERY_THEMES = ("산업 과제", "시장 변화")
 INDUSTRY_BUSINESS_TOKEN_END = r"(?=$|[^가-힣A-Za-z0-9]|의|은|는|이|가|업계|산업|시장|제조|생산|수요|가격|공급)"
 INDUSTRY_SEARCH_CLAUSE_RE = re.compile(r"[.!?。…\n]+")
 INDUSTRY_QUERY_REGIONS = (("국내", "domestic"), ("세계", "global"))

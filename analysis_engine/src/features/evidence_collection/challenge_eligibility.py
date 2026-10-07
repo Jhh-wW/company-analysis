@@ -76,7 +76,14 @@ def challenge_issue_problem(text: str) -> str:
         if (c.PROBLEM_RE.search(surface) or c.POLICY_BUSINESS_PROBLEM_RE.search(surface)
                 or c.ISSUE_RELATION_VETO_RE.search(surface)):
             return False
-        return bool(c.ROUTINE_OPERATION_ISSUE_RE.fullmatch(surface)
+        raw_unit = unicodedata.normalize("NFKC", unit)
+        duty_subject = c.ROUTINE_DUTY_SUBJECT_RE.match(raw_unit)
+        duty_list = (len(surface) <= c.ROUTINE_DUTY_MAX_CHARS
+                     and duty_subject
+                     and not c.ROUTINE_DUTY_OTHER_CLAUSE_RE.search(raw_unit[duty_subject.end():])
+                     and c.ROUTINE_DUTY_ACTIVITY_RE.search(surface)
+                     and c.ROUTINE_DUTY_END_RE.search(surface))
+        return bool(duty_list or c.ROUTINE_OPERATION_ISSUE_RE.fullmatch(surface)
                     or c.INDUSTRY_TREND_ISSUE_RE.fullmatch(surface))
     return c.ADMINISTRATIVE_EVENT_ONLY if all(ordinary(unit) for unit in units) else ""
 

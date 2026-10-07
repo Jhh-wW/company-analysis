@@ -13,6 +13,9 @@ ORDINARY = (
     "회사는 분석정보를 고객에게 제공하고 있다.",
     "회사는 고객 서비스를 여러 플랫폼을 통해 제공하며, 이를 지원하는 하드웨어와 소프트웨어 인프라를 유지·개발하고 있다.",
     "유통산업은 기술 발전에 따라 빠르게 변화하고 있으며, 채널 간의 경계가 사라지는 융합 시대에 진입했다.",
+    "회사의 개발부는 하드웨어 유지보수, 소프트웨어 개발, 서버와 스토리지 관리 등 기술 인프라 전반을 담당하고 있다.",
+    "연구개발 조직은 회사의 인프라와 소프트웨어 개발 업무 등을 담당하고 있습니다.",
+    "인프라 주요업무: 하드웨어 유지보수, 데이터베이스 관리, 온라인 기사엔진 개발 및 관리",
 )
 ACTUAL = (
     "회사는 고객 서비스를 제공하고 있으나, 결제 장애로 고객 피해가 발생했다.",
@@ -24,6 +27,15 @@ ACTUAL = (
     "공급처 이탈로 조달비용이 증가했다.",
     "회사는 핵심 시장의 수요 둔화를 겪고 있다.",
     "고객의 실제 발생한 소송이 진행 중이며 법률 서비스를 제공하고 있다.",
+    "개발부는 서버 유지보수를 담당하고 있으며 서비스 장애로 고객 피해가 발생했다.",
+    "개발부는 규제로 판매가 중단된 냉매 제품의 소프트웨어 개발을 담당하고 있다.",
+    "개발부는 고객 결제 지연이 해결되지 않아 인프라 전환이 필요한 업무를 담당하고 있다.",
+    "개발부는 접근권한을 잃어 납품에 차질이 생긴 설비의 유지보수를 담당하고 있다.",
+    "기존 장비가 노후화되어 개발부는 서버 유지보수를 담당하고 있다.",
+    "인력 충원이 되지 않아 개발부는 서버 유지보수와 소프트웨어 개발을 함께 담당하고 있다.",
+    "접속이 자주 끊겨 개발부는 서버와 소프트웨어 유지보수를 담당하고 있다.",
+    "개발부는 기존 장비가 노후화되어 서버 유지보수를 담당하고 있다.",
+    "개발부는 인력 충원이 되지 않아 서버 유지보수를 담당하고 있다.",
 )
 
 @pytest.mark.parametrize("text", ORDINARY)
@@ -53,3 +65,18 @@ def test_혼합원문의일반절만제한하고실제절좌표를유지한다()
 def test_문제어휘가없는임의문장을일괄금지하지않는다():
     text = "회사는 새 거래 조건에서 기존 계약을 잃었다."
     assert not challenge_issue_problem(text)
+
+def test_업무목록과실제문제의정확절을구분한다():
+    ordinary, actual = ORDINARY[3], ACTUAL[9]
+    source = ordinary + " " + actual
+    scope = challenge_eligibility_scope(source, ISSUE)
+    assert actual in scope.score_text and ordinary not in scope.score_text
+    assert challenge_eligibility_quote_problem(ordinary, source, ISSUE)
+    assert not challenge_eligibility_quote_problem(actual, source, ISSUE)
+    assert business_slot_scope(source, RESPONSE).score_text == source
+
+def test_업무목록의일부인용은혼합원문의다른문제를빌리지않는다():
+    ordinary, actual = ORDINARY[3], ACTUAL[9]
+    source = ordinary + " " + actual
+    assert challenge_eligibility_quote_problem("소프트웨어 개발", source, ISSUE)
+    assert not challenge_eligibility_quote_problem(actual, source, ISSUE)

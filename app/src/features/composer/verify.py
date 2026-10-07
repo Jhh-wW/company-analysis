@@ -117,11 +117,12 @@ from src.features.composer.entity_scope_constraints import (
     build_entity_scope_contexts,
 )
 from src.features.composer.scope_guard import flow_scope_problem
+from src.features.composer.identity_flow_scope import identity_flow_scope_problem
 from src.features.composer.challenge_guard import challenge_response_problem
 from src.features.composer.challenge_response_evidence import (
     challenge_response_evidence_problem,
 )
-from src.features.composer.constants import CHALLENGE_FLOW_SECTION_ID, STRATEGY_TABLE_SECTION_ID
+from src.features.composer.constants import CHALLENGE_FLOW_SECTION_ID, STRATEGY_TABLE_SECTION_ID, IDENTITY_TABLE_SECTION_ID
 from src.features.composer.future_plan_constants import (
     FUTURE_PLAN_REVIEW_GUIDE,
     FUTURE_SECTION_NO_FORWARD_STATEMENT,
@@ -455,6 +456,12 @@ REVIEW_PROMPT_RULES: Final[str] = (
     "밝힌 사람·권한·절차·원칙에 관한 근거인지 확인한다. 사실들이 각각 "
     "맞아도 그 사실 사이에 없는 관계를 붙인 «확인» 문장은 «거짓»이다.\n"
     "12. 5장에서는 핵심 제품·서비스·사업과 문제의 연결을 대조한다. 단순한 "
+    "업무 분장·제품 제공·설비 유지·개발 목록은 원문과 일치해도 과제가 아니다. "
+    "current_challenges:issue 문장이나 과제 칸은 그 사업에서 무엇이 어렵거나 "
+    "막혔는지, 어떤 제약이나 미해결 필요가 있는지를 자체 인용과 함께 확인한다. "
+    "이 관계가 없으면 «거짓»이다. 문제를 직접 설명하지 않은 통상 업무에 "
+    "'과제'라는 이름을 붙이거나 해석 등급으로 바꿔 구제하지 않는다. "
+    "대응은 자체 인용에서 확인한 문제와 그 행동의 연결도 있어야 한다. "
     "재무지표 증감이나 유동성·환율·신용위험 관리 상용구는 사업 과제의 "
     "근거가 아니다. 산업 일반의 문제를 이 회사가 실제로 겪는 사건·피해·"
     "대응으로 바꿨으면 «거짓»이다. 산업과 회사 사업의 관계를 읽은 «해석»은 "
@@ -2333,6 +2340,8 @@ def _apply_grounding(
             #   표지가 결합해 정상 행이 지워진다(cellwise_problem 머리말).
             problem = cellwise_problem(cells, absence_claim_problem)
             problem = problem or flow_scope_problem(cells, sources)
+            if not problem and context and context[0] == IDENTITY_TABLE_SECTION_ID:
+                problem = identity_flow_scope_problem(cells, sources)
             if not problem and context and context[0] == CHALLENGE_FLOW_SECTION_ID:
                 # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 묶음 검수 경로와
                 # flat 경로가 «같은» 두 검사를 쓴다 — 한쪽만 걸면 그 경로로만

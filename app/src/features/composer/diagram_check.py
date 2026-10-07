@@ -69,6 +69,7 @@ from typing import Callable, Final, Optional
 from src.features.composer.constants import (
     BUSINESS_FLOW_SECTION_ID,
     CHALLENGE_FLOW_SECTION_ID,
+    IDENTITY_TABLE_SECTION_ID,
     FLOW_ARROW_SECTION_IDS,
     FLOW_HEADERS_BY_SECTION,
     FLOW_RELATION_REVIEW_GUIDE,
@@ -136,6 +137,7 @@ from src.features.composer.portfolio_name_constants import (
 )
 from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
 from src.features.composer.scope_guard import flow_scope_problem
+from src.features.composer.identity_flow_scope import identity_flow_scope_problem
 from src.features.composer.absence_claim_guard import absence_claim_problem
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_financial_risk_goal_problem,
@@ -1182,6 +1184,8 @@ def _review_rows(
                 cellwise_problem(row.cells, absence_claim_problem)
                 or flow_scope_problem(row.cells, sources)
             )
+            if not flow_problem and section_id == IDENTITY_TABLE_SECTION_ID:
+                flow_problem = identity_flow_scope_problem(row.cells, sources)
             if not flow_problem and section_id == CHALLENGE_FLOW_SECTION_ID:
                 # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 앞의 검사가
                 # 「비었는가」만 보므로, 채워졌지만 원문에 없는 말은 여기서만
