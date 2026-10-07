@@ -59,11 +59,35 @@ def test_actual_product_regulation_customer_service_and_dispute_are_preserved(so
 
 
 @pytest.mark.parametrize("service", ("법률 자문 서비스", "계약 검토 플랫폼"))
-def test_서비스뒤에_고객수혜자가_명시된본업제공도_보존한다(service):
+def test_서비스뒤에_고객수혜자가_명시된본업제공은_대응인용으로_보존한다(service):
     source = f"사내 법무팀은 {service}를 고객사에게 제공하고 있다."
+    digest = hashlib.sha256(source.encode()).hexdigest()
     assert not challenge_eligibility_problem(source)
     assert challenge_eligibility_scope(source).score_text.strip()
-    assert not challenge_eligibility_quote_problem(source, source, "current_challenges:issue")
+    # 고객 본업 제공 사실은 실제 문제 발생을 말하지 않으므로 issue 허용과 구분한다.
+    assert not challenge_eligibility_quote_problem(source, source, "current_challenges:response")
+    assert hashlib.sha256(source.encode()).hexdigest() == digest
+
+
+def test_고객자문서비스제공자체는_실제문제issue를_채우지않는다():
+    source = "사내 법무팀은 법률 자문 서비스를 고객사에게 제공하고 있다."
+    assert challenge_eligibility_quote_problem(source, source, "current_challenges:issue") == (
+        "challenge_business_relation_unbound"
+    )
+
+
+@pytest.mark.parametrize("service", ("법률 자문 서비스", "계약 검토 플랫폼"))
+def test_고객본업제공과_실제고객문제가_섞인원문의_issue를_보존한다(service):
+    ordinary = f"사내 법무팀은 {service}를 고객사에게 제공하고 있다."
+    problem = "고객의 계약 소송이 진행 중이며 법원 처리 지연으로 피해가 발생했다."
+    source = ordinary + " " + problem
+    digest = hashlib.sha256(source.encode()).hexdigest()
+    assert problem in challenge_eligibility_scope(source, "current_challenges:issue").score_text
+    assert not challenge_eligibility_quote_problem(problem, source, "current_challenges:issue")
+    assert not business_slot_quote_problem(source, "current_challenges:issue",
+                                           len(ordinary) + 1, len(source))
+    assert not challenge_eligibility_quote_problem(ordinary, source, "current_challenges:response")
+    assert hashlib.sha256(source.encode()).hexdigest() == digest
 
 
 @pytest.mark.parametrize("service", ("법률 자문 서비스", "계약 검토 플랫폼"))
