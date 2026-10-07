@@ -1,4 +1,6 @@
 """조건부 일반 업무와 사고 이력의 현재 필수칸을 구분한다."""
+import hashlib
+
 import pytest
 
 from src.shared.report_evidence.challenge_eligibility import (
@@ -52,10 +54,30 @@ def test_actual_problem_in_mixed_raw_survives_and_original_stays_exact(source, p
     assert raw == source + " " + problem
 
 
-def test_legal_risk_increase_is_not_removed_by_management_keyword():
+def test_general_legal_risk_and_conditional_management_do_not_fill_current_slots():
     source = "법률 리스크가 증가하고 있습니다. OE 사업에서 법률 리스크가 발생할 수 있어 전담 조직을 갖추고 있습니다."
-    assert not challenge_eligibility_problem(source)
-    assert challenge_eligibility_scope(source).score_text == source
+    digest = hashlib.sha256(source.encode()).hexdigest()
+    # 일반 위험 증가와 조건부 관리만으로 현재 사업 피해나 진행 분쟁을 증명하지 않는다.
+    assert challenge_eligibility_problem(source) == "challenge_business_relation_unbound"
+    assert not challenge_eligibility_scope(source).score_text.strip()
+    for slot in ("current_challenges:issue", "current_challenges:response"):
+        assert challenge_eligibility_quote_problem(source, source, slot) == "challenge_business_relation_unbound"
+    assert not challenge_eligibility_quote_problem(source, source, "past_changes:completed_execution")
+    assert hashlib.sha256(source.encode()).hexdigest() == digest
+
+
+def test_actual_product_dispute_survives_the_same_conditional_management_context():
+    management = "법률 리스크가 증가하고 있습니다. OE 사업에서 법률 리스크가 발생할 수 있어 전담 조직을 갖추고 있습니다."
+    problem = "현재 제품 특허 소송이 진행 중이며 고객 납품 차질이 지속되고 있다."
+    source = management + " " + problem
+    digest = hashlib.sha256(source.encode()).hexdigest()
+    scope = challenge_eligibility_scope(source)
+    assert problem in scope.score_text
+    assert management not in scope.score_text
+    assert not challenge_eligibility_quote_problem(problem, source, "current_challenges:issue")
+    for slot in ("current_challenges:issue", "current_challenges:response"):
+        assert challenge_eligibility_quote_problem(management, source, slot) == "challenge_business_relation_unbound"
+    assert hashlib.sha256(source.encode()).hexdigest() == digest
 
 
 def test_dated_accident_measures_do_not_prove_current_status_or_completion():
