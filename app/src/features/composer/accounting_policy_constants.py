@@ -31,6 +31,10 @@
 
 from typing import Final
 import re
+from src.shared.report_evidence.overhead_allocation_constants import (
+    OVERHEAD_ALLOCATION_SUBJECT_RE, OVERHEAD_ALLOCATION_TREATMENT_RE,
+    OVERHEAD_ALLOCATION_RULE_NAME,
+)
 
 
 #: 항목의 «모든» 절이 회계정책 상용구일 때 붙는 차단 사유.
@@ -193,6 +197,7 @@ LIQUIDITY_BOILERPLATE_RE: Final[re.Pattern[str]] = re.compile(
     r"영업자금수요|예측하고관리|부채상환|자금수요를충당|"
     r"유동성위험(?:을|를|의)?(?:지속적으로|정기적으로|적절히)?관리"
 )
+
 LIQUIDITY_ACTUAL_PRESSURE_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:유동성|자금)(?:위험)?(?:이|가|의|에)?"
     r"(?:악화|부족|고갈|급감)|"
@@ -229,6 +234,7 @@ ACCOUNTING_POLICY_RULES: Final[tuple[tuple[str, re.Pattern[str], re.Pattern[str]
     ("현금성자산정의", CASH_EQUIVALENT_SUBJECT_RE, CASH_EQUIVALENT_MATURITY_RE),
     ("정부보조금", SUBSIDY_SUBJECT_RE, SUBSIDY_TREATMENT_RE),
     ("재고자산평가", INVENTORY_SUBJECT_RE, INVENTORY_METHOD_RE),
+    (OVERHEAD_ALLOCATION_RULE_NAME, OVERHEAD_ALLOCATION_SUBJECT_RE, OVERHEAD_ALLOCATION_TREATMENT_RE),
     ("이연법인세", DEFERRED_TAX_SUBJECT_RE, DEFERRED_TAX_TREATMENT_RE),
     ("회계기준적용", ACCOUNTING_STANDARD_SUBJECT_RE, ACCOUNTING_STANDARD_CONTEXT_RE),
     ("재무제표표시", FINANCIAL_STATEMENT_SUBJECT_RE, FINANCIAL_STATEMENT_PRESENTATION_RE),

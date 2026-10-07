@@ -1189,6 +1189,10 @@ def _review_fragment_metadata(fragment: CollectedFragment) -> str:
         "문서기준일": fragment.document_date,
         "원문위치": fragment.location,
     }
+    if fragment.section_context_json:
+        from src.shared.report_evidence.section_context import parse_section_context
+        from src.features.composer.section_context_constants import SECTION_CONTEXT_LABEL
+        metadata[SECTION_CONTEXT_LABEL] = parse_section_context(fragment.section_context_json)["text"]
     # JSON 구분자 공백만 줄인다. 빈 필드와 문자열 안의 공백도 출처 자료다.
     return "출처 분류(JSON 자료): " + json.dumps(
         metadata, ensure_ascii=False, separators=(",", ":")
@@ -2989,6 +2993,8 @@ def _ask_rewrite(
     for citation in sentence.citations:
         fragment = frag_by_id.get(citation)
         if fragment is not None:
+            if fragment.section_context_json:
+                parts.append(_review_fragment_metadata(fragment))
             parts.append(
                 f"[조각 {citation}] 원문(JSON 문자열): "
                 f"{json.dumps(fragment.text, ensure_ascii=False)}\n"

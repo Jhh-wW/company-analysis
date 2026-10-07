@@ -34,6 +34,8 @@ from src.features.composer.culture_constants import (
     CULTURE_EMPLOYEE_FINANCIAL_BENEFIT_RE,
     CULTURE_EVIDENCE_SCOPE_MISMATCH,
     CULTURE_EXTERNAL_AUDIT_RE,
+    CULTURE_EXTERNAL_COMMUNICATION_RE,
+    CULTURE_INTERNAL_COMMUNICATION_RE,
     CULTURE_ORG_UNIT_STOPWORDS,
     CULTURE_FINANCIAL_RISK_CATEGORY_RE,
     CULTURE_FINANCIAL_RISK_DERIVATIVE_RE,
@@ -310,8 +312,16 @@ def _clause_carries_section_subject(clause: str) -> bool:
         # 「정관」은 사람·기관 규정을 말한 절에서만 이 장의 소재다 — 그냥 받으면
         # 「정관에 따라 이익잉여금을 처분한다」류 회계 절이 함께 열린다.
         return True
-    return bool(CULTURE_PEOPLE_INSTITUTION_RE.search(surface_clause)
-                or EXPLICIT_CULTURE_RE.search(surface_clause))
+    people_matches = tuple(CULTURE_PEOPLE_INSTITUTION_RE.finditer(surface_clause))
+    explicit_culture = bool(EXPLICIT_CULTURE_RE.search(surface_clause))
+    if (people_matches and all(match.group() == "소통" for match in people_matches)
+            and not explicit_culture
+            and CULTURE_EXTERNAL_COMMUNICATION_RE.search(surface_clause)
+            and not CULTURE_INTERNAL_COMMUNICATION_RE.search(surface_clause)):
+        # 고객 접점 소통만으로 내부 문화 소재를 만들지 않는다. 앞에서 확인한
+        # 조직 주체·업무 실행과 같은 절의 다른 임직원 제도는 그대로 보존한다.
+        return False
+    return bool(people_matches or explicit_culture)
 
 
 def culture_problem(text: str, sources_mapping: Mapping[str, str]) -> str:
@@ -381,10 +391,25 @@ def culture_section_evidence_problem(
 
     if not _surface(text):
         return ""  # 실을 내용이 없는 후보는 이 계약의 대상이 아니다.
+    if _candidate_external_communication_only(text):
+        # 외부 고객 후보를 원문 뒤의 비슷한 사내 소통 문장으로 살리지 않는다.
+        # 후보 자체의 혼합 절·직원 업무 실행은 기존 인용 검수에 남긴다.
+        return CULTURE_SECTION_EVIDENCE_OFFCONTRACT
     if any(_clause_carries_section_subject(clause)
            for clause in _supporting_clauses(text, sources_mapping)):
         return ""
     return CULTURE_SECTION_EVIDENCE_OFFCONTRACT
+
+
+def _candidate_external_communication_only(text: str) -> bool:
+    """외부 소통만 말한 후보는 다른 원문 절의 사내 소재를 빌릴 수 없다."""
+
+    clauses = tuple(clause for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
+                    if _surface(clause))
+    external = any(CULTURE_EXTERNAL_COMMUNICATION_RE.search(_surface(clause))
+                   for clause in clauses)
+    return external and not any(_clause_carries_section_subject(clause)
+                                for clause in clauses)
 
 
 def culture_accounting_policy_problem(text: str) -> str:
@@ -691,6 +716,8 @@ def culture_flow_cells_evidence_problem(
     """
 
     for cell in cells:
+        if _candidate_external_communication_only(str(cell)):
+            return CULTURE_SECTION_EVIDENCE_OFFCONTRACT
         지지 = _supporting_clauses(str(cell), sources_mapping)
         if not 지지:
             continue  # 기댄 절을 못 찾았다 — 이 계약은 이 칸을 판정하지 않는다.

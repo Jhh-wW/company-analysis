@@ -8,6 +8,7 @@ from src.shared.report_evidence.challenge_eligibility import (
     challenge_eligibility_quote_problem,
 )
 from src.shared.report_evidence.challenge_eligibility_constants import CHALLENGE_SLOTS
+from src.shared.report_evidence.overhead_allocation_scope import overhead_allocation_scope
 
 
 def _surface(text: str) -> str:
@@ -65,6 +66,8 @@ def business_slot_scope(text: str, slot_id: str) -> BusinessSlotScope:
     if slot_id not in c.BUSINESS_SCOPE_SLOTS:
         return BusinessSlotScope(text, ())
     kept, excluded, excluded_spans = [], [], []
+    allocation_spans = (overhead_allocation_scope(text).excluded_spans
+                        if slot_id == c.OPERATING_ROLE_SLOT else ())
     sentence_cursor = 0
     for sentence in c.SENTENCE_BOUNDARY_RE.split(text):
         sentence_start = text.find(sentence, sentence_cursor)
@@ -76,14 +79,32 @@ def business_slot_scope(text: str, slot_id: str) -> BusinessSlotScope:
             unit_cursor = unit_start + len(unit)
             if not unit.strip():
                 continue
-            # 쉼표 앞의 관리 문맥을 잃으면 뒤의 '제조물' 등이 사업 역할로 재진입한다.
-            is_admin = _administration(unit, slot_id) or context
-            if is_admin and not _business_fact(unit, slot_id, sentence):
-                excluded.append(unit)
-                start = sentence_start + unit_start
-                excluded_spans.append((start, start + len(unit)))
-            else:
-                kept.append(unit)
+            absolute_start = sentence_start + unit_start
+            unit_end = absolute_start + len(unit)
+            pieces = []
+            cursor = absolute_start
+            for begin, end in allocation_spans:
+                begin, end = max(begin, absolute_start), min(end, unit_end)
+                if begin >= end:
+                    continue
+                if cursor < begin:
+                    pieces.append((cursor, begin, False))
+                pieces.append((begin, end, True))
+                cursor = end
+            if cursor < unit_end:
+                pieces.append((cursor, unit_end, False))
+            for begin, end, allocation_excluded in pieces:
+                piece = text[begin:end]
+                if not piece.strip():
+                    continue
+                # 정책 범위만 제한하여 쉼표 없이 연결된 실제 사건도 보존한다.
+                # 남은 부분에는 기존 경력·관리 문맥 검사를 그대로 적용한다.
+                is_admin = _administration(piece, slot_id) or context
+                if allocation_excluded or (is_admin and not _business_fact(piece, slot_id, sentence)):
+                    excluded.append(piece)
+                    excluded_spans.append((begin, end))
+                else:
+                    kept.append(piece)
     return BusinessSlotScope("\n".join(kept), tuple(excluded), tuple(excluded_spans))
 
 

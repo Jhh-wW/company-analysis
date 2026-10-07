@@ -36,6 +36,7 @@ from src.features.composer.accounting_policy_constants import (
     ACCOUNTING_POLICY_CLAUSE_SPLIT_RE,
     ACCOUNTING_POLICY_EXEMPTIONS,
     ACCOUNTING_POLICY_RULES,
+    OVERHEAD_ALLOCATION_RULE_NAME,
     LIQUIDITY_ACTUAL_PRESSURE_RE,
     LIQUIDITY_BUSINESS_OFFERING_RE,
     LIQUIDITY_BUSINESS_EVENT_RE,
@@ -61,6 +62,7 @@ from src.features.composer.accounting_policy_constants import (
 )
 from src.features.composer.culture_constants import SOURCE_CLAUSE_SPLIT_RE
 from src.features.composer.culture_guard import culture_accounting_policy_problem
+from src.shared.report_evidence.overhead_allocation_scope import overhead_allocation_policy
 # 같은 feature 안의 기준·조건 문법을 그대로 빌린다 — 규칙을 두 벌로 만들면
 # 한쪽만 고쳐져 두 잣대가 생긴다(진행·완료·기간 한정은 scope 가드와 같은 잣대).
 from src.features.composer.scope_constants import (
@@ -285,6 +287,8 @@ def _rule_hit(clause: str, section_id: str = "") -> str:
     for name, subject_pattern, treatment_pattern in ACCOUNTING_POLICY_RULES:
         if (subject_pattern.search(surface_clause)
                 and treatment_pattern.search(surface_clause)):
+            if name == OVERHEAD_ALLOCATION_RULE_NAME and not overhead_allocation_policy(clause):
+                continue
             return name
     return ""
 

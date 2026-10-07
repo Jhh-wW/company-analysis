@@ -381,7 +381,7 @@ def test_소유_밖_조각을_행으로_만들면_자체_검사가_뺀다(
 
     row = news_block._news_row(_news("40"))  # noqa: SLF001
     problem = news_block._row_problem(  # noqa: SLF001
-        row, _news("40"), allowed_fragment_ids=frozenset({"99"})
+        row, _news("40"), allowed_fragment_ids=frozenset({"99"}), section_id="identity"
     )
 
     assert problem == BLOCKED_NOT_SECTION_OWNED

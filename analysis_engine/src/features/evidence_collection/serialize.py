@@ -43,6 +43,7 @@ def _document_to_mapping(
     exact_evidence_hashes: list[str],
     exact_evidence_bindings: list[dict[str, str]],
     source_context_bindings: list[dict[str, str]] | None = None,
+    section_context_bindings: list[dict[str, str]] | None = None,
 ) -> dict[str, object]:
     return {
         "company_id": document.company_id,
@@ -66,6 +67,7 @@ def _document_to_mapping(
         # 비교할 수 있게 생산 자리에서 함께 봉인한다.
         "exact_evidence_bindings": exact_evidence_bindings,
         **({"exact_source_context_bindings": source_context_bindings} if source_context_bindings else {}),
+        **({"exact_section_context_bindings": section_context_bindings} if section_context_bindings else {}),
     }
 
 
@@ -87,6 +89,7 @@ def _fragment_to_mapping(fragment: EvidenceFragment) -> dict[str, object]:
         "unit": fragment.unit,
         "company_scope": fragment.company_scope,
         **({"source_context_json": fragment.source_context_json} if fragment.source_context_json else {}),
+        **({"section_context_json": fragment.section_context_json} if fragment.section_context_json else {}),
     }
 
 
@@ -175,6 +178,18 @@ def harvest_to_mapping(harvest: DartEvidenceHarvest) -> dict[str, object]:
                 "location": fragment.location, "text_sha256": fragment.text_sha256,
                 "source_context_sha256": hashlib.sha256(fragment.source_context_json.encode("utf-8")).hexdigest(),
             })
+    def section_bindings(fragments: tuple[EvidenceFragment, ...]) -> dict[str, list[dict[str, str]]]:
+        result: dict[str, list[dict[str, str]]] = {}
+        for fragment in fragments:
+            if fragment.section_context_json:
+                result.setdefault(fragment.document_id, []).append({
+                    "location": fragment.location, "text_sha256": fragment.text_sha256,
+                    "section_context_sha256": hashlib.sha256(fragment.section_context_json.encode("utf-8")).hexdigest(),
+                })
+        return result
+
+    classified_section_bindings = section_bindings(harvest.fragments)
+    unclassified_section_bindings = section_bindings(harvest.unclassified_fragments)
     return {
         "company_id": harvest.company_id,
         "company_type": harvest.company_type,
@@ -184,6 +199,7 @@ def harvest_to_mapping(harvest: DartEvidenceHarvest) -> dict[str, object]:
                 exact_hashes_by_document_id.get(document.document_id, []),
                 exact_bindings_by_document_id.get(document.document_id, []),
                 context_bindings.get(document.document_id),
+                classified_section_bindings.get(document.document_id),
             )
             for document in harvest.documents
         ],
@@ -192,7 +208,10 @@ def harvest_to_mapping(harvest: DartEvidenceHarvest) -> dict[str, object]:
         # 원문을 별도 차선으로 보존해, 뒤 단계가 자료 부족과 분류기 결함을
         # 구분하거나 다음 분류기 버전으로 다시 판정할 수 있게 한다.
         "unclassified_documents": [
-            _document_to_mapping(document, [], [], unclassified_context_bindings.get(document.document_id))
+            _document_to_mapping(
+                document, [], [], unclassified_context_bindings.get(document.document_id),
+                unclassified_section_bindings.get(document.document_id),
+            )
             for document in harvest.unclassified_documents
         ],
         "unclassified_fragments": [

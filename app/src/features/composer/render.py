@@ -180,6 +180,7 @@ class _FragmentMeta:
     #: 증거 해시와 일반 산문 FactRecord를 만들 때만 쓴다.
     text: str = ""
     source_context_json: str = ""
+    section_context_json: str = ""
     source_url: str = ""
     document_title: str = ""
     item_title: str = ""
@@ -221,6 +222,18 @@ class _FragmentMeta:
     #: 선택된 사업보고서가 아니라 별도로 받은 OpenDART 주요계정 응답인가.
     from_financial_api: bool = False
 
+    def __post_init__(self) -> None:
+        if self.section_context_json == "":
+            return
+        from src.shared.report_evidence.section_context import parse_section_context
+        if any(type(value) is not str or not value for value in (
+            self.source_document_id, self.document_content_sha256, self.location,
+        )):
+            raise ValueError("사업 범위 문맥에 원문 문서·해시·조각 위치 결속이 필요합니다")
+        parse_section_context(self.section_context_json, document_id=self.source_document_id,
+            document_sha256=self.document_content_sha256, fragment_location=self.location,
+            fragment_sha256=exact_evidence_text_hash(self.text))
+
 
 def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
     """원시 dict든 어댑터 튜플이든 부록용 메타로 맞춘다.
@@ -243,6 +256,11 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
                     kind=str(item.get("종류") or "").strip(),
                     text=text,
                     source_context_json=str(item.get("source_context_json") or ""),
+                    section_context_json=item.get("section_context_json", ""),
+                    **({
+                        "source_document_id": str(item.get("문서ID") or ""),
+                        "document_content_sha256": str(item.get("_evidence_document_content_sha256") or ""),
+                    } if item.get("section_context_json") else {}),
                     source_url=source_url,
                     document_title=str(item.get("문서명") or "").strip(),
                     item_title=str(item.get("item_title") or "").strip(),
@@ -262,6 +280,7 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
             kind=str(getattr(fragment, "kind", "") or ""),
             text=str(getattr(fragment, "text", "") or ""),
             source_context_json=str(getattr(fragment, "source_context_json", "") or ""),
+            section_context_json=getattr(fragment, "section_context_json", ""),
             source_url=str(getattr(fragment, "source_url", "") or ""),
             document_title=str(getattr(fragment, "document_title", "") or ""),
             item_title=fragment.item_title,
@@ -1266,6 +1285,7 @@ def render_report(
                             ),
                             exact_text=meta.text,
                             source_context_json=meta.source_context_json,
+                            section_context_json=meta.section_context_json,
                         )
                     )
                 fact = build_verified_prose_fact(

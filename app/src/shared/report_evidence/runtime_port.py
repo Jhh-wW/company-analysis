@@ -288,6 +288,8 @@ def _source_snapshot(
                 fragment_row.update(range_index=fragment.range_index, item_url=fragment.item_url)
             if fragment.source_context_json:
                 fragment_row["source_context_json"] = fragment.source_context_json
+            if fragment.section_context_json:
+                fragment_row["section_context_json"] = fragment.section_context_json
             previous_fragment = fragment_rows_by_id.setdefault(
                 fragment.fragment_id,
                 fragment_row,
@@ -363,6 +365,7 @@ def _source_snapshot(
                 "location": item.location,
                 "evidence_sha256": item.evidence_sha256,
                 **({"source_context_json": item.source_context_json} if item.source_context_json else {}),
+                **({"section_context_json": item.section_context_json} if item.section_context_json else {}),
             }
             for item in comparison_candidates
         ],
@@ -444,10 +447,15 @@ class OfficialComparisonCandidateEvidence:
     evidence_text: str
     evidence_sha256: str
     source_context_json: str = ""
+    section_context_json: str = ""
 
     def __post_init__(self) -> None:
         from src.shared.report_evidence.source_context import parse_source_context
         parse_source_context(self.source_context_json)
+        from src.shared.report_evidence.section_context import parse_section_context
+        # 비교 후보는 원 조각의 문장 부분집합이므로 원 조각 좌표는 문맥에 보존한다.
+        parse_section_context(self.section_context_json, document_id=self.document_id,
+                              document_sha256=self.document_content_sha256)
         for value, label in (
             (self.company_id, "비교 후보 회사 식별자"),
             (self.candidate_id, "비교 후보 식별자"),

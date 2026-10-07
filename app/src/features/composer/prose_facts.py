@@ -31,6 +31,7 @@ from src.shared.report_quality.constants import (
 from src.shared.report_quality.numeric_detection import has_public_numeric_token
 from src.shared.report_quality.source_identity import document_identity
 from src.shared.report_evidence.source_context import source_context_fingerprint
+from src.shared.report_evidence.section_context import parse_section_context, section_context_fingerprint
 
 
 PROSE_FACT_BINDING_VERSION: Final[str] = "verified-prose-binding-v1"
@@ -50,6 +51,17 @@ class ProseEvidence:
     source: Source
     exact_text: str
     source_context_json: str = ""
+    section_context_json: str = ""
+
+    def __post_init__(self) -> None:
+        if self.section_context_json == "":
+            return
+        # 공개 Source의 문서 ID는 접수번호로 투영될 수 있어 typed ID와 직접 비교하지 않는다.
+        parse_section_context(
+            self.section_context_json, fragment_sha256=exact_evidence_text_hash(self.exact_text),
+            fragment_location=self.source.location,
+            document_sha256=self.source.document_content_sha256,
+        )
 
 
 @dataclass(frozen=True)
@@ -179,6 +191,8 @@ def evaluate_verified_prose_fact(
         )
         if item.source_context_json:
             manifest[-1]["source_context_sha256"] = source_context_fingerprint(item.source_context_json)
+        if item.section_context_json:
+            manifest[-1]["section_context_sha256"] = section_context_fingerprint(item.section_context_json)
         if source.kind is SourceKind.NEWS:
             # 보도 수치는 계산값이 아니다. 최종 품질 검사가 날짜·출처와 함께
             # 실제 숫자·단위를 재대조할 정확 원문을 사실 결속 안에 남긴다.

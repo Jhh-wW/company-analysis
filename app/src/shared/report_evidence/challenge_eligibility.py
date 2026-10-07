@@ -24,10 +24,17 @@ class ChallengeEligibilityScope:
 def _reason(text: str, *, table_record: bool = False, positive_context: bool = False,
             policy_units: tuple = ()) -> str:
     surface = _surface(text)
+    business_exception = bool(
+        c.POLICY_BUSINESS_PROBLEM_RE.search(surface)
+        or c.CUSTOMER_LEGAL_FINANCIAL_SERVICE_RE.search(surface)
+        or c.PRODUCT_REGULATION_RESPONSE_RE.search(surface)
+    )
     if (c.FINANCIAL_EXPOSURE_RE.search(surface)
             or c.GENERAL_LEGAL_MANAGEMENT_RE.search(surface)
             or c.CONDITIONAL_SANCTION_RULE_RE.search(surface)
-            or any(pattern.search(surface) for pattern in policy_units)) and not c.POLICY_BUSINESS_PROBLEM_RE.search(surface):
+            or c.ACCOUNTING_MEASUREMENT_RE.search(surface)
+            or c.INTERNAL_LEGAL_ACTIVITY_RE.search(surface)
+            or any(pattern.search(surface) for pattern in policy_units)) and not business_exception:
         return c.ADMINISTRATIVE_EVENT_ONLY
     if c.ADMINISTRATIVE_RE.search(surface) and not c.BUSINESS_PROBLEM_RE.search(surface):
         return c.ADMINISTRATIVE_EVENT_ONLY

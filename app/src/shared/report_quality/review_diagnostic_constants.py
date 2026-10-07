@@ -13,6 +13,7 @@ REVIEW_SCOPE_ITEMS = {
     "public_sentence_fact_unbound": "공개 사실 결속",
     "public_sentence_fact_duplicate": "공개 사실 결속",
     "planned_claim_asserted": "계획·성과",
+    "possible_activity_asserted": "계획·성과",
     "scope_condition_unbound": "조건·적용대상",
     "culture_evidence_scope_mismatch": "공식 조직설명",
     "culture_accounting_policy_misplaced": "장별 작성범위",

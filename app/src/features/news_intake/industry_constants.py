@@ -2,7 +2,7 @@
 
 import re
 
-INDUSTRY_PROMPT_VERSION = "industry-context-v1"
+INDUSTRY_PROMPT_VERSION = "industry-context-v2"
 INDUSTRY_TOPIC_PREFIX = "industry_"
 INDUSTRY_QUERY_COUNT = 4
 INDUSTRY_COMPANY_QUERY_COUNT = 2

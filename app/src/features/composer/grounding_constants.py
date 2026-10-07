@@ -110,6 +110,13 @@ ACTIVITY_DATE_RE = re.compile(
     r"|\d{2}[.]\d{2}\s*[~～–-]\s*\d{2}[.]\d{2})(?!\d)"
 )
 HISTORICAL_ACTIVITY_RE = re.compile(r"개발|특허\s*(?:출원|등록)|완료|달성|출시|신설|개선|시행|수행")
+# 상대 과거 기간은 실적의 종결 술어와 같은 절에 있을 때만 읽는다.
+RELATIVE_COMPLETED_PERIOD_RE = re.compile(r"지난해|작년|전년도|전년|전기|지난\s*(?:분기|사업연도)")
+COMPLETED_ACTIVITY_RE = re.compile(
+    r"(?:실적|성과).{0,35}(?:거두었|거뒀|달성했|달성하였|기록했|기록하였)"
+    r"|(?:완료|달성|시행|수행|실행|확장|구축)(?:했|하였|되었)"
+)
+ACTIVITY_SENTENCE_SPLIT_RE = re.compile(r"(?<=[다요])[.!?]\s*|[;\n]")
 HISTORICAL_OVERLAP_MIN_LENGTH = 3
 HISTORICAL_OVERLAP_MIN_TOKENS = 2
 ACTIVITY_SUBJECT_RE = re.compile(r"[가-힣A-Za-z][가-힣A-Za-z0-9]{2,}(?:은|는|이|가)(?=\s)")

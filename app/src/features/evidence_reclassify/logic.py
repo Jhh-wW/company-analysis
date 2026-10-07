@@ -706,6 +706,16 @@ def to_typed_fragments(
         actual_hash = exact_text_sha256(candidate.text)
         if declared_hash and declared_hash != actual_hash:
             raise ValueError(f"후보 문단 원문과 SHA-256이 다릅니다: {paragraph_id}")
+        section_context_json = _metadata_value(candidate, source_record, ("section_context_json",), "")
+        if ("section_context_json" in candidate.source and "section_context_json" in source_record
+                and candidate.source["section_context_json"] != source_record["section_context_json"]):
+            raise ValueError("재판정 사업 범위 문맥이 원래 후보와 다릅니다")
+        from src.shared.report_evidence.section_context import parse_section_context
+        parse_section_context(
+            section_context_json, document_id=document_id,
+            document_sha256=_metadata_value(candidate, source_record, ("content_sha256",), ""),
+            fragment_location=location, fragment_sha256=actual_hash,
+        )
         slot_ids = tuple(dict.fromkeys(item.slot_id for item in assignments))
         reason_codes = _metadata_value(
             candidate, source_record, ("reason_codes",), ()
@@ -728,6 +738,7 @@ def to_typed_fragments(
                 "location": location,
                 "text_sha256": actual_hash,
                 "text": candidate.text,
+                **({"section_context_json": section_context_json} if section_context_json else {}),
                 "section_id": section_id,
                 "section_ids": (section_id,),
                 "slot_id": slot_ids[0],

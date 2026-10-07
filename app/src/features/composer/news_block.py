@@ -16,6 +16,7 @@ from datetime import date
 from typing import Final, Mapping, Optional, Sequence
 
 from src.features.composer.constants import SECTION_IDS
+from src.features.composer.culture_guard import culture_section_evidence_problem
 from src.features.composer.news_constants import (
     NEWS_BODY_DUPLICATE_PREVIEW_CHARS,
     NEWS_BODY_REFERENCE_SUFFIX,
@@ -307,6 +308,7 @@ def _row_problem(
     fragment: CollectedFragment,
     *,
     allowed_fragment_ids: Optional[frozenset[str]],
+    section_id: str,
 ) -> str:
     """만든 행을 스스로 다시 검사한다. 문제없으면 "".
 
@@ -333,6 +335,10 @@ def _row_problem(
         return BLOCKED_MISSING_META
     if not sentence.strip() or _normalized(sentence) != _normalized(fragment.text):
         return BLOCKED_TEXT_MISMATCH
+    if section_id == "culture":
+        # 정확한 보도 인용도 문화 장의 소재를 증명해야 한다. 산문이 제외된 뒤
+        # 같은 원문이 보도표를 통해 다시 공개되는 경로에 같은 가드를 적용한다.
+        return culture_section_evidence_problem(fragment.text, {fragment_id: fragment.text})
     return ""
 
 
@@ -517,7 +523,8 @@ def augment_news_blocks(
         grouped: dict[str, list[CollectedFragment]] = {}
         for fragment in owned:
             row = _news_row(fragment)
-            problem = _row_problem(row, fragment, allowed_fragment_ids=allowed)
+            problem = _row_problem(row, fragment, allowed_fragment_ids=allowed,
+                                   section_id=section.section_id)
             if not fragment.source_publisher.strip():
                 problem = BLOCKED_MISSING_META
             if not fragment.document_title.strip() or not fragment.source_url.strip():

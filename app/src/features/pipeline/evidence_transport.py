@@ -523,6 +523,16 @@ def _typed_metadata(
         from src.shared.report_evidence.source_context import parse_source_context
         parse_source_context(source_context_json)
         marker_payload["source_context_json"] = source_context_json
+    section_context_json = _optional_text(raw, "section_context_json")
+    if section_context_json:
+        from src.shared.report_evidence.section_context import parse_section_context
+        parse_section_context(
+            section_context_json, document_id=_optional_text(raw, "문서ID"),
+            document_sha256=document_content_sha256,
+            fragment_location=_optional_text(raw, "원문위치"),
+            fragment_sha256=hashlib.sha256(str(raw.get("원문", "")).encode("utf-8")).hexdigest(),
+        )
+        marker_payload["section_context_json"] = section_context_json
     marker_digest = hashlib.sha256(
         json.dumps(
             marker_payload,
@@ -658,6 +668,7 @@ def _collected_fragment_from_raw(
         item_published_on=_optional_text(raw, "item_published_on"),
         item_url=_optional_text(raw, "item_url"),
         source_context_json=_optional_text(raw, "source_context_json"),
+        section_context_json=_optional_text(raw, "section_context_json"),
         location=_optional_text(raw, "원문위치"),
         document_date=_optional_text(raw, "문서일"),
         financial_api_disclosed_at=_optional_text(raw, "financial_api_disclosed_at"),

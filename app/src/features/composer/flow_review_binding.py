@@ -54,6 +54,8 @@ def _binding(
         # 기존 빈 문맥의 봉인 값은 유지하며, 검수에 쓰인 법인·단계 문맥을 묶는다.
         if fragment.source_context_json:
             source_scope["source_context_json"] = fragment.source_context_json
+        if fragment.section_context_json:
+            source_scope["section_context_json"] = fragment.section_context_json
         refs.append(FlowEvidenceRef(
             fragment_id=fid,
             document_identity=fragment.document_identity,

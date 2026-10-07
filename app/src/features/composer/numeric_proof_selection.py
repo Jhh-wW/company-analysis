@@ -57,11 +57,14 @@ class NumericProofOption:
 
 
 def _fragment_snapshot(fragment: CollectedFragment) -> dict[str, str]:
-    return {key: getattr(fragment, key) for key in (
+    snapshot = {key: getattr(fragment, key) for key in (
         'fragment_id', 'kind', 'text', 'source_url', 'location', 'document_identity',
         'document_content_sha256', 'formal_source_kind', 'source_document_id',
         'identity_binding', 'source_context_json',
     )}
+    if fragment.section_context_json:
+        snapshot['section_context_json'] = fragment.section_context_json
+    return snapshot
 
 
 def _eligible(fragment: CollectedFragment) -> bool:

@@ -310,6 +310,18 @@ CULTURE_PEOPLE_INSTITUTION_RE: Final[re.Pattern[str]] = re.compile(
     r"전담부서|전담조직|조직효율화|전직지원"
 )
 
+# 외부 고객 접점의 소통은 임직원의 소통 제도를 뜻하지 않는다. 같은 절에
+# 다른 사람·조직 제도나 사내 소통이 있으면 이 닫힌 제외를 적용하지 않는다.
+# 이 관계 표현 밖의 모든 마케팅 의미를 정규식으로 판정하지는 않는다.
+CULTURE_EXTERNAL_COMMUNICATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:고객|소비자|인플루언서|비즈니스파트너)"
+    r"(?:(?:와|과)의?|대상의?|을위한|를위한)?"
+    r"소통(?:접점|채널|창구|기회|활동|행사|이벤트|하|해|했|할|한|을|를)"
+)
+CULTURE_INTERNAL_COMMUNICATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:사내|내부|조직내|부서간|팀간)(?:의|에서)?소통"
+)
+
 # ── «외부 감사 절차» 절은 이 장의 소재가 아니다 (닫힌 제외 목록) ──────────
 #
 # ★ 왜 필요한가 (인텍에프에이 4차 유료 실행 실측) — 8장에 남은 «한 줄»이

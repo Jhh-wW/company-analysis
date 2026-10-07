@@ -930,6 +930,7 @@ def _labelled_cells(section_id: str, row: FlowRow) -> list[str]:
 def _review_prompt(
     items: Sequence[tuple[int, str, FlowRow]],
     texts: Mapping[str, str],
+    *, fragments_by_id: Optional[Mapping[str, CollectedFragment]] = None,
 ) -> str:
     has_card_rows = any(
         section_id not in FLOW_ARROW_SECTION_IDS for _n, section_id, _r in items
@@ -1000,6 +1001,17 @@ def _review_prompt(
             "",
         )
     )
+    scoped_sources = {
+        fid: fragment for fid, fragment in (fragments_by_id or {}).items()
+        if fid in source_dictionary and fragment.section_context_json
+    }
+    if scoped_sources:
+        from src.shared.report_evidence.section_context import parse_section_context
+        from src.features.composer.section_context_constants import SECTION_CONTEXT_LABEL
+        lines.append(SECTION_CONTEXT_LABEL + " (조각별 JSON 자료): " + json.dumps({
+            fid: parse_section_context(fragment.section_context_json)["text"]
+            for fid, fragment in scoped_sources.items()
+        }, ensure_ascii=False, separators=(",", ":")))
     for number, section_id, row in items:
         # 경로·원문은 신뢰할 수 없는 데이터다. JSON 문자열로 봉인해
         # 안의 줄바꿈·가짜 번호·지시가 검수 프롬프트 구조를 바꾸지 못한다.
@@ -1108,7 +1120,7 @@ def _review_rows(
             blank_dropped,
         )
 
-    prompt = _review_prompt(items, texts)
+    prompt = _review_prompt(items, texts, fragments_by_id=fragments_by_id)
     raw = _safe_ask(ask, prompt)
     verdicts = _parse_verdicts(raw)
     retries = 0

@@ -25,6 +25,8 @@ from features.evidence_collection.source_context import context_for_candidate, h
 from features.evidence_collection.source_context import SourceContextBudgetExceeded
 from features.evidence_collection.source_context_constants import CONTEXT_BUDGET_REASON
 from features.evidence_collection.scan_contract import DocumentScan
+from features.evidence_collection.section_scope import section_scopes, context_for_section_candidate
+from features.evidence_collection.section_context import SectionContextBudgetExceeded
 from features.evidence_collection.models import (
     CollectedDocument,
     CollectionAttempt,
@@ -334,7 +336,8 @@ def collect_dart_evidence(
         retention = CandidateRetention(allowed_slot_ids)
         try:
             source_scopes = heading_source_scopes(fetch_result.text, document_actor=fetch_result.document_actor)
-        except SourceContextBudgetExceeded:
+            business_scopes = section_scopes(fetch_result.text)
+        except (SourceContextBudgetExceeded, SectionContextBudgetExceeded):
             attempts.append(_document_attempt(company_id, filing, c.ATTEMPT_STATE_TRUNCATED, CONTEXT_BUDGET_REASON, fetch_result))
             continue
         table_scopes = prepare_table_contexts(fetch_result.source_contexts, document_text=fetch_result.text)
@@ -347,7 +350,13 @@ def collect_dart_evidence(
                 table_contexts=table_scopes, scopes=source_scopes,
             )
             validate_source_context(context_json, document_text=fetch_result.text)
-            candidate = replace(candidate, source_context_json=context_json)
+            candidate = replace(
+                candidate, source_context_json=context_json,
+                section_context_json=context_for_section_candidate(
+                    business_scopes, text=candidate.text, start=candidate.start, end=candidate.end,
+                    document_id=document_id, document_sha256=content_sha256,
+                ),
+            )
             if candidate.is_short:
                 retention.offer_unclassified(candidate_index, candidate)
                 continue
@@ -427,6 +436,7 @@ def collect_dart_evidence(
                         ).hexdigest(),
                         text=candidate.text,
                         source_context_json=candidate.source_context_json,
+                        section_context_json=candidate.section_context_json,
                         section_id="",
                         slot_id="",
                         score_millis=0,
@@ -519,6 +529,7 @@ def collect_dart_evidence(
                         text_sha256=hashlib.sha256(candidate.text.encode("utf-8")).hexdigest(),
                         text=candidate.text,
                         source_context_json=candidate.source_context_json,
+                        section_context_json=candidate.section_context_json,
                         section_id=primary_score.section_id,
                         slot_id=primary_score.slot_id,
                         score_millis=primary_score.score_millis,

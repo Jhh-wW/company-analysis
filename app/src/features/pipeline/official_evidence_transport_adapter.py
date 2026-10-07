@@ -91,6 +91,7 @@ def merge_official_evidence_fragments(
                     "item_published_on": fragment.item_published_on,
                     "item_url": fragment.item_url,
                     "source_context_json": fragment.source_context_json,
+                    "section_context_json": fragment.section_context_json,
                     "section_ids": set(),
                     "slot_ids": set(),
                     "origin_ids": set(),
@@ -104,6 +105,7 @@ def merge_official_evidence_fragments(
                 or group["item_published_on"] != fragment.item_published_on
                 or group["item_url"] != fragment.item_url
                 or group["source_context_json"] != fragment.source_context_json
+                or group["section_context_json"] != fragment.section_context_json
             ):
                 raise ValueError("같은 typed origin ID가 서로 다른 원문을 가리킵니다")
             group["section_ids"].add(fragment.section_id)
@@ -190,6 +192,7 @@ def merge_official_evidence_fragments(
                 "item_published_on": str(group["item_published_on"]),
                 "item_url": str(group["item_url"]),
                 **({"source_context_json": str(group["source_context_json"])} if group["source_context_json"] else {}),
+                **({"section_context_json": str(group["section_context_json"])} if group["section_context_json"] else {}),
                 RAW_EVIDENCE_COMPANY_ID_KEY: result.company_id,
                 RAW_EVIDENCE_DOCUMENT_IDENTITY_KEY: identity,
                 RAW_EVIDENCE_DOCUMENT_CONTENT_SHA256_KEY: (

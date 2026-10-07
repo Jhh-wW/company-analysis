@@ -328,9 +328,11 @@ def build_typed_comparison_candidate_inputs(
         raise ValueError("typed 비교 후보 묶음의 회사 식별자가 다릅니다")
     documents = _document_registry(result)
     expected_contexts: dict[tuple[str, str], set[str]] = {}
+    expected_sections: dict[tuple[str, str, str], set[str]] = {}
     for candidate in result.candidates:
         for fragment in candidate.fragments:
             expected_contexts.setdefault((fragment.document_id, fragment.text_sha256), set()).add(fragment.source_context_json)
+            expected_sections.setdefault((fragment.document_id, fragment.location, fragment.text_sha256), set()).add(fragment.section_context_json)
     copied = {int(number): dict(raw) for number, raw in fragments.items()}
 
     sources: list[Source] = []
@@ -365,6 +367,10 @@ def build_typed_comparison_candidate_inputs(
         raw_digest = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
         context_values = expected_contexts.get((document_id, raw_digest), set())
         raw_context = raw.get("source_context_json", "")
+        raw_section = raw.get("section_context_json", "")
+        section_values = expected_sections.get((document_id, str(raw.get("원문위치", "")), raw_digest), set())
+        if type(raw_section) is not str or (section_values and section_values != {raw_section}) or (raw_section and not section_values):
+            raise ValueError("typed 비교 후보가 원문 사업 범위 문맥을 삭제하거나 바꿨습니다")
         if type(raw_context) is not str:
             raise ValueError("typed 비교 후보의 회사 주어 문맥은 문자열이어야 합니다")
         if (context_values and context_values != {raw_context}) or (raw_context and not context_values):
@@ -476,6 +482,7 @@ def build_typed_comparison_candidate_inputs(
                 document_identity=document_identity,
                 document_content_sha256=item.document_content_sha256,
                 source_context_json=item.source_context_json,
+                section_context_json=item.section_context_json,
             )
         )
         existing_candidate_keys.add((document_identity, exact_hash))

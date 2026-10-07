@@ -17,7 +17,9 @@ def test_transport_contract_matches_the_actual_producer():
     from src.shared.report_quality.review_diagnostic_constants import (
         REVIEW_ITEMS, REVIEW_REASONS, REVIEW_SECTION_IDS, REVIEW_SCOPE_ITEMS,
     )
-    from src.features.composer.modality_constants import MODALITY_PLAN_ASSERTED
+    from src.features.composer.modality_constants import (
+        MODALITY_PLAN_ASSERTED, MODALITY_POSSIBILITY_ASSERTED,
+    )
     from src.features.composer.scope_constants import SCOPE_CONDITION_UNBOUND
     from src.features.composer.quantified_relation_constants import QUANTIFIED_DIVIDEND_UNBOUND
     from src.features.composer.prose_own_source_constants import (
@@ -61,7 +63,8 @@ def test_transport_contract_matches_the_actual_producer():
         "public_sentence_fact_unbound", "public_sentence_fact_duplicate",
         COMPETITIVE_SECTION_EVIDENCE_OFFCONTRACT,
         FLOW_REVIEW_BINDING_INVALID, FLOW_REVIEW_BINDING_MISSING,
-        MODALITY_PLAN_ASSERTED, SCOPE_CONDITION_UNBOUND, CULTURE_EVIDENCE_SCOPE_MISMATCH,
+        MODALITY_PLAN_ASSERTED, MODALITY_POSSIBILITY_ASSERTED,
+        SCOPE_CONDITION_UNBOUND, CULTURE_EVIDENCE_SCOPE_MISMATCH,
         QUANTIFIED_DIVIDEND_UNBOUND,
         CULTURE_ACCOUNTING_POLICY_MISPLACED, *DIRECT_SUPPORT_REASON_TEXTS,
         *ROLE_BINDING_REASON_TEXTS,
@@ -93,6 +96,32 @@ def test_transport_contract_matches_the_actual_producer():
     }
     assert set(REVIEW_REASONS) == {GROUNDING_INVALID, GROUNDING_MISSING, *REVIEW_SCOPE_ITEMS}
     assert REVIEW_SECTION_IDS == set(SECTION_IDS) | {"summary"}
+
+
+def test_가능성_실제화_거절사유가_생산자에서_전송진단까지_보존된다():
+    from src.features.composer.grounding import constrain_verdicts
+    from src.features.composer.modality_constants import MODALITY_POSSIBILITY_ASSERTED
+    from src.features.composer.verify import _append_grounding_diagnostic
+
+    candidate = "가람기업은 부품 통합화/모듈화를 추진하고 있다."
+    sources = {"공시": "부품 통합화/모듈화 가능"}
+    verdicts, problems = constrain_verdicts(
+        '{"판정":[{"번호":1,"결과":"참","검증근거":{}}]}', {1: "참"},
+        {1: (candidate, sources)},
+    )
+    assert verdicts[1] != "참"
+    assert problems[1] == MODALITY_POSSIBILITY_ASSERTED
+    diagnostics = []
+    _append_grounding_diagnostic(
+        diagnostics, section_id="current_challenges", kind="본문",
+        reason_code=problems[1], candidate_text=candidate, sources=sources,
+    )
+    transported = observed_review_outcomes(diagnostics)
+    assert len(transported) == 1
+    assert transported[0]["reason_code"] == MODALITY_POSSIBILITY_ASSERTED
+    assert transported[0]["candidate_sha256"] == sha256(candidate.encode()).hexdigest()
+    assert transported[0]["verification_items"] == ("계획·성과",)
+    assert "candidate_text" not in transported[0]
 
 
 @pytest.mark.parametrize("field", (

@@ -48,6 +48,7 @@ from src.features.composer.verbatim_news import VerbatimNewsSource
 
 from src.features.composer.grounding_constants import (
     ACTIVITY_DATE_RE, HISTORICAL_ACTIVITY_RE, HISTORICAL_OVERLAP_MIN_LENGTH,
+    RELATIVE_COMPLETED_PERIOD_RE, COMPLETED_ACTIVITY_RE, ACTIVITY_SENTENCE_SPLIT_RE,
     HISTORICAL_OVERLAP_MIN_TOKENS, HISTORICAL_GENERIC_TOPIC_WORDS, ACTIVITY_SUBJECT_RE,
     COMPARATIVE_RE, CONTINUOUS_RE, COUNTED_CONTINUOUS_RE,
     CONTINUOUS_POINTS_OVER_PERIODS, DOWN_RE, GROUNDING_INVALID, GROUNDING_KEY,
@@ -174,13 +175,22 @@ def _dated_activity_requires_time(text: str, sources: Sequence[str]) -> bool:
         return False
     claim_tokens = _content_tokens(text)
     for source in sources:
-        for clause in SENTENCE_SPLIT_RE.split(source):
-            if (not ACTIVITY_DATE_RE.search(clause) or not HISTORICAL_ACTIVITY_RE.search(clause)
+        # 기존 날짜 과제의 문장 경계는 유지한다. 상대 과거 실적만 붙은 종결
+        # 문장을 따로 읽어 뒤의 무관한 현재 활동에 흡수되지 않게 한다.
+        clauses = [(clause, False) for clause in SENTENCE_SPLIT_RE.split(source)]
+        clauses.extend((clause, True) for clause in ACTIVITY_SENTENCE_SPLIT_RE.split(source))
+        for clause, relative_only in clauses:
+            relative_completed = relative_only and RELATIVE_COMPLETED_PERIOD_RE.search(clause) and COMPLETED_ACTIVITY_RE.search(clause)
+            historical = relative_completed if relative_only else (
+                ACTIVITY_DATE_RE.search(clause) and HISTORICAL_ACTIVITY_RE.search(clause))
+            if (not historical
                     or PRESENT_RE.search(clause) or PLANNED_END_RE.search(clause)):
                 continue
             source_tokens = _content_tokens(clause)
             source_subjects = {_label(match.group()) for match in ACTIVITY_SUBJECT_RE.finditer(clause)}
             claim_subjects = {_label(match.group()) for match in ACTIVITY_SUBJECT_RE.finditer(text)}
+            if relative_completed and source_subjects and claim_subjects and not source_subjects.intersection(claim_subjects):
+                continue
             matched = {
                 token for token in claim_tokens if any(
                     min(len(token), len(other)) >= HISTORICAL_OVERLAP_MIN_LENGTH
@@ -189,6 +199,10 @@ def _dated_activity_requires_time(text: str, sources: Sequence[str]) -> bool:
                 )
             }
             matched -= source_subjects & claim_subjects
+            # 상대 기간의 실적 표와 일반 사업 설명이 공유하는 부문명 하나는
+            # 같은 현재 활동의 증명이 아니다. 구체 근거어 둘 이상을 요구한다.
+            if relative_completed and len(matched) < HISTORICAL_OVERLAP_MIN_TOKENS:
+                continue
             # 같은 대상의 과거 개발을 현재 연구·생산으로 바꾸면 동사 어휘는
             # 달라져도 시점 증명이 필요하다. 일반 결과어 하나만 겹친 경우는 제외한다.
             topics = {token for token in matched

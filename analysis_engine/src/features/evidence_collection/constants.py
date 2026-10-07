@@ -683,11 +683,13 @@ FINANCIAL_COMPANY_REVENUE_KEYWORDS: Final[tuple[str, ...]] = (
 
 #: 2.7: 고객 신용관리와 보험·조사의 사업 의미칸 오분류도 제한한다.
 #: 2.9: 감사인의 절차·평가 투입변수·금융관리 뒤 절을 5장 점수에서 제한한다.
-COLLECTOR_VERSION: Final[str] = "evidence_collection/3.4"
+#: 3.5: 회계 측정·일반 관리의 의미칸 경계를 좁히고 사업부 문맥을 보존한다.
+COLLECTOR_VERSION: Final[str] = "evidence_collection/3.5"
 DOCUMENT_IDENTITY_HEADER_MAX_BYTES: Final[int] = 16 * 1024
 #: 2.0: EOF 후보 반복자·유한 문단 구간·제목 오인 방지. 1.x의 저장 한도
 #: 잘림 기록을 새 완료 증명으로 재사용하지 않는다.
-PARSER_VERSION: Final[str] = "evidence_collection_segment/2.1"
+#: 2.2: 원문과 조각 좌표는 유지하고 사업부 표제의 정확한 범위 문맥을 추가한다.
+PARSER_VERSION: Final[str] = "evidence_collection_segment/2.2"
 DART_PUBLISHER_NAME: Final[str] = "금융감독원 전자공시시스템(DART)"
 #: composer/constants.py DART_DOCUMENT_URL_TEMPLATE와 같은 값(rcept_no만 다른 키 이름).
 DART_DOCUMENT_URL_TEMPLATE: Final[str] = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"

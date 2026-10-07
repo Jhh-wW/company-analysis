@@ -359,7 +359,7 @@ URL_VARIANT_ORDER: Final[tuple[str, ...]] = (
 MAX_URL_VARIANTS: Final[int] = 3
 
 # 새 수집 경로의 상한은 기사 수를 채우는 목표가 아니라 요청 비용의 경계다.
-COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v14"
+COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v15"
 NAME_ACRONYM_MIN_CHARS: Final[int] = 2
 NAME_ACRONYM_MAX_CHARS: Final[int] = 8
 NAME_RETAINED_SUFFIX_MIN_CHARS: Final[int] = 2
@@ -623,7 +623,10 @@ GROUNDED_SECTION_GUIDE: Final[tuple[tuple[str, str], ...]] = (
     ("future_strategy", "회사가 밝힌 미실현 계획(stated_plan)과 진행 상태(plan_status). "
                         "완료 실적과 섞거나 본문에 없는 계획을 추측하지 않습니다."),
     ("operations_partners", "가치사슬·운영 역할·공급·유통 관계·제휴."),
-    ("culture", "회사가 밝힌 리더십·일하는 원칙·의사결정·조직 변화·검증된 사례."),
+    ("culture", "회사가 밝힌 임직원 인재상·인사제도·내부 일하는 원칙·의사결정·조직 변화와 "
+                "그 문화의 검증된 사례. 소비자·고객·인플루언서 대상 마케팅이나 외부 고객 접점 "
+                "확대만으로 이 장을 채우지 않습니다. 직원의 구체적인 업무·협업 방식이 같은 "
+                "인용에 명시된 실행은 기존 의미 검수 대상으로 남깁니다."),
 )
 
 # ── 주장 역할의 좁은 기계 경계 (claim_role) ────────────────────────────

@@ -31,6 +31,7 @@ class FragmentCandidate:
     section_heading: str
     is_short: bool = False
     source_context_json: str = ""
+    section_context_json: str = ""
 
 
 @dataclass
