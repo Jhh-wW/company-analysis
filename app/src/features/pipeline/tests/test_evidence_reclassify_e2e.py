@@ -799,7 +799,11 @@ def test_real_session_binds_final_partial_identity_and_waiter_reuses_without_ai(
 ):
     from src.core import clock
     from src.features.budget import spend_store, state_machine
-    from src.features.budget.constants import SPEND_PHASE_PIPELINE
+    from src.features.budget.constants import (
+        PAID_PHASE_PROVIDER_BUDGET_KRW,
+        SONNET_WRITER_PIPELINE_BUDGET_KRW,
+        SPEND_PHASE_PIPELINE,
+    )
     from src.features.report_delivery import artifact, store
     from src.features.report_delivery.models import ContentSnapshot
     from src.features.report_delivery.source_identity import SourceSnapshot
@@ -814,9 +818,18 @@ def test_real_session_binds_final_partial_identity_and_waiter_reuses_without_ai(
     paid_runtime._seed_ledger()
     # 가짜모델은 보수 단가를 쓰므로 기존 무과금 픽스처와 같은 시험 한도를 예약한다.
     begin_phase = paid_runtime._begin_paid_phase
+
+    def begin_fixture_phase(*, requested_cost_krw, **kwargs):
+        # 요청별 선택 예약액은 검증·소비하고 가짜모델의 시험 예약만 한 번 전달한다.
+        assert requested_cost_krw in (
+            PAID_PHASE_PROVIDER_BUDGET_KRW[SPEND_PHASE_PIPELINE],
+            SONNET_WRITER_PIPELINE_BUDGET_KRW,
+        )
+        return begin_phase(**kwargs, requested_cost_krw=100_000)
+
     monkeypatch.setattr(
         paid_runtime, "_begin_paid_phase",
-        lambda **kwargs: begin_phase(**kwargs, requested_cost_krw=100_000),
+        begin_fixture_phase,
     )
     build = real.engine_build_identity.process_engine_build_identity()
     installed = []
