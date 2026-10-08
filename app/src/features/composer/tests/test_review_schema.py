@@ -193,10 +193,10 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 # 도식은 같은 안내와 경로 헤더 +1자만 역치환했다. 원문·번호·schema는 바뀌지 않았다.
 # 증거: tmp/audit-20260930/paid/514031-schema-six-baseline-private.json.
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "182d9bf8205189e234920e6d0f2866715ca37c9d9998461ee6fa15f8ad6cea3c"),
-    (_golden_case, True, "58192325e8bf9ed76774d3cf6a2a54405cf698a78c267defd2f4ac833aad1b7f"),
-    (_boundary_case, False, "55afa081b9de50ec57ba568f7bbc07e09dcb84e4a82a69f9399f6c069b6ad99c"),
-    (_boundary_case, True, "443a9d21882c4a3ccc0f384ef922bfad23aec2654709aa99a273941a28789ddd"),
+    (_golden_case, False, "aa1fd1c7099559aba2f8146a53996617fec48b59be894525b25b6051880f19a7"),
+    (_golden_case, True, "10c65b144d265daa46cf5ef472ccd36077c6320ad6634dd92ab8e3a9becc3590"),
+    (_boundary_case, False, "cef6e5c04b5a0456cf576af3bcd70791f5c65f7df37576bd65680fe40a79064b"),
+    (_boundary_case, True, "e4e2cc35aa2ac3b02471f15f9b03c3417e8ee25532f8e71846e87e8380e0bce2"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
     # 2장 매출 모집단 안내 101자만 역치환해 기존 네 지문과 전체 바이트를 복원했다.
@@ -232,12 +232,12 @@ def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected)
 
 
 @pytest.mark.parametrize("items,expected", (
-    ((), "fcb1363036ff30fa2ba5de0e5f206fb6a9312d742e3c896a0f66c1f192b7693e"),
-    (FLOW_ITEMS, "ed8240e7b5348c9a9330013986c49fbab8bc7bcc5aed7b8b41b6640a2341a11b"),
+    ((), "a7e94c10577b23e6e4e3c06470352d6d9e980b08a9dce306f15eb91fd5654a72"),
+    (FLOW_ITEMS, "2808e18536567559d00ba439a4a8c0ec13cbd015b478f120be2f2ffbfb41c640"),
 ))
 def test_diagram_prompt_bytes_match_pre_schema_baseline(items, expected):
-    # 직접 비중 안내 185자만 역치환하면 기존 도식 두 지문·전체 바이트가 복원된다.
-    # 증거: paid/5e30-direct-share-six-baseline-private.json. 스키마 단정은 그대로다.
+    # 계획 증명 안내 257자만 역치환하면 기존 도식 두 지문·전체 바이트가 복원된다.
+    # 증거: paid/8ae2-review-guide-baseline-private.json. 스키마 단정은 그대로다.
     prompt = diagram_check._review_prompt(items, {"1": TEXT})
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
 

@@ -10,6 +10,13 @@ from src.shared.report_evidence.business_slot_scope_constants import CUSTOMER_SL
 import re
 import unicodedata
 
+from src.features.composer.portfolio_revenue_scope_constants import (
+    PORTFOLIO_SECTION, EXTERNAL_SCOPE_RE, EXTERNAL_ACTIVITIES,
+    EXTERNAL_OBJECT_RE, EXTERNAL_GENERIC_OBJECTS,
+    EXTERNAL_ASSERTION_DENIAL_RE, EXTERNAL_TITLE_ONLY_RE,
+    EXTERNAL_OBJECT_PREFIX_BOUNDARY_RE,
+)
+
 from src.features.composer.business_relation_scope_constants import (
     ACTOR_CLAUSE_BOUNDARY_RE, ACTUAL_ACTION_RE, BUSINESS_RELATION_PROBLEM,
     BUSINESS_RELATION_SECTIONS, CLAUSE_BOUNDARY_RE, CUSTOMER_CLAIM_RE,
@@ -163,10 +170,81 @@ def _provision_direction_problem(claim: str, source_units: tuple[str, ...]) -> b
     return False
 
 
+def _external_objects(text: str) -> frozenset[str]:
+    objects = set()
+    for match in EXTERNAL_OBJECT_RE.finditer(text):
+        if match[1] in EXTERNAL_GENERIC_OBJECTS:
+            continue
+        words = [match[1]]
+        # 같은 끝 명사를 가진 서로 다른 제품도 구분하도록 바로 앞 제품 수식어를 묶는다.
+        for word in reversed(text[:match.start()].split()):
+            if (EXTERNAL_OBJECT_PREFIX_BOUNDARY_RE.search(word)
+                    or not re.fullmatch(r"[가-힣A-Za-z0-9_-]+", word)):
+                break
+            words.insert(0, word)
+        objects.add(" ".join(words))
+    return frozenset(objects)
+
+
+def _external_objects_supported(objects: frozenset[str], source: str) -> bool:
+    source_objects = _external_objects(source)
+    return all(any(original == item or original.endswith(" " + item)
+                   for original in source_objects) for item in objects)
+
+
+def _external_segments(text: str) -> tuple[str, ...]:
+    return tuple(segment for segment in STATE_CLAUSE_BOUNDARY_RE.split(text)
+                 if EXTERNAL_SCOPE_RE.search(_surface(segment)))
+
+
+def _portfolio_external_revenue_problem(text: str, own_sources: Mapping[str, str]) -> str:
+    """3장의 외부 거래 역할만 같은 주체·활동의 자기 원문에 묶는다."""
+    source_units = tuple(
+        unit for value in own_sources.values()
+        for unit in _units("\n".join(line for line in value.splitlines()
+                                    if not EXTERNAL_TITLE_ONLY_RE.fullmatch(_surface(line))))
+    )
+    for claim in _units(text):
+        for segment in _external_segments(claim):
+            candidate = _surface(segment)
+            external = EXTERNAL_SCOPE_RE.search(candidate)
+            if EXTERNAL_ASSERTION_DENIAL_RE.search(candidate):
+                continue
+            claim_actor = segment if _raw_subject(segment) else claim
+            # 외부 행동의 절만 대조한다. 다른 절의 내부 제품은 외부 거래를 지원하지 않는다.
+            activities = frozenset(name for name, pattern in EXTERNAL_ACTIVITIES
+                                   if pattern.search(candidate[external.start():]))
+            objects = _external_objects(segment)
+            supported = False
+            for unit in source_units:
+                for source_segment in _external_segments(unit):
+                    source_actor = source_segment if _raw_subject(source_segment) else unit
+                    original = _surface(source_segment)
+                    source_external = EXTERNAL_SCOPE_RE.search(original)
+                    if (EXTERNAL_TITLE_ONLY_RE.fullmatch(original)
+                            or EXTERNAL_ASSERTION_DENIAL_RE.search(original)
+                            or not _same_provision_actor(claim_actor, source_actor)
+                            or (_raw_subject(claim_actor) and not _raw_subject(source_actor))
+                            or not _external_objects_supported(objects, source_segment)):
+                        continue
+                    source_activities = frozenset(name for name, pattern in EXTERNAL_ACTIVITIES
+                                                 if pattern.search(original[source_external.start():]))
+                    if activities.issubset(source_activities):
+                        supported = True
+                        break
+                if supported:
+                    break
+            if not supported:
+                return BUSINESS_RELATION_PROBLEM
+    return ""
+
+
 def business_relation_scope_problem(
     text: str, own_sources: Mapping[str, str], *, section_id: str, claim_slot: str = "",
 ) -> str:
     """2·7장 산문의 명시적 거래·고객 관계만 자기 인용의 절/표행과 대조한다."""
+    if section_id == PORTFOLIO_SECTION:
+        return _portfolio_external_revenue_problem(text, own_sources)
     if section_id not in BUSINESS_RELATION_SECTIONS or not own_sources:
         return ""
     # 원문 사실이 참이어도 회수관리만으로 고객유형 칸을 충족하지 않는다.

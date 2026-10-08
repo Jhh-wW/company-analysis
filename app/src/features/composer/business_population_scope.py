@@ -13,6 +13,7 @@ from src.features.composer.business_population_scope_constants import (
     EXPLICIT_SUBJECT_RE, INVESTMENT_PLAN_RE, LOCAL_OWNER_SUFFIX_RE,
     INVESTMENT_WORD_RE, PLAN_SUBJECT_END_RE, PURPOSE_END_RE, QUANTITY_SUBJECT_RE,
     INVESTMENT_PURPOSE_PREFIX_RE, INVESTMENT_PLAN_LABEL_END_RE,
+    INVESTMENT_PURPOSE_LIST_SEPARATOR_RE, INVESTMENT_PURPOSE_LIST_MIN_ITEMS,
     REVENUE_METRIC_RE,
     LOCAL_SECTION_RE, OTHER_SECTION_SUBJECT_RE, POPULATION_SOURCE_WINDOW, REVENUE_CONTRAST_RE,
     REVENUE_OWNER_RE, SECTION_PART_RE, SOURCE_INVESTMENT_PLAN_RE, WHOLE_COMPANY_RE,
@@ -239,6 +240,17 @@ def _whole_plan_supports(candidate: str, sources: Mapping[str, str]) -> bool:
     return False
 
 
+def _same_investment_purpose_list(candidate: str, source: str) -> bool:
+    """동일한 목적 전체의 순서를 유지한 쉼표·및 나열만 비교한다."""
+    candidate_items = tuple(INVESTMENT_PURPOSE_LIST_SEPARATOR_RE.split(candidate))
+    source_items = tuple(INVESTMENT_PURPOSE_LIST_SEPARATOR_RE.split(source))
+    return (
+        len(candidate_items) >= INVESTMENT_PURPOSE_LIST_MIN_ITEMS
+        and all(candidate_items)
+        and candidate_items == source_items
+    )
+
+
 def _local_plan_supports(candidate: str, local: str, source: str) -> bool:
     """명시 투자 목적이 있으면 같은 부문의 자기 원문과만 연결한다."""
     target = _investment_target(candidate)
@@ -264,6 +276,7 @@ def _local_plan_supports(candidate: str, local: str, source: str) -> bool:
     return bool(target and any(
         target == re.sub(r'^' + owner, '', source_target)
         or target in re.sub(r'^' + owner, '', source_target)
+        or _same_investment_purpose_list(target, re.sub(r'^' + owner, '', source_target))
         for source_target in source_targets
     ))
 
