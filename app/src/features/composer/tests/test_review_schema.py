@@ -175,12 +175,14 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 # 도식은 같은 안내와 경로 헤더 +1자만 역치환했다. 원문·번호·schema는 바뀌지 않았다.
 # 증거: tmp/audit-20260930/paid/514031-schema-six-baseline-private.json.
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "df82fc75c8d74250a9441073c84d54a108ee93438a57e9a3588ba67297288829"),
-    (_golden_case, True, "3a7a157bf298cffd47f8dd842b01430757009c9f335ae97f298a124e6a9624bb"),
-    (_boundary_case, False, "51e1a6248b3e48fef7b89780eed8a26d339afbd3f3b30785ee2b84bb2946098c"),
-    (_boundary_case, True, "d0e8f78d8bf737df54bfe2e7be4697ff254daf6960088e55544b0fa5356f5b92"),
+    (_golden_case, False, "1d1f0a784852c529a6fb3d75865538d5a2a24de6da4ea951c6712efeeec312fd"),
+    (_golden_case, True, "47f60dae71d2862c5ca605c0828b37c8211225e24042ed8d571179c203bd833b"),
+    (_boundary_case, False, "1ffed30d262ee3861107f875ea55e6b217a54380ac5e6de6130150b3934e0883"),
+    (_boundary_case, True, "28a27b5da2136896b1d813b4eea12e4399953faf24d8c4aed6d881ac54183097"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
+    # 자기 인용·활동 상태 안내만 역치환해 직전 네 지문을 재현했다.
+    # 증거: paid/6755-prompt-baseline-private.json. 스키마·후보·원문은 같다.
     # 2026-10-08: 2·3·5·7장 안내 417자만 역치환해 직전 전체 지문을 복구했다.
     # paid/0346-prompt-baseline-private.json: 원문·번호·스키마·고정 접두부 불변.
     # 2026-10-08: packet 표시 ID 안내 125자만 제거하면 직전 두 지문이 복구된다.

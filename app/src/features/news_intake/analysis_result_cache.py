@@ -88,6 +88,7 @@ class AnalysisRequest:
         try:
             if self.company.business_anchors:
                 from src.features.news_intake.industry_context import split_response
+                from src.features.news_intake.industry_constants import INDUSTRY_ASSESSMENT_FIELD
                 from src.features.news_intake.identity_names import mentions_target
                 from src.features.news_intake.grounded import parse_grounded_payload
                 items = parse_grounded_payload(payload)
@@ -98,6 +99,7 @@ class AnalysisRequest:
                 direct, problems, industry_rejected = split_response(
                     payload, articles=self.articles, company=self.company, as_of=self.as_of,
                     full_body_hashes=self.full_body_hashes,
+                    assessment_required=INDUSTRY_ASSESSMENT_FIELD in self.schema["properties"]["items"]["items"]["required"],
                 )
                 named = [(candidate, body) for candidate, body in self.articles if mentions_target(body, self.company)]
                 named_ids = {candidate.id for candidate, _ in named}

@@ -9,6 +9,8 @@ import datetime as dt
 import json
 
 from src.features.news_intake import industry_constants as ic
+from src.features.news_intake.industry_assessment import observe_assessments
+from src.features.news_intake.article_text_scope import overlaps_auxiliary
 from src.features.news_intake.grounded import parse_grounded_payload, GROUNDED_ANALYSIS_SCHEMA
 from src.features.news_intake.models import NewsCandidate, NewsCompanyContext
 from src.features.news_intake.quote_selection import quote_response_sha256, restore_quote_response
@@ -54,7 +56,7 @@ def industry_candidate(candidate: NewsCandidate) -> bool:
     return any(topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) for topic in candidate.topics)
 
 
-def extend_schema(schema: dict, company: NewsCompanyContext) -> dict:
+def extend_schema(schema: dict, company: NewsCompanyContext, *, priority: bool = False) -> dict:
     if not company.business_anchors:
         return schema
     schema = deepcopy(schema)
@@ -76,10 +78,21 @@ def extend_schema(schema: dict, company: NewsCompanyContext) -> dict:
                   "properties": properties, "required": required},
     }
     item["required"].append("industry_problems")
+    if priority:
+        item["properties"][ic.INDUSTRY_ASSESSMENT_FIELD] = {
+            "type": "array", "minItems": len(company.business_anchors),
+            "maxItems": len(company.business_anchors),
+            "items": {"type": "object", "additionalProperties": False,
+                      "properties": {
+                          "anchor_id": {"type": "string", "enum": [anchor.anchor_id for anchor in company.business_anchors]},
+                          "status": {"type": "string", "enum": list(ic.INDUSTRY_ASSESSMENT_STATUSES)},
+                      }, "required": ["anchor_id", "status"]},
+        }
+        item["required"].append(ic.INDUSTRY_ASSESSMENT_FIELD)
     return schema
 
 
-def extend_prompt(prompt: str, company: NewsCompanyContext) -> str:
+def extend_prompt(prompt: str, company: NewsCompanyContext, *, priority: bool = False) -> str:
     if not company.business_anchors:
         return prompt
     guide = (
@@ -107,14 +120,16 @@ def extend_prompt(prompt: str, company: NewsCompanyContext) -> str:
         "검증 불가면 industry_problems=[]입니다. 회사 피해가 실제라는 해석 문구는 생성하지 마세요. "
         "공식 사업 앵커=" + json.dumps([asdict(anchor) for anchor in company.business_anchors], ensure_ascii=False)
     )
-    return guide + "\n" + prompt
+    return (ic.INDUSTRY_PRIORITY_GUIDE if priority else "") + guide + "\n" + prompt
 
 
 def split_response(raw: object, *, articles: list[tuple[NewsCandidate, str]],
                    company: NewsCompanyContext, as_of: dt.date,
                    full_body_hashes: dict[str, str],
                    observations: Counter[str] | None = None,
-                   source_response_sha256: str | None = None) -> tuple[object, tuple[IndustryProblemEvidence, ...], dict[str, int]]:
+                   source_response_sha256: str | None = None,
+                   assessment_required: bool = False,
+                   assessment_records: list[dict[str, str]] | None = None) -> tuple[object, tuple[IndustryProblemEvidence, ...], dict[str, int]]:
     if not company.business_anchors:
         return raw, (), {}
     source_response_sha256 = source_response_sha256 or quote_response_sha256(raw)
@@ -125,6 +140,8 @@ def split_response(raw: object, *, articles: list[tuple[NewsCandidate, str]],
     anchors = {anchor.anchor_id: anchor for anchor in company.business_anchors}
     counts = Counter(item.get("id") for item in items if type(item) is dict and type(item.get("id")) is str)
     direct, problems, rejected = [], [], Counter()
+    rejected.update(observe_assessments(items, articles=articles, company=company,
+                                       required=assessment_required, records=assessment_records))
     missing = set(by_id) - set(counts)
     if missing:
         rejected["industry_invalid_missing_result"] += len(missing)
@@ -134,6 +151,7 @@ def split_response(raw: object, *, articles: list[tuple[NewsCandidate, str]],
             direct.append(item)
             continue
         clean = dict(item)
+        clean.pop(ic.INDUSTRY_ASSESSMENT_FIELD, None)
         entries = clean.pop("industry_problems", None)
         direct.append(clean)
         if type(item.get("id")) is not str:
@@ -141,7 +159,7 @@ def split_response(raw: object, *, articles: list[tuple[NewsCandidate, str]],
             continue
         candidate_body = by_id.get(item.get("id"))
         expected_keys = set(GROUNDED_ANALYSIS_SCHEMA["properties"]["items"]["items"]["required"]) | {"industry_problems"}
-        if (set(item) - {"invalid_quote_selection"} != expected_keys or candidate_body is None or counts[item.get("id")] != 1 or type(entries) is not list
+        if (set(item) - {"invalid_quote_selection", ic.INDUSTRY_ASSESSMENT_FIELD} != expected_keys or candidate_body is None or counts[item.get("id")] != 1 or type(entries) is not list
                 or type(item.get("same_company")) is not bool or type(item.get("material")) is not bool
                 or type(item.get("entity_evidence")) is not str or type(item.get("excerpts")) is not list
                 or type(item.get("source_type")) is not str
@@ -170,6 +188,8 @@ def split_response(raw: object, *, articles: list[tuple[NewsCandidate, str]],
                                or entry[name] not in text for name in ("industry", "problem", "geography_detail", "geography_evidence", "applicability_quote"))):
                     raise ValueError("산업 원문·출처·날짜 결속 미충족")
                 start = body.index(text)
+                if overlaps_auxiliary(body, start, start + len(text)):
+                    raise ValueError("산업 인용이 기사 밖 메타 목록에 걸칩니다")
                 if not _has_supported_problem_and_geography(entry, text):
                     raise ValueError("실제 산업 문제 또는 적용 지역의 명시 근거가 없습니다")
                 problems.append(IndustryProblemEvidence(

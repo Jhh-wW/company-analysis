@@ -15,7 +15,10 @@ from src.features.composer.grounding_constants import (
 )
 from src.features.composer.review_evidence_constants import (
     REVIEW_DISPLAY_ID_RE, TREND_OBSERVATIONS_KEY,
+    REVIEW_COMPARISON_MARKED_ID_RE, REVIEW_COMPARISON_LEADING_ID_RE,
+    REVIEW_COMPARISON_NUMBER_RE, REVIEW_COMPARISON_YEAR_RE,
 )
+from src.features.composer.body_review_constants import BODY_REVIEW_COMPARISON_KEY
 from src.features.composer.verdict_number import coerce_verdict_number
 from src.features.composer.logic import extract_json_payload
 
@@ -40,6 +43,21 @@ def _source_id(value: object, allowed: frozenset[str], registry: frozenset[str])
     return source_id
 
 
+def review_comparison_ids_valid(entry: Mapping, allowed: frozenset[str], registry: frozenset[str]) -> bool:
+    """대조 설명의 명시 출처 표시만 읽고 일반 수치나 의미 판정을 만들지 않는다."""
+    comparison = entry.get(BODY_REVIEW_COMPARISON_KEY)
+    if not isinstance(comparison, str):
+        return True
+    ids = {value for match in REVIEW_COMPARISON_MARKED_ID_RE.finditer(comparison)
+           for value in REVIEW_COMPARISON_NUMBER_RE.findall(match['ids'])}
+    for match in REVIEW_COMPARISON_LEADING_ID_RE.finditer(comparison):
+        values = REVIEW_COMPARISON_NUMBER_RE.findall(match['ids'])
+        # 표시 없는 연도형 숫자는 ':'가 있어도 출처 ID로 단정하지 않는다.
+        if all(value in registry and not REVIEW_COMPARISON_YEAR_RE.fullmatch(value) for value in values):
+            ids.update(values)
+    return ids.issubset(allowed)
+
+
 def normalize_review_entry(
     entry: Mapping, context: ReviewEvidenceContext,
     *, validate_proof_ids: bool = True,
@@ -55,6 +73,8 @@ def normalize_review_entry(
         ids = [_source_id(value, citations, context.source_ids) for value in raw_ids]
         derived[GROUNDING_SOURCE_FIELD] = ids
         valid = bool(ids) and len(ids) == len(set(ids)) and frozenset(ids) == citations
+    if validate_proof_ids and not review_comparison_ids_valid(entry, citations | proof_ids, context.source_ids):
+        valid = False
     grounding = derived.get(GROUNDING_KEY)
     if not isinstance(grounding, dict):
         return derived, valid

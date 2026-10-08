@@ -2,6 +2,21 @@
 import re
 
 TIME_BINDING_PROBLEM = "time_invalid"
+RESPONSE_ACTIVITY_RE = re.compile(r"확보|보완|강화|개선|수립|설치|구축|개발|적용|획득|출원|납부|교육|이행")
+RESPONSE_ACTIVITY_UNIT_RE = re.compile(r"[;|\n,]|(?<=[다음함])[.!?。](?:\s+|$)")
+RESPONSE_CURRENT_STATE_RE = re.compile(r"(?:진행|추진)\s*(?:중|中)(?!\s*(?:이었|이던|일))|추진\s*하고\s*있(?!었|던|을)")
+RESPONSE_UNREAL_PREFIX_RE = re.compile(r"당시|과거|향후|앞으로|가정|경우")
+RESPONSE_OTHER_STATE_RE = re.compile(r"완료|예정|계획|가정|경우|가능|하지\s*않|미수행|하지\s*못|했|하였")
+RESPONSE_ACTIVITY_WORD_RE = re.compile(r"[가-힣A-Za-z0-9_-]+")
+RESPONSE_ACTIVITY_PARTICLE_RE = re.compile(r"(?:을|를|의)$")
+RESPONSE_ACTIVITY_SUBJECT_WORD_RE = re.compile(r"(?:는|은)$")
+RESPONSE_ACTIVITY_HEAD_WORDS = 2
+RESPONSE_ACTIVITY_HEAD_CONNECTORS = frozenset({'대해', '위해', '통해', '하여', '위한', '관련한'})
+EVENT_ACTOR_LEGAL_FORM_RE = re.compile(r"^(?:주식회사|\(주\))|(?:주식회사|\(주\))$")
+RESPONSE_ACTIVITY_PROGRESS_TAIL_RE = re.compile(r"^\s*(?:[이가을를]\s*)?(?:중|中)(?!\s*(?:이었|이던|일))")
+RESPONSE_ACTIVITY_HEAD_RE = re.compile(r"^(?:(?:현재|지금|올해)|(?:회사|당사|본사)(?:는|은))")
+RESPONSE_FOREIGN_ACTOR_RE = re.compile(r"(?P<actor>고객사|거래처|협력사|자회사|종속기업|다른회사)\s*(?:는|은|이|가)")
+RESPONSE_ACTION_JOIN_RE = re.compile(r"(?:^|\s)(?:및|그리고)(?=\s|$)|^\s*[이가을를]?(?:와|과)(?=\s|$)")
 EVENT_CATEGORY_PATTERNS = {
     "sanction": r"제재|과태료|벌금|과징금|시정명령|(?:안전|보건|환경|규제|법규)[^.!?。;\n]{0,16}위반",
     "accident": r"중대재해|산업재해|사망사고|끼임사고|추락사고|사고|재해",
@@ -33,6 +48,7 @@ TABLE_UNIT_SPLIT_RE = re.compile(r"[;\n]")
 EVENT_DATE_HEADERS = frozenset({"제재조치일", "제재일", "조치일", "중대재해발생일자", "재해발생일자", "사고발생일자"})
 EVENT_ACTOR_HEADERS = frozenset({"조치대상자", "처벌또는조치대상자", "재해발생회사", "사고발생회사"})
 EVENT_RESPONSE_HEADERS = frozenset({"이행및재발방지대책", "이행및대책", "조치및전망", "조치내용", "개선대책", "대책"})
+EVENT_PRIMARY_RESPONSE_HEADERS = EVENT_RESPONSE_HEADERS - {'조치내용'}
 EVENT_CONTENT_HEADERS = frozenset({"처벌또는조치내용", "중대재해내용", "재해내용", "사고내용"})
 SELF_EVENT_ACTORS = frozenset({"당사", "회사", "본사", "당사사업장"})
 UNKNOWN_EVENT_ACTORS = frozenset({"", "-", "해당없음", "미확인", "없음"})

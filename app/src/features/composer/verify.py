@@ -50,6 +50,7 @@ from src.features.composer.numeric_proof_selection import (
 from src.features.composer.numeric_proof_selection_constants import NUMERIC_SELECTION_STAGE
 from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_VERSION
 from src.features.composer.source_actor_scope import source_actor_problem
+from src.features.composer.business_population_scope import section_investment_plan_problem
 from src.features.composer.competitive_scope_guard import competitive_section_evidence_problem
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_accounting_policy_problem,
@@ -117,7 +118,9 @@ from src.features.composer.review_evidence_constants import (
 )
 from src.features.composer.review_evidence_ids import (
     ReviewEvidenceContext, normalize_review_entry, normalize_review_binding_text,
+    review_comparison_ids_valid,
 )
+from src.features.composer.verdict_number import coerce_verdict_number
 from src.features.composer.entity_scope_constraints import (
     EntityScopeContext,
     build_entity_scope_contexts,
@@ -1842,6 +1845,9 @@ def _ask_grouped_verdicts(
         verdicts,
         candidates,
         review_evidence_context=evidence_context,
+        section_context_by_source_id={fid: fragment.section_context_json
+                                      for fid, fragment in frag_by_id.items()
+                                      if fragment.section_context_json},
         numeric_options_by_number=numeric_options_by_number,
         entity_scope_by_number=_entity_scope_by_number(
             ((item.number, item.citations) for item in items),
@@ -2128,6 +2134,7 @@ def _apply_grounding(
     entity_scope_by_number: Optional[Mapping[int, Sequence[EntityScopeContext]]] = None,
     numeric_options_by_number: Optional[Mapping[int, tuple[NumericProofOption, ...]]] = None,
     review_evidence_context: Optional[ReviewEvidenceContext] = None,
+    section_context_by_source_id: Optional[Mapping[str, str]] = None,
 ) -> dict[int, str]:
     # ★ 보고서 기준일을 그대로 넘긴다. 안 넘기면 executive_status_guard 가 날짜
     #   문턱 없이 이탈 «표지» 존재만으로 판정해, 「기준일 이후에 물러날 예정」인
@@ -2153,6 +2160,14 @@ def _apply_grounding(
     #   원문을 넘기든 구제 문자열을 넘기든 결과가 같도록 이 한 곳에서 맞춘다.
     raw = _review_binding_text(raw)
     invalid_evidence_ids: frozenset[int] = frozenset()
+    if review_evidence_context is None:
+        # 평문/legacy에는 상위 근거 배열을 새로 요구하지 않는다. 명시 ID 차용만 닫는다.
+        registry = frozenset(key for _, sources in candidates.values() for key in sources)
+        invalid_evidence_ids = frozenset(
+            number for entry in (_review_entries(raw, None) or []) if isinstance(entry, Mapping)
+            if (number := coerce_verdict_number(entry.get(REVIEW_NUMBER_KEY))) in candidates
+            if not review_comparison_ids_valid(entry, frozenset(candidates[number][1]), registry)
+        )
     if review_evidence_context is not None:
         original_evidence_raw = raw
         raw, invalid_evidence_ids = normalize_review_binding_text(raw, review_evidence_context)
@@ -2230,6 +2245,16 @@ def _apply_grounding(
     future_evidence = review_evidence
     for number, (text, sources) in candidates.items():
         if constrained.get(number) not in (VERDICT_TRUE, VERDICT_UNCLEAR):
+            continue
+        # 검증된 자기 조각의 사업부 제목은 제약으로만 쓴다. 긍정 근거에 합치지 않는다.
+        section_problem = section_investment_plan_problem(
+            text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+            section_context_by_source_id or {},
+            cells=(flow_cells_by_number or {}).get(number),
+        )
+        if section_problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = section_problem
             continue
         context = (diagnostic_contexts or {}).get(number)
         if context and context[1] == DIAGNOSTIC_KIND_BODY:
@@ -3031,6 +3056,9 @@ def _ask_verdicts(
         entity_scope_by_number=_entity_scope_by_number(
             ((item.number, item.sentence.citations) for item in items), frag_by_id,
         ),
+        section_context_by_source_id={fid: fragment.section_context_json
+                                      for fid, fragment in frag_by_id.items()
+                                      if fragment.section_context_json},
         diagnostics=diagnostics,
         diagnostic_contexts={
             item.number: (item.section_id, item.kind, item.sentence.text)

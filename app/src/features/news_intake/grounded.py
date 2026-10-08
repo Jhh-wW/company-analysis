@@ -11,6 +11,8 @@ from dataclasses import asdict, replace
 from typing import Any
 
 from src.features.news_intake import constants as c
+from src.features.news_intake.article_text_scope import overlaps_auxiliary
+from src.features.news_intake.article_text_scope_constants import EXCLUDED_AUXILIARY_EXCERPT
 from src.features.news_intake.claim_role import plan_role_parts
 from src.features.news_intake.partnership_role import partnership_role_parts
 from src.shared.report_evidence import partnership_scope_constants as pc
@@ -348,11 +350,17 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
     if start < 0 or body.find(text, start + 1) >= 0:
         excluded["grounded_text_not_exact"] += 1
         return None
+    if overlaps_auxiliary(body, start, start + len(text)):
+        excluded[EXCLUDED_AUXILIARY_EXCERPT] += 1
+        return None
     bound = _bound_subject(raw, body, company, start, diagnostics=subject_diagnostics)
     if bound is None:
         excluded["grounded_subject_missing"] += 1
         return None
     text, start = bound
+    if overlaps_auxiliary(body, start, start + len(text)):
+        excluded[EXCLUDED_AUXILIARY_EXCERPT] += 1
+        return None
     if _fact_start(text, 0, len(text), article_context := article_company_context(body, company)) > 0:
         excluded["grounded_ui_prefix"] += 1
         return None

@@ -16,6 +16,7 @@ from src.features.news_intake import constants as c
 from src.features.news_intake.analysis_result_cache import analysis_request
 from src.features.news_intake.quote_selection import quote_candidates, quote_response_sha256, restore_quote_response
 from src.features.news_intake.industry_context import extend_prompt, extend_schema, industry_candidate, split_response
+from src.features.news_intake.industry_assessment import priority_enabled
 from src.features.news_intake import industry_constants as ic
 from src.features.news_intake.observation import NewsObserver, observe_news
 from src.features.news_intake.grounded import parse_grounded_payload
@@ -112,6 +113,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     all_excerpts: list[GroundedNewsExcerpt] = []
     industry_problems = []
     industry_observations: Counter[str] = Counter()
+    industry_assessments: list[dict[str, str]] = []
     industry_read_ids: set[str] = set()
     industry_analysis_ids: set[str] = set()
     windows: list[int] = []
@@ -168,8 +170,9 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             budget_codes.append(c.ANALYSIS_BUDGET_EXHAUSTED_CODE)
             stopped = True
             return
-        legacy_prompt = extend_prompt(build_grounded_prompt(company, batch, as_of), company)
-        prompt = extend_prompt(build_grounded_prompt(company, batch, as_of, selection=True), company)
+        industry_priority = priority_enabled(company, batch)
+        legacy_prompt = extend_prompt(build_grounded_prompt(company, batch, as_of), company, priority=industry_priority)
+        prompt = extend_prompt(build_grounded_prompt(company, batch, as_of, selection=True), company, priority=industry_priority)
         selection = len(prompt) <= policy.max_prompt_chars and all(quote_candidates(candidate, body, company) for candidate, body in batch)
         if not selection:
             # 선택표가 기존 배치를 나눠 호출 수를 늘리지 않도록 구형 계약으로 돌린다.
@@ -189,7 +192,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             industry_observations["검수입력기사"] += len(batch)
             industry_analysis_ids.update(candidate.id for candidate, _ in batch if industry_candidate(candidate))
         try:
-            schema = extend_schema(build_grounded_schema(batch, selection=selection, company=company), company)
+            schema = extend_schema(build_grounded_schema(batch, selection=selection, company=company), company,
+                                   priority=industry_priority)
             with analysis_request(
                 company=company, as_of=as_of, policy=policy, articles=batch,
                 full_body_hashes=document_hashes, prompt=prompt, schema=schema,
@@ -237,6 +241,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             response, articles=batch, company=company, as_of=as_of, full_body_hashes=document_hashes,
             observations=industry_observations,
             source_response_sha256=source_response_sha256,
+            assessment_required=industry_priority, assessment_records=industry_assessments,
         )
         industry_problems.extend(industry_found)
         excluded.update(industry_rejected)
@@ -575,7 +580,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     ) for url in chosen_urls)
     enough = sufficient()
     incomplete_codes = tuple(code for code in excluded if excluded[code] and (
-        code.startswith("grounded_invalid_") or code.startswith("industry_invalid_") or code in {
+            code.startswith("grounded_invalid_") or code.startswith("industry_invalid_")
+            or code.startswith("industry_assessment_") or code in {
             "grounded_text_not_exact", "grounded_missing_result", "grounded_unknown_or_duplicate_id",
             "grounded_subject_missing", "grounded_identity_unverified", "grounded_plan_mismatch",
             "grounded_event_date_unverified", "grounded_attribution_required",
@@ -678,6 +684,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         # 회사 검색에서 찾은 기사에도 산업문제를 검수한다. 이 집계는 산업 검색 결과만의 수가 아니다.
         diagnostics["산업검수"] = {name: industry_observations[name]
                                    for name in ic.INDUSTRY_RESPONSE_OBSERVATION_FIELDS}
+        diagnostics["산업판정상태"] = industry_assessments
     if observer is not None:
         observe_news(observer, "body_selection", lambda: {
             "snapshot_digest": snapshot.digest, "rankings": observed_rankings,

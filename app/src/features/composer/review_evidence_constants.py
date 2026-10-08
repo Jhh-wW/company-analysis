@@ -3,6 +3,16 @@
 import re
 
 REVIEW_DISPLAY_ID_RE = re.compile(r"조각 ([0-9]+)")
+REVIEW_COMPARISON_ID_LIST = r"[0-9]+(?:\s*(?:[,·]|및|와|과)\s*(?:조각\s*)?[0-9]+)*"
+REVIEW_COMPARISON_MARKED_ID_RE = re.compile(
+    r"(?<![\w])(?:조각|근거(?:\s*ID)?)\s*\[?(?P<ids>(?>" + REVIEW_COMPARISON_ID_LIST + r"))\]?"
+    r"(?![0-9]|\s*(?:[.,][0-9]|[%％]|개|년|월|일|원|억|만|천|배|채|건|명))"
+)
+REVIEW_COMPARISON_LEADING_ID_RE = re.compile(
+    r"(?:^|[;；\n|])\s*\[?(?P<ids>(?>" + REVIEW_COMPARISON_ID_LIST + r"))\]?\s*[:：](?!\s*[0-9])"
+)
+REVIEW_COMPARISON_NUMBER_RE = re.compile(r"[0-9]+")
+REVIEW_COMPARISON_YEAR_RE = re.compile(r"[12][0-9]{3}")
 TREND_OBSERVATIONS_KEY = "관측"
 REVIEW_EVIDENCE_ID_STAGE = "review_evidence_id_binding"
 REVIEW_EVIDENCE_ID_GUIDE = (

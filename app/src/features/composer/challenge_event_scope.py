@@ -16,6 +16,69 @@ def _days(text: str):
     return frozenset(tuple(int(part) for part in day) for day in c.EVENT_DAY_RE.findall(text))
 
 
+def _activity_records(text: str, *, claim: bool):
+    """짧은 명시 활동명과 그 절의 진행 표지만 읽는다. 일반 의미 승인은 하지 않는다."""
+    records = []
+    for unit in c.RESPONSE_ACTIVITY_UNIT_RE.split(unicodedata.normalize('NFKC', text)):
+        matches = tuple(c.RESPONSE_ACTIVITY_RE.finditer(unit))
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(unit)
+            tail = unit[match.end():end]
+            rest = unit[match.end():]
+            words = c.RESPONSE_ACTIVITY_WORD_RE.findall(unit[:match.start()])
+            selected_words = words[-c.RESPONSE_ACTIVITY_HEAD_WORDS:]
+            selected_words = [word for word in selected_words if word not in c.RESPONSE_ACTIVITY_HEAD_CONNECTORS]
+            if len(selected_words) > 1 and c.RESPONSE_ACTIVITY_SUBJECT_WORD_RE.search(selected_words[0]):
+                selected_words = selected_words[1:]
+            head = c.RESPONSE_ACTIVITY_PARTICLE_RE.sub('', ''.join(selected_words))
+            head = c.RESPONSE_ACTIVITY_HEAD_RE.sub('', head).casefold()
+            foreign = c.RESPONSE_FOREIGN_ACTOR_RE.search(unit[:match.start()])
+            current = bool(c.RESPONSE_CURRENT_STATE_RE.search(tail) or c.RESPONSE_ACTIVITY_PROGRESS_TAIL_RE.search(tail))
+            if not current and c.RESPONSE_CURRENT_STATE_RE.search(rest):
+                # 원문과 주장 모두 활동 목록의 접속 관계가 있을 때만 뒤 진행
+                # 상태를 함께 읽는다. 앞 활동의 성과·이후 절차까지 넓히지 않는다.
+                current = bool(c.RESPONSE_ACTION_JOIN_RE.search(tail))
+            if c.RESPONSE_OTHER_STATE_RE.search(tail):
+                current = False
+            if not claim and c.RESPONSE_UNREAL_PREFIX_RE.search(unit[:match.start()]):
+                current = False
+            head_words = tuple(c.RESPONSE_ACTIVITY_PARTICLE_RE.sub('', word).casefold() for word in selected_words)
+            records.append((match.group(), head, foreign['actor'] if foreign else '', current, head_words))
+    return tuple(records)
+
+
+def response_current_activity_problem(candidate: str, sources: Mapping[str, str]) -> str:
+    """명사형 대응에 없는 현재진행을 붙이는 경계만 닫고 원문 활동은 보존한다."""
+    if not c.RESPONSE_CURRENT_STATE_RE.search(candidate):
+        return ''
+    claim_records = tuple(record for record in _activity_records(candidate, claim=True) if record[3])
+    if not claim_records:
+        return ''
+    rows = tuple(row for source in sources.values() for row in _event_rows(source))
+    units = tuple(sources.values())
+    if rows:
+        selected = _selected_rows(candidate, rows)
+        named = tuple(row for row in rows if _surface(row.actor)
+                      not in c.UNKNOWN_EVENT_ACTORS and c.EVENT_ACTOR_LEGAL_FORM_RE.sub('', _surface(row.actor)) in _surface(candidate))
+        if named:
+            selected = tuple(row for row in selected if row in named) if selected else named
+        if not selected and len(rows) == 1 and _surface(rows[0].actor) in c.SELF_EVENT_ACTORS:
+            selected = rows
+        # 동일 법인의 여러 행은 날짜 없이 서로의 진행 상태를 빌리지 않는다.
+        units = tuple(row.response for row in selected) if len(selected) == 1 else ()
+    source_records = tuple(record for unit in units for record in _activity_records(unit, claim=False))
+    action_sources = tuple(row.response for row in rows) if rows else tuple(sources.values())
+    all_actions = {record[0] for source in action_sources for record in _activity_records(source, claim=False)}
+    for action, head, actor, _, head_words in claim_records:
+        if action not in all_actions:
+            continue  # 없는 활동 자체의 의미 검수는 기존 계약이 담당한다.
+        if not any(source_action == action and current and (not head or not source_head or source_head == head or source_head in head_words)
+                   and (not source_actor or source_actor == actor or source_actor in candidate)
+                   for source_action, source_head, source_actor, current, _ in source_records):
+            return c.TIME_BINDING_PROBLEM
+    return ''
+
+
 @dataclass(frozen=True)
 class _LitigationRow:
     event: str
@@ -140,12 +203,14 @@ def _event_rows(source: str) -> tuple[_EventRow, ...]:
         if date_columns:
             date_index = date_columns[0]
             actor_index = next((i for i, value in enumerate(compact) if value in c.EVENT_ACTOR_HEADERS), None)
-            response_index = next((i for i, value in enumerate(compact) if value in c.EVENT_RESPONSE_HEADERS), None)
+            primary_response_indices = [i for i, value in enumerate(compact) if value in c.EVENT_PRIMARY_RESPONSE_HEADERS]
+            response_indices = primary_response_indices or [i for i, value in enumerate(compact) if value in c.EVENT_RESPONSE_HEADERS]
+            response_index = response_indices[0] if response_indices else None
             category = "accident" if "재해" in compact[date_index] or "사고" in compact[date_index] else "sanction"
             event_indices = tuple(i for i, value in enumerate(compact) if value in c.EVENT_CONTENT_HEADERS)
             unambiguous = (len(date_columns) == 1
                            and sum(value in c.EVENT_ACTOR_HEADERS for value in compact) == 1
-                           and sum(value in c.EVENT_RESPONSE_HEADERS for value in compact) == 1)
+                           and len(response_indices) == 1)
             mapping = (len(parts), date_index, actor_index, response_index, category, event_indices, unambiguous)
             continue
         if mapping is None:
@@ -315,6 +380,9 @@ def challenge_event_scope_problem(text: str, sources: Mapping[str, str], *, cell
     완료·진행 여부는 해당 발생 기간의 행 안에서만 확인하며 다른 행으로 빌리지 않는다.
     """
     candidate = " ".join(cells) if cells is not None else text
+    current_problem = response_current_activity_problem(candidate, sources)
+    if current_problem:
+        return current_problem
     footnote_problem = litigation_footnote_scope_problem(candidate, sources)
     if footnote_problem:
         return footnote_problem
