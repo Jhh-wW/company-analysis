@@ -84,14 +84,16 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "641a223fae317a1b40c58617bfbf7443c78fa30417afb23ccf034dae7e23b1dd"),
-    (_golden_case, True, "b3e6590dae75eec12d96d79390fffab1e8bbb1ab35a925f8a70166fb41b33c03"),
+    (_golden_case, False, "17aee464d8dc8ba15054df742402e25113be1ec63aee7f5b500ac628dd43453d"),
+    (_golden_case, True, "9dfd22e500ec717ae22aa321f402aa917b493d4c347b5fcca10d9c327d96b785"),
     (_boundary_case, False, "1ffed30d262ee3861107f875ea55e6b217a54380ac5e6de6130150b3934e0883"),
     (_boundary_case, True, "28a27b5da2136896b1d813b4eea12e4399953faf24d8c4aed6d881ac54183097"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
 ):
+    # 3·5·7장 안내 342자만 HEAD로 역치환해 기존 네 지문을 복원했다.
+    # paid/1d65-review-guide-baseline-private.json: 원문·번호·schema·고정 접두부 불변.
     # 6장 범위 안내 162자만 역치환하면 직전 지문이 복원된다. 고정 접두부는 같다.
     # 증거: paid/2dc-prompt-schema-baseline-private.json. 후보·원문·번호를 바꾸지 않았다.
     # 2026-10-08: 2·3·5·7장 안내 417자만 역치환해 직전 전체 지문을 복구했다.

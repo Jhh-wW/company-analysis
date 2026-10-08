@@ -15,7 +15,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from src.features.composer.business_population_scope import opposing_revenue_population_problem
+from src.features.composer.business_population_scope import (
+    contract_revenue_priority_problem, opposing_revenue_population_problem,
+)
 
 if TYPE_CHECKING:
     # 같은 feature 의 배선 도우미가 소유하는 context 타입(총괄 설계 채택안). 실행 시
@@ -666,6 +668,9 @@ def scope_problem(candidate_text: str, sources_mapping: Mapping[str, str]) -> st
       (공유 닫힌 목록의 «장별 작성범위» 코드 — 새 코드를 만들지 않았다).
     """
     text = unicodedata.normalize("NFKC", candidate_text)
+    priority_problem = contract_revenue_priority_problem(text, sources_mapping)
+    if priority_problem:
+        return priority_problem
     opposing_problem = opposing_revenue_population_problem(text, sources_mapping)
     if opposing_problem:
         return opposing_problem

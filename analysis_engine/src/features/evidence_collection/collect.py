@@ -24,6 +24,7 @@ from features.evidence_collection.retention import CandidateRetention
 from features.evidence_collection.source_context import context_for_candidate, heading_source_scopes, different_document_actor, validate_source_context, prepare_table_contexts
 from features.evidence_collection.source_context import SourceContextBudgetExceeded
 from features.evidence_collection.business_activity_table import activity_table_ranges
+from features.evidence_collection.business_constraint_signal import business_constraint_signals
 from features.evidence_collection import business_activity_table_constants as activity_c
 from features.evidence_collection.source_context_constants import CONTEXT_BUDGET_REASON
 from features.evidence_collection.scan_contract import DocumentScan
@@ -343,6 +344,7 @@ def collect_dart_evidence(
             attempts.append(_document_attempt(company_id, filing, c.ATTEMPT_STATE_TRUNCATED, CONTEXT_BUDGET_REASON, fetch_result))
             continue
         table_scopes = prepare_table_contexts(fetch_result.source_contexts, document_text=fetch_result.text)
+        constraint_count = 0
         for candidate_index, candidate in enumerate(segment.iter_document_candidates(
             fetch_result.text, progress=progress, deadline_at=deadline_at,
             short_filter=short_observation_filter,
@@ -374,6 +376,34 @@ def collect_dart_evidence(
             elif not has_any_direct_signal:
                 retention.offer_unclassified(candidate_index, candidate)
 
+            # 같은 문단의 기존 장 배정은 그대로 둔다. 명시 사업 제약→현재 대응만
+            # 정확 부분구간으로 기존 5장 몫에서 경쟁하며 다른 장 몫은 건드리지 않는다.
+            for signal in business_constraint_signals(candidate.text, source_context_json=context_json):
+                constraint_scores = tuple(score for score in relevance.business_constraint_scores()
+                                          if score.slot_id in allowed_slot_ids)
+                if not constraint_scores:
+                    continue
+                start, end = candidate.start + signal.start, candidate.start + signal.end
+                exact_text = fetch_result.text[start:end]
+                derived = segment.FragmentCandidate(
+                    start, end, exact_text, candidate.section_heading,
+                    source_context_json=context_for_candidate(
+                        text=exact_text, start=start, end=end,
+                        table_contexts=table_scopes, scopes=source_scopes,
+                    ),
+                    section_context_json=context_for_section_candidate(
+                        business_scopes, text=exact_text, start=start, end=end,
+                        document_id=document_id, document_sha256=content_sha256,
+                    ),
+                )
+                validate_source_context(derived.source_context_json, document_text=fetch_result.text)
+                # 일반 후보 index는 문서 문자 수보다 작다. ID용 번호와 원순회
+                # 순위를 분리해 후처리·부분구간을 문서 끝의 최근 근거로 올리지 않는다.
+                retention.offer_scored(len(fetch_result.text) + constraint_count, derived,
+                                       constraint_scores, rank_index=candidate_index)
+                constraint_count += 1
+                progress.candidates_seen += 1
+
         # 행만으로 자기 사업을 확정하지 않는다. 명시 당사 표제와 당기 종류별
         # 실적이 결속되는 연속 원문창만 기존 identity 보관몫에 더한다.
         # 기존 개별 계약 조각·총 문자/개수 상한·장별 보관몫은 그대로 유지한다.
@@ -402,7 +432,8 @@ def collect_dart_evidence(
                 )
                 previous_indices = {index for index, _candidate, _scores in retention.selected_scored()}
                 previous_pools = {key: list(pool) for key, pool in retention.pools.items()}
-                retention.offer_scored(progress.candidates_seen, candidate, (
+                # 새 5장 후보 관측을 더해도 기존 표 후보의 ID·순위는 이동하지 않는다.
+                retention.offer_scored(progress.candidates_seen - constraint_count, candidate, (
                     relevance.SlotScore("identity", activity_slot, c.RELEVANCE_KEYWORD_HIT_SCORE_MILLIS,
                                         (activity_c.ACTIVITY_TABLE_REASON,)),
                 ))

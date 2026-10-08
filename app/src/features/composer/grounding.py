@@ -37,6 +37,7 @@ from src.features.composer.numeric_quote_refs import resolve_numeric_quote_refs
 from src.features.composer.entity_scope_constraint_constants import ENTITY_SCOPE_EXCLUSION_STAGE
 from src.features.composer.entity_scope_constraints import EntityScopeContext
 from src.features.composer.scope_guard import document_entity_scope_problem, scope_problem
+from src.features.composer.loan_execution_scope import loan_execution_problem
 # 정성 인식 주장의 발동·결속 문법은 scope 가드와 «같은 상수»를 쓴다 — 두 벌로
 # 적으면 한쪽만 고쳐져 요구와 판정이 어긋난다.
 from src.features.composer.scope_constants import (
@@ -1175,6 +1176,13 @@ def constrain_verdicts(
         # 도식 후보만 칸 경계를 함께 준다. 본문·요약은 None 이므로 한 문장
         # 안에서 절을 넘는 연결이 새로 허용되지 않는다.
         cells = (cells_by_number or {}).get(number)
+        # 배열형 legacy 응답도 같은 후보 검사를 거친다. 대출 실행은 근거 JSON
+        # 유무와 무관하며, 표의 다른 용도·기관 실행을 빌릴 수 없다.
+        execution_problem = loan_execution_problem(text, sources)
+        if execution_problem:
+            result[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = execution_problem
+            continue
         # 같은 공시의 인용 밖 제외 각주가 부정한 현재 종속·연결 단정(제약만 소비, 등급 무관).
         # 공개 사유 코드는 기존 그대로이고, 어느 단계였는지는 세부 진단에만 남긴다(원문 없음).
         entity_scope = (entity_scope_by_number or {}).get(number)

@@ -28,6 +28,9 @@ def _table_item(table: str) -> str:
         if any(c.ACTIVITY_INACTIVE_RE.search(row[i]) for i, header in enumerate(headers)
                if header in c.ACTIVITY_STATUS_HEADERS):
             continue
+        if any(c.ACTIVITY_ROW_PERIOD_EXCLUDED_RE.search(row[i]) for i, header in enumerate(headers)
+               if header in c.ACTIVITY_PERIOD_HEADERS):
+            continue
         item, amount = row[names[0]], row[amounts[0]]
         if _header(item) in c.ACTIVITY_GENERIC_ITEMS:
             continue
@@ -47,6 +50,18 @@ def _table_item(table: str) -> str:
     return ""
 
 
+def _table_items(table: str) -> tuple[str, ...]:
+    """같은 표의 유효한 모든 종류를 읽되 행·열이 깨진 표는 추정하지 않는다."""
+    rows = table.split(" ; ")
+    width = len(rows[0].split(" | "))
+    if len(rows) < 2 or any(len(row.split(" | ")) != width for row in rows[1:]):
+        return ()
+    return tuple(dict.fromkeys(
+        item for row in rows[1:]
+        if (item := _table_item(" ; ".join((rows[0], row))))
+    ))
+
+
 def _other_owner(text: str, company_name: str) -> bool:
     key = c.ACTIVITY_COMPANY_KEY_RE.sub("", company_name).casefold()
     def same_company(value: str) -> bool:
@@ -64,7 +79,9 @@ def _other_owner(text: str, company_name: str) -> bool:
     )
 
 
-def _activity_tables(text: str, company_name: str) -> Iterator[tuple[int, int, str]]:
+def _activity_tables(
+    text: str, company_name: str, *, multiple: bool = False,
+) -> Iterator[tuple[int, int, str]]:
     for owner in c.ACTIVITY_OWNER_RE.finditer(text):
         start = text.rfind("\n\n", 0, owner.start()) + 2
         if start == 1:
@@ -95,13 +112,15 @@ def _activity_tables(text: str, company_name: str) -> Iterator[tuple[int, int, s
                 break  # 문자 상한에서 잘린 표를 완결 행으로 확정하지 않는다.
             if (c.ACTIVITY_CURRENT_RE.search(previous) and not c.ACTIVITY_PRIOR_RE.search(previous)
                     and not c.ACTIVITY_EXCLUDED_RE.search(previous)):
-                item = _table_item(paragraph)
-                if item:
+                items = _table_items(paragraph) if multiple else (_table_item(paragraph),)
+                if any(items):
                     end = paragraph_end
                     # 별도 법인 표제는 앞 당사 설명의 소유를 이어받지 않는다.
                     # 완전한 표 안의 발주처/고객 명칭과 구별한다.
                     if end <= limit:
-                        yield start, end, item
+                        for item in items:
+                            if item:
+                                yield start, end, item
                     break
             previous = ""
             at += len(paragraph) + 2
@@ -116,3 +135,10 @@ def activity_table_ranges(text: str, company_name: str = "") -> Iterator[tuple[i
 def activity_table_item(text: str, company_name: str = "") -> str:
     """현재 사업 사건/문제 판정 없이 한 종류를 검색용 항목으로 선택한다."""
     return next((item for _start, _end, item in _activity_tables(text, company_name)), "")
+
+
+def activity_table_items(text: str, company_name: str = "") -> tuple[str, ...]:
+    """한 공식 당기 표에 함께 있는 종류도 원문 범위를 유지하며 조사에 전달한다."""
+    return tuple(dict.fromkeys(
+        item for _start, _end, item in _activity_tables(text, company_name, multiple=True)
+    ))

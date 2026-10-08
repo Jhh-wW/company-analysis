@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from collections import OrderedDict
 
 from features.evidence_collection import constants as c
+from features.evidence_collection.business_constraint_signal_constants import DIRECT_RELATION_REASONS_BY_SLOT
 from features.evidence_collection.relevance import SlotScore
 from features.evidence_collection.segment import FragmentCandidate
 
@@ -14,6 +15,11 @@ class ScoredCandidate:
     index: int
     candidate: FragmentCandidate
     scores: tuple[SlotScore, ...]
+    rank_index: int
+
+
+def _direct_relation_priority(score: SlotScore) -> bool:
+    return bool(DIRECT_RELATION_REASONS_BY_SLOT.get(score.slot_id, frozenset()).intersection(score.reason_codes))
 
 
 class _UnclassifiedPool:
@@ -70,9 +76,10 @@ class CandidateRetention:
         self.slot_count_limit = c.MAX_LONG_FRAGMENT_CANDIDATES_PER_DOCUMENT // self.slot_count
         self.slot_char_limit = c.MAX_LONG_FRAGMENT_CHARS_PER_DOCUMENT // self.slot_count
 
-    def offer_scored(self, index: int, candidate: FragmentCandidate, scores: tuple[SlotScore, ...]) -> None:
+    def offer_scored(self, index: int, candidate: FragmentCandidate, scores: tuple[SlotScore, ...],
+                     *, rank_index: int | None = None) -> None:
         self.scored_seen += 1
-        item = ScoredCandidate(index, candidate, scores)
+        item = ScoredCandidate(index, candidate, scores, index if rank_index is None else rank_index)
         change = any(marker in candidate.text for marker in c.CHANGE_CONTEXT_MARKERS)
         lane_specs = (("top", c.RETAINED_TOP_PER_SLOT), ("recent", c.RETAINED_RECENT_PER_SLOT),
                       ("change", c.RETAINED_CHANGE_PER_SLOT if change else 0))
@@ -90,9 +97,12 @@ class CandidateRetention:
                 pool[:] = [old for old in pool if old.candidate.text != candidate.text]
                 pool.append(item)
                 if lane == "top":
-                    pool.sort(key=lambda value: (-next(s.score_millis for s in value.scores if s.slot_id == score.slot_id), value.index))
+                    def priority(value: ScoredCandidate) -> tuple[int, bool, int]:
+                        own_score = next(s for s in value.scores if s.slot_id == score.slot_id)
+                        return (-own_score.score_millis, not _direct_relation_priority(own_score), value.rank_index)
+                    pool.sort(key=priority)
                 else:
-                    pool.sort(key=lambda value: -value.index)
+                    pool.sort(key=lambda value: -value.rank_index)
                 while len(pool) > count_limit or sum(len(value.candidate.text) for value in pool) > char_limit:
                     pool.pop()
 

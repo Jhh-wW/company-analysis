@@ -356,6 +356,17 @@ class SlotScore:
     reason_codes: tuple[str, ...]
 
 
+def business_constraint_scores() -> tuple[SlotScore, ...]:
+    """관계 helper가 확인한 부분구간에만 기존 한 신호 점수를 부여한다."""
+    from features.evidence_collection import business_constraint_signal_constants as constraint_c
+    return (
+        SlotScore("current_challenges", constraint_c.ISSUE_SLOT,
+                  c.RELEVANCE_KEYWORD_HIT_SCORE_MILLIS, (constraint_c.SIGNAL_REASON,)),
+        SlotScore("current_challenges", constraint_c.RESPONSE_SLOT,
+                  c.RELEVANCE_KEYWORD_HIT_SCORE_MILLIS, (constraint_c.RESPONSE_REASON,)),
+    )
+
+
 def score_fragment_text(text: str, section_heading: str = "") -> SlotScore | None:
     """조각 원문 하나에 가장 잘 맞는 (장, 슬롯)을 고른다. 신호가 없으면 None.
 

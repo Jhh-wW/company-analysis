@@ -258,6 +258,9 @@ def _classified_evidence_location_bindings(
     actual_by_document: dict[str, set[tuple[str, str]]] = {
         document_id: set() for document_id in documents
     }
+    dart_text_ranges: dict[str, list[tuple[int, int, str]]] = {
+        document_id: [] for document_id in documents
+    }
     context_by_document: dict[str, list[dict[str, str]]] = {key: [] for key in documents}
     section_context_by_document: dict[str, list[dict[str, str]]] = {key: [] for key in documents}
     for raw_fragment in raw_fragments:
@@ -287,8 +290,10 @@ def _classified_evidence_location_bindings(
             if matched is None:
                 raise ValueError("typed DART 근거 위치가 offset 형식이 아닙니다")
             target_range = tuple(int(value) for value in matched.groups())
-            if target_range not in ranges or target_range[1] - target_range[0] != len(text):
+            if (not any(start <= target_range[0] < target_range[1] <= end for start, end in ranges)
+                    or target_range[1] - target_range[0] != len(text)):
                 raise ValueError("typed DART 근거 위치가 usable range와 다릅니다")
+            dart_text_ranges[document_id].append((*target_range, text))
         else:
             prefix, separator, raw_index = location.rpartition("#")
             explicit_index = raw_fragment.get("range_index", -1)
@@ -332,6 +337,22 @@ def _classified_evidence_location_bindings(
             })
 
     for document_id, document in documents.items():
+        if document["source_kind"] in _DART_DOCUMENT_SOURCE_KINDS:
+            # 부모 원문과 정확 부분구간은 함께 보존한다. 포함만으로 허용하지
+            # 않고 실제 조각들의 합집합·중첩 문자까지 생산 범위와 대조한다.
+            union: list[tuple[int, int, str]] = []
+            for start, end, text in sorted(dart_text_ranges[document_id]):
+                if union and start <= union[-1][1]:
+                    previous_start, previous_end, previous_text = union[-1]
+                    overlap = min(end, previous_end) - start
+                    if text[:overlap] != previous_text[start - previous_start:start - previous_start + overlap]:
+                        raise ValueError("typed DART 중첩 근거의 원문이 다릅니다")
+                    union[-1] = (previous_start, max(previous_end, end),
+                                 previous_text + text[max(previous_end - start, 0):])
+                else:
+                    union.append((start, end, text))
+            if tuple((start, end) for start, end, _text in union) != document["ranges"]:
+                raise ValueError("typed DART 근거 합집합이 usable range와 다릅니다")
         if section_context_by_document[document_id] != document["section_context_bindings"]:
             raise ValueError("typed 공식 근거의 사업 범위 문맥 결속이 다릅니다")
         if context_by_document[document_id] != document["source_context_bindings"]:

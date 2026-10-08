@@ -10,11 +10,34 @@ from src.features.composer.constants import CHALLENGE_FLOW_SECTION_ID
 from src.features.composer.challenge_event_scope import (
     challenge_event_scope_problem, _event_rows, _selected_rows, _surface,
 )
+from src.features.composer.challenge_business_scope_constants import (
+    PROCEDURAL_ISSUE_ONLY, PROCEDURAL_ISSUE_UNIT_RE, PROCEDURAL_LABEL_RELATION_RE,
+    PROCEDURAL_COURT_ISSUE_RE, PROCEDURAL_ACTION_ISSUE_RE, PROCEDURAL_EVENT_LABEL_RE,
+)
 from src.shared.report_evidence.challenge_eligibility import (
     challenge_eligibility_problem, challenge_eligibility_quote_problem,
     challenge_incident_row_problem,
     challenge_issue_problem,
 )
+
+
+def _procedural_issue_problem(text: str) -> str:
+    """사건명·법원·심급·절차 상태만인 후보를 직접 사업 문제로 세지 않는다.
+
+    형식 밖의 술어·사업 영향이 섞이면 의미 검수에 남긴다. 자기 인용의 다른 절이나
+    표의 대응 셀은 절차 전용 후보에 사업 영향을 빌려주지 않는다.
+    """
+    units = tuple(unit for unit in PROCEDURAL_ISSUE_UNIT_RE.split(text) if unit.strip())
+    if not units:
+        return ""
+    for unit in units:
+        compact = "".join(unit.split())
+        match = (PROCEDURAL_COURT_ISSUE_RE.fullmatch(compact)
+                 or PROCEDURAL_ACTION_ISSUE_RE.fullmatch(compact)
+                 or PROCEDURAL_EVENT_LABEL_RE.fullmatch(compact))
+        if not match or PROCEDURAL_LABEL_RELATION_RE.search(match.group("label")):
+            return ""
+    return PROCEDURAL_ISSUE_ONLY
 
 
 def challenge_business_problem(text: str, sources: Mapping[str, str], *, cells: Sequence[str] | None = None,
@@ -37,6 +60,9 @@ def challenge_business_problem(text: str, sources: Mapping[str, str], *, cells: 
     # 표의 대응 셀이나 같은 인용의 다른 절에서 문제 관계를 빌리지 않는다.
     issue_text = cells[0] if cells else text
     if cells is not None or claim_slot == "current_challenges:issue":
+        problem = _procedural_issue_problem(issue_text)
+        if problem:
+            return problem
         problem = challenge_issue_problem(issue_text)
         if problem:
             return problem

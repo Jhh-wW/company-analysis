@@ -1,4 +1,4 @@
-"""반대 매출 추세의 모집단과 명시 부문의 투자 계획만 검사한다.
+"""매출 모집단·계약 목록의 수익 추론과 명시 부문의 투자 계획을 검사한다.
 
 빈 사유는 전체 의미 승인이나 다른 시점·주어·수치 검사 면제가 아니다.
 부문 제목은 범위를 좁히는 제약이며 긍정 사실의 원문에 합치지 않는다.
@@ -15,6 +15,14 @@ from src.features.composer.business_population_scope_constants import (
     REVENUE_METRIC_RE,
     LOCAL_SECTION_RE, OTHER_SECTION_SUBJECT_RE, POPULATION_SOURCE_WINDOW, REVENUE_CONTRAST_RE,
     REVENUE_OWNER_RE, SECTION_PART_RE, SOURCE_INVESTMENT_PLAN_RE, WHOLE_COMPANY_RE,
+    CONTRACT_AMOUNT_COLUMN, CONTRACT_AMOUNT_RE, CONTRACT_PERIOD_COLUMN,
+    CONTRACT_PERIOD_RE, CONTRACT_ROW_MIN_COLUMNS, EXPLICIT_REVENUE_PRIORITY_RE,
+    REVENUE_COMPOSITION_RE, REVENUE_PRIORITY_RE,
+    REVENUE_PRIORITY_TARGET_END_RE, REVENUE_PRIORITY_LEADING_SUBJECT_RE,
+    REVENUE_PRIORITY_FOREIGN_OWNER_RE, REVENUE_SHARE_RE,
+    REVENUE_PRIORITY_POSTPARTICLE_RE, REVENUE_PRIORITY_PREPARTICLE_RE,
+    REVENUE_ITEM_COLUMN_RE, REVENUE_AMOUNT_COLUMN_RE, REVENUE_SHARE_COLUMN_RE,
+    REVENUE_TABLE_OWNER_RE, REVENUE_TABLE_OWNERS,
 )
 from src.features.composer.scope_constants import SCOPE_CONDITION_UNBOUND
 from src.shared.report_evidence.section_context import parse_section_context
@@ -22,6 +30,96 @@ from src.shared.report_evidence.section_context import parse_section_context
 
 def _surface(text: str) -> str:
     return re.sub(r'\s+', '', unicodedata.normalize('NFKC', text))
+
+
+def _contract_rows(source: str) -> list[str]:
+    rows = []
+    for row in source.splitlines():
+        columns = [_surface(cell) for cell in row.split('|')]
+        if (len(columns) >= CONTRACT_ROW_MIN_COLUMNS
+                and columns[0] and columns[1]
+                and CONTRACT_PERIOD_RE.fullmatch(columns[CONTRACT_PERIOD_COLUMN])
+                and CONTRACT_AMOUNT_RE.fullmatch(columns[CONTRACT_AMOUNT_COLUMN])):
+            rows.append(row)
+    return rows
+
+
+def contract_revenue_priority_problem(text: str, sources: Mapping[str, str]) -> str:
+    """계약 행만으로 수익 우선순위·매출 비중을 새로 단정하는 경로를 닫는다.
+
+    계약의 존재·금액 설명은 보존한다. 해석 표시도 매출 전제의 증명을 면제하지
+    않는다. 별도 자기 원문에 직접 수익원 또는 매출 구성 수치가 있으면 기존
+    모집단·수치·의미 검수가 판단하며, 여기의 빈 결과는 승인이 아니다.
+    """
+    candidate = _surface(text)
+    if not REVENUE_PRIORITY_RE.search(candidate):
+        return ''
+    if not any(_contract_rows(source) for source in sources.values()):
+        return ''
+    for clause in CLAUSE_BOUNDARY_RE.split(candidate):
+        for claim in REVENUE_PRIORITY_RE.finditer(clause):
+            target = _revenue_priority_target(clause, claim)
+            if not target or not _own_revenue_priority_support(target, sources):
+                return SCOPE_CONDITION_UNBOUND
+    return ''
+
+
+def _revenue_priority_target(clause: str, claim: re.Match) -> str:
+    if EXPLICIT_REVENUE_PRIORITY_RE.fullmatch(claim.group()):
+        tail = REVENUE_PRIORITY_POSTPARTICLE_RE.sub('', clause[claim.end():])
+        target = REVENUE_PRIORITY_TARGET_END_RE.split(tail, maxsplit=1)[0]
+        if target and target not in ('다', '고', '라고'):
+            return target
+    prefix = REVENUE_PRIORITY_LEADING_SUBJECT_RE.sub('', clause[:claim.start()])
+    return REVENUE_PRIORITY_PREPARTICLE_RE.sub('', prefix)
+
+
+def _own_revenue_priority_support(target: str, sources: Mapping[str, str]) -> bool:
+    for source in sources.values():
+        contract_rows = set(_contract_rows(source))
+        header = None
+        table_owner_supported = True
+        for row in source.splitlines():
+            # 명시 타회사 표제의 소유권은 뒤 매출표에도 이어진다.
+            # 새 자기 매출 표제가 나오면 그 표부터 기존 지원 경로를 복구한다.
+            owners = tuple(REVENUE_TABLE_OWNER_RE.finditer(unicodedata.normalize('NFKC', row)))
+            if owners:
+                table_owner_supported = _surface(owners[-1]['owner']) in REVENUE_TABLE_OWNERS
+                header = None
+            # 프로젝트명·발주처 칸의 말을 매출 증명으로 빌리지 않는다.
+            if row in contract_rows:
+                header = None
+                continue
+            columns = [_surface(cell) for cell in row.split('|')]
+            if (len(columns) == CONTRACT_ROW_MIN_COLUMNS - 1
+                    and REVENUE_ITEM_COLUMN_RE.fullmatch(columns[0])
+                    and REVENUE_AMOUNT_COLUMN_RE.fullmatch(columns[1])
+                    and REVENUE_SHARE_COLUMN_RE.fullmatch(columns[2])):
+                header = columns
+                continue
+            if (header and table_owner_supported
+                    and len(columns) == len(header) and columns[0] == target
+                    and CONTRACT_AMOUNT_RE.fullmatch(columns[1])
+                    and REVENUE_SHARE_RE.fullmatch(columns[2])):
+                return True
+            if '|' not in row:
+                header = None
+            if not table_owner_supported:
+                continue
+            for unit in CLAUSE_BOUNDARY_RE.split(_surface(row)):
+                if REVENUE_PRIORITY_FOREIGN_OWNER_RE.search(unit):
+                    continue
+                direct = tuple(EXPLICIT_REVENUE_PRIORITY_RE.finditer(unit))
+                if any(_revenue_priority_target(unit, claim) == target for claim in direct):
+                    return True
+                # 같은 제공물의 매출 구성 비율만 비교 대상으로 인정한다.
+                # 계약액·자산·이익 수치나 다른 상품의 비율은 면제 근거가 아니다.
+                metric = re.search(re.escape(target) + r'(?:의)?매출(?:액|수익|비중|구성)?', unit)
+                columns = unit.split('|')
+                table_metric = target in columns and REVENUE_COMPOSITION_RE.search(unit)
+                if (metric or table_metric) and REVENUE_SHARE_RE.search(unit):
+                    return True
+    return False
 
 
 def opposing_revenue_population_problem(text: str, sources: Mapping[str, str]) -> str:

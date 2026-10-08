@@ -25,3 +25,37 @@ QUANTITY_SUBJECT_RE = re.compile(r'수주량(?:은|는|이|가|도)')
 INVESTMENT_WORD_RE = re.compile(r'투자')
 PURPOSE_END_RE = re.compile(r'(?:을|를)?위(?:해|하여)')
 PLAN_SUBJECT_END_RE = re.compile(r'(?:계획은|예정은|는|은)')
+
+# 계약 금액·기간 행은 매출 구성이나 수익 우선순위를 직접 증명하지 않는다.
+REVENUE_PRIORITY_RE = re.compile(
+    r'(?:주요|주된|최대|핵심|가장큰)(?:수익원|매출원|매출발생원)|'
+    r'매출(?:액)?(?:의|에서)?(?:대부분|과반|가장큰비중)|'
+    r'매출(?:액)?비중(?:은|이|을|으로|의)|매출(?:액)?의?\d+(?:\.\d+)?%'
+)
+CONTRACT_PERIOD_RE = re.compile(
+    r'\d{4}[./-]\d{1,2}[./-]\d{1,2}(?:~|∼|～|–|—|-)(?:\d{4}[./-])?\d{1,2}[./-]\d{1,2}'
+)
+CONTRACT_AMOUNT_RE = re.compile(r'[+-]?\d[\d,]*(?:\.\d+)?')
+CONTRACT_ROW_MIN_COLUMNS = 4
+CONTRACT_PERIOD_COLUMN = 2
+CONTRACT_AMOUNT_COLUMN = 3
+EXPLICIT_REVENUE_PRIORITY_RE = re.compile(
+    r'(?:주요|주된|최대|핵심|가장큰)(?:수익원|매출원|매출발생원)|'
+    r'매출(?:액)?(?:의|에서)?(?:대부분|과반|가장큰비중)'
+)
+REVENUE_COMPOSITION_RE = re.compile(r'매출(?:액|수익|비중|구성)?')
+REVENUE_PRIORITY_TARGET_END_RE = re.compile(r'으로|로서|이다|입니다|이며|이고|였다|이었다|[,.。;]')
+REVENUE_PRIORITY_LEADING_SUBJECT_RE = re.compile(r'^(?:회사|당사|연결회사)(?:는|은|의)')
+REVENUE_PRIORITY_FOREIGN_OWNER_RE = re.compile(r'(?:타사|다른회사|다른기업|고객사|자회사|종속기업|관계기업)(?:의|는|은|이|가)')
+REVENUE_SHARE_RE = re.compile(r'\d+(?:\.\d+)?%')
+REVENUE_PRIORITY_POSTPARTICLE_RE = re.compile(r'^(?:은|는|이|가)')
+REVENUE_PRIORITY_PREPARTICLE_RE = re.compile(r'(?:의|이|가|은|는)$')
+REVENUE_ITEM_COLUMN_RE = re.compile(r'(?:품목|제품|상품|사업|사업부문)')
+REVENUE_AMOUNT_COLUMN_RE = re.compile(r'매출(?:액|수익)')
+REVENUE_SHARE_COLUMN_RE = re.compile(r'(?:비중|비율|구성비)')
+REVENUE_TABLE_OWNER_RE = re.compile(
+    r'(?<![가-힣A-Za-z0-9])'
+    r'(?P<owner>당사|회사|연결회사|타사|다른\s*회사|다른\s*기업|고객\s*회사|고객사|자회사|종속기업|관계기업)'
+    r'(?:의|는|은|이|가)[^.。;\n|]*?매출(?:액|수익|비중|구성)?'
+)
+REVENUE_TABLE_OWNERS = frozenset({'당사', '회사', '연결회사'})

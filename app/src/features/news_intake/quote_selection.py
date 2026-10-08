@@ -76,6 +76,10 @@ def quote_candidates(candidate: NewsCandidate, body: str,
     # 대상명으로 시작하는 연속 범위는 선택지일 뿐 해당 사건의 주어라는 판정이 아니다.
     target_starts = [i for i, (start, end) in enumerate(units)
                      if company is not None and mentions_target(body[start:end], company)]
+    # 관계 문장의 생략된 행위주어를 읽을 수 있도록 직전 문장과 정확히 이어 준다.
+    # 선택 기회일 뿐 회사 귀속 판정은 기존 원문·주어 검수에 그대로 남긴다.
+    ranges.extend((units[i - c.QUOTE_PRECEDING_CONTEXT_SENTENCES][0], units[i][1])
+                  for i in target_starts if i >= c.QUOTE_PRECEDING_CONTEXT_SENTENCES)
     for i in target_starts:
         for width in range(2, c.QUOTE_MAX_ADJACENT_SENTENCES + 1):
             if i + width <= len(units):

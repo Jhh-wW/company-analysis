@@ -10,7 +10,7 @@ from src.shared.report_evidence import business_activity_constants as c
 from src.shared.report_evidence.models import EvidenceFragment
 from src.shared.report_evidence.source_context import parse_source_context
 from src.shared.report_evidence.business_activity_declaration import declared_business_item
-from src.shared.report_evidence.business_activity_table import activity_table_item
+from src.shared.report_evidence.business_activity_table import activity_table_item, activity_table_items
 
 
 def _valid_item(item: str) -> bool:
@@ -19,6 +19,17 @@ def _valid_item(item: str) -> bool:
         and not c.BUSINESS_ACTIVITY_NONITEM_RE.search(item)
         and not c.BUSINESS_ACTIVITY_EXCLUDED_RE.search(item)
     )
+
+
+def current_business_table_items(fragment: EvidenceFragment, company_name: str) -> tuple[str, ...]:
+    """기존 회사·문맥·의미칸 검사를 통과한 당기 표의 사업 종류를 보존한다."""
+    first = current_business_item(fragment, company_name, include_activity_table=True)
+    if not first:
+        return ()
+    items = activity_table_items(fragment.text, company_name)
+    if first not in items:
+        return ()
+    return tuple(item for item in items if _valid_item(item))
 
 
 def _has_other_company_reference(text: str, company_name: str) -> bool:

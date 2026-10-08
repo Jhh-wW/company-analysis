@@ -20,7 +20,7 @@ from src.shared.name_fragments.constants import (
 from src.shared.report_evidence.models import CollectedEvidenceDocument, EvidenceFragment
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
 from src.shared.report_evidence.source_kind_policy import formal_document_is_writer_eligible
-from src.shared.report_evidence.business_activity import current_business_item
+from src.shared.report_evidence.business_activity import current_business_item, current_business_table_items
 
 
 def _anchor(fragment: EvidenceFragment, document: CollectedEvidenceDocument, item: str) -> BusinessActivityAnchor:
@@ -135,11 +135,23 @@ def build_business_activity_anchors(
             continue
         if len(anchors) == c.MAX_BUSINESS_ACTIVITY_ANCHORS:
             break
-        item = current_business_item(fragment, company_name, include_activity_table=True)
-        counts["current_business_matches"] += bool(item)
-        key = " ".join(item.casefold().split())
-        if item and key not in seen:
-            anchors.append(_anchor(fragment, document, item))
+        items = current_business_table_items(fragment, company_name)
+        counts["current_business_matches"] += bool(items)
+        for index, item in enumerate(items):
+            if len(anchors) == c.MAX_BUSINESS_ACTIVITY_ANCHORS:
+                break
+            key = " ".join(item.casefold().split())
+            if key in seen:
+                continue
+            anchor = _anchor(fragment, document, item)
+            if index:
+                # 첫 항목의 기존 ID는 유지한다. 추가 항목은 동일 원조각·항목에만
+                # 결속한 별도 조사 ID를 쓰며 원문·좌표·출처·SHA는 바꾸지 않는다.
+                identity = "\0".join((fragment.fragment_id, document.document_id,
+                                       fragment.text_sha256, item))
+                anchor = replace(anchor, anchor_id=(c.BUSINESS_ACTIVITY_ITEM_ANCHOR_PREFIX
+                                  + hashlib.sha256(identity.encode("utf-8")).hexdigest()))
+            anchors.append(anchor)
             seen.add(key)
             counts["accepted_anchors"] = len(anchors)
         if diagnostics is not None:
