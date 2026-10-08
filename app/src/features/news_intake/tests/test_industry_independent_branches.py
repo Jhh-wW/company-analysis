@@ -76,11 +76,14 @@ def test_동일기사의_독립두검사는_한호출과_기존선택원문을_�
     def analyze(prompt, schema, tokens):
         calls.append((prompt, schema, tokens))
         assert "회사명 유무와 same_company/material 판정에 관계없이" in prompt
-        assert "한쪽이 비거나 실패했다는 이유로 다른 쪽을 비우지" in prompt
+        assert "회사 인용의 실패로 산업 판정을 생략하지" in prompt
         assert json.loads(prompt.split("자료 시작:\n", 1)[1])["articles"][0]["body"] == body
         fields = schema["properties"]["items"]["items"]
-        assert {"excerpts", "industry_problems"} <= set(fields["required"])
-        return raw
+        assert {"excerpts", "industry_assessments"} <= set(fields["required"])
+        assert "industry_problems" not in fields["properties"]
+        # 수집 요청만 새 단일 판정으로 맞추고 아래 구형 독립 검수 시험은 유지한다.
+        from src.features.news_intake.tests.test_industry_priority_assessment import assessed
+        return assessed(raw)
 
     result = collect_from_snapshot(snapshot, company=COMPANY, as_of=AS_OF,
                                    fetch_text=lambda _: body, analyze_grounded=analyze, policy=policy)

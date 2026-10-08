@@ -143,7 +143,7 @@ from src.features.composer.dedupe import duplicates_kept_sentence
 from src.features.composer.future_plan_guard import (
     future_section_prose_problem,
     future_plan_entries_by_number, future_plan_problem,
-    future_plan_prose_problem,
+    future_plan_prose_problem, has_forward_marker,
 )
 from src.features.composer.direct_support_constants import (
     FLOW_CELL_JOIN, PURPOSE_INTERPRETATION_UNSUPPORTED, RELATION_REVIEW_GUIDE,
@@ -151,6 +151,10 @@ from src.features.composer.direct_support_constants import (
 from src.features.composer.direct_support import support_entries_by_number
 from src.features.composer.role_binding import (
     company_flow_actor_problem, role_binding_report, role_binding_requirements,
+)
+from src.features.composer.plan_status_constants import PLAN_STATUS_REVIEW_GUIDE, PLAN_STATUS_SLOT
+from src.features.composer.plan_status_scope import (
+    completed_execution_status_problem, plan_status_prose_problem,
 )
 from src.features.composer.business_relation_scope import business_relation_scope_problem
 from src.features.composer.role_binding_constants import (
@@ -1381,6 +1385,8 @@ def _build_grouped_review_prompt(
                 verbatim_source=(verbatim_by_number or {}).get(item.number),
             ))
             parts.append(numeric_proof_option_hint((numeric_options_by_number or {}).get(item.number, ())))
+            if item.sentence is not None and item.sentence.planned_claim_slot == PLAN_STATUS_SLOT:
+                parts.append(PLAN_STATUS_REVIEW_GUIDE)
         parts.append("===== 장별 검수 블록 끝 =====\n")
     parts.append(REVIEW_TRUSTED_TAIL)
     return with_review_prompt_cache("".join(parts), fixed_prefix_chars=fixed_prefix_chars)
@@ -2359,6 +2365,13 @@ def _apply_grounding(
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
                 continue
+        slot = (claim_slots_by_number or {}).get(number, "")
+        if not (flow_cells_by_number and number in flow_cells_by_number):
+            problem = completed_execution_status_problem(text, slot)
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
         # 6장 «성장 전략» 본문 문장이 회사의 계획·전망을 명시하면 표와 같은
         # 미래 근거를 요구한다. 칸이 있는 후보(표)는 아래 기존 경로가 그대로 맡고
         # 표 계약은 바뀌지 않는다. 다른 장의 산문은 이 조건에 들어오지 않는다.
@@ -2373,6 +2386,19 @@ def _apply_grounding(
             plan_problem = future_plan_prose_problem(
                 text, sources, future_evidence.get(number)
             )
+            if slot == PLAN_STATUS_SLOT:
+                status_problem = plan_status_prose_problem(
+                    text, sources, future_evidence.get(number),
+                    claim_slot=slot, baseline_date=baseline_date,
+                )
+                if not has_forward_marker(text):
+                    # 현재 상태는 계획·상태 두 구절이 결속된 경우만 배치 예외다.
+                    # 실패한 상태를 다른 장으로 옮겨 승인하지 않는다.
+                    problem, plan_problem = status_problem, ""
+                    if status_problem:
+                        constrained[number] = REVIEW_GROUNDING_REJECTED
+                        problems[number] = status_problem
+                        continue
             if (problem == FUTURE_SECTION_NO_FORWARD_STATEMENT
                     and section_moves is not None):
                 blocker = _relocation_blocker(
@@ -2717,6 +2743,8 @@ def _build_review_prompt(
             verbatim_source=(verbatim_by_number or {}).get(item.number),
         ))
         parts.append(numeric_proof_option_hint((numeric_options_by_number or {}).get(item.number, ())))
+        if item.sentence.planned_claim_slot == PLAN_STATUS_SLOT:
+            parts.append(PLAN_STATUS_REVIEW_GUIDE)
     parts.append(REVIEW_TRUSTED_TAIL)
     return with_review_prompt_cache("".join(parts), fixed_prefix_chars=fixed_prefix_chars)
 

@@ -48,6 +48,7 @@ from src.features.composer.numeric_quote_refs import NUMERIC_QUOTE_REF_KEY
 from src.features.composer.numeric_proof_selection_constants import NUMERIC_SELECTION_KEY
 from src.features.composer.prompt_metadata import PromptMetadata
 from src.features.composer.role_binding_constants import RELATION_KEY
+from src.features.composer.plan_status_constants import PLAN_STATUS_FIELDS, PLAN_STATUS_KEY
 
 
 class ReviewPrompt(PromptMetadata):
@@ -137,6 +138,7 @@ def _grounding_schema(*, numeric_selection: bool = False) -> dict[str, Any]:
         TIME_KEY: _array(_object(_strings("표현", "근거", "원문", "기간"))),
         RELATION_KEY: _array(relation),
         FUTURE_KEY: _array(future),
+        PLAN_STATUS_KEY: _array(_object(_strings(*sorted(PLAN_STATUS_FIELDS)))),
         # 정성 수익 인식 기준 단정의 정확 인용(4차 채택안). 최소 세 칸만 두고
         # 배열 자체는 선택이다 — 요구가 없는 후보에 빈 근거를 만들게 하지 않는다.
         RECOGNITION_KEY: _array(_object(_strings("표현", "근거", "원문"))),

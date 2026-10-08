@@ -178,8 +178,11 @@ def _project(payload: dict, request: AnalysisRequest, *, restore: bool) -> dict:
                 elif raw and raw in body:
                     excerpt[name] = convert(raw)
         if request.company.business_anchors:
-            from src.features.news_intake.industry_constants import INDUSTRY_CACHE_SOURCE_FIELDS
-            for problem in item["industry_problems"]:
+            from src.features.news_intake.industry_constants import INDUSTRY_ASSESSMENT_FIELD, INDUSTRY_CACHE_SOURCE_FIELDS
+            problems = item.get("industry_problems", [])
+            if INDUSTRY_ASSESSMENT_FIELD in request.schema["properties"]["items"]["items"]["required"]:
+                problems = [entry for entry in item[INDUSTRY_ASSESSMENT_FIELD] if entry["status"] == "proposed"]
+            for problem in problems:
                 for name in INDUSTRY_CACHE_SOURCE_FIELDS:
                     problem[name] = convert(problem[name])
     return value

@@ -2,7 +2,7 @@
 
 import re
 
-INDUSTRY_PROMPT_VERSION = "industry-context-v4"
+INDUSTRY_PROMPT_VERSION = "industry-context-v5"
 INDUSTRY_ASSESSMENT_MAX_ANCHORS = 3
 INDUSTRY_ASSESSMENT_FIELD = "industry_assessments"
 INDUSTRY_ASSESSMENT_STATUSES = (
@@ -12,11 +12,14 @@ INDUSTRY_ASSESSMENT_STATUSES = (
 INDUSTRY_PRIORITY_GUIDE = (
     "이번 묶음의 주과제는 각 기사와 공식 사업 앵커별 산업문제 판정입니다. "
     "먼저 같은 사업 활동의 현재 문제와 실제 적용 지역을 자기 원문에서 확인하고, "
-    "확인되면 industry_problems에 검증 가능한 인용을 선택하세요. "
+    "확인되면 industry_assessments의 해당 판정 안에 검증 가능한 인용을 선택하세요. "
     "same_company/material=false도 이 판정을 생략하는 이유가 아닙니다. "
     "각 기사의 industry_assessments에는 모든 공식 anchor_id를 한 번씩 판정하세요: "
     "proposed=인용 제안, no_current_problem=현재 문제 없음, different_business=다른 사업, "
     "geography_unbound=지역 근거 부족, insufficient_quote=인용 근거 부족, uncertain=불확실. "
+    "proposed는 status와 모든 산업 근거 필드를 같은 객체에 반환하며 빈 근거는 허용하지 않습니다. "
+    "비제안 상태는 anchor_id와 status만 반환합니다. 기사당 proposed는 최대 1개이며 "
+    "나머지 앵커는 비제안 상태로 판정하세요. 별도 산업 제안 배열은 출력하지 마세요. "
     "상태는 사실이나 근거 승인으로 쓰지 않으며 불확실하면 산업 제안 0개도 허용합니다. "
     "회사 직접 사건도 기존 기준으로 독립 검수해 반환하고, 회사 인용 실패를 산업으로 자동 전환하지 마세요. "
 )

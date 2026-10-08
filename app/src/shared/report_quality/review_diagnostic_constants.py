@@ -22,6 +22,7 @@ REVIEW_SCOPE_ITEMS = {
     "challenge_business_relation_unbound": "장별 작성범위",
     "challenge_response_problem_unbound": "장별 작성범위",
     "future_section_no_forward_statement": "장별 작성범위",
+    "completed_execution_state_mismatch": "계획·성과",
     "culture_financial_risk_scope_misplaced": "장별 작성범위",
     "culture_section_evidence_offcontract": "장별 작성범위",
     # ★ 전 장 공통 회계정책 상용구 가드(composer.accounting_policy_constants).

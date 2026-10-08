@@ -18,7 +18,10 @@ from src.shared.report_generation.models import exact_text_sha256
 
 def assessed(raw=None, status="proposed"):
     raw = deepcopy(response() if raw is None else raw)
-    raw["items"][0][ic.INDUSTRY_ASSESSMENT_FIELD] = [{"anchor_id": ANCHOR.anchor_id, "status": status}]
+    item = raw["items"][0]
+    problems = item.pop("industry_problems")
+    item[ic.INDUSTRY_ASSESSMENT_FIELD] = ([{**problems[0], "status": status}]
+        if status == "proposed" and problems else [{"anchor_id": ANCHOR.anchor_id, "status": status}])
     return raw
 
 
@@ -46,7 +49,13 @@ def test_산업토픽있는_동일묶음만_주과제와_닫힌상태를_요청�
     assert schema == original
     assert ic.INDUSTRY_ASSESSMENT_FIELD not in extend_schema(schema, COMPANY)["properties"]["items"]["items"]["required"]
     prompt = build_grounded_prompt(COMPANY, articles, AS_OF)
-    assert extend_prompt(prompt, COMPANY, priority=True) == ic.INDUSTRY_PRIORITY_GUIDE + extend_prompt(prompt, COMPANY)
+    primary_prompt = extend_prompt(prompt, COMPANY, priority=True)
+    assert primary_prompt.startswith(ic.INDUSTRY_PRIORITY_GUIDE)
+    assert "industry_problems" not in primary_prompt
+    assert "industry_assessments=[]" not in primary_prompt
+    assert "모든 공식 앵커의 판정 상태" in primary_prompt and "두 배열에 모두" not in primary_prompt
+    assert "industry_problems" not in primary["properties"]["items"]["items"]["properties"]
+    assert len(status["items"]["anyOf"]) == 2
 
 
 def test_산업주과제는_최대기존묶음과_공식앵커상한만_요청한다():
@@ -71,8 +80,9 @@ def test_정상회사_false도_산업을_독립검증하고_상태를_사실에_
 ))
 def test_proposed상태도_사업문제지역원문_불일치를_살리지_않는다(change):
     _, problems, rejected, records = split(assessed(response(**change)))
-    assert not problems and rejected["industry_unbound_problem"] == 1
-    assert records[0]["status"] == "proposed"
+    assert not problems and rejected
+    if change.get("anchor_id") != "unknown":
+        assert records[0]["status"] == "proposed"
 
 
 @pytest.mark.parametrize("status", ic.INDUSTRY_ASSESSMENT_STATUSES[1:])
@@ -86,7 +96,7 @@ def test_현재문제없음과_불확실은_제안0을_정직하게_기록한다
 @pytest.mark.parametrize("entries", (
     None, [], [{"anchor_id": "unknown", "status": "proposed"}],
     [{"anchor_id": ANCHOR.anchor_id, "status": "invalid"}],
-    [{"anchor_id": ANCHOR.anchor_id, "status": "uncertain"}],
+    [{"anchor_id": ANCHOR.anchor_id, "status": "proposed", "text": "불완전한 인용"}],
     [{"anchor_id": ANCHOR.anchor_id, "status": "proposed"}] * 2,
 ))
 def test_상태결함은_유효회사인용을_삭제하지않는다(entries):
@@ -99,7 +109,7 @@ def test_상태결함은_유효회사인용을_삭제하지않는다(entries):
     else:
         raw["items"][0][ic.INDUSTRY_ASSESSMENT_FIELD] = entries
     direct, problems, rejected, _ = split(raw, body=body)
-    assert rejected and len(problems) == 1
+    assert rejected and not problems
     excerpts, company_rejected = validate_grounded_response(direct, articles=[(CANDIDATE, body)], company=COMPANY, as_of=AS_OF)
     assert len(excerpts) == 1 and not company_rejected
 

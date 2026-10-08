@@ -178,6 +178,7 @@ def test_prompt_change_invalidates_old_policy_cache_namespace(monkeypatch) -> No
     policy = NewsCollectionPolicy()
     current = policy_digest(policy)
     # 메타 목록 인용 차단과 산업 주과제·상태 계약의 캐시를 분리한다.
-    assert c.COLLECTION_POLICY_VERSION == "news-grounded-v21"
+    # 산업 우선 요청의 단일 판정 계약으로 이전 분석 캐시를 분리한다.
+    assert c.COLLECTION_POLICY_VERSION == "news-grounded-v22"
     monkeypatch.setattr(c, "COLLECTION_POLICY_VERSION", "news-grounded-v11")
     assert policy_digest(policy) != current

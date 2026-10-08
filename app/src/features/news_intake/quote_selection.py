@@ -8,6 +8,7 @@ import json
 import re
 
 from src.features.news_intake import quote_selection_constants as c
+from src.features.news_intake import industry_constants as ic
 from src.features.news_intake.identity_names import company_query_names, mentions_target
 from src.features.news_intake.select import normalize_company_name
 from src.features.news_intake.models import NewsCandidate, NewsCompanyContext
@@ -232,9 +233,17 @@ def restore_quote_response(raw: object, *, articles: list[tuple[NewsCandidate, s
                 except (KeyError, TypeError, ValueError):
                     fail_selection(excerpt, c.QUOTE_EXCERPT_SOURCE_FIELDS)
         problems = item.get("industry_problems")
+        # 단일 산업 판정은 원래 상태 객체를 유지한 채 자기 기사의 ID만 복원한다.
+        assessments = item.get(ic.INDUSTRY_ASSESSMENT_FIELD)
+        if type(assessments) is list:
+            problems = [*(problems if type(problems) is list else []),
+                        *(entry for entry in assessments if type(entry) is dict
+                          and (entry.get("status") == "proposed" or has_selection(entry)))]
         for problem in problems if type(problems) is list else []:
             if type(problem) is dict:
                 try:
+                    if "status" in problem and problem["status"] != "proposed":
+                        raise ValueError("비제안 산업 판정에는 인용 선택 필드가 허용되지 않습니다")
                     if "text_quote_id" not in problem or "text" in problem:
                         raise ValueError("산업 인용의 원문 선택 계약이 누락됐습니다")
                     restore(problem, ("text",), body, table)

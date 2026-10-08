@@ -40,6 +40,7 @@ from src.features.composer.writer_schema_constants import (
     LEGACY_FLOW_REQUIRED_KEYS_GUIDE, FULL_REQUIRED_FLOW_KEYS_GUIDE,
 )
 from src.features.composer.supplement_feedback import supplement_feedback
+from src.features.composer.scope_supplement_feedback import ScopeSupplementFailure, render_scope_supplement_feedback
 from src.features.composer.partial_evidence import PartialEvidenceView
 from src.features.composer.partial_evidence_constants import (
     EXACT_EVIDENCE_SCOPE_GUIDE,
@@ -1966,6 +1967,7 @@ def compose_selected_sections(
     section_evidence_packets: SectionEvidencePacketSet,
     section_ids: tuple[str, ...],
     missing_slots_by_section: Mapping[str, tuple[str, ...]] | None = None,
+    scope_failures_by_section: Mapping[str, tuple[ScopeSupplementFailure, ...]] | None = None,
 ) -> ComposedReport:
     """승인된 FULL 장만 각자의 기존 typed packet으로 한 번씩 다시 쓴다.
 
@@ -2001,9 +2003,13 @@ def compose_selected_sections(
     )
     sections: list[ComposedSection] = []
     for section_id in section_ids:
+        packet = next(item for item in section_evidence_packets.packets if item.section_id == section_id)
+        scope_feedback = render_scope_supplement_feedback(
+            packet, (scope_failures_by_section or {}).get(section_id, ()),
+        )
         section = _compose_one_section(
             section_id,
-            supplement_feedback(section_id, missing_slots_by_section) + build_section_prompt(
+            supplement_feedback(section_id, missing_slots_by_section) + scope_feedback + build_section_prompt(
                 company_name,
                 section_id,
                 prepared.packets[section_id],

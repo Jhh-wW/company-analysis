@@ -103,11 +103,11 @@ def _schema_sha(schema):
     (FLAT_REVIEW_SCHEMA,
      "ec40152ca2ad8aa43192180dd0583bff4a6c3f5e52042ac1f2b915bc7fd0b94d",
      "ff4e031accf5776e3f189483531e5c5270bea8c8d1ec8cd6da75008384f901ab",
-     "971e6a1d87c3292025b973121577bd91b8fabd07077e7f28614407093ac17c89"),
+     "d5ed95c706f46a243cec736eaea60d9b2540dfb716d628150b52b5f08f1af073"),
     (DIAGRAM_REVIEW_SCHEMA,
      "ba1d778829286673bd6cde6ebb5d559274c78f0202b92d6e4128891736dfc1c8",
      "43db498656efc5545d712fcc1f0c9893fe69fbd1f2dcca8a42a470c03e4bcb8a",
-     "5e650e7f2d7b91af0d6a9d45f632f0880accfd835b8c3d801207880d02660201"),
+     "75ad2c9cc2175cd91d96878ce42b4a4d87fb027cef1233ee61ce3b41c7b97691"),
 ))
 def test_retry_schema_hash_matches_provider_accepted_schema(schema, accepted, recognition, current):
     assert _schema_sha(schema) == current
@@ -116,6 +116,24 @@ def test_retry_schema_hash_matches_provider_accepted_schema(schema, accepted, re
     assert relation["required"] == ["근거", "원문", "유형"]
     assert relation["additionalProperties"] is False
     previous = deepcopy(schema)
+    # 6장 현재 계획 상태에만 쓰는 선택 배열을 제거하면 직전 전체 스키마가 같다.
+    # 제공자의 실제 컴파일 성공은 이 무과금 구조 대조와 별개다.
+    grounding = previous["$defs"]["grounding"]
+    assert "계획진행근거" not in grounding["required"]
+    assert grounding["properties"].pop("계획진행근거") == {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {key: {"type": "string"} for key in ("계획원문", "근거", "대상", "진행원문", "활동")},
+            "required": ["계획원문", "근거", "대상", "진행원문", "활동"],
+            "additionalProperties": False,
+        },
+    }
+    assert _schema_sha(previous) == (
+        "971e6a1d87c3292025b973121577bd91b8fabd07077e7f28614407093ac17c89"
+        if schema is FLAT_REVIEW_SCHEMA
+        else "5e650e7f2d7b91af0d6a9d45f632f0880accfd835b8c3d801207880d02660201"
+    )
     if schema is FLAT_REVIEW_SCHEMA:
         # 새 본문 스키마는 선택 문자열 하나만 추가했다. 종전 정본 전체를 복원한다.
         assert previous["$defs"]["grounding"]["properties"].pop("수치선택") == {"type": "string"}
@@ -175,8 +193,8 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 # 도식은 같은 안내와 경로 헤더 +1자만 역치환했다. 원문·번호·schema는 바뀌지 않았다.
 # 증거: tmp/audit-20260930/paid/514031-schema-six-baseline-private.json.
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "1d1f0a784852c529a6fb3d75865538d5a2a24de6da4ea951c6712efeeec312fd"),
-    (_golden_case, True, "47f60dae71d2862c5ca605c0828b37c8211225e24042ed8d571179c203bd833b"),
+    (_golden_case, False, "641a223fae317a1b40c58617bfbf7443c78fa30417afb23ccf034dae7e23b1dd"),
+    (_golden_case, True, "b3e6590dae75eec12d96d79390fffab1e8bbb1ab35a925f8a70166fb41b33c03"),
     (_boundary_case, False, "1ffed30d262ee3861107f875ea55e6b217a54380ac5e6de6130150b3934e0883"),
     (_boundary_case, True, "28a27b5da2136896b1d813b4eea12e4399953faf24d8c4aed6d881ac54183097"),
 ))

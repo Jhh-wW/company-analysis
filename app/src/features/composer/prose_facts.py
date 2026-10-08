@@ -15,6 +15,7 @@ from typing import Final, Optional, Sequence
 
 from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
 from src.features.composer.future_plan_constants import FUTURE_SECTION_FORWARD_RE
+from src.features.composer.plan_status_scope import plan_status_fact_state
 from src.features.composer.port import ComposedSentence
 from src.features.composer.prose_own_source import own_source_support_terms
 from src.features.composer.source_actor_scope import source_actor_subject_scope
@@ -219,6 +220,7 @@ def evaluate_verified_prose_fact(
     # 발표가 과거여도 본문이 아직 할 계획·전망이면 실행 완료 사실로 봉인하지
     # 않는다. 이 표지는 시점 metadata만 보수화하며 인용 검수의 승인을 대신하지 않는다.
     forward_claim = bool(FUTURE_SECTION_FORWARD_RE.search(claim))
+    status_time, plan_status = plan_status_fact_state(claim, claim_slot)
     fact = FactRecord(
         fact_id=_fact_id(
             company_name=company_name,
@@ -246,7 +248,8 @@ def evaluate_verified_prose_fact(
             else INTERPRETATION_CLAIM_TYPE
         ),
         section_owner=section_id,
-        time_state="future" if forward_claim else _TIME_STATE_BY_SECTION.get(section_id, "present"),
+        time_state=status_time or ("future" if forward_claim else _TIME_STATE_BY_SECTION.get(section_id, "present")),
+        plan_status=plan_status,
         as_of=str(as_of_date or "").strip(),
         source_id=source_ids[0],
         source_type=primary.source_type or primary.kind.value,

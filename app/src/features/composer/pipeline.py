@@ -126,6 +126,7 @@ from src.features.composer.constants import (
 )
 from src.features.composer.industry_context import select_industry_context_for_fragments
 from src.features.composer.supplement_feedback import missing_writer_slots
+from src.features.composer.scope_supplement_feedback import collect_scope_supplement_failures
 from src.features.composer.evidence_availability import (
     COLLECTION_STATE_PARTIAL,
     EvidenceAvailability,
@@ -3162,6 +3163,9 @@ def run_v2(
                 section_evidence_packets=section_evidence_packets,
                 section_ids=targets,
                 missing_slots_by_section=missing_writer_slots(quality_candidate, targets),
+                scope_failures_by_section=collect_scope_supplement_failures(
+                    draft, review_diagnostics, section_evidence_packets,
+                ),
             )
             supplement_draft, supplement_news = supplement_news_candidates(
                 supplement_draft, _normalize_fragments(verification_fragments),

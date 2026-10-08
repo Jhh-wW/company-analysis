@@ -9,6 +9,7 @@ import json
 
 from src.features.composer.direct_support_constants import RELATION_KEY
 from src.features.composer.future_plan_constants import FUTURE_KEY
+from src.features.composer.plan_status_constants import PLAN_STATUS_KEY
 from src.features.composer.grounding_constants import (
     GROUNDING_KEY, GROUNDING_SOURCE_FIELD, NUMERIC_KEY, RECOGNITION_KEY,
     REVIEW_ENTRIES_KEY, REVIEW_NUMBER_KEY, TIME_KEY, TREND_KEY,
@@ -91,7 +92,7 @@ def normalize_review_entry(
             if validate_proof_ids and value not in proof_ids:
                 valid = False
 
-    for key in (NUMERIC_KEY, TIME_KEY, RELATION_KEY, FUTURE_KEY, RECOGNITION_KEY):
+    for key in (NUMERIC_KEY, TIME_KEY, RELATION_KEY, FUTURE_KEY, PLAN_STATUS_KEY, RECOGNITION_KEY):
         normalize_proofs(grounding.get(key))
     trends = grounding.get(TREND_KEY)
     if isinstance(trends, list):

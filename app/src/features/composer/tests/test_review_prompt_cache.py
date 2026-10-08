@@ -84,14 +84,16 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "1d1f0a784852c529a6fb3d75865538d5a2a24de6da4ea951c6712efeeec312fd"),
-    (_golden_case, True, "47f60dae71d2862c5ca605c0828b37c8211225e24042ed8d571179c203bd833b"),
+    (_golden_case, False, "641a223fae317a1b40c58617bfbf7443c78fa30417afb23ccf034dae7e23b1dd"),
+    (_golden_case, True, "b3e6590dae75eec12d96d79390fffab1e8bbb1ab35a925f8a70166fb41b33c03"),
     (_boundary_case, False, "1ffed30d262ee3861107f875ea55e6b217a54380ac5e6de6130150b3934e0883"),
     (_boundary_case, True, "28a27b5da2136896b1d813b4eea12e4399953faf24d8c4aed6d881ac54183097"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
 ):
+    # 6장 범위 안내 162자만 역치환하면 직전 지문이 복원된다. 고정 접두부는 같다.
+    # 증거: paid/2dc-prompt-schema-baseline-private.json. 후보·원문·번호를 바꾸지 않았다.
     # 2026-10-08: 2·3·5·7장 안내 417자만 역치환해 직전 전체 지문을 복구했다.
     # paid/0346-prompt-baseline-private.json: 원문·번호·스키마·고정 접두부 불변.
     # 5장 발생기간·완료/진행 안내 205자만 제거하면 직전 네 지문이 재현된다.

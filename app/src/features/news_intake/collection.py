@@ -237,12 +237,16 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             "복원응답정규JSON_SHA256": quote_response_sha256(response),
             "입력기사본문SHA256": {candidate.id: exact_text_sha256(body) for candidate, body in batch},
         })
+        normalization_traces = []
         direct_response, industry_found, industry_rejected = split_response(
             response, articles=batch, company=company, as_of=as_of, full_body_hashes=document_hashes,
             observations=industry_observations,
             source_response_sha256=source_response_sha256,
             assessment_required=industry_priority, assessment_records=industry_assessments,
+            normalization_traces=normalization_traces,
         )
+        if normalization_traces:
+            analysis_quote_traces[-1].update(normalization_traces[0])
         industry_problems.extend(industry_found)
         excluded.update(industry_rejected)
         direct_batch = batch

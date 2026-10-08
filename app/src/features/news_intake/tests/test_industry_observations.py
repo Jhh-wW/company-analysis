@@ -22,6 +22,10 @@ def _collect(raw, *, fetch=lambda _: BODY):
 
     def analyze(prompt, schema, tokens):
         calls.append(tokens)
+        # 새 산업 우선 요청에서도 기존 제안/검증 계수의 의미를 유지한다.
+        from src.features.news_intake.tests.test_industry_priority_assessment import assessed
+        if raw.get("items") and "industry_problems" in raw["items"][0]:
+            return assessed(raw, "proposed" if raw["items"][0]["industry_problems"] else "no_current_problem")
         return raw
 
     result = collect_from_snapshot(snapshot, company=COMPANY, as_of=AS_OF, fetch_text=fetch,

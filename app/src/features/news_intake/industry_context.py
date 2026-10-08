@@ -9,7 +9,7 @@ import datetime as dt
 import json
 
 from src.features.news_intake import industry_constants as ic
-from src.features.news_intake.industry_assessment import observe_assessments
+from src.features.news_intake.industry_assessment import normalize_assessments, observe_assessments
 from src.features.news_intake.article_text_scope import overlaps_auxiliary
 from src.features.news_intake.grounded import parse_grounded_payload, GROUNDED_ANALYSIS_SCHEMA
 from src.features.news_intake.models import NewsCandidate, NewsCompanyContext
@@ -79,14 +79,21 @@ def extend_schema(schema: dict, company: NewsCompanyContext, *, priority: bool =
     }
     item["required"].append("industry_problems")
     if priority:
+        item["properties"].pop("industry_problems")
+        item["required"].remove("industry_problems")
         item["properties"][ic.INDUSTRY_ASSESSMENT_FIELD] = {
             "type": "array", "minItems": len(company.business_anchors),
             "maxItems": len(company.business_anchors),
-            "items": {"type": "object", "additionalProperties": False,
+            "items": {"anyOf": [
+                {"type": "object", "additionalProperties": False,
+                 "properties": {**deepcopy(properties), "status": {"type": "string", "enum": ["proposed"]}},
+                 "required": [*required, "status"]},
+                {"type": "object", "additionalProperties": False,
                       "properties": {
                           "anchor_id": {"type": "string", "enum": [anchor.anchor_id for anchor in company.business_anchors]},
-                          "status": {"type": "string", "enum": list(ic.INDUSTRY_ASSESSMENT_STATUSES)},
+                          "status": {"type": "string", "enum": list(ic.INDUSTRY_ASSESSMENT_STATUSES[1:])},
                       }, "required": ["anchor_id", "status"]},
+            ]},
         }
         item["required"].append(ic.INDUSTRY_ASSESSMENT_FIELD)
     return schema
@@ -120,6 +127,15 @@ def extend_prompt(prompt: str, company: NewsCompanyContext, *, priority: bool = 
         "검증 불가면 industry_problems=[]입니다. 회사 피해가 실제라는 해석 문구는 생성하지 마세요. "
         "공식 사업 앵커=" + json.dumps([asdict(anchor) for anchor in company.business_anchors], ensure_ascii=False)
     )
+    if priority:
+        guide = guide.replace("검증 불가면 industry_problems=[]입니다.",
+                              "검증 불가면 해당 앵커의 비제안 상태를 반환합니다.")
+        guide = guide.replace("같은 산업/사업 활동일 때만 산업문맥 1개를 반환합니다.",
+                              "같은 산업/사업 활동일 때만 기사당 산업 근거 최대 1개를 제안합니다. "
+                              "근거 제안 여부와 관계없이 모든 공식 앵커의 판정 상태를 반환합니다.")
+        guide = guide.replace("두 검사가 각각 충족되면 두 배열에 모두 제안하고, 한쪽이 비거나 실패했다는 이유로 다른 쪽을 비우지 마세요.",
+                              "회사 직접 검수와 산업 검수를 각각 수행하고, 회사 인용의 실패로 산업 판정을 생략하지 마세요.")
+        guide = guide.replace("industry_problems", ic.INDUSTRY_ASSESSMENT_FIELD)
     return (ic.INDUSTRY_PRIORITY_GUIDE if priority else "") + guide + "\n" + prompt
 
 
@@ -129,17 +145,25 @@ def split_response(raw: object, *, articles: list[tuple[NewsCandidate, str]],
                    observations: Counter[str] | None = None,
                    source_response_sha256: str | None = None,
                    assessment_required: bool = False,
-                   assessment_records: list[dict[str, str]] | None = None) -> tuple[object, tuple[IndustryProblemEvidence, ...], dict[str, int]]:
+                   assessment_records: list[dict[str, str]] | None = None,
+                   normalization_traces: list[dict[str, str | None]] | None = None) -> tuple[object, tuple[IndustryProblemEvidence, ...], dict[str, int]]:
     if not company.business_anchors:
         return raw, (), {}
     source_response_sha256 = source_response_sha256 or quote_response_sha256(raw)
     items = parse_grounded_payload(restore_quote_response(raw, articles=articles, company=company))
     if items is None:
         return raw, (), {"industry_invalid_response": 1}
+    normalization_rejected = {}
+    if assessment_required:
+        items, normalization_rejected = normalize_assessments(items, company=company)
+        if normalization_traces is not None:
+            normalization_traces.append({"원응답정규JSON_SHA256": source_response_sha256,
+                                         "정규화응답정규JSON_SHA256": quote_response_sha256({"items": items})})
     by_id = {candidate.id: (candidate, body) for candidate, body in articles}
     anchors = {anchor.anchor_id: anchor for anchor in company.business_anchors}
     counts = Counter(item.get("id") for item in items if type(item) is dict and type(item.get("id")) is str)
     direct, problems, rejected = [], [], Counter()
+    rejected.update(normalization_rejected)
     rejected.update(observe_assessments(items, articles=articles, company=company,
                                        required=assessment_required, records=assessment_records))
     missing = set(by_id) - set(counts)

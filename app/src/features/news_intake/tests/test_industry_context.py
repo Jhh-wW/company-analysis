@@ -176,7 +176,9 @@ def test_동일분석예산으로_산업만_수집하며_READY기사조각은_�
     calls = []
     def analyze(prompt, schema, tokens):
         calls.append((prompt, schema, tokens))
-        return response()
+        # 산업 우선 요청은 상태와 자기 인용을 같은 객체로 반환한다.
+        from src.features.news_intake.tests.test_industry_priority_assessment import assessed
+        return assessed()
     result = collect_from_snapshot(snapshot, company=COMPANY, as_of=AS_OF, fetch_text=lambda url: BODY,
                                    analyze_grounded=analyze, policy=policy)
     assert len(calls) == 1

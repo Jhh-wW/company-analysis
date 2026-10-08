@@ -15,6 +15,7 @@ from src.features.composer.combined_relation_guard import (
     combined_relation_hint, combined_relation_problem, combined_relation_triggers,
 )
 from src.features.composer.future_plan_constants import FUTURE_KEY
+from src.features.composer.plan_status_constants import PLAN_STATUS_KEY
 from src.features.composer.grounding_constants import REVIEW_SUPPORT_CANDIDATE_VERDICTS
 from src.features.composer.grounding_constants import BOUND_VALUE_RE, BOUND_TAIL_RE, RATIO_BASIS_RE
 from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_VERSION
@@ -1054,7 +1055,7 @@ def grounding_problem(
         # 미래 근거는 6장 성장 계획 표와 그 장의 본문 계획 문장에서 쓰이며,
         # future_plan_guard 가 그 줄의 칸·인용 또는 그 문장·인용에 따로 결속한다.
         # 여기서는 모양만 보고 넘긴다 — 관계 근거와 같다.
-        if kind == FUTURE_KEY:
+        if kind in (FUTURE_KEY, PLAN_STATUS_KEY):
             if not isinstance(payload, list) or any(not isinstance(item, Mapping) for item in payload):
                 return invalid_shape()
             continue
