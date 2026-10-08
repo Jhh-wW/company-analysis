@@ -18,6 +18,8 @@ from typing import Final
 # ══════════════════════════════════════════════════════════
 #: 기존 «검증근거» 객체 안에 놓는 배열 이름. 「관계」와 같은 자리다.
 FUTURE_KEY: Final[str] = "미래근거"
+# 선택한 회사 계획 슬롯은 고유명사·위원회·생략 주어에도 같은 근거 계약을 적용한다.
+STATED_PLAN_SLOT: Final[str] = "future_strategy:stated_plan"
 FUTURE_SOURCE_KEY: Final[str] = "근거"
 FUTURE_TARGET_KEY: Final[str] = "대상"
 FUTURE_ACTIVITY_KEY: Final[str] = "활동"
@@ -321,6 +323,12 @@ MODALITY_FUTURE_KINDS: Final[frozenset[str]] = frozenset({"outlook", "plan"})
 FUTURE_TEMPORAL_RE: Final[re.Pattern[str]] = re.compile(
     r"향후|앞으로|추후|중장기적으로|장기적으로|내년|차년도"
     r"|[0-9]{4}\s*년\s*(?:까지|부터)"
+)
+#: 본문 대상과 활동 사이에는 기존 미래 시점과 닫힌 기간 조사만 허용한다.
+#: 전체 다리를 소비해야 하므로 다른 목적어·조건·활동은 시점으로 지워지지 않는다.
+PROSE_TEMPORAL_ACTIVITY_BRIDGE_RE: Final[re.Pattern[str]] = re.compile(
+    r"\A(?:" + PARTICLE_TAIL + r")?\s*(?P<time>(?:"
+    + FUTURE_TEMPORAL_RE.pattern + r")\s*(?:초|중|말)?\s*(?:부터|까지|에)?)\s*\Z"
 )
 #: 원문 쪽 부정·축소·보류. 원문은 완결된 문장이므로 넓게 본다.
 SOURCE_NEGATION_RE: Final[re.Pattern[str]] = re.compile(

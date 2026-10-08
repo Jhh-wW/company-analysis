@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from src.features.composer.business_population_scope import (
     contract_revenue_priority_problem, opposing_revenue_population_problem,
+    section_product_exclusion_problem,
 )
 
 if TYPE_CHECKING:
@@ -668,6 +669,9 @@ def scope_problem(candidate_text: str, sources_mapping: Mapping[str, str]) -> st
       (공유 닫힌 목록의 «장별 작성범위» 코드 — 새 코드를 만들지 않았다).
     """
     text = unicodedata.normalize("NFKC", candidate_text)
+    product_section_problem = section_product_exclusion_problem(text, sources_mapping)
+    if product_section_problem:
+        return product_section_problem
     priority_problem = contract_revenue_priority_problem(text, sources_mapping)
     if priority_problem:
         return priority_problem

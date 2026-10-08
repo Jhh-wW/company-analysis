@@ -158,6 +158,7 @@ from src.features.composer.plan_status_scope import (
     completed_execution_status_problem, plan_status_prose_problem,
 )
 from src.features.composer.business_relation_scope import business_relation_scope_problem
+from src.features.composer.source_attribution_scope import source_attribution_problem
 from src.features.composer.role_binding_constants import (
     ROLE_BINDING_REASON_TEXTS, ROLE_BINDING_REVIEW_GUIDE,
 )
@@ -1855,6 +1856,7 @@ def _ask_grouped_verdicts(
         section_context_by_source_id={fid: fragment.section_context_json
                                       for fid, fragment in frag_by_id.items()
                                       if fragment.section_context_json},
+        source_fragments_by_id=frag_by_id,
         numeric_options_by_number=numeric_options_by_number,
         entity_scope_by_number=_entity_scope_by_number(
             ((item.number, item.citations) for item in items),
@@ -2142,6 +2144,7 @@ def _apply_grounding(
     numeric_options_by_number: Optional[Mapping[int, tuple[NumericProofOption, ...]]] = None,
     review_evidence_context: Optional[ReviewEvidenceContext] = None,
     section_context_by_source_id: Optional[Mapping[str, str]] = None,
+    source_fragments_by_id: Optional[Mapping[str, CollectedFragment]] = None,
 ) -> dict[int, str]:
     # ★ 보고서 기준일을 그대로 넘긴다. 안 넘기면 executive_status_guard 가 날짜
     #   문턱 없이 이탈 «표지» 존재만으로 판정해, 「기준일 이후에 물러날 예정」인
@@ -2252,6 +2255,14 @@ def _apply_grounding(
     future_evidence = review_evidence
     for number, (text, sources) in candidates.items():
         if constrained.get(number) not in (VERDICT_TRUE, VERDICT_UNCLEAR):
+            continue
+        attribution_problem = source_attribution_problem(
+            text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+            source_fragments_by_id or {},
+        )
+        if attribution_problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = attribution_problem
             continue
         # 검증된 자기 조각의 사업부 제목은 제약으로만 쓴다. 긍정 근거에 합치지 않는다.
         section_problem = section_investment_plan_problem(
@@ -2393,7 +2404,7 @@ def _apply_grounding(
             #   않으려면 여기서 둘 다 알아야 한다. 사유 코드 우선순위는
             #   예전 그대로다 — 장 배치가 먼저다.
             plan_problem = future_plan_prose_problem(
-                text, sources, future_evidence.get(number)
+                text, sources, future_evidence.get(number), claim_slot=slot,
             )
             if slot == PLAN_STATUS_SLOT:
                 status_problem = plan_status_prose_problem(
@@ -3096,6 +3107,7 @@ def _ask_verdicts(
         section_context_by_source_id={fid: fragment.section_context_json
                                       for fid, fragment in frag_by_id.items()
                                       if fragment.section_context_json},
+        source_fragments_by_id=frag_by_id,
         diagnostics=diagnostics,
         diagnostic_contexts={
             item.number: (item.section_id, item.kind, item.sentence.text)

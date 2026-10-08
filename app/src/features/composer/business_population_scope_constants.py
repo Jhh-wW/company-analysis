@@ -61,3 +61,16 @@ REVENUE_TABLE_OWNER_RE = re.compile(
     r'(?:의|는|은|이|가)[^.。;\n|]*?매출(?:액|수익|비중|구성)?'
 )
 REVENUE_TABLE_OWNERS = frozenset({'당사', '회사', '연결회사'})
+
+# 명시 부문 제품표의 품목을 같은 부문 밖으로 옮긴 주장만 비교한다.
+PRODUCT_SECTION_EXCLUSION_RE = re.compile(
+    r'(?P<owner>[가-힣A-Za-z0-9&]+(?:사업부문|사업부|부문))'
+    r'(?:외에도|외의|밖에서|이아닌|을제외한|에속하지않는)'
+)
+PRODUCT_SECTION_HEADING_RE = re.compile(r'^\[(?P<owner>[^\]\n]+(?:부문|사업부))\]$')
+PRODUCT_ITEM_HEADER_RE = re.compile(r'^(?:품목|제품|상품)$')
+PRODUCT_ITEM_SPLIT_RE = re.compile(r'[\s·,/]+')
+PRODUCT_ITEM_IGNORED_WORDS = frozenset({'등', '기타', '제품', '상품'})
+PRODUCT_ITEM_MIN_CHARS = 2
+PRODUCT_ASSERTION_BOUNDARY_RE = re.compile(r'[,;。\n]|(?<!\d)\.(?!\d)|(?:하며|이며|이고|지만)\s+')
+PRODUCT_ASSERTION_DENIAL_RE = re.compile(r'판매하지|공급하지|아니(?:다|며|고)|않(?:는다|습니다)|없(?:다|습니다)')

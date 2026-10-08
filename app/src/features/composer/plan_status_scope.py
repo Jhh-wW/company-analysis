@@ -18,7 +18,7 @@ from src.features.composer.future_plan_guard import (
 )
 from src.features.composer.plan_status_constants import (
     COMPLETED_ROLE_CLAUSE_RE, COMPLETED_ROLE_CURRENT_RE, COMPLETED_ROLE_EVENT_RE,
-    COMPLETED_ROLE_NOUN_RE,
+    COMPLETED_ROLE_NOUN_RE, COMPLETED_ROLE_MEMBERSHIP_RE,
     COMPLETED_EXECUTION_SLOT, COMPLETED_EXECUTION_STATE_MISMATCH, PLAN_STATUS_FIELDS, PLAN_STATUS_KEY, PLAN_STATUS_SLOT,
     STATE_RE, STATUS_ACTIVITY_BOUNDARY_RE, STATUS_COMPLETION_FACTS, STATUS_CONDITIONAL_RE,
     STATUS_CURRENT_CONTEXT_RE, STATUS_NEGATION_RE, STATUS_OWNER_MODIFIER_RE,
@@ -50,6 +50,10 @@ def _has_completed_statement(text: str) -> bool:
     """후보가 직접 서술한 실제 완료만 현재역할과 함께 남긴다."""
     for sentence in _sentences(_normalized(text)):
         for event in COMPLETED_ROLE_EVENT_RE.finditer(sentence):
+            # ‘경영진으로 구성된 위원회’는 구성원 설명이며 구성 완료 이력이 아니다.
+            if (event.group() == '구성된'
+                    and COMPLETED_ROLE_MEMBERSHIP_RE.search(sentence[:event.start()])):
+                continue
             # 완료 뒤 별도 현재·계획 절은 완료 이력의 양태를 바꾸지 않는다.
             boundary = COMPLETED_ROLE_CLAUSE_RE.search(sentence, event.end())
             clause = sentence[:boundary.start()] if boundary else sentence

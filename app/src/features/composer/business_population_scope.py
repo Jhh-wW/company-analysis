@@ -24,6 +24,9 @@ from src.features.composer.business_population_scope_constants import (
     REVENUE_PRIORITY_POSTPARTICLE_RE, REVENUE_PRIORITY_PREPARTICLE_RE,
     REVENUE_ITEM_COLUMN_RE, REVENUE_AMOUNT_COLUMN_RE, REVENUE_SHARE_COLUMN_RE,
     REVENUE_TABLE_OWNER_RE, REVENUE_TABLE_OWNERS,
+    PRODUCT_SECTION_EXCLUSION_RE, PRODUCT_SECTION_HEADING_RE,
+    PRODUCT_ITEM_HEADER_RE, PRODUCT_ITEM_SPLIT_RE, PRODUCT_ITEM_IGNORED_WORDS,
+    PRODUCT_ITEM_MIN_CHARS, PRODUCT_ASSERTION_BOUNDARY_RE, PRODUCT_ASSERTION_DENIAL_RE,
 )
 from src.features.composer.scope_constants import SCOPE_CONDITION_UNBOUND
 from src.shared.report_evidence.section_context import parse_section_context
@@ -31,6 +34,48 @@ from src.shared.report_evidence.section_context import parse_section_context
 
 def _surface(text: str) -> str:
     return re.sub(r'\s+', '', unicodedata.normalize('NFKC', text))
+
+
+def section_product_exclusion_problem(text: str, sources: Mapping[str, str]) -> str:
+    """같은 품목이 속한 명시 부문을 부정하는 외부 배치만 제한한다."""
+    items_by_owner: dict[str, set[str]] = {}
+    for source in sources.values():
+        owner = ''
+        item_column = None
+        for raw in unicodedata.normalize('NFKC', source).splitlines():
+            heading = PRODUCT_SECTION_HEADING_RE.fullmatch(raw.strip())
+            if heading:
+                owner = _surface(heading['owner'])
+                item_column = None
+                continue
+            columns = [cell.strip() for cell in raw.split('|')]
+            if not owner or len(columns) < 2:
+                continue
+            headers = [index for index, cell in enumerate(columns)
+                       if PRODUCT_ITEM_HEADER_RE.fullmatch(_surface(cell))]
+            if headers and (item_column is None or item_column in headers):
+                item_column = headers[0]
+                continue
+            if item_column is not None and item_column < len(columns):
+                items_by_owner.setdefault(owner, set()).update(
+                    _surface(item) for item in PRODUCT_ITEM_SPLIT_RE.split(columns[item_column])
+                    if len(_surface(item)) >= PRODUCT_ITEM_MIN_CHARS
+                    and _surface(item) not in PRODUCT_ITEM_IGNORED_WORDS
+                )
+    for clause in PRODUCT_ASSERTION_BOUNDARY_RE.split(unicodedata.normalize('NFKC', text)):
+        if PRODUCT_ASSERTION_DENIAL_RE.search(clause):
+            continue
+        candidate = _surface(clause)
+        for exclusion in PRODUCT_SECTION_EXCLUSION_RE.finditer(candidate):
+            owner = exclusion['owner']
+            tail = candidate[exclusion.end():]
+            for item in items_by_owner.get(owner, ()):
+                if item not in tail:
+                    continue
+                # 같은 품목을 실제 다른 부문에서도 취급하는 자기 표는 유지한다.
+                if not any(other != owner and item in items for other, items in items_by_owner.items()):
+                    return SCOPE_CONDITION_UNBOUND
+    return ''
 
 
 def _contract_rows(source: str) -> list[str]:

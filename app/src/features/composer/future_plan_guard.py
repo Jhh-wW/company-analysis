@@ -87,6 +87,7 @@ from src.features.composer.future_plan_constants import (
     MODALITY_FUTURE_KINDS,
     PROSE_COMPANY_ATTRIBUTION_RE,
     PROSE_SUBJECT_RE,
+    PROSE_TEMPORAL_ACTIVITY_BRIDGE_RE,
     MEANS_BRIDGE_RE,
     MODALITY_RE,
     CANDIDATE_NEGATION_RE,
@@ -100,6 +101,7 @@ from src.features.composer.future_plan_constants import (
     PHRASE_GAP,
     QUOTE_CHARACTERS,
     SENTENCE_SPLIT_RE,
+    STATED_PLAN_SLOT,
     TARGET_ACTIVITY_BRIDGE_RE,
     THING_HEAD_NOUNS,
     THIRD_PARTY_SUBJECTS,
@@ -670,7 +672,9 @@ def future_section_prose_problem(text: str) -> str:
     return FUTURE_SECTION_NO_FORWARD_STATEMENT
 
 
-def _prose_plan_claims(text: str) -> tuple[tuple[int, str, int, int], ...]:
+def _prose_plan_claims(
+    text: str, *, company_plan_slot: bool = False,
+) -> tuple[tuple[int, str, int, int], ...]:
     """산문에서 «회사에 명시적으로 귀속한 계획·전망 주장»의 자리만 돌려준다.
 
     돌려주는 값: (문장 번호, 그 문장, 표지 시작, 표지 끝). 하나도 없으면 이 검사는 아무 판정도
@@ -688,7 +692,8 @@ def _prose_plan_claims(text: str) -> tuple[tuple[int, str, int, int], ...]:
     claims: list[tuple[int, str, int, int]] = []
     for index, sentence in enumerate(_sentences(_normalized(text))):
         subjects = [match.group(1) for match in PROSE_SUBJECT_RE.finditer(sentence)]
-        if not (any(subject in GENERIC_SUBJECTS for subject in subjects)
+        if not (company_plan_slot
+                or any(subject in GENERIC_SUBJECTS for subject in subjects)
                 or PROSE_COMPANY_ATTRIBUTION_RE.search(sentence)):
             continue
         markers = [match for match in MODALITY_RE.finditer(sentence)
@@ -795,6 +800,34 @@ def _one_prose_item_problem(
     return FUTURE_TARGET_NOT_BOUND, ()
 
 
+def _prose_temporal_bridge_kind(
+    sentence: str, target: str, activity_span: tuple[int, int],
+) -> str:
+    """본문의 명시 시점 다리만 인정하고 시점 자체도 원문·후보에서 대조한다."""
+    for _start, end in _bounded_spans(sentence, target):
+        if end <= activity_span[0]:
+            match = PROSE_TEMPORAL_ACTIVITY_BRIDGE_RE.fullmatch(
+                sentence[end:activity_span[0]].strip()
+            )
+            if match:
+                return "temporal:" + _compact(match.group("time"))
+    return ""
+
+
+def _prose_activity_subject(sentence: str, activity_start: int) -> str:
+    """같은 절의 활동 앞에 명시된 주어만 반환한다. 회사 귀속을 추정하지 않는다."""
+    subjects = [match for match in PROSE_SUBJECT_RE.finditer(sentence)
+                if match.end() <= activity_start
+                and not TIME_TOPIC_RE.fullmatch(match.group(1).strip())]
+    if not subjects:
+        return ""
+    nearest = subjects[-1]
+    # 다른 절의 이름이나 목적어로 언급한 이름은 활동 주어의 증명이 아니다.
+    if CANDIDATE_SEGMENT_RE.search(sentence[nearest.end():activity_start]):
+        return ""
+    return nearest.group(1)
+
+
 def _bind_prose_position(
     source_sentences: Sequence[str],
     candidate_sentence: str,
@@ -812,8 +845,14 @@ def _bind_prose_position(
 
     for source_sentence in source_sentences:
         for activity_span in _bounded_spans(source_sentence, activity, verbal=True):
-            kind = _target_bound_to_activity(source_sentence, target, activity_span)
+            kind = (_target_bound_to_activity(source_sentence, target, activity_span)
+                    or _prose_temporal_bridge_kind(source_sentence, target, activity_span))
             if not kind:
+                problems.append(FUTURE_TARGET_NOT_BOUND)
+                continue
+            if kind.startswith("temporal:") and (
+                _prose_temporal_bridge_kind(candidate_sentence, target, candidate_span) != kind
+            ):
                 problems.append(FUTURE_TARGET_NOT_BOUND)
                 continue
             if kind in ("adjacent", "means") and (
@@ -821,8 +860,15 @@ def _bind_prose_position(
             ):
                 problems.append(FUTURE_TARGET_NOT_BOUND)
                 continue
+            source_subject = _prose_activity_subject(source_sentence, activity_span[0])
+            candidate_subject = _prose_activity_subject(candidate_sentence, candidate_span[0])
+            # 수집·회사 귀속 검사를 대신하지 않는다. 자기 원문과 후보의 같은
+            # 활동 앞 명시 주어가 정확히 같을 때만 그 주어를 대조 칸으로 준다.
+            # 후보 전체를 주면 다른 절·목적어의 제3자 이름까지 빌릴 수 있다.
+            bound_subject = ((candidate_subject,) if source_subject
+                             and source_subject == candidate_subject else ())
             subject_problem = _subject_problem(
-                source_sentence, target, activity_span[0], ()
+                source_sentence, target, activity_span[0], bound_subject
             )
             if subject_problem:
                 problems.append(subject_problem)
@@ -853,22 +899,28 @@ def future_plan_prose_problem(
     text: str,
     sources_mapping: Mapping[str, str],
     evidence: object,
+    *,
+    claim_slot: str = "",
 ) -> str:
     """성장 전략 본문 문장이 «회사의 계획·전망»을 명시했을 때만 미래 근거를 결속한다.
 
     ★ 부르는 쪽이 «6장 성장 전략의 본문 문장일 때만» 부른다. 표는 기존
       `future_plan_problem` 이 그대로 맡고 계약이 바뀌지 않는다.
-    ★ 발동은 좁다 — 그 문장이 회사를 주어로 세우고 계획·전망 표지를 함께 쓸 때만이다.
-      산업·시장의 현재 변화, 회사가 이미 하고 있는 일, 배경 설명은 발동하지 않는다.
+    ★ 명시 회사 계획 슬롯에서는 주어 표기와 무관하게 계획·전망 주장과 제공한
+      근거를 검사한다. 다른 슬롯은 기존 회사 주어 발동 조건을 유지한다.
+      근거 없는 비계획 현재 업무와 배경 설명은 이 검사에서 발동하지 않는다.
     ★ 발동한 «주장 자리마다» 증명이 있어야 한다. 한 자리를 증명하고 나머지를 얹지
       못한다. 항목마다 자기 인용 하나의 연속 구절이어야 하는 것도 표와 같다.
     ⚠️ 빈 문자열은 승인이 아니라 «이 검사가 반례를 찾지 못했다»는 뜻이다.
     """
 
-    claims = _prose_plan_claims(text)
-    if not claims:
-        return ""
+    # 회사의 명시 계획으로 선택한 슬롯은 문장 주어 표기와 무관하게 결속한다.
+    # 다른 슬롯과 비계획 산문에는 기존 발동 조건을 유지한다.
+    company_plan_slot = claim_slot == STATED_PLAN_SLOT
+    claims = _prose_plan_claims(text, company_plan_slot=company_plan_slot)
     items = _entries(evidence)
+    if not claims and not (company_plan_slot and items):
+        return ""
     if items is None:
         return FUTURE_EVIDENCE_MISSING
     if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
