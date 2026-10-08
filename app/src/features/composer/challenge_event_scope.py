@@ -16,11 +16,14 @@ def _days(text: str):
     return frozenset(tuple(int(part) for part in day) for day in c.EVENT_DAY_RE.findall(text))
 
 
-def _activity_records(text: str, *, claim: bool):
+def _activity_records(text: str, *, claim: bool, additional_actions: tuple[str, ...] = ()):
     """짧은 명시 활동명과 그 절의 진행 표지만 읽는다. 일반 의미 승인은 하지 않는다."""
     records = []
+    activity_re = re.compile(
+        c.RESPONSE_ACTIVITY_RE.pattern + "|" + "|".join(re.escape(action) for action in additional_actions)
+    ) if additional_actions else c.RESPONSE_ACTIVITY_RE
     for unit in c.RESPONSE_ACTIVITY_UNIT_RE.split(unicodedata.normalize('NFKC', text)):
-        matches = tuple(c.RESPONSE_ACTIVITY_RE.finditer(unit))
+        matches = tuple(activity_re.finditer(unit))
         for index, match in enumerate(matches):
             end = matches[index + 1].start() if index + 1 < len(matches) else len(unit)
             tail = unit[match.end():end]
@@ -51,7 +54,12 @@ def response_current_activity_problem(candidate: str, sources: Mapping[str, str]
     """명사형 대응에 없는 현재진행을 붙이는 경계만 닫고 원문 활동은 보존한다."""
     if not c.RESPONSE_CURRENT_STATE_RE.search(candidate):
         return ''
-    claim_records = tuple(record for record in _activity_records(candidate, claim=True) if record[3])
+    additional_actions = tuple(dict.fromkeys(
+        match['activity'] for match in c.RESPONSE_NOMINAL_PROGRESS_RE.finditer(candidate)
+        if not c.RESPONSE_ACTIVITY_RE.fullmatch(match['activity'])
+    ))
+    claim_records = tuple(record for record in _activity_records(
+        candidate, claim=True, additional_actions=additional_actions) if record[3])
     if not claim_records:
         return ''
     rows = tuple(row for source in sources.values() for row in _event_rows(source))
@@ -66,11 +74,13 @@ def response_current_activity_problem(candidate: str, sources: Mapping[str, str]
             selected = rows
         # 동일 법인의 여러 행은 날짜 없이 서로의 진행 상태를 빌리지 않는다.
         units = tuple(row.response for row in selected) if len(selected) == 1 else ()
-    source_records = tuple(record for unit in units for record in _activity_records(unit, claim=False))
+    source_records = tuple(record for unit in units for record in _activity_records(
+        unit, claim=False, additional_actions=additional_actions))
     action_sources = tuple(row.response for row in rows) if rows else tuple(sources.values())
-    all_actions = {record[0] for source in action_sources for record in _activity_records(source, claim=False)}
+    all_actions = {record[0] for source in action_sources for record in _activity_records(
+        source, claim=False, additional_actions=additional_actions)}
     for action, head, actor, _, head_words in claim_records:
-        if action not in all_actions:
+        if action not in all_actions and action not in additional_actions:
             continue  # 없는 활동 자체의 의미 검수는 기존 계약이 담당한다.
         if not any(source_action == action and current and (not head or not source_head or source_head == head or source_head in head_words)
                    and (not source_actor or source_actor == actor or source_actor in candidate)

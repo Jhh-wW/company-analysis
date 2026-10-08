@@ -7,8 +7,8 @@ import pytest
 
 from src.features.composer.logic import compose_selected_sections
 from src.features.composer.supplement_feedback import missing_writer_slots, supplement_feedback
-from src.features.composer.tests.test_evidence_pair_selection import _packets
-from src.features.composer.writer_schema_constants import FULL_SUPPLEMENT_GUIDE
+from src.features.composer.tests.test_evidence_pair_selection import _packets, _fragment
+from src.features.composer.writer_schema_constants import FULL_SUPPLEMENT_GUIDE, FULL_SUPPLEMENT_PAIRS_GUIDE
 from src.shared.report_quality.constants import VERIFIED_PROSE_CLAIM_TYPE
 from src.shared.report_quality.dto import ClaimFact, ReportCandidate, ReportSectionCandidate
 
@@ -58,3 +58,33 @@ def test_supplement_receives_gap_feedback_once_and_keeps_native_schema_and_seale
     assert seen[0].cache_prefix_chars == 0
     assert tuple(section.section_id for section in result.sections) == ("business_model",)
     assert result.sections[0].sentences == ()
+
+
+def test_missing_slot_lists_only_its_existing_packet_pairs():
+    packets = _packets()
+    packet = next(p for p in packets.packets if p.section_id == 'future_strategy')
+    packet = replace(packet, fragments=(
+        _fragment(1, 'future_strategy:stated_plan', 'future_strategy:plan_status'),
+        _fragment(2, 'future_strategy:plan_status'),
+        _fragment(3, 'future_strategy:plan_status', 'business_model:customer_type'),
+    ))
+    text = supplement_feedback('future_strategy', {'future_strategy': ('future_strategy:stated_plan',)}, packet=packet)
+    data = json.loads(text.split(FULL_SUPPLEMENT_PAIRS_GUIDE)[1])
+    assert data == {'packet_sha256': packet.packet_sha256, '누락의미칸': [
+        {'주장범주': 'future_strategy:stated_plan', '허용지원쌍': ['p6-001']},
+    ]}
+    assert '합성원문' not in text
+
+
+def test_missing_slot_without_support_is_explicitly_empty():
+    packet = next(p for p in _packets().packets if p.section_id == 'future_strategy')
+    packet = replace(packet, fragments=(_fragment(1, 'future_strategy:plan_status'),))
+    text = supplement_feedback('future_strategy', {'future_strategy': ('future_strategy:stated_plan',)}, packet=packet)
+    data = json.loads(text.split(FULL_SUPPLEMENT_PAIRS_GUIDE)[1])
+    assert data['누락의미칸'][0]['허용지원쌍'] == []
+
+
+def test_supplement_feedback_rejects_other_section_packet():
+    packet = next(p for p in _packets().packets if p.section_id == 'business_model')
+    with pytest.raises(ValueError):
+        supplement_feedback('future_strategy', {'future_strategy': ('future_strategy:stated_plan',)}, packet=packet)

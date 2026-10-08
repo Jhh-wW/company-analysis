@@ -3,15 +3,20 @@ import re
 
 TIME_BINDING_PROBLEM = "time_invalid"
 RESPONSE_ACTIVITY_RE = re.compile(r"확보|보완|강화|개선|수립|설치|구축|개발|적용|획득|출원|납부|교육|이행")
+# 동사 목록 밖의 명사형 활동도 명시 목적격 뒤 현재 진행을 붙인 경우에만 읽는다.
+RESPONSE_NOMINAL_PROGRESS_RE = re.compile(
+    r"(?P<activity>[가-힣A-Za-z][가-힣A-Za-z0-9_-]*?)(?:을|를|이|가)\s*"
+    r"(?:(?:추진|진행)\s*하고\s*있(?!었|던|을)|(?:추진|진행)\s*(?:중|中)(?!\s*(?:이었|이던|일)))"
+)
 RESPONSE_ACTIVITY_UNIT_RE = re.compile(r"[;|\n,]|(?<=[다음함])[.!?。](?:\s+|$)")
-RESPONSE_CURRENT_STATE_RE = re.compile(r"(?:진행|추진)\s*(?:중|中)(?!\s*(?:이었|이던|일))|추진\s*하고\s*있(?!었|던|을)")
+RESPONSE_CURRENT_STATE_RE = re.compile(r"(?:진행|추진)\s*(?:중|中)(?!\s*(?:이었|이던|일))|(?:진행|추진)\s*하고\s*있(?!었|던|을)")
 RESPONSE_UNREAL_PREFIX_RE = re.compile(r"당시|과거|향후|앞으로|가정|경우")
 RESPONSE_OTHER_STATE_RE = re.compile(r"완료|예정|계획|가정|경우|가능|하지\s*않|미수행|하지\s*못|했|하였")
 RESPONSE_ACTIVITY_WORD_RE = re.compile(r"[가-힣A-Za-z0-9_-]+")
-RESPONSE_ACTIVITY_PARTICLE_RE = re.compile(r"(?:을|를|의)$")
+RESPONSE_ACTIVITY_PARTICLE_RE = re.compile(r"(?:을|를|의|에)$")
 RESPONSE_ACTIVITY_SUBJECT_WORD_RE = re.compile(r"(?:는|은)$")
 RESPONSE_ACTIVITY_HEAD_WORDS = 2
-RESPONSE_ACTIVITY_HEAD_CONNECTORS = frozenset({'대해', '위해', '통해', '하여', '위한', '관련한'})
+RESPONSE_ACTIVITY_HEAD_CONNECTORS = frozenset({'대해', '위해', '통해', '하여', '위한', '관련한', '대한', '분야'})
 EVENT_ACTOR_LEGAL_FORM_RE = re.compile(r"^(?:주식회사|\(주\))|(?:주식회사|\(주\))$")
 RESPONSE_ACTIVITY_PROGRESS_TAIL_RE = re.compile(r"^\s*(?:[이가을를]\s*)?(?:중|中)(?!\s*(?:이었|이던|일))")
 RESPONSE_ACTIVITY_HEAD_RE = re.compile(r"^(?:(?:현재|지금|올해)|(?:회사|당사|본사)(?:는|은))")

@@ -2009,7 +2009,7 @@ def compose_selected_sections(
         )
         section = _compose_one_section(
             section_id,
-            supplement_feedback(section_id, missing_slots_by_section) + scope_feedback + build_section_prompt(
+            supplement_feedback(section_id, missing_slots_by_section, packet=packet) + scope_feedback + build_section_prompt(
                 company_name,
                 section_id,
                 prepared.packets[section_id],

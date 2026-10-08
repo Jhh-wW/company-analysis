@@ -12,6 +12,7 @@ from src.features.composer.business_population_scope_constants import (
     ASSERTED_INCREASE_RE, CLAIM_REVENUE_CONTRAST_RE, CLAUSE_BOUNDARY_RE,
     EXPLICIT_SUBJECT_RE, INVESTMENT_PLAN_RE, LOCAL_OWNER_SUFFIX_RE,
     INVESTMENT_WORD_RE, PLAN_SUBJECT_END_RE, PURPOSE_END_RE, QUANTITY_SUBJECT_RE,
+    INVESTMENT_PURPOSE_PREFIX_RE, INVESTMENT_PLAN_LABEL_END_RE,
     REVENUE_METRIC_RE,
     LOCAL_SECTION_RE, OTHER_SECTION_SUBJECT_RE, POPULATION_SOURCE_WINDOW, REVENUE_CONTRAST_RE,
     REVENUE_OWNER_RE, SECTION_PART_RE, SOURCE_INVESTMENT_PLAN_RE, WHOLE_COMPANY_RE,
@@ -174,7 +175,9 @@ def _investment_target(clause: str) -> str:
         return ''
     target = prefix[:ends[-1].start()]
     subjects = list(PLAN_SUBJECT_END_RE.finditer(target))
-    return target[subjects[-1].end():] if subjects else target
+    target = target[subjects[-1].end():] if subjects else target
+    # 시점·계획의 연결어는 투자 목적 자체가 아니다. 날짜와 사업명은 지우지 않는다.
+    return INVESTMENT_PURPOSE_PREFIX_RE.sub('', target, count=1)
 
 
 def _whole_plan_supports(candidate: str, sources: Mapping[str, str]) -> bool:
@@ -194,13 +197,30 @@ def _whole_plan_supports(candidate: str, sources: Mapping[str, str]) -> bool:
 def _local_plan_supports(candidate: str, local: str, source: str) -> bool:
     """명시 투자 목적이 있으면 같은 부문의 자기 원문과만 연결한다."""
     target = _investment_target(candidate)
-    source_target = _investment_target(_surface(source))
-    if not target or not source_target:
+    source_targets = []
+    purpose_found = False
+    for unit in CLAUSE_BOUNDARY_RE.split(_surface(source)):
+        for plan in INVESTMENT_PLAN_RE.finditer(unit):
+            prefix = unit[:plan.end()]
+            source_target = _investment_target(prefix)
+            purpose_found = purpose_found or bool(source_target)
+            owners = list(OTHER_SECTION_SUBJECT_RE.finditer(prefix))
+            if owners and not re.fullmatch(
+                re.escape(local) + r'(?:사업부문|사업부|부문|사업|분야)?(?:에서|은|는|이|가|의)',
+                owners[-1].group(),
+            ):
+                continue
+            if source_target:
+                source_targets.append(source_target)
+    if not target or not purpose_found:
         return True
     owner = re.escape(local) + r'(?:사업부문|사업부|부문|사업|분야)?(?:에서|은|는|이|가|의)?'
     target = re.sub(r'^' + owner, '', target)
-    source_target = re.sub(r'^' + owner, '', source_target)
-    return bool(target and (target == source_target or target in source_target))
+    return bool(target and any(
+        target == re.sub(r'^' + owner, '', source_target)
+        or target in re.sub(r'^' + owner, '', source_target)
+        for source_target in source_targets
+    ))
 
 
 def section_investment_plan_problem(
@@ -233,6 +253,10 @@ def section_investment_plan_problem(
         previous_end = 0
         bound_local = None
         for plan in INVESTMENT_PLAN_RE.finditer(clause):
+            # '투자 계획으로/계획은'은 뒤 실제 투자 행위의 도입어다.
+            if (plan.group().endswith('계획')
+                    and INVESTMENT_PLAN_LABEL_END_RE.match(clause[plan.end():])):
+                continue
             segment = clause[previous_end:plan.end()]
             prefix = clause[previous_end:plan.start()]
             previous_end = plan.end()
@@ -255,7 +279,7 @@ def section_investment_plan_problem(
                             and _local_plan_supports(segment, local, source)):
                         bound_local = local
                         break
-                match = re.search(re.escape(local) + r'(?:사업부문|사업부|부문|사업|분야)?(?:은|는|이|가|의|에서)', prefix)
+                match = re.search(re.escape(local) + r'\)?(?:사업부문|사업부|부문|사업|분야)?(?:은|는|이|가|의|에서)', prefix)
                 if (match and not EXPLICIT_SUBJECT_RE.search(prefix[match.end():])
                         and not OTHER_SECTION_SUBJECT_RE.search(prefix[match.end():])
                         and _local_plan_supports(segment, local, source)):

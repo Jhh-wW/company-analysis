@@ -1,9 +1,11 @@
 """원문 표의 부문·분모·기간을 추출기와 작성 검수기가 함께 보존한다."""
 import re
 import json
+import hashlib
 from collections.abc import Mapping
 
 from src.shared import revenue_population_constants as c
+from src.shared.report_evidence.section_context import parse_section_context
 
 
 def revenue_population_context_start(text: str, header_start: int) -> int:
@@ -60,13 +62,15 @@ def revenue_population_caption_matches(caption: str, source: str, *, header_text
 def revenue_population_claim_problem(candidate: str, sources: Mapping[str, str]) -> str:
     compact = "".join(candidate.split())
     revenue_claims = tuple(c.WHOLE_REVENUE_CLAIM_RE.finditer(compact))
+    qualitative_claims = tuple(match for match in c.QUALITATIVE_REVENUE_CLAIM_RE.finditer(compact)
+                               if not any(other.start() <= match.start() < other.end() for other in revenue_claims))
     matches = (*c.WHOLE_BUSINESS_COMPARISON_RE.finditer(compact),
                *c.PORTFOLIO_ROLE_COMPARISON_RE.finditer(compact),
                *c.PRIMARY_BUSINESS_ROLE_RE.finditer(compact))
     business_claims = tuple(match for match in matches if not any(
         other.start() < match.start() < other.end()
         or (other.start() == match.start() and other.end() > match.end()) for other in matches))
-    if not revenue_claims and not business_claims:
+    if not revenue_claims and not business_claims and not qualitative_claims:
         return ""
     revenue_sources = [source for source in sources.values() if (
         c.REVENUE_ROW_RE.search(source) and ("|" in source or "%" in source)
@@ -74,7 +78,9 @@ def revenue_population_claim_problem(candidate: str, sources: Mapping[str, str])
     if not revenue_sources:
         return ""
     # 전사 범위가 원문에 직접 있으면 기존 의미·수치 검수에 맡긴다.
-    if any(c.WHOLE_REVENUE_CLAIM_RE.search("".join(revenue_population_source_header(source).split())) for source in revenue_sources):
+    if any(not revenue_population_heading(revenue_population_source_header(source))
+           and c.WHOLE_REVENUE_CLAIM_RE.search("".join(revenue_population_source_header(source).split()))
+           for source in revenue_sources):
         return ""
     if not revenue_claims and any(c.WHOLE_BUSINESS_POPULATION_RE.search(
             "".join(revenue_population_source_header(source).split())) for source in revenue_sources):
@@ -82,9 +88,9 @@ def revenue_population_claim_problem(candidate: str, sources: Mapping[str, str])
     headings = tuple(filter(None, (
         revenue_population_heading(revenue_population_source_header(source))
         for source in revenue_sources)))
-    for claim in revenue_claims:
+    for claim in (*revenue_claims, *(qualitative_claims if headings else ())):
         position = claim.start() + (1 if claim.group().startswith("의") else 0)
-        if not headings and _explicit_company_share_support(compact, claim.start(), sources):
+        if _explicit_company_share_support(compact, claim.start(), sources):
             continue
         if c.EXPLICIT_COMPANY_CLAIM_RE.search(claim.group()) or not _claim_bound_to_population(compact, position, headings):
             return "scope_condition_unbound"
@@ -99,6 +105,25 @@ def revenue_population_claim_problem(candidate: str, sources: Mapping[str, str])
             if c.EXPLICIT_COMPANY_CLAIM_RE.search(claim.group()) or not _claim_bound_to_population(compact, claim.start(), headings):
                 return "scope_condition_unbound"
     return ""
+
+
+def revenue_population_context_problem(candidate: str, sources: Mapping[str, str],
+                                       section_contexts: Mapping[str, str]) -> str:
+    """검증된 자기 표의 부문 제목을 제약으로만 사용한다. 긍정 원문은 그대로 둔다."""
+    constrained = {}
+    for source_id, source in sources.items():
+        serialized = section_contexts.get(source_id)
+        if serialized:
+            try:
+                context = parse_section_context(serialized,
+                    fragment_sha256=hashlib.sha256(source.encode('utf-8')).hexdigest())
+            except (ValueError, TypeError):
+                return 'scope_condition_unbound'
+            heading = revenue_population_heading(context['text'])
+        else:
+            heading = ''
+        constrained[source_id] = f'[{heading}]\n{source}' if heading else source
+    return revenue_population_claim_problem(candidate, constrained)
 
 
 def _explicit_company_share_support(candidate: str, position: int, sources: Mapping[str, str]) -> bool:
@@ -160,6 +185,9 @@ def _claim_bound_to_population(candidate: str, position: int, headings: tuple[st
     for heading in headings:
         label = "".join(heading.split())
         prefix = candidate[max(0, position - len(label) - c.POPULATION_CLAIM_LOOKBACK_CHARS):position]
+        resets = tuple(c.POPULATION_SUBJECT_RESET_RE.finditer(prefix))
+        if resets and c.COMPARATIVE_MAGNITUDE_RE.search(prefix[:resets[-1].start()]):
+            continue  # 앞 부문 비교가 끝난 뒤 다시 명시된 회사 주어로 범위를 대여하지 않는다.
         pattern = re.escape(label) + r"(?:내|안|의|에서는|에서의|에서)(?:전체사업|사업|전체)?" + c.LOCAL_COMPARISON_SUBJECT_PATTERN + "$"
         if re.search(pattern, prefix):
             return True

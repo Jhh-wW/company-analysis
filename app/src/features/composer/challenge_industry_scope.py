@@ -8,7 +8,8 @@ from src.features.composer.challenge_industry_scope_constants import (
     QUALIFIED_SUBJECT_RE, ROUTINE_COMPANY_ACTIVITY_RE, COMPANY_STATE_JOIN_RE,
     MARKET_BACKGROUND_RE, MARKET_OBSERVATION_ONLY_RE,
     INDUSTRY_REPORT_PREFIX_RE, INDUSTRY_REPORT_SCOPE_RE, INDUSTRY_REPORT_FUTURE_RE,
-    OTHER_COMPANY_SCOPE_RE,
+    OTHER_COMPANY_SCOPE_RE, GENERAL_BUSINESS_POPULATION_RE,
+    COMPANY_PROBLEM_LINK_ONLY, COMPANY_EXPLICIT_CONSTRAINT_RE,
 )
 from src.shared.report_evidence.challenge_eligibility import challenge_issue_problem
 from src.shared.report_evidence.challenge_eligibility_constants import (
@@ -19,13 +20,16 @@ from src.shared.report_evidence.challenge_eligibility_constants import (
 
 def _has_company_problem(text: str) -> bool:
     """주장 안 자기 관계 뒤의 문제 술어만 읽고 산업·다른 회사의 주어는 빌리지 않는다."""
-    other = tuple(OTHER_COMPANY_SCOPE_RE.finditer(text))
+    other = (*OTHER_COMPANY_SCOPE_RE.finditer(text), *GENERAL_BUSINESS_POPULATION_RE.finditer(text))
     for match in COMPANY_SCOPE_RE.finditer(text):
         if any(start.start() <= match.start() < start.end() for start in other):
             continue
-        tail = "".join(text[match.end():].split())
+        end = min((boundary.start() for boundary in other if boundary.start() >= match.end()), default=len(text))
+        tail = "".join(text[match.end():end].split())
         if (PROBLEM_RE.search(tail) or POLICY_BUSINESS_PROBLEM_RE.search(tail)
-                or ISSUE_RELATION_VETO_RE.search(tail)):
+                or COMPANY_EXPLICIT_CONSTRAINT_RE.search(tail)
+                or any(value.group() not in COMPANY_PROBLEM_LINK_ONLY
+                       for value in ISSUE_RELATION_VETO_RE.finditer(tail))):
             return True
     return False
 
@@ -49,6 +53,9 @@ def industry_only_challenge_problem(text: str, *, claim_slot: str = "") -> str:
         reported = reporting.group("body") if reporting else normalized
         background = MARKET_BACKGROUND_RE.fullmatch(normalized)
         surface = "".join(normalized.split())
+        if GENERAL_BUSINESS_POPULATION_RE.search(reported) and not _has_company_problem(reported):
+            found_industry_subject = True
+            continue
         if (background
                 and MARKET_OBSERVATION_ONLY_RE.fullmatch("".join(background.group("body").split()))
                 and not PROBLEM_RE.search(surface)

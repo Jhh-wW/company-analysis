@@ -42,6 +42,13 @@ COMPANY_SCOPE_RE = re.compile(
 OTHER_COMPANY_SCOPE_RE = re.compile(
     r"(?:선도|다른|타|경쟁|외부|협력|고객|공급)(?:\s*회사)(?:에게|에|를|을|가|이|은|는|의)"
 )
+# 일반 기업 모집단의 제약은 실제 회사가 그 제약을 겪는다는 사실이 아니다.
+GENERAL_BUSINESS_POPULATION_RE = re.compile(
+    r"(?:대다수(?:의)?|대부분(?:의)?|여러|많은|다수(?:의)?|일반(?:적인)?|업계(?:의)?)\s*"
+    r"(?:기업|회사|제조사|업체)(?:들)?(?:은|는|이|가|의|에|에게)"
+)
+COMPANY_PROBLEM_LINK_ONLY = frozenset({'때문', '로인해', '에따른', '하지만', '그러나', '그럼에도', '반면'})
+COMPANY_EXPLICIT_CONSTRAINT_RE = re.compile(r"제약(?:을)?(?:받|겪)|제약(?:이)?존재")
 # '회사가 영위하는 시장' 같은 관형절을 일반 시장 주어로 단정하지 않는다.
 QUALIFIED_SUBJECT_RE = re.compile(r"(?:영위|생산|제공|판매|운영|납품|수행)하는")
 # 회사 일반 업무 문장을 산업 설명 뒤에 붙여 직접 문제의 주체를 만들지 않는다.

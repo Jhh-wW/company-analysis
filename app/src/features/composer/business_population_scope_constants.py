@@ -25,6 +25,8 @@ QUANTITY_SUBJECT_RE = re.compile(r'수주량(?:은|는|이|가|도)')
 INVESTMENT_WORD_RE = re.compile(r'투자')
 PURPOSE_END_RE = re.compile(r'(?:을|를)?위(?:해|하여)')
 PLAN_SUBJECT_END_RE = re.compile(r'(?:계획은|예정은|는|은)')
+INVESTMENT_PURPOSE_PREFIX_RE = re.compile(r'^(?:이며|이고)?(?:향후|앞으로)?(?:투자계획으로)?')
+INVESTMENT_PLAN_LABEL_END_RE = re.compile(r'^(?:으로|은)')
 
 # 계약 금액·기간 행은 매출 구성이나 수익 우선순위를 직접 증명하지 않는다.
 REVENUE_PRIORITY_RE = re.compile(

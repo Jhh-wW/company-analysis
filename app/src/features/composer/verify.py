@@ -51,6 +51,7 @@ from src.features.composer.numeric_proof_selection_constants import NUMERIC_SELE
 from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_VERSION
 from src.features.composer.source_actor_scope import source_actor_problem
 from src.features.composer.business_population_scope import section_investment_plan_problem
+from src.shared.revenue_population_scope import revenue_population_context_problem
 from src.features.composer.competitive_scope_guard import competitive_section_evidence_problem
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_accounting_policy_problem,
@@ -2261,6 +2262,14 @@ def _apply_grounding(
         if section_problem:
             constrained[number] = REVIEW_GROUNDING_REJECTED
             problems[number] = section_problem
+            continue
+        population_problem = revenue_population_context_problem(
+            text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+            section_context_by_source_id or {},
+        )
+        if population_problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = population_problem
             continue
         context = (diagnostic_contexts or {}).get(number)
         if context and context[1] == DIAGNOSTIC_KIND_BODY:

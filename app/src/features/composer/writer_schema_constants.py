@@ -44,3 +44,9 @@ FULL_SUPPLEMENT_GUIDE = (
     "근거가 부족하면 빈 배열을 유지한다.\n"
 )
 FULL_SUPPLEMENT_MISSING_HEAD = "1차 공개 후보에 남지 않은 필수 의미칸:\n"
+FULL_SUPPLEMENT_PAIRS_GUIDE = (
+    '아래 JSON은 누락 의미칸별로 현재 자기 packet에서 선택 가능한 지원쌍이다. '
+    '다른 의미칸의 지원쌍을 선택하면 이 누락을 채우지 못한다. '
+    '허용쌍은 작성 후보이며 사실 승인·출고 증명은 아니다. '
+    '빈 목록이면 다른 근거를 빌리거나 사실을 만들지 않는다.\n'
+)

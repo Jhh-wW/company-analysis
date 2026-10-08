@@ -1,10 +1,13 @@
 """1차 공개 후보의 빠진 질문을 보충 작성기에 전달한다. 출고 판정은 바꾸지 않는다."""
 
 from collections.abc import Mapping
+import json
 
 from src.features.composer.writer_schema_constants import (
-    FULL_SUPPLEMENT_GUIDE, FULL_SUPPLEMENT_MISSING_HEAD,
+    FULL_SUPPLEMENT_GUIDE, FULL_SUPPLEMENT_MISSING_HEAD, FULL_SUPPLEMENT_PAIRS_GUIDE,
 )
+from src.features.composer.evidence_pair_selection import build_evidence_pair_map
+from src.features.composer.port import SectionEvidencePacket
 from src.shared.report_evidence.policy import injected_slots_for, required_slots_for
 from src.shared.report_quality.constants import STRICT_PUBLIC_CLAIM_TYPES
 from src.shared.report_quality.dto import ReportCandidate
@@ -28,13 +31,32 @@ def missing_writer_slots(candidate: ReportCandidate, section_ids: tuple[str, ...
     return result
 
 
-def supplement_feedback(section_id: str, missing_by_section: Mapping[str, tuple[str, ...]] | None) -> str:
+def supplement_feedback(
+    section_id: str, missing_by_section: Mapping[str, tuple[str, ...]] | None,
+    *, packet: SectionEvidencePacket | None = None,
+) -> str:
     """외부 문자열을 지시문에 넣지 않고 이 장의 정책상 질문만 안내한다."""
     supplied = () if missing_by_section is None else missing_by_section.get(section_id, ())
     allowed = set(required_slots_for(section_id)) - set(injected_slots_for(section_id))
     if type(supplied) is not tuple or any(type(slot) is not str or slot not in allowed for slot in supplied):
         raise ValueError("보충 안내에는 해당 장의 필수 의미칸만 넣을 수 있습니다")
     missing = tuple(slot for slot in required_slots_for(section_id) if slot in supplied)
-    return FULL_SUPPLEMENT_GUIDE + (
+    feedback = FULL_SUPPLEMENT_GUIDE + (
         FULL_SUPPLEMENT_MISSING_HEAD + "".join(f"- {slot}\n" for slot in missing) if missing else ""
     )
+    if packet is None:
+        return feedback
+    if type(packet) is not SectionEvidencePacket or packet.section_id != section_id:
+        raise ValueError('보충 허용쌍은 해당 장의 봉인된 packet이어야 합니다')
+    pairs = build_evidence_pair_map(section_id, packet.fragments)
+    rows = [
+        {'주장범주': slot, '허용지원쌍': [identifier for identifier, (pair_slot, _) in pairs.items()
+                                  if pair_slot == slot]}
+        for slot in missing
+    ]
+    if not rows:
+        return feedback
+    return feedback + FULL_SUPPLEMENT_PAIRS_GUIDE + json.dumps(
+        {'packet_sha256': packet.packet_sha256, '누락의미칸': rows},
+        ensure_ascii=False, sort_keys=True, separators=(',', ':'),
+    ) + '\n'
