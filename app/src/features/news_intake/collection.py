@@ -17,6 +17,7 @@ from src.features.news_intake.analysis_result_cache import analysis_request
 from src.features.news_intake.quote_selection import quote_candidates, quote_response_sha256, restore_quote_response
 from src.features.news_intake.industry_context import extend_prompt, extend_schema, industry_candidate, split_response
 from src.features.news_intake.industry_assessment import priority_enabled
+from src.features.news_intake.industry_body_fallback import IndustryBodyFallback, body_chain_urls
 from src.features.news_intake import industry_constants as ic
 from src.features.news_intake.observation import NewsObserver, observe_news
 from src.features.news_intake.grounded import parse_grounded_payload
@@ -37,7 +38,7 @@ from src.features.news_intake.models import (
 )
 from src.features.news_intake.search_snapshot import (  # noqa: F401 - collect_search_snapshot은 어댑터·시험이 이 모듈에서 가져간다
     body_ranked_candidates, candidate_window, collect_search_snapshot, company_digest,
-    metadata_probe_budget,
+    metadata_probe_budget, industry_body_reservations,
     policy_digest, snapshot_digest,
 )
 from src.shared.report_generation.models import exact_text_sha256
@@ -73,9 +74,9 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     """검색·본문 callback을 섞지 않고, 검증 실패를 예전 휴리스틱으로 보충하지 않는다.
 
     ``body_fetch``는 호출자가 «``fetch_text``를 여러 스레드에서 동시에 불러도
-    안전하다»고 선언하는 opt-in이다. 없으면 오늘과 같은 순차 수집이다. 있어도
-    기사 선택·소비 순서·원문·예산 계약은 같고, 같은 기간·같은 분석 묶음 안의
-    본문 요청 대기만 겹친다(``body_prefetch`` 모듈 설명 참조).
+    안전하다»고 선언하는 opt-in이다. 없으면 순차 수집이다. 실패 보충 없는 경로는
+    같은 선택·소비 순서를 유지한다. 산업 본문 실패 보충은 이미 출발한 사슬을
+    먼저 소비하므로 순차 실행과 묶음 안의 순서가 달라질 수 있다. 원문·상한은 같다.
     """
 
     policy = policy or NewsCollectionPolicy()
@@ -110,12 +111,16 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     # 충분성은 이 기사를 새 기사로 세지 않았으므로 충분성에서만 세지 않는다.
     republished_urls: set[str] = set()
     seen_urls: set[str] = set()
+    planned_body_urls: set[str] = set()
     all_excerpts: list[GroundedNewsExcerpt] = []
     industry_problems = []
     industry_observations: Counter[str] = Counter()
     industry_assessments: list[dict[str, str]] = []
     industry_read_ids: set[str] = set()
     industry_analysis_ids: set[str] = set()
+    industry_fallback_records: list[dict[str, str]] = []
+    industry_initial_reservations = 0
+    industry_fallback_ceiling = policy.max_body_articles // ic.INDUSTRY_BODY_DIVISOR
     windows: list[int] = []
     window_counts: dict[str, dict[str, int]] = {}
     deferred: dict[int, list[tuple[NewsCandidate, str]]] = {}
@@ -332,10 +337,18 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                 probes_attempted=sum(candidate_name_match.get(candidate_id) is False
                                      for candidate_id in attempted_candidate_ids),
             )
-            ranked_candidates = body_ranked_candidates(
+            ranked_candidates = list(body_ranked_candidates(
                 candidates + [candidate for candidate, _ in carried],
                 attempt_budget=window_budget, probe_budget=probe_budget,
                 replacement=is_replacement, company=company,
+            ))
+            reservations = (industry_body_reservations(
+                candidates + [candidate for candidate, _ in carried], window_budget, company=company,
+            ) if not is_replacement and company.business_anchors else {})
+            industry_initial_reservations += len(reservations)
+            industry_fallback = IndustryBodyFallback(
+                reservations, company=company,
+                remaining_allowance=industry_fallback_ceiling - len(industry_fallback_records),
             )
             if observer is not None:
                 try:
@@ -356,7 +369,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             relevant_before = len(relevant_articles)
             unused_before = prefetch_stats["선행미사용"]
             # 후보를 순위 순서로 «계획»하고 같은 순서로만 «소비»한다. 사슬 완료 순서가
-            # 뒤집혀도 분석 묶음·중복 판정·이월은 순차 실행과 같은 순서로 일어난다.
+            # 뒤집혀도 계획된 사슬을 순서대로 소비한다. 산업 보충은 미출발 후보만
+            # 앞당기므로 이미 출발한 사슬을 보충 후보와 다시 정렬하지 않는다.
             planned: deque[_PlannedCandidate] = deque()
             plan_index = 0
             in_flight = 0
@@ -411,6 +425,17 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                         planned.append(_PlannedCandidate(candidate, c.PLANNED_DUPLICATE))
                         plan_index += 1
                         continue
+                    if (company.business_anchors and industry_candidate(candidate)
+                            and body_chain_urls(candidate) & (planned_body_urls | seen_urls)):
+                        # 보충에서 제외된 별칭 후보가 뒤의 기본 순위로 다시 나타나도
+                        # 이전 기간·기출발 기사 주소를 다시 보내지 않는다.
+                        examined -= 1
+                        body_articles -= 1
+                        planned.append(_PlannedCandidate(
+                            candidate, c.PLANNED_DUPLICATE, budget_code=c.EXCLUDED_DUPLICATE_BODY_CHAIN_URL,
+                        ))
+                        plan_index += 1
+                        continue
                     lease = CallLease()
                     needed = len(eligible_body_urls(candidate, company, policy))
                     if needed and not call_pool.try_reserve(needed, lease):
@@ -421,6 +446,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                             return
                         # 마지막 몫은 순차 규칙 그대로 — 주소마다 남은 호출을 하나씩 확인한다.
                     future = lane.submit(partial(fetch_article_body, job, candidate, lease))
+                    planned_body_urls.update(body_chain_urls(candidate))
                     planned.append(_PlannedCandidate(candidate, c.PLANNED_LAUNCHED, future=future, lease=lease))
                     prefetch_stats["출발"] += 1
                     in_flight += 1
@@ -447,7 +473,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                     stopped = True
                     break
                 if item.kind == c.PLANNED_DUPLICATE:
-                    excluded["duplicate_effective_url"] += 1
+                    excluded[item.budget_code or "duplicate_effective_url"] += 1
                     continue
                 in_flight -= 1
                 outcome = item.future.result()
@@ -495,6 +521,22 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                     if outcome.article_failures:
                         failures.append(outcome.article_failures[-1])
                     excluded["article_body_unavailable"] += 1
+                    # 이미 출발한 사슬은 취소·재요청하지 않는다. 같은 예약군의 별개
+                    # 미시도 기사만 다음 빈 모델 자리보다 앞에 두며 기본 상한을 늘리지 않는다.
+                    if not stopped and analysis_calls < policy.max_analysis_calls:
+                        reserved_ids = {entry.candidate.id for entry in planned}
+                        reserved_urls = {entry.candidate.source_url for entry in planned}
+                        reserved_urls.update(url for earlier in ranked_candidates[:plan_index]
+                                             for url in body_chain_urls(earlier))
+                        promoted = industry_fallback.select(
+                            candidate.id, ranked_candidates[plan_index:],
+                            excluded_ids=attempted_candidate_ids | reserved_ids,
+                            excluded_urls=seen_urls | reserved_urls | planned_body_urls,
+                        )
+                        if promoted is not None:
+                            ranked_candidates.remove(promoted)
+                            ranked_candidates.insert(plan_index, promoted)
+                            industry_fallback_records.append(dict(industry_fallback.records[-1]))
                     continue
                 stages[outcome.stage] += 1
                 if industry_candidate(read_candidate):
@@ -685,6 +727,15 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             "본문읽기사": len(industry_read_ids),
             "분석입력기사": len(industry_analysis_ids),
         }
+        fallback_ids = {entry["candidate_id"] for entry in industry_fallback_records}
+        diagnostics["산업본문보충"] = {
+            "초기예약": industry_initial_reservations,
+            "선정상한": min(industry_initial_reservations, industry_fallback_ceiling),
+            "선정": len(industry_fallback_records),
+            "시도": len(fallback_ids & attempted_candidate_ids),
+            "본문읽기사": len(fallback_ids & industry_read_ids),
+            "분석입력기사": len(fallback_ids & industry_analysis_ids),
+        }
         # 회사 검색에서 찾은 기사에도 산업문제를 검수한다. 이 집계는 산업 검색 결과만의 수가 아니다.
         diagnostics["산업검수"] = {name: industry_observations[name]
                                    for name in ic.INDUSTRY_RESPONSE_OBSERVATION_FIELDS}
@@ -696,6 +747,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             "attempted_candidate_ids": sorted(attempted_candidate_ids),
             "industry_read_candidate_ids": sorted(industry_read_ids),
             "industry_analysis_candidate_ids": sorted(industry_analysis_ids),
+            "industry_body_fallbacks": [dict(entry) for entry in industry_fallback_records],
             "document_content_sha256": dict(document_hashes),
         })
     return NewsCollectionResult(

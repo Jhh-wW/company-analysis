@@ -24,6 +24,7 @@ from src.features.news_intake.models import (
     NewsSearchSnapshot,
 )
 from src.shared.report_generation.models import exact_text_sha256
+from src.shared.business_challenge_context import BusinessActivityAnchor
 from src.shared.report_quality.source_identity import canonical_url
 
 
@@ -89,6 +90,15 @@ def industry_search_expression(business_item: str) -> str:
     return match["object"] + " " + match["activity"]
 
 
+def industry_anchor_search_expression(anchor: BusinessActivityAnchor) -> tuple[str, str]:
+    """자기 앵커의 유일 현재 역할만 탐색어로 덧붙이며 원 사업명은 바꾸지 않는다."""
+    expression = industry_search_expression(anchor.business_item)
+    roles = _industry_self_roles(anchor.exact_text)
+    if len(roles) != 1 or roles[0].casefold() in anchor.business_item.casefold():
+        return expression, ""
+    return expression + " " + roles[0], roles[0]
+
+
 def industry_query_derivation(company: NewsCompanyContext, query: str, topic: str) -> dict[str, str] | None:
     """실제로 전달한 질의와 공식 원 앵커의 관계를 관측에만 기록한다."""
     if not topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) or ":" not in topic:
@@ -98,11 +108,13 @@ def industry_query_derivation(company: NewsCompanyContext, query: str, topic: st
     if anchor is None:
         return None
     expression = industry_search_expression(anchor.business_item)
+    qualified_expression, role = industry_anchor_search_expression(anchor)
     return {
         "anchor_id": anchor.anchor_id, "original_business_item": anchor.business_item,
         "search_expression": expression, "query": query,
         "transformation": "activity_suffix_spacing" if expression != anchor.business_item else "unchanged",
         "anchor_location": anchor.location, "anchor_text_sha256": anchor.text_sha256,
+        "role_qualifier": role, "qualified_search_expression": qualified_expression,
     }
 
 
@@ -137,7 +149,7 @@ def search_plan(company: NewsCompanyContext, as_of: dt.date) -> tuple[tuple[str,
             region_index = index % region_count
             _, topic = ic.INDUSTRY_QUERY_REGIONS[region_index]
             region, theme = ic.INDUSTRY_QUERY_EXPRESSIONS[index % len(ic.INDUSTRY_QUERY_EXPRESSIONS)]
-            expression = industry_search_expression(anchor.business_item)
+            expression, _ = industry_anchor_search_expression(anchor)
             # 첫 질의의 국내 topic은 탐색 배분이다. 지역 없는 검색어로 지리를 승인하지 않는다.
             query = " ".join(part for part in (expression, region, theme) if part)
             industry_queries.append((query, "sim",
@@ -363,7 +375,8 @@ def _industry_candidates(candidates: list[NewsCandidate], *,
 
 
 def _reserved_industry_candidates(industry: list[NewsCandidate], reserved: int, *,
-                                  company: NewsCompanyContext | None) -> list[NewsCandidate]:
+                                  company: NewsCompanyContext | None,
+                                  assignments: dict[str, str] | None = None) -> list[NewsCandidate]:
     """같은 예약 몫을 질의별로 나누고 빈 군의 몫은 남은 고유 기사에 돌린다.
 
     query 주제는 탐색 기회에만 사용한다. 실제 지역과 현재 문제는 본문 검수가
@@ -398,6 +411,8 @@ def _reserved_industry_candidates(industry: list[NewsCandidate], reserved: int, 
             replace(options[value], topics=(value,)), company))
         item = options[topic]
         chosen.append(item)
+        if assignments is not None:
+            assignments[item.id] = topic
         selected_ids.add(item.id)
         assigned_regions.add(topic.split(":", 1)[0])
         del groups[topic]
@@ -407,7 +422,19 @@ def _reserved_industry_candidates(industry: list[NewsCandidate], reserved: int, 
         if item.id not in selected_ids:
             chosen.append(item)
             selected_ids.add(item.id)
+            if assignments is not None:
+                assignments[item.id] = next((topic for topic in topics if topic in item.topics), "")
     return chosen
+
+
+def industry_body_reservations(candidates: list[NewsCandidate], budget: int, *,
+                               company: NewsCompanyContext) -> dict[str, str]:
+    """초기 고유 기사 예약이 실제 배정받은 질의군을 그대로 돌려준다."""
+    assignments: dict[str, str] = {}
+    industry = _industry_candidates(candidates, company=company)
+    _reserved_industry_candidates(industry, min(len(industry), budget // ic.INDUSTRY_BODY_DIVISOR),
+                                  company=company, assignments=assignments)
+    return {identifier: topic for identifier, topic in assignments.items() if topic}
 
 
 def diverse_candidates(candidates: list[NewsCandidate], limit: int, *,

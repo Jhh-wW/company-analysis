@@ -17,6 +17,8 @@ from src.features.news_intake.tests.test_industry_context import (
 def candidate(identifier, region=None):
     return replace(CANDIDATE, id=identifier, title="시장 변화 분석", description="새 동향",
                    source_url=f"https://media.example/{identifier}",
+                   # 양지역의 별개 기사다. 같은 원문 주소를 복사해 별칭 중복으로 만들지 않는다.
+                   originallink=f"https://media.example/{identifier}", link="",
                    metadata_name_match=region is None,
                    topics=(f"industry_{region}:{ANCHOR.anchor_id}",) if region else ("business",))
 
