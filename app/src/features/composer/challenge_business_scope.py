@@ -2,10 +2,19 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import re
 
-from src.features.composer.accounting_policy_constants import ACCOUNTING_POLICY_BOILERPLATE
+from src.features.composer.accounting_policy_constants import (
+    ACCOUNTING_POLICY_BOILERPLATE, LIQUIDITY_ACTUAL_PRESSURE_RE,
+)
 from src.features.composer.accounting_policy_guard import accounting_policy_problem
-from src.features.composer.challenge_accounting_policy import is_challenge_accounting_policy
+from src.features.composer.challenge_accounting_policy import (
+    _has_business_fact, is_challenge_accounting_policy,
+)
+from src.features.composer.challenge_accounting_constants import (
+    FINANCIAL_RISK_SUBJECT_RE, POLICY_SENTENCE_RE, POLICY_SUBCLAUSE_RE,
+)
+from src.features.composer.challenge_event_constants import RESPONSE_FOREIGN_ACTOR_RE
 from src.features.composer.challenge_industry_scope import industry_only_challenge_problem
 from src.features.composer.constants import CHALLENGE_FLOW_SECTION_ID
 from src.features.composer.challenge_constants import (
@@ -19,6 +28,9 @@ from src.features.composer.challenge_business_scope_constants import (
     PROCEDURAL_COURT_ISSUE_RE, PROCEDURAL_ACTION_ISSUE_RE, PROCEDURAL_EVENT_LABEL_RE,
     PROCEDURAL_TABLE_ISSUE_RE, TABLE_ACCOUNTING_RESPONSE_UNIT_RE,
     TABLE_ACCOUNTING_RESPONSE_ONLY_RE,
+    EXPENSE_COMPARISON_RE, EXPENSE_ROW_VALUES_RE, EXPENSE_ACTIVITY_EVENT_RE,
+    EXPENSE_NONACTUAL_CONTEXT_RE, EXPENSE_ACTOR_RE, EXPENSE_OWNER_RE, EXPENSE_SELF_ACTORS,
+    EXPENSE_BUSINESS_RELATION_UNBOUND,
 )
 from src.shared.report_evidence.challenge_eligibility import (
     challenge_eligibility_problem, challenge_eligibility_quote_problem,
@@ -56,6 +68,77 @@ def _accounting_response_cell_problem(text: str) -> str:
     return ""
 
 
+def _financial_enumeration_problem(text: str) -> str:
+    """같은 문장 금융관리 열거의 쉼표가 정책 문맥을 끊지 않게 한다.
+
+    실제 사업 사건·서비스·유동성 악화가 있는 혼합 후보는 기존 의미 검수에 남긴다.
+    자기 인용의 다른 문장이 후보 자체의 금융관리만인 성격을 바꾸지는 않는다.
+    """
+    sentences = tuple(value for value in POLICY_SENTENCE_RE.split(text) if value.strip())
+    if not sentences:
+        return ""
+    compact = "".join(text.split())
+    if not FINANCIAL_RISK_SUBJECT_RE.search(compact) or LIQUIDITY_ACTUAL_PRESSURE_RE.search(compact):
+        return ""
+    return (ACCOUNTING_POLICY_BOILERPLATE
+            if all(is_challenge_accounting_policy(value.replace(",", "").replace("，", ""))
+                   for value in sentences) else "")
+
+
+def _expense_comparison_problem(text: str, sources: Mapping[str, str]) -> str:
+    """자기 비용 비교행만으로 5장 사업제약·투자대응을 만들지 않는다."""
+    comparisons = tuple(EXPENSE_COMPARISON_RE.finditer(text))
+    for comparison in comparisons:
+        expense = comparison.group("expense")
+        # 같은 원문에 명시된 같은 활동의 수행중단·인력축소 등은 표와 함께 보존한다.
+        activity = expense[:-2] if expense.endswith("비용") else expense[:-1]
+        has_business_support = False
+        for source in sources.values():
+            for clause in POLICY_SENTENCE_RE.split(source):
+                if not activity or activity not in clause:
+                    continue
+                compact = "".join(clause.split())
+                if EXPENSE_NONACTUAL_CONTEXT_RE.search(compact) or RESPONSE_FOREIGN_ACTOR_RE.search(clause):
+                    continue
+                for mention in re.finditer(re.escape(activity), clause):
+                    # 앞의 비용 숫자행과 뒤의 다른 활동을 하나의 사업 관계로 읽지 않는다.
+                    if clause.startswith(expense, mention.start()) and EXPENSE_ROW_VALUES_RE.match(
+                        clause, mention.start() + len(expense)
+                    ):
+                        continue
+                    prefix = clause[:mention.start()]
+                    actors = tuple(match["actor"] for pattern in (EXPENSE_ACTOR_RE, EXPENSE_OWNER_RE)
+                                   for match in pattern.finditer(prefix))
+                    if any(actor not in EXPENSE_SELF_ACTORS and activity not in actor and actor not in text
+                           for actor in actors):
+                        continue
+                    tail = clause[mention.start():]
+                    if EXPENSE_ACTIVITY_EVENT_RE.search("".join(tail.split())) or _has_business_fact(tail):
+                        has_business_support = True
+                        break
+        if has_business_support:
+            continue
+        table_only = False
+        for source in sources.values():
+            for start in (match.end() for match in re.finditer(re.escape(expense), source)):
+                if EXPENSE_ROW_VALUES_RE.match(source, start):
+                    table_only = True
+                    break
+        if table_only:
+            return EXPENSE_BUSINESS_RELATION_UNBOUND
+    return ""
+
+
+def _own_business_clause(text: str, sources: Mapping[str, str]) -> bool:
+    """혼합 후보의 실제 사업절은 자기 원문의 같은 절에 결속되어야 한다."""
+    for sentence in POLICY_SENTENCE_RE.split(text):
+        for clause in POLICY_SUBCLAUSE_RE.split(sentence):
+            if _has_business_fact(clause) and any(_surface(clause) in _surface(source)
+                                                  for source in sources.values()):
+                return True
+    return False
+
+
 def challenge_business_problem(text: str, sources: Mapping[str, str], *, cells: Sequence[str] | None = None,
                                require_current: bool = True, claim_slot: str = "") -> str:
     """자기 인용 전체가 재무 조건뿐인 경우 표현을 바꿔도 사업 과제가 되지 않는다.
@@ -65,6 +148,9 @@ def challenge_business_problem(text: str, sources: Mapping[str, str], *, cells: 
     인용하지 않은 근거는 이 함수에 넘기지 않는다.
     """
     problem = accounting_policy_problem(text, section_id=CHALLENGE_FLOW_SECTION_ID)
+    if problem and not _own_business_clause(text, sources):
+        return problem
+    problem = _financial_enumeration_problem(text) or _expense_comparison_problem(text, sources)
     if problem:
         return problem
     own_texts = tuple(value for value in sources.values() if value.strip())
