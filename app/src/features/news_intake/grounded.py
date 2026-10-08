@@ -24,6 +24,8 @@ from src.features.news_intake.reporting_subject_scope import target_is_only_inte
 from src.features.news_intake.reporting_subject_scope_constants import SUBJECT_INTERVIEW_RECIPIENT_ONLY
 from src.features.news_intake.relation_subject_scope import bind_relation_subject, starts_relation_target
 from src.features.news_intake.relation_subject_scope_constants import RELATION_CONTEXT_REASON
+from src.features.news_intake.contract_execution_context import contract_execution_context_problem
+from src.features.news_intake.contract_execution_context_constants import CONTRACT_EXECUTION_SELECTION_GUIDE
 from src.features.news_intake.quote_selection import quote_candidates, quote_schema, restore_quote_response, _fact_start
 from src.features.news_intake import quote_selection_constants as qc
 from src.features.news_intake.select import normalize_company_name
@@ -153,6 +155,7 @@ def build_grounded_prompt(company: NewsCompanyContext, articles: list[tuple[News
         "이름이 인용에 나오는 것만으로 true가 아닙니다. 목록·발행처·과거 직장의 이름이면 false입니다. "
         "제품·브랜드·인물의 경우 명시 회사 관계와 그 회사의 실제 사업 사건이 모두 확인될 때만 true입니다. "
         + qc.QUOTE_SELF_CONTAINED_SELECTION_GUIDE
+        + CONTRACT_EXECUTION_SELECTION_GUIDE
         + qc.QUOTE_EVENT_DATE_GUIDE
         + "앞의 복사 지시는 실제 반환에서 해당 ID 선택으로 수행합니다.\n"
         if selection else ""
@@ -398,6 +401,10 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
         return None
     if re.search(c.FUTURE_PLAN_PATTERN, text) and temporal != "planned":
         excluded["grounded_plan_mismatch"] += 1
+        return None
+    if contract_problem := contract_execution_context_problem(text, body, article_context, as_of,
+                                                            temporal_status=temporal):
+        excluded[contract_problem] += 1
         return None
     if section in c.ATTRIBUTED_QUOTE_ONLY_SECTIONS | c.DATED_QUOTE_ONLY_SECTIONS:
         if kind not in {"company_statement", "company_plan"}:

@@ -47,6 +47,11 @@ from src.features.composer.numeric_proof_selection import (
     NumericProofCandidate, NumericProofOption, prepare_numeric_proof_options,
     numeric_proof_option_hint, restore_numeric_proof_selections,
 )
+from src.features.composer.future_proof_selection import (
+    FutureProofCandidate, FutureProofOption, prepare_future_proof_options,
+    future_proof_option_hint, restore_future_proof_selections,
+)
+from src.features.composer.future_proof_selection_constants import FUTURE_SELECTION_STAGE
 from src.features.composer.numeric_proof_selection_constants import NUMERIC_SELECTION_STAGE
 from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_VERSION
 from src.features.composer.source_actor_scope import source_actor_problem
@@ -158,6 +163,7 @@ from src.features.composer.plan_status_scope import (
     completed_execution_status_problem, plan_status_prose_problem,
 )
 from src.features.composer.business_relation_scope import business_relation_scope_problem
+from src.features.composer.payment_method_scope import payment_method_scope_problem
 from src.features.composer.source_attribution_scope import source_attribution_problem
 from src.features.composer.role_binding_constants import (
     ROLE_BINDING_REASON_TEXTS, ROLE_BINDING_REVIEW_GUIDE,
@@ -1262,6 +1268,7 @@ def _build_grouped_review_prompt(
     *,
     verbatim_by_number: Optional[Mapping[int, VerbatimNewsSource]] = None,
     numeric_options_by_number: Optional[Mapping[int, tuple[NumericProofOption, ...]]] = None,
+    future_options_by_number: Optional[Mapping[int, tuple[FutureProofOption, ...]]] = None,
 ) -> str:
     """장별 후보와 그 장이 실제 인용한 원문만 한 블록에 묶는다.
 
@@ -1387,6 +1394,7 @@ def _build_grouped_review_prompt(
                 verbatim_source=(verbatim_by_number or {}).get(item.number),
             ))
             parts.append(numeric_proof_option_hint((numeric_options_by_number or {}).get(item.number, ())))
+            parts.append(future_proof_option_hint((future_options_by_number or {}).get(item.number, ())))
             if item.sentence is not None and item.sentence.planned_claim_slot == PLAN_STATUS_SLOT:
                 parts.append(PLAN_STATUS_REVIEW_GUIDE)
         parts.append("===== 장별 검수 블록 끝 =====\n")
@@ -1589,6 +1597,17 @@ def _prepare_review_numeric_options(rows, frag_by_id):
     })
 
 
+def _prepare_review_future_options(items, frag_by_id):
+    """같은 요청의 자기 인용만으로 미래 산문 선택지를 준비한다."""
+    return prepare_future_proof_options({
+        item.number: FutureProofCandidate(
+            item.number, item.section_id, item.sentence.planned_claim_slot,
+            item.sentence.text, tuple(frag_by_id[fid] for fid in item.sentence.citations
+                                      if fid in frag_by_id),
+        ) for item in items if item.sentence is not None
+    })
+
+
 def _ask_grouped_verdicts(
     ask: AskFn,
     items: Sequence[_GroupedReviewItem],
@@ -1663,6 +1682,7 @@ def _ask_grouped_verdicts(
     prompt = _build_grouped_review_prompt(
         items, frag_by_id, table, verbatim_by_number=verbatim_by_number,
         numeric_options_by_number=numeric_options_by_number,
+        future_options_by_number=(future_options_by_number := _prepare_review_future_options(items, frag_by_id)),
     )
     owners = {item.number: item.section_id for item in items}
     evidence_ids_by_number = {
@@ -1779,6 +1799,7 @@ def _ask_grouped_verdicts(
                     missing_items, frag_by_id, table,
                     verbatim_by_number=verbatim_by_number,
                     numeric_options_by_number=numeric_options_by_number,
+                    future_options_by_number=future_options_by_number,
                 ) + MISSING_VERDICTS_REMINDER
             )
             try:
@@ -1858,6 +1879,7 @@ def _ask_grouped_verdicts(
                                       if fragment.section_context_json},
         source_fragments_by_id=frag_by_id,
         numeric_options_by_number=numeric_options_by_number,
+        future_options_by_number=future_options_by_number,
         entity_scope_by_number=_entity_scope_by_number(
             ((item.number, item.citations) for item in items),
             frag_by_id,
@@ -2142,6 +2164,7 @@ def _apply_grounding(
     grounding_problems: Optional[dict[int, str]] = None,
     entity_scope_by_number: Optional[Mapping[int, Sequence[EntityScopeContext]]] = None,
     numeric_options_by_number: Optional[Mapping[int, tuple[NumericProofOption, ...]]] = None,
+    future_options_by_number: Optional[Mapping[int, tuple[FutureProofOption, ...]]] = None,
     review_evidence_context: Optional[ReviewEvidenceContext] = None,
     section_context_by_source_id: Optional[Mapping[str, str]] = None,
     source_fragments_by_id: Optional[Mapping[str, CollectedFragment]] = None,
@@ -2195,6 +2218,17 @@ def _apply_grounding(
                     hashlib.sha256((original_binding_raw or '').encode()).hexdigest(),
                     hashlib.sha256((raw or '').encode()).hexdigest(), len(invalid_numeric_selections))
     grounding_details: dict[int, dict[str, object]] = {}
+    original_future_raw = raw
+    raw, invalid_future_selections = restore_future_proof_selections(
+        raw, future_options_by_number or {}, candidates,
+        {number: context[0] for number, context in (diagnostic_contexts or {}).items()},
+        claim_slots_by_number or {},
+        source_fragments_by_id or {},
+    )
+    if raw != original_future_raw:
+        logger.info("미래 선택 파생 검수 입력: 원입력지문 %s, 파생지문 %s, 결속 실패 %d개",
+                    hashlib.sha256((original_future_raw or '').encode()).hexdigest(),
+                    hashlib.sha256((raw or '').encode()).hexdigest(), len(invalid_future_selections))
     constrained, problems = constrain_verdicts(
         raw, verdicts, candidates, cells_by_number=flow_cells_by_number,
         baseline_date=baseline_date, verbatim_by_number=verbatim_by_number,
@@ -2210,6 +2244,15 @@ def _apply_grounding(
         grounding_details[number] = {
             "version": GROUNDING_DETAIL_VERSION, "check_kind": "수치",
             "stage": NUMERIC_SELECTION_STAGE,
+        }
+    for number in invalid_future_selections:
+        if verdicts.get(number) not in (VERDICT_TRUE, VERDICT_UNCLEAR):
+            continue
+        constrained[number] = REVIEW_GROUNDING_REJECTED
+        problems[number] = GROUNDING_INVALID
+        grounding_details[number] = {
+            "version": GROUNDING_DETAIL_VERSION, "check_kind": "미래 계획",
+            "stage": FUTURE_SELECTION_STAGE,
         }
     # ★ 결속 요구를 «제외»한 자리는 진단 목록에 남지 않는다(제외는 탈락이 아니다).
     #   그래서 개수·규칙 버전·후보지문만 로그로 남겨 «어느 표지의 요구가 빠졌는지»를
@@ -2284,6 +2327,14 @@ def _apply_grounding(
             continue
         context = (diagnostic_contexts or {}).get(number)
         if context and context[1] == DIAGNOSTIC_KIND_BODY:
+            problem = payment_method_scope_problem(
+                text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+                section_id=context[0],
+            )
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
             # 지원쌍은 작성 후보일 뿐이다. 다른 지원쌍의 고객·OEM 관계를
             # 빌린 산문은 자기 인용에 같은 관계가 있어야 공개로 진행한다.
             problem = business_relation_scope_problem(
@@ -2684,6 +2735,7 @@ def _build_review_prompt(
     *,
     verbatim_by_number: Optional[Mapping[int, VerbatimNewsSource]] = None,
     numeric_options_by_number: Optional[Mapping[int, tuple[NumericProofOption, ...]]] = None,
+    future_options_by_number: Optional[Mapping[int, tuple[FutureProofOption, ...]]] = None,
 ) -> str:
     """문장과 근거를 «나란히» 놓는 대조 지시문 (writer/verify.py의 핵심 철학).
 
@@ -2763,6 +2815,7 @@ def _build_review_prompt(
             verbatim_source=(verbatim_by_number or {}).get(item.number),
         ))
         parts.append(numeric_proof_option_hint((numeric_options_by_number or {}).get(item.number, ())))
+        parts.append(future_proof_option_hint((future_options_by_number or {}).get(item.number, ())))
         if item.sentence.planned_claim_slot == PLAN_STATUS_SLOT:
             parts.append(PLAN_STATUS_REVIEW_GUIDE)
     parts.append(REVIEW_TRUSTED_TAIL)
@@ -2943,6 +2996,7 @@ def _ask_verdicts(
         items, frag_by_id, table_evidence, table_source,
         verbatim_by_number=verbatim_by_number,
         numeric_options_by_number=numeric_options_by_number,
+        future_options_by_number=(future_options_by_number := _prepare_review_future_options(items, frag_by_id)),
     )
     # 초기 재검수 호출자 선택은 위에서 함께 설정한다.
     # 재요청은 «최초 본문 검수»일 때만 전용 호출자를 쓴다. 후속 검수(재검수
@@ -3047,6 +3101,7 @@ def _ask_verdicts(
                     missing_items, frag_by_id, table_evidence, table_source,
                     verbatim_by_number=verbatim_by_number,
                     numeric_options_by_number=numeric_options_by_number,
+                    future_options_by_number=future_options_by_number,
                 ) + MISSING_VERDICTS_REMINDER,
                 FLAT_REVIEW_SCHEMA,
             )
@@ -3101,6 +3156,7 @@ def _ask_verdicts(
         verdicts,
         candidates,
         numeric_options_by_number=numeric_options_by_number,
+        future_options_by_number=future_options_by_number,
         entity_scope_by_number=_entity_scope_by_number(
             ((item.number, item.sentence.citations) for item in items), frag_by_id,
         ),

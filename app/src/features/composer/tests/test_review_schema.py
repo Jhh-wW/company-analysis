@@ -103,7 +103,7 @@ def _schema_sha(schema):
     (FLAT_REVIEW_SCHEMA,
      "ec40152ca2ad8aa43192180dd0583bff4a6c3f5e52042ac1f2b915bc7fd0b94d",
      "ff4e031accf5776e3f189483531e5c5270bea8c8d1ec8cd6da75008384f901ab",
-     "d5ed95c706f46a243cec736eaea60d9b2540dfb716d628150b52b5f08f1af073"),
+     "b3b082e80ec2cb420056f17683ea46962bf853dbdba0f131aec86d1e8405dbae"),
     (DIAGRAM_REVIEW_SCHEMA,
      "ba1d778829286673bd6cde6ebb5d559274c78f0202b92d6e4128891736dfc1c8",
      "43db498656efc5545d712fcc1f0c9893fe69fbd1f2dcca8a42a470c03e4bcb8a",
@@ -116,6 +116,10 @@ def test_retry_schema_hash_matches_provider_accepted_schema(schema, accepted, re
     assert relation["required"] == ["근거", "원문", "유형"]
     assert relation["additionalProperties"] is False
     previous = deepcopy(schema)
+    if schema is FLAT_REVIEW_SCHEMA:
+        # 요청별 미래 증명 선택 문자열만 제거하면 이전 정본 전체가 정확히 복원된다.
+        assert previous["$defs"]["grounding"]["properties"].pop("미래증명선택") == {"type": "string"}
+        assert _schema_sha(previous) == "d5ed95c706f46a243cec736eaea60d9b2540dfb716d628150b52b5f08f1af073"
     # 6장 현재 계획 상태에만 쓰는 선택 배열을 제거하면 직전 전체 스키마가 같다.
     # 제공자의 실제 컴파일 성공은 이 무과금 구조 대조와 별개다.
     grounding = previous["$defs"]["grounding"]

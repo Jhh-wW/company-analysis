@@ -20,7 +20,9 @@ import re
 ROLE_WORDS: Final[tuple[str, ...]] = ("기획", "제작", "개발", "제조", "생산")
 _ROLE_ALT: Final[str] = "|".join(ROLE_WORDS)
 #: 도식 칸은 «칸 하나가 하나의 주장»이라 낱말만으로 발동한다.
-ROLE_CELL_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"(" + _ROLE_ALT + r")")
+# ‘생산성 향상’처럼 성질을 나타내는 파생 명사는 생산 역할 단언이 아니다.
+# 생산·제작의 동사형과 ‘생산 및 제작’ 같은 실제 역할 나열은 그대로 검사한다.
+ROLE_CELL_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"(" + _ROLE_ALT + r")(?!성)")
 #: 산문은 그 낱말이 «서술어로 쓰였을 때»만 발동한다.
 #:
 #: ★ 명사 나열(「공연 기획, 영상 콘텐츠 제작」·「자체 개발 소비자 조사 데이터」·

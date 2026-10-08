@@ -90,6 +90,7 @@ from src.features.composer.future_plan_constants import (
     PROSE_TEMPORAL_ACTIVITY_BRIDGE_RE,
     MEANS_BRIDGE_RE,
     MODALITY_RE,
+    NOMINAL_PLAN_INTRO_RE,
     CANDIDATE_NEGATION_RE,
     CANDIDATE_SEGMENT_RE,
     CLAUSE_BOUNDARY_RE,
@@ -947,6 +948,17 @@ def future_plan_prose_problem(
     choices: list[set[int]] = []
     previous_end: dict[int, int] = {}
     for index, _sentence, marker_start, marker_end in claims:
+        # 명사형 도입도 처음에는 주장으로 센다. 자기 증명의 대상이 이 도입을
+        # 실제로 덮고 뒤의 같은 활동까지 결속한 경우만 한 증명으로 처리한다.
+        # 원문에 없는 ‘공장 증설 계획으로’ 등을 뒤의 다른 개발 계획으로 면제하지 않는다.
+        if NOMINAL_PLAN_INTRO_RE.fullmatch(_sentence[marker_start:marker_end]) and any(
+            any(start <= marker_start and end >= marker_start + len('계획')
+                for start, end in _bounded_spans(_sentence, _normalized(item.get(FUTURE_TARGET_KEY))))
+            and any(sentence_index == index and activity_start >= marker_end
+                    for sentence_index, activity_start in positions)
+            for item, positions in zip(entries, proofs)
+        ):
+            continue
         low = previous_end.get(index, 0)
         choices.append({
             item_index

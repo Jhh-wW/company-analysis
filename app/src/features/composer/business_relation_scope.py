@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from src.shared.report_evidence.partnership_scope import research_partnership_claim_problem
 from src.shared.report_evidence.business_slot_scope import business_slot_scope_problem
 from src.shared.report_evidence.business_slot_scope_constants import CUSTOMER_SLOT
+from src.features.composer.portfolio_product_scope import portfolio_product_scope_problem
 import re
 import unicodedata
 from decimal import Decimal
@@ -327,7 +328,8 @@ def business_relation_scope_problem(
 ) -> str:
     """2·7장 산문의 명시적 거래·고객 관계만 자기 인용의 절/표행과 대조한다."""
     if section_id == PORTFOLIO_SECTION:
-        return _portfolio_external_revenue_problem(text, own_sources)
+        return (_portfolio_external_revenue_problem(text, own_sources)
+                or portfolio_product_scope_problem(text, own_sources))
     if section_id not in BUSINESS_RELATION_SECTIONS or not own_sources:
         return ""
     # 원문 사실이 참이어도 회수관리만으로 고객유형 칸을 충족하지 않는다.

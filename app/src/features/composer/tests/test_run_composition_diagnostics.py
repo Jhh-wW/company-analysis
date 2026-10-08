@@ -1,10 +1,12 @@
 """실제 작성·검수·요약·최종 게이트를 지나는 요청 로컬 진단 배선."""
 
 import json
+from uuid import UUID
 
 import pytest
 
 from src.features.composer import pipeline
+from src.features.composer import future_proof_selection
 from src.features.composer.tests.test_pipeline import (
     _FakeReviewer,
     _FakeWriter,
@@ -18,6 +20,9 @@ from src.shared.report_quality.composition_diagnostics import observed_compositi
 def test_real_run_preserves_output_calls_and_records_across_final_gate(
     monkeypatch: pytest.MonkeyPatch, stop_at_gate: bool,
 ) -> None:
+    # 두 실행은 같은 요청 조건으로 비교하며 요청별 선택 ID만 고정한다.
+    monkeypatch.setattr(future_proof_selection, "uuid4", lambda: UUID(int=1))
+
     def run(writer, reviewer, sink):
         return pipeline.run_v2(
             "가나다전자", _raw_fragments(), None,

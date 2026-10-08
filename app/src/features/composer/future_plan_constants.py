@@ -324,6 +324,8 @@ FUTURE_TEMPORAL_RE: Final[re.Pattern[str]] = re.compile(
     r"향후|앞으로|추후|중장기적으로|장기적으로|내년|차년도"
     r"|[0-9]{4}\s*년\s*(?:까지|부터)"
 )
+# 단순 명사형 도입은 뒤의 미래 서술과 같은 주장이다. ‘할 계획’은 별도 서술이다.
+NOMINAL_PLAN_INTRO_RE: Final[re.Pattern[str]] = re.compile(r"계획으로\Z")
 #: 본문 대상과 활동 사이에는 기존 미래 시점과 닫힌 기간 조사만 허용한다.
 #: 전체 다리를 소비해야 하므로 다른 목적어·조건·활동은 시점으로 지워지지 않는다.
 PROSE_TEMPORAL_ACTIVITY_BRIDGE_RE: Final[re.Pattern[str]] = re.compile(

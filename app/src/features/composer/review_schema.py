@@ -46,6 +46,7 @@ from src.features.composer.grounding_constants import (
 )
 from src.features.composer.numeric_quote_refs import NUMERIC_QUOTE_REF_KEY
 from src.features.composer.numeric_proof_selection_constants import NUMERIC_SELECTION_KEY
+from src.features.composer.future_proof_selection_constants import FUTURE_SELECTION_KEY
 from src.features.composer.prompt_metadata import PromptMetadata
 from src.features.composer.role_binding_constants import RELATION_KEY
 from src.features.composer.plan_status_constants import PLAN_STATUS_FIELDS, PLAN_STATUS_KEY
@@ -146,6 +147,7 @@ def _grounding_schema(*, numeric_selection: bool = False) -> dict[str, Any]:
     if numeric_selection:
         # 본문만 지원한다. 실제 선택 자격·번호·원문 결속은 요청 로컬 코드가 검사한다.
         properties[NUMERIC_SELECTION_KEY] = {"type": "string"}
+        properties[FUTURE_SELECTION_KEY] = {"type": "string"}
     return _object(properties, required=())
 
 
