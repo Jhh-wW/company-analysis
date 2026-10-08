@@ -84,14 +84,16 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "17aee464d8dc8ba15054df742402e25113be1ec63aee7f5b500ac628dd43453d"),
-    (_golden_case, True, "9dfd22e500ec717ae22aa321f402aa917b493d4c347b5fcca10d9c327d96b785"),
+    (_golden_case, False, "695644e17447fec321eff7088bb4bb6e55284d4e988147be313c4e4d9df9bfbb"),
+    (_golden_case, True, "1d9d53e4eb53aedcdf731f33f1a5f5ae18f21e274830a529511bf7971e1beb7a"),
     (_boundary_case, False, "1ffed30d262ee3861107f875ea55e6b217a54380ac5e6de6130150b3934e0883"),
     (_boundary_case, True, "28a27b5da2136896b1d813b4eea12e4399953faf24d8c4aed6d881ac54183097"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
 ):
+    # 6장 주어 범위 안내 64자만 제거하면 3728의 네 지문이 복원된다.
+    # paid/2dc-future-subject-guide-baseline-private.json: 경계 두 지문·검수 계약 불변.
     # 3·5·7장 안내 342자만 HEAD로 역치환해 기존 네 지문을 복원했다.
     # paid/1d65-review-guide-baseline-private.json: 원문·번호·schema·고정 접두부 불변.
     # 6장 범위 안내 162자만 역치환하면 직전 지문이 복원된다. 고정 접두부는 같다.

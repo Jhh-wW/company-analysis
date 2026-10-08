@@ -9,7 +9,9 @@
    OPTIONAL_CANDIDATE_SLOTS_BY_SECTION)의 대표를 같은 예산 안에서 담는다. 고득점
    반복 근거가 2단계에서 원문이 뒷받침하는 선택 사실을 밀어내지 않게 한다. 선택
    칸은 필수 커버리지로 세지 않으며 예산을 늘리지도 않는다.
-2) 남는 예산 — 아직 못 담은 조각을 점수(score_millis) 내림차순으로 채운다.
+2) 남는 예산 — 취소·변경 문맥을 먼저 보존하고 최근 문맥·명시된 5장 사업
+   관계 후보를 같은 그룹에 담는다. 그룹 안에서는 점수, 동점인 직접 관계,
+   공시일 순으로 채운다. 관계가 없는 후보의 기존 순서와 예산은 유지한다.
 
 ⚠️ 설계상 한계 — 슬롯 대표 조각들의 합이 그 자체로 예산을 넘을 만큼 크면
 (예: 슬롯마다 몇천자짜리 대표 조각), 이 구현은 «예산을 어겨서라도 대표를
@@ -46,6 +48,8 @@ from src.features.chapter_evidence.constants import (
     AUDITOR_JUDGED_SOURCE_KINDS,
     AUDITOR_STRUCTURE_GATED_SOURCE_KINDS,
     CHARS_PER_ESTIMATED_TOKEN,
+    CHALLENGE_DIRECT_RELATION_REASONS_BY_SLOT,
+    CHALLENGE_DIRECT_RELATION_SOURCE_KINDS,
     DEFAULT_MAX_CHARS_PER_SECTION,
     DEFAULT_MAX_ESTIMATED_TOKENS_PER_SECTION,
     SELECTION_CHANGE_CONTEXT,
@@ -102,14 +106,17 @@ def _published_date_priority(published_on: str) -> int:
 def _selection_priority(
     fragment: EvidenceFragment,
     published_priorities: dict[str, int],
-) -> tuple[bool, int, bool, int, int, str]:
+    direct_relation_ids: frozenset[str] = frozenset(),
+) -> tuple[bool, int, bool, int, bool, int, str]:
     """뒤쪽 취소·변경을 대표/추가 후보 단계 모두에서 보존한다."""
     is_change = SELECTION_CHANGE_CONTEXT in fragment.reason_codes
     start = fragment.location.partition("-")[0]
     source_order = int(start) if is_change and start.isdecimal() else 0
+    is_relation = not is_change and fragment.fragment_id in direct_relation_ids
     return (not is_change, -source_order,
-            SELECTION_RECENT_CONTEXT not in fragment.reason_codes,
+            not (SELECTION_RECENT_CONTEXT in fragment.reason_codes or is_relation),
             -fragment.score_millis,
+            not is_relation,
             published_priorities.get(fragment.document_id, 0),
             fragment.fragment_id)
 
@@ -354,7 +361,27 @@ def select_section_fragments(
             )
         )
 
+    # 중복 통합 전의 같은 칸·사유 결속만 사용한다. 합집합된 사유가 다른 칸의
+    # 우선순위까지 빌리지 않으며, 출처·원문 결속을 통과한 DART 후보만 대상이다.
+    relation_slots_by_range: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    for fragment in eligible:
+        document = own_documents_by_id[fragment.document_id]
+        if document.source_kind not in CHALLENGE_DIRECT_RELATION_SOURCE_KINDS:
+            continue
+        for slot_id in fragment.covered_slot_ids:
+            allowed_reasons = CHALLENGE_DIRECT_RELATION_REASONS_BY_SLOT.get(slot_id, ())
+            if allowed_reasons and any(reason in allowed_reasons for reason in fragment.reason_codes):
+                relation_slots_by_range[(fragment.document_id, fragment.location, fragment.text_sha256)].add(slot_id)
     deduped, duplicate_count = _dedupe_by_evidence_range(eligible)
+    direct_relation_ids_by_slot: dict[str, frozenset[str]] = {
+        slot_id: frozenset(
+            fragment.fragment_id for fragment in deduped
+            if slot_id in relation_slots_by_range.get(
+                (fragment.document_id, fragment.location, fragment.text_sha256), (),
+            )
+        ) for slot_id in CHALLENGE_DIRECT_RELATION_REASONS_BY_SLOT
+    }
+    direct_relation_ids = frozenset().union(*direct_relation_ids_by_slot.values())
 
     by_slot: dict[str, list[EvidenceFragment]] = defaultdict(list)
     for fragment in deduped:
@@ -374,6 +401,8 @@ def select_section_fragments(
             slot_id == "identity:business_definition"
             and fragment.fragment_id not in explicit_business_ids,
             -fragment.score_millis,
+            SELECTION_CHANGE_CONTEXT in fragment.reason_codes
+            or fragment.fragment_id not in direct_relation_ids_by_slot.get(slot_id, ()),
             published_priorities.get(fragment.document_id, 0),
             fragment.fragment_id,
         ))
@@ -447,7 +476,7 @@ def select_section_fragments(
             if fragment.fragment_id not in included_ids
             and fragment.fragment_id not in excluded_ids
         ),
-        key=lambda fragment: _selection_priority(fragment, published_priorities),
+        key=lambda fragment: _selection_priority(fragment, published_priorities, direct_relation_ids),
     )
     for fragment in remaining:
         cost_chars = len(fragment.text)
