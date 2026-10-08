@@ -28,6 +28,7 @@ from src.features.composer.constants import (
     NOTICE_AI_UNAVAILABLE,
     NOTICE_EVIDENCE_NONE,
     NOTICE_EVIDENCE_NOT_COMPOSED,
+    SHORTFALL_AI_DEGRADED,
     SECTION_IDS,
     SUMMARY_NOTICE_EMPTY,
 )
@@ -67,6 +68,7 @@ from src.features.storage import reports as report_storage
 from src.shared.report_evidence.constants import ReleaseMode
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_quality.constants import VERIFIED_PROSE_CLAIM_TYPE
+from src.shared.report_quality.composition_diagnostic_constants import READ_GLOBAL_FAILURE
 from src.shared.report_quality.models import PublicationPolicy
 
 
@@ -554,6 +556,84 @@ def test_FULL_품질_하한_미달은_전환이_허용되면_검증_본문으로
     assert any("공식 자료에서 확인했다" in text for text in body), "검증 본문이 보존돼야 한다"
     # 작가 9회 뒤 유료 보충을 부르지 않는다 — 보충으로도 하한을 못 넘는 얇은 후보다.
     assert len(writer.prompts) == 9
+
+
+def test_FULL_최초검수_공급자실패는_후속품질강등이_원인과호출기록을_덮지않는다(monkeypatch) -> None:
+    from src.core.provider_gateway.gateway import ProviderCallFailed
+    from src.core.provider_gateway.types import (
+        BillingDisposition, ProviderObservation, TransportState,
+    )
+    from src.features.composer.tests.test_pipeline import (
+        _strict_fragments, _strict_packet_set,
+    )
+
+    # 전송 결과의 불확실한 비용 관측은 공급자 소유다. 보고서 폴백이
+    # 이 관측을 성공·사용량 0으로 바꾸거나 실패한 호출을 재시도하면 안 된다.
+    observation = ProviderObservation(
+        transport_state=TransportState.TRANSPORT_AMBIGUOUS,
+        billing_disposition=BillingDisposition.CONSERVATIVE_LIABILITY,
+        known_cost_krw=0, liability_krw=1,
+        status_code=None, error_type="APITimeoutError", request_id="",
+    )
+    provider_error = ProviderCallFailed(observation)
+    review_prompts: list[str] = []
+
+    def unavailable_review(prompt: str) -> str:
+        review_prompts.append(prompt)
+        raise AskFatalError(provider_error)
+
+    diagnostics: list[dict] = []
+    final_bodies: list[ComposedReport] = []
+    original_finish = composer_pipeline._finish_evidence_available
+
+    def record_finish(company_name, verified, *args, **kwargs):
+        final_bodies.append(verified)
+        return original_finish(company_name, verified, *args, **kwargs)
+
+    monkeypatch.setattr(composer_pipeline, "_finish_evidence_available", record_finish)
+    writer = _StrictThinWriter()
+    performance_table, _, filing_meta = make_numeric_performance_evidence(
+        fragment_number=9
+    )
+    output = run_v2(
+        "가나다전자", _strict_fragments(), performance_table,
+        writer_ask=writer, reviewer_ask=unavailable_review,
+        release_mode=ReleaseMode.FULL,
+        section_evidence_packets=_strict_packet_set(),
+        company_id="00123456", build_identity_sha256="b" * 64,
+        filing_meta=filing_meta,
+        evidence_available_fallback=True,
+        composition_diagnostics_sink=diagnostics,
+    )
+
+    _assert_evidence_available_shape(output)
+    assert output.degraded_reason == DEGRADED_REASON_PROVIDER_UNAVAILABLE
+    assert output.degraded_cause_kind == "ProviderCallFailed"
+    assert output.ai_stages_skipped == ("compose_verify",)
+    assert output.downgraded_from_release_mode == ReleaseMode.FULL.value
+    assert output.generation_evidence is None
+    assert SHORTFALL_AI_DEGRADED in output.report.shortfall_reasons
+    assert len(writer.prompts) == 9 and len(review_prompts) == 1
+    assert provider_error.observation is observation
+    assert observation.billing_disposition is BillingDisposition.CONSERVATIVE_LIABILITY
+    assert observation.liability_krw == 1
+    mode = next(item for item in diagnostics if item.get("step") == "8_출고모드_적용")
+    assert mode["검수호출"] == {"bundled": 1, "bundled_retry": 0}
+    assert mode["장부사용"] is True
+    fatal_attempts = [item for item in diagnostics if item.get("판독") == READ_GLOBAL_FAILURE]
+    assert len(fatal_attempts) == 1
+    assert fatal_attempts[0]["입력문자"] == len(review_prompts[0])
+    assert fatal_attempts[0]["요청번호수"] > 0
+    assert fatal_attempts[0]["응답문자"] == 0
+    assert fatal_attempts[0]["원인종류"] == output.degraded_cause_kind
+    # 품질 관측은 계속 남으며, 미검수 초안은 본문·요약·도식 어느 곳에도 없다.
+    assert output.quality_observation is not None
+    assert output.quality_observation.release_allowed is False
+    for section in output.report.sections:
+        assert not any("공식 자료에서 확인했다" in text for text, _ in section.prose_lines)
+    assert len(final_bodies) == 1
+    assert all(not section.flow_rows for section in final_bodies[0].sections)
+    assert not any("공식 자료에서 확인했다" in item.text for item in output.report.summary_items)
 
 
 # ══════════════════════════════════════════════════════════

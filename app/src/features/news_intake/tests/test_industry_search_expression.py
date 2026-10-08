@@ -53,8 +53,8 @@ def test_실제전송질의와_원앵커의_위치해시는_별도로_관측한�
     assert len(queries) == len(ordinary)
     rows = [row for row in observed[0][1]["queries"] if row["query_derivation"] is not None]
     assert [row["attempt"]["query"] for row in rows] == [
-        "정밀부품 제조 국내 문제", "정밀부품 제조 세계 문제",
-        "정밀부품 제조 한국 시장 변화", "정밀부품 제조 글로벌 시장 변화",
+        "정밀부품 제조 산업 과제", "정밀부품 제조 세계 산업 동향",
+        "정밀부품 제조 국내 업계 문제", "정밀부품 제조 글로벌 업계 위기",
     ]
     for row in rows:
         derivation = row["query_derivation"]

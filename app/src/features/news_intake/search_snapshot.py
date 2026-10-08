@@ -136,10 +136,11 @@ def search_plan(company: NewsCompanyContext, as_of: dt.date) -> tuple[tuple[str,
             anchor = company.business_anchors[group % len(company.business_anchors)]
             region_index = index % region_count
             _, topic = ic.INDUSTRY_QUERY_REGIONS[region_index]
-            region = ic.INDUSTRY_QUERY_REGION_EXPRESSIONS[group % len(ic.INDUSTRY_QUERY_REGION_EXPRESSIONS)][region_index]
-            theme = ic.INDUSTRY_QUERY_THEMES[group % len(ic.INDUSTRY_QUERY_THEMES)]
+            region, theme = ic.INDUSTRY_QUERY_EXPRESSIONS[index % len(ic.INDUSTRY_QUERY_EXPRESSIONS)]
             expression = industry_search_expression(anchor.business_item)
-            industry_queries.append((f"{expression} {region} {theme}", "sim",
+            # 첫 질의의 국내 topic은 탐색 배분이다. 지역 없는 검색어로 지리를 승인하지 않는다.
+            query = " ".join(part for part in (expression, region, theme) if part)
+            industry_queries.append((query, "sim",
                                      f"industry_{topic}:{anchor.anchor_id}", recent_months))
         # 회사 검색 두 개를 유지하고 기존 뒤쪽 탐색을 대체한다. 총 호출은 늘리지 않는다.
         industry_queries = list(dict.fromkeys(industry_queries))

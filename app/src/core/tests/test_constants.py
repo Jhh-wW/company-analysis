@@ -14,8 +14,12 @@ def test_비용과판정_안전상수가_승인된값이다():
     from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC
 
     하트비트 = 30.0  # generation_singleflight.HEARTBEAT_INTERVAL_SEC
-    천장초 = PAID_PHASE_LEASE_SEC - (ANTHROPIC_TIMEOUT_SEC + 2 * 하트비트)
-    assert C.MAX_AI_CALLS_PER_REQUEST * ANTHROPIC_TIMEOUT_SEC <= 천장초, (
+    assert ANTHROPIC_TIMEOUT_SEC == C.PROVIDER_BASE_TIMEOUT_SEC == 180.0
+    assert C.INITIAL_REVIEW_TIMEOUT_SEC == 600.0
+    assert C.INITIAL_REVIEW_MAX_CALLS == 2
+    assert C.REPORT_PROVIDER_WAIT_MAX_SEC == 4440.0
+    천장초 = PAID_PHASE_LEASE_SEC - (C.REPORT_PROVIDER_SINGLE_TIMEOUT_MAX_SEC + 2 * 하트비트)
+    assert C.REPORT_PROVIDER_WAIT_MAX_SEC <= 천장초, (
         "★ 시간 규약을 넘었다 — generation_singleflight 가 import 부터 실패한다"
     )
 

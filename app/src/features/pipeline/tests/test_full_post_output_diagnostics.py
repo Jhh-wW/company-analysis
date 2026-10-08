@@ -234,7 +234,10 @@ def test_FULL_생성후_manifest_결속형식오류는_자료부족이_아닌_�
         # 1차 검수 재요청 호출자는 «보낼 때» 푸는 callable 상한을 받는다.
         max_tokens,
         reserved_calls: int = 0,
+        timeout_sec: float | None = None,
     ):
+        assert timeout_sec in (None, real.INITIAL_REVIEW_TIMEOUT_SEC)
+        assert timeout_sec is None or stage == "v2_review"
         assert (max_tokens() if callable(max_tokens) else max_tokens) > 0
         if stage == "v2_compose":
             return writer
@@ -364,7 +367,10 @@ def test_보충_대상_장이_후보를_전부_잃어도_내부계약오류로_�
         # 1차 검수 재요청 호출자는 «보낼 때» 푸는 callable 상한을 받는다.
         max_tokens,
         reserved_calls: int = 0,
+        timeout_sec: float | None = None,
     ):
+        assert timeout_sec in (None, real.INITIAL_REVIEW_TIMEOUT_SEC)
+        assert timeout_sec is None or stage == "v2_review"
         assert (max_tokens() if callable(max_tokens) else max_tokens) > 0
         if stage == "v2_compose":
             return writer

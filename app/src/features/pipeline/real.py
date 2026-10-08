@@ -77,6 +77,7 @@ from src.core.constants import (
     EMPTY_REASON_NO_MATERIAL,
     HOMEPAGE_GATE_CELLS,
     MAX_AI_CALLS_PER_REQUEST,
+    INITIAL_REVIEW_TIMEOUT_SEC,
     SUBSTANCE_FAILED_REASON,
     TABLE_DUMP_REASON,
     VOTE_ROUNDS,
@@ -5918,13 +5919,16 @@ def _v2_ask_via_provider(
     stage: str,
     max_tokens: int | Callable[[], int],
     reserved_calls: int = 0,
+    timeout_sec: float | None = None,
 ):
     """composer의 AskFn(프롬프트→응답 문자열)을 기존 provider 포트로 감싼다.
 
     writer 경로와 같은 계량 client 경계를 지난다 — 비용 계량·예산 가드·요청별
     모델 고정이 전부 그 경계에서 적용된다. 프롬프트에 response_schema가 있으면
     구조화 출력(output_config)으로 전달하고, 정규화·계측은 계량 경계에 맡긴다.
-    표시 없는 문자열은 기존 호출 형태를 유지한다.
+    표시 없는 문자열은 기존 호출 형태를 유지한다. ``timeout_sec``는 최초 검수
+    두 호출자만 지정한다. None이면 기존 client의 180초 설정을 그대로 사용한다.
+    SDK 호출 인자로 넘기므로 계량 client를 복제하거나 원장 경계를 우회하지 않는다.
 
     ★ ``max_tokens`` 가 callable이면 «호출 시점에» 풀어 쓴다 — 1차 검수 재요청의
       상한은 첫 답이 실제로 얼마나 길었는지에 달려 있어 클로저를 만드는 시점에는
@@ -5980,6 +5984,8 @@ def _v2_ask_via_provider(
         )
         try:
             extra: dict[str, Any] = {}
+            if timeout_sec is not None:
+                extra["timeout"] = timeout_sec
             response_schema = getattr(prompt, "response_schema", None)
             if response_schema is not None:
                 if not isinstance(response_schema, Mapping):
@@ -6917,6 +6923,7 @@ def _run_v2_composer(
     initial_reviewer_ask = _v2_ask_via_provider(
         engine, client, stage="v2_review",
         max_tokens=V2_INITIAL_REVIEWER_MAX_TOKENS,
+        timeout_sec=INITIAL_REVIEW_TIMEOUT_SEC,
     )
     # 최초 본문 검수의 «파싱 재요청» 전용 — 예약은 상한으로 잡히므로 첫 답이
     # 실제로 쓴 출력에 맞춰 상한을 줄여 그 한 번의 예약액을 작게 만든다.
@@ -6926,6 +6933,7 @@ def _run_v2_composer(
     initial_retry_reviewer_ask = _v2_ask_via_provider(
         engine, client, stage="v2_review",
         max_tokens=lambda: _initial_review_retry_max_tokens(engine),
+        timeout_sec=INITIAL_REVIEW_TIMEOUT_SEC,
     )
     # 선택적 다듬기 전용 — «내 뒤에 반드시 와야 하는 호출»을 남기고 멈춘다.
     #   재작성: 재검수 1 + 필수 후속 2 를 남긴다 (재검수를 못 할 재작성은 안 한다).

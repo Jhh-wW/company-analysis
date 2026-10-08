@@ -152,7 +152,7 @@ def note_optional_call_aborted(
 def note_optional_call_global_failure(
     observe: Optional[dict], *, cause_kind: str,
 ) -> None:
-    """두 번째 호출이 요청 «전역» 장애로 멈췄음을 닫힌 판독 코드와 원인 «종류»로 적는다.
+    """검수 호출이 요청 «전역» 장애로 멈췄음을 닫힌 판독 코드와 원인 «종류»로 적는다.
 
     처분은 부르는 쪽이 정한다(예외 재전파). 여기서는 사실만 남긴다 — ``cause_kind`` 는
     원인 예외의 클래스 이름이고, 오류 문구·응답은 담지 않는다(2026-09-24 결정 3).

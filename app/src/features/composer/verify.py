@@ -1699,7 +1699,18 @@ def _ask_grouped_verdicts(
     first_prompt = (
         _packet_review_prompt(prompt) if initial_ask is not None else prompt
     )
-    raw = _safe_ask(reviewer, first_prompt)
+    try:
+        raw = _safe_ask(reviewer, first_prompt)
+    except AskFatalError as error:
+        # 미응답은 빈 응답의 파싱 실패와 다르다. 최초 실패도 요청 크기와
+        # 후보 수만 기록하고, 같은 예외를 그대로 바깥 폴백에 전달한다.
+        observe = _observe_attempt(1, first_prompt, None)
+        note_optional_call_global_failure(
+            observe, cause_kind=type(error.cause).__name__,
+        )
+        if observe is not None:
+            protocol_diagnostics.append(observe)
+        raise
     observe = _observe_attempt(1, first_prompt, raw)
     verdicts = _parse_grouped_verdicts(
         raw, owners, evidence_ids_by_number, observe=observe,

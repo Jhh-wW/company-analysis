@@ -1004,6 +1004,41 @@ def test_후속의_AskFatalError는_삼키지_않는다():
     assert raised.value is error
 
 
+@pytest.mark.parametrize("degradable", (False, True))
+def test_최초_fatal은_미응답관측만남기고_같은예외를_재전파한다(packet_schema, degradable):
+    private_message = "시험 전용 오류 원문을 관측에 싣지 않는다"
+    error = AskFatalError(RuntimeError(private_message), request_budget=degradable)
+    initial = _Caller("initial", lambda prompt: error)
+    retry = _Caller("retry", lambda prompt: _rows(prompt))
+    sinks = SimpleNamespace(diagnostics=[], protocol=[], problems={})
+    with pytest.raises(AskFatalError) as raised:
+        _ask_grouped(ITEMS, FRAGMENTS, initial=initial, retry=retry, sinks=sinks)
+    assert raised.value is error
+    assert initial.count == 1 and retry.count == 0
+    assert len(sinks.protocol) == 1
+    observe = sinks.protocol[0]
+    assert observe["경로"] == PATH_PACKET and observe["시도"] == 1
+    assert observe["판독"] == READ_GLOBAL_FAILURE
+    assert observe["원인종류"] == "RuntimeError"
+    assert observe["입력문자"] == len(initial.prompts[0])
+    assert observe["요청번호수"] == observe["미응답번호수"] == TOTAL
+    assert observe["응답문자"] == observe["응답행수"] == observe["유효행수"] == 0
+    sanitized = observed_composition_steps(sinks.protocol)
+    assert sanitized == tuple(sinks.protocol)
+    assert private_message not in json.dumps(sanitized, ensure_ascii=False)
+    assert WORDS[0] not in json.dumps(sanitized, ensure_ascii=False)
+
+
+def test_실제빈응답은_최초_fatal미응답과_다른_판독으로_남는다(packet_schema):
+    initial = _Caller("initial", lambda prompt: "")
+    run = _ask_grouped(ITEMS, FRAGMENTS, initial=initial, available=lambda: False)
+    assert run.result is None and initial.count == 1
+    assert len(run.protocol) == 1
+    observe = run.protocol[0]
+    assert observe["판독"] == READ_EMPTY
+    assert observe["응답문자"] == 0 and "원인종류" not in observe
+
+
 @pytest.mark.parametrize("separate_retry", (True, False))
 def test_재요청_호출자가_없으면_최초_호출자로_나가고_ask는_쓰지_않는다(separate_retry):
     calls = []

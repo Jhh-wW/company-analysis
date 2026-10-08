@@ -19,9 +19,11 @@ from dataclasses import InitVar, dataclass, field
 from typing import Any, Final
 
 from src.core import clock
-from src.core.constants import MAX_AI_CALLS_PER_REQUEST
+from src.core.constants import (
+    REPORT_PROVIDER_SINGLE_TIMEOUT_MAX_SEC,
+    REPORT_PROVIDER_WAIT_MAX_SEC,
+)
 from src.features.budget.constants import PAID_PHASE_LEASE_SEC, SPEND_PHASE_PIPELINE
-from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC
 from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
 from src.features.report_delivery import artifact as delivery_artifact
 from src.features.report_delivery import authority as authority_store
@@ -60,15 +62,15 @@ PREPARATION_FAILED_CODE: Final[str] = "preparation_failed"
 # ``MAX_RESPONSE_SEC=300``은 진행 화면의 안내 기준이지 작업 강제 종료 시간이
 # 아니다. 실제 유료 경계의 근거 있는 상한은 다음 두 기존 계약이다.
 #
-# * 한 요청의 provider 호출은 최대 15회
-# * 한 호출의 SDK timeout은 180초
+# * 한 요청의 provider 호출은 최대 20회
+# * 최초 검수 두 자리만 600초, 나머지는 180초
 #
-# 최악의 provider 대기 45분에 DART·공식 웹 수집과 로컬 검증 여유 15분을 더한
-# 기존 paid-phase lease 1시간을 single-flight owner의 절대 상한으로도 쓴다.
+# 단계별 provider 대기 합과 마지막 호출 여유를 담은 paid-phase lease를
+# single-flight owner의 절대 상한으로도 쓴다.
 # 이 값 뒤에는 heartbeat를 더 연장하지 않아 멈춘 thread가 영구 owner가 될 수 없다.
 OWNER_MAX_AGE: Final[dt.timedelta] = dt.timedelta(seconds=PAID_PHASE_LEASE_SEC)
 PROVIDER_IN_FLIGHT_GRACE: Final[dt.timedelta] = dt.timedelta(
-    seconds=ANTHROPIC_TIMEOUT_SEC + (2 * HEARTBEAT_INTERVAL_SEC)
+    seconds=REPORT_PROVIDER_SINGLE_TIMEOUT_MAX_SEC + (2 * HEARTBEAT_INTERVAL_SEC)
 )
 OWNER_PROVIDER_ADMISSION_AGE: Final[dt.timedelta] = (
     OWNER_MAX_AGE - PROVIDER_IN_FLIGHT_GRACE
@@ -180,7 +182,7 @@ def _quarantine_completion_receipt(
         conn.commit()
 
 
-if MAX_AI_CALLS_PER_REQUEST * ANTHROPIC_TIMEOUT_SEC > (
+if REPORT_PROVIDER_WAIT_MAX_SEC > (
     OWNER_PROVIDER_ADMISSION_AGE.total_seconds()
 ):  # pragma: no cover - 서로 다른 정본 상수가 어긋나면 import부터 실패한다.
     raise RuntimeError("provider 최악 대기보다 single-flight owner 상한이 짧습니다")

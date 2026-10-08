@@ -2,18 +2,30 @@
 
 import re
 
-INDUSTRY_PROMPT_VERSION = "industry-context-v2"
+INDUSTRY_PROMPT_VERSION = "industry-context-v3"
 INDUSTRY_TOPIC_PREFIX = "industry_"
 INDUSTRY_QUERY_COUNT = 4
 INDUSTRY_COMPANY_QUERY_COUNT = 2
 INDUSTRY_BODY_DIVISOR = 6
-# 업종에 특정 문제를 미리 부여하지 않고 현재 문제·시장 변화의 본문을 찾는다.
-INDUSTRY_QUERY_THEMES = ("문제", "시장 변화")
+# 산업·업계의 문제와 동향을 탐색하며 검색어가 실제 문제를 증명하지는 않는다.
+# 첫 질의는 지역을 지정하지 않는다. 국내 탐색 몫의 후보도 본문 지역 검수가 필요하다.
+INDUSTRY_QUERY_EXPRESSIONS = (
+    ("", "산업 과제"),
+    ("세계", "산업 동향"),
+    ("국내", "업계 문제"),
+    ("글로벌", "업계 위기"),
+)
+INDUSTRY_QUERY_THEMES = tuple(theme for _, theme in INDUSTRY_QUERY_EXPRESSIONS)
+INDUSTRY_BUSINESS_ACTIVITY_GUIDE = (
+    "같은 제품명이 나와도 제조·공급업과 이를 사용하는 운송·시공·운영업을 구분하세요. "
+    "문제를 겪는 주체의 사업 활동을 공식 앵커와 대조하세요. "
+    "고객의 사용상 문제나 개별 사고를 제품 산업 전체의 문제로 확대하지 마세요. "
+    "공식 앵커와 같은 사업 활동에 미치는 영향이 기사에 명시되면 그 범위에서 판정하세요. "
+)
 # 원문 문자를 삭제하거나 업종 이름을 번역하지 않고 활동 접미어의 경계만 나눈다.
 INDUSTRY_SEARCH_ACTIVITY_RE = re.compile(
     r"^(?P<object>[가-힣A-Za-z0-9]{2,})(?P<activity>공사|서비스|제조|판매|유통)$"
 )
-INDUSTRY_QUERY_REGION_EXPRESSIONS = (("국내", "세계"), ("한국", "글로벌"))
 # 명시 정보성 제목은 삭제하지 않는다. 제목에 문제 사건이 있으면 이 제한을 적용하지 않는다.
 INDUSTRY_SEARCH_INFORMATION_TITLE_RE = re.compile(
     r"^\s*(?:\[\s*who\s+is\s*\?\s*\]|\[?관련주\]?\s*(?:목록|모음|정리|총정리))|"

@@ -301,12 +301,21 @@ MAX_RETRY_INPUT: Final[int] = 3
 #:
 #: ⚠️ 상한은 «시간 규약»의 천장을 넘을 수 없다 — 넘기면 `generation_singleflight.py`
 #:   가 import 부터 실패한다:
-#:     MAX_AI_CALLS_PER_REQUEST × ANTHROPIC_TIMEOUT_SEC ≤ OWNER_PROVIDER_ADMISSION_AGE
-#:     = PAID_PHASE_LEASE_SEC − (ANTHROPIC_TIMEOUT_SEC + 2×HEARTBEAT_INTERVAL_SEC)
-#:     = 3900 − 240 = 3660초  →  20×180=3600 ✅ / 21×180=3780 ❌
-#:   그래서 상한과 함께 lease(`REPORT_GENERATION_EXECUTION_MAX_SEC`)를 3600→3900으로
-#:   올렸다. 더 필요하면 다시 lease 부터 늘려야 하며, 그건 사람이 결정한다.
+#:     REPORT_PROVIDER_WAIT_MAX_SEC ≤ OWNER_PROVIDER_ADMISSION_AGE
+#:     = PAID_PHASE_LEASE_SEC − (REPORT_PROVIDER_SINGLE_TIMEOUT_MAX_SEC + heartbeat 2회)
+#:   호출 수와 최초 검수의 긴 두 자리를 함께 계산한다. 시간 변경은 lease도 같이 바꾼다.
 MAX_AI_CALLS_PER_REQUEST: Final[int] = 20
+
+#: 최초 본문 검수와 형식 재요청 또는 누락 후속만 긴 대기를 허용한다.
+#: grouped/flat의 재요청 예산은 공유되며 FULL 사전 부족 전환은 유료 호출 전이다.
+PROVIDER_BASE_TIMEOUT_SEC: Final[float] = 180.0
+INITIAL_REVIEW_TIMEOUT_SEC: Final[float] = 600.0
+INITIAL_REVIEW_MAX_CALLS: Final[int] = 2
+REPORT_PROVIDER_SINGLE_TIMEOUT_MAX_SEC: Final[float] = INITIAL_REVIEW_TIMEOUT_SEC
+REPORT_PROVIDER_WAIT_MAX_SEC: Final[float] = (
+    MAX_AI_CALLS_PER_REQUEST * PROVIDER_BASE_TIMEOUT_SEC
+    + INITIAL_REVIEW_MAX_CALLS * (INITIAL_REVIEW_TIMEOUT_SEC - PROVIDER_BASE_TIMEOUT_SEC)
+)
 
 # ── 응답 시간 ────────────────────────────────────────────
 
@@ -319,9 +328,11 @@ MAX_RESPONSE_SEC: Final[int] = 300
 #: 삼아야 한다. 각 feature에 ``3600``을 따로 쓰면 한쪽만 바뀐 배포에서 작업은
 #: 아직 실행 중인데 접근권한이 먼저 만료될 수 있으므로 중립 core가 정본을 가진다.
 #:
-#: ★ 3600 → 3900 (2026-09-17). AI 호출 상한 20회 × 최악 180초 = 3600초가 유료 phase
-#:   안에 들어가려면 lease가 그보다 240초(마지막 호출 + heartbeat 2회) 길어야 한다.
-REPORT_GENERATION_EXECUTION_MAX_SEC: Final[int] = 3900
+#: 최초 검수 두 자리만 600초: 20×180 + 2×(600−180) = 4440초.
+#: 마지막 호출 600초와 heartbeat 두 번 60초까지 최소 5100초가 필요하다.
+#: 수집·로컬 검증 여유를 더해 5400초를 쓰며 heartbeat는 이 절대 상한을 연장하지 않는다.
+#: SDK 시간은 연결/읽기 대기 설정이다. 별도 전체 wall-time 중단기로 해석하지 않는다.
+REPORT_GENERATION_EXECUTION_MAX_SEC: Final[int] = 5400
 
 #: 저장된 보고서를 돌려줄 때 상한(초)
 MAX_CACHE_RESPONSE_SEC: Final[int] = 5

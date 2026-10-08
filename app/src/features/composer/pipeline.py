@@ -2746,8 +2746,14 @@ def run_v2(
                 evidence_availability
                 or EvidenceAvailability(COLLECTION_STATE_PARTIAL)
             ),
-            degraded_reason=reason,
-            degraded_cause_kind="",
+            # 공급자 장애 뒤 안내 본문이 품질 하한에 걸려도 최초 장애를
+            # 품질 부족으로 덮지 않는다. 품질 중단 진단은 별도로 보존한다.
+            degraded_reason=(
+                _degraded_reason_of(ai_failure) if ai_failure is not None else reason
+            ),
+            degraded_cause_kind=(
+                type(ai_failure.cause).__name__ if ai_failure is not None else ""
+            ),
             ai_stages_skipped=(*ai_stages_skipped, *stages),
             downgraded_from=release_mode.value,
             tail_already_applied=True,

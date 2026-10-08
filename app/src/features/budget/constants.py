@@ -156,9 +156,10 @@ PAID_PHASE_PROVIDER_BUDGET_KRW: Final[dict[str, float]] = {
     SPEND_PHASE_PIPELINE: 2000.0,
 }
 
-#: 유료 phase DB lease의 기본 수명. 현재 가장 긴 단일 provider timeout(180초)보다
-#: 충분히 길고, 정상 조사 전체가 외부 호출 사이의 로컬 처리 때문에 잘못 만료되지
-#: 않도록 1시간으로 둔다. 각 provider 전송 직전에 heartbeat로 다시 연장한다.
+#: 유료 phase DB lease의 수명은 core의 전체 실행 시간 정본을 따른다.
+#: 최초 검수 두 자리의 SDK 대기 600초와 일반 대기 180초를 합산하고 로컬 처리
+#: 여유를 둔다. SDK 설정은 전체 네트워크 wall-time 상한이 아니며, 각 provider
+#: 전송 직전 heartbeat와 실행 소유권의 절대 마감 검사도 함께 적용한다.
 #: 서버가 죽어도 이 시간이 지나면 ACTIVE 예약은 자동으로 확정비용이 아니라
 #: ``전송 의도가 남은 attempt의 보수부채``로만 축소된다.
 PAID_PHASE_LEASE_SEC: Final[int] = REPORT_GENERATION_EXECUTION_MAX_SEC

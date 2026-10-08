@@ -95,6 +95,7 @@ def extend_prompt(prompt: str, company: NewsCompanyContext) -> str:
         "회사 직접 인용의 주어 미확인을 산업 근거의 합격으로 바꾸지 말고 산업의 사업·현재 문제·지역 근거를 별도로 확인하세요. "
         "산업 기사에서 회사명이 없어도 산업 문제가 원문에 실제 명시되고 공식 사업 앵커의 구체 제품·서비스와 "
         "같은 산업/사업 활동일 때만 산업문맥 1개를 반환합니다. 다른 산업·인접시장·일반 경제·회계 상용구는 제외합니다. "
+        + ic.INDUSTRY_BUSINESS_ACTIVITY_GUIDE +
         "제목·검색요약·발행처 이름에서 문제나 지역을 추론하지 마세요. text는 본문에 있는 하나의 연속 원문이며 "
         "industry/problem/geography_detail/geography_evidence/applicability_quote는 모두 그 text의 연속부분을 그대로 복사하세요. "
         "applicability_quote는 공식 사업과 같은 구체 사업 활동임을 보여주는 text 안의 연속 원문입니다. "
