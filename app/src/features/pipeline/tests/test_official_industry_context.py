@@ -159,6 +159,23 @@ def test_official_call_uses_sonnet_180_seconds_native_schema_and_ledger(monkeypa
     assert replay[0]["model"] == real.V2_REVIEW_MODEL
 
 
+@pytest.mark.parametrize("factory_override", [False, True])
+def test_metered_guard_is_lazy_and_rejects_before_actual_analysis(monkeypatch, factory_override):
+    sends = []
+    low_level = SimpleNamespace(_ask=lambda *args, **kwargs: sends.append(args))
+    if factory_override:
+        monkeypatch.setattr(real, "_MeteredEngine", lambda engine: engine)
+    analyze = real._official_industry_analyzer(low_level, None, fatal_error_type=AskFatalError)
+    anchors, fallback = prepare_official_industry_fallback(
+        collection=None, profile=None, company_id="00000001", reference_date="2026-10-08",
+        anchors=(), analyze=analyze, available_calls=lambda: 1, diagnostics=[],
+    )
+    assert anchors == () and fallback is None and sends == []
+    with pytest.raises(TypeError, match="요청별 계량 래퍼가 필요합니다"):
+        analyze("호출 전 검사", {"type": "object"}, 3000)
+    assert sends == []
+
+
 def test_official_timeout_preserves_unknown_cost_failure_replay_and_never_retries(monkeypatch):
     sends, failures, reservations = [], [], []
     def handler(request):

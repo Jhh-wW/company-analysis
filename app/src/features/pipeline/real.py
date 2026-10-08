@@ -7919,10 +7919,9 @@ def _official_industry_analyzer(
     from src.features.pipeline.official_industry_context_constants import OFFICIAL_INDUSTRY_STAGE
     from src.features.pipeline.private_replay import local_provider_replay_enabled
 
-    if not isinstance(metered, _MeteredEngine):
-        raise TypeError("공식 산업 분석에는 요청별 계량 래퍼가 필요합니다")
-
     def analyze(prompt: str, schema: dict, max_tokens: int) -> Any:
+        if not isinstance(_MeteredEngine, type) or not isinstance(metered, _MeteredEngine):
+            raise TypeError("공식 산업 분석에는 요청별 계량 래퍼가 필요합니다")
         before_dispatch = metered._provider_dispatch_count
         before_usage = len(metered.usages)
         started = time.monotonic()
