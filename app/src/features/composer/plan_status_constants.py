@@ -22,6 +22,19 @@ STATUS_ACTIVITY_BOUNDARY_RE = re.compile(r'[,;]|(?:했고|하였고|했으며|�
 STATUS_PLAN_DENIAL_RE = re.compile(r'계획(?:은|는|이|이란)?\s*(?:없|아니|아닙)')
 SCOPE_FEEDBACK_BODY_KIND = '본문'
 STATUS_COMPLETION_FACTS = ('완료했', '완료하였', '설립했', '설립하였', '착공했', '착공하였', '시행했', '시행하였')
+# 현재 조직·체계의 역할 설명은 설립·실시 이력과 구별한다. 일반 현재형은 대상이 아니다.
+COMPLETED_ROLE_NOUN_RE = re.compile(r'(?:위원회|협의체|조직|체계|구조|제도)')
+COMPLETED_ROLE_CURRENT_RE = re.compile(
+    r'(?:운영|수행|관리|유지|보유|보고|논의)하고\s*있(?:다|습니다|으며|고|는)'
+    r'|갖추고\s*있(?:다|습니다|으며|고|는)'
+    r'|구성되어\s*있(?:다|습니다|으며|고|는)'
+    r'|(?:운영|수행|관리|유지)\s*중(?:이다|입니다|인)'
+)
+COMPLETED_ROLE_EVENT_RE = re.compile(
+    r'(?:완료|준공|설립|구성|구축|도입|시행|실시|설치|출시|착공)'
+    r'(?:했|하였|되었|됐|된)'
+)
+COMPLETED_ROLE_CLAUSE_RE = re.compile(r'[.;!?\n]|(?:으며|(?<!다)고|지만)\s+')
 PLAN_STATUS_REVIEW_GUIDE = (
     '6장 plan_status의 현재 진행·중단·보류·취소·완료 상태를 참으로 판정하려면 '
     '그 후보에만 검증근거.계획진행근거 배열을 추가한다. 항목은 '

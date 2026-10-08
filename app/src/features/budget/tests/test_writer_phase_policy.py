@@ -11,7 +11,7 @@ from src.features.budget.writer_phase_policy import writer_pipeline_reservation_
 @pytest.mark.parametrize("model,is_v2,expected", [
     ("", True, 2000), ("", False, 2000),
     ("claude-haiku-4-5", True, 2000), ("claude-haiku-4-5", False, 2000),
-    ("claude-sonnet-4-6", True, 3000), ("claude-sonnet-4-6", False, 2000),
+    ("claude-sonnet-4-6", True, 4000), ("claude-sonnet-4-6", False, 2000),
 ])
 def test_only_explicit_v2_sonnet_has_additional_reservation(model, is_v2, expected):
     assert writer_pipeline_reservation_krw(model, is_v2=is_v2) == expected
@@ -25,7 +25,7 @@ def test_unknown_or_ambiguous_selection_is_rejected(model, is_v2):
 
 
 @pytest.mark.parametrize("daily_limit,total_limit,prior_cost,allowed", [
-    (15000, None, 0, 5), (15000, 4000, 0, 1), (15000, 4000, 1553.26, 0),
+    (15000, None, 0, 3), (15000, 4000, 0, 1), (15000, 4000, 1553.26, 0),
 ])
 def test_larger_reservation_still_obeys_atomic_daily_link_and_prior_exposure(daily_limit, total_limit, prior_cost, allowed):
     conn = sqlite3.connect(":memory:")
@@ -39,7 +39,7 @@ def test_larger_reservation_still_obeys_atomic_daily_link_and_prior_exposure(dai
             lease_expires_at="2026-10-09T02:30:00+09:00", started_at="2026-10-09T01:00:00+09:00")
     try:
         for index in range(allowed):
-            assert begin(index).reservation_krw == 3000
+            assert begin(index).reservation_krw == 4000
         with pytest.raises(state_machine.AdmissionLimitExceeded):
             begin(allowed)
     finally:

@@ -152,7 +152,9 @@ def build_grounded_prompt(company: NewsCompanyContext, articles: list[tuple[News
         "각 인용은 subject_is_target에 해당 사건의 실제 주어가 대상 법인인지 별도로 판정하세요. "
         "이름이 인용에 나오는 것만으로 true가 아닙니다. 목록·발행처·과거 직장의 이름이면 false입니다. "
         "제품·브랜드·인물의 경우 명시 회사 관계와 그 회사의 실제 사업 사건이 모두 확인될 때만 true입니다. "
-        "앞의 복사 지시는 실제 반환에서 해당 ID 선택으로 수행합니다.\n"
+        + qc.QUOTE_SELF_CONTAINED_SELECTION_GUIDE
+        + qc.QUOTE_EVENT_DATE_GUIDE
+        + "앞의 복사 지시는 실제 반환에서 해당 ID 선택으로 수행합니다.\n"
         if selection else ""
     )
     return (

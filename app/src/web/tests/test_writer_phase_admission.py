@@ -39,7 +39,7 @@ def install_phase_stub(monkeypatch):
 
 
 @pytest.mark.parametrize("model,is_v2,expected", [
-    ("claude-sonnet-4-6", True, 3000), ("claude-haiku-4-5", True, 2000),
+    ("claude-sonnet-4-6", True, 4000), ("claude-haiku-4-5", True, 2000),
     ("", True, 2000), ("claude-sonnet-4-6", False, 2000),
 ])
 def test_frozen_choice_reaches_existing_phase_and_provider_context(session_factory, monkeypatch, model, is_v2, expected):
@@ -67,9 +67,9 @@ def test_guarded_job_callback_clone_preserves_writer_binding(session_factory, mo
     with generation_coordination.activate(guarded):
         generation_coordination.bind_writer_model("claude-sonnet-4-6", is_v2=True)
         generation_coordination.ensure_paid_phase()
-        assert provider_budget.current().total_krw == 3000
+        assert provider_budget.current().total_krw == 4000
         session.close_provider_context()
-    assert checks == ["checked"] and records[0]["requested_cost_krw"] == 3000
+    assert checks == ["checked"] and records[0]["requested_cost_krw"] == 4000
 
 
 def test_changed_or_late_selection_cannot_reuse_cheaper_phase(session_factory, monkeypatch):
@@ -114,8 +114,8 @@ def test_concurrent_requests_keep_different_phase_contexts(session_factory, monk
                 session.close_provider_context()
             return limit
     with ThreadPoolExecutor(max_workers=2) as pool:
-        assert list(pool.map(execute, zip(sessions, ("claude-sonnet-4-6", "claude-haiku-4-5")))) == [3000, 2000]
-    assert {record["run_id"]: record["requested_cost_krw"] for record in records} == {"sonnet": 3000, "haiku": 2000}
+        assert list(pool.map(execute, zip(sessions, ("claude-sonnet-4-6", "claude-haiku-4-5")))) == [4000, 2000]
+    assert {record["run_id"]: record["requested_cost_krw"] for record in records} == {"sonnet": 4000, "haiku": 2000}
 
 
 def test_same_production_request_uses_sonnet_in_phase_sdk_usage_and_cache(session_factory, monkeypatch):
@@ -148,7 +148,7 @@ def test_same_production_request_uses_sonnet_in_phase_sdk_usage_and_cache(sessio
         messages.attach(engine)
         ask = real._v2_ask_via_provider(engine, real._metered_client(engine, raw._client()), stage="v2_compose", max_tokens=6000)
         assert ask("검증용 원문") == "작성 응답"
-        assert provider_budget.current().total_krw == 3000
+        assert provider_budget.current().total_krw == 4000
         assert messages.requests[0]["model"] == engine.usages[0]["model"] == "claude-sonnet-4-6"
         observed.append(namespace.model_identity_sha256)
         return RunResult(outcome=Outcome.GATE_STOPPED)
@@ -159,6 +159,6 @@ def test_same_production_request_uses_sonnet_in_phase_sdk_usage_and_cache(sessio
                 CompanyCard(legal_name="예시제조", typed_name="예시제조", address="", ceo="", founded="", ref="00000001"))
     finally:
         session.close_provider_context()
-    assert len(records) == len(observed) == 1 and records[0]["requested_cost_krw"] == 3000
+    assert len(records) == len(observed) == 1 and records[0]["requested_cost_krw"] == 4000
     assert len(attempts) == 1 and attempts[0][0] == "v2_compose"
     assert result.outcome is Outcome.GATE_STOPPED

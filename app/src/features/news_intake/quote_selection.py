@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import datetime as dt
 import hashlib
 import json
 import re
@@ -120,6 +121,17 @@ def quote_schema(schema: dict, articles: list[tuple[NewsCandidate, str]],
     result = deepcopy(schema)
     item = result["properties"]["items"]["items"]
     excerpt = item["properties"]["excerpts"]["items"]
+    # 선택지는 배치 원문에 실제 적힌 유효 연월일만이다. 이 선택값은 승인 근거가
+    # 아니며 같은 기사·선택 인용 안의 날짜 증명은 기존 _exact_date가 다시 검사한다.
+    dates = set()
+    for _, body in articles:
+        for match in c.QUOTE_EVENT_DATE_RE.finditer(body):
+            year, month, day = (int(value) for value in re.findall(r"\d+", match.group()))
+            try:
+                dates.add(dt.date(year, month, day).isoformat())
+            except ValueError:
+                continue
+    excerpt["properties"]["event_on"] = {"type": "string", "enum": ["", *sorted(dates)]}
     excerpt["properties"]["subject_is_target"] = {"type": "boolean"}
     excerpt["required"].append("subject_is_target")
     for fields, names in ((item, ("entity_evidence",)),
@@ -137,10 +149,27 @@ def quote_schema(schema: dict, articles: list[tuple[NewsCandidate, str]],
 def _selection_subject_supported(text: str, company: NewsCompanyContext, body: str | None = None) -> bool:
     """회사명 존재를 행동 주어로 승격시키는 명시 모순만 신규 선택에서 제외한다."""
     company = article_company_context(body if body is not None else text, company)
+    scope_body = body if body is not None else text
+    scope_start = scope_body.find(text)
+    # 첫 기사 바이라인은 본문의 사업 주어가 아니다. 원 선택 인용은 그대로 두고
+    # 판정에서만 분리하며, 중간 괄호·앞에 완결 본문이 있는 바이라인은 제외하지 않는다.
+    byline = c.QUOTE_OPENING_BYLINE_RE.match(text)
+    if byline is not None:
+        prefix = c.QUOTE_PRE_BYLINE_CAPTION_RE.sub("", scope_body[:scope_start])
+        if (scope_start >= 0 and scope_body.find(text, scope_start + 1) < 0
+                and not c.QUOTE_PRIOR_SENTENCE_END_RE.search(prefix)):
+            content = text[byline.end():]
+            if not mentions_target(content, company):
+                return False
+            if any(re.match(c.QUOTE_SUBJECT_PREFIX + re.escape(name)
+                            + c.QUOTE_OPENING_TARGET_SUBJECT, content, re.I)
+                   for name in company_query_names(company)):
+                scope_start += byline.end()
+                text = content
     if target_is_only_interview_recipient(text, company):
         return False
-    if bind_relation_subject(text, body if body is not None else text, company,
-                             (body if body is not None else text).find(text), max_chars=c.QUOTE_MAX_CHARS) is None:
+    if bind_relation_subject(text, scope_body, company,
+                             scope_start, max_chars=c.QUOTE_MAX_CHARS) is None:
         return False
     if not mentions_target(text, company):
         return True  # 제품·인물의 명시 관계는 기존 주어 결속 검사에서 판정한다.

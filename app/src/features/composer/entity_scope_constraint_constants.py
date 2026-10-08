@@ -22,6 +22,11 @@ ENTITY_SCOPE_CONFLICT_FIELDS: Final[tuple[str, ...]] = ("document_content_sha256
 #: ``SCOPE_CONDITION_UNBOUND`` 그대로다. ``shared.report_quality.review_diagnostic_constants
 #: .GROUNDING_DETAIL_STAGES``에 같은 글자가 있어야 진단에서 버려지지 않는다.
 ENTITY_SCOPE_EXCLUSION_STAGE: Final[str] = "entity_scope_exclusion"
+SOURCE_ACTOR_WRITER_GUIDE: Final[str] = (
+    " · 주어와 예정 상태를 대상 회사의 직접 행위나 완료로 바꾸지 마세요"
+    " · 행위주체 표시는 소속 관계의 증명이 아닙니다. 선택한 자기 원문에 관계가 없으면"
+    " 종속회사·자회사·계열사라는 말을 붙이지 말고 표시된 행위자 이름으로 서술하세요"
+)
 SOURCE_CONTEXT_SELF_RE = re.compile(r"(?:^|[.。;]\s*)(?:회사|당사|동사|본사)(?:는|가|의)\s")
 SOURCE_CONTEXT_GROUP_RE = re.compile(r"^(?:연결회사|연결그룹|연결기업)(?:는|은|가|이|의)\s")
 # 표의 짧은 명사형 칸만 앞뒤 칸의 명시 행위자와 함께 읽는다. 새 서술문은 면제하지 않는다.

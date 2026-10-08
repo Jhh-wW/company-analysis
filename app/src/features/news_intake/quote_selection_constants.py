@@ -39,6 +39,30 @@ QUOTE_UI_PREFIX_PROBLEM_RE = re.compile(
     r"(?:장애|고장|지연|차질|중단|결함|불량|피해)"
 )
 QUOTE_PUBLISHER_RE = re.compile(r"(?:기사\s*제공|발행처|저작권|기자)\s*[:：©]?")
+QUOTE_OPENING_BYLINE_MAX_CHARS = 80
+QUOTE_OPENING_BYLINE_RE = re.compile(
+    rf"^\s*\[[^\[\]\n.!?。]{{1,{QUOTE_OPENING_BYLINE_MAX_CHARS}}}\s+기자\]\s*"
+)
+QUOTE_PRIOR_SENTENCE_END_RE = re.compile(r"[.!?。](?=\s|$)")
+QUOTE_PRE_BYLINE_CAPTION_RE = re.compile(
+    r"^[^\n]*[.!?。]\s*\((?:사진|자료)\s*=[^()\n]+\)\s*$", re.M
+)
+QUOTE_OPENING_TARGET_SUBJECT = r"\s*(?:은|는|이|가)"
+QUOTE_SELF_CONTAINED_SELECTION_GUIDE = (
+    "뒤 문장이 약칭·회사·생략 주어로 이어지면, 명시한 대상 법인 소개와 그 회사의 "
+    "같은 사업 사실이 함께 들어 있는 기존 연속 후보 ID를 고르세요. 다른 주체로 전환된 "
+    "문장·다른 문단의 소개를 빌리지 말고, 그러한 자기완결 후보가 없으면 제외하세요. "
+)
+QUOTE_EVENT_DATE_RE = re.compile(
+    r"(?<!\d)(?:\d{4}-\d{2}-\d{2}|\d{4}\.\d{1,2}\.\d{1,2}|"
+    r"\d{4}/\d{2}/\d{2}|\d{4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일)(?!\d)"
+)
+QUOTE_EVENT_DATE_GUIDE = (
+    "event_on은 스키마의 날짜 선택값 중 고르되, 선택한 text 내부의 해당 사건 연월일을 "
+    "time_evidence_quote_id가 정확히 증명할 때만 날짜를 선택하세요. 연도만(예: 2026), "
+    "행사명에 든 연도, 지난 2~3일처럼 불완전한 날짜만 있으면 event_on과 "
+    "time_evidence_quote_id 모두 빈 문자열입니다. 다른 기사 날짜나 발행일을 빌리지 마세요. "
+)
 QUOTE_SUBSIDIARY_RE = re.compile(r"\s*의\s*(?:자회사|계열사)(?:인|\s)")
 QUOTE_PAST_EMPLOYMENT_RE = re.compile(r"(?:과거|이전|전직)[^.。\n]*(?:근무|재직|출신)")
 QUOTE_INDEPENDENT_TRANSITION_RE = re.compile(r"(?:독립\s*회사|개인\s*창업|독립해|독립한|퇴사\s*후)")

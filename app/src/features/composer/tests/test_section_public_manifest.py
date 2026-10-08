@@ -1609,14 +1609,16 @@ def test_보충후보지문이_같으면_재보충없이_중단한다(monkeypatc
     assert len(reviewer.prompts) == 2
 
 
-def test_얇은장이_세개면_primary10회뒤_보충하지않는다():
+def test_three_thin_sections_recover_two_then_reject_remaining_shortfall(monkeypatch):
     targets = ("identity", "business_model", "portfolio")
     writer = _RecoveringPacketWriter(targets)
     reviewer = _BoundGroupedReviewer()
+    recorder = pipeline_module._CallLedgerRecorder()
+    monkeypatch.setattr(pipeline_module, '_CallLedgerRecorder', lambda: recorder)
 
     with pytest.raises(
         V2ValidationError,
-        match="report_recovery:too_many_underfilled_sections",
+        match="report_recovery:post_supplement_quality_failed",
     ):
         run_v2(
             "가나다전자",
@@ -1630,8 +1632,17 @@ def test_얇은장이_세개면_primary10회뒤_보충하지않는다():
             build_identity_sha256="b" * 64,
         )
 
-    assert len(writer.prompts) == 9
-    assert len(reviewer.prompts) == 1
+    assert len(writer.prompts) == PRIMARY_WRITER_CALLS + 2 * SUPPLEMENT_CALLS_PER_SECTION
+    assert len(reviewer.prompts) == 1 + SUPPLEMENT_REVIEW_CALLS
+    supplementary = tuple(record for record in recorder.freeze().records
+                          if record.validation_round.value == 'SUPPLEMENT')
+    assert tuple(record.section_id for record in supplementary if record.role == 'writer') == (
+        'identity', 'business_model',
+    )
+    assert len(supplementary) == 2 * SUPPLEMENT_CALLS_PER_SECTION + SUPPLEMENT_REVIEW_CALLS
+    assert supplementary[-1].role == 'reviewer'
+    # 셋째 장은 보충하지 않았고 전체 최종 품질 검사에서 남은 부족을 거절한다.
+    assert all(record.section_id != 'portfolio' for record in supplementary)
 
 
 def test_안전실패는_primary10회뒤_보충없이_즉시중단한다(monkeypatch):

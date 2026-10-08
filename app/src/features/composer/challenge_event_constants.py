@@ -8,15 +8,38 @@ RESPONSE_NOMINAL_PROGRESS_RE = re.compile(
     r"(?P<activity>[가-힣A-Za-z][가-힣A-Za-z0-9_-]*?)(?:을|를|이|가)\s*"
     r"(?:(?:추진|진행)\s*하고\s*있(?!었|던|을)|(?:추진|진행)\s*(?:중|中)(?!\s*(?:이었|이던|일)))"
 )
-RESPONSE_ACTIVITY_UNIT_RE = re.compile(r"[;|\n,]|(?<=[다음함])[.!?。](?:\s+|$)")
+# 현재 서술이 끝난 접속절 뒤의 다른 활동·예정 상태를 앞 활동에 붙이지 않는다.
+RESPONSE_ACTIVITY_UNIT_RE = re.compile(
+    r"[;|\n,]|(?<=[다음함])[.!?。](?:\s+|$)|(?<=있으며)|(?<=있고)|(?<=있지만)"
+)
 RESPONSE_CURRENT_STATE_RE = re.compile(r"(?:진행|추진)\s*(?:중|中)(?!\s*(?:이었|이던|일))|(?:진행|추진)\s*하고\s*있(?!었|던|을)")
+# 두 글자 이상 동작명이 현재 수행 술어에 직접 붙은 경우만 읽는다.
+# 한 글자 어근은 정관·규정·조정 등의 일부와 구분하지 않고 의미 검수에 남긴다.
+RESPONSE_PERFORMING_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9_-])(?P<activity>[가-힣A-Za-z][가-힣A-Za-z0-9_-]+?)\s*"
+    r"(?:하고\s*있(?!었|던|을|지\s*않)|하는\s*(?:중|中)(?!\s*(?:이었|이던|일)))"
+)
+RESPONSE_PERFORMING_TAIL_RE = re.compile(
+    r"^\s*(?:하고\s*있(?!었|던|을|지\s*않)|하는\s*(?:중|中)(?!\s*(?:이었|이던|일)))"
+)
+# 현재 종결 서술도 실행 상태를 제공한다. 목표를 정의하는 명사절은 구분한다.
+RESPONSE_PRESENT_VERB_TAIL_RE = re.compile(
+    r"^\s*(?:한다|합니다|하는\s*것(?:이다|입니다))(?=[.!?。]|$)"
+)
+RESPONSE_PURPOSE_SUBJECT_RE = re.compile(r"(?:목적|목표)(?:은|는|이|가)\s*[^.!?。;\n]*$")
+# 진행·추진은 앞 활동의 상태이고 계획은 실행을 뜻하지 않는다.
+RESPONSE_PROGRESS_CONTROLS = frozenset({'진행', '추진', '계획'})
+RESPONSE_CURRENT_HEADER_RE = re.compile(
+    r"^\s*(?:현재\s*)?(?:진행|수행|실행)\s*(?:중|中)인\s*"
+    r"(?:대응|활동|조치|업무)(?:\s*(?:내용|목록))?\s*[:：]\s*(?P<body>[^\n;]+)$"
+)
 RESPONSE_UNREAL_PREFIX_RE = re.compile(r"당시|과거|향후|앞으로|가정|경우")
 RESPONSE_OTHER_STATE_RE = re.compile(r"완료|예정|계획|가정|경우|가능|하지\s*않|미수행|하지\s*못|했|하였")
 RESPONSE_ACTIVITY_WORD_RE = re.compile(r"[가-힣A-Za-z0-9_-]+")
-RESPONSE_ACTIVITY_PARTICLE_RE = re.compile(r"(?:을|를|의|에)$")
+RESPONSE_ACTIVITY_PARTICLE_RE = re.compile(r"(?:으로|하는|을|를|의|에|로)$")
 RESPONSE_ACTIVITY_SUBJECT_WORD_RE = re.compile(r"(?:는|은)$")
 RESPONSE_ACTIVITY_HEAD_WORDS = 2
-RESPONSE_ACTIVITY_HEAD_CONNECTORS = frozenset({'대해', '위해', '통해', '하여', '위한', '관련한', '대한', '분야'})
+RESPONSE_ACTIVITY_HEAD_CONNECTORS = frozenset({'대해', '위해', '통해', '하여', '위한', '관련한', '대한', '분야', '대책으로'})
 EVENT_ACTOR_LEGAL_FORM_RE = re.compile(r"^(?:주식회사|\(주\))|(?:주식회사|\(주\))$")
 RESPONSE_ACTIVITY_PROGRESS_TAIL_RE = re.compile(r"^\s*(?:[이가을를]\s*)?(?:중|中)(?!\s*(?:이었|이던|일))")
 RESPONSE_ACTIVITY_HEAD_RE = re.compile(r"^(?:(?:현재|지금|올해)|(?:회사|당사|본사)(?:는|은))")

@@ -55,7 +55,7 @@ PRIMARY_REVIEW_CALLS: Final[int] = 1
 #:   (장부가 첫 검수 뒤 막음)이 없다.
 PRIMARY_REVIEW_RETRY_CALLS: Final[int] = 1
 
-# 얇은 장 하나마다 한 번만 보충하고, 보충 결과를 한 번에 다시 검수한다.
+# 얇은 장 중 최대 두 장만 한 번 보충하고, 전체 결과를 한 번에 다시 검수한다.
 MAX_SUPPLEMENT_SECTIONS: Final[int] = 2
 SUPPLEMENT_CALLS_PER_SECTION: Final[int] = 1
 SUPPLEMENT_REVIEW_CALLS: Final[int] = 1
@@ -380,9 +380,19 @@ def _supplement_targets(
     if not codes or not codes.issubset(_RECOVERABLE_QUALITY_CODES):
         return None
     targets = _problem_sections(assessment)
-    if not targets or len(targets) > MAX_SUPPLEMENT_SECTIONS:
+    if not targets:
         return None
-    return targets
+    if len(targets) <= MAX_SUPPLEMENT_SECTIONS:
+        return targets
+    # 필수 의미칸이 비어 있는 장을 먼저 보충한다. 선택 밖 장도 후검사에서
+    # 그대로 평가하므로 이 제한 선택은 FULL 품질 기준을 충족시키지 않는다.
+    semantic = set(assessment.quality.semantic_underfilled_sections)
+    prioritized = tuple(section for section in targets if section in semantic) + tuple(
+        section for section in targets if section not in semantic
+    )
+    chosen = set(prioritized[:MAX_SUPPLEMENT_SECTIONS])
+    # writer와 영수증의 장 순서 계약은 의미 우선 선정 뒤에도 유지한다.
+    return tuple(section for section in targets if section in chosen)
 
 
 def _authorization_for(

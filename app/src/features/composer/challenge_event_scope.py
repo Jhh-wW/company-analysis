@@ -23,6 +23,10 @@ def _activity_records(text: str, *, claim: bool, additional_actions: tuple[str, 
         c.RESPONSE_ACTIVITY_RE.pattern + "|" + "|".join(re.escape(action) for action in additional_actions)
     ) if additional_actions else c.RESPONSE_ACTIVITY_RE
     for unit in c.RESPONSE_ACTIVITY_UNIT_RE.split(unicodedata.normalize('NFKC', text)):
+        header = c.RESPONSE_CURRENT_HEADER_RE.fullmatch(unit)
+        header_current = header is not None
+        if header is not None:
+            unit = header['body']
         matches = tuple(activity_re.finditer(unit))
         for index, match in enumerate(matches):
             end = matches[index + 1].start() if index + 1 < len(matches) else len(unit)
@@ -36,11 +40,18 @@ def _activity_records(text: str, *, claim: bool, additional_actions: tuple[str, 
             head = c.RESPONSE_ACTIVITY_PARTICLE_RE.sub('', ''.join(selected_words))
             head = c.RESPONSE_ACTIVITY_HEAD_RE.sub('', head).casefold()
             foreign = c.RESPONSE_FOREIGN_ACTOR_RE.search(unit[:match.start()])
-            current = bool(c.RESPONSE_CURRENT_STATE_RE.search(tail) or c.RESPONSE_ACTIVITY_PROGRESS_TAIL_RE.search(tail))
+            current = bool(c.RESPONSE_CURRENT_STATE_RE.search(tail)
+                           or c.RESPONSE_ACTIVITY_PROGRESS_TAIL_RE.search(tail)
+                           or c.RESPONSE_PERFORMING_TAIL_RE.search(tail)
+                           or header_current)
+            if not claim and not current:
+                current = bool(c.RESPONSE_PRESENT_VERB_TAIL_RE.search(tail)
+                               and not c.RESPONSE_PURPOSE_SUBJECT_RE.search(unit[:match.start()]))
             if not current and c.RESPONSE_CURRENT_STATE_RE.search(rest):
                 # 원문과 주장 모두 활동 목록의 접속 관계가 있을 때만 뒤 진행
                 # 상태를 함께 읽는다. 앞 활동의 성과·이후 절차까지 넓히지 않는다.
-                current = bool(c.RESPONSE_ACTION_JOIN_RE.search(tail))
+                current = bool(c.RESPONSE_ACTION_JOIN_RE.search(tail)
+                               and not c.RESPONSE_FOREIGN_ACTOR_RE.search(tail))
             if c.RESPONSE_OTHER_STATE_RE.search(tail):
                 current = False
             if not claim and c.RESPONSE_UNREAL_PREFIX_RE.search(unit[:match.start()]):
@@ -52,10 +63,12 @@ def _activity_records(text: str, *, claim: bool, additional_actions: tuple[str, 
 
 def response_current_activity_problem(candidate: str, sources: Mapping[str, str]) -> str:
     """명사형 대응에 없는 현재진행을 붙이는 경계만 닫고 원문 활동은 보존한다."""
-    if not c.RESPONSE_CURRENT_STATE_RE.search(candidate):
+    performing = tuple(c.RESPONSE_PERFORMING_RE.finditer(candidate))
+    if not c.RESPONSE_CURRENT_STATE_RE.search(candidate) and not performing:
         return ''
     additional_actions = tuple(dict.fromkeys(
-        match['activity'] for match in c.RESPONSE_NOMINAL_PROGRESS_RE.finditer(candidate)
+        match['activity'] for match in (*c.RESPONSE_NOMINAL_PROGRESS_RE.finditer(candidate), *performing)
+        if match['activity'] not in c.RESPONSE_PROGRESS_CONTROLS
         if not c.RESPONSE_ACTIVITY_RE.fullmatch(match['activity'])
     ))
     claim_records = tuple(record for record in _activity_records(
@@ -80,10 +93,10 @@ def response_current_activity_problem(candidate: str, sources: Mapping[str, str]
     all_actions = {record[0] for source in action_sources for record in _activity_records(
         source, claim=False, additional_actions=additional_actions)}
     for action, head, actor, _, head_words in claim_records:
-        if action not in all_actions and action not in additional_actions:
+        if action not in all_actions:
             continue  # 없는 활동 자체의 의미 검수는 기존 계약이 담당한다.
         if not any(source_action == action and current and (not head or not source_head or source_head == head or source_head in head_words)
-                   and (not source_actor or source_actor == actor or source_actor in candidate)
+                   and (not source_actor or source_actor == actor)
                    for source_action, source_head, source_actor, current, _ in source_records):
             return c.TIME_BINDING_PROBLEM
     return ''

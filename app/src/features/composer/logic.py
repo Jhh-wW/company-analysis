@@ -434,11 +434,12 @@ def _render_fragments(
             label = f"{label} · 지원 주장슬롯: {supported}"
         if fragment.source_context_json:
             from src.shared.report_evidence.source_context import parse_source_context
+            from src.features.composer.entity_scope_constraint_constants import SOURCE_ACTOR_WRITER_GUIDE
             context = parse_source_context(fragment.source_context_json)
             label += " · 원문 행위주체: " + json.dumps(context["actor"], ensure_ascii=False)
             if context["status"]:
                 label += " · 원문 진행상태: " + json.dumps(context["status"], ensure_ascii=False)
-            label += " · 주어와 예정 상태를 대상 회사의 직접 행위나 완료로 바꾸지 마세요"
+            label += SOURCE_ACTOR_WRITER_GUIDE
         if fragment.section_context_json:
             from src.shared.report_evidence.section_context import parse_section_context
             from src.features.composer.section_context_constants import SECTION_CONTEXT_LABEL

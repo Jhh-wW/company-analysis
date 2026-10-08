@@ -201,21 +201,27 @@ def test_FULL_전환과_보충에서도_최종_보도표와_후보진단을_보�
     delegate = _CompletePacketWriter()
     prompts = []
     identity_payload = None
+    primary_payloads = {}
 
     def writer(prompt):
         nonlocal identity_payload
         prompts.append(prompt)
         section_id = section_id_in_prompt(prompt)
-        if delegate.calls < 9:
+        primary_request = delegate.calls < 9
+        if primary_request:
             payload = json.loads(delegate(prompt))
+            primary_payloads[section_id] = json.dumps(payload, ensure_ascii=False)
             if section_id == "identity":
                 identity_payload = json.dumps(payload, ensure_ascii=False)
                 if route == "supplement":
                     payload["문장들"] = payload["문장들"][:1]
         else:
-            assert route == "supplement" and section_id == "identity" and identity_payload
-            payload = json.loads(identity_payload)
-        if route == "fallback":
+            if route == 'supplement':
+                assert section_id == "identity" and identity_payload
+            # 제한 보충은 기존 자기 packet으로 쓴 해당 장의 정상 응답만 돌려준다.
+            assert section_id in primary_payloads
+            payload = json.loads(primary_payloads[section_id])
+        if route == "fallback" and primary_request:
             payload["문장들"] = payload["문장들"][:2]
         if section_id == "past_changes":
             payload["문장들"].append({"글": _NEWS_A, "인용": ["41"], "등급": "확인", "주장슬롯": _PAST_SLOT})
@@ -233,7 +239,8 @@ def test_FULL_전환과_보충에서도_최종_보도표와_후보진단을_보�
     )
     if route == "fallback":
         assert output.downgraded_from_release_mode == ReleaseMode.FULL.value
-        assert len(prompts) == 9
+        assert len(prompts) == 11
+        assert len({section_id_in_prompt(prompt) for prompt in prompts[9:]}) == 2
     else:
         assert len(prompts) == 10
         assert output.report.generation_evidence is not None

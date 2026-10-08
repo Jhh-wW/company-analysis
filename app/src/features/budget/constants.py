@@ -158,7 +158,8 @@ PAID_PHASE_PROVIDER_BUDGET_KRW: Final[dict[str, float]] = {
 
 # 명시 v2 Sonnet 작성 요청만 초기 검수·후속 복구 여유를 추가 예약한다.
 # 사용자 요금이나 일/링크 한도는 바꾸지 않는다. 기본·Haiku·v1은 기존 예약이다.
-SONNET_WRITER_PIPELINE_BUDGET_KRW: Final[float] = 3000.0
+# 두 장 보충 작성과 후속 검수를 위한 추가 예약이다.
+SONNET_WRITER_PIPELINE_BUDGET_KRW: Final[float] = 4000.0
 PIPELINE_WRITER_SONNET_MODEL: Final[str] = "claude-sonnet-4-6"
 PIPELINE_WRITER_HAIKU_MODEL: Final[str] = "claude-haiku-4-5"
 
