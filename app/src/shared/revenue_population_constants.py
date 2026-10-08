@@ -29,3 +29,18 @@ EXPLICIT_COMPANY_PRIMARY_BUSINESS_RE = re.compile(
 COMPARATIVE_MAGNITUDE_RE = re.compile(r"비중|대부분|압도|지배적|최대|가장|[0-9]+위")
 EXPLICIT_COMPANY_CLAIM_RE = re.compile(r"^(?:회사|기업|전사|그룹)")
 LOCAL_COMPARISON_SUBJECT_PATTERN = r"(?:[가-힣A-Za-z0-9&()]{1,24}(?:은|는|이|가))?"
+
+# 평문 표와 별도로 같은 회사가 직접 밝힌 비중 문장의 범위를 보존한다.
+DIRECT_SHARE_SENTENCE_BOUNDARY_RE = re.compile(r"(?<![0-9])[.!?]|[.!?](?![0-9])|[;\n]")
+DIRECT_SHARE_ITEM_MAX_CHARS = 40
+DIRECT_COMPANY_SHARE_RE = re.compile(
+    r"^(?:당사|회사)(?:는|가|의)?(?:경우(?:도|는)?(?:마찬가지로)?)?"
+    rf"(?P<item>[가-힣A-Za-z0-9&·_-]{{1,{DIRECT_SHARE_ITEM_MAX_CHARS}}}?)(?:사업|제품|서비스)?"
+    r"매출(?:액)?(?:은|는|이|가)(?:회사|당사)?(?:의)?"
+    r"(?P<share>전체매출(?:액)?의(?:약)?[0-9]+(?:\.[0-9]+)?%)를?"
+    r"차지(?:한다|합니다|하고있(?:다|습니다))$"
+)
+DIRECT_SHARE_ITEM_SUFFIX_RE = re.compile(r"(?:사업|제품|서비스)$")
+DIRECT_SHARE_CANDIDATE_SUBJECT = r"(?:사업|제품|서비스|매출액|매출)?(?:은|는|이|가)"
+DIRECT_SHARE_SUBJECT_PREFIX = r"^(?:(?:연결|별도|개별)(?:재무제표)?기준으로)?(?:당사는|회사는)?"
+DIRECT_SHARE_OTHER_SUBJECT_RE = re.compile(r"(?:사업|제품|서비스|매출액|매출)(?:은|는|이|가)")

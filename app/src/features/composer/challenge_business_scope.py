@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from src.features.composer.accounting_policy_constants import ACCOUNTING_POLICY_BOILERPLATE
 from src.features.composer.accounting_policy_guard import accounting_policy_problem
 from src.features.composer.challenge_accounting_policy import is_challenge_accounting_policy
+from src.features.composer.challenge_industry_scope import industry_only_challenge_problem
 from src.features.composer.constants import CHALLENGE_FLOW_SECTION_ID
 from src.features.composer.challenge_event_scope import (
     challenge_event_scope_problem, _event_rows, _selected_rows, _surface,
@@ -59,6 +60,11 @@ def challenge_business_problem(text: str, sources: Mapping[str, str], *, cells: 
         return problem
     # 표의 대응 셀이나 같은 인용의 다른 절에서 문제 관계를 빌리지 않는다.
     issue_text = cells[0] if cells else text
+    problem = industry_only_challenge_problem(
+        issue_text, claim_slot=("current_challenges:issue" if cells is not None else claim_slot),
+    )
+    if problem:
+        return problem
     if cells is not None or claim_slot == "current_challenges:issue":
         problem = _procedural_issue_problem(issue_text)
         if problem:

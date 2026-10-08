@@ -5,6 +5,8 @@
 """
 from collections.abc import Mapping
 from src.shared.report_evidence.partnership_scope import research_partnership_claim_problem
+from src.shared.report_evidence.business_slot_scope import business_slot_scope_problem
+from src.shared.report_evidence.business_slot_scope_constants import CUSTOMER_SLOT
 import re
 import unicodedata
 
@@ -167,6 +169,11 @@ def business_relation_scope_problem(
     """2·7장 산문의 명시적 거래·고객 관계만 자기 인용의 절/표행과 대조한다."""
     if section_id not in BUSINESS_RELATION_SECTIONS or not own_sources:
         return ""
+    # 원문 사실이 참이어도 회수관리만으로 고객유형 칸을 충족하지 않는다.
+    # 혼합 원문은 유지하고 실제 후보의 해당 절만 같은 수집 계약으로 검사한다.
+    if (section_id == "business_model" and claim_slot == CUSTOMER_SLOT
+            and business_slot_scope_problem(text, CUSTOMER_SLOT)):
+        return BUSINESS_RELATION_PROBLEM
     if section_id == "operations_partners":
         problem = research_partnership_claim_problem(text, own_sources, claim_slot=claim_slot)
         if problem:

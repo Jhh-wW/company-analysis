@@ -84,6 +84,8 @@ def revenue_population_claim_problem(candidate: str, sources: Mapping[str, str])
         for source in revenue_sources)))
     for claim in revenue_claims:
         position = claim.start() + (1 if claim.group().startswith("의") else 0)
+        if not headings and _explicit_company_share_support(compact, claim.start(), sources):
+            continue
         if c.EXPLICIT_COMPANY_CLAIM_RE.search(claim.group()) or not _claim_bound_to_population(compact, position, headings):
             return "scope_condition_unbound"
     # 제품·서비스 정의의 '주력'은 구성비 추론과 다르다. 명시된 부문표만 있을 때
@@ -97,6 +99,34 @@ def revenue_population_claim_problem(candidate: str, sources: Mapping[str, str])
             if c.EXPLICIT_COMPANY_CLAIM_RE.search(claim.group()) or not _claim_bound_to_population(compact, claim.start(), headings):
                 return "scope_condition_unbound"
     return ""
+
+
+def _explicit_company_share_support(candidate: str, position: int, sources: Mapping[str, str]) -> bool:
+    """표의 추정 분모와 별개인 회사 명시 비중을 같은 품목·비율에서만 인정한다.
+
+    원문 표·수치는 바꾸지 않으며 수치와 의미 검수도 면제하지 않는다.
+    부문 표제의 자료는 호출자가 제외하고, 표행의 상품명은 직접 서술로 읽지 않는다.
+    """
+    sentence_start = 0
+    for boundary in c.DIRECT_SHARE_SENTENCE_BOUNDARY_RE.finditer(candidate[:position]):
+        sentence_start = boundary.end()
+    prefix = candidate[sentence_start:position]
+    tail = candidate[position:]
+    for source in sources.values():
+        if revenue_population_heading(source):
+            continue
+        for unit in c.DIRECT_SHARE_SENTENCE_BOUNDARY_RE.split(source):
+            if "|" in unit:
+                continue
+            direct = c.DIRECT_COMPANY_SHARE_RE.match("".join(unit.split()))
+            if not direct or not tail.startswith(direct["share"]):
+                continue
+            item = c.DIRECT_SHARE_ITEM_SUFFIX_RE.sub("", direct["item"])
+            subject = re.match(c.DIRECT_SHARE_SUBJECT_PREFIX + re.escape(item)
+                               + c.DIRECT_SHARE_CANDIDATE_SUBJECT, prefix) if item else None
+            if subject and not c.DIRECT_SHARE_OTHER_SUBJECT_RE.search(prefix[subject.end():]):
+                return True
+    return False
 
 
 def _claim_bound_to_population(candidate: str, position: int, headings: tuple[str, ...]) -> bool:

@@ -18,7 +18,11 @@ def _surface(text: str) -> str:
 def _administration(text: str, slot_id: str) -> bool:
     surface = _surface(text)
     if slot_id == c.CUSTOMER_SLOT:
-        return bool(c.CUSTOMER_ADMIN_RE.search(surface) and c.CUSTOMER_ADMIN_ACTION_RE.search(surface))
+        return bool(
+            (c.CUSTOMER_ADMIN_RE.search(surface) and c.CUSTOMER_ADMIN_ACTION_RE.search(surface))
+            or (c.CUSTOMER_RECOVERY_OBJECT_RE.search(surface)
+                and c.CUSTOMER_RECOVERY_MANAGEMENT_RE.search(surface))
+        )
     return bool(c.OPERATING_ADMIN_RE.search(surface) or (
         c.CAREER_PROFILE_RE.search(surface) and (
             c.PERSONAL_POSITION_RE.search(surface) or c.COMPOUND_PERSONAL_POSITION_RE.search(surface))))
@@ -40,6 +44,9 @@ def _business_fact(text: str, slot_id: str, context: str = "") -> bool:
         and c.COMPANY_ACTION_SUBJECT_RE.search(surface)
         and c.COMPANY_OPERATING_PLAN_RE.search(surface))
     return bool(c.BUSINESS_SERVICE_RE.search(surface) or (
+        slot_id == c.CUSTOMER_SLOT and (
+            c.CUSTOMER_CREDIT_SERVICE_RE.search(surface)
+            or c.CUSTOMER_PROVISION_PAYMENT_RE.search(surface))) or (
         slot_id == c.CUSTOMER_SLOT and c.CUSTOMER_DEFINITION_RE.search(surface)
         and not _administration(text, slot_id)) or (
         slot_id == c.OPERATING_ROLE_SLOT and (
@@ -72,7 +79,11 @@ def business_slot_scope(text: str, slot_id: str) -> BusinessSlotScope:
     for sentence in c.SENTENCE_BOUNDARY_RE.split(text):
         sentence_start = text.find(sentence, sentence_cursor)
         sentence_cursor = sentence_start + len(sentence)
-        context = _administration(sentence, slot_id)
+        # 회수관리의 새 문맥은 앞의 실제 판매 절로 거꾸로 전파하지 않는다.
+        context = (bool(c.CUSTOMER_ADMIN_RE.search(_surface(sentence))
+                        and c.CUSTOMER_ADMIN_ACTION_RE.search(_surface(sentence)))
+                   if slot_id == c.CUSTOMER_SLOT else _administration(sentence, slot_id))
+        recovery_seen = False
         unit_cursor = 0
         for unit in c.CLAUSE_BOUNDARY_RE.split(sentence):
             unit_start = sentence.find(unit, unit_cursor)
@@ -99,7 +110,15 @@ def business_slot_scope(text: str, slot_id: str) -> BusinessSlotScope:
                     continue
                 # 정책 범위만 제한하여 쉼표 없이 연결된 실제 사건도 보존한다.
                 # 남은 부분에는 기존 경력·관리 문맥 검사를 그대로 적용한다.
-                is_admin = _administration(piece, slot_id) or context
+                surface = _surface(piece)
+                recovery_here = bool(slot_id == c.CUSTOMER_SLOT
+                                     and c.CUSTOMER_RECOVERY_OBJECT_RE.search(surface)
+                                     and c.CUSTOMER_RECOVERY_MANAGEMENT_RE.search(surface))
+                # 대상이 생략된 뒤 관리절도 보존된 앞의 관리 대상에만 연결한다.
+                recovery_tail = bool(slot_id == c.CUSTOMER_SLOT and recovery_seen
+                                     and c.CUSTOMER_RECOVERY_MANAGEMENT_RE.search(surface))
+                is_admin = _administration(piece, slot_id) or context or recovery_tail
+                recovery_seen = recovery_seen or recovery_here
                 if allocation_excluded or (is_admin and not _business_fact(piece, slot_id, sentence)):
                     excluded.append(piece)
                     excluded_spans.append((begin, end))

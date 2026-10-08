@@ -359,7 +359,7 @@ URL_VARIANT_ORDER: Final[tuple[str, ...]] = (
 MAX_URL_VARIANTS: Final[int] = 3
 
 # 새 수집 경로의 상한은 기사 수를 채우는 목표가 아니라 요청 비용의 경계다.
-COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v23"
+COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v24"
 NAME_ACRONYM_MIN_CHARS: Final[int] = 2
 NAME_ACRONYM_MAX_CHARS: Final[int] = 8
 NAME_RETAINED_SUFFIX_MIN_CHARS: Final[int] = 2

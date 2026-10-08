@@ -53,6 +53,39 @@ INDUSTRY_SEARCH_INFORMATION_TITLE_RE = re.compile(
     re.I,
 )
 INDUSTRY_BUSINESS_TOKEN_END = r"(?=$|[^가-힣A-Za-z0-9]|의|은|는|이|가|업계|산업|시장|제조|생산|수요|가격|공급)"
+# 사업명 자체는 보존하고, 메타 순위에서만 공백 및 닫힌 사업 접미어를 비교한다.
+INDUSTRY_SEARCH_BUSINESS_SUFFIX_RE = re.compile(r"^([가-힣A-Za-z0-9][가-힣A-Za-z0-9 ]+?)\s*사업$")
+INDUSTRY_SEARCH_MIN_CORE_CHARS = 2
+INDUSTRY_SEARCH_REVENUE_SUFFIX = r"(?:료|비)"
+INDUSTRY_SEARCH_TOKEN_START = r"(?<![가-힣A-Za-z0-9])"
+INDUSTRY_SEARCH_ROLE_PREFIX_CHARS = 80
+INDUSTRY_SEARCH_ROLE_MIN_CHARS = 2
+INDUSTRY_SEARCH_ROLE_PREFIX = (
+    rf"(?:^|[.!?。\n])\s*당사는\s+(?P<prefix>[^.!?。\n\"'‘’“”]{{0,{INDUSTRY_SEARCH_ROLE_PREFIX_CHARS}}}?)"
+)
+INDUSTRY_SEARCH_SELF_ROLE_RE = re.compile(
+    INDUSTRY_SEARCH_ROLE_PREFIX
+    + rf"(?P<role>[가-힣A-Za-z]{{{INDUSTRY_SEARCH_ROLE_MIN_CHARS},}})(?:입니다|이다)(?=$|[.!?。\n])",
+    re.I,
+)
+INDUSTRY_SEARCH_PROFESSIONAL_ROLE_RE = re.compile(
+    INDUSTRY_SEARCH_ROLE_PREFIX + r"전문\s+"
+    + rf"(?P<role>[가-힣A-Za-z]{{{INDUSTRY_SEARCH_ROLE_MIN_CHARS},}})(?:으로|로)(?!부터|서|써)\s+",
+    re.I,
+)
+INDUSTRY_SEARCH_ROLE_FOREIGN_RE = re.compile(
+    r"(?:고객(?:사)?|타사|다른\s*회사|자회사|종속(?:회사|기업)|거래처|경쟁사)(?:의|가|는|에서)|"
+    r"(?:과거|당시|예정|계획)|(?:은|는|이|가|의)\s+"
+)
+INDUSTRY_SEARCH_ROLE_RECIPIENT_RE = re.compile(r"\s*(?:고객|고객사|거래처|이용자)(?:에게|을|를|에)")
+INDUSTRY_SEARCH_ROLE_CURRENT_END_RE = re.compile(r"(?:하고\s*있(?:습니다|다)|합니다|한다)\s*$")
+INDUSTRY_SEARCH_ROLE_TAIL_NEGATIVE_RE = re.compile(
+    r"(?:하지|하지는|되지|되지는)\s*(?:않|못)|중단|폐업|종료|(?:할|될)\s*(?:계획|예정)"
+)
+INDUSTRY_SEARCH_GENERIC_ROLES = frozenset({
+    "회사", "기업", "업체", "기관", "사업", "서비스", "제품", "상품", "기술", "시스템",
+    "방법", "방식", "수단", "도구", "예정", "계획",
+})
 INDUSTRY_SEARCH_CLAUSE_RE = re.compile(r"[.!?。…\n]+")
 INDUSTRY_QUERY_REGIONS = (("국내", "domestic"), ("세계", "global"))
 # 검색 메타데이터는 본문 조사 순위에만 쓰며 문제의 사실 여부를 증명하지 않는다.
