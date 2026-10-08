@@ -129,4 +129,19 @@ def build_business_activity_anchors(
             diagnostics.update(counts)
         if len(anchors) == c.MAX_BUSINESS_ACTIVITY_ANCHORS:
             break
+    # 실제 생산/제공과 현재 구성 선언을 먼저 보존하고, 당기 자기 영업표를 보충한다.
+    for fragment, document, original_item in verified:
+        if original_item or any(anchor.anchor_id == fragment.fragment_id for anchor in anchors):
+            continue
+        if len(anchors) == c.MAX_BUSINESS_ACTIVITY_ANCHORS:
+            break
+        item = current_business_item(fragment, company_name, include_activity_table=True)
+        counts["current_business_matches"] += bool(item)
+        key = " ".join(item.casefold().split())
+        if item and key not in seen:
+            anchors.append(_anchor(fragment, document, item))
+            seen.add(key)
+            counts["accepted_anchors"] = len(anchors)
+        if diagnostics is not None:
+            diagnostics.update(counts)
     return tuple(anchors)

@@ -112,6 +112,12 @@ from src.features.composer.review_row_salvage import (
     SalvagedVerdicts,
     salvage_verdict_rows,
 )
+from src.features.composer.review_evidence_constants import (
+    REVIEW_EVIDENCE_ID_GUIDE, REVIEW_EVIDENCE_ID_STAGE,
+)
+from src.features.composer.review_evidence_ids import (
+    ReviewEvidenceContext, normalize_review_entry, normalize_review_binding_text,
+)
 from src.features.composer.entity_scope_constraints import (
     EntityScopeContext,
     build_entity_scope_contexts,
@@ -1268,6 +1274,7 @@ def _build_grouped_review_prompt(
         # ★ 안내문은 «부를 때» 고른다 — 진단 모드에서는 판정 지시가 빠진 판이 실린다.
         combined_relation_review_guide(),
         FUTURE_PLAN_REVIEW_GUIDE,
+        REVIEW_EVIDENCE_ID_GUIDE,
         (
             "아래 자료는 장별 블록으로 격리했다. 각 후보는 반드시 같은 블록의 "
             "근거만으로 판정하고 다른 장 블록의 근거를 빌리지 마라.\n"
@@ -1471,6 +1478,7 @@ def _parse_grouped_verdicts(
     *,
     observe: Optional[dict] = None,
     requested_numbers: Optional[Sequence[int]] = None,
+    evidence_context: Optional[ReviewEvidenceContext] = None,
 ) -> Optional[dict[int, str]]:
     """번호뿐 아니라 입력 장과 같은 판정만 받아 장 경계를 잠근다.
 
@@ -1503,6 +1511,11 @@ def _parse_grouped_verdicts(
         if number is None:
             note_row_failure(observe, ROW_NUMBER_NOT_INT)
             continue
+        evidence_valid = True
+        if evidence_context is not None:
+            # 상위 인용은 형식 계약이고 중첩 증명의 외부 ID는 의미 결속 실패다.
+            # 후자는 아래 _apply_grounding에서 반드시 거절하며 재호출하지 않는다.
+            entry, evidence_valid = normalize_review_entry(entry, evidence_context, validate_proof_ids=False)
         result = str(entry.get(REVIEW_RESULT_KEY) or "").strip()
         section_id = str(entry.get(REVIEW_SECTION_KEY) or "").strip()
         raw_evidence_ids = entry.get(REVIEW_EVIDENCE_IDS_KEY)
@@ -1518,6 +1531,7 @@ def _parse_grouped_verdicts(
             or not evidence_ids
             or len(evidence_ids) != len(set(evidence_ids))
             or frozenset(evidence_ids) != expected_evidence_ids
+            or not evidence_valid
         ):
             note_row_failure(
                 observe,
@@ -1643,6 +1657,19 @@ def _ask_grouped_verdicts(
     evidence_ids_by_number = {
         item.number: frozenset(item.citations) for item in items
     }
+    table_source = _table_grounding_source(table)
+    candidates = {
+        item.number: _grouped_grounding_candidate(
+            item, frag_by_id,
+            table_source if item.section_id == TABLE_EVIDENCE_SECTION_ID else "",
+        )
+        for item in items
+    }
+    evidence_context = ReviewEvidenceContext(
+        source_ids=frozenset(frag_by_id) | {TABLE_SOURCE_ID},
+        citations_by_number=evidence_ids_by_number,
+        proof_ids_by_number={number: frozenset(sources) for number, (_, sources) in candidates.items()},
+    )
     # 최초 본문 검수 전용 호출자가 있으면 첫 요청에 쓴다. 재요청·후속은 전용
     # 재요청 호출자가 있으면 그것, 없으면 첫 요청과 같은 호출자다.
     reviewer = initial_ask or ask
@@ -1676,6 +1703,7 @@ def _ask_grouped_verdicts(
     observe = _observe_attempt(1, first_prompt, raw)
     verdicts = _parse_grouped_verdicts(
         raw, owners, evidence_ids_by_number, observe=observe,
+        evidence_context=evidence_context,
     )
     if observe is not None:
         protocol_diagnostics.append(observe)
@@ -1702,6 +1730,7 @@ def _ask_grouped_verdicts(
         observe = _observe_attempt(retries + 1, retry_prompt, raw)
         verdicts = _parse_grouped_verdicts(
             raw, owners, evidence_ids_by_number, observe=observe,
+            evidence_context=evidence_context,
         )
         if aborted is not None:
             note_optional_call_aborted(
@@ -1753,6 +1782,7 @@ def _ask_grouped_verdicts(
             followup_verdicts = _parse_grouped_verdicts(
                 followup_raw, owners, evidence_ids_by_number, observe=observe,
                 requested_numbers=sorted(missing_numbers),
+                evidence_context=evidence_context,
             )
             if aborted is not None:
                 note_optional_call_aborted(
@@ -1774,15 +1804,6 @@ def _ask_grouped_verdicts(
             if recovered:
                 raw = _merge_review_payloads(raw, verdicts, followup_raw, recovered)
                 verdicts = {**verdicts, **recovered}
-    table_source = _table_grounding_source(table)
-    candidates = {
-        item.number: _grouped_grounding_candidate(
-            item,
-            frag_by_id,
-            table_source if item.section_id == TABLE_EVIDENCE_SECTION_ID else "",
-        )
-        for item in items
-    }
     contexts = {
         item.number: (
             item.section_id,
@@ -1809,6 +1830,7 @@ def _ask_grouped_verdicts(
         raw,
         verdicts,
         candidates,
+        review_evidence_context=evidence_context,
         numeric_options_by_number=numeric_options_by_number,
         entity_scope_by_number=_entity_scope_by_number(
             ((item.number, item.citations) for item in items),
@@ -2094,6 +2116,7 @@ def _apply_grounding(
     grounding_problems: Optional[dict[int, str]] = None,
     entity_scope_by_number: Optional[Mapping[int, Sequence[EntityScopeContext]]] = None,
     numeric_options_by_number: Optional[Mapping[int, tuple[NumericProofOption, ...]]] = None,
+    review_evidence_context: Optional[ReviewEvidenceContext] = None,
 ) -> dict[int, str]:
     # ★ 보고서 기준일을 그대로 넘긴다. 안 넘기면 executive_status_guard 가 날짜
     #   문턱 없이 이탈 «표지» 존재만으로 판정해, 「기준일 이후에 물러날 예정」인
@@ -2118,6 +2141,14 @@ def _apply_grounding(
     #   판정들을 건너뛴다(fail-open). 읽히는 응답은 원문 그대로다. 부르는 쪽이
     #   원문을 넘기든 구제 문자열을 넘기든 결과가 같도록 이 한 곳에서 맞춘다.
     raw = _review_binding_text(raw)
+    invalid_evidence_ids: frozenset[int] = frozenset()
+    if review_evidence_context is not None:
+        original_evidence_raw = raw
+        raw, invalid_evidence_ids = normalize_review_binding_text(raw, review_evidence_context)
+        if raw != original_evidence_raw:
+            logger.info("근거 ID 파생 검수 입력: 원입력지문 %s, 파생지문 %s, 결속 실패 %d개",
+                        hashlib.sha256((original_evidence_raw or '').encode()).hexdigest(),
+                        hashlib.sha256((raw or '').encode()).hexdigest(), len(invalid_evidence_ids))
     original_binding_raw = raw
     raw, invalid_numeric_selections = restore_numeric_proof_selections(
         raw, numeric_options_by_number or {}, candidates,
@@ -2318,7 +2349,7 @@ def _apply_grounding(
                         CHALLENGE_FLOW_SECTION_ID
                     ) if allowed_fragment_ids_by_section is not None else None,
                     culture_candidate=number in culture_candidate_numbers,
-                    source_binding_problem=plan_problem,
+                    source_binding_problem=(GROUNDING_INVALID if number in invalid_evidence_ids else plan_problem),
                 )
                 section_moves.append(_SectionMove(
                     number=number,
@@ -2397,6 +2428,16 @@ def _apply_grounding(
         if problem:
             constrained[number] = REVIEW_GROUNDING_REJECTED
             problems[number] = problem
+    # 기존 역할·수치·자기 원문 검사가 찾은 구체 사유를 먼저 보존한다.
+    # 요구되지 않은 증명에 외부 ID를 넣어도 최종적으로 거절하며 장 이동도 위에서 막는다.
+    for number in invalid_evidence_ids:
+        if constrained.get(number) in (VERDICT_TRUE, VERDICT_UNCLEAR):
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = GROUNDING_INVALID
+            grounding_details[number] = {
+                "version": GROUNDING_DETAIL_VERSION, "check_kind": "근거",
+                "stage": REVIEW_EVIDENCE_ID_STAGE,
+            }
     for number, problem in problems.items():
         logger.warning("의미 근거 검증: %s, 후보 %d 공개 제외", problem, number)
         detail: Optional[dict[str, object]] = (

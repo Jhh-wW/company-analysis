@@ -176,11 +176,13 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 # 증거: tmp/audit-20260930/paid/514031-schema-six-baseline-private.json.
 @pytest.mark.parametrize("factory,grouped,expected", (
     (_golden_case, False, "68aedc7566cc3a824402c30915c6ef85dcf30c53c9ef7cf31779832b63848d05"),
-    (_golden_case, True, "d65b477a9cad6ea92ac8d472a16783504040ec1f78509d16d7de1222c3acd3ea"),
+    (_golden_case, True, "5a7f3a995b342e514fa12a094a38a1f969fd138205dccb37a95073ca3281eecb"),
     (_boundary_case, False, "51e1a6248b3e48fef7b89780eed8a26d339afbd3f3b30785ee2b84bb2946098c"),
-    (_boundary_case, True, "8f8d80576ec2a40ecbb8e26e3a84942a9951f4bc81d7d0a7a2a66e9d2d58c40e"),
+    (_boundary_case, True, "d0e8f78d8bf737df54bfe2e7be4697ff254daf6960088e55544b0fa5356f5b92"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
+    # 2026-10-08: packet 표시 ID 안내 125자만 제거하면 직전 두 지문이 복구된다.
+    # 증거: paid/a82b-review-id-prompt-baseline-private.json. 원문·번호·스키마 불변.
     # 현재 builder와 현재 안내문으로 재생한 전체 UTF-8 프롬프트 해시다.
     # ★ 기준값은 «스키마 포장 이전 builder»가 «현재 안내문»으로 만든 프롬프트다. 안내문이
     #   바뀌면(2026-09-14: 역할·과금 안내의 유형 이름을 「」로 교체) 값도 함께 갱신한다 —

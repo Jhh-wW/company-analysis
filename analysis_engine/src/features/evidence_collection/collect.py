@@ -23,6 +23,8 @@ from features.evidence_collection.filing_select import DartFetcher, DocumentFetc
 from features.evidence_collection.retention import CandidateRetention
 from features.evidence_collection.source_context import context_for_candidate, heading_source_scopes, different_document_actor, validate_source_context, prepare_table_contexts
 from features.evidence_collection.source_context import SourceContextBudgetExceeded
+from features.evidence_collection.business_activity_table import activity_table_ranges
+from features.evidence_collection import business_activity_table_constants as activity_c
 from features.evidence_collection.source_context_constants import CONTEXT_BUDGET_REASON
 from features.evidence_collection.scan_contract import DocumentScan
 from features.evidence_collection.section_scope import section_scopes, context_for_section_candidate
@@ -372,6 +374,44 @@ def collect_dart_evidence(
             elif not has_any_direct_signal:
                 retention.offer_unclassified(candidate_index, candidate)
 
+        # 행만으로 자기 사업을 확정하지 않는다. 명시 당사 표제와 당기 종류별
+        # 실적이 결속되는 연속 원문창만 기존 identity 보관몫에 더한다.
+        # 기존 개별 계약 조각·총 문자/개수 상한·장별 보관몫은 그대로 유지한다.
+        activity_slot = activity_c.ACTIVITY_TABLE_SLOT_ID
+        if progress.complete and activity_slot in allowed_slot_ids:
+            for activity_start, activity_end in activity_table_ranges(fetch_result.text, fetch_result.document_actor):
+                if deadline_at is not None and time.monotonic() > deadline_at:
+                    progress.truncation_reason = c.REASON_DEADLINE_EXCEEDED
+                    progress.complete = False
+                    break
+                activity_text = fetch_result.text[activity_start:activity_end]
+                context_json = context_for_candidate(
+                    text=activity_text, start=activity_start, end=activity_end,
+                    table_contexts=table_scopes, scopes=source_scopes,
+                )
+                if different_document_actor(context_json):
+                    continue
+                candidate = segment.FragmentCandidate(
+                    activity_start, activity_end, activity_text, "",
+                    source_context_json=context_json,
+                    section_context_json=context_for_section_candidate(
+                        business_scopes, text=activity_text, start=activity_start,
+                        end=activity_end, document_id=document_id,
+                        document_sha256=content_sha256,
+                    ),
+                )
+                previous_indices = {index for index, _candidate, _scores in retention.selected_scored()}
+                previous_pools = {key: list(pool) for key, pool in retention.pools.items()}
+                retention.offer_scored(progress.candidates_seen, candidate, (
+                    relevance.SlotScore("identity", activity_slot, c.RELEVANCE_KEYWORD_HIT_SCORE_MILLIS,
+                                        (activity_c.ACTIVITY_TABLE_REASON,)),
+                ))
+                current_indices = {index for index, _candidate, _scores in retention.selected_scored()}
+                if not previous_indices <= current_indices:
+                    # 검색 보충 때문에 이미 선택한 표시용 조각을 밀어내지 않는다.
+                    # 여유 몫이 없으면 새 표 후보를 보관하지 않고 압축 관측만 남긴다.
+                    retention.pools = previous_pools
+                progress.candidates_seen += 1
         scored = retention.selected_scored()
         classify_probe_keywords.update(progress.classification_keywords)
         unclassified_candidates = retention.selected_unclassified()

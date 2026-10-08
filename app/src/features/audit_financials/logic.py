@@ -24,6 +24,7 @@ from src.features.audit_financials.constants import (
     LOSS_ONLY_ALIASES,
     METRIC_ALIASES,
     OUTPUT_YEAR_COUNT,
+    PLAIN_INLINE_NOTE_PATTERN,
     PLAIN_METRIC_WINDOW_CHARS,
     PLAIN_NOTE_NUMBER_MAX,
     UNIT_DIVISORS,
@@ -64,6 +65,7 @@ _AMOUNT_TOKEN_RE = re.compile(
 _PLAIN_NUMERIC_PREFIX_RE = re.compile(r"[\d\s,().+△▲−-]*")
 _PLAIN_SEPARATED_SIGN_RE = re.compile(r"[△▲+−-](?:\s|$)")
 _PLAIN_NOTE_HEADER_RE = re.compile(r"주\s*석")
+_PLAIN_INLINE_NOTE_RE = re.compile(PLAIN_INLINE_NOTE_PATTERN)
 _PLAIN_PERIOD_SUFFIX_RE = re.compile(
     r"(?:년(?:도|말|초)?|월|일|기말|기초)(?=\s|$|\d|부터|까지)"
 )
@@ -308,6 +310,7 @@ def _plain_candidates(raw: str, *, source_kind: str = "plain") -> list[_Statemen
     plain = _plain_text(raw)
     matches = list(_STATEMENT_TITLE_RE.finditer(plain))
     candidates: list[_StatementCandidate] = []
+    leading_space = len(raw) - len(raw.lstrip())
     for index, match in enumerate(matches):
         next_income_start = matches[index + 1].start() if index + 1 < len(matches) else len(plain)
         next_statement = _NEXT_STATEMENT_RE.search(plain, match.end())
@@ -319,12 +322,19 @@ def _plain_candidates(raw: str, *, source_kind: str = "plain") -> list[_Statemen
         excerpt = plain[match.start():end].strip()
         if not excerpt:
             continue
+        start = match.start()
+        if source_kind == "plain":
+            # 운영 평문은 선행공백이 남을 수 있다. 원문에 정확한 연속 구간이
+            # 있을 때만 그 좌표를 쓰며, 추출된 내용이나 지문은 바꾸지 않는다.
+            raw_start = leading_space + match.start()
+            if raw[raw_start:raw_start + len(excerpt)] == excerpt:
+                start = raw_start
         candidates.append(
             _StatementCandidate(
                 source_kind=source_kind,
                 scope="연결" if match.group("scope") else "별도",
-                start=match.start(),
-                end=match.start() + len(excerpt),
+                start=start,
+                end=start + len(excerpt),
                 search_text=excerpt,
                 evidence_text=excerpt,
             )
@@ -489,11 +499,19 @@ def _plain_observation(
         )
         for match in pattern.finditer(text):
             window = text[match.end() : match.end() + PLAIN_METRIC_WINDOW_CHARS]
+            inline_note = _PLAIN_INLINE_NOTE_RE.match(window)
+            if inline_note is not None:
+                note_numbers = inline_note.group("numbers").split(",")
+                if any(int(number.strip()) > PLAIN_NOTE_NUMBER_MAX for number in note_numbers):
+                    continue
+                window = window[inline_note.end():]
             amounts = _plain_row_amounts(
                 window,
                 period_count=period_count,
                 force_negative=alias in LOSS_ONLY_ALIASES,
-                has_note_column=has_note_column,
+                # 명시 주석을 제거한 뒤에는 기간별 금액만 허용한다. 추가 번호를
+                # 주석 열로 다시 버리면 결측 금액이나 중복 주석을 숨길 수 있다.
+                has_note_column=has_note_column and inline_note is None,
             )
             if amounts:
                 return amounts

@@ -142,6 +142,7 @@ CANDIDATE_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 CANDIDATE_FINGERPRINT_VERSION = "candidate-raw-utf8-v1"
 GROUNDING_DETAIL_VERSION = "grounding-detail-v1"
 GROUNDING_DETAIL_STAGES = frozenset({
+    "review_evidence_id_binding",
     "numeric_selection_unbound",
     "entries_missing", "entry_type", "expression_fields", "expression_not_in_candidate",
     "quote_not_bound", "metric_mismatch", "candidate_value_missing", "candidate_value_scope",

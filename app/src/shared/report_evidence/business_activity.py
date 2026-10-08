@@ -10,6 +10,7 @@ from src.shared.report_evidence import business_activity_constants as c
 from src.shared.report_evidence.models import EvidenceFragment
 from src.shared.report_evidence.source_context import parse_source_context
 from src.shared.report_evidence.business_activity_declaration import declared_business_item
+from src.shared.report_evidence.business_activity_table import activity_table_item
 
 
 def _valid_item(item: str) -> bool:
@@ -38,6 +39,7 @@ def _has_other_company_reference(text: str, company_name: str) -> bool:
 
 def current_business_item(
     fragment: EvidenceFragment, company_name: str, *, include_declaration: bool = False,
+    include_activity_table: bool = False,
 ) -> str:
     """회사 자신의 현재 구체 사업이 명시된 경우에만 원문 속 항목을 돌려준다."""
     if not company_name.strip():
@@ -56,6 +58,12 @@ def current_business_item(
     operating_slots = set(fragment.covered_slot_ids) & c.BUSINESS_ACTIVITY_OPERATING_SLOT_IDS
     if not business_slots and not operating_slots:
         return ""
+    # 표의 발주처 명칭을 자기 시공의 주어와 혼동하지 않는다. 새로운 표 경로는
+    # 별도 원문 문법으로 회사 소유·당기·종류별 실적을 함께 확인한 뒤에만 쓴다.
+    if include_activity_table and business_slots:
+        item = activity_table_item(fragment.text, company_name)
+        if _valid_item(item):
+            return item
     operating_only = bool(operating_slots and not business_slots)
     named = parse_name_location(fragment.location)
     if named is not None:

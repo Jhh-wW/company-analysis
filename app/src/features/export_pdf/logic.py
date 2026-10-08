@@ -2452,8 +2452,9 @@ def _add_section(
         else ""
     )
     if empty_notice:
-        story.extend(_lead_with_heading(
-            heading_flowables, [Paragraph(_escape(empty_notice), styles["small"])]
+        story.extend(_paragraphs_with_heading(
+            heading_flowables, [Paragraph(_escape(empty_notice), styles["small"])],
+            width, text_only=True,
         ))
         _add_unsealed_industry_contexts(story, report, section, styles)
         return

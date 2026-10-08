@@ -56,7 +56,9 @@ def test_explicit_opt_in_only_attaches_metadata(monkeypatch, configured):
 # 세 신규 5장 안내만 HEAD로 역치환한 증거는 paid/8f3e-review-prompt-baseline-complete-private.json.
 # 2026-10-07 회사·고객 행위와 외주 부정 범위 지침 +347자. 원문·번호·스키마는 동일하다.
 # paid/514031-prompt-baseline-private.json에서 지침 역치환으로 직전 네 지문을 확인했다.
-@pytest.mark.parametrize("grouped,prefix_chars", ((False, 12860), (True, 13914)))
+# 2026-10-08: packet 표시 ID 안내 125자 추가. 안내만 역치환해 직전 지문을 확인했다.
+# 증거: paid/a82b-review-id-prompt-baseline-private.json.
+@pytest.mark.parametrize("grouped,prefix_chars", ((False, 12860), (True, 14039)))
 @pytest.mark.parametrize("factory", (_golden_case, _large_case, _boundary_case))
 def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
     monkeypatch, grouped, prefix_chars, factory,
@@ -81,9 +83,9 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 @pytest.mark.parametrize("factory,grouped,expected", (
     (_golden_case, False, "68aedc7566cc3a824402c30915c6ef85dcf30c53c9ef7cf31779832b63848d05"),
-    (_golden_case, True, "d65b477a9cad6ea92ac8d472a16783504040ec1f78509d16d7de1222c3acd3ea"),
+    (_golden_case, True, "5a7f3a995b342e514fa12a094a38a1f969fd138205dccb37a95073ca3281eecb"),
     (_boundary_case, False, "51e1a6248b3e48fef7b89780eed8a26d339afbd3f3b30785ee2b84bb2946098c"),
-    (_boundary_case, True, "8f8d80576ec2a40ecbb8e26e3a84942a9951f4bc81d7d0a7a2a66e9d2d58c40e"),
+    (_boundary_case, True, "d0e8f78d8bf737df54bfe2e7be4697ff254daf6960088e55544b0fa5356f5b92"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,

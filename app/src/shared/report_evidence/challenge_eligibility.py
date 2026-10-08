@@ -32,7 +32,7 @@ def _reason(text: str, *, table_record: bool = False, positive_context: bool = F
             credit_context and c.CREDIT_MEASUREMENT_UNIT_RE.search(surface))) and not credit_business:
         return c.ADMINISTRATIVE_EVENT_ONLY
     business_exception = bool(
-        c.POLICY_BUSINESS_PROBLEM_RE.search(surface)
+        c.POLICY_BUSINESS_PROBLEM_RE.search(c.POLICY_REDUCTION_PURPOSE_RE.sub("", surface))
         or c.CUSTOMER_LEGAL_FINANCIAL_SERVICE_RE.search(surface)
         or c.PRODUCT_REGULATION_RESPONSE_RE.search(surface)
         or credit_business
@@ -181,6 +181,13 @@ def challenge_eligibility_quote_problem(quote: str, source: str, slot_id: str) -
         problem = _reason(quote, credit_context=True)
         if problem:
             return problem
+    # 실제 사건과 같은 절에 있는 정책 인용도 전체 원문의 사건을 빌리지 않는다.
+    full_surface = _surface(source)
+    policy_units = tuple(unit for first, second, unit in c.POLICY_CONTEXT_RULES
+                         if first.search(full_surface) and second.search(full_surface))
+    problem = _reason(quote, policy_units=policy_units)
+    if problem:
+        return problem
     scoped = challenge_eligibility_scope(source, slot_id)
     if not scoped.excluded_spans:
         return ""

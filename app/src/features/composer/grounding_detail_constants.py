@@ -2,6 +2,7 @@
 
 GROUNDING_DETAIL_VERSION = "grounding-detail-v1"
 GROUNDING_DETAIL_GUIDES = {
+    "review_evidence_id_binding": "근거 ID가 이 문장에 배정된 출처와 일치하지 않거나 중복됩니다.",
     "numeric_selection_unbound": "수치 선택 ID가 이번 번호·장·자기 인용에 결속되지 않거나 자유 수치 증명과 충돌합니다.",
     "entries_missing": "수치 근거 배열이 비었거나 배열이 아닙니다.",
     "entry_type": "수치 근거 항목이 객체가 아닙니다.",
