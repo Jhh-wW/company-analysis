@@ -501,9 +501,10 @@ def build_generation_quality_candidate(
             )
         )
 
-    context_anchor_sources = {
-        context.anchor.source_id
+    context_sources = {
+        source_id
         for section in rendered.sections for context in section.industry_contexts
+        for source_id in (context.anchor.source_id, context.problem.source_id)
     }
     direct_fact_sources = {
         source_id for fact in rendered.fact_records
@@ -522,7 +523,7 @@ def build_generation_quality_candidate(
             publisher=source.publisher,
             counts_toward_document_floor=(
                 source.kind is not SourceKind.NEWS
-                and (source.source_id not in context_anchor_sources or source.source_id in direct_fact_sources)
+                and (source.source_id not in context_sources or source.source_id in direct_fact_sources)
             ),
             source_kind=(
                 "news" if source.kind is SourceKind.NEWS

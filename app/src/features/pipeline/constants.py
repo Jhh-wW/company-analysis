@@ -8,7 +8,7 @@ from src.core.constants import PROVIDER_BASE_TIMEOUT_SEC
 # 요청/모듈 MODEL을 바꾸지 않고 계량 경계에서 단계별로 고정한다.
 V2_REVIEW_MODEL: Final[str] = "claude-sonnet-4-6"
 V2_REVIEW_MODEL_STAGES: Final[frozenset[str]] = frozenset({
-    "v2_review", "v2_diagram",
+    "v2_review", "v2_diagram", "official_industry_context",
 })
 
 #: DART OpenAPI가 요청을 정상 처리했음을 뜻하는 상태 코드.

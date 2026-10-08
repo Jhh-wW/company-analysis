@@ -16,6 +16,8 @@ def supplementary_research_source_verifier() -> SourceVerifier:
 
 def register_industry_problem_source(problem: IndustryProblemEvidence, *, number: int, section_id: str) -> object:
     """검수 원문의 실제 메타데이터로 회사 사실과 구분한 뉴스 출처를 봉인한다."""
+    if problem.source_kind:
+        raise ValueError("공식 산업 자료는 기존 공식 출처 생성기로 결속해야 합니다")
     from urllib.parse import urlsplit
     from src.features.provenance.sources import Source, SourceKind, evidence_text_hash, seal_collected_source
 

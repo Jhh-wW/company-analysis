@@ -1,18 +1,21 @@
 """회사 직접 사실과 분리한 산업 과제의 원문·사업 연결 계약.
 
-이 타입의 존재나 지문은 의미 검수 완료를 뜻하지 않는다. 생산자는 기존
-기사 검수 요청에서 원문과 공식 사업 근거의 적용 관계를 검수해야 한다.
+이 타입의 존재나 지문은 의미 검수 완료를 뜻하지 않는다. 생산자는 기사 또는
+공식 자료 검수 요청에서 원문과 공식 사업 근거의 적용 관계를 검수해야 한다.
 소비자는 같은 실행의 출처 등록부로 두 원문을 다시 검증한다.
 """
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import asdict, dataclass
+import re
+from dataclasses import asdict, dataclass, field
 from datetime import date
 from typing import Final, Mapping
 
-from src.shared.report_evidence.constants import FORMAL_DOCUMENT_SOURCE_KINDS
+from src.shared.report_evidence.constants import (
+    FORMAL_DOCUMENT_SOURCE_KINDS, OFFICIAL_WEB_SOURCE_KINDS,
+)
 from src.shared.report_evidence.source_verification import SourceVerifier
 
 INDUSTRY_CONTEXT_SECTION: Final[str] = "current_challenges"
@@ -22,6 +25,10 @@ INDUSTRY_CONTEXT_LIMITATION: Final[str] = (
     "실제 대응은 확인되지 않았다."
 )
 INDUSTRY_CONTEXT_MAX_ITEMS: Final[int] = 2
+OFFICIAL_INDUSTRY_FIELDS: Final[tuple[str, ...]] = (
+    "source_kind", "identity_binding", "assessment_quote", "observation_period",
+)
+OFFICIAL_INDUSTRY_YEAR_RE: Final[re.Pattern[str]] = re.compile(r"(?:19|20)[0-9]{2}")
 INDUSTRY_GEOGRAPHIES: Final[frozenset[str]] = frozenset({"domestic", "global", "foreign"})
 INDUSTRY_GEOGRAPHY_LABELS: Final[Mapping[str, str]] = {
     "domestic": "국내", "global": "세계", "foreign": "해외 특정 지역",
@@ -98,6 +105,11 @@ class IndustryProblemEvidence:
     document_content_sha256: str = ""
     analysis_response_sha256: str = ""
     applicability_quote: str = ""
+    # 빈 기본값은 이미 봉인된 뉴스 산업 자료의 저장 형식을 그대로 보존한다.
+    source_kind: str = field(default="", metadata={"canonical_omit_empty_string": True})
+    identity_binding: str = field(default="", metadata={"canonical_omit_empty_string": True})
+    assessment_quote: str = field(default="", metadata={"canonical_omit_empty_string": True})
+    observation_period: str = field(default="", metadata={"canonical_omit_empty_string": True})
 
     def __post_init__(self) -> None:
         for name in ("evidence_id", "business_anchor_id", "document_id", "source_url", "publisher", "title", "industry", "problem", "geography_detail", "geography_evidence"):
@@ -115,6 +127,30 @@ class IndustryProblemEvidence:
                 raise ValueError("산업 자료에는 전체 원문과 검수 응답의 SHA-256이 필요합니다")
         if not self.applicability_quote or self.applicability_quote not in self.exact_text:
             raise ValueError("사업 적용 근거는 산업 자료의 연속 원문 안에 있어야 합니다")
+        for name in OFFICIAL_INDUSTRY_FIELDS:
+            if type(getattr(self, name)) is not str:
+                raise ValueError("공식 산업 자료의 추가 메타데이터는 문자열이어야 합니다")
+        if not self.source_kind:
+            if any(getattr(self, name) for name in OFFICIAL_INDUSTRY_FIELDS[1:]):
+                raise ValueError("뉴스 산업 자료에 공식 검수 메타데이터를 섞을 수 없습니다")
+            return
+        if self.source_kind not in FORMAL_DOCUMENT_SOURCE_KINDS:
+            raise ValueError("공식 산업 자료의 수집 종류가 계약 밖입니다")
+        for name in OFFICIAL_INDUSTRY_FIELDS:
+            _text(getattr(self, name), name)
+        if self.exact_text.count(self.assessment_quote) != 1:
+            raise ValueError("공식 산업 평가 범위는 자기 조각의 유일한 연속 원문이어야 합니다")
+        if any(value not in self.assessment_quote for value in (
+            self.industry, self.problem, self.geography_detail,
+            self.geography_evidence, self.applicability_quote,
+        )):
+            raise ValueError("공식 산업 판정이 다른 절의 문제나 지역을 빌렸습니다")
+        if (self.observation_period not in self.title
+                and self.observation_period not in self.assessment_quote):
+            raise ValueError("공식 산업 자료의 관찰 시점이 제목 또는 평가 원문에 없습니다")
+        years = OFFICIAL_INDUSTRY_YEAR_RE.findall(self.observation_period)
+        if not years or any(int(year) > date.fromisoformat(self.published_on).year for year in years):
+            raise ValueError("공식 산업 자료의 관찰 연도가 없거나 공표 이후입니다")
 
 
 @dataclass(frozen=True)
@@ -168,6 +204,12 @@ class IndustryContextDisplay:
             f"{self.context.interpretation} [{self.business_source_number}] [{self.industry_source_number}] — 해석",
             self.context.limitation,
         )
+        if self.context.problem.source_kind:
+            problem = self.context.problem
+            expected = (
+                f"회사 공식 자료의 기준: {problem.observation_period} · {problem.published_on} 공표",
+                *expected,
+            )
         if self.lines and self.lines != expected:
             raise ValueError("산업 과제의 공개 문구가 근거로 만든 고정 해석과 다릅니다")
         object.__setattr__(self, "lines", expected)
@@ -191,7 +233,12 @@ def industry_context_displays(contexts: tuple[IndustryChallengeContext, ...], so
 def industry_context_to_dict(value: IndustryChallengeContext) -> dict[str, object]:
     if type(value) is not IndustryChallengeContext:
         raise ValueError("정확한 산업 과제 타입이 필요합니다")
-    return asdict(value)
+    payload = asdict(value)
+    # 새 필드가 없는 옛 뉴스 보고서도 같은 공개 내용 지문으로 다시 읽는다.
+    for name in OFFICIAL_INDUSTRY_FIELDS:
+        if not payload["problem"][name]:
+            payload["problem"].pop(name)
+    return payload
 
 
 def industry_context_from_dict(value: object) -> IndustryChallengeContext:
@@ -243,10 +290,23 @@ def industry_context_problems(
                 problems.append("industry_context_unofficial_anchor")
             elif not official and not (verified.news or verified.official):
                 problems.append("industry_context_unqualified_industry_source")
+            elif not official and span.source_kind and (
+                not verified.official
+                or verified.formal_kind != span.source_kind
+                or str(getattr(source, "identity_binding", "")) != span.identity_binding
+            ):
+                problems.append("industry_context_changed_official_source")
             elif not official and (
-                str(getattr(source, "published_at", "")) != span.published_on
+                str(getattr(source, (
+                    "disclosed_at" if span.source_kind
+                    and span.source_kind not in OFFICIAL_WEB_SOURCE_KINDS
+                    else "published_at"
+                ), "")) != span.published_on
                 or str(getattr(source, "publisher", "")) != span.publisher
-                or str(getattr(source, "title", "")) != span.title
+                or str(
+                    (getattr(source, "title", "") or getattr(source, "label", ""))
+                    if span.source_kind else getattr(source, "title", "")
+                ) != span.title
             ):
                 problems.append("industry_context_changed_source_metadata")
     return tuple(dict.fromkeys(problems))

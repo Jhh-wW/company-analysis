@@ -4885,6 +4885,7 @@ class RealPipeline:
                     official_evidence if supplementary_research_required else None
                 ),
                 official_evidence_context=official_evidence,
+                official_company_profile=profile,
                 industry_anchors=tuple(
                     getattr(getattr(news_session, "company", None), "business_anchors", ())
                 ),
@@ -6656,6 +6657,7 @@ def _run_v2_composer(
     supplementary_research_required: bool = False,
     supplementary_official_evidence: OfficialEvidenceCollectionResult | None = None,
     official_evidence_context: OfficialEvidenceCollectionResult | None = None,
+    official_company_profile: Mapping[str, Any] | None = None,
     industry_anchors: tuple[BusinessActivityAnchor, ...] = (),
     industry_problems: tuple[IndustryProblemEvidence, ...] = (),
 ) -> RunResult:
@@ -6981,6 +6983,15 @@ def _run_v2_composer(
     )
     review_diagnostics_sink: list[dict] = []
     composition_diagnostics_sink: list[dict] = []
+    from src.features.pipeline.official_industry_context import prepare_official_industry_fallback
+    industry_anchors, official_industry_fallback = prepare_official_industry_fallback(
+        collection=official_evidence_context, profile=official_company_profile,
+        company_id=corp_id, reference_date=business_date.isoformat(),
+        anchors=industry_anchors,
+        analyze=_official_industry_analyzer(engine, client, fatal_error_type=AskFatalError),
+        available_calls=lambda: engine.available_provider_calls(reserved_calls=0),
+        diagnostics=steps, budget_exceptions=(provider_budget.ProviderBudgetExceeded,),
+    )
     try:
         output = composer_pipeline.run_v2(
             company_name,
@@ -7023,6 +7034,7 @@ def _run_v2_composer(
             company_id=corp_id,
             industry_anchors=industry_anchors,
             industry_problems=industry_problems,
+            official_industry_fallback=official_industry_fallback,
             build_identity_sha256=build_identity_sha256,
             review_diagnostics_sink=review_diagnostics_sink,
             composition_diagnostics_sink=composition_diagnostics_sink,
@@ -7798,7 +7810,7 @@ def _local_news_research_observer() -> Callable[[str, dict[str, Any]], object] |
 
 def _record_local_news_analysis_replay(
     *, prompt: str, payload: Any, schema: dict[str, Any], model: str,
-    usage: Any, max_tokens: int, started: float,
+    usage: Any, max_tokens: int, started: float, stage: str | None = None,
 ) -> None:
     """명시적인 로컬 평가에서 실제 호출의 해석된 JSON만 보관한다."""
     from src.features.pipeline.private_replay import (
@@ -7809,11 +7821,12 @@ def _record_local_news_analysis_replay(
     )
     if not local_provider_replay_enabled():
         return
+    replay_stage = stage or REPLAY_NEWS_STAGE
     stored = False
     try:
         response = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
         stored = record_local_provider_replay(
-            prompt=prompt, response=response, stage=REPLAY_NEWS_STAGE,
+            prompt=prompt, response=response, stage=replay_stage,
             model=model, response_schema=schema,
             output_limit=max_tokens, stop_reason=str(usage.get("stop_reason", "")) if isinstance(usage, dict) else "",
             elapsed_ms=max(0, int((time.monotonic() - started) * MILLISECONDS_PER_SECOND)),
@@ -7823,7 +7836,7 @@ def _record_local_news_analysis_replay(
         pass
     try:
         run_diagnostics.current_steps().append({
-            "step": REPLAY_DIAGNOSTIC_STEP, "단계": REPLAY_NEWS_STAGE,
+            "step": REPLAY_DIAGNOSTIC_STEP, "단계": replay_stage,
             "시도수": 1, "저장수": int(stored), "미보관수": int(not stored),
         })
     except Exception:  # noqa: BLE001 — 진단 실패도 실제 결과에 전파하지 않는다
@@ -7860,7 +7873,7 @@ def _capture_local_news_request(metered: _MeteredEngine, kwargs: dict[str, Any])
 
 def _record_local_news_analysis_failure(
     *, request: dict[str, Any] | None, cause: BaseException | None,
-    provider_request_id: object, started: float,
+    provider_request_id: object, started: float, stage: str | None = None,
 ) -> None:
     """실제 단회 실패의 요청과 SDK body.error 세 필드만 로컬 비공개 보관에 넘긴다."""
     from src.features.pipeline.private_replay import (
@@ -7871,6 +7884,7 @@ def _record_local_news_analysis_failure(
     )
     if not local_provider_replay_enabled():
         return
+    replay_stage = stage or REPLAY_NEWS_STAGE
     stored = False
     try:
         body = getattr(cause, "body", None)
@@ -7878,7 +7892,7 @@ def _record_local_news_analysis_failure(
         error = error if type(error) is dict else {}
         if request is not None:
             stored = record_local_provider_failure(
-                **request, stage=REPLAY_NEWS_STAGE,
+                **request, stage=replay_stage,
                 error_type=error.get("type"), error_message=error.get("message"),
                 status_code=getattr(cause, "status_code", None),
                 provider_request_id_sha256=(
@@ -7891,11 +7905,65 @@ def _record_local_news_analysis_failure(
         pass
     try:
         run_diagnostics.current_steps().append({
-            "step": REPLAY_FAILURE_DIAGNOSTIC_STEP, "단계": REPLAY_NEWS_STAGE,
+            "step": REPLAY_FAILURE_DIAGNOSTIC_STEP, "단계": replay_stage,
             "시도수": 1, "저장수": int(stored), "미보관수": int(not stored),
         })
     except Exception:  # noqa: BLE001 — 원문·SDK 메시지는 일반 진단에 넣지 않는다
         pass
+
+
+def _official_industry_analyzer(
+    engine: _MeteredEngine, client: Any, *, fatal_error_type: type[Exception],
+) -> Callable:
+    """마지막 공식 분석은 별도 단계로 한 번 계량하며 응답 캐시를 빌리지 않는다."""
+    from src.features.pipeline.official_industry_context_constants import OFFICIAL_INDUSTRY_STAGE
+    from src.features.pipeline.private_replay import local_provider_replay_enabled
+
+    def analyze(prompt: str, schema: dict, max_tokens: int) -> Any:
+        before_dispatch = engine._provider_dispatch_count
+        before_usage = len(engine.usages)
+        started = time.monotonic()
+        capture = [] if local_provider_replay_enabled() else None
+        token = engine._private_news_request.set(capture)
+        try:
+            with _meter_stage(engine, OFFICIAL_INDUSTRY_STAGE, reserved_calls=0):
+                payload, usage = engine._ask(client, prompt, schema, max_tokens=max_tokens)
+        except provider_budget.ProviderBudgetExceeded:
+            # 전송 전 요청 로컬 예산 소진은 기존 검증 본문을 그대로 남긴다.
+            raise
+        except gateway.ProviderCallFailed as error:
+            if engine._provider_dispatch_count - before_dispatch == 1:
+                _record_local_news_analysis_failure(
+                    request=capture[0] if capture is not None and len(capture) == 1 else None,
+                    cause=error.__cause__, provider_request_id=error.observation.request_id,
+                    started=started, stage=OFFICIAL_INDUSTRY_STAGE,
+                )
+            raise fatal_error_type(error, provider_failure=True) from error
+        except (provider_budget.ProviderBudgetUnavailable,
+                generation_coordination.GenerationCoordinationError) as error:
+            raise fatal_error_type(error) from error
+        finally:
+            engine._private_news_request.reset(token)
+        events = engine.usages[before_usage:]
+        if engine._provider_dispatch_count - before_dispatch == 1:
+            _record_local_news_analysis_replay(
+                prompt=prompt, payload=payload, schema=schema, usage=usage,
+                model=str(events[0].get(USAGE_MODEL_KEY) or V2_REVIEW_MODEL)
+                if len(events) == 1 else V2_REVIEW_MODEL,
+                max_tokens=max_tokens, started=started, stage=OFFICIAL_INDUSTRY_STAGE,
+            )
+        complete = (
+            len(events) == 1 and events[0].get("failed") is False
+            and engine._provider_dispatch_count - before_dispatch == 1
+            and not engine.billing_uncertain and isinstance(usage, dict)
+            and usage.get("stop_reason") == "end_turn"
+            and not any(usage.get(key) for key in (
+                "error", "refusal", "parse_failed", "output_limit_reached", "truncation_suspected",
+            ))
+        )
+        return payload if complete else None
+
+    return analyze
 
 
 def _news_grounded_analyzer(

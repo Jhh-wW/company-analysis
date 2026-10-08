@@ -124,7 +124,9 @@ from src.features.composer.constants import (
     SUPPLEMENT_RETAINED_BODY_REASON,
     INDUSTRY_CONTEXT_SELECTION_STEP,
 )
-from src.features.composer.industry_context import select_industry_context_for_fragments
+from src.features.composer.industry_context import (
+    has_verified_direct_business_issue, select_industry_context_for_fragments,
+)
 from src.features.composer.supplement_feedback import missing_writer_slots
 from src.features.composer.scope_supplement_feedback import collect_scope_supplement_failures
 from src.features.composer.evidence_availability import (
@@ -172,6 +174,7 @@ from src.features.composer.portfolio_name_table import (
 from src.features.composer.portfolio_names import portfolio_name_usage
 from src.features.composer.port import (
     AskFatalError,
+    CollectedFragment,
     ComposedReport,
     ComposedSection,
     ComposedSentence,
@@ -1562,6 +1565,34 @@ def _record_fact_summary(
     })
 
 
+def _late_official_industry_problems(
+    report: ComposedReport, *, callback: Callable | None,
+    anchors: tuple[BusinessActivityAnchor, ...], problems: tuple[IndustryProblemEvidence, ...],
+    fragments: FragmentsInput, company_id: str,
+    diagnostics: list[dict],
+) -> tuple[IndustryProblemEvidence, ...]:
+    """최종 검수 본문의 직접 과제가 없을 때만 별도 산업 근거를 보충한다."""
+    if (callback is None or problems or has_verified_direct_business_issue(report)
+            or not any(sentence.verification_state == "verified"
+                       for section in report.sections for sentence in section.sentences)):
+        return problems
+    selected = _normalize_fragments(fragments)
+    added = callback(selected)
+    if not added:
+        return problems
+    try:
+        _, bound, _ = select_industry_context_for_fragments(
+            anchors=anchors, problems=tuple(added), original_fragments=selected,
+            selected_fragments=selected, company_id=company_id,
+        )
+    except ValueError:
+        # 선택에 결속되지 않은 새 산업 보조만 제외한다. 기존 본문 등록부의
+        # 충돌이나 renderer 오류는 여기서 감추지 않는다.
+        diagnostics.append({"step": "공식_산업_선택결속", "상태": "결속불가", "산업근거수": 0})
+        return problems
+    return bound
+
+
 def _finish_evidence_available(
     company_name: str,
     verified: ComposedReport,
@@ -1595,8 +1626,12 @@ def _finish_evidence_available(
     news_block_result: NewsBlockResult | None = None,
     industry_anchors: tuple[BusinessActivityAnchor, ...] = (),
     industry_problems: tuple[IndustryProblemEvidence, ...] = (),
+    official_industry_fallback: Callable[[tuple[CollectedFragment, ...]], tuple[IndustryProblemEvidence, ...]] | None = None,
 ) -> V2RunOutput:
-    """검증된 본문(또는 안내뿐인 본문)에서 AI 0회로 확보 근거 보고서를 마무리한다.
+    """검증된 본문(또는 안내뿐인 본문)으로 확보 근거 보고서를 마무리한다.
+
+    기본 진입은 AI 0회다. 작성 뒤 강등 경로가 전달한 공식 산업 콜백만
+    최종 검수 본문에서 한 번 선택 호출할 수 있으며 그 뒤에는 AI를 쓰지 않는다.
 
     ``tail_already_applied``가 참이면(FULL 후처리에서 내려온 본문) 수치 claim·
     보도표·조사 안내를 다시 붙이지 않는다 — 두 번 붙이면 같은 문장이 겹친다.
@@ -1680,6 +1715,11 @@ def _finish_evidence_available(
     body = reconcile_section_notices(
         body, sections_with_program_tables(performance_table, composition_tables),
         moved_facts=final_moved_facts, fragments=_normalize_fragments(fragments),
+    )
+    industry_problems = _late_official_industry_problems(
+        body, callback=official_industry_fallback, anchors=industry_anchors,
+        problems=industry_problems, fragments=fragments, company_id=company_id,
+        diagnostics=composition_diagnostics,
     )
     extractive = select_extractive_summary(body, body_rendered.fact_records)
     _record_fact_summary(len(selection.fact_ids), len(extractive.items), composition_diagnostics)
@@ -1854,6 +1894,7 @@ def run_v2(
     reviewer_ask: AskFn,
     industry_anchors: tuple[BusinessActivityAnchor, ...] = (),
     industry_problems: tuple[IndustryProblemEvidence, ...] = (),
+    official_industry_fallback: Callable[[tuple[CollectedFragment, ...]], tuple[IndustryProblemEvidence, ...]] | None = None,
     initial_reviewer_ask: Optional[AskFn] = None,
     initial_retry_reviewer_ask: Optional[AskFn] = None,
     rewrite_ask: Optional[AskFn] = None,
@@ -2281,6 +2322,7 @@ def run_v2(
                         _downgraded_from=release_mode.value,
                         industry_anchors=industry_anchors,
                         industry_problems=industry_problems,
+                        official_industry_fallback=official_industry_fallback,
                     )
                 raise V2ValidationError(
                     (
@@ -2777,6 +2819,7 @@ def run_v2(
             news_block_result=news_block,
             industry_anchors=industry_anchors,
             industry_problems=industry_problems,
+            official_industry_fallback=(official_industry_fallback if ai_failure is None else None),
             # 본문은 FULL 작성본 그대로라 프로그램 등록부에 결속된 문장이 살아
             # 있다. 같은 등록부를 넘겨야 renderer가 그 문장의 짝을 찾는다 —
             # 빼면 무차감 중단이 생성 실패로 뒤집힌다.
@@ -2951,6 +2994,12 @@ def run_v2(
     _record_public_binding(public_selection, composition_diagnostics, review_diagnostics)
     if public_selection.excluded or superseded:
         body_rendered = _render_bound_body()
+    if release_mode is ReleaseMode.SHADOW and ai_failure is None:
+        industry_problems = _late_official_industry_problems(
+            verified, callback=official_industry_fallback, anchors=industry_anchors,
+            problems=industry_problems, fragments=verification_fragments, company_id=company_id,
+            diagnostics=composition_diagnostics,
+        )
     extractive = select_extractive_summary(verified, body_rendered.fact_records)
     # FULL 하한은 뒤의 권위 있는 품질/복구 정책이 판정한다. 확보자료 보고서는
     # 근거가 0~2개뿐이면 그 범위만 보여 주며 요약 길이를 맞추려고 호출하지 않는다.
