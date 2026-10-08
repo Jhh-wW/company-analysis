@@ -14,6 +14,7 @@ from src.features.pipeline.official_news_aliases import _document_matches_profil
 from src.features.pipeline import official_industry_context_constants as c
 from src.shared.business_challenge_context import BusinessActivityAnchor
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
+from src.shared.report_evidence.industry_candidates import OfficialIndustryCandidateEvidence, OfficialIndustrySupplement
 from src.shared.report_evidence.source_kind_policy import formal_document_is_writer_eligible
 
 
@@ -50,6 +51,7 @@ def prepare_official_industry_fallback(
         usable_anchors = tuple(value for value in (anchors or validated_anchors)
                                if value in validated_anchors)
         originals = []
+        industry_originals = []
         seen = set()
         for group in collection.candidates:
             documents = {value.document_id: value for value in group.documents}
@@ -68,6 +70,17 @@ def prepare_official_industry_fallback(
                     continue
                 originals.append((fragment, document))
                 seen.add(key)
+        for fragment in collection.industry_candidates:
+            if type(fragment) is not OfficialIndustryCandidateEvidence:
+                raise ValueError("공식 산업 후보 자료형이 다릅니다")
+            fragment.__post_init__()
+            document = fragment.document
+            key = (fragment.document_id, fragment.location, fragment.text_sha256)
+            if (key not in seen and fragment.company_id == company_id
+                    and _document_matches_profile(document, profile)
+                    and formal_document_is_writer_eligible(document)):
+                industry_originals.append((fragment, document))
+                seen.add(key)
     except (ValueError, TypeError, KeyError, AttributeError):
         return anchors, None
     if not usable_anchors or not originals:
@@ -81,15 +94,16 @@ def prepare_official_industry_fallback(
         attempted = True
         observation = {"step": c.OFFICIAL_INDUSTRY_DIAGNOSTIC_STEP, "상태": "후보부족"}
         diagnostics.append(observation)
-        candidates = tuple((fragment, document) for fragment, document in originals
+        selected_originals = tuple((fragment, document) for fragment, document in originals
                            if any(_matches_selected(fragment, document, value) for value in selected))
         selected_anchors = tuple(anchor for anchor in usable_anchors if any(
             fragment.text == anchor.exact_text and fragment.location == anchor.location
             and document.document_id == anchor.document_id
-            for fragment, document in candidates
+            for fragment, document in selected_originals
         ))
-        if not candidates or not selected_anchors:
+        if not selected_originals or not selected_anchors:
             return ()
+        candidates = selected_originals + tuple(industry_originals)
         if available_calls() <= 0:
             observation["상태"] = "호출여유없음"
             return ()
@@ -110,6 +124,17 @@ def prepare_official_industry_fallback(
             observation["상태"] = "요청예산부족"
             return ()
         observation["호출수"] = calls
-        return tuple(result)
+        result = tuple(result)
+        # 작성 이후 채택된 별도 원문만 출처 등록용으로 반환한다. 탐색 후보 전체를
+        # 본문 근거 목록에 추가하거나 필수 칸의 점수로 바꾸지 않는다.
+        used = tuple(fragment for fragment, document in industry_originals if any(
+            problem.document_id == fragment.document_id
+            and problem.location == fragment.location
+            and problem.exact_text == fragment.text
+            and problem.text_sha256 == fragment.text_sha256
+            and problem.document_content_sha256 == document.content_sha256
+            for problem in result
+        ))
+        return OfficialIndustrySupplement(problems=result, candidates=used) if used else result
 
     return usable_anchors, fallback

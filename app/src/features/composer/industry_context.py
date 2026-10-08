@@ -13,6 +13,53 @@ from src.shared.business_challenge_context import (
     INDUSTRY_CONTEXT_MAX_ITEMS, INDUSTRY_CONTEXT_SECTION, industry_context_problems,
 )
 from src.shared.report_evidence.constants import OFFICIAL_WEB_SOURCE_KINDS
+from src.shared.report_evidence.industry_candidates import OfficialIndustrySupplement
+from src.shared.report_quality.source_identity import collected_document_identity
+from src.features.composer.port import CollectedFragment
+
+
+def discovery_fragments_for_supplement(
+    supplement: OfficialIndustrySupplement, *, fragments: Sequence[CollectedFragment], company_id: str,
+) -> tuple[CollectedFragment, ...]:
+    """작성 후 채택된 조사 원문만 슬롯 없이 최종 출처 등록부로 옮긴다."""
+    supplement.__post_init__()
+    if len(supplement.problems) > INDUSTRY_CONTEXT_MAX_ITEMS:
+        raise ValueError("공식 산업 설명의 출력 한도를 넘었습니다")
+    next_number = max((int(value.fragment_id) for value in fragments if value.fragment_id.isdecimal()), default=0) + 1
+    extra = []
+    for candidate in supplement.candidates:
+        if candidate.company_id != company_id:
+            raise ValueError("공식 산업 조사 원문의 회사가 다릅니다")
+        document = candidate.document
+        identity = collected_document_identity(
+            source_kind=document.source_kind, document_id=document.document_id, url=document.canonical_url,
+        )
+        if not identity:
+            raise ValueError("공식 산업 문서의 공개 신원을 확인할 수 없습니다")
+        item = CollectedFragment(
+            fragment_id=str(next_number), kind="official-industry-discovery", text=candidate.text,
+            source_url=document.canonical_url, document_title=document.title, location=candidate.location,
+            document_date=document.published_on, document_identity=identity,
+            document_content_sha256=document.content_sha256, counts_toward_document_floor=False,
+            supported_claim_slots=(), formal_source_kind=document.source_kind,
+            source_document_id=document.document_id, source_publisher=document.publisher,
+            identity_binding=document.identity_binding, source_collected_on=document.collected_at,
+            domain_attestation_source_id=document.domain_attestation_source_id,
+            domain_attestation_evidence=document.domain_attestation_evidence,
+            reporting_period=document.reporting_period, attachment_url=document.attachment_url,
+            ir_metadata_verification=document.ir_metadata_verification,
+            domain_redirect_verification=document.domain_redirect_verification,
+            domain_redirect_from_host=document.domain_redirect_from_host,
+            domain_redirect_to_host=document.domain_redirect_to_host,
+            source_context_json=candidate.source_context_json, section_context_json=candidate.section_context_json,
+        )
+        if not any(_matches_official_problem(item, problem) for problem in supplement.problems):
+            raise ValueError("채택된 산업 설명과 무관한 원문을 출처에 추가할 수 없습니다")
+        if not any(value.text == item.text and value.source_url == item.source_url
+                   and value.location == item.location for value in (*fragments, *extra)):
+            extra.append(item)
+            next_number += 1
+    return tuple(extra)
 
 
 def has_verified_direct_business_issue(report: object) -> bool:

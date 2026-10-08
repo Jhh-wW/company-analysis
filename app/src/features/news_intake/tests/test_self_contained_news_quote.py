@@ -180,6 +180,6 @@ def test_prompt_change_invalidates_old_policy_cache_namespace(monkeypatch) -> No
     # 메타 목록 인용 차단과 산업 주과제·상태 계약의 캐시를 분리한다.
     # 산업 우선 요청의 단일 판정 계약으로 이전 분석 캐시를 분리한다.
     # 산업 본문 실패의 제한 보충으로 수집 정책 캐시를 분리한다. 인용 계약은 같다.
-    assert c.COLLECTION_POLICY_VERSION == "news-grounded-v25"
+    assert c.COLLECTION_POLICY_VERSION == "news-grounded-v26"
     monkeypatch.setattr(c, "COLLECTION_POLICY_VERSION", "news-grounded-v11")
     assert policy_digest(policy) != current

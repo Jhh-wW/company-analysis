@@ -21,6 +21,8 @@ from features.evidence_collection.fetch_failure import (
 )
 from features.evidence_collection.filing_select import DartFetcher, DocumentFetchResult, SelectedFiling
 from features.evidence_collection.retention import CandidateRetention
+from features.evidence_collection.official_industry_discovery import official_industry_discovery
+from features.evidence_collection.official_industry_discovery_constants import DISCOVERY_REASON
 from features.evidence_collection.source_context import context_for_candidate, heading_source_scopes, different_document_actor, validate_source_context, prepare_table_contexts
 from features.evidence_collection.source_context import SourceContextBudgetExceeded
 from features.evidence_collection.business_activity_table import activity_table_ranges
@@ -373,7 +375,11 @@ def collect_dart_evidence(
                 slot_scores = tuple(score for score in slot_scores if score.section_id != "identity")
             if slot_scores:
                 retention.offer_scored(candidate_index, candidate, slot_scores)
+                # 기존 장별 선별을 바꾸지 않고, 산업 검수 기회만 기존 무분류
+                # 원문 몫에도 보관한다. 회사 issue/response 지원 쌍은 추가하지 않는다.
             elif not has_any_direct_signal:
+                retention.offer_unclassified(candidate_index, candidate)
+            if official_industry_discovery(candidate.text) and (slot_scores or has_any_direct_signal):
                 retention.offer_unclassified(candidate_index, candidate)
 
             # 같은 문단의 기존 장 배정은 그대로 둔다. 명시 사업 제약→현재 대응만
@@ -457,7 +463,12 @@ def collect_dart_evidence(
             state=c.SCAN_STATE_COMPLETE if progress.complete else c.SCAN_STATE_INCOMPLETE,
             total_chars=len(fetch_result.text), scanned_chars=progress.scanned_chars,
             candidates_seen=progress.candidates_seen,
-            candidates_retained=len(scored) + len(unclassified_candidates),
+            # 같은 순회 원문을 작성·산업 보조 두 차선에 보관해도 검사한 후보는
+            # 한 건이다. 각 차선의 자료는 별도로 유지하되 순회 계수만 합집합으로 센다.
+            candidates_retained=len(
+                {(candidate.start, candidate.end) for _, candidate, _ in scored}
+                | {(candidate.start, candidate.end) for _, candidate in unclassified_candidates}
+            ),
             unclassified_seen=retention.unclassified_seen + retention.short_seen,
             unclassified_retained=len(unclassified_candidates),
             selection_compressed=selection_compressed,
@@ -511,7 +522,9 @@ def collect_dart_evidence(
                         section_id="",
                         slot_id="",
                         score_millis=0,
-                        reason_codes=(c.REASON_NO_SIGNAL,),
+                        reason_codes=((c.REASON_NO_SIGNAL, DISCOVERY_REASON)
+                                      if official_industry_discovery(candidate.text)
+                                      else (c.REASON_NO_SIGNAL,)),
                         covered_slot_ids=(),
                     )
                     for candidate_suffix, candidate in unclassified_candidates

@@ -26,6 +26,7 @@ from src.shared.report_evidence.constants import (
     SourceTier,
 )
 from src.shared.report_evidence.models import ChapterEvidenceCandidates
+from src.shared.report_evidence.industry_candidates import OfficialIndustryCandidateEvidence
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 from src.shared.report_evidence.profile_domain_attestation import (
     parse_dart_profile_domain_attestation,
@@ -193,6 +194,7 @@ def _source_snapshot(
     candidates: tuple[ChapterEvidenceCandidates, ...],
     unclassified_evidence: UnclassifiedEvidenceObservation | None,
     comparison_candidates: tuple[OfficialComparisonCandidateEvidence, ...],
+    industry_candidates: tuple[OfficialIndustryCandidateEvidence, ...] = (),
 ) -> tuple[str, int]:
     """선택·게이트·공개 출처에 영향을 주는 입력의 canonical 지문을 만든다.
 
@@ -370,6 +372,16 @@ def _source_snapshot(
             for item in comparison_candidates
         ],
     }
+    # 별도 산업 원문이 없을 때는 기존 snapshot 바이트를 유지한다.
+    # 산업 후보가 생겨도 회사 사실의 독립 문서 수와 장별 준비도는 늘리지 않는다.
+    if industry_candidates:
+        rows = []
+        for item in industry_candidates:
+            row = asdict(item)
+            row.pop("text")
+            row["document"].pop("collected_at")
+            rows.append(row)
+        payload["industry_candidates"] = sorted(rows, key=lambda row: row["fragment_id"])
     # 독립 문서는 호출자가 붙인 document_id 개수가 아니라 실제 원문 바이트의
     # 고유 지문으로 센다. 같은 파일을 URL·ID만 바꿔 여덟 번 싣는다고 서로
     # 독립된 여덟 출처가 되지 않는다. 반대로 내용이 다른 문서는 같은 발행자의
@@ -633,6 +645,7 @@ class OfficialEvidenceCollectionResult:
     unclassified_evidence: UnclassifiedEvidenceObservation | None = None
     comparison_candidates: tuple[OfficialComparisonCandidateEvidence, ...] = ()
     provenance_documents: tuple[OfficialProvenanceDocument, ...] = ()
+    industry_candidates: tuple[OfficialIndustryCandidateEvidence, ...] = ()
     source_snapshot_sha256: str = field(init=False)
     provenance_snapshot_sha256: str = field(init=False)
     independent_document_count: int = field(init=False)
@@ -670,6 +683,28 @@ class OfficialEvidenceCollectionResult:
         if len(candidate_ids) != len(set(candidate_ids)):
             raise ValueError("공식 비교 후보 식별자가 중복됩니다")
         object.__setattr__(self, "comparison_candidates", comparison_candidates)
+        industry_candidates = tuple(self.industry_candidates)
+        if any(type(item) is not OfficialIndustryCandidateEvidence or item.company_id != clean_company_id
+               for item in industry_candidates):
+            raise ValueError("공식 산업 후보의 자료형 또는 회사 결속이 다릅니다")
+        if len({item.fragment_id for item in industry_candidates}) != len(industry_candidates):
+            raise ValueError("공식 산업 후보 식별자가 중복됐습니다")
+        for item in industry_candidates:
+            item.__post_init__()
+        known_documents = [document for candidate in candidates for document in candidate.documents]
+        for item in industry_candidates:
+            for document in known_documents:
+                if (document.document_id != item.document_id
+                        and document.canonical_url != item.document.canonical_url):
+                    continue
+                left, right = asdict(document), asdict(item.document)
+                for key in ("exact_evidence_hashes", "usable_ranges", "collected_at"):
+                    left.pop(key)
+                    right.pop(key)
+                if left != right:
+                    raise ValueError("같은 공식 문서의 산업 후보와 작성 후보 신원이 다릅니다")
+            known_documents.append(item.document)
+        object.__setattr__(self, "industry_candidates", industry_candidates)
         provenance_documents = tuple(self.provenance_documents)
         if any(
             not isinstance(item, OfficialProvenanceDocument)
@@ -699,6 +734,7 @@ class OfficialEvidenceCollectionResult:
             candidates,
             observation,
             comparison_candidates,
+            industry_candidates,
         )
         object.__setattr__(self, "source_snapshot_sha256", snapshot_sha256)
         object.__setattr__(

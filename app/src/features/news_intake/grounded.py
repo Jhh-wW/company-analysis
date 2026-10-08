@@ -19,6 +19,8 @@ from src.shared.report_evidence import partnership_scope_constants as pc
 from src.features.news_intake.models import GroundedNewsExcerpt, NewsCandidate, NewsCompanyContext
 from src.features.news_intake.identity_names import company_query_names, mentions_target
 from src.features.news_intake.article_identity import article_company_context
+from src.features.news_intake.reporting_subject_scope import target_is_only_interview_recipient
+from src.features.news_intake.reporting_subject_scope_constants import SUBJECT_INTERVIEW_RECIPIENT_ONLY
 from src.features.news_intake.quote_selection import quote_candidates, quote_schema, restore_quote_response, _fact_start
 from src.features.news_intake import quote_selection_constants as qc
 from src.features.news_intake.select import normalize_company_name
@@ -305,6 +307,8 @@ def _bound_subject(raw: dict[str, str], body: str, company: NewsCompanyContext,
     text = raw["text"]
     subject, evidence = raw["subject"], raw["subject_evidence"]
     article_context = article_company_context(body, company)
+    if target_is_only_interview_recipient(text, article_context):
+        return _subject_rejected(diagnostics, SUBJECT_INTERVIEW_RECIPIENT_ONLY)
     if mentions_target(text, article_context):
         return (text, start) if not subject and not evidence else _subject_rejected(
             diagnostics, c.SUBJECT_DIRECT_NAME_EXTRA_FIELDS

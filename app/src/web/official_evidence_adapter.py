@@ -15,6 +15,7 @@ from types import ModuleType
 from typing import Final
 
 from src.core import paths
+from src.web.official_industry_evidence import industry_candidates_from_envelope
 from src.shared.report_evidence.source_context import parse_source_context, source_context_fingerprint
 from src.shared.report_evidence.section_context import parse_section_context, section_context_fingerprint
 from src.core.evidence_reclassify_switch import evidence_reclassify_enabled
@@ -939,6 +940,10 @@ class ProductionOfficialEvidenceCollector:
             dart_envelope,
             company_id=request.company_id,
         )
+        industry_candidates = industry_candidates_from_envelope(
+            dart_envelope, company_id=request.company_id,
+            validate=_unclassified_evidence_observation,
+        )
 
         wide_result = collect_official_web_documents(
             company_id=request.company_id,
@@ -1002,6 +1007,7 @@ class ProductionOfficialEvidenceCollector:
             candidates=candidates,
             unclassified_evidence=unclassified_evidence,
             comparison_candidates=comparison_candidates,
+            industry_candidates=industry_candidates,
             provenance_documents=provenance_documents,
         )
         if not evidence_reclassify_enabled():

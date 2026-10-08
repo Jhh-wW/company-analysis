@@ -126,7 +126,9 @@ from src.features.composer.constants import (
 )
 from src.features.composer.industry_context import (
     has_verified_direct_business_issue, select_industry_context_for_fragments,
+    discovery_fragments_for_supplement,
 )
+from src.shared.report_evidence.industry_candidates import OfficialIndustrySupplement
 from src.features.composer.supplement_feedback import missing_writer_slots
 from src.features.composer.scope_supplement_feedback import collect_scope_supplement_failures
 from src.features.composer.evidence_availability import (
@@ -1570,6 +1572,7 @@ def _late_official_industry_problems(
     anchors: tuple[BusinessActivityAnchor, ...], problems: tuple[IndustryProblemEvidence, ...],
     fragments: FragmentsInput, company_id: str,
     diagnostics: list[dict],
+    discovery_fragments_sink: list[CollectedFragment] | None = None,
 ) -> tuple[IndustryProblemEvidence, ...]:
     """최종 검수 본문의 직접 과제가 없을 때만 별도 산업 근거를 보충한다."""
     if (callback is None or problems or has_verified_direct_business_issue(report)
@@ -1581,15 +1584,24 @@ def _late_official_industry_problems(
     if not added:
         return problems
     try:
+        extra = ()
+        if type(added) is OfficialIndustrySupplement:
+            if discovery_fragments_sink is None:
+                raise ValueError("공식 산업 조사 원문의 최종 등록 경로가 없습니다")
+            extra = discovery_fragments_for_supplement(added, fragments=selected, company_id=company_id)
+            added = added.problems
+        available = (*selected, *extra)
         _, bound, _ = select_industry_context_for_fragments(
-            anchors=anchors, problems=tuple(added), original_fragments=selected,
-            selected_fragments=selected, company_id=company_id,
+            anchors=anchors, problems=tuple(added), original_fragments=available,
+            selected_fragments=available, company_id=company_id,
         )
     except ValueError:
         # 선택에 결속되지 않은 새 산업 보조만 제외한다. 기존 본문 등록부의
         # 충돌이나 renderer 오류는 여기서 감추지 않는다.
         diagnostics.append({"step": "공식_산업_선택결속", "상태": "결속불가", "산업근거수": 0})
         return problems
+    if discovery_fragments_sink is not None and bound:
+        discovery_fragments_sink.extend(extra)
     return bound
 
 
@@ -1716,11 +1728,15 @@ def _finish_evidence_available(
         body, sections_with_program_tables(performance_table, composition_tables),
         moved_facts=final_moved_facts, fragments=_normalize_fragments(fragments),
     )
+    discovery_fragments: list[CollectedFragment] = []
     industry_problems = _late_official_industry_problems(
         body, callback=official_industry_fallback, anchors=industry_anchors,
         problems=industry_problems, fragments=fragments, company_id=company_id,
         diagnostics=composition_diagnostics,
+        discovery_fragments_sink=discovery_fragments,
     )
+    if discovery_fragments:
+        fragments = (*_normalize_fragments(fragments), *discovery_fragments)
     extractive = select_extractive_summary(body, body_rendered.fact_records)
     _record_fact_summary(len(selection.fact_ids), len(extractive.items), composition_diagnostics)
     final = ComposedReport(sections=body.sections, summary=extractive.bound_sentences)
@@ -2995,11 +3011,15 @@ def run_v2(
     if public_selection.excluded or superseded:
         body_rendered = _render_bound_body()
     if release_mode is ReleaseMode.SHADOW and ai_failure is None:
+        discovery_fragments = []
         industry_problems = _late_official_industry_problems(
             verified, callback=official_industry_fallback, anchors=industry_anchors,
             problems=industry_problems, fragments=verification_fragments, company_id=company_id,
             diagnostics=composition_diagnostics,
+            discovery_fragments_sink=discovery_fragments,
         )
+        if discovery_fragments:
+            verification_fragments = (*_normalize_fragments(verification_fragments), *discovery_fragments)
     extractive = select_extractive_summary(verified, body_rendered.fact_records)
     # FULL 하한은 뒤의 권위 있는 품질/복구 정책이 판정한다. 확보자료 보고서는
     # 근거가 0~2개뿐이면 그 범위만 보여 주며 요약 길이를 맞추려고 호출하지 않는다.

@@ -1,6 +1,7 @@
 """공식 산업 보조 호출의 단계와 결정적 연결 필드."""
 
 OFFICIAL_INDUSTRY_STAGE = "official_industry_context"
+INDUSTRY_DISCOVERY_REASON = "official_industry_discovery"
 OFFICIAL_INDUSTRY_DIAGNOSTIC_STEP = "공식_산업_보조"
 SELECTED_DOCUMENT_FIELDS = (
     ("source_document_id", "document_id"),

@@ -13,6 +13,7 @@ from src.shared.business_challenge_context import BusinessActivityAnchor, Indust
 from src.shared.official_ir import IR_METADATA_VERIFICATION_VALUES, official_ir_time_is_usable, safe_https_attachment_url
 from src.shared.report_evidence.constants import FORMAL_DOCUMENT_SOURCE_KINDS, OFFICIAL_WEB_SOURCE_KINDS, SOURCE_KIND_OFFICIAL_IR_PDF
 from src.shared.report_evidence.models import EvidenceFragment, CollectedEvidenceDocument
+from src.shared.report_evidence.industry_candidates import OfficialIndustryCandidateEvidence
 
 
 def _hash(text: str) -> str:
@@ -83,8 +84,12 @@ def _location_bound(fragment: EvidenceFragment, document: CollectedEvidenceDocum
 
 
 def _bound_pair(fragment: EvidenceFragment, document: CollectedEvidenceDocument, company_id: str, reference_date: str) -> bool:
-    if type(fragment) is not EvidenceFragment or type(document) is not CollectedEvidenceDocument:
+    if type(fragment) not in (EvidenceFragment, OfficialIndustryCandidateEvidence) or type(document) is not CollectedEvidenceDocument:
         return False
+    if type(fragment) is OfficialIndustryCandidateEvidence:
+        fragment.__post_init__()
+        if fragment.document != document:
+            return False
     if document.source_kind == SOURCE_KIND_OFFICIAL_IR_PDF and not (
         document.ir_metadata_verification in IR_METADATA_VERIFICATION_VALUES
         and _text(document.domain_attestation_source_id) and _text(document.domain_attestation_evidence)
@@ -112,7 +117,7 @@ def select_candidates(*, candidates: tuple, anchors: tuple, company_id: str, ref
     if type(candidates) is not tuple:
         _note(diagnostics, "invalid_candidates")
         return ()
-    ids = Counter(pair[0].fragment_id for pair in candidates if type(pair) is tuple and len(pair) == 2 and type(pair[0]) is EvidenceFragment)
+    ids = Counter(pair[0].fragment_id for pair in candidates if type(pair) is tuple and len(pair) == 2 and type(pair[0]) in (EvidenceFragment, OfficialIndustryCandidateEvidence))
     result = []
     chars = 0
     for pair in candidates:

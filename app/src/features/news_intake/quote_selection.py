@@ -13,6 +13,7 @@ from src.features.news_intake.identity_names import company_query_names, mention
 from src.features.news_intake.select import normalize_company_name
 from src.features.news_intake.models import NewsCandidate, NewsCompanyContext
 from src.features.news_intake.article_identity import article_company_context
+from src.features.news_intake.reporting_subject_scope import target_is_only_interview_recipient
 
 
 def _fact_start(body: str, start: int, end: int, company: NewsCompanyContext | None) -> int:
@@ -135,6 +136,8 @@ def quote_schema(schema: dict, articles: list[tuple[NewsCandidate, str]],
 def _selection_subject_supported(text: str, company: NewsCompanyContext, body: str | None = None) -> bool:
     """회사명 존재를 행동 주어로 승격시키는 명시 모순만 신규 선택에서 제외한다."""
     company = article_company_context(body if body is not None else text, company)
+    if target_is_only_interview_recipient(text, company):
+        return False
     if not mentions_target(text, company):
         return True  # 제품·인물의 명시 관계는 기존 주어 결속 검사에서 판정한다.
     names = company_query_names(company)
