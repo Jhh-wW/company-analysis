@@ -18,6 +18,9 @@ from src.features.composer.business_relation_scope_constants import (
     PROVISION_ACTION_RE, PROVISION_ITEM_FAMILIES, PROVISION_GENERIC_ITEMS,
     PROVISION_COMPANY_SUBJECT_RE,
     PROVISION_UNCONFIRMED_TAIL_RE,
+    RECEIVABLE_COLLECTION_RE, RECEIVABLE_ACTION_RE, RECEIVABLE_COUNTERPARTY_RE,
+    RECEIVABLE_OBJECT_QUALIFIER,
+    RECOGNITION_CLAIM_RE, RECOGNITION_SOURCE_RE, RECOGNITION_BASES, RECOGNITION_METRIC_HEAD_RE,
 )
 
 
@@ -171,6 +174,30 @@ def business_relation_scope_problem(
     source_units = tuple(unit for value in own_sources.values() for unit in _units(value))
     for claim in _units(text):
         candidate = _surface(claim)
+        if section_id == "business_model":
+            for match in RECEIVABLE_COLLECTION_RE.finditer(candidate):
+                item = match["object"]
+                action = re.compile(re.escape(item) + RECEIVABLE_OBJECT_QUALIFIER + RECEIVABLE_ACTION_RE.pattern)
+                relation = re.compile(re.escape(item) + r"[^.!?。;\n]{0,20}회수")
+                supported = [unit for unit in source_units
+                             if item in _surface(unit) and _compatible_subject(claim, unit)
+                             and (not RECEIVABLE_COUNTERPARTY_RE.match(_surface(unit))
+                                  or _raw_subject(claim) == _raw_subject(unit))
+                             and action.search(_surface(unit))
+                             and _state_supported(claim, unit, relation)]
+                # 계정 잔액·누적액만 있는 원문에서 행동을 만들어 내지 않는다.
+                if not supported:
+                    return BUSINESS_RELATION_PROBLEM
+            if RECOGNITION_CLAIM_RE.search(candidate):
+                supported = [unit for unit in source_units
+                             if RECOGNITION_SOURCE_RE.search(_surface(unit))
+                             and (_compatible_subject(claim, unit)
+                                  or RECOGNITION_METRIC_HEAD_RE.match(_surface(unit)))]
+                if not supported:
+                    return BUSINESS_RELATION_PROBLEM
+                for claim_basis, source_basis in RECOGNITION_BASES:
+                    if claim_basis.search(candidate) and not any(source_basis.search(_surface(unit)) for unit in supported):
+                        return BUSINESS_RELATION_PROBLEM
         if section_id == "operations_partners" and (
             _accounting_quality_problem(claim, source_units)
             or _provision_direction_problem(claim, source_units)

@@ -35,12 +35,14 @@ def _reason(text: str, *, table_record: bool = False, positive_context: bool = F
         c.POLICY_BUSINESS_PROBLEM_RE.search(c.POLICY_REDUCTION_PURPOSE_RE.sub("", surface))
         or c.CUSTOMER_LEGAL_FINANCIAL_SERVICE_RE.search(surface)
         or c.PRODUCT_REGULATION_RESPONSE_RE.search(surface)
+        or c.LITIGATION_PAYMENT_ACTION_RE.search(surface)
         or credit_business
     )
     if (c.FINANCIAL_EXPOSURE_RE.search(surface)
             or c.GENERAL_LEGAL_MANAGEMENT_RE.search(surface)
             or c.CONDITIONAL_SANCTION_RULE_RE.search(surface)
             or c.ACCOUNTING_MEASUREMENT_RE.search(surface)
+            or c.LITIGATION_ACCOUNTING_ASSESSMENT_RE.search(surface)
             or c.INTERNAL_LEGAL_ACTIVITY_RE.search(surface)
             or any(pattern.search(surface) for pattern in policy_units)) and not business_exception:
         return c.ADMINISTRATIVE_EVENT_ONLY
@@ -128,6 +130,8 @@ def challenge_eligibility_scope(text: str, slot_id: str = "") -> ChallengeEligib
                     extra_bounds.append((cursor + match.start(), cursor + match.end()))
         cursor = next_start
     bounds = sorted((*bounds, *extra_bounds))
+    bounds = sorted((*bounds, *((match.start(), match.start())
+                               for match in c.LITIGATION_ASSESSMENT_START_RE.finditer(text))))
     for end, next_start in (*bounds, (len(text), len(text))):
         unit = text[start:end]
         if unit.strip():

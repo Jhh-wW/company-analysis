@@ -82,14 +82,16 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "68aedc7566cc3a824402c30915c6ef85dcf30c53c9ef7cf31779832b63848d05"),
-    (_golden_case, True, "5a7f3a995b342e514fa12a094a38a1f969fd138205dccb37a95073ca3281eecb"),
+    (_golden_case, False, "df82fc75c8d74250a9441073c84d54a108ee93438a57e9a3588ba67297288829"),
+    (_golden_case, True, "3a7a157bf298cffd47f8dd842b01430757009c9f335ae97f298a124e6a9624bb"),
     (_boundary_case, False, "51e1a6248b3e48fef7b89780eed8a26d339afbd3f3b30785ee2b84bb2946098c"),
     (_boundary_case, True, "d0e8f78d8bf737df54bfe2e7be4697ff254daf6960088e55544b0fa5356f5b92"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
 ):
+    # 2026-10-08: 2·3·5·7장 안내 417자만 역치환해 직전 전체 지문을 복구했다.
+    # paid/0346-prompt-baseline-private.json: 원문·번호·스키마·고정 접두부 불변.
     # 5장 발생기간·완료/진행 안내 205자만 제거하면 직전 네 지문이 재현된다.
     # 근거·번호·캐시 접두부·스키마는 그대로이며 5장 없는 경계 지문은 유지한다.
     # 증거: tmp/audit-20260930/validation/ci-flow-header-prompt-baseline.json.

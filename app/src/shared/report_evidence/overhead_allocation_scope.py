@@ -18,6 +18,44 @@ class OverheadAllocationScope:
     excluded_spans: tuple[tuple[int, int], ...] = ()
 
 
+def _amortization_ranges(text: str) -> tuple[tuple[int, int], ...]:
+    """닫힌 상각·원가계상 술어만 원문 좌표로 돌려준다."""
+    ranges = []
+    start = 0
+    for boundary in (*c.AMORTIZATION_UNIT_SPLIT_RE.finditer(text), None):
+        end = boundary.start() if boundary else len(text)
+        unit = text[start:end]
+        chars, offsets = [], []
+        for index, character in enumerate(unit):
+            for normalized in unicodedata.normalize("NFKC", character).casefold():
+                if not normalized.isspace():
+                    chars.append(normalized)
+                    offsets.append(start + index)
+        surface = "".join(chars)
+        # 고객 자산을 다루는 서비스는 회사 자체 자산의 상각 정책과 다르다.
+        if not c.EXTERNAL_ASSET_ACCOUNTING_RE.search(surface):
+            for pattern in (c.ASSET_AMORTIZATION_POLICY_RE, c.AMORTIZATION_COST_POLICY_RE):
+                for match in pattern.finditer(surface):
+                    ranges.append((offsets[match.start()], offsets[match.end() - 1] + 1))
+        start = boundary.end() if boundary else len(text)
+    return tuple(sorted(set(ranges)))
+
+
+def amortization_accounting_policy(text: str) -> bool:
+    """다른 사업 사실이 남지 않는 순수 상각 정책만 제한한다."""
+    ranges = _amortization_ranges(text)
+    if not ranges:
+        return False
+    kept, cursor = [], 0
+    for begin, end in ranges:
+        if begin >= cursor:
+            kept.append(text[cursor:begin])
+        cursor = max(cursor, end)
+    kept.append(text[cursor:])
+    surface = "".join(unicodedata.normalize("NFKC", "".join(kept)).casefold().split())
+    return bool(c.AMORTIZATION_RESIDUE_RE.fullmatch(surface))
+
+
 def _mixed_policy_range(text: str) -> tuple[int, int] | None:
     """실제 사건과 함께 있는 절에서도 조건부 처리의 원문 범위는 남긴다."""
     chars, offsets = [], []
@@ -49,11 +87,19 @@ def overhead_allocation_scope(text: str) -> OverheadAllocationScope:
             spans.append((start, end))
         else:
             mixed = _mixed_policy_range(text[start:end])
-            if mixed is None:
+            local_ranges = list(_amortization_ranges(text[start:end]))
+            if mixed is not None:
+                local_ranges.append(mixed)
+            if not local_ranges:
                 kept.append(text[start:next_start])
             else:
-                begin, finish = (start + point for point in mixed)
-                spans.append((begin, finish))
-                kept.append(text[start:begin] + text[finish:next_start])
+                cursor = start
+                for local_begin, local_end in sorted(set(local_ranges)):
+                    begin, finish = start + local_begin, start + local_end
+                    if begin >= cursor:
+                        kept.append(text[cursor:begin])
+                    spans.append((begin, finish))
+                    cursor = max(cursor, finish)
+                kept.append(text[cursor:next_start])
         start = next_start
     return OverheadAllocationScope("".join(kept) if spans else text, tuple(spans))

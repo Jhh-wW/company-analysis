@@ -2376,6 +2376,10 @@ def _apply_grounding(
             #   표지가 결합해 정상 행이 지워진다(cellwise_problem 머리말).
             problem = cellwise_problem(cells, absence_claim_problem)
             problem = problem or flow_scope_problem(cells, sources)
+            if not problem and context and context[0] == "business_model":
+                problem = next((value for cell in cells if (value := business_relation_scope_problem(
+                    cell, sources, section_id="business_model",
+                ))), "")
             if not problem and context and context[0] == IDENTITY_TABLE_SECTION_ID:
                 problem = identity_flow_scope_problem(cells, sources)
             if not problem and context and context[0] == OPERATIONS_FLOW_SECTION_ID:

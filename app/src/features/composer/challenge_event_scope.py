@@ -1,6 +1,7 @@
 """과거 사고·제재 기록의 날짜를 지워 현재 과제로 보이지 않게 한다."""
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import re
 import unicodedata
 
 from src.features.composer import challenge_event_constants as c
@@ -13,6 +14,98 @@ def _surface(text: str) -> str:
 
 def _days(text: str):
     return frozenset(tuple(int(part) for part in day) for day in c.EVENT_DAY_RE.findall(text))
+
+
+@dataclass(frozen=True)
+class _LitigationRow:
+    event: str
+    markers: frozenset[str]
+    raw_row: str
+    start: int
+    end: int
+
+
+def _litigation_rows_and_notes(source: str):
+    """표 머리말·심급·금액이 명시된 행과 각주를 원문 좌표에 묶는다.
+
+    공백을 접어 탐색하되 결과는 원문 연속 범위로 복원한다. 발행일이나
+    숫자만으로 사건을 만들지 않으며 이 함수의 빈 결과는 의미 승인이 아니다.
+    """
+    chars, positions = [], []
+    for index, char in enumerate(source):
+        normalized = unicodedata.normalize("NFKC", char)
+        for value in normalized:
+            if not value.isspace():
+                chars.append(value)
+                positions.append(index)
+    compact = "".join(chars)
+    header = c.LITIGATION_TABLE_HEADER_RE.search(compact)
+    if not header:
+        return (), {}
+    definitions = tuple(c.LITIGATION_FOOTNOTE_RE.finditer(compact, header.end()))
+    if not definitions:
+        return (), {}
+    body_end = definitions[0].start()
+    rows = []
+    start = header.end()
+    for ending in c.LITIGATION_ROW_END_RE.finditer(compact, start, body_end):
+        raw_start, raw_end = positions[start], positions[ending.end() - 1] + 1
+        raw_row = source[raw_start:raw_end]
+        court = c.LITIGATION_COURT_RE.search(raw_row)
+        if not court:
+            return (), {}
+        prefix = _surface(raw_row[:court.start()])
+        markers = frozenset(c.LITIGATION_MARKER_RE.findall(_surface(raw_row)))
+        event = c.LITIGATION_MARKER_RE.sub("", prefix).strip(";|")
+        if not event or any(char.isdigit() for char in event):
+            return (), {}
+        rows.append(_LitigationRow(event, markers, raw_row, raw_start, raw_end))
+        start = ending.end()
+    # 마지막 행 뒤에 다른 표나 식별 못한 행이 끼면 앞 표의 적용 범위를 빌리지 않는다.
+    if compact[start:body_end].strip(";|.,") or not rows:
+        return (), {}
+    notes = {}
+    for index, definition in enumerate(definitions):
+        end = definitions[index + 1].start() if index + 1 < len(definitions) else len(compact)
+        body = c.LITIGATION_FOOTNOTE_BODY_RE.match(compact, definition.end(), end)
+        if body is None or definition["marker"] in notes:
+            return (), {}
+        notes[definition["marker"]] = body.group()
+    return tuple(rows), notes
+
+
+def litigation_footnote_scope_problem(candidate: str, sources: Mapping[str, str]) -> str:
+    """일부 사건의 각주 평가를 다른 사건이나 소송 전체로 넓히는 경계만 제한한다."""
+    surface = _surface(candidate)
+    properties = tuple(pattern for pattern in c.LITIGATION_ASSESSMENT_PROPERTIES if pattern.search(surface))
+    if not properties:
+        return ""
+    for source in sources.values():
+        rows, notes = _litigation_rows_and_notes(source)
+        if not rows:
+            continue
+        mentions = tuple((match.start(), match.end(), row)
+                         for row in rows for match in re.finditer(re.escape(row.event), surface))
+        # 같은 위치의 긴 사건명 안에 든 접두 사건은 별도 언급으로 세지 않는다.
+        # 다른 위치에서 짧은 사건도 명시하면 그 행의 각주 범위는 계속 검사한다.
+        selected = tuple(row for row in rows if any(
+            mentioned is row and not any(left <= start and end <= right and right - left > end - start
+                                        for left, right, _ in mentions)
+            for start, end, mentioned in mentions))
+        if not selected:
+            explicit = c.LITIGATION_EXPLICIT_NOTE_RE.search(surface)
+            if explicit:
+                marker = "(*" + (explicit["number"] or explicit["marker_number"]) + ")"
+                selected = tuple(row for row in rows if marker in row.markers)
+            elif c.LITIGATION_GLOBAL_CLAIM_RE.search(surface):
+                selected = rows
+        if not selected:
+            continue
+        for pattern in properties:
+            applicable = {marker for marker, note in notes.items() if pattern.search(note)}
+            if applicable and any(not (row.markers & applicable) for row in selected):
+                return c.EVENT_SCOPE_PROBLEM
+    return ""
 
 
 @dataclass(frozen=True)
@@ -222,6 +315,9 @@ def challenge_event_scope_problem(text: str, sources: Mapping[str, str], *, cell
     완료·진행 여부는 해당 발생 기간의 행 안에서만 확인하며 다른 행으로 빌리지 않는다.
     """
     candidate = " ".join(cells) if cells is not None else text
+    footnote_problem = litigation_footnote_scope_problem(candidate, sources)
+    if footnote_problem:
+        return footnote_problem
     if cells is not None and len(cells) == CHALLENGE_RESPONSE_CELL_COUNT and _possible_response_problem(_surface(str(cells[CHALLENGE_RESPONSE_CELL_INDEX])), sources, candidate=candidate):
         return c.RESPONSE_SCOPE_PROBLEM
     units = _claim_units(candidate)

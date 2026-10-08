@@ -95,6 +95,7 @@ def test_질의는_사업과양지역을유지하되_특정문제를미리단정
     plain = search_plan(replace(COMPANY, business_anchors=()), AS_OF)
     industrial = [row for row in active if row[2].startswith("industry_")]
     assert len(active) == len(plain) and len(industrial) == 4
+    # 질의 표현 변경만 반영한다. 양지역·질의 수·전체 조사 예산은 그대로다.
     assert {row[0] for row in industrial} == {
-        f"{ANCHOR.business_item} {region} {theme}"
-        for region in ("국내", "세계") for theme in ("산업 과제", "시장 변화")}
+        f"{ANCHOR.business_item} 국내 문제", f"{ANCHOR.business_item} 세계 문제",
+        f"{ANCHOR.business_item} 한국 시장 변화", f"{ANCHOR.business_item} 글로벌 시장 변화"}

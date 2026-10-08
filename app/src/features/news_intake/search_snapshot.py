@@ -81,6 +81,31 @@ def source_category(url: str, company: NewsCompanyContext, policy: NewsCollectio
     return ""
 
 
+def industry_search_expression(business_item: str) -> str:
+    """검색용 공백 경계만 파생한다. 원 앵커와 사실 검수의 사업명은 그대로 둔다."""
+    match = ic.INDUSTRY_SEARCH_ACTIVITY_RE.fullmatch(business_item)
+    if match is None:
+        return business_item
+    return match["object"] + " " + match["activity"]
+
+
+def industry_query_derivation(company: NewsCompanyContext, query: str, topic: str) -> dict[str, str] | None:
+    """실제로 전달한 질의와 공식 원 앵커의 관계를 관측에만 기록한다."""
+    if not topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) or ":" not in topic:
+        return None
+    anchor = next((item for item in company.business_anchors
+                   if item.anchor_id == topic.split(":", 1)[1]), None)
+    if anchor is None:
+        return None
+    expression = industry_search_expression(anchor.business_item)
+    return {
+        "anchor_id": anchor.anchor_id, "original_business_item": anchor.business_item,
+        "search_expression": expression, "query": query,
+        "transformation": "activity_suffix_spacing" if expression != anchor.business_item else "unchanged",
+        "anchor_location": anchor.location, "anchor_text_sha256": anchor.text_sha256,
+    }
+
+
 def search_plan(company: NewsCompanyContext, as_of: dt.date) -> tuple[tuple[str, str, str, int], ...]:
     """최근 후보를 먼저 찾고, 본문 탈락에 대비한 과거 후보도 미리 고정한다."""
 
@@ -109,9 +134,12 @@ def search_plan(company: NewsCompanyContext, as_of: dt.date) -> tuple[tuple[str,
             region_count = len(ic.INDUSTRY_QUERY_REGIONS)
             group = index // region_count
             anchor = company.business_anchors[group % len(company.business_anchors)]
-            region, topic = ic.INDUSTRY_QUERY_REGIONS[index % region_count]
-            theme = ic.INDUSTRY_QUERY_THEMES[(group // len(company.business_anchors)) % len(ic.INDUSTRY_QUERY_THEMES)]
-            industry_queries.append((f"{anchor.business_item} {region} {theme}", "sim",
+            region_index = index % region_count
+            _, topic = ic.INDUSTRY_QUERY_REGIONS[region_index]
+            region = ic.INDUSTRY_QUERY_REGION_EXPRESSIONS[group % len(ic.INDUSTRY_QUERY_REGION_EXPRESSIONS)][region_index]
+            theme = ic.INDUSTRY_QUERY_THEMES[group % len(ic.INDUSTRY_QUERY_THEMES)]
+            expression = industry_search_expression(anchor.business_item)
+            industry_queries.append((f"{expression} {region} {theme}", "sim",
                                      f"industry_{topic}:{anchor.anchor_id}", recent_months))
         # 회사 검색 두 개를 유지하고 기존 뒤쪽 탐색을 대체한다. 총 호출은 늘리지 않는다.
         industry_queries = list(dict.fromkeys(industry_queries))
@@ -213,6 +241,13 @@ def _industry_problem_signal(item: NewsCandidate, *, title_only: bool = False) -
                 or ic.INDUSTRY_SEARCH_QUESTION_RE.search(metadata))
 
 
+def _industry_information_only(item: NewsCandidate, company: NewsCompanyContext | None) -> bool:
+    """명시 인물 프로필·관련주 목록의 요약 키워드가 사건 제목을 앞서지 않게 한다."""
+    return bool(ic.INDUSTRY_SEARCH_INFORMATION_TITLE_RE.search(item.title)
+                and not _industry_problem_signal(item, title_only=True)
+                and not _industry_problem_linked(item, company))
+
+
 def _industry_candidates(candidates: list[NewsCandidate], *,
                          company: NewsCompanyContext | None = None) -> list[NewsCandidate]:
     """문제 신호가 있는 산업 검색 후보에 본문 조사 기회를 먼저 준다.
@@ -232,6 +267,7 @@ def _industry_candidates(candidates: list[NewsCandidate], *,
             for anchor_id in anchor_ids)]
 
     return sorted(industry, key=lambda item: (
+        not _industry_information_only(item, company),
         _industry_business_linked(item, company),
         _industry_problem_linked(item, company) and _industry_business_linked(item, company, item.title),
         _industry_problem_linked(item, company),
@@ -486,6 +522,7 @@ def collect_search_snapshot(*, search_news: Callable[..., Any], company: NewsCom
             try:
                 observed_queries.append({
                     "attempt": asdict(attempt),
+                    "query_derivation": industry_query_derivation(company, query, topic),
                     # 검색 제공자가 해석한 허용 필드만 보관한다. HTTP 원응답이 아니다.
                     "parsed_rows": [{field: _value(item, field) for field in
                                      ("title", "description", "originallink", "link", "pubDate")}

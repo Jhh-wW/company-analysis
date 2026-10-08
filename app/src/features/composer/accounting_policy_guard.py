@@ -62,7 +62,10 @@ from src.features.composer.accounting_policy_constants import (
 )
 from src.features.composer.culture_constants import SOURCE_CLAUSE_SPLIT_RE
 from src.features.composer.culture_guard import culture_accounting_policy_problem
-from src.shared.report_evidence.overhead_allocation_scope import overhead_allocation_policy
+from src.shared.report_evidence.overhead_allocation_scope import (
+    amortization_accounting_policy, overhead_allocation_policy,
+)
+from src.shared.report_evidence.overhead_allocation_constants import ASSET_AMORTIZATION_RULE_NAME
 # 같은 feature 안의 기준·조건 문법을 그대로 빌린다 — 규칙을 두 벌로 만들면
 # 한쪽만 고쳐져 두 잣대가 생긴다(진행·완료·기간 한정은 scope 가드와 같은 잣대).
 from src.features.composer.scope_constants import (
@@ -313,6 +316,8 @@ def _matched_rule(
     # 실제 사건·회계 서비스 제공은 좁은 절 판정에서 먼저 보존한다.
     if section_id == "current_challenges" and is_challenge_accounting_policy(clause):
         return "사업문제미결속재무회계조건"
+    if section_id == "operations_partners" and amortization_accounting_policy(clause):
+        return ASSET_AMORTIZATION_RULE_NAME
     if _exemption_with_sources(clause, sources, section_id):
         return ""
     return _rule_hit(clause, section_id)

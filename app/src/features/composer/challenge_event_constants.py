@@ -49,3 +49,17 @@ PREVENTIVE_RESPONSE_RE = re.compile(r"(?:가능성|위험)[^.!?。;\n]{0,16}(?:�
 CLAIM_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[다요음함])[.!?。](?:\s+|$)|[;\n]")
 EVENT_SCOPE_PROBLEM = "scope_condition_unbound"
 RESPONSE_SCOPE_PROBLEM = "challenge_response_not_in_source"
+
+# 명시 소송표만 읽는다. 사고 날짜표의 기존 열 계약은 바꾸지 않는다.
+LITIGATION_TABLE_HEADER_RE = re.compile(r"구분\|?계류법원\|?원고\|?피고\|?진행상황\|?소송금액")
+LITIGATION_ROW_END_RE = re.compile(r"(?:\d+심|조정|중재)(?:진행중|진행中|계류중)\|?[\d,]+(?:천원)?")
+LITIGATION_COURT_RE = re.compile(r"(?<![가-힣])[가-힣]{0,12}(?:지방|고등|가정|행정)법원(?:\s+[가-힣]{1,12}지원)?|(?<![가-힣])대법원")
+LITIGATION_MARKER_RE = re.compile(r"\(\*\d+\)")
+LITIGATION_FOOTNOTE_RE = re.compile(r"(?P<marker>\(\*\d+\))(?=(?:해당|관련|상기|동)소송)")
+LITIGATION_FOOTNOTE_BODY_RE = re.compile(r"[^.!?。;\n]{1,800}")
+LITIGATION_GLOBAL_CLAIM_RE = re.compile(r"(?:계류중인|진행중인|모든|전체|상기|이들)소송")
+LITIGATION_EXPLICIT_NOTE_RE = re.compile(r"각주(?:\(?\*?|\[)?(?P<number>\d+)|\(\*(?P<marker_number>\d+)\)")
+LITIGATION_ASSESSMENT_PROPERTIES = (
+    re.compile(r"자원(?:의)?유출(?:금액|액)[^.!?。;\n]{0,48}불확실"),
+    re.compile(r"재무상태[^.!?。;\n]{0,64}중요[^.!?。;\n]{0,32}영향[^.!?。;\n]{0,32}(?:미치지않|판단)"),
+)

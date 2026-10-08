@@ -137,6 +137,7 @@ from src.features.composer.portfolio_name_constants import (
 )
 from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
 from src.features.composer.scope_guard import flow_scope_problem
+from src.features.composer.business_relation_scope import business_relation_scope_problem
 from src.features.composer.identity_flow_scope import identity_flow_scope_problem
 from src.features.composer.role_binding import company_flow_actor_problem
 from src.features.composer.absence_claim_guard import absence_claim_problem
@@ -1185,6 +1186,10 @@ def _review_rows(
                 cellwise_problem(row.cells, absence_claim_problem)
                 or flow_scope_problem(row.cells, sources)
             )
+            if not flow_problem and section_id == "business_model":
+                flow_problem = next((value for cell in row.cells if (value := business_relation_scope_problem(
+                    cell, sources, section_id="business_model",
+                ))), "")
             if not flow_problem and section_id == IDENTITY_TABLE_SECTION_ID:
                 flow_problem = identity_flow_scope_problem(row.cells, sources)
             if not flow_problem and section_id == OPERATIONS_FLOW_SECTION_ID:

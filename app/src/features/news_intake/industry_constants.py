@@ -8,7 +8,18 @@ INDUSTRY_QUERY_COUNT = 4
 INDUSTRY_COMPANY_QUERY_COUNT = 2
 INDUSTRY_BODY_DIVISOR = 6
 # 업종에 특정 문제를 미리 부여하지 않고 현재 문제·시장 변화의 본문을 찾는다.
-INDUSTRY_QUERY_THEMES = ("산업 과제", "시장 변화")
+INDUSTRY_QUERY_THEMES = ("문제", "시장 변화")
+# 원문 문자를 삭제하거나 업종 이름을 번역하지 않고 활동 접미어의 경계만 나눈다.
+INDUSTRY_SEARCH_ACTIVITY_RE = re.compile(
+    r"^(?P<object>[가-힣A-Za-z0-9]{2,})(?P<activity>공사|서비스|제조|판매|유통)$"
+)
+INDUSTRY_QUERY_REGION_EXPRESSIONS = (("국내", "세계"), ("한국", "글로벌"))
+# 명시 정보성 제목은 삭제하지 않는다. 제목에 문제 사건이 있으면 이 제한을 적용하지 않는다.
+INDUSTRY_SEARCH_INFORMATION_TITLE_RE = re.compile(
+    r"^\s*(?:\[\s*who\s+is\s*\?\s*\]|\[?관련주\]?\s*(?:목록|모음|정리|총정리))|"
+    r"관련주[^.!?\n]{0,30}(?:목록|모음|총정리)\s*$",
+    re.I,
+)
 INDUSTRY_BUSINESS_TOKEN_END = r"(?=$|[^가-힣A-Za-z0-9]|의|은|는|이|가|업계|산업|시장|제조|생산|수요|가격|공급)"
 INDUSTRY_SEARCH_CLAUSE_RE = re.compile(r"[.!?。…\n]+")
 INDUSTRY_QUERY_REGIONS = (("국내", "domestic"), ("세계", "global"))
