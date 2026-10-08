@@ -108,3 +108,65 @@ def test_다른주체_과거_가정은_현재실행의_근거로_쓰지_않는�
 def test_같은문장의_다른계획_주체_과거와_구별한_현재사업은_남긴다(source):
     assert founding_purpose_scope_problem("회사는 모듈 제작업을 영위하고 있다.",
                                           {"a": PURPOSE, "b": source}) == ""
+
+
+@pytest.mark.parametrize("claim", [
+    "회사는 설립 이후 모듈 제작업을 영위해 왔으며 제조부문을 분할하였다.",
+    "회사는 모듈 제작업을 영위해 왔다.",
+    "회사는 모듈 제작업을 영위해 왔습니다.",
+    "회사는 모듈 제작업을 영위해 온 기업이다.",
+    "회사는 모듈 제작업을 경영해 오고 있으며 설비를 갖추고 있다.",
+])
+def test_설립목적만으로_계속사업의_실행이력을_만들지_않는다(claim):
+    assert scope_problem(claim, {"a": PURPOSE}) == SCOPE_CONDITION_UNBOUND
+
+
+@pytest.mark.parametrize("activity", [
+    "회사는 설립 이후 모듈 제작업을 영위해 왔다.",
+    "회사는 모듈 제작업을 영위해 왔으며 설비를 갖추고 있다.",
+    "회사는 모듈 제작업 서비스를 제공해 왔습니다.",
+    "회사는 모듈 제작업을 영위해 오고 있으며 설비를 갖추고 있다.",
+])
+def test_원문이_실제계속사업을_명시한_경우_보존한다(activity):
+    claim = "회사는 모듈 제작업을 영위해 왔다."
+    assert scope_problem(claim, {"a": PURPOSE, "b": activity}) == ""
+
+
+@pytest.mark.parametrize("activity", [
+    "고객은 모듈 제작업을 영위해 왔다.",
+    "회사는 운송업을 영위해 왔다.",
+    "회사는 모듈 제작업을 영위해 왔지만 현재 중단하였다.",
+    "회사는 모듈 제작업을 영위해 왔다고 가정한다.",
+])
+def test_다른주체_사업_중단_가정을_계속사업의_근거로_빌리지_않는다(activity):
+    claim = "회사는 모듈 제작업을 영위해 왔다."
+    assert scope_problem(claim, {"a": PURPOSE, "b": activity}) == SCOPE_CONDITION_UNBOUND
+
+
+def test_계속이력_뒤_종료된_사업을_현재실행으로_승격하지_않는다():
+    source = PURPOSE + " 회사는 모듈 제작업을 영위해 왔다. 현재 해당 사업을 중단하였다."
+    claim = "회사는 현재 모듈 제작업을 영위해 오고 있다."
+    assert scope_problem(claim, {"a": source}) == SCOPE_CONDITION_UNBOUND
+
+
+def test_명시과거의_계속이력은_현재주장이_아니다():
+    claim = "회사는 과거 모듈 제작업을 영위해 왔다."
+    source = PURPOSE + " " + claim + " 현재 해당 사업을 중단하였다."
+    assert scope_problem(claim, {"a": source}) == ""
+
+
+def test_과거이력과_같은문장의_명시현재주장을_구분한다():
+    claim = "회사는 과거 모듈 제작업을 영위해 왔으며 현재 모듈 제작업을 영위하고 있다."
+    assert scope_problem(claim, {"a": PURPOSE}) == SCOPE_CONDITION_UNBOUND
+
+
+@pytest.mark.parametrize("join", ["왔고 현재", "왔으나 지금", "왔다고 하며 현재도"])
+def test_과거이력_뒤_명시현재절이_이력표시에_가려지지_않는다(join):
+    claim = f"회사는 과거 모듈 제작업을 영위해 {join} 모듈 제작업을 영위하고 있다."
+    assert scope_problem(claim, {"a": PURPOSE}) == SCOPE_CONDITION_UNBOUND
+
+
+def test_과거사업과_다른_현재사업의_지원근거를_구분한다():
+    claim = "회사는 과거 모듈 제작업을 영위해 왔고 현재 설비공사업을 영위하고 있다."
+    source = {"a": PURPOSE, "b": "회사는 현재 설비공사업을 영위하고 있다."}
+    assert scope_problem(claim, source) == ""

@@ -8,12 +8,17 @@ from src.features.composer.accounting_policy_guard import accounting_policy_prob
 from src.features.composer.challenge_accounting_policy import is_challenge_accounting_policy
 from src.features.composer.challenge_industry_scope import industry_only_challenge_problem
 from src.features.composer.constants import CHALLENGE_FLOW_SECTION_ID
+from src.features.composer.challenge_constants import (
+    CHALLENGE_RESPONSE_CELL_COUNT, CHALLENGE_RESPONSE_CELL_INDEX,
+)
 from src.features.composer.challenge_event_scope import (
     challenge_event_scope_problem, _event_rows, _selected_rows, _surface,
 )
 from src.features.composer.challenge_business_scope_constants import (
     PROCEDURAL_ISSUE_ONLY, PROCEDURAL_ISSUE_UNIT_RE, PROCEDURAL_LABEL_RELATION_RE,
     PROCEDURAL_COURT_ISSUE_RE, PROCEDURAL_ACTION_ISSUE_RE, PROCEDURAL_EVENT_LABEL_RE,
+    PROCEDURAL_TABLE_ISSUE_RE, TABLE_ACCOUNTING_RESPONSE_UNIT_RE,
+    TABLE_ACCOUNTING_RESPONSE_ONLY_RE,
 )
 from src.shared.report_evidence.challenge_eligibility import (
     challenge_eligibility_problem, challenge_eligibility_quote_problem,
@@ -22,7 +27,7 @@ from src.shared.report_evidence.challenge_eligibility import (
 )
 
 
-def _procedural_issue_problem(text: str) -> str:
+def _procedural_issue_problem(text: str, *, table_cell: bool = False) -> str:
     """사건명·법원·심급·절차 상태만인 후보를 직접 사업 문제로 세지 않는다.
 
     형식 밖의 술어·사업 영향이 섞이면 의미 검수에 남긴다. 자기 인용의 다른 절이나
@@ -35,10 +40,20 @@ def _procedural_issue_problem(text: str) -> str:
         compact = "".join(unit.split())
         match = (PROCEDURAL_COURT_ISSUE_RE.fullmatch(compact)
                  or PROCEDURAL_ACTION_ISSUE_RE.fullmatch(compact)
-                 or PROCEDURAL_EVENT_LABEL_RE.fullmatch(compact))
+                 or PROCEDURAL_EVENT_LABEL_RE.fullmatch(compact)
+                 or (PROCEDURAL_TABLE_ISSUE_RE.fullmatch(compact) if table_cell else None))
         if not match or PROCEDURAL_LABEL_RELATION_RE.search(match.group("label")):
             return ""
     return PROCEDURAL_ISSUE_ONLY
+
+
+def _accounting_response_cell_problem(text: str) -> str:
+    units = tuple(unit for unit in TABLE_ACCOUNTING_RESPONSE_UNIT_RE.split(text)
+                  if unit.strip())
+    if units and all(TABLE_ACCOUNTING_RESPONSE_ONLY_RE.fullmatch("".join(unit.split()))
+                     for unit in units):
+        return ACCOUNTING_POLICY_BOILERPLATE
+    return ""
 
 
 def challenge_business_problem(text: str, sources: Mapping[str, str], *, cells: Sequence[str] | None = None,
@@ -66,10 +81,14 @@ def challenge_business_problem(text: str, sources: Mapping[str, str], *, cells: 
     if problem:
         return problem
     if cells is not None or claim_slot == "current_challenges:issue":
-        problem = _procedural_issue_problem(issue_text)
+        problem = _procedural_issue_problem(issue_text, table_cell=cells is not None)
         if problem:
             return problem
         problem = challenge_issue_problem(issue_text)
+        if problem:
+            return problem
+    if cells is not None and len(cells) == CHALLENGE_RESPONSE_CELL_COUNT:
+        problem = _accounting_response_cell_problem(cells[CHALLENGE_RESPONSE_CELL_INDEX])
         if problem:
             return problem
     candidate = " ".join(cells) if cells is not None else text

@@ -288,6 +288,9 @@ from src.features.pipeline.constants import (
     ANTHROPIC_TIMEOUT_SEC,
     V2_REVIEW_MODEL,
     V2_REVIEW_MODEL_STAGES,
+    V2_WRITER_MODEL_ENV,
+    V2_WRITER_MODEL_STAGE,
+    V2_WRITER_ALLOWED_MODELS,
     CORPCODE_REFRESH_INTERVAL_DAYS,
     DART_SUCCESS_STATUS,
     STAGE_BOOT,
@@ -601,6 +604,29 @@ def _requested_release_mode(
         return None
 
 
+def _configured_v2_writer_model(engine: Any) -> str:
+    """요청 생성 시 보관한 명시 작성 모델만 닫힌 선택값으로 읽는다."""
+    value = getattr(engine, "_writer_model", "")
+    if value == "":
+        return ""
+    if type(value) is not str or value not in V2_WRITER_ALLOWED_MODELS:
+        raise provider_budget.ProviderBudgetUnavailable(
+            "작성 모델 설정은 허용된 Haiku 또는 Sonnet이어야 합니다"
+        )
+    return value
+
+
+def _provider_model_for_stage(engine: Any, stage: str, *, fallback: str = "") -> str:
+    """예약·실제 송신·응답 보존이 같은 요청 로컬 모델을 사용한다."""
+    if stage in V2_REVIEW_MODEL_STAGES:
+        return V2_REVIEW_MODEL
+    if stage == V2_WRITER_MODEL_STAGE:
+        writer_model = _configured_v2_writer_model(engine)
+        if writer_model:
+            return writer_model
+    return str(getattr(engine, "MODEL", "") or fallback)
+
+
 def _generation_cache_namespace(
     engine: Any,
     build_identity: Any,
@@ -665,6 +691,10 @@ def _generation_cache_namespace(
     requested_models = {"pipeline": model}
     if generation_mode is engine_mode.EngineMode.V2:
         requested_models["reviewer"] = V2_REVIEW_MODEL
+        writer_model = _configured_v2_writer_model(engine)
+        if writer_model:
+            # 미지정은 기존 캐시 신원 그대로, 명시 비교만 별도 저장본을 쓴다.
+            requested_models["writer"] = writer_model
     return GenerationCacheNamespace.create(
         product="company-analysis",
         schema_version=schema_version,
@@ -898,6 +928,8 @@ class _MeteredEngine:
         # ★ 1판 모듈의 MODEL을 직접 바꾸면 겹쳐 도는 다른 요청의 모델도 바뀐다.
         # 요청마다 자기 값을 들고 client 경계에서 덮어써야 Sonnet/Haiku가 섞이지 않는다.
         object.__setattr__(self, "_model", str(getattr(engine, "MODEL", "")))
+        # 실행 중 환경이 바뀌어도 이 요청의 캐시·송신 모델은 함께 고정된다.
+        object.__setattr__(self, "_writer_model", os.getenv(V2_WRITER_MODEL_ENV, ""))
         object.__setattr__(self, "_billing_uncertain", False)
         object.__setattr__(self, "_call_context", contextvars.ContextVar(
             "pipeline_provider_call_context", default=_ProviderCallContext(),
@@ -924,6 +956,7 @@ class _MeteredEngine:
             "_engine",
             "_usages",
             "_model",
+            "_writer_model",
             "_billing_uncertain",
             "_call_context",
             "_private_news_request",
@@ -1320,6 +1353,11 @@ class _MeteredMessages:
 
     def _create_admitted(self, *args: Any, **kwargs: Any) -> Any:
         call_context = self._metered._call_context.get()
+        call_kwargs = dict(kwargs)
+        call_kwargs["model"] = _provider_model_for_stage(
+            self._metered, call_context.stage,
+            fallback=str(call_kwargs.get("model", "")),
+        )
         # ``MAX_AI_CALLS_PER_REQUEST``가 문서와 시험에만 있으면 실패 응답처럼
         # usages에 안 쌓이는 호출은 무한히 반복될 수 있다. 실제 전송보다 먼저
         # 요청 로컬 계수를 잡아 상한을 넘는 호출을 원장·네트워크 앞에서 닫는다.
@@ -1328,13 +1366,8 @@ class _MeteredMessages:
         )
         # 자리 배분 전 owner·유료 phase를 확인했어도 예산 문맥 누락은 허용하지 않는다.
         budget = provider_budget.current()
-        call_kwargs = dict(kwargs)
         # 1판 `_ask`는 모듈 전역 MODEL을 읽지만 그 값은 다른 요청과 공유된다.
         # provider에 나가는 마지막 경계에서 이 요청의 로컬 모델로 바로잡는다.
-        if call_context.stage in V2_REVIEW_MODEL_STAGES:
-            call_kwargs["model"] = V2_REVIEW_MODEL
-        elif self._metered.MODEL:
-            call_kwargs["model"] = self._metered.MODEL
         if "output_config" in call_kwargs:
             call_kwargs["output_config"] = _provider_output_config(
                 call_kwargs["output_config"]
@@ -5951,10 +5984,12 @@ def _v2_ask_via_provider(
 
     def ask(prompt: str) -> str:
         replay_started = time.monotonic()
-        requested_model = (
-            V2_REVIEW_MODEL if stage in V2_REVIEW_MODEL_STAGES
-            else (getattr(engine, "MODEL", "") or GENERATION_MODEL)
-        )
+        try:
+            requested_model = _provider_model_for_stage(
+                engine, stage, fallback=GENERATION_MODEL,
+            )
+        except provider_budget.ProviderBudgetUnavailable as error:
+            raise AskFatalError(error, call_limit=False) from error
         # 출력 상한은 «보내기 직전»에 확정한다 — 1차 검수 재요청의 상한은 첫
         # 답의 실제 출력에 달려 있어 이 클로저를 만들 때는 아직 모른다.
         cap = max_tokens() if callable(max_tokens) else max_tokens

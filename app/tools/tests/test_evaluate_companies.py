@@ -200,6 +200,52 @@ def test_changed_performance_settings_cannot_resume_same_paid_batch(harness):
     assert all(method == "GET" for method, _ in calls)
 
 
+def write_model_settings(settings, value):
+    snapshot = json.loads(settings.read_bytes())
+    snapshot["model_settings"] = value
+    settings.write_text(json.dumps(snapshot), encoding="utf-8")
+    settings.with_suffix(".sha256").write_text(digest(settings.read_bytes()), encoding="utf-8")
+
+
+@pytest.mark.parametrize("model", ["claude-haiku-4-5", "claude-sonnet-4-6"])
+def test_writer_model_snapshot_preflight_preserves_actual_option(harness, model):
+    build, calls, _, _, settings = harness
+    expected = {"REPORT_V2_WRITER_MODEL": model}
+    write_model_settings(settings, expected)
+    result = build().operate()
+    assert result["model_settings"] == expected
+    assert result["paid_posts"] == 0 and calls == [("GET", "/")]
+
+
+def test_legacy_model_snapshot_is_not_invented(harness):
+    build, _, _, _, _ = harness
+    assert "model_settings" not in build().operate()
+
+
+@pytest.mark.parametrize("value", [
+    {}, None, [], {"REPORT_V2_WRITER_MODEL": ""},
+    {"REPORT_V2_WRITER_MODEL": "unknown"}, {"REPORT_V2_WRITER_MODEL": True},
+    {"REPORT_V2_WRITER_MODEL": " claude-sonnet-4-6"},
+    {"REPORT_V2_WRITER_MODEL": "claude-sonnet-4-6", "other": "claude-haiku-4-5"},
+])
+def test_invalid_writer_model_snapshot_rejects_before_http(harness, value):
+    build, calls, _, _, settings = harness
+    write_model_settings(settings, value)
+    with pytest.raises(EvaluationError, match="작성 모델 설정"):
+        build()
+    assert calls == []
+
+
+def test_changed_writer_model_cannot_resume_previous_paid_label(harness):
+    build, calls, _, _, settings = harness
+    write_model_settings(settings, {"REPORT_V2_WRITER_MODEL": "claude-haiku-4-5"})
+    build().operate()
+    write_model_settings(settings, {"REPORT_V2_WRITER_MODEL": "claude-sonnet-4-6"})
+    with pytest.raises(EvaluationError, match="자동 재개"):
+        build().operate(execute=True)
+    assert all(method == "GET" for method, _ in calls)
+
+
 @pytest.fixture
 def asgi_confirm_boundary(harness, monkeypatch):
     """실제 앱의 CSRF·동의 경계까지만 통과하고 외부 전송은 금지한다."""

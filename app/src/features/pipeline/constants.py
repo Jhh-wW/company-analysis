@@ -11,6 +11,13 @@ V2_REVIEW_MODEL_STAGES: Final[frozenset[str]] = frozenset({
     "v2_review", "v2_diagram", "official_industry_context",
 })
 
+# 명시 비교 요청만 작성 모델을 고른다. 빈 설정은 기존 엔진 모델을 유지한다.
+V2_WRITER_MODEL_ENV: Final[str] = "REPORT_V2_WRITER_MODEL"
+V2_WRITER_MODEL_STAGE: Final[str] = "v2_compose"
+V2_WRITER_ALLOWED_MODELS: Final[frozenset[str]] = frozenset({
+    "claude-haiku-4-5", "claude-sonnet-4-6",
+})
+
 #: DART OpenAPI가 요청을 정상 처리했음을 뜻하는 상태 코드.
 #: 목록이 비어 있는 정상 응답과 한도·인증·서버 오류를 가르려면 반드시 확인한다.
 DART_SUCCESS_STATUS: Final[str] = "000"

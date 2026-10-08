@@ -234,6 +234,13 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             except (TypeError, ValueError):
                 response = None
         source_response_sha256 = request.source_response_sha256 or quote_response_sha256(response)
+        original_items = parse_grounded_payload(response)
+        selected_quote_ids = {
+            row["id"]: tuple(entry.get("text_quote_id", "") if type(entry) is dict else ""
+                             for entry in row["excerpts"])
+            for row in original_items or [] if type(row) is dict and type(row.get("id")) is str
+            and type(row.get("excerpts")) is list
+        }
         response = restore_quote_response(response, articles=batch, company=company,
                                           selection_enabled=selection)
         analysis_quote_traces.append({
@@ -263,10 +270,15 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
                 direct_response = {"items": [item for item in direct_items
                                              if type(item) is not dict or type(item.get("id")) is not str
                                              or item.get("id") in direct_ids]}
+        subject_bindings: list[dict[str, object]] = []
         excerpts, rejected = validate_grounded_response(
             direct_response, articles=direct_batch, company=company, as_of=as_of, identity_diagnostics=identity_diagnostics,
             role_diagnostics=role_diagnostics, subject_diagnostics=subject_diagnostics,
+            binding_observations=subject_bindings,
+            selected_quote_ids=selected_quote_ids,
         )
+        if subject_bindings:
+            analysis_quote_traces[-1]["관계주어원문결속"] = subject_bindings
         excluded.update(rejected)
         if any(code in rejected for code in ("grounded_invalid_response", "grounded_invalid_item", "grounded_missing_result")):
             failures.append("grounded_response_incomplete")

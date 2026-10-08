@@ -30,6 +30,9 @@ param(
     [string]$NewsBodyFetchConcurrency = "2",
     [switch]$EnableReviewPromptCache,
 
+    # 작성 단계만 비교한다. 부모 환경·provider 파일의 모델 설정은 상속하지 않는다.
+    [string]$WriterModel = "",
+
     # 원문 보관은 부모 환경·provider 환경 파일과 무관하게 명시적으로만 켠다.
     # 실행 표지는 회사·개인 이름을 넣지 않은 불투명한 식별자를 사용한다.
     [switch]$EnableLocalReplay,
@@ -100,6 +103,10 @@ $performanceSettings = [ordered]@{
     PROVIDER_MAX_CONCURRENT_CALLS = $ProviderMaxConcurrentCalls
     NEWS_BODY_FETCH_CONCURRENCY = $NewsBodyFetchConcurrency
     COMPOSER_REVIEW_PROMPT_CACHE_ENABLED = $(if ($EnableReviewPromptCache) { "1" } else { "0" })
+}
+if ($WriterModel -cne "" -and @("claude-haiku-4-5", "claude-sonnet-4-6") -cnotcontains $WriterModel) {
+    Write-Host "작성 모델은 claude-haiku-4-5 또는 claude-sonnet-4-6 중 하나여야 합니다." -ForegroundColor Red
+    exit 2
 }
 foreach ($name in @($performanceSettings.Keys)) {
     if ($performanceAllowedValues[$name] -cnotcontains $performanceSettings[$name]) {
@@ -617,6 +624,9 @@ foreach ($name in @("NEWS_INTAKE", "REVENUE_TABLE_V2", "TYPED_DART_COLLECTOR", "
 foreach ($name in @($performanceSettings.Keys)) {
     $childEnvironment[$name] = $performanceSettings[$name]
 }
+if ($WriterModel -cne "") {
+    $childEnvironment["REPORT_V2_WRITER_MODEL"] = $WriterModel
+}
 
 # 비밀이나 부모 환경 전체를 직렬화하지 않는다. 관측값은 스위치 범위만 뜻한다.
 $observedProductionSwitches = [ordered]@{
@@ -648,6 +658,9 @@ $snapshot = [ordered]@{
     per_run_expected_cost_cap_krw = $PerRunExpectedCostCapKrw
     daily_expected_cost_cap_krw = $DailyExpectedCostCapKrw
 }
+if ($WriterModel -cne "") {
+    $snapshot["model_settings"] = [ordered]@{ REPORT_V2_WRITER_MODEL = $WriterModel }
+}
 $snapshotJson = $snapshot | ConvertTo-Json -Depth 5 -Compress
 $snapshotDigest = Get-Utf8Sha256 -Text $snapshotJson
 $snapshotPath = Join-Path $evaluationRoot "evaluation-settings.json"
@@ -677,6 +690,9 @@ $allowedChildEnvironmentNames = $allowedParentNames + @(
 )
 if ($EnableLocalReplay) {
     $allowedChildEnvironmentNames += @("REPORT_LOCAL_REPLAY_ENABLED", "REPORT_LOCAL_REPLAY_RUN")
+}
+if ($WriterModel -cne "") {
+    $allowedChildEnvironmentNames += @("REPORT_V2_WRITER_MODEL")
 }
 foreach ($name in @($childEnvironment.Keys)) {
     if ($allowedChildEnvironmentNames -notcontains [string]$name) {

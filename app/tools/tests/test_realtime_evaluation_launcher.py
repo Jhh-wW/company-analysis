@@ -189,6 +189,7 @@ payload = {
         "REPORT_WRITER_MAX_PARALLEL_CALLS", "PROVIDER_MAX_CONCURRENT_CALLS",
         "NEWS_BODY_FETCH_CONCURRENCY", "COMPOSER_REVIEW_PROMPT_CACHE_ENABLED",
     )},
+    "writer_model": os.environ.get("REPORT_V2_WRITER_MODEL"),
     "legacy_naver_keys_absent": all(name not in os.environ for name in (
         "NAVER_CLIENT_ID", "NAVER_CLIENT_SECRET",
     )),
@@ -274,6 +275,7 @@ def _run_fake(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=30,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
     return result, list(app_copy.rglob("child-environment.json"))
 
@@ -825,3 +827,42 @@ def test_unknown_release_mode_is_refused_readably_when_started_by_file(
     for allowed in (b"SHADOW", b"ENFORCE_NO_PARTIAL", b"FULL"):
         assert allowed in result.stdout, f"쓸 수 있는 값 {allowed!r}이 안내에 없다"
     assert list(app_copy.rglob("child-environment.json")) == []
+
+
+@pytest.mark.skipif(WINDOWS_POWERSHELL is None, reason="Windows 가짜 자식 환경 확인")
+@pytest.mark.parametrize("model", ["", "claude-haiku-4-5", "claude-sonnet-4-6"])
+def test_explicit_writer_model_matches_child_and_settings_snapshot(tmp_path, model):
+    app_copy = _copy_fake_app(tmp_path)
+    environment = _environment(tmp_path)
+    # 부모의 값은 미지정 요청이나 명시 CLI 선택을 대신할 수 없다.
+    environment["REPORT_V2_WRITER_MODEL"] = "parent-must-not-win"
+    arguments = f" -WriterModel {model}" if model else ""
+    result, records = _run_fake(app_copy, environment, paid=True, feature_arguments=arguments)
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert len(records) == 1
+    payload = json.loads(records[0].read_bytes())
+    snapshot_path = records[0].parent / "evaluation-settings.json"
+    snapshot = json.loads(snapshot_path.read_bytes())
+    from tools.evaluate_companies import digest
+    assert snapshot_path.with_suffix(".sha256").read_text(encoding="utf-8") == digest(snapshot_path.read_bytes())
+    if model:
+        assert payload["writer_model"] == model
+        assert snapshot["model_settings"] == {"REPORT_V2_WRITER_MODEL": model}
+    else:
+        assert payload["writer_model"] is None
+        assert "model_settings" not in snapshot
+    assert set(snapshot["performance_settings"]) == set(PERFORMANCE_KEYS)
+    assert b"parent-must-not-win" not in snapshot_path.read_bytes() + result.stdout + result.stderr
+
+
+@pytest.mark.skipif(WINDOWS_POWERSHELL is None, reason="Windows 가짜 자식 환경 확인")
+@pytest.mark.parametrize("model", ["unknown", "CLAUDE-SONNET-4-6"])
+def test_invalid_writer_model_refuses_before_child_launch(tmp_path, model):
+    app_copy = _copy_fake_app(tmp_path)
+    result, records = _run_fake(
+        app_copy, _environment(tmp_path), paid=True, feature_arguments=f" -WriterModel {model}",
+    )
+    # 중첩 -Command 시험 래퍼는 내부 exit 2를 비영 종료로 전달한다.
+    assert result.returncode != 0
+    assert records == []
+    assert list(app_copy.rglob("evaluation-settings.json")) == []

@@ -16,7 +16,7 @@ def _activity_text(unit: str) -> str:
     return c.PURPOSE_OBJECT_RE.sub(" ", unit)
 
 
-def _current_activities(unit: str) -> list[str]:
+def _current_activities(unit: str, *, allow_continuity: bool = False) -> list[str]:
     """같은 문장에서도 현재 실행과 다른 사업의 계획을 별도 절로 읽는다."""
     current = []
     historical = other_subject = False
@@ -30,7 +30,8 @@ def _current_activities(unit: str) -> list[str]:
         other_subject = other_subject or bool(c.SOURCE_OTHER_SUBJECT_RE.search(surface))
         if historical or other_subject:
             continue
-        if (c.CURRENT_BUSINESS_RE.search(surface)
+        if ((c.CURRENT_BUSINESS_RE.search(surface)
+             or (allow_continuity and c.CONTINUING_BUSINESS_RE.search(surface)))
                 and not c.UNCONFIRMED_BUSINESS_RE.search(surface)
                 and not c.SOURCE_MODAL_RE.search(surface)):
             current.append(surface)
@@ -52,14 +53,23 @@ def founding_purpose_scope_problem(text: str, sources: Mapping[str, str]) -> str
             if item:
                 items.add(item)
     current = [surface for unit in units for surface in _current_activities(unit)]
+    continuing = [surface for unit in units for surface in _current_activities(unit, allow_continuity=True)]
     for unit in c.UNIT_RE.split(text):
-        surface = _surface(c.HISTORICAL_FOUNDING_CLAIM_RE.sub(" ", _activity_text(unit)))
-        if not c.CURRENT_CLAIM_RE.search(surface):
-            continue
-        # 같은 인용 묶음에 다른 현재 사업이 있어도 설립 목적의 실행 근거를 빌리지 않는다.
-        mentioned = [item for item in items if item in surface]
-        if any(not any(item in source for source in current) for item in mentioned):
-            return SCOPE_CONDITION_UNBOUND
-        if not mentioned and not current:
-            return SCOPE_CONDITION_UNBOUND
+        historical = False
+        for clause in c.CLAIM_CLAUSE_BOUNDARY_RE.split(
+                c.HISTORICAL_FOUNDING_CLAIM_RE.sub(" ", _activity_text(unit))):
+            surface = _surface(clause)
+            if c.SOURCE_CURRENT_RESET_RE.search(surface):
+                historical = False
+            historical = historical or bool(c.SOURCE_HISTORICAL_RE.search(surface))
+            if historical or not c.CURRENT_CLAIM_RE.search(surface):
+                continue
+            # ‘해 왔다’는 현재 실행을 별도로 입증하지 않는다. 명시 현재 주장은 현재형 원문만 쓴다.
+            evidence = (continuing if c.CONTINUING_CLAIM_RE.search(surface)
+                        and not c.EXPLICIT_PRESENT_CLAIM_RE.search(surface) else current)
+            mentioned = [item for item in items if item in surface]
+            if any(not any(item in source for source in evidence) for item in mentioned):
+                return SCOPE_CONDITION_UNBOUND
+            if not mentioned and not evidence:
+                return SCOPE_CONDITION_UNBOUND
     return ""

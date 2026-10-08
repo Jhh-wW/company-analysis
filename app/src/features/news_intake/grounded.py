@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import re
 from collections import Counter
@@ -21,6 +22,8 @@ from src.features.news_intake.identity_names import company_query_names, mention
 from src.features.news_intake.article_identity import article_company_context
 from src.features.news_intake.reporting_subject_scope import target_is_only_interview_recipient
 from src.features.news_intake.reporting_subject_scope_constants import SUBJECT_INTERVIEW_RECIPIENT_ONLY
+from src.features.news_intake.relation_subject_scope import bind_relation_subject, starts_relation_target
+from src.features.news_intake.relation_subject_scope_constants import RELATION_CONTEXT_REASON
 from src.features.news_intake.quote_selection import quote_candidates, quote_schema, restore_quote_response, _fact_start
 from src.features.news_intake import quote_selection_constants as qc
 from src.features.news_intake.select import normalize_company_name
@@ -309,10 +312,12 @@ def _bound_subject(raw: dict[str, str], body: str, company: NewsCompanyContext,
     article_context = article_company_context(body, company)
     if target_is_only_interview_recipient(text, article_context):
         return _subject_rejected(diagnostics, SUBJECT_INTERVIEW_RECIPIENT_ONLY)
-    if mentions_target(text, article_context):
-        return (text, start) if not subject and not evidence else _subject_rejected(
-            diagnostics, c.SUBJECT_DIRECT_NAME_EXTRA_FIELDS
-        )
+    if mentions_target(text, article_context) or starts_relation_target(text, article_context):
+        if subject or evidence:
+            return _subject_rejected(diagnostics, c.SUBJECT_DIRECT_NAME_EXTRA_FIELDS)
+        bound = bind_relation_subject(text, body, article_context, start,
+                                      max_chars=c.GROUNDED_MAX_EXCERPT_CHARS)
+        return bound if bound is not None else _subject_rejected(diagnostics, c.SUBJECT_MISSING_OR_GENERIC)
     if not subject.strip() or len(subject) > c.GROUNDED_SUBJECT_CHARS or not evidence:
         return _subject_rejected(diagnostics, c.SUBJECT_MISSING_OR_GENERIC)
     if normalize_company_name(subject) in c.IDENTITY_STOP_WORDS | c.SUBJECT_GENERIC_TERMS:
@@ -496,8 +501,18 @@ def validate_grounded_response(raw: object, *, articles: list[tuple[NewsCandidat
                                identity_diagnostics: Counter[str] | None = None,
                                role_diagnostics: Counter[str] | None = None,
                                subject_diagnostics: Counter[str] | None = None,
+                               binding_observations: list[dict[str, object]] | None = None,
+                               selected_quote_ids: dict[str, tuple[str, ...]] | None = None,
                                ) -> tuple[tuple[GroundedNewsExcerpt, ...], dict[str, int]]:
     excluded: Counter[str] = Counter()
+    if selected_quote_ids is None:
+        original_items = parse_grounded_payload(raw)
+        selected_quote_ids = {
+            item["id"]: tuple(entry.get("text_quote_id", "") if isinstance(entry, dict) else ""
+                              for entry in item["excerpts"])
+            for item in original_items or [] if isinstance(item, dict) and isinstance(item.get("id"), str)
+            and isinstance(item.get("excerpts"), list)
+        }
     items = parse_grounded_payload(restore_quote_response(raw, articles=articles, company=company))
     if items is None:
         return (), {"grounded_invalid_response": 1}
@@ -546,6 +561,37 @@ def validate_grounded_response(raw: object, *, articles: list[tuple[NewsCandidat
         if role_diagnostics is not None:
             # 신원 복구에 실패해 버린 기사의 조정은 세지 않는다 — 실제 운반된 것만.
             role_diagnostics.update(article_roles)
+        if binding_observations is not None:
+            for excerpt_index, raw_excerpt in enumerate(item["excerpts"]):
+                if not isinstance(raw_excerpt, dict) or not isinstance(raw_excerpt.get("text"), str):
+                    continue
+                original = raw_excerpt["text"]
+                original_start = body.find(original)
+                if original_start < 0:
+                    continue
+                bound = bind_relation_subject(original, body, article_company_context(body, company),
+                                              original_start, max_chars=c.GROUNDED_MAX_EXCERPT_CHARS)
+                if bound is None or bound == (original, original_start):
+                    continue
+                final, final_start = bound
+                if not any(value.text == final and value.span_start == final_start for value in article_excerpts):
+                    continue
+                original_end = original_start + len(original)
+                original_ids = selected_quote_ids.get(candidate.id, ())
+                selected_id = original_ids[excerpt_index] if excerpt_index < len(original_ids) else ""
+                if not isinstance(selected_id, str):
+                    selected_id = ""
+                if selected_id and not any(value["id"] == selected_id and value["start"] == original_start
+                                          and value["end"] == original_end
+                                          for value in quote_candidates(candidate, body, company)):
+                    selected_id = ""
+                binding_observations.append({
+                    "기사ID": candidate.id, "선택ID": selected_id, "사유": RELATION_CONTEXT_REASON,
+                    "원선택원문": original, "원선택범위": [original_start, original_end],
+                    "원선택SHA256": hashlib.sha256(original.encode()).hexdigest(),
+                    "최종인용원문": final, "최종인용범위": [final_start, final_start + len(final)],
+                    "최종인용SHA256": hashlib.sha256(final.encode()).hexdigest(),
+                })
         excerpts.extend(article_excerpts)
     excluded["grounded_missing_result"] += len(set(by_id) - seen)
     return tuple(excerpts), {key: count for key, count in excluded.items() if count}
