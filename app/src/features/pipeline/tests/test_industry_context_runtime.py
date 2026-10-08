@@ -7,6 +7,8 @@ import json
 from dataclasses import replace
 from types import SimpleNamespace
 
+from jsonschema import Draft202012Validator
+
 from src.features.pipeline import real
 from src.features.pipeline.tests.test_business_activity_anchors import PROFILE, _evidence
 from src.features.pipeline.business_activity_anchors import build_business_activity_anchors
@@ -67,17 +69,25 @@ def test_industry_problems_cross_runtime_without_becoming_company_fragments():
     def analyze(prompt, schema, max_tokens):
         calls.append((schema, max_tokens))
         articles = json.loads(prompt.split("자료 시작:\n", 1)[1])["articles"]
-        return {"items": [{
+        # 산업 우선 요청은 단일 판정 union을 사용한다. 구형 배열을 새 근거로 승격하지 않는다.
+        item_schema = schema["properties"]["items"]["items"]
+        assert "industry_assessments" in item_schema["required"]
+        assert "industry_problems" not in item_schema["properties"]
+        result = {"items": [{
             "id": article["id"], "same_company": False, "material": False,
-            "entity_evidence": "", "source_type": "news_report", "excerpts": [],
-            "industry_problems": [{
-                "anchor_id": anchor.anchor_id, "text": BODY,
+            "entity_evidence_quote_id": "", "source_type": "news_report", "excerpts": [],
+            "industry_assessments": [{
+                "anchor_id": anchor.anchor_id, "status": "proposed",
+                "text_quote_id": next(quote["id"] for quote in article["quote_candidates"]
+                                      if quote["start"] == 0 and quote["end"] == len(BODY)),
                 "industry": "정밀부품 제조", "problem": "공급 지연",
                 "geography": "domestic", "geography_detail": "한국",
                 "geography_evidence": "한국의", "applicability_quote": "정밀부품 제조 산업",
                 "problem_present": True, "same_business": True, "geography_supported": True,
             }],
         } for article in articles]}
+        Draft202012Validator(schema).validate(result)
+        return result
 
     fragments = real._collect_grounded_news(
         session=session, analyze=analyze, fetch_text=lambda _url: BODY,

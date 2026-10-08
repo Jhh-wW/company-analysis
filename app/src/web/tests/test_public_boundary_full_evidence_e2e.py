@@ -33,6 +33,8 @@ from src.features.composer.constants import (
     SECTION_IDS,
 )
 from src.features.composer.logic import SUMMARY_PROMPT_HEADER
+from src.features.composer.future_plan_constants import FUTURE_KEY
+from src.features.composer.plan_status_constants import PLAN_STATUS_KEY
 from src.features.composer.public_manifest import assert_stored_strict_manifest
 from src.features.homepage.ir_pdf import FetchedIrHtml, FetchedIrPdf
 from src.features.homepage.wide_fetch import WideRawResponse
@@ -158,6 +160,11 @@ _RECRUIT_SENTENCE = (
 def _section_sentences(section_id: str) -> tuple[str, ...]:
     """각 문장 자체가 해당 장의 수집기 필수 슬롯을 직접 증명하게 만든다."""
 
+    if section_id == "future_strategy":
+        # 현재 상태와 명시 미래 계획을 구분한다. 같은 공식 문단의 두 구절을
+        # 검수 대역도 정확 인용해야 하며 참 판정만으로 새 증명 계약을 우회하지 않는다.
+        return tuple(_future_sentences(value)[index % 2] for index, value in enumerate(_ORDINALS))
+
     templates = {
         "identity": (
             "가나다전자는 설립 이후 반도체 검사 장비를 제조 및 판매하는 주요 사업 전문기업이며 {ordinal} 원칙을 공개한다."
@@ -174,9 +181,6 @@ def _section_sentences(section_id: str) -> tuple[str, ...]:
         "current_challenges": (
             "당사는 원재료 가격 상승으로 원가 부담이 커졌고, 이에 대응해 공급업체 다변화를 도입한 {ordinal} 조치를 공개한다."
         ),
-        "future_strategy": (
-            "가나다전자는 해외 유통망 확대 계획을 추진하고 실행 단계에 착수한 상태를 {ordinal} 과제로 공개한다."
-        ),
         "operations_partners": (
             "가나다전자는 협력사 공급망을 관리하며 검사 장비 생산을 직접 운영하는 역할을 {ordinal} 원칙으로 공개한다."
         ),
@@ -188,6 +192,43 @@ def _section_sentences(section_id: str) -> tuple[str, ...]:
         ),
     }
     return tuple(templates[section_id].format(ordinal=value) for value in _ORDINALS)
+
+
+def _future_sentences(ordinal: str) -> tuple[str, str]:
+    """하나의 사업 활동에 대한 현재 상태와 명시 계획의 공식 원문 대역."""
+    return (
+        f"가나다전자는 해외 유통망 확대를 추진 중이며 {ordinal} 과제로 공개한다.",
+        f"가나다전자는 해외 유통망을 확대할 계획이며 {ordinal} 과제로 공개한다.",
+    )
+
+
+def _full_future_review_proofs(prompt: str, number: int, evidence_ids: list[str]) -> dict:
+    """대역도 자기 후보와 자기 원문을 읽어 미래·계획상태 증명을 반환한다."""
+    headers = list(re.finditer(r"(?m)^\[(\d+)\] \(", prompt))
+    own = next((index for index, header in enumerate(headers) if int(header.group(1)) == number), None)
+    if own is None:
+        return {}
+    end = headers[own + 1].start() if own + 1 < len(headers) else len(prompt)
+    candidate_line = re.search(r"(?m)^\s*문장\(JSON 문자열\): (.+)$", prompt[headers[own].end():end])
+    if candidate_line is None:
+        return {}
+    candidate = json.loads(candidate_line.group(1))
+    source_rows = re.findall(r"(?m)^\[조각 (\d+)\] 원문\(JSON 문자열\): (.+)$", prompt)
+    sources = {fragment_id: json.loads(raw) for fragment_id, raw in source_rows}
+    for ordinal in _ORDINALS:
+        current, plan = _future_sentences(ordinal)
+        if candidate not in (current, plan):
+            continue
+        for fragment_id in evidence_ids:
+            source = sources.get(fragment_id, "")
+            if current not in source or plan not in source:
+                continue
+            if candidate == current:
+                return {PLAN_STATUS_KEY: [{"근거": fragment_id, "대상": "해외 유통망", "활동": "확대",
+                                           "진행원문": current, "계획원문": plan}]}
+            return {FUTURE_KEY: [{"근거": fragment_id, "대상": "해외 유통망", "활동": "확대",
+                                 "원문": plan, "양태": "계획"}]}
+    return {}
 
 
 def _root_html() -> str:
@@ -209,9 +250,13 @@ def _root_html() -> str:
 
 
 def _page_html(section_id: str) -> str:
+    sentences = (
+        tuple(" ".join(_future_sentences(value)) for value in _ORDINALS)
+        if section_id == "future_strategy" else _section_sentences(section_id)
+    )
     body = "".join(
         f"<p>{html.escape(sentence)}</p>"
-        for sentence in _section_sentences(section_id)
+        for sentence in sentences
     )
     return f"<html><head><title>{section_id} 공식 자료</title></head><body><main>{body}</main></body></html>"
 
@@ -358,6 +403,8 @@ class _ProviderMessages:
                         "장": section_id,
                         "근거": re.findall(r"조각 (\d+)", citations),
                         "결과": "참",
+                        **({"검증근거": _full_future_review_proofs(prompt, int(number), re.findall(r"조각 (\d+)", citations))}
+                           if section_id == "future_strategy" else {}),
                     }
                     for number, section_id, _kind, citations in locked_review_items
                 ]
@@ -408,9 +455,14 @@ class _ProviderMessages:
                 sentences = (_RECRUIT_SENTENCE, *sentences[1:])
             rows: list[dict[str, object]] = []
             for index, sentence in enumerate(sentences):
+                exact_line = (
+                    rf"[^\r\n]*{re.escape(sentence)}[^\r\n]*(?:\r?\n|$)"
+                    if section_id == "future_strategy"
+                    else rf"{re.escape(sentence)}(?:\r?\n|$)"
+                )
                 supported = re.search(
                     r"\[조각 (\d+)\] \([^\n]*지원 주장슬롯: ([^)]+)\) "
-                    rf"{re.escape(sentence)}(?:\r?\n|$)",
+                    + exact_line,
                     prompt,
                 )
                 assert supported is not None, (
@@ -424,6 +476,11 @@ class _ProviderMessages:
                     if value.strip() in CLAIM_SLOTS_BY_SECTION[section_id]
                 )
                 assert slots, f"{section_id} 장에 작가가 쓸 수 있는 슬롯이 없습니다"
+                selected_slot = slots[0] if persistently_thin else slots[index % len(slots)]
+                if section_id == "future_strategy" and not persistently_thin:
+                    selected_slot = ("future_strategy:plan_status" if index % 2 == 0
+                                     else "future_strategy:stated_plan")
+                    assert selected_slot in slots, "공식 원문이 계획과 진행 상태를 모두 지원해야 합니다"
                 rows.append(
                     {
                         "글": sentence,
@@ -432,11 +489,7 @@ class _ProviderMessages:
                         # 같은 지원 칸만 되풀이해 공개문장 2개와 필수 의미칸
                         # 누락을 동시에 만든다. 보충 호출에서도 그대로여야
                         # recovery가 세 번째 호출 없이 닫히는지 증명할 수 있다.
-                        "주장슬롯": (
-                            slots[0]
-                            if persistently_thin
-                            else slots[index % len(slots)]
-                        ),
+                        "주장슬롯": selected_slot,
                     }
                 )
             text = json.dumps({"문장들": rows}, ensure_ascii=False)

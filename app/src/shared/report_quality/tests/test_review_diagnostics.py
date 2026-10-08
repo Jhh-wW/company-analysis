@@ -43,6 +43,9 @@ def test_transport_contract_matches_the_actual_producer():
     from src.features.composer.future_plan_constants import (
         FUTURE_REASON_CODES, FUTURE_SECTION_NO_FORWARD_STATEMENT,
     )
+    from src.features.composer.plan_status_constants import (
+        COMPLETED_EXECUTION_STATE_MISMATCH,
+    )
 
     from src.features.composer.role_binding_constants import ROLE_BINDING_REASON_TEXTS
     from src.features.composer.executive_status_constants import (
@@ -71,6 +74,8 @@ def test_transport_contract_matches_the_actual_producer():
         *FUTURE_REASON_CODES,
         # 6장 장 계약 — 근거 결속 사유가 아니라 «작성 범위» 사유다.
         FUTURE_SECTION_NO_FORWARD_STATEMENT,
+        # 완료 실행 칸에 진행 상태를 배치한 생산자 사유도 같은 전송 계약에 속한다.
+        COMPLETED_EXECUTION_STATE_MISMATCH,
         CHALLENGE_RESPONSE_MISSING,
         HISTORICAL_EVENT_ONLY, ADMINISTRATIVE_EVENT_ONLY, POSITIVE_RESPONSE_ONLY,
         CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,

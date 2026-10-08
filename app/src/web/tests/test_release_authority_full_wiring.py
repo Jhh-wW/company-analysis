@@ -78,6 +78,7 @@ from src.web.tests.test_public_boundary_full_evidence_e2e import (
     _install_actual_official_collector_with_fake_http,
     _install_production_engine_with_fake_external_services,
     _section_sentences,
+    _full_future_review_proofs,
 )
 
 _COMPANY_ID = "00126380"
@@ -247,12 +248,17 @@ class _CompleteWriter:
                 if slot_id in CLAIM_SLOTS_BY_SECTION[section_id]
             )
             assert supported, f"{section_id} 운영 packet의 주장 슬롯이 비었습니다"
+            selected_slot = supported[index % len(supported)]
+            if section_id == "future_strategy":
+                selected_slot = ("future_strategy:plan_status" if index % 2 == 0
+                                 else "future_strategy:stated_plan")
+                assert selected_slot in supported, "공식 원문이 계획과 진행 상태를 모두 지원해야 합니다"
             rows.append(
                 {
                     "글": sentence,
                     "인용": [fragment.fragment_id],
                     "등급": GRADE_CONFIRMED,
-                    "주장슬롯": supported[index % len(supported)],
+                    "주장슬롯": selected_slot,
                 }
             )
         return json.dumps(
@@ -281,6 +287,8 @@ class _FakeReviewer:
                         "장": section_id,
                         "근거": re.findall(r"조각 (\d+)", citations),
                         "결과": "참",
+                        **({"검증근거": _full_future_review_proofs(prompt, int(number), re.findall(r"조각 (\d+)", citations))}
+                           if section_id == "future_strategy" else {}),
                     }
                     for number, section_id, _kind, citations in grouped
                 ]
