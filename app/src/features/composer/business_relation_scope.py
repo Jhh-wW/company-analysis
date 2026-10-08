@@ -9,12 +9,21 @@ from src.shared.report_evidence.business_slot_scope import business_slot_scope_p
 from src.shared.report_evidence.business_slot_scope_constants import CUSTOMER_SLOT
 import re
 import unicodedata
+from decimal import Decimal
 
 from src.features.composer.portfolio_revenue_scope_constants import (
     PORTFOLIO_SECTION, EXTERNAL_SCOPE_RE, EXTERNAL_ACTIVITIES,
     EXTERNAL_OBJECT_RE, EXTERNAL_GENERIC_OBJECTS,
     EXTERNAL_ASSERTION_DENIAL_RE, EXTERNAL_TITLE_ONLY_RE,
     EXTERNAL_OBJECT_PREFIX_BOUNDARY_RE,
+    EXTERNAL_TABLE_OWNER_HEADERS, EXTERNAL_TABLE_REVENUE_HEADERS,
+    EXTERNAL_TABLE_MIN_COLUMNS, EXTERNAL_TABLE_ZERO, EXTERNAL_TABLE_ROW_BOUNDARY_RE,
+    EXTERNAL_TABLE_ALIGNMENT_RE, EXTERNAL_TABLE_AMOUNT_RE, EXTERNAL_TABLE_NON_ACTUAL_RE,
+    EXTERNAL_TABLE_AGGREGATE_RE, EXTERNAL_TABLE_REVENUE_ASSERTION_RE,
+    EXTERNAL_TABLE_CAPTION_NON_ACTUAL_RE,
+)
+from src.features.composer.business_population_scope_constants import (
+    REVENUE_TABLE_OWNER_RE, REVENUE_TABLE_OWNERS,
 )
 
 from src.features.composer.business_relation_scope_constants import (
@@ -197,6 +206,77 @@ def _external_segments(text: str) -> tuple[str, ...]:
                  if EXTERNAL_SCOPE_RE.search(_surface(segment)))
 
 
+def _external_revenue_tables(source: str) -> tuple[tuple[tuple[str, ...], tuple[tuple[str, ...], ...]], ...]:
+    """한 자기 원문의 연속 표에서 명시 열과 완전한 행만 묶는다."""
+    tables = []
+    header = ()
+    rows = []
+    previous_non_actual = False
+    blocked = False
+    own_table = True
+
+    def finish():
+        if header and rows and not blocked and own_table:
+            tables.append((header, tuple(rows)))
+
+    for raw in EXTERNAL_TABLE_ROW_BOUNDARY_RE.split(source):
+        owners = tuple(REVENUE_TABLE_OWNER_RE.finditer(unicodedata.normalize("NFKC", raw)))
+        if owners:
+            finish()
+            header, rows = (), []
+            own_table = _surface(owners[-1]["owner"]) in REVENUE_TABLE_OWNERS
+        if "|" not in raw:
+            finish()
+            header, rows = (), []
+            if raw.strip():
+                previous_non_actual = bool(EXTERNAL_TABLE_CAPTION_NON_ACTUAL_RE.search(raw))
+            continue
+        columns = tuple(_surface(cell) for cell in raw.strip().strip("|").split("|"))
+        owners = [i for i, value in enumerate(columns) if value in EXTERNAL_TABLE_OWNER_HEADERS]
+        revenues = [i for i, value in enumerate(columns) if value in EXTERNAL_TABLE_REVENUE_HEADERS]
+        if owners or revenues:
+            finish()
+            header, rows = (), []
+            if len(owners) == len(revenues) == 1 and len(columns) >= EXTERNAL_TABLE_MIN_COLUMNS:
+                header = columns
+                blocked = previous_non_actual
+            continue
+        if header and all(EXTERNAL_TABLE_ALIGNMENT_RE.fullmatch(cell) for cell in columns):
+            continue
+        if not header or len(columns) != len(header):
+            header, rows = (), []
+            continue
+        rows.append(columns)
+    finish()
+    return tuple(tables)
+
+
+def _external_table_revenue_supported(segment: str, actor: str, own_sources: Mapping[str, str]) -> bool:
+    subject = _subject(actor)
+    if not subject or EXTERNAL_TABLE_AGGREGATE_RE.fullmatch(subject):
+        return False
+    match = SUBJECT_RE.match(segment)
+    assertion = _surface(segment[match.end():] if match else segment)
+    if not EXTERNAL_TABLE_REVENUE_ASSERTION_RE.fullmatch(assertion):
+        return False
+    for source in own_sources.values():
+        for headers, rows in _external_revenue_tables(source):
+            owner_column = next(i for i, value in enumerate(headers) if value in EXTERNAL_TABLE_OWNER_HEADERS)
+            revenue_column = next(i for i, value in enumerate(headers) if value in EXTERNAL_TABLE_REVENUE_HEADERS)
+            matching_rows = [row for row in rows if SUBJECT_SUFFIX_RE.sub("", row[owner_column]) == subject]
+            # 중복 행의 충돌을 임의로 고르거나 합산하지 않는다.
+            if len(matching_rows) != 1:
+                continue
+            row = matching_rows[0]
+            value = row[revenue_column]
+            if (not any(EXTERNAL_TABLE_NON_ACTUAL_RE.search(cell)
+                        for i, cell in enumerate(row) if i != owner_column)
+                    and EXTERNAL_TABLE_AMOUNT_RE.fullmatch(value)
+                    and Decimal(value.replace(",", "")) > EXTERNAL_TABLE_ZERO):
+                return True
+    return False
+
+
 def _portfolio_external_revenue_problem(text: str, own_sources: Mapping[str, str]) -> str:
     """3장의 외부 거래 역할만 같은 주체·활동의 자기 원문에 묶는다."""
     source_units = tuple(
@@ -215,6 +295,9 @@ def _portfolio_external_revenue_problem(text: str, own_sources: Mapping[str, str
             activities = frozenset(name for name, pattern in EXTERNAL_ACTIVITIES
                                    if pattern.search(candidate[external.start():]))
             objects = _external_objects(segment)
+            if (activities == {"매출"} and not objects
+                    and _external_table_revenue_supported(segment, claim_actor, own_sources)):
+                continue
             supported = False
             for unit in source_units:
                 for source_segment in _external_segments(unit):
