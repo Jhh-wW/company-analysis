@@ -85,6 +85,8 @@ class GenerationCallbacks:
         [str, GenerationCacheNamespace | None, str], ContextManager[bool]
     ] | None = None
     bind_release_mode: Callable[[str], None] | None = None
+    # SDK·캐시가 쓰는 frozen 선택을 첫 collect/preparation 예약보다 먼저 운반한다.
+    bind_writer_model: Callable[[str, bool], None] | None = None
 
 
 _CURRENT: contextvars.ContextVar[GenerationCallbacks | None] = (
@@ -153,6 +155,18 @@ def ensure_paid_phase() -> None:
     callbacks = _CURRENT.get()
     if callbacks is not None:
         callbacks.ensure_paid_phase()
+
+
+def bind_writer_model(writer_model: str, *, is_v2: bool) -> None:
+    """선택 전달만 한다. 예약·환경 재조회·provider 호출을 일으키지 않는다."""
+    callbacks = _CURRENT.get()
+    if callbacks is None:
+        return
+    if callbacks.bind_writer_model is None:
+        if is_v2 and writer_model:
+            raise GenerationCoordinationError("명시 작성 모델의 본조사 예약 결속을 지원하지 않습니다")
+        return
+    callbacks.bind_writer_model(writer_model, is_v2)
 
 
 @contextlib.contextmanager

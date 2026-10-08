@@ -7,12 +7,27 @@ from src.features.composer.challenge_industry_scope_constants import (
     COMPANY_SCOPE_RE, DIRECT_CHALLENGE_CLAIM_SLOTS, INDUSTRY_SUBJECT_RE,
     QUALIFIED_SUBJECT_RE, ROUTINE_COMPANY_ACTIVITY_RE, COMPANY_STATE_JOIN_RE,
     MARKET_BACKGROUND_RE, MARKET_OBSERVATION_ONLY_RE,
+    INDUSTRY_REPORT_PREFIX_RE, INDUSTRY_REPORT_SCOPE_RE, INDUSTRY_REPORT_FUTURE_RE,
+    OTHER_COMPANY_SCOPE_RE,
 )
 from src.shared.report_evidence.challenge_eligibility import challenge_issue_problem
 from src.shared.report_evidence.challenge_eligibility_constants import (
     ADMINISTRATIVE_EVENT_ONLY, UNIT_RE, PROBLEM_RE, POLICY_BUSINESS_PROBLEM_RE,
     ISSUE_RELATION_VETO_RE, ROUTINE_DUTY_OTHER_CLAUSE_RE,
 )
+
+
+def _has_company_problem(text: str) -> bool:
+    """주장 안 자기 관계 뒤의 문제 술어만 읽고 산업·다른 회사의 주어는 빌리지 않는다."""
+    other = tuple(OTHER_COMPANY_SCOPE_RE.finditer(text))
+    for match in COMPANY_SCOPE_RE.finditer(text):
+        if any(start.start() <= match.start() < start.end() for start in other):
+            continue
+        tail = "".join(text[match.end():].split())
+        if (PROBLEM_RE.search(tail) or POLICY_BUSINESS_PROBLEM_RE.search(tail)
+                or ISSUE_RELATION_VETO_RE.search(tail)):
+            return True
+    return False
 
 
 def industry_only_challenge_problem(text: str, *, claim_slot: str = "") -> str:
@@ -30,6 +45,8 @@ def industry_only_challenge_problem(text: str, *, claim_slot: str = "") -> str:
     found_industry_subject = False
     for unit in units:
         normalized = unicodedata.normalize("NFKC", unit)
+        reporting = INDUSTRY_REPORT_PREFIX_RE.fullmatch(normalized)
+        reported = reporting.group("body") if reporting else normalized
         background = MARKET_BACKGROUND_RE.fullmatch(normalized)
         surface = "".join(normalized.split())
         if (background
@@ -41,10 +58,15 @@ def industry_only_challenge_problem(text: str, *, claim_slot: str = "") -> str:
             # 다른 술어·제약이 섞인 시장 배경 문장은 이 닫힌 분기에 들어오지 않는다.
             found_industry_subject = True
             continue
-        subject = INDUSTRY_SUBJECT_RE.match(normalized)
+        subject = INDUSTRY_SUBJECT_RE.match(reported)
         if subject and not QUALIFIED_SUBJECT_RE.search(subject.group("subject")):
-            if COMPANY_SCOPE_RE.search(normalized):
+            if _has_company_problem(normalized):
                 return ""
+            found_industry_subject = True
+            continue
+        if (reporting and INDUSTRY_REPORT_SCOPE_RE.search(normalized)
+                and INDUSTRY_REPORT_FUTURE_RE.search(reported)
+                and not _has_company_problem(reported)):
             found_industry_subject = True
             continue
         ordinary = ROUTINE_COMPANY_ACTIVITY_RE.fullmatch(normalized)

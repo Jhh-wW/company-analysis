@@ -3718,6 +3718,12 @@ class RealPipeline:
         # 모으다 멈췄나」를 물어볼 곳이 없어진다.
         diagnostics = run_diagnostics.begin_run()
         try:
+            # 같은 요청의 SDK·캐시 선택을 무료 수집/유료 preparation보다 먼저 고정한다.
+            # 웹 비용 정책은 shared callback으로만 전달하며 pipeline이 직접 읽지 않는다.
+            generation_coordination.bind_writer_model(
+                _configured_v2_writer_model(engine) if generation_mode is engine_mode.EngineMode.V2 else "",
+                is_v2=generation_mode is engine_mode.EngineMode.V2,
+            )
             result = self._run_metered(
                 user_input,
                 card,

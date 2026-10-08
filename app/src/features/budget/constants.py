@@ -156,6 +156,12 @@ PAID_PHASE_PROVIDER_BUDGET_KRW: Final[dict[str, float]] = {
     SPEND_PHASE_PIPELINE: 2000.0,
 }
 
+# 명시 v2 Sonnet 작성 요청만 초기 검수·후속 복구 여유를 추가 예약한다.
+# 사용자 요금이나 일/링크 한도는 바꾸지 않는다. 기본·Haiku·v1은 기존 예약이다.
+SONNET_WRITER_PIPELINE_BUDGET_KRW: Final[float] = 3000.0
+PIPELINE_WRITER_SONNET_MODEL: Final[str] = "claude-sonnet-4-6"
+PIPELINE_WRITER_HAIKU_MODEL: Final[str] = "claude-haiku-4-5"
+
 #: 유료 phase DB lease의 수명은 core의 전체 실행 시간 정본을 따른다.
 #: 최초 검수 두 자리의 SDK 대기 600초와 일반 대기 180초를 합산하고 로컬 처리
 #: 여유를 둔다. SDK 설정은 전체 네트워크 wall-time 상한이 아니며, 각 provider

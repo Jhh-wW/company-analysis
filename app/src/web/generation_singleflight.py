@@ -25,6 +25,7 @@ from src.core.constants import (
 )
 from src.features.budget.constants import PAID_PHASE_LEASE_SEC, SPEND_PHASE_PIPELINE
 from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
+from src.features.budget.writer_phase_policy import writer_pipeline_reservation_krw
 from src.features.report_delivery import artifact as delivery_artifact
 from src.features.report_delivery import authority as authority_store
 from src.features.report_delivery import singleflight
@@ -360,6 +361,8 @@ class GenerationSession:
     _final_release_mode: ReleaseMode | None = field(default=None, init=False)
     _paid_phase: paid_runtime.PaidPhase | None = field(default=None, init=False)
     _provider_stack: contextlib.ExitStack | None = field(default=None, init=False)
+    _writer_selection: tuple[str, bool] | None = field(default=None, init=False)
+    _writer_reservation_krw: float | None = field(default=None, init=False)
     _cancel_wait: threading.Event = field(default_factory=threading.Event, init=False)
     _stop_heartbeat: threading.Event = field(default_factory=threading.Event, init=False)
     _heartbeat_thread: threading.Thread | None = field(default=None, init=False)
@@ -398,6 +401,7 @@ class GenerationSession:
             check_active=self.check_active,
             paid_preparation=self.paid_preparation,
             bind_release_mode=self.bind_release_mode,
+            bind_writer_model=self.bind_writer_model,
         )
 
     @property
@@ -1280,6 +1284,23 @@ class GenerationSession:
             ) from lease_error
         self._bounded_owner_ttl(clock.now_kst())
 
+    def bind_writer_model(self, writer_model: str, is_v2: bool) -> None:
+        """요청별 선택과 예약액을 고정한다. 늦은 단가 변경은 같은 phase로 보내지 않는다."""
+        try:
+            requested = writer_pipeline_reservation_krw(writer_model, is_v2=is_v2)
+        except ValueError as exc:
+            raise GenerationSingleflightUnavailable(str(exc)) from exc
+        selection = (writer_model, is_v2)
+        with self._lock:
+            if self._writer_selection is not None:
+                if self._writer_selection != selection:
+                    raise GenerationSingleflightUnavailable("한 요청의 작성 모델 선택을 변경할 수 없습니다")
+                return
+            if self._paid_phase is not None or self._provider_stack is not None:
+                raise GenerationSingleflightUnavailable("본조사 예약 뒤에 작성 모델을 선택할 수 없습니다")
+            self._writer_selection = selection
+            self._writer_reservation_krw = requested
+
     def ensure_paid_phase(self) -> None:
         """owner/bypass만 첫 provider 전에 비용 phase와 attempt 문맥을 연다."""
 
@@ -1310,11 +1331,15 @@ class GenerationSession:
             self._require_provider_admission_time(None, clock.now_kst())
         if provider_context_is_open:
             return
+        # 기존 대역·미지정 기본은 옛 호출 형태를 유지한다. 명시 선택만 예약액을 운반한다.
+        reservation = ({"requested_cost_krw": self._writer_reservation_krw}
+                       if self._writer_selection is not None else {})
         ticket = paid_runtime._begin_paid_phase(
             run_id=self.run_id,
             phase=SPEND_PHASE_PIPELINE,
             share_key=self.share_key,
             cap_krw=self.cap_krw,
+            **reservation,
         )
         if ticket is None:
             raise PaidGenerationAdmissionUnavailable(
