@@ -115,18 +115,44 @@ def _explicit_company_share_support(candidate: str, position: int, sources: Mapp
     for source in sources.values():
         if revenue_population_heading(source):
             continue
-        for unit in c.DIRECT_SHARE_SENTENCE_BOUNDARY_RE.split(source):
+        unit_start = 0
+        units = []
+        for boundary in c.DIRECT_SHARE_SENTENCE_BOUNDARY_RE.finditer(source):
+            units.append((unit_start, source[unit_start:boundary.start()]))
+            unit_start = boundary.end()
+        units.append((unit_start, source[unit_start:]))
+        for start, unit in units:
             if "|" in unit:
                 continue
             direct = c.DIRECT_COMPANY_SHARE_RE.match("".join(unit.split()))
             if not direct or not tail.startswith(direct["share"]):
                 continue
+            # 표와 별개인 직접 비중도 연결/개별 범위는 바꿀 수 없다.
+            # 명시 후보 기준을 해당 직접 문장 앞의 가장 가까운 원기준에 결속한다.
+            candidate_bases = {_share_reporting_basis(match['basis'])
+                               for match in c.DIRECT_SHARE_REPORTING_BASIS_RE.finditer(prefix)}
+            source_bases = tuple(c.DIRECT_SHARE_REPORTING_BASIS_RE.finditer(source, 0, start))
+            source_basis = _share_reporting_basis(source_bases[-1]['basis']) if source_bases else ''
+            if candidate_bases and candidate_bases != {source_basis}:
+                continue
             item = c.DIRECT_SHARE_ITEM_SUFFIX_RE.sub("", direct["item"])
-            subject = re.match(c.DIRECT_SHARE_SUBJECT_PREFIX + re.escape(item)
-                               + c.DIRECT_SHARE_CANDIDATE_SUBJECT, prefix) if item else None
-            if subject and not c.DIRECT_SHARE_OTHER_SUBJECT_RE.search(prefix[subject.end():]):
-                return True
+            prefixes = [prefix]
+            # 쉼표 뒤 회사 자신으로 명시 전환한 해당 비중 절만 읽는다.
+            # 앞의 일반 산업 설명이나 다른 회사 주어를 자기 증명으로 쓰지 않는다.
+            tail_prefix = prefix.rsplit(',', 1)[-1]
+            if tail_prefix != prefix and c.DIRECT_SHARE_CASE_START_RE.match(tail_prefix):
+                prefixes.append(tail_prefix)
+            for own_prefix in prefixes:
+                subject = re.match(c.DIRECT_SHARE_SUBJECT_PREFIX + re.escape(item)
+                                   + c.DIRECT_SHARE_CANDIDATE_SUBJECT, own_prefix) if item else None
+                if subject and not c.DIRECT_SHARE_OTHER_SUBJECT_RE.search(own_prefix[subject.end():]):
+                    return True
     return False
+
+
+def _share_reporting_basis(basis: str) -> str:
+    """별도·개별은 같은 법인 범위이고 연결은 별도 모집단이다."""
+    return '연결' if basis == '연결' else '개별'
 
 
 def _claim_bound_to_population(candidate: str, position: int, headings: tuple[str, ...]) -> bool:

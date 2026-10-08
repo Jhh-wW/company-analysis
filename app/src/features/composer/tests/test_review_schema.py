@@ -193,10 +193,10 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 # 도식은 같은 안내와 경로 헤더 +1자만 역치환했다. 원문·번호·schema는 바뀌지 않았다.
 # 증거: tmp/audit-20260930/paid/514031-schema-six-baseline-private.json.
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "695644e17447fec321eff7088bb4bb6e55284d4e988147be313c4e4d9df9bfbb"),
-    (_golden_case, True, "1d9d53e4eb53aedcdf731f33f1a5f5ae18f21e274830a529511bf7971e1beb7a"),
-    (_boundary_case, False, "1ffed30d262ee3861107f875ea55e6b217a54380ac5e6de6130150b3934e0883"),
-    (_boundary_case, True, "28a27b5da2136896b1d813b4eea12e4399953faf24d8c4aed6d881ac54183097"),
+    (_golden_case, False, "bdcb16566bae7c248729774407c366b8a721d345e0d9da2a8ae934aa144a8be7"),
+    (_golden_case, True, "630d592290c9a11ce03ffc621acc025faee47a9449f417de3749f4cc1a1b5b00"),
+    (_boundary_case, False, "55afa081b9de50ec57ba568f7bbc07e09dcb84e4a82a69f9399f6c069b6ad99c"),
+    (_boundary_case, True, "443a9d21882c4a3ccc0f384ef922bfad23aec2654709aa99a273941a28789ddd"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
     # 6장 주어 범위 안내 64자만 제거하면 3728의 네 지문이 복원된다.
@@ -230,10 +230,12 @@ def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected)
 
 
 @pytest.mark.parametrize("items,expected", (
-    ((), "43f0cef0feb02a669ae0cb72daa0a6094ddde8ab412c2af4a11e3c08068dc677"),
-    (FLOW_ITEMS, "ed7d53d41dba2557e9aeaec1454b880be16781dd3cb2152f5c3bb05d4d4a2720"),
+    ((), "fcb1363036ff30fa2ba5de0e5f206fb6a9312d742e3c896a0f66c1f192b7693e"),
+    (FLOW_ITEMS, "ed8240e7b5348c9a9330013986c49fbab8bc7bcc5aed7b8b41b6640a2341a11b"),
 ))
 def test_diagram_prompt_bytes_match_pre_schema_baseline(items, expected):
+    # 직접 비중 안내 185자만 역치환하면 기존 도식 두 지문·전체 바이트가 복원된다.
+    # 증거: paid/5e30-direct-share-six-baseline-private.json. 스키마 단정은 그대로다.
     prompt = diagram_check._review_prompt(items, {"1": TEXT})
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
 

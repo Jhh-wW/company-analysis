@@ -7,11 +7,16 @@ DIRECT = "당사의 경우도 마찬가지로 설비 매출이 전체 매출의 
 
 @pytest.mark.parametrize("candidate", [
     "설비 사업은 장비를 판매하여 수익을 창출하고 있으며, 전체 매출의 약 55%를 차지한다.",
-    "개별재무제표 기준으로 설비 사업이 전체 매출의 약 55%를 차지하고 있다.",
     "설비 매출은 전체 매출의 약 55%를 차지한다.",
 ])
 def test_same_item_and_explicit_company_share_survive(candidate):
     assert not revenue_population_claim_problem(candidate, {"1": TABLE + DIRECT})
+
+
+def test_explicit_individual_basis_uses_the_same_source_basis():
+    # 후보만 기준을 새로 붙이지 않고 동일 법인 범위의 직접 원문을 사용한다.
+    candidate = "개별재무제표 기준으로 설비 사업이 전체 매출의 약 55%를 차지하고 있다."
+    assert not revenue_population_claim_problem(candidate, {"1": "개별재무제표 기준 매출액 " + TABLE + DIRECT})
 
 @pytest.mark.parametrize("candidate, source", [
     ("부품 사업은 전체 매출의 약 55%를 차지한다.", TABLE + DIRECT),

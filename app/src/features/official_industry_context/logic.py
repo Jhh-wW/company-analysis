@@ -9,7 +9,10 @@ from collections.abc import Callable
 from datetime import date
 
 from src.features.official_industry_context import constants as c
-from src.shared.business_challenge_context import BusinessActivityAnchor, IndustryProblemEvidence, INDUSTRY_GEOGRAPHIES
+from src.shared.business_challenge_context import (
+    BusinessActivityAnchor, IndustryProblemEvidence, INDUSTRY_GEOGRAPHIES,
+    OFFICIAL_INDUSTRY_GEOGRAPHIES, OFFICIAL_UNSPECIFIED_GEOGRAPHY,
+)
 from src.shared.official_ir import IR_METADATA_VERIFICATION_VALUES, official_ir_time_is_usable, safe_https_attachment_url
 from src.shared.report_evidence.constants import FORMAL_DOCUMENT_SOURCE_KINDS, OFFICIAL_WEB_SOURCE_KINDS, SOURCE_KIND_OFFICIAL_IR_PDF
 from src.shared.report_evidence.models import EvidenceFragment, CollectedEvidenceDocument
@@ -168,12 +171,22 @@ def response_schema(selected: tuple, anchors: tuple[BusinessActivityAnchor, ...]
     base = {"fragment_id": {"type": "string", "enum": [f.fragment_id for f, _, _ in selected]}, "anchor_id": {"type": "string", "enum": [a.anchor_id for a in anchors]}}
     # 문장 enum을 조각×앵커마다 복제하지 않는다. 실제 닫힌 membership은 서버가
     # 검산하며 SDK가 pattern을 설명으로 옮겨도 해당 검증은 그대로다.
-    branches = [_object({**base, "status": {"type": "string", "enum": list(c.STATUSES[1:])}}), _object({
+    proposed = {
         **base, "status": {"type": "string", "enum": ["proposed"]},
         "sentence_ids": {"type": "array", "items": {"type": "string", "pattern": c.SENTENCE_ID_PATTERN}, "minItems": 1, "maxItems": c.MAX_ASSESSMENT_SENTENCES},
-        **{name: {"type": "boolean"} for name in c.BOOL_FIELDS},
-        **{name: {"type": "string", "minLength": 1} for name in (*c.QUOTE_FIELDS, "observation_period")},
+        **{name: {"type": "boolean"} for name in c.COMMON_BOOL_FIELDS},
+        **{name: {"type": "string", "minLength": 1} for name in (*c.COMMON_QUOTE_FIELDS, "observation_period")},
+    }
+    branches = [_object({**base, "status": {"type": "string", "enum": list(c.STATUSES[1:])}}), _object({
+        **proposed,
+        "geography_supported": {"type": "boolean", "enum": [True]},
+        **{name: {"type": "string", "minLength": 1} for name in c.GEOGRAPHY_QUOTE_FIELDS},
         "geography": {"type": "string", "enum": sorted(INDUSTRY_GEOGRAPHIES)},
+    }), _object({
+        **proposed,
+        "geography_supported": {"type": "boolean", "enum": [False]},
+        **{name: {"type": "string", "enum": [""]} for name in c.GEOGRAPHY_QUOTE_FIELDS},
+        "geography": {"type": "string", "enum": [OFFICIAL_UNSPECIFIED_GEOGRAPHY]},
     })]
     return _object({"assessments": {"type": "array", "items": {"anyOf": branches}, "maxItems": len(selected) * len(anchors)}})
 
@@ -225,12 +238,20 @@ def _contradiction(entry: dict, quote: str) -> bool:
         domestic = any(marker in lowered for marker in c.DOMESTIC_MARKERS)
         foreign = any(marker in lowered for marker in c.FOREIGN_SCOPE_MARKERS)
         world = any(marker in lowered for marker in c.WORLD_MARKERS)
+        if geography == OFFICIAL_UNSPECIFIED_GEOGRAPHY:
+            scope = c.REGION_ACTOR_RE.sub("", lowered)
+            if (any(marker in scope for marker in (
+                *c.DOMESTIC_MARKERS, *c.FOREIGN_SCOPE_MARKERS, *c.WORLD_MARKERS,
+            )) or c.NAMED_REGION_SCOPE_RE.search(scope)):
+                return True
         if geography == "domestic" and foreign and not domestic:
             return True
         if geography == "foreign" and domestic and not foreign:
             return True
         if geography == "global" and domestic and not world:
             return True
+    if geography == OFFICIAL_UNSPECIFIED_GEOGRAPHY:
+        return False
     detail = entry["geography_detail"].casefold()
     evidence = entry["geography_evidence"].casefold()
     if detail not in evidence or detail in c.GENERIC_GEOGRAPHIES:
@@ -319,12 +340,18 @@ def validate_response(raw: object, *, selected: tuple, anchors: tuple, diagnosti
                 continue
             if too_many or proposed[row["fragment_id"]] != 1:
                 raise ValueError("제안 한도를 초과했습니다")
-            if set(row) != set(c.PROPOSED_FIELDS) or any(row[name] is not True for name in c.BOOL_FIELDS):
+            if set(row) != set(c.PROPOSED_FIELDS) or any(row[name] is not True for name in c.COMMON_BOOL_FIELDS):
                 raise ValueError("닫힌 제안 검수 필드가 미충족입니다")
+            unspecified = row["geography"] == OFFICIAL_UNSPECIFIED_GEOGRAPHY
+            if row["geography_supported"] is not (not unspecified):
+                raise ValueError("지역 범주와 실제 지역 검수 상태가 다릅니다")
+            if unspecified and any(row[name] != "" for name in c.GEOGRAPHY_QUOTE_FIELDS):
+                raise ValueError("지역 미확인 판정에 임의 지역 근거가 있습니다")
             fragment, document, sentences = by_fragment[row["fragment_id"]]
             anchor = by_anchor[row["anchor_id"]]
             quote = _assessment_quote(row["sentence_ids"], sentences, fragment.text)
-            if any(not _text(row[name]) or row[name] not in quote for name in c.QUOTE_FIELDS):
+            quote_fields = c.COMMON_QUOTE_FIELDS if unspecified else c.QUOTE_FIELDS
+            if any(not _text(row[name]) or row[name] not in quote for name in quote_fields):
                 raise ValueError("산업 판정이 평가 원문 밖의 문구를 빌렸습니다")
             if not _business_quote_bound(anchor, row["applicability_quote"]):
                 raise ValueError("공식 사업 제공물이 적용 인용에 없습니다")
@@ -336,7 +363,7 @@ def validate_response(raw: object, *, selected: tuple, anchors: tuple, diagnosti
                 raise ValueError("평가 원문과 선택 기간의 명시 연도가 다릅니다")
             if any(int(year) > date.fromisoformat(document.published_on).year for year in period_years):
                 raise ValueError("공표 이후 기간을 현재 관찰로 선택했습니다")
-            if row["geography"] not in INDUSTRY_GEOGRAPHIES or _contradiction(row, quote):
+            if row["geography"] not in OFFICIAL_INDUSTRY_GEOGRAPHIES or _contradiction(row, quote):
                 raise ValueError("문제·사업·지역·기간의 닫힌 모순이 있습니다")
             result.append(IndustryProblemEvidence(
                 evidence_id="official-industry-" + _hash(_json([fragment.fragment_id, anchor.anchor_id, fragment.text_sha256, quote]))[:c.ID_DIGEST_CHARS],
@@ -352,6 +379,12 @@ def validate_response(raw: object, *, selected: tuple, anchors: tuple, diagnosti
         except (KeyError, TypeError, ValueError):
             _note(diagnostics, "unbound_assessment")
     diagnostics["verified_count"] = len(result)
+    diagnostics["verified_region_unspecified_count"] = sum(
+        value.geography == OFFICIAL_UNSPECIFIED_GEOGRAPHY for value in result
+    )
+    diagnostics["verified_regional_count"] = (
+        len(result) - diagnostics["verified_region_unspecified_count"]
+    )
     return tuple(result)
 
 

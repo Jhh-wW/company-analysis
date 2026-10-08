@@ -30,8 +30,16 @@ OFFICIAL_INDUSTRY_FIELDS: Final[tuple[str, ...]] = (
 )
 OFFICIAL_INDUSTRY_YEAR_RE: Final[re.Pattern[str]] = re.compile(r"(?:19|20)[0-9]{2}")
 INDUSTRY_GEOGRAPHIES: Final[frozenset[str]] = frozenset({"domestic", "global", "foreign"})
+OFFICIAL_UNSPECIFIED_GEOGRAPHY: Final[str] = "unspecified"
+OFFICIAL_INDUSTRY_GEOGRAPHIES: Final[frozenset[str]] = (
+    INDUSTRY_GEOGRAPHIES | {OFFICIAL_UNSPECIFIED_GEOGRAPHY}
+)
+UNSPECIFIED_GEOGRAPHY_LIMITATION: Final[str] = (
+    "이 산업 관찰의 지역 범위는 확인되지 않아 국내·세계 산업 문제로 단정하지 않는다."
+)
 INDUSTRY_GEOGRAPHY_LABELS: Final[Mapping[str, str]] = {
     "domestic": "국내", "global": "세계", "foreign": "해외 특정 지역",
+    OFFICIAL_UNSPECIFIED_GEOGRAPHY: "지역 범위 미확인",
 }
 
 
@@ -112,12 +120,20 @@ class IndustryProblemEvidence:
     observation_period: str = field(default="", metadata={"canonical_omit_empty_string": True})
 
     def __post_init__(self) -> None:
-        for name in ("evidence_id", "business_anchor_id", "document_id", "source_url", "publisher", "title", "industry", "problem", "geography_detail", "geography_evidence"):
+        for name in ("evidence_id", "business_anchor_id", "document_id", "source_url", "publisher", "title", "industry", "problem"):
             _text(getattr(self, name), name)
         date.fromisoformat(self.published_on)
         _span(self.exact_text, self.text_sha256, self.location)
-        if self.geography not in INDUSTRY_GEOGRAPHIES:
+        unspecified = self.geography == OFFICIAL_UNSPECIFIED_GEOGRAPHY
+        allowed_geographies = OFFICIAL_INDUSTRY_GEOGRAPHIES if self.source_kind else INDUSTRY_GEOGRAPHIES
+        if self.geography not in allowed_geographies:
             raise ValueError("산업 문제의 지역 범위가 계약 밖입니다")
+        if unspecified:
+            if self.geography_detail != "" or self.geography_evidence != "":
+                raise ValueError("지역 미확인 공식 관찰에 지역 명칭이나 근거를 만들 수 없습니다")
+        else:
+            _text(self.geography_detail, "geography_detail")
+            _text(self.geography_evidence, "geography_evidence")
         if any(value not in self.exact_text for value in (self.industry, self.problem, self.geography_evidence, self.geography_detail)):
             raise ValueError("산업명·문제·지역 적용 근거는 같은 연속 원문 안에 있어야 합니다")
         if type(self.source_id) is not str:
@@ -172,6 +188,8 @@ class IndustryChallengeContext:
 
     @property
     def limitation(self) -> str:
+        if self.problem.geography == OFFICIAL_UNSPECIFIED_GEOGRAPHY:
+            return INDUSTRY_CONTEXT_LIMITATION + " " + UNSPECIFIED_GEOGRAPHY_LIMITATION
         return INDUSTRY_CONTEXT_LIMITATION
 
     @property
@@ -196,10 +214,14 @@ class IndustryContextDisplay:
         if any(type(value) is not int or value <= 0 for value in (self.business_source_number, self.industry_source_number)):
             raise ValueError("산업 과제 표시에는 두 공개 출처 번호가 필요합니다")
         geography = self.context.geography_label
-        if self.context.problem.geography_detail != geography:
+        if self.context.problem.geography_detail and self.context.problem.geography_detail != geography:
             geography += f"·{self.context.problem.geography_detail}"
+        problem_label = (
+            "산업 관찰" if self.context.problem.geography == OFFICIAL_UNSPECIFIED_GEOGRAPHY
+            else "산업 문제"
+        )
         expected = (
-            f"산업 문제({geography}): {self.context.problem.problem} [{self.industry_source_number}]",
+            f"{problem_label}({geography}): {self.context.problem.problem} [{self.industry_source_number}]",
             f"공식 사업 근거: {self.context.anchor.business_item} [{self.business_source_number}]",
             f"{self.context.interpretation} [{self.business_source_number}] [{self.industry_source_number}] — 해석",
             self.context.limitation,

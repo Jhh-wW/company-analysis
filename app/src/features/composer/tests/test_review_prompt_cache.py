@@ -60,7 +60,9 @@ def test_explicit_opt_in_only_attaches_metadata(monkeypatch, configured):
 # 증거: paid/a82b-review-id-prompt-baseline-private.json.
 # 2026-10-08: 자기 인용·활동 상태 안내 +166자, 5장 범위 +86자.
 # paid/6755-prompt-baseline-private.json에서 안내만 역치환해 직전 네 지문을 재현했다.
-@pytest.mark.parametrize("grouped,prefix_chars", ((False, 13026), (True, 14205)))
+# 직접 비중 안내 185자만 역치환해 기존 본문·도식 여섯 지문을 정확 복원했다.
+# 증거: paid/5e30-direct-share-six-baseline-private.json. 근거·번호·스키마는 같다.
+@pytest.mark.parametrize("grouped,prefix_chars", ((False, 13211), (True, 14390)))
 @pytest.mark.parametrize("factory", (_golden_case, _large_case, _boundary_case))
 def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
     monkeypatch, grouped, prefix_chars, factory,
@@ -84,10 +86,10 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "695644e17447fec321eff7088bb4bb6e55284d4e988147be313c4e4d9df9bfbb"),
-    (_golden_case, True, "1d9d53e4eb53aedcdf731f33f1a5f5ae18f21e274830a529511bf7971e1beb7a"),
-    (_boundary_case, False, "1ffed30d262ee3861107f875ea55e6b217a54380ac5e6de6130150b3934e0883"),
-    (_boundary_case, True, "28a27b5da2136896b1d813b4eea12e4399953faf24d8c4aed6d881ac54183097"),
+    (_golden_case, False, "bdcb16566bae7c248729774407c366b8a721d345e0d9da2a8ae934aa144a8be7"),
+    (_golden_case, True, "630d592290c9a11ce03ffc621acc025faee47a9449f417de3749f4cc1a1b5b00"),
+    (_boundary_case, False, "55afa081b9de50ec57ba568f7bbc07e09dcb84e4a82a69f9399f6c069b6ad99c"),
+    (_boundary_case, True, "443a9d21882c4a3ccc0f384ef922bfad23aec2654709aa99a273941a28789ddd"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
@@ -165,8 +167,8 @@ def test_diagram_cache_excludes_card_switch_sources_and_rows(monkeypatch, items)
     cached = diagram_check._review_prompt(items, texts)
     reference = diagram_check._review_prompt((), {})
     assert cached.encode("utf-8") == plain.encode("utf-8")
-    # 역할 지침 +347자와 경로 헤더 +1자: 8810 → 9158. 개별 원문은 캐시 밖이다.
-    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 9158
+    # 직접 비중 안내 +185자: 9158 → 9343. 개별 원문은 캐시 밖이다.
+    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 9343
     assert cached[:cached.cache_prefix_chars] == reference[:reference.cache_prefix_chars]
     assert texts["2"] not in cached[:cached.cache_prefix_chars]
     assert getattr(cached, "response_schema", None) is None
