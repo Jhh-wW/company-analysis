@@ -7913,26 +7913,29 @@ def _record_local_news_analysis_failure(
 
 
 def _official_industry_analyzer(
-    engine: _MeteredEngine, client: Any, *, fatal_error_type: type[Exception],
+    metered: _MeteredEngine, client: Any, *, fatal_error_type: type[Exception],
 ) -> Callable:
     """마지막 공식 분석은 별도 단계로 한 번 계량하며 응답 캐시를 빌리지 않는다."""
     from src.features.pipeline.official_industry_context_constants import OFFICIAL_INDUSTRY_STAGE
     from src.features.pipeline.private_replay import local_provider_replay_enabled
 
+    if not isinstance(metered, _MeteredEngine):
+        raise TypeError("공식 산업 분석에는 요청별 계량 래퍼가 필요합니다")
+
     def analyze(prompt: str, schema: dict, max_tokens: int) -> Any:
-        before_dispatch = engine._provider_dispatch_count
-        before_usage = len(engine.usages)
+        before_dispatch = metered._provider_dispatch_count
+        before_usage = len(metered.usages)
         started = time.monotonic()
         capture = [] if local_provider_replay_enabled() else None
-        token = engine._private_news_request.set(capture)
+        token = metered._private_news_request.set(capture)
         try:
-            with _meter_stage(engine, OFFICIAL_INDUSTRY_STAGE, reserved_calls=0):
-                payload, usage = engine._ask(client, prompt, schema, max_tokens=max_tokens)
+            with _meter_stage(metered, OFFICIAL_INDUSTRY_STAGE, reserved_calls=0):
+                payload, usage = metered._ask(client, prompt, schema, max_tokens=max_tokens)
         except provider_budget.ProviderBudgetExceeded:
             # 전송 전 요청 로컬 예산 소진은 기존 검증 본문을 그대로 남긴다.
             raise
         except gateway.ProviderCallFailed as error:
-            if engine._provider_dispatch_count - before_dispatch == 1:
+            if metered._provider_dispatch_count - before_dispatch == 1:
                 _record_local_news_analysis_failure(
                     request=capture[0] if capture is not None and len(capture) == 1 else None,
                     cause=error.__cause__, provider_request_id=error.observation.request_id,
@@ -7943,9 +7946,9 @@ def _official_industry_analyzer(
                 generation_coordination.GenerationCoordinationError) as error:
             raise fatal_error_type(error) from error
         finally:
-            engine._private_news_request.reset(token)
-        events = engine.usages[before_usage:]
-        if engine._provider_dispatch_count - before_dispatch == 1:
+            metered._private_news_request.reset(token)
+        events = metered.usages[before_usage:]
+        if metered._provider_dispatch_count - before_dispatch == 1:
             _record_local_news_analysis_replay(
                 prompt=prompt, payload=payload, schema=schema, usage=usage,
                 model=str(events[0].get(USAGE_MODEL_KEY) or V2_REVIEW_MODEL)
@@ -7954,8 +7957,8 @@ def _official_industry_analyzer(
             )
         complete = (
             len(events) == 1 and events[0].get("failed") is False
-            and engine._provider_dispatch_count - before_dispatch == 1
-            and not engine.billing_uncertain and isinstance(usage, dict)
+            and metered._provider_dispatch_count - before_dispatch == 1
+            and not metered.billing_uncertain and isinstance(usage, dict)
             and usage.get("stop_reason") == "end_turn"
             and not any(usage.get(key) for key in (
                 "error", "refusal", "parse_failed", "output_limit_reached", "truncation_suspected",
