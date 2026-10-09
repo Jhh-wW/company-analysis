@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import hashlib
+from src.features.homepage.safe_http import BlockedRedirectDiscovery
 import re
 from dataclasses import dataclass
 
@@ -319,9 +320,12 @@ class WideCollectionResult:
     company_id: str
     documents: tuple[WideDocumentIdentity, ...]
     attempts: tuple[WideCollectionAttempt, ...]
+    redirect_discoveries: tuple[BlockedRedirectDiscovery, ...] = ()
 
     def __post_init__(self) -> None:
         _require_nonblank(self.company_id, "company_id")
+        if not isinstance(self.redirect_discoveries, tuple) or any(not isinstance(item, BlockedRedirectDiscovery) for item in self.redirect_discoveries):
+            raise ValueError("redirect 발견 관측은 올바른 tuple이어야 합니다")
         if not isinstance(self.documents, tuple):
             raise ValueError("documents는 tuple[WideDocumentIdentity, ...]이어야 합니다")
         if not isinstance(self.attempts, tuple):

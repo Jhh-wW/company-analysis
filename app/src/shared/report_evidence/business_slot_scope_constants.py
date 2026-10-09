@@ -4,9 +4,25 @@ import re
 CUSTOMER_SLOT = "business_model:customer_type"
 REVENUE_SLOT = "business_model:revenue_model"
 OPERATING_ROLE_SLOT = "operations_partners:operating_role"
-BUSINESS_SCOPE_SLOTS = frozenset({CUSTOMER_SLOT, REVENUE_SLOT, OPERATING_ROLE_SLOT})
+PRODUCT_ROLE_SLOT = "portfolio:product_role"
+BUSINESS_SCOPE_SLOTS = frozenset({CUSTOMER_SLOT, REVENUE_SLOT, OPERATING_ROLE_SLOT, PRODUCT_ROLE_SLOT})
 SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[가-힣)])[.!?]\s*|[;\n]+")
+# 구체 제품 없이 회사의 포지셔닝만 밝힌 절은 제품 역할 칸을 채우지 않는다.
+PRODUCT_POSITIONING_RE = re.compile(
+    r"(?:다양한|새로운|혁신적인)솔루션(?:을|를)?제시"
+    r"(?:합니다|한다|하며|하고|하여|하고있(?:다|습니다)|하고있다고밝히고있다)$"
+    r"|^(?:(?:회사|당사|우리)(?:는|가))?"
+    r"(?:변화하는[^.!?;\n]*산업[^.!?;\n]*|앞선변화로)?"
+    r"(?:시장|산업)(?:을|를)?(?:이끌|선도)"
+)
+PRODUCT_NAMED_SOLUTION_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])(?!(?:다양한|새로운|혁신적인|종합|최고의|최적의)\s*)"
+    r"[가-힣A-Za-z0-9_\-]+(?:솔루션|서비스)(?:은|는|이|가|을|를|로|이다|입니다|\s)"
+)
 CLAUSE_BOUNDARY_RE = re.compile(r"(?<![0-9]),(?![0-9])|(?<=으며)\s+|(?<=이며)\s+")
+PRODUCT_ROLE_CLAUSE_BOUNDARY_RE = re.compile(
+    CLAUSE_BOUNDARY_RE.pattern + r"|(?<=제시하며)\s+|(?<=제시하고)\s+|(?<=제시하여)\s+"
+)
 # 수익 계정의 포함·제외 정의만 제한한다. 실제 매출 종류의 구성은 그대로 둔다.
 REVENUE_CLASSIFICATION_WINDOW_CHARS = 160
 REVENUE_ACCOUNT_RE = re.compile(

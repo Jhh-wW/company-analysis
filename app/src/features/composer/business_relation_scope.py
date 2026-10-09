@@ -6,7 +6,7 @@
 from collections.abc import Mapping
 from src.shared.report_evidence.partnership_scope import research_partnership_claim_problem
 from src.shared.report_evidence.business_slot_scope import business_slot_scope_problem
-from src.shared.report_evidence.business_slot_scope_constants import CUSTOMER_SLOT, REVENUE_SLOT
+from src.shared.report_evidence.business_slot_scope_constants import CUSTOMER_SLOT, REVENUE_SLOT, PRODUCT_ROLE_SLOT
 from src.features.composer.portfolio_product_scope import portfolio_product_scope_problem
 from src.features.composer.revenue_activity_scope import revenue_activity_scope_problem
 import re
@@ -329,6 +329,12 @@ def business_relation_scope_problem(
 ) -> str:
     """2·7장 산문의 명시적 거래·고객 관계만 자기 인용의 절/표행과 대조한다."""
     if section_id == PORTFOLIO_SECTION:
+        if claim_slot == PRODUCT_ROLE_SLOT and (
+            business_slot_scope_problem(text, PRODUCT_ROLE_SLOT)
+            or (own_sources and all(business_slot_scope_problem(source, PRODUCT_ROLE_SLOT)
+                                    for source in own_sources.values()))
+        ):
+            return BUSINESS_RELATION_PROBLEM
         return (_portfolio_external_revenue_problem(text, own_sources)
                 or portfolio_product_scope_problem(text, own_sources))
     if section_id not in BUSINESS_RELATION_SECTIONS or not own_sources:

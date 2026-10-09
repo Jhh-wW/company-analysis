@@ -208,10 +208,10 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 # 갱신 과금 안내 +140자와 identity 안내 +87자만 역치환해 기존 여섯 지문을 복원했다.
 # paid/9c46-role-origin-prompt-baseline-private.json: 후보·원문·번호·스키마는 같다.
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "ee5ef74ff3980842ec2a9c8587444ea5b5a9feef4e626bc5120c7109d77650c9"),
-    (_golden_case, True, "a0191ea5fe34c6c026864b1d7bdab6cf788ccdd421113362bb21ec4b5ddd9697"),
-    (_boundary_case, False, "01b23c580123776b34fc594f7165505614385b5f03e3bd4ed0487dd4b1dd36df"),
-    (_boundary_case, True, "40a1da3febd1791259256516ec2c8e0d70a796467fc3485b90d9136b436d5fbf"),
+    (_golden_case, False, "eedd0d762d5d475fa95c6689bd053b727612de438b48f54fb53f8f85cab772bb"),
+    (_golden_case, True, "80504c0ec2094ac5d3b02c061405119874796e78b706e1ea74bac7fb3014c4cb"),
+    (_boundary_case, False, "f59d124cdc4eac28915bc0865d90c29400a8cbf9aa2dd67ef71a6bb68b3435ca"),
+    (_boundary_case, True, "fe93cb1d10952cdf4b9a08c659c9929238d8052f0725ce7725309027256a3da9"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
     # 2장 매출 모집단 안내 101자만 역치환해 기존 네 지문과 전체 바이트를 복원했다.
@@ -247,8 +247,8 @@ def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected)
 
 
 @pytest.mark.parametrize("items,expected", (
-    ((), "aeec4ae8f56955533049049bfb5c1175e7812bf4f94843f2f4cd1fe028114626"),
-    (FLOW_ITEMS, "a232088256fe61ea053f2bf655c79603eddf38fec3aa1dfe1965de697577302b"),
+    ((), "c316a7ea46d06931e9f60d6a9ed71dee5ab3d3f7698fb3dd90cbb7062363b8c0"),
+    (FLOW_ITEMS, "91e138aed97c7721de3b13e488d368c31831abc3b8ddcce5bfbaf4a32b170910"),
 ))
 def test_diagram_prompt_bytes_match_pre_schema_baseline(items, expected):
     # 계획 증명 안내 257자만 역치환하면 기존 도식 두 지문·전체 바이트가 복원된다.

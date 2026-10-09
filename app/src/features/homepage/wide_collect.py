@@ -19,10 +19,13 @@ from __future__ import annotations
 import hashlib
 import time
 import urllib.parse
+from src.features.homepage.safe_http import BlockedRedirectDiscovery
 from dataclasses import dataclass, field, replace
 from typing import Callable
 
 from src.features.homepage.constants import (
+    WIDE_REDIRECT_DISCOVERY_PREFIX,
+    WIDE_REDIRECT_DISCOVERY_LABEL,
     PRIORITY_PATH_KEYWORDS,
     WIDE_COLLECTION_TIMEOUT_SEC,
     WIDE_COLLECTOR_VERSION,
@@ -237,6 +240,7 @@ class _CollectionState:
     # 다른 등록 도메인 exact URL. 링크 사실만으로는 절대 문서가 되지 않고,
     # 수집 후 official_identity의 법인명+등록번호 이중 검증을 다시 거친다.
     cross_domain_candidates: dict[str, str] = field(default_factory=dict)
+    redirect_discoveries: dict[str, BlockedRedirectDiscovery] = field(default_factory=dict)
     # 외부 exact 링크의 계보를 주장할 수 있는 실제 고신뢰 페이지 URL.
     # DART root 신원 검증을 통과한 origin에서 이번 실행 중 성공적으로 읽은
     # 페이지만 들어간다. 호출자가 넘긴 URL 문자열만으로는 채우지 않는다.
@@ -411,6 +415,9 @@ def _has_official_discovery_lineage(
     if promote_verified_root:
         return True
     source = str(source_page_url or "").strip()
+    discovery = state.redirect_discoveries.get(source)
+    if discovery is not None:
+        return _identity_candidate_https_url(discovery.target_url) == candidate_url
     if source == _DART_IR_DISCOVERY:
         return True
     provenance = parse_dart_filing_url_provenance(source)
@@ -706,6 +713,7 @@ def collect_official_web_documents(
         company_id=state.company_id,
         documents=tuple(state.documents),
         attempts=tuple(state.attempts),
+        redirect_discoveries=tuple(state.redirect_discoveries.values()),
     )
 
 
@@ -1168,11 +1176,23 @@ def _collect_identity_verified_candidate(
         response = transport(origin.root_url, origin.allows_content_url)
     except WideTransportError as exc:
         error = exc
+        discovery = exc.redirect_discovery
+        # 등록 root 요청의 관측만 새 후보의 계보가 된다. 목적지는 따라가지 않고
+        # 기존 후보 루프에서 자기 robots·SSRF·법인명/번호를 다시 확인한다.
+        if discovery is not None and promote_verified_root and origin.allows_content_url(discovery.source_url):
+            source_id = WIDE_REDIRECT_DISCOVERY_PREFIX + discovery.sha256
+            state.redirect_discoveries[source_id] = discovery
+            target = _identity_candidate_https_url(discovery.target_url)
+            target_origin = parse_official_origin(target)
+            if target_origin is not None and target_origin.host != origin.host:
+                state.add_cross_domain_candidate(url=target, source_page_url=source_id)
     elapsed_ms = int((state.clock() - started) * 1000)
     state.pages_fetched += 1
     _record_page_section(state, candidate_url)
 
     page_state, reason_code = classify_general_outcome(response, error)
+    if error is not None and error.redirect_discovery is not None:
+        reason_code = "redirect_scope_blocked"
     response_bytes = len(
         (response.text if response else "").encode("utf-8", errors="ignore")
     )
@@ -1285,7 +1305,11 @@ def _collect_identity_verified_candidate(
                 else (
                     "DART company.json ir_url"
                     if source_page_url == _DART_IR_DISCOVERY
-                    else "검증된 DART root 문서의 exact 링크"
+                    else (
+                        WIDE_REDIRECT_DISCOVERY_LABEL
+                        if source_page_url in state.redirect_discoveries
+                        else "검증된 DART root 문서의 exact 링크"
+                    )
                 )
             )
         )

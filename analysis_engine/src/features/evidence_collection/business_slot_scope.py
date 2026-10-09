@@ -17,6 +17,8 @@ def _surface(text: str) -> str:
 
 def _administration(text: str, slot_id: str) -> bool:
     surface = _surface(text)
+    if slot_id == c.PRODUCT_ROLE_SLOT:
+        return bool(c.PRODUCT_POSITIONING_RE.search(surface))
     if slot_id == c.REVENUE_SLOT:
         account = (c.REVENUE_ACCOUNT_RE.search(surface)
                    or (c.REVENUE_IMPLICIT_ACCOUNT_RE.search(surface)
@@ -44,6 +46,10 @@ def _personal_past_role(text: str, context: str = "") -> bool:
 
 def _business_fact(text: str, slot_id: str, context: str = "") -> bool:
     surface = _surface(text)
+    if slot_id == c.PRODUCT_ROLE_SLOT:
+        return bool(c.OPERATING_ACTION_RE.search(surface)
+                    or c.PRODUCT_NAMED_SOLUTION_RE.search(text)
+                    or "|" in text)
     if slot_id == c.REVENUE_SLOT:
         return bool(c.REVENUE_ACTIVITY_RE.search(surface)
                     or c.CUSTOMER_PROVISION_PAYMENT_RE.search(surface)
@@ -92,11 +98,13 @@ def business_slot_scope(text: str, slot_id: str) -> BusinessSlotScope:
         # 회수관리의 새 문맥은 앞의 실제 판매 절로 거꾸로 전파하지 않는다.
         context = (bool(c.CUSTOMER_ADMIN_RE.search(_surface(sentence))
                         and c.CUSTOMER_ADMIN_ACTION_RE.search(_surface(sentence)))
-                   if slot_id == c.CUSTOMER_SLOT else _administration(sentence, slot_id))
+                   if slot_id == c.CUSTOMER_SLOT else
+                   False if slot_id == c.PRODUCT_ROLE_SLOT else _administration(sentence, slot_id))
         recovery_seen = False
         unit_cursor = 0
         clause_boundary = (c.REVENUE_CLAUSE_BOUNDARY_RE
-                           if slot_id == c.REVENUE_SLOT else c.CLAUSE_BOUNDARY_RE)
+                           if slot_id == c.REVENUE_SLOT else c.PRODUCT_ROLE_CLAUSE_BOUNDARY_RE
+                           if slot_id == c.PRODUCT_ROLE_SLOT else c.CLAUSE_BOUNDARY_RE)
         for unit in clause_boundary.split(sentence):
             unit_start = sentence.find(unit, unit_cursor)
             unit_cursor = unit_start + len(unit)
@@ -143,6 +151,9 @@ def business_slot_scope_problem(text: str, slot_id: str) -> str:
     if slot_id in CHALLENGE_SLOTS:
         return challenge_eligibility_problem(text, slot_id)
     scoped = business_slot_scope(text, slot_id)
+    if slot_id == c.PRODUCT_ROLE_SLOT:
+        # 회사 일반 문구로 확인된 절만 제한한다. 남은 제품 기능을 동사 사전으로 재단하지 않는다.
+        return c.REJECT_BUSINESS_SLOT_SCOPE if scoped.excluded_clauses and not scoped.score_text.strip() else ""
     remaining = c.REMAINING_SUPPORT_RE.get(slot_id)
     return c.REJECT_BUSINESS_SLOT_SCOPE if scoped.excluded_clauses and not (
         _business_fact(scoped.score_text, slot_id, text)

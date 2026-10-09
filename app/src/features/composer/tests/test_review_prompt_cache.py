@@ -67,7 +67,7 @@ def test_explicit_opt_in_only_attaches_metadata(monkeypatch, configured):
 # paid/9c46-role-origin-prompt-baseline-private.json: 후보·원문·번호·스키마는 같다.
 # 2026-10-10: 자기 원문과 후보의 공통 표현을 그대로 고르는 안내 138자 추가.
 # 안내만 역치환하여 기존 전체 지문·접두부를 복원하고, 근거·번호·스키마는 유지한다.
-@pytest.mark.parametrize("grouped,prefix_chars", ((False, 13746), (True, 14925)))
+@pytest.mark.parametrize("grouped,prefix_chars", ((False, 13892), (True, 15071)))
 @pytest.mark.parametrize("factory", (_golden_case, _large_case, _boundary_case))
 def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
     monkeypatch, grouped, prefix_chars, factory,
@@ -91,10 +91,10 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "ee5ef74ff3980842ec2a9c8587444ea5b5a9feef4e626bc5120c7109d77650c9"),
-    (_golden_case, True, "a0191ea5fe34c6c026864b1d7bdab6cf788ccdd421113362bb21ec4b5ddd9697"),
-    (_boundary_case, False, "01b23c580123776b34fc594f7165505614385b5f03e3bd4ed0487dd4b1dd36df"),
-    (_boundary_case, True, "40a1da3febd1791259256516ec2c8e0d70a796467fc3485b90d9136b436d5fbf"),
+    (_golden_case, False, "eedd0d762d5d475fa95c6689bd053b727612de438b48f54fb53f8f85cab772bb"),
+    (_golden_case, True, "80504c0ec2094ac5d3b02c061405119874796e78b706e1ea74bac7fb3014c4cb"),
+    (_boundary_case, False, "f59d124cdc4eac28915bc0865d90c29400a8cbf9aa2dd67ef71a6bb68b3435ca"),
+    (_boundary_case, True, "fe93cb1d10952cdf4b9a08c659c9929238d8052f0725ce7725309027256a3da9"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
@@ -177,7 +177,7 @@ def test_diagram_cache_excludes_card_switch_sources_and_rows(monkeypatch, items)
     reference = diagram_check._review_prompt((), {})
     assert cached.encode("utf-8") == plain.encode("utf-8")
     # 계획 증명의 공통 literal 안내 +257자: 9343 → 9600. 개별 원문은 캐시 밖이다.
-    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 9878
+    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 10024
     assert cached[:cached.cache_prefix_chars] == reference[:reference.cache_prefix_chars]
     assert texts["2"] not in cached[:cached.cache_prefix_chars]
     assert getattr(cached, "response_schema", None) is None

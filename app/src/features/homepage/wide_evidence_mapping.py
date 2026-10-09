@@ -89,7 +89,7 @@ def to_evidence_mappings(
             "Writer 자격이 없는 formal 문서에 근거 조각이 붙었습니다: "
             + ", ".join(ineligible_fragment_document_ids)
         )
-    return {
+    mapped = {
         "company_id": result.company_id,
         "documents": [
             _document_mapping(
@@ -119,6 +119,9 @@ def to_evidence_mappings(
             if not hashes_by_document.get(document.document_id)
         ],
     }
+    if result.redirect_discoveries:
+        mapped["redirect_discoveries"] = [dict(item.to_mapping(), sha256=item.sha256) for item in result.redirect_discoveries]
+    return mapped
 
 
 def _exact_hashes_by_document(fragments: tuple[WideFragment, ...]) -> dict[str, list[str]]:
