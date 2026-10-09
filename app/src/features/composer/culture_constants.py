@@ -322,6 +322,34 @@ CULTURE_INTERNAL_COMMUNICATION_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:사내|내부|조직내|부서간|팀간)(?:의|에서)?소통"
 )
 
+# 성과 소통의 수단과 대상은 같은 절에 결속한다. '성과'나 '회의' 단독으로
+# 문화 소재를 넓히지 않으며, 영어 표기는 같은 제도의 명시 표기만 인정한다.
+CULTURE_PERFORMANCE_INSTRUMENTS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
+    ("review", re.compile(r"성과리뷰(?:\(reflection&dialogue\))?")),
+    ("meeting", re.compile(r"1:1(?:meeting|미팅)|일대일면담")),
+    ("assessment", re.compile(r"360도다면평가|360다면평가")),
+)
+CULTURE_PERFORMANCE_COMMUNICATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"성과(?:communication|커뮤니케이션|소통)"
+)
+CULTURE_PERFORMANCE_ACTION_RE: Final[re.Pattern[str]] = re.compile(
+    r"성과(?:communication|커뮤니케이션|소통)(?:을|를)?(?P<action>진행|실시|운영)"
+)
+CULTURE_PERFORMANCE_PEOPLE_RE: Final[re.Pattern[str]] = re.compile(
+    r"임직원|종업원|근로자|구성원|직원|사원|인사제도"
+)
+CULTURE_PERFORMANCE_CADENCE_RE: Final[re.Pattern[str]] = re.compile(
+    r"연중|수시|매일|매주|매월|정기"
+)
+CULTURE_PERFORMANCE_NON_CURRENT_RE: Final[re.Pattern[str]] = re.compile(
+    r"계획|예정|목표|향후|앞으로|하지않|하지못|하지는않|하지는못|"
+    r"중단|폐지|종료|미시행|미도입"
+)
+CULTURE_PERFORMANCE_SURFACE_ALIASES: Final[tuple[tuple[str, str], ...]] = (
+    ("communication", "커뮤니케이션"),
+    ("meeting", "미팅"),
+)
+
 # ── «외부 감사 절차» 절은 이 장의 소재가 아니다 (닫힌 제외 목록) ──────────
 #
 # ★ 왜 필요한가 (인텍에프에이 4차 유료 실행 실측) — 8장에 남은 «한 줄»이

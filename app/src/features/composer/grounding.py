@@ -36,6 +36,7 @@ from src.features.composer.role_binding import (
 from src.features.composer.numeric_quote_refs import resolve_numeric_quote_refs
 from src.features.composer.entity_scope_constraint_constants import ENTITY_SCOPE_EXCLUSION_STAGE
 from src.features.composer.entity_scope_constraints import EntityScopeContext
+from src.features.composer.entity_relationship_scope import entity_relationship_problem
 from src.features.composer.scope_guard import document_entity_scope_problem, scope_problem
 from src.features.composer.loan_execution_scope import loan_execution_problem
 # 정성 인식 주장의 발동·결속 문법은 scope 가드와 «같은 상수»를 쓴다 — 두 벌로
@@ -1013,6 +1014,7 @@ def grounding_problem(
     # 승인하지 않는다. 다른 문장과 기존 수치·시점 검증 경로는 그대로 둔다.
     scope_issue = (
         modality_problem(text, sources) or scope_problem(text, sources)
+        or entity_relationship_problem(text, sources)
         or quantified_dividend_problem(text, sources)
     )
     if scope_issue:

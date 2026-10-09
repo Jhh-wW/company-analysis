@@ -56,6 +56,9 @@ from src.features.composer.numeric_proof_selection_constants import NUMERIC_SELE
 from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_VERSION
 from src.features.composer.source_actor_scope import source_actor_problem
 from src.features.composer.business_population_scope import section_investment_plan_problem
+from src.features.composer.flow_target_relation import (
+    flow_target_relation_hint, flow_target_relation_problem,
+)
 from src.shared.revenue_population_scope import revenue_population_context_problem
 from src.features.composer.competitive_scope_guard import competitive_section_evidence_problem
 from src.features.composer.culture_guard import (
@@ -1394,6 +1397,12 @@ def _build_grouped_review_prompt(
                 cells=item.flow_row.cells if item.flow_row is not None else None,
                 verbatim_source=(verbatim_by_number or {}).get(item.number),
             ))
+            if item.flow_row is not None:
+                flow_relation_hint = flow_target_relation_hint(
+                    item.flow_row.cells, candidate[1], section_id=section_id,
+                )
+                if flow_relation_hint:
+                    parts.append(flow_relation_hint)
             parts.append(numeric_proof_option_hint((numeric_options_by_number or {}).get(item.number, ())))
             parts.append(future_proof_option_hint((future_options_by_number or {}).get(item.number, ())))
             if item.sentence is not None and item.sentence.planned_claim_slot == PLAN_STATUS_SLOT:
@@ -2526,6 +2535,10 @@ def _apply_grounding(
                 problem = identity_flow_scope_problem(cells, sources)
             if not problem and context and context[0] == OPERATIONS_FLOW_SECTION_ID:
                 problem = company_flow_actor_problem(cells, sources)
+                problem = problem or flow_target_relation_problem(
+                    cells, sources, relation_evidence.get(number),
+                    section_id=context[0],
+                )
             if not problem and context and context[0] == CHALLENGE_FLOW_SECTION_ID:
                 # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 묶음 검수 경로와
                 # flat 경로가 «같은» 두 검사를 쓴다 — 한쪽만 걸면 그 경로로만

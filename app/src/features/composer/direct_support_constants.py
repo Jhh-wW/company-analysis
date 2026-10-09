@@ -75,7 +75,7 @@ RELATION_CONCESSIVE: Final[str] = "양보"
 #:   세어, 역할·과금 요구가 없는 후보에서 결합 항목을 냈다는 이유만으로 역할 가드가
 #:   그 문장을 탈락시킨다(combined_relation_constants.py §3.4 참고).
 RELATION_TYPES: Final[tuple[str, ...]] = (
-    RELATION_CAUSAL, RELATION_CONCESSIVE, "역할", "과금", "결합",
+    RELATION_CAUSAL, RELATION_CONCESSIVE, "역할", "과금", "결합", "경로",
 )
 #: 관계 항목이 «무엇이 원인이고 무엇이 결과인지»를 스스로 밝히게 하는 칸.
 #:

@@ -67,7 +67,13 @@ REVENUE_TABLE_OWNERS = frozenset({'당사', '회사', '연결회사'})
 # 명시 부문 제품표의 품목을 같은 부문 밖으로 옮긴 주장만 비교한다.
 PRODUCT_SECTION_EXCLUSION_RE = re.compile(
     r'(?P<owner>[가-힣A-Za-z0-9&]+(?:사업부문|사업부|부문))'
-    r'(?:외에도|외의|밖에서|이아닌|을제외한|에속하지않는)'
+    r'(?:외에(?:도)?|외의|이외(?:에(?:도)?|의)?|밖에서|이아닌|(?:을)?제외한|'
+    r'(?:과|와)(?:는)?별개(?:로|의|인)?|에속하지않는)'
+)
+PRODUCT_NEGATED_SECTION_RE = re.compile(
+    r'(?<![가-힣A-Za-z0-9])비[-·]?\s*'
+    r'(?P<owner>[가-힣A-Za-z0-9&][가-힣A-Za-z0-9&\s]*?(?:사업\s*부문|사업부|부문))'
+    r'(?:에서(?:도)?|의|은|는|인)'
 )
 PRODUCT_SECTION_HEADING_RE = re.compile(r'^\[(?P<owner>[^\]\n]+(?:부문|사업부))\]$')
 PRODUCT_ITEM_HEADER_RE = re.compile(r'^(?:품목|제품|상품)$')

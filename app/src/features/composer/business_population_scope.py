@@ -25,7 +25,7 @@ from src.features.composer.business_population_scope_constants import (
     REVENUE_PRIORITY_POSTPARTICLE_RE, REVENUE_PRIORITY_PREPARTICLE_RE,
     REVENUE_ITEM_COLUMN_RE, REVENUE_AMOUNT_COLUMN_RE, REVENUE_SHARE_COLUMN_RE,
     REVENUE_TABLE_OWNER_RE, REVENUE_TABLE_OWNERS,
-    PRODUCT_SECTION_EXCLUSION_RE, PRODUCT_SECTION_HEADING_RE,
+    PRODUCT_SECTION_EXCLUSION_RE, PRODUCT_NEGATED_SECTION_RE, PRODUCT_SECTION_HEADING_RE,
     PRODUCT_ITEM_HEADER_RE, PRODUCT_ITEM_SPLIT_RE, PRODUCT_ITEM_IGNORED_WORDS,
     PRODUCT_ITEM_MIN_CHARS, PRODUCT_ASSERTION_BOUNDARY_RE, PRODUCT_ASSERTION_DENIAL_RE,
 )
@@ -67,9 +67,12 @@ def section_product_exclusion_problem(text: str, sources: Mapping[str, str]) -> 
         if PRODUCT_ASSERTION_DENIAL_RE.search(clause):
             continue
         candidate = _surface(clause)
-        for exclusion in PRODUCT_SECTION_EXCLUSION_RE.finditer(candidate):
-            owner = exclusion['owner']
-            tail = candidate[exclusion.end():]
+        exclusions = [(exclusion['owner'], candidate[exclusion.end():])
+                      for exclusion in PRODUCT_SECTION_EXCLUSION_RE.finditer(candidate)]
+        # 비~는 실제 단어 경계를 유지해 예비/준비 같은 명사 내부를 부정으로 읽지 않는다.
+        exclusions.extend((_surface(exclusion['owner']), _surface(clause[exclusion.end():]))
+                          for exclusion in PRODUCT_NEGATED_SECTION_RE.finditer(clause))
+        for owner, tail in exclusions:
             for item in items_by_owner.get(owner, ()):
                 if item not in tail:
                     continue

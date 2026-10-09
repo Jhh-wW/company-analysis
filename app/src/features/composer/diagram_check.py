@@ -138,6 +138,10 @@ from src.features.composer.portfolio_name_constants import (
 from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
 from src.features.composer.scope_guard import flow_scope_problem
 from src.features.composer.business_population_scope import section_investment_plan_problem
+from src.features.composer.flow_target_relation import (
+    flow_target_relation_hint, flow_target_relation_problem,
+)
+from src.features.composer.direct_support import support_entries_by_number
 from src.features.composer.business_relation_scope import business_relation_scope_problem
 from src.features.composer.identity_flow_scope import identity_flow_scope_problem
 from src.features.composer.role_binding import company_flow_actor_problem
@@ -1030,6 +1034,9 @@ def _review_prompt(
         ))
         sources = {fid: texts[fid] for fid in row.citations if fid in texts}
         lines.append(grounding_hint(FLOW_CELL_JOIN.join(row.cells), sources, row.cells))
+        flow_relation_hint = flow_target_relation_hint(row.cells, sources, section_id=section_id)
+        if flow_relation_hint:
+            lines.append(flow_relation_hint)
     lines.extend(
         (
             "",
@@ -1173,6 +1180,7 @@ def _review_rows(
     )
     # 같은 파서로 미래 근거를 읽고, 중복 번호는 근거 없음으로 처리한다.
     future_evidence = future_plan_entries_by_number(raw)
+    relation_evidence = support_entries_by_number(raw)
     kept: dict[str, list[FlowRow]] = {section_id: [] for section_id, _ in by_section}
     dropped: list[str] = list(blank_dropped)
     for number, _section, row in items:
@@ -1202,6 +1210,10 @@ def _review_rows(
                 flow_problem = identity_flow_scope_problem(row.cells, sources)
             if not flow_problem and section_id == OPERATIONS_FLOW_SECTION_ID:
                 flow_problem = company_flow_actor_problem(row.cells, sources)
+                flow_problem = flow_problem or flow_target_relation_problem(
+                    row.cells, sources, relation_evidence.get(number),
+                    section_id=section_id,
+                )
             if not flow_problem and section_id == CHALLENGE_FLOW_SECTION_ID:
                 # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 앞의 검사가
                 # 「비었는가」만 보므로, 채워졌지만 원문에 없는 말은 여기서만
