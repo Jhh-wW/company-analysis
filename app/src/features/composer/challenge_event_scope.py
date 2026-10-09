@@ -289,6 +289,116 @@ def _selected_rows(candidate: str, rows: Sequence[_EventRow]) -> tuple[_EventRow
     ))
 
 
+def _sanction_response_rows(source: str) -> tuple[_EventRow, ...]:
+    """머리말이 있는 제재표의 조치 셀을 합치지 않고 각각 보존한다."""
+    mapping = None
+    rows = []
+    for unit, start in _table_units_with_spans(source):
+        cells = tuple(part.strip() for part in unit.split('|'))
+        headers = tuple(_surface(part) for part in cells)
+        date_indices = [i for i, value in enumerate(headers) if value in c.SANCTION_TABLE_DATE_HEADERS]
+        if date_indices:
+            actors = [i for i, value in enumerate(headers) if value in c.EVENT_ACTOR_HEADERS]
+            contents = [i for i, value in enumerate(headers) if value in c.SANCTION_TABLE_CONTENT_HEADERS]
+            responses = [i for i, value in enumerate(headers) if value in c.SANCTION_RESPONSE_HEADERS]
+            mapping = (len(cells), date_indices[0], actors[0], contents, responses) if (
+                len(date_indices) == len(actors) == 1 and contents and responses) else None
+            continue
+        if mapping is None:
+            continue
+        width, date_index, actor_index, contents, responses = mapping
+        if len(cells) != width or not _days(cells[date_index]):
+            mapping = None
+            continue
+        # 날짜와 비고만 있는 일반 표에는 발동하지 않는다.
+        if not any(c.PENALTY_RE.search(cells[i]) for i in contents):
+            continue
+        for index in responses:
+            rows.append(_EventRow(cells[date_index], cells[actor_index], cells[index],
+                                  'sanction', raw_row=unit.strip(), start=start,
+                                  end=start + len(unit), columns_unambiguous=True))
+    return tuple(rows)
+
+
+def _response_completion_records(text: str) -> tuple[tuple[str, str, bool], ...]:
+    """조치 바로 뒤 완료만 읽는다. 납부의 완료를 뒤 개선에 전파하지 않는다."""
+    result = []
+    for unit in c.SANCTION_RESPONSE_UNIT_RE.split(unicodedata.normalize('NFKC', text)):
+        matches = tuple(c.SANCTION_RESPONSE_ACTION_RE.finditer(unit))
+        records = []
+        tails = []
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(unit)
+            # 포괄 '조치를 이행했다'는 바로 앞 명시 조치의 술어다.
+            if index + 1 < len(matches) and matches[index + 1].group() in c.SANCTION_EXECUTION_ACTIONS:
+                bridge = unit[match.end():end].strip()
+                if bridge in c.SANCTION_ACTION_BRIDGES:
+                    end = matches[index + 2].start() if index + 2 < len(matches) else len(unit)
+            tail = unit[match.end():end]
+            completed = bool(c.SANCTION_COMPLETED_TAIL_RE.search(tail))
+            if c.SANCTION_NONACTUAL_RE.search(unit[:end]):
+                completed = False
+            prefix = c.EVENT_DAY_RE.sub('', unit[:match.start()])
+            if match.group() == '납부':
+                # 금액은 기존 숫자 검수가 대조한다. 생략된 금액을 다른 납부 활동명으로 읽지 않는다.
+                prefix = c.SANCTION_PAYMENT_AMOUNT_RE.sub('', prefix)
+            words = c.RESPONSE_ACTIVITY_WORD_RE.findall(prefix)
+            words = [word for word in words[-c.RESPONSE_ACTIVITY_HEAD_WORDS:]
+                     if word not in c.SANCTION_HEAD_STOPWORDS]
+            if len(words) > 1 and c.RESPONSE_ACTIVITY_SUBJECT_WORD_RE.search(words[0]):
+                words = words[1:]
+            head = ''.join(c.RESPONSE_ACTIVITY_PARTICLE_RE.sub('', word) for word in words)
+            previous = None
+            while previous != head:
+                previous, head = head, c.SANCTION_HEAD_PREFIX_RE.sub('', head)
+            records.append((match.group(), head.casefold(), completed))
+            tails.append(tail)
+        # 같은 목록의 접속에만 뒤 완료를 공유한다. 다른 절·성과는 공유하지 않는다.
+        for index in range(len(records) - 2, -1, -1):
+            if not records[index][2] and records[index + 1][2] and c.SANCTION_JOIN_TAIL_RE.fullmatch(tails[index]):
+                action, head, _ = records[index]
+                records[index] = (action, head, True)
+        result.extend(records)
+    return tuple(result)
+
+
+def sanction_response_completed_problem(candidate: str, sources: Mapping[str, str],
+                                        *, claim_slot: str) -> str:
+    """4장 완료 후보가 제재표의 무상태 대책을 완료로 승격한 경우만 제한한다."""
+    if claim_slot != c.SANCTION_COMPLETED_SLOT:
+        return ''
+    claims = tuple(record for record in _response_completion_records(candidate) if record[2])
+    rows = tuple(row for source in sources.values() for row in _sanction_response_rows(source))
+    if not claims or not rows:
+        return ''
+    selected = _selected_rows(candidate, rows)
+    if not selected and not c.EVENT_DATE_RE.search(candidate):
+        selected = rows
+    surface = _surface(candidate)
+    named = tuple(row for row in rows if c.EVENT_ACTOR_LEGAL_FORM_RE.sub('', _surface(row.actor)) in surface)
+    if named:
+        selected = tuple(row for row in selected if row in named)
+    records = tuple(record for row in selected for record in _response_completion_records(row.response))
+    actions = {record[0] for row in rows for record in _response_completion_records(row.response)}
+    event_keys = {(row.date, row.actor, row.raw_row) for row in selected}
+    for action, head, _ in claims:
+        if action not in actions:
+            if action in c.SANCTION_EXECUTION_ACTIONS and c.SANCTION_GENERIC_RESPONSE_HEAD_RE.fullmatch(head):
+                # 활동명을 생략한 대책 이행도 명사구와 납부 완료만으로 증명하지 않는다.
+                if len(event_keys) != 1 or not any(
+                    source_action != '납부' and completed
+                    for source_action, _, completed in records
+                ):
+                    return c.TIME_BINDING_PROBLEM
+            continue  # 없는 행동의 의미 지원은 기존 자기 인용 검수가 담당한다.
+        if len(event_keys) != 1 or not any(
+            source_action == action and completed and (not head or not source_head or head == source_head)
+            for source_action, source_head, completed in records
+        ):
+            return c.TIME_BINDING_PROBLEM
+    return ''
+
+
 def _action_states(text: str) -> dict[str, set[str]]:
     surface = _surface(text)
     matches = tuple(c.ACTION_RE.finditer(surface))

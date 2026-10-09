@@ -16,7 +16,7 @@ from src.shared.report_quality.constants import COMPARISON_JUDGMENTS
 BUSINESS_SUMMARY_TOPICS: Final[dict[str, str]] = {
     "customer_type": "고객 대상",
     "sales_channel": "판매 경로",
-    "value_exchange": "제공 가치",
+    "value_exchange": "제공 가치와 대가",
     "revenue_model": "수익 모델",
 }
 BUSINESS_SUMMARY_FALLBACK: Final[str] = "사업 구조"

@@ -13,7 +13,7 @@ from src.features.report_standard.section_content import summary_topic
 @pytest.mark.parametrize("slot,action,expected", [
     ("customer_type", "customer_type", "고객 대상"),
     ("sales_channel", "sales_channel", "판매 경로"),
-    ("value_exchange", "value_exchange", "제공 가치"),
+    ("value_exchange", "value_exchange", "제공 가치와 대가"),
     ("revenue_model", "revenue_model", "수익 모델"),
     ("customer_type", "", "고객 대상"),
     ("", "sales_channel", "판매 경로"),

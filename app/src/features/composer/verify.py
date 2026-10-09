@@ -55,6 +55,7 @@ from src.features.composer.future_proof_selection_constants import FUTURE_SELECT
 from src.features.composer.numeric_proof_selection_constants import NUMERIC_SELECTION_STAGE
 from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_VERSION
 from src.features.composer.source_actor_scope import source_actor_problem
+from src.features.composer.challenge_event_scope import sanction_response_completed_problem
 from src.features.composer.business_population_scope import section_investment_plan_problem
 from src.features.composer.flow_target_relation import (
     flow_target_relation_hint, flow_target_relation_problem,
@@ -1623,6 +1624,31 @@ def _prepare_review_future_options(items, frag_by_id):
     })
 
 
+def _future_selection_candidates(candidates, diagnostic_contexts, fragments):
+    """미래 선택의 전체 후보를 기존 검수 몸통과 정확히 다시 결속한다.
+
+    보도 접두사는 일반 수치 검수에서 제외하지만 선택지의 후보 SHA에는 포함된다.
+    실제 검수 문장을 같은 정규화 함수로 돌린 결과가 원래 몸통·자기 근거와 모두
+    같을 때만 전체 문장을 복원한다. 다른 날짜·매체·본문을 추정해 보정하지 않는다.
+    """
+    result = dict(candidates)
+    for number, (text, sources) in candidates.items():
+        context = (diagnostic_contexts or {}).get(number)
+        if not context or len(context) < 3 or not isinstance(context[2], str):
+            continue
+        full_text = context[2]
+        if full_text == text:
+            continue
+        source_ids = tuple(fid for fid in sources if fid != TABLE_SOURCE_ID)
+        table_source = sources.get(TABLE_SOURCE_ID, "")
+        normalized, own_sources = _grounding_candidate(
+            full_text, source_ids, fragments or {}, table_source,
+        )
+        if normalized == text and own_sources == sources:
+            result[number] = (full_text, sources)
+    return result
+
+
 def _ask_grouped_verdicts(
     ask: AskFn,
     items: Sequence[_GroupedReviewItem],
@@ -2235,7 +2261,9 @@ def _apply_grounding(
     grounding_details: dict[int, dict[str, object]] = {}
     original_future_raw = raw
     raw, invalid_future_selections = restore_future_proof_selections(
-        raw, future_options_by_number or {}, candidates,
+        raw, future_options_by_number or {}, _future_selection_candidates(
+            candidates, diagnostic_contexts, source_fragments_by_id,
+        ),
         {number: context[0] for number, context in (diagnostic_contexts or {}).items()},
         claim_slots_by_number or {},
         source_fragments_by_id or {},
@@ -2490,6 +2518,14 @@ def _apply_grounding(
                 problems[number] = problem
                 continue
         slot = (claim_slots_by_number or {}).get(number, "")
+        problem = sanction_response_completed_problem(
+            text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+            claim_slot=slot,
+        )
+        if problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = problem
+            continue
         if not (flow_cells_by_number and number in flow_cells_by_number):
             problem = completed_execution_status_problem(text, slot)
             if problem:
