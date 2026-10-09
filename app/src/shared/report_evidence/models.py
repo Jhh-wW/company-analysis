@@ -179,7 +179,11 @@ class EvidenceFragment:
         if type(self.range_index) is not int or self.range_index < -1:
             raise ValueError("근거 원문 구간 인덱스는 -1 또는 0 이상의 정수여야 합니다")
         from src.shared.report_evidence.source_context import parse_source_context
-        parse_source_context(self.source_context_json)
+        parse_source_context(
+            self.source_context_json, document_id=self.document_id,
+            fragment_location=self.location, fragment_sha256=self.text_sha256,
+            section_context_json=self.section_context_json, binding_scope='fragment_identity',
+        )
         from src.shared.report_evidence.section_context import parse_section_context
         parse_section_context(
             self.section_context_json, document_id=self.document_id,

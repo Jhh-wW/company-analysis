@@ -99,6 +99,7 @@ from src.features.composer.constants import (
     PARSE_RETRY_LIMIT,
     PROMPT_FRAGMENTS_HEAD,
     PROMPT_FRAGMENT_LOCATION_LABEL,
+    PLAN_DISCLOSURE_DATE_LABEL, PLAN_DISCLOSURE_DATE_PURPOSE,
     PROMPT_HEADER,
     PROMPT_TABLE_HEAD,
     SOURCE_KIND_DISPLAY_NAMES,
@@ -415,6 +416,10 @@ def _render_fragments(
             label += " · 메타데이터 " + news_metadata(fragment)
         if not use_header and fragment.document_title:
             label = f"{label}·{fragment.document_title}"
+        if fragment.document_date:
+            label += (f" · {PLAN_DISCLOSURE_DATE_LABEL}: "
+                      + json.dumps(fragment.document_date, ensure_ascii=False)
+                      + f" ({PLAN_DISCLOSURE_DATE_PURPOSE})")
         show_location = fragment.location and (
             not omit_numeric_location
             or not _is_numeric_offset_location(fragment.location)

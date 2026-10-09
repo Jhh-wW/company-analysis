@@ -691,7 +691,8 @@ FINANCIAL_COMPANY_REVENUE_KEYWORDS: Final[tuple[str, ...]] = (
 #: 3.14: 수익 계정의 포함·제외 정의만으로 사업 수익방식을 채우지 않는다.
 #: 3.15: 구체 제품 없는 회사 포지셔닝 문구의 제품 역할 칸을 제한한다.
 #: 3.16: 실제 거래 없는 회계 인식정책의 수익·대가 칸 채점만 제한한다.
-COLLECTOR_VERSION: Final[str] = "evidence_collection/3.16"
+# 3.17: 자기부문 선언과 제품 현황표의 품목·용도를 정확 원문 문맥으로 결속한다.
+COLLECTOR_VERSION: Final[str] = "evidence_collection/3.17"
 DOCUMENT_IDENTITY_HEADER_MAX_BYTES: Final[int] = 16 * 1024
 #: 2.0: EOF 후보 반복자·유한 문단 구간·제목 오인 방지. 1.x의 저장 한도
 #: 잘림 기록을 새 완료 증명으로 재사용하지 않는다.

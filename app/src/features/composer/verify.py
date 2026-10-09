@@ -143,6 +143,7 @@ from src.features.composer.challenge_response_evidence import (
 from src.features.composer.constants import (
     CHALLENGE_FLOW_SECTION_ID, STRATEGY_TABLE_SECTION_ID, IDENTITY_TABLE_SECTION_ID,
     OPERATIONS_FLOW_SECTION_ID,
+    PLAN_DISCLOSURE_REVIEW_GUIDE,
 )
 from src.features.composer.future_plan_constants import (
     FUTURE_PLAN_REVIEW_GUIDE,
@@ -503,6 +504,7 @@ REVIEW_PROMPT_RULES: Final[str] = (
     "같은 인용에서 구체 사업 문제와 대응 관계가 확인되어야 5장의 대응이다. "
     "금융서비스 회사의 실제 상품·고객 문제는 금융 용어가 있다는 이유로 "
     "거절하지 않는다.\n"
+    + PLAN_DISCLOSURE_REVIEW_GUIDE
 )
 REVIEW_JSON_GUIDE: Final[str] = (
     "\n출력 형식 — 설명 없이 아래 모양의 JSON만 출력한다:\n"

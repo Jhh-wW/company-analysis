@@ -353,7 +353,13 @@ def _classified_evidence_location_bindings(
                 "section_context_sha256": section_context_fingerprint(section_context_json),
             })
         if source_context_json:
-            parse_source_context(source_context_json)
+            parse_source_context(
+                source_context_json, document_id=document_id,
+                document_sha256=document["content_sha256"],
+                fragment_location=location, fragment_sha256=text_sha256,
+                section_context_json=section_context_json,
+                binding_scope='fragment',
+            )
             context_by_document[document_id].append({
                 "location": location, "text_sha256": text_sha256,
                 "source_context_sha256": source_context_fingerprint(source_context_json),
@@ -600,7 +606,13 @@ def _unclassified_evidence_observation(
                 "location": location, "text_sha256": text_sha256,
                 "section_context_sha256": section_context_fingerprint(section_context_json),
             })
-        parse_source_context(source_context_json)
+        parse_source_context(
+            source_context_json, document_id=document_id,
+            document_sha256=document_hashes[document_id],
+            fragment_location=location, fragment_sha256=text_sha256,
+            section_context_json=section_context_json,
+            binding_scope='fragment',
+        )
         if source_context_json:
             actual_contexts_by_document_id[document_id].append({
                 "location": location, "text_sha256": text_sha256,

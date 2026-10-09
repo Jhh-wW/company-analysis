@@ -3185,7 +3185,7 @@ def _summary_table(
             entries.append(
                 (
                     f"{index:02d}",
-                    summary_topic(item.section_id),
+                    summary_topic(item.section_id, report, item),
                     "" if spec is None else spec.display_number,
                     item.text.strip(),
                 )

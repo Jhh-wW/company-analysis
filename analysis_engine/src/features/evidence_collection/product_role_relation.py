@@ -7,6 +7,7 @@ from features.evidence_collection import product_role_relation_constants as c
 from features.evidence_collection.business_slot_scope import business_slot_scope_problem
 from features.evidence_collection.source_context import different_document_actor, validate_source_context
 from features.evidence_collection import constants as collection_c
+from features.evidence_collection import source_context_constants as source_c
 from features.evidence_collection.section_context import section_heading_boundaries
 
 
@@ -114,6 +115,14 @@ def product_role_actor_matches(text: str, section_heading: str = '', *,
     target = key(document_actor)
     if context and key(context['document_actor']) != target:
         return False
+    if context and context['origin'] == source_c.SELF_SECTION_ORIGIN:
+        from features.evidence_collection.product_role_table import product_table_role_supported
+        import hashlib
+        import json
+        section = json.loads(context['section_context_json'])
+        return (key(context['actor']) == target
+                and section['fragment_sha256'] == hashlib.sha256(text.encode()).hexdigest()
+                and product_table_role_supported(text, section_heading))
     actors = tuple(_relation_actors(text, section_heading))
     return bool(actors) and all(
         actor in c.SELF_ACTORS or actor.startswith('당사의')

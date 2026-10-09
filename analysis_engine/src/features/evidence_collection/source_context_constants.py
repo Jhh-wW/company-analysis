@@ -3,6 +3,13 @@
 import re
 
 CONTEXT_VERSION = "source-context-v1"
+SELF_SECTION_ORIGIN = "self_section_declaration"
+SELF_SECTION_EXTRA_KEYS = frozenset({"declaration_part", "section_context_json"})
+SELF_DECLARATION_RE = re.compile(
+    r"^당사는\s+[^\n.!?]{1,1800}(?:으로|로)\s*구성(?:되어\s*있(?:는|습니다)|되어\s*있는)[^\n.!?]*[.]$"
+)
+SELF_DECLARATION_PART_RE = re.compile(r"하는\s+([가-힣A-Za-z0-9 ·-]{1,80}?(?:사업부문|부문))(?=과|,|으로|\s)")
+SELF_DECLARATION_EXCLUDED_RE = re.compile(r"가상|예시|가정|향후|예정|계획|전망|구성하지|아니|과거|당시|타사|다른\s*회사|경쟁사|인용|라고|다고")
 MAX_CONTEXT_TABLE_CHARS = 200_000
 MAX_CONTEXT_TEXT_CHARS = 12_000
 MAX_ACTOR_CHARS = 120

@@ -572,8 +572,10 @@ def test_v2_PDF_텍스트는_display_paragraphs와_글자_단위로_같다():
 # 2026-10-06: 공개 표 비율 보존을 설명하는 구성비 안내 한 줄만 갱신했다.
 # 옛 안내만 메모리 복원하면 직전 길이·PDF/낱말/배치 지문이 모두 재현된다.
 # 안내 외 4,008개 glyph와 6쪽 구성·원 report는 그대로다.
-_V1_DEMO_PDF_SHA256 = "60eafcb24cb83a9e1ee46837a2f3af7a24659dad0c3cae40d7e06510e788fac0"
-_V1_DEMO_PDF_LENGTH = 91033
+# 2026-10-10: 의미 칸이 없는 레거시 요약의 라벨만 '사업 구조'로 변경했다.
+# 옛 라벨을 메모리에서 복원하면 직전 길이와 SHA가 그대로 재현된다.
+_V1_DEMO_PDF_SHA256 = "f0f1d261f6df051bf33fa181220d33e7afb01d3f277da68140b0bc69fc7eb7f2"
+_V1_DEMO_PDF_LENGTH = 91007
 
 
 def test_v1_PDF는_바이트_불변이다():

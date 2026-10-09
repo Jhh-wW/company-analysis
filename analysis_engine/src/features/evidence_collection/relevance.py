@@ -371,7 +371,9 @@ def product_role_relation_scores(text: str, section_heading: str = '') -> tuple[
     """기존 장 승자를 바꾸지 않는 제품역할 보조 차선의 점수다."""
     from features.evidence_collection.product_role_relation import current_product_role_relation
     from features.evidence_collection import product_role_relation_constants as product_c
-    if not current_product_role_relation(text, section_heading):
+    from features.evidence_collection.product_role_table import product_table_role_supported
+    if not (current_product_role_relation(text, section_heading)
+            or product_table_role_supported(text, section_heading)):
         return ()
     return (SlotScore('portfolio', product_c.SLOT_ID,
                       product_c.AUXILIARY_SCORE_MILLIS, (product_c.REASON_CODE,)),)

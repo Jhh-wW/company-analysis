@@ -53,7 +53,12 @@ class OfficialIndustryCandidateEvidence:
         ):
             raise ValueError("산업 후보 원문과 문서 사용 구간이 다릅니다")
         date.fromisoformat(self.document.published_on)
-        parse_source_context(self.source_context_json)
+        parse_source_context(
+            self.source_context_json, document_id=self.document_id,
+            document_sha256=self.document.content_sha256,
+            fragment_location=self.location, fragment_sha256=self.text_sha256,
+            section_context_json=self.section_context_json, binding_scope='fragment',
+        )
         parse_practice_context(
             self.practice_context_json, document_id=self.document_id,
             document_sha256=self.document.content_sha256,

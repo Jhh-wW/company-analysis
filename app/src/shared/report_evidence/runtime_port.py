@@ -469,7 +469,11 @@ class OfficialComparisonCandidateEvidence:
 
     def __post_init__(self) -> None:
         from src.shared.report_evidence.source_context import parse_source_context
-        parse_source_context(self.source_context_json)
+        parse_source_context(
+            self.source_context_json, document_id=self.document_id,
+            document_sha256=self.document_content_sha256,
+            section_context_json=self.section_context_json, binding_scope='document',
+        )
         from src.shared.report_evidence.section_context import parse_section_context
         # 비교 후보는 원 조각의 문장 부분집합이므로 원 조각 좌표는 문맥에 보존한다.
         parse_section_context(self.section_context_json, document_id=self.document_id,

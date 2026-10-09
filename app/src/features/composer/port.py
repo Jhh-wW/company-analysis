@@ -346,7 +346,13 @@ class CollectedFragment:
         if not isinstance(self.financial_api_disclosed_at, str):
             raise TypeError("재무 API 공시일은 문자열이어야 합니다")
         from src.shared.report_evidence.source_context import parse_source_context
-        parse_source_context(self.source_context_json)
+        parse_source_context(
+            self.source_context_json, document_id=self.source_document_id,
+            document_sha256=self.document_content_sha256,
+            fragment_location=self.location,
+            fragment_sha256=hashlib.sha256(self.text.encode('utf-8')).hexdigest(),
+            section_context_json=self.section_context_json, binding_scope='fragment',
+        )
         from src.shared.report_evidence.section_context import parse_section_context
         if self.section_context_json and any(type(value) is not str or not value for value in (
             self.source_document_id, self.document_content_sha256, self.location,
