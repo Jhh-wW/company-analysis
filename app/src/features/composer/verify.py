@@ -1230,6 +1230,9 @@ def _review_fragment_metadata(fragment: CollectedFragment) -> str:
         from src.shared.report_evidence.section_context import parse_section_context
         from src.features.composer.section_context_constants import SECTION_CONTEXT_LABEL
         metadata[SECTION_CONTEXT_LABEL] = parse_section_context(fragment.section_context_json)["text"]
+    if fragment.practice_context_json:
+        from src.shared.report_evidence.practice_context import parse_practice_context
+        metadata["원문 예시·안내 문맥"] = parse_practice_context(fragment.practice_context_json)["text"]
     # JSON 구분자 공백만 줄인다. 빈 필드와 문자열 안의 공백도 출처 자료다.
     return "출처 분류(JSON 자료): " + json.dumps(
         metadata, ensure_ascii=False, separators=(",", ":")
@@ -2364,6 +2367,36 @@ def _apply_grounding(
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
                 continue
+            from src.features.composer.education_practice_scope import education_practice_scope_problem
+            problem = education_practice_scope_problem(
+                text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+                section_id=context[0],
+                claim_slot=(claim_slots_by_number or {}).get(number, ""),
+                practice_context_by_source_id={
+                    fid: fragment.practice_context_json
+                    for fid, fragment in (source_fragments_by_id or {}).items()
+                    if fid in sources and fragment.practice_context_json
+                },
+            )
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
+        if context and context[1] == DIAGNOSTIC_KIND_SUMMARY:
+            from src.features.composer.education_practice_scope import education_practice_scope_problem
+            problem = education_practice_scope_problem(
+                text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+                section_id="summary",
+                practice_context_by_source_id={
+                    fid: fragment.practice_context_json
+                    for fid, fragment in (source_fragments_by_id or {}).items()
+                    if fid in sources and fragment.practice_context_json
+                },
+            )
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
         # ★ «확인» 산문은 본문이든 요약이든 자기 인용 원문에 걸린다. 여기서
         #   걸러야 본문·요약·부록·빈 장 안내가 «같은 판정»을 보게 된다.
         #
@@ -2527,6 +2560,17 @@ def _apply_grounding(
             #   표지가 결합해 정상 행이 지워진다(cellwise_problem 머리말).
             problem = cellwise_problem(cells, absence_claim_problem)
             problem = problem or flow_scope_problem(cells, sources)
+            if not problem and context and context[0] == "past_changes":
+                from src.features.composer.education_practice_scope import education_practice_scope_problem
+                problem = education_practice_scope_problem(
+                    text, sources, section_id="past_changes",
+                    claim_slot="past_changes:completed_execution",
+                    practice_context_by_source_id={
+                        fid: fragment.practice_context_json
+                        for fid, fragment in (source_fragments_by_id or {}).items()
+                        if fid in sources and fragment.practice_context_json
+                    },
+                )
             if not problem and context and context[0] == "business_model":
                 problem = next((value for cell in cells if (value := business_relation_scope_problem(
                     cell, sources, section_id="business_model",

@@ -18,6 +18,7 @@ from src.core import paths
 from src.web.official_industry_evidence import industry_candidates_from_envelope
 from src.shared.report_evidence.source_context import parse_source_context, source_context_fingerprint
 from src.shared.report_evidence.section_context import parse_section_context, section_context_fingerprint
+from src.shared.report_evidence.practice_context import parse_practice_context, practice_context_fingerprint
 from src.core.evidence_reclassify_switch import evidence_reclassify_enabled
 from src.features.chapter_evidence.produce import produce_from_collection_envelopes
 from src.features.homepage.wide_collect import collect_official_web_documents
@@ -254,6 +255,7 @@ def _classified_evidence_location_bindings(
             "source_context_bindings": raw_document.get("exact_source_context_bindings", []),
             "content_sha256": raw_document.get("content_sha256", ""),
             "section_context_bindings": raw_document.get("exact_section_context_bindings", []),
+            "practice_context_bindings": raw_document.get("exact_practice_context_bindings", []),
         }
 
     actual_by_document: dict[str, set[tuple[str, str]]] = {
@@ -264,6 +266,8 @@ def _classified_evidence_location_bindings(
     }
     context_by_document: dict[str, list[dict[str, str]]] = {key: [] for key in documents}
     section_context_by_document: dict[str, list[dict[str, str]]] = {key: [] for key in documents}
+    practice_context_by_document: dict[str, list[dict[str, str]]] = {key: [] for key in documents}
+    practice_context_by_location: dict[tuple[str, str, str], str] = {}
     for raw_fragment in raw_fragments:
         if not isinstance(raw_fragment, Mapping):
             raise ValueError("typed 공식 근거 조각이 Mapping이 아닙니다")
@@ -318,6 +322,24 @@ def _classified_evidence_location_bindings(
         actual_by_document[document_id].add((location, text_sha256))
         source_context_json = raw_fragment.get("source_context_json", "")
         section_context_json = raw_fragment.get("section_context_json", "")
+        practice_context_json = raw_fragment.get("practice_context_json", "")
+        if practice_context_json and (type(document["content_sha256"]) is not str or _SHA256_HEX_RE.fullmatch(document["content_sha256"]) is None):
+            raise ValueError("typed 공식 근거의 예시·안내 문맥에 원문 문서 해시가 없습니다")
+        parse_practice_context(
+            practice_context_json, document_id=document_id,
+            document_sha256=document["content_sha256"],
+            fragment_location=location, fragment_sha256=text_sha256, fragment_text=text,
+        )
+        previous_practice = practice_context_by_location.setdefault(
+            (document_id, location, text_sha256), practice_context_json,
+        )
+        if previous_practice != practice_context_json:
+            raise ValueError("같은 원문의 장별 조각에서 예시·안내 문맥이 달라졌습니다")
+        if practice_context_json:
+            practice_context_by_document[document_id].append({
+                "location": location, "text_sha256": text_sha256,
+                "practice_context_sha256": practice_context_fingerprint(practice_context_json),
+            })
         if section_context_json and (type(document["content_sha256"]) is not str or _SHA256_HEX_RE.fullmatch(document["content_sha256"]) is None):
             raise ValueError("typed 공식 근거의 사업 범위 문맥에 원문 문서 해시가 없습니다")
         parse_section_context(
@@ -356,6 +378,16 @@ def _classified_evidence_location_bindings(
                 raise ValueError("typed DART 근거 합집합이 usable range와 다릅니다")
         if section_context_by_document[document_id] != document["section_context_bindings"]:
             raise ValueError("typed 공식 근거의 사업 범위 문맥 결속이 다릅니다")
+        actual_practice = sorted({
+            (row["location"], row["text_sha256"], row["practice_context_sha256"])
+            for row in practice_context_by_document[document_id]
+        })
+        canonical_practice = [
+            {"location": location, "text_sha256": text_hash, "practice_context_sha256": context_hash}
+            for location, text_hash, context_hash in actual_practice
+        ]
+        if canonical_practice != document["practice_context_bindings"]:
+            raise ValueError("typed 공식 근거의 예시·안내 문맥 결속이 다릅니다")
         if context_by_document[document_id] != document["source_context_bindings"]:
             raise ValueError("typed 공식 근거의 회사 주어 문맥 결속이 다릅니다")
         if actual_by_document[document_id] != set(document["declared_bindings"]):
@@ -658,6 +690,16 @@ def _comparison_candidate_evidence(
         if raw_document is None:
             raise ValueError("typed DART 비교 후보의 원본 문서가 없습니다")
         fragment_text = str(raw_fragment.get("text") or "")
+        practice_context = parse_practice_context(
+            raw_fragment.get("practice_context_json", ""), document_id=document_id,
+            document_sha256=str(raw_document.get("content_sha256") or ""),
+            fragment_location=str(raw_fragment.get("location") or ""),
+            fragment_sha256=hashlib.sha256(fragment_text.encode("utf-8")).hexdigest(),
+            fragment_text=fragment_text,
+        )
+        if practice_context:
+            # 교육 예시는 회사의 실제 경쟁 현황을 증명하지 않는다. 원조각은 보존한다.
+            continue
         marker_sentences = tuple(
             sentence
             for sentence in comparison_evidence_sentences(fragment_text)

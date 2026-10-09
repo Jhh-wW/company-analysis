@@ -3,9 +3,11 @@ import re
 
 CUSTOMER_SLOT = "business_model:customer_type"
 REVENUE_SLOT = "business_model:revenue_model"
+VALUE_EXCHANGE_SLOT = "business_model:value_exchange"
+REVENUE_RELATION_SLOTS = frozenset({REVENUE_SLOT, VALUE_EXCHANGE_SLOT})
 OPERATING_ROLE_SLOT = "operations_partners:operating_role"
 PRODUCT_ROLE_SLOT = "portfolio:product_role"
-BUSINESS_SCOPE_SLOTS = frozenset({CUSTOMER_SLOT, REVENUE_SLOT, OPERATING_ROLE_SLOT, PRODUCT_ROLE_SLOT})
+BUSINESS_SCOPE_SLOTS = frozenset({CUSTOMER_SLOT, *REVENUE_RELATION_SLOTS, OPERATING_ROLE_SLOT, PRODUCT_ROLE_SLOT})
 SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[가-힣)])[.!?]\s*|[;\n]+")
 # 구체 제품 없이 회사의 포지셔닝만 밝힌 절은 제품 역할 칸을 채우지 않는다.
 PRODUCT_POSITIONING_RE = re.compile(
@@ -40,6 +42,24 @@ REVENUE_CLAUSE_BOUNDARY_RE = re.compile(
     + r"|(?<=포함되고)\s+|(?<=제외되고)\s+|(?<=분류하고)\s+|(?<=계상하고)\s+"
     + r"|(?<=포함되며)\s+|(?<=제외되며)\s+|(?<=분류하며)\s+|(?<=계상하며)\s+")
 REVENUE_ACTIVITY_WINDOW_CHARS = 80
+# 인식·측정 정책만으로 거래의 대가 칸을 채우지 않는다. 실제 수금 조건은 보존한다.
+REVENUE_POLICY_RE = re.compile(
+    r"수익(?:의)?인식|(?:수익|매출)(?:은|는|을|으로)[^.!?;]{0,80}(?:인식|측정)|"
+    r"유의적(?:인)?금융요소|실무적간편법|유효이자율법"
+)
+REVENUE_TRANSACTION_RE = re.compile(
+    r"(?:고객|구매자|이용자)[^.!?;]{0,80}(?:판매했|제공했|공급했|납품했)"
+    r"[^.!?;]{0,60}(?:대가|대금)[^.!?;]{0,20}\d[\d,.]*(?:억|만|천|백만)?(?:원|달러|유로)|"
+    r"(?:고객|구매자|차주|가입자|계약자|이용자)[^.!?;]{0,80}"
+    r"(?:대가|대금|이용료|구독료|수수료|보험료|이자)[^.!?;]{0,60}(?:받|수취|회수|청구|지급)|"
+    r"(?:대가|대금|이용료|구독료|수수료|보험료|운용보수)[^.!?;]{0,40}"
+    r"(?:현금|어음|월정액|연정액|건당|계약금|판매가격|납품가격|요율)|"
+    r"(?:판매|제공|공급|납품|임대|구독)[^.!?;]{0,40}(?:대가|대금|이용료|수수료)"
+    r"[^.!?;]{0,40}(?:받|수취|회수|청구)|"
+    r"(?:기업|개인|고객|차주)(?:대출|여신)[^.!?;]{0,80}(?:이자|수수료)|"
+    r"(?:보험계약자|보험가입자)[^.!?;]{0,80}보험료|"
+    r"신탁[^.!?;]{0,80}(?:운용보수|수수료)"
+)
 # 금융업의 대출취급·보험판매처럼 실제 상품 활동을 나타내는 명사도 보존한다.
 # 이자수익·수입수수료·수입기술료의 계정명만으로 활동을 추정하지 않는다.
 REVENUE_ACTIVITY_RE = re.compile(

@@ -98,6 +98,19 @@ def test_sanction_is_supported_by_actual_row_not_incidental_law_name():
     assert not slots(header + "; " + noise)[0]
 
 
+def test_regulatory_table_aliases_bind_event_and_distinct_response():
+    header = "제재조치일 | 조치기관 | 조치대상자 | 조치내용 | 이행 및 재발방지대책"
+    event = "2026.09.15 | 감독기관 | 가람제조 | 시정조치 및 과징금 부과 | 구매프로세스 보완"
+    raw = header + "; " + event
+    result = challenge_table_scope(raw)
+    assert result.has_incident_row and result.has_response_row
+    assert {"current_challenges:issue", "current_challenges:response"} <= slots(raw)[0]
+    assert not challenge_table_scope(header + "; " + event.replace("구매프로세스 보완", "-")).has_response_row
+    assert not challenge_table_scope(header + "; " + event.replace("2026.09.15", "-")).has_incident_row
+    assert not challenge_table_scope(header + "; " + event.replace("시정조치 및 과징금 부과", "위반 시 과징금 부과할 수 있음")).has_incident_row
+    assert not challenge_table_scope(header + "; " + event.replace("구매프로세스 보완", "과징금 납부 완료")).has_incident_row
+
+
 def test_completed_sanction_history_keeps_raw_and_observation_without_current_slots():
     header = "제재조치일 | 처벌 또는 조치대상자 | 처벌 또는 조치내용 | 사유 및 근거법령 | 이행 및 재발방지대책"
     row = "2024.04.10 | 가온제조 | 과태료 100만원 | 위험물안전관리법 | 과태료 납부 완료"

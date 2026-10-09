@@ -21,6 +21,7 @@ from src.shared.report_evidence.models import CollectedEvidenceDocument, Evidenc
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
 from src.shared.report_evidence.source_kind_policy import formal_document_is_writer_eligible
 from src.shared.report_evidence.business_activity import current_business_item, current_business_table_items
+from src.shared.report_evidence.practice_context import parse_practice_context
 
 
 def _anchor(fragment: EvidenceFragment, document: CollectedEvidenceDocument, item: str) -> BusinessActivityAnchor:
@@ -98,6 +99,13 @@ def build_business_activity_anchors(
             ):
                 continue
             counts["verified_fragments"] += 1
+            if parse_practice_context(
+                fragment.practice_context_json, document_id=fragment.document_id,
+                document_sha256=document.content_sha256,
+                fragment_location=fragment.location, fragment_sha256=fragment.text_sha256,
+                fragment_text=fragment.text,
+            ):
+                continue
             item = current_business_item(fragment, company_name)
             verified.append((fragment, document, item))
             counts["current_business_matches"] += bool(item)

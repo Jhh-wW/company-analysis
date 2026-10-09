@@ -173,6 +173,7 @@ class EvidenceFragment:
     range_index: int = -1
     source_context_json: str = ""
     section_context_json: str = ""
+    practice_context_json: str = ""
 
     def __post_init__(self) -> None:
         if type(self.range_index) is not int or self.range_index < -1:
@@ -183,6 +184,12 @@ class EvidenceFragment:
         parse_section_context(
             self.section_context_json, document_id=self.document_id,
             fragment_location=self.location, fragment_sha256=self.text_sha256,
+        )
+        from src.shared.report_evidence.practice_context import parse_practice_context
+        parse_practice_context(
+            self.practice_context_json, document_id=self.document_id,
+            fragment_location=self.location, fragment_sha256=self.text_sha256,
+            fragment_text=self.text,
         )
         for label, value in (
             ("회사 식별자", self.company_id),

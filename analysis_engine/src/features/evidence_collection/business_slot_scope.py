@@ -19,12 +19,13 @@ def _administration(text: str, slot_id: str) -> bool:
     surface = _surface(text)
     if slot_id == c.PRODUCT_ROLE_SLOT:
         return bool(c.PRODUCT_POSITIONING_RE.search(surface))
-    if slot_id == c.REVENUE_SLOT:
+    if slot_id in c.REVENUE_RELATION_SLOTS:
         account = (c.REVENUE_ACCOUNT_RE.search(surface)
                    or (c.REVENUE_IMPLICIT_ACCOUNT_RE.search(surface)
                        and len(set(c.REVENUE_ACCOUNT_ITEM_RE.findall(surface)))
                        >= c.MIN_REVENUE_ACCOUNT_ITEMS))
-        return bool(account and c.REVENUE_CLASSIFICATION_RE.search(surface))
+        return bool((account and c.REVENUE_CLASSIFICATION_RE.search(surface))
+                    or c.REVENUE_POLICY_RE.search(surface))
     if slot_id == c.CUSTOMER_SLOT:
         return bool(
             (c.CUSTOMER_ADMIN_RE.search(surface) and c.CUSTOMER_ADMIN_ACTION_RE.search(surface))
@@ -50,8 +51,11 @@ def _business_fact(text: str, slot_id: str, context: str = "") -> bool:
         return bool(c.OPERATING_ACTION_RE.search(surface)
                     or c.PRODUCT_NAMED_SOLUTION_RE.search(text)
                     or "|" in text)
-    if slot_id == c.REVENUE_SLOT:
+    if slot_id in c.REVENUE_RELATION_SLOTS:
+        if c.REVENUE_POLICY_RE.search(surface):
+            return bool(c.REVENUE_TRANSACTION_RE.search(surface))
         return bool(c.REVENUE_ACTIVITY_RE.search(surface)
+                    or c.REVENUE_TRANSACTION_RE.search(surface)
                     or c.CUSTOMER_PROVISION_PAYMENT_RE.search(surface)
                     or c.CUSTOMER_CREDIT_SERVICE_RE.search(surface))
     career_company_plan = bool(
@@ -103,7 +107,7 @@ def business_slot_scope(text: str, slot_id: str) -> BusinessSlotScope:
         recovery_seen = False
         unit_cursor = 0
         clause_boundary = (c.REVENUE_CLAUSE_BOUNDARY_RE
-                           if slot_id == c.REVENUE_SLOT else c.PRODUCT_ROLE_CLAUSE_BOUNDARY_RE
+                           if slot_id in c.REVENUE_RELATION_SLOTS else c.PRODUCT_ROLE_CLAUSE_BOUNDARY_RE
                            if slot_id == c.PRODUCT_ROLE_SLOT else c.CLAUSE_BOUNDARY_RE)
         for unit in clause_boundary.split(sentence):
             unit_start = sentence.find(unit, unit_cursor)

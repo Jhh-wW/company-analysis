@@ -46,4 +46,5 @@ def industry_candidates_from_envelope(
         text_sha256=row["text_sha256"], text=row["text"],
         source_context_json=row.get("source_context_json", ""),
         section_context_json=row.get("section_context_json", ""),
+        practice_context_json=row.get("practice_context_json", ""),
     ) for row in fragments)

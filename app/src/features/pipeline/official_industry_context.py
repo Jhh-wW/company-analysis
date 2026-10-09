@@ -17,6 +17,7 @@ from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionRe
 from src.shared.report_evidence.industry_candidates import OfficialIndustryCandidateEvidence, OfficialIndustrySupplement
 from src.shared.report_evidence.source_kind_policy import formal_document_is_writer_eligible
 from src.shared.report_evidence.constants import SOURCE_KIND_NEWS
+from src.shared.report_evidence.practice_context import parse_practice_context
 from src.shared.report_evidence.news_business_activity import (
     news_business_anchor_problem, news_business_fragment_matches,
 )
@@ -85,6 +86,13 @@ def prepare_official_industry_fallback(
                         or fragment.text_sha256 not in document.exact_evidence_hashes
                         or hashlib.sha256(fragment.text.encode("utf-8")).hexdigest() != fragment.text_sha256):
                     continue
+                if parse_practice_context(
+                    fragment.practice_context_json, document_id=fragment.document_id,
+                    document_sha256=document.content_sha256,
+                    fragment_location=fragment.location, fragment_sha256=fragment.text_sha256,
+                    fragment_text=fragment.text,
+                ):
+                    continue
                 originals.append((fragment, document))
                 seen.add(key)
         for fragment in collection.industry_candidates:
@@ -92,6 +100,13 @@ def prepare_official_industry_fallback(
                 raise ValueError("공식 산업 후보 자료형이 다릅니다")
             fragment.__post_init__()
             document = fragment.document
+            if parse_practice_context(fragment.practice_context_json,
+                                      document_id=fragment.document_id,
+                                      document_sha256=document.content_sha256,
+                                      fragment_location=fragment.location,
+                                      fragment_sha256=fragment.text_sha256,
+                                      fragment_text=fragment.text):
+                continue
             key = (fragment.document_id, fragment.location, fragment.text_sha256)
             if (key not in seen and fragment.company_id == company_id
                     and _document_matches_profile(document, profile)

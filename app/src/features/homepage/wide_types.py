@@ -258,8 +258,15 @@ class WideFragment:
     item_title: str = ""
     item_published_on: str = ""
     item_url: str = ""
+    practice_context_json: str = ""
 
     def __post_init__(self) -> None:
+        from src.shared.report_evidence.practice_context import parse_practice_context
+        parse_practice_context(
+            self.practice_context_json, document_id=self.document_id,
+            fragment_location=self.location, fragment_sha256=self.text_sha256,
+            fragment_text=self.text,
+        )
         for name in (
             "company_id",
             "fragment_id",

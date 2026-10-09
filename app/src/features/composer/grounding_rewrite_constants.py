@@ -56,6 +56,7 @@ GROUNDING_REWRITE_MAX_SENTENCES: Final[int] = 12
 GROUNDING_REWRITE_EXCLUDED_REASONS: Final[frozenset[str]] = frozenset({
     "accounting_policy_boilerplate", "culture_accounting_policy_misplaced",
     "competitive_section_evidence_offcontract",
+    "source_practice_unbound",
 })
 
 #: 묶음 재작성 프롬프트 전체의 글자 상한. 완전한 자기 인용이 들어갈 후보만 담는다.

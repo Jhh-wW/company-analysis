@@ -446,6 +446,12 @@ def _render_fragments(
             from src.features.composer.section_context_constants import SECTION_CONTEXT_LABEL
             section_context = parse_section_context(fragment.section_context_json)
             label += " · " + SECTION_CONTEXT_LABEL + ": " + json.dumps(section_context["text"], ensure_ascii=False)
+        if fragment.practice_context_json:
+            from src.shared.report_evidence.practice_context import parse_practice_context
+            from src.features.composer.education_practice_scope_constants import PRACTICE_WRITER_GUIDE
+            practice_context = parse_practice_context(fragment.practice_context_json)
+            label += " · 원문 예시·안내 문맥: " + json.dumps(practice_context["text"], ensure_ascii=False)
+            label += PRACTICE_WRITER_GUIDE
         evidence_text = json.dumps(fragment.text, ensure_ascii=False) if _is_news_fragment(fragment) else fragment.text
         lines.append(f"[조각 {fragment.fragment_id}] ({label}) {evidence_text}\n")
     return "".join(lines)
@@ -1350,6 +1356,7 @@ def _normalize_packet_fragments(
             bound_source=fragment.bound_source,
             source_context_json=fragment.source_context_json,
             section_context_json=fragment.section_context_json,
+            practice_context_json=fragment.practice_context_json,
         )
         for fragment in normalized
     )

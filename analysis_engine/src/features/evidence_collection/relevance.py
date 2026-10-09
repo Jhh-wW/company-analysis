@@ -367,6 +367,16 @@ def business_constraint_scores() -> tuple[SlotScore, ...]:
     )
 
 
+def product_role_relation_scores(text: str, section_heading: str = '') -> tuple[SlotScore, ...]:
+    """기존 장 승자를 바꾸지 않는 제품역할 보조 차선의 점수다."""
+    from features.evidence_collection.product_role_relation import current_product_role_relation
+    from features.evidence_collection import product_role_relation_constants as product_c
+    if not current_product_role_relation(text, section_heading):
+        return ()
+    return (SlotScore('portfolio', product_c.SLOT_ID,
+                      product_c.AUXILIARY_SCORE_MILLIS, (product_c.REASON_CODE,)),)
+
+
 def score_fragment_text(text: str, section_heading: str = "") -> SlotScore | None:
     """조각 원문 하나에 가장 잘 맞는 (장, 슬롯)을 고른다. 신호가 없으면 None.
 
@@ -525,16 +535,16 @@ def score_fragment_slots_with_signal(
             hits.append("stated_investment_plan")
         payment_route = (
             slot_id == "business_model:value_exchange"
-            and value_exchange_has_payment_route(text)
+            and value_exchange_has_payment_route(score_text)
         )
         direct_exchange = (
             slot_id == "business_model:value_exchange"
-            and value_exchange_has_direct_relation(text)
+            and value_exchange_has_direct_relation(score_text)
         )
         if slot_id == "business_model:value_exchange":
             raw_hits = tuple(hits)
             hits = list(value_exchange_supported_hits(
-                text, keywords, keyword_has_direct_hit,
+                score_text, keywords, keyword_has_direct_hit,
             ))
             if raw_hits or payment_route or direct_exchange or value_exchange_policy_observed(text):
                 # 부적격 약신호는 재판정용 무신호 자료가 되지 않도록 관측만 남긴다.

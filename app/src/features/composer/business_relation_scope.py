@@ -6,7 +6,7 @@
 from collections.abc import Mapping
 from src.shared.report_evidence.partnership_scope import research_partnership_claim_problem
 from src.shared.report_evidence.business_slot_scope import business_slot_scope_problem
-from src.shared.report_evidence.business_slot_scope_constants import CUSTOMER_SLOT, REVENUE_SLOT, PRODUCT_ROLE_SLOT
+from src.shared.report_evidence.business_slot_scope_constants import CUSTOMER_SLOT, REVENUE_RELATION_SLOTS, PRODUCT_ROLE_SLOT
 from src.features.composer.portfolio_product_scope import portfolio_product_scope_problem
 from src.features.composer.revenue_activity_scope import revenue_activity_scope_problem
 import re
@@ -32,7 +32,8 @@ from src.features.composer.business_relation_scope_constants import (
     ACTOR_CLAUSE_BOUNDARY_RE, ACTUAL_ACTION_RE, BUSINESS_RELATION_PROBLEM,
     BUSINESS_RELATION_SECTIONS, CLAUSE_BOUNDARY_RE, CUSTOMER_CLAIM_RE,
     CUSTOMER_FAMILIES, CUSTOMER_SOURCE_RELATION_RE, GENERIC_SUBJECT_RE,
-    NEGATED_ACTION_RE, OTHER_ACTOR_RE, PENDING_ACTION_RE, RELATION_FAMILIES,
+    NEGATED_ACTION_RE, OTHER_ACTOR_RE, INDUSTRY_COLLECTIVE_SUBJECT_RE, PENDING_ACTION_RE, RELATION_FAMILIES,
+    INDUSTRY_RELATION_CONTEXT_RE, COMPANY_RELATION_ACTOR_RE,
     STATE_CLAUSE_BOUNDARY_RE, SUBJECT_RE, SUBJECT_SUFFIX_RE,
     ACCOUNTING_INSPECTION_RE, PRODUCT_QUALITY_RE, QUALITY_PURPOSE_LINK_RE, QUALITY_PURPOSE_DENIAL_RE,
     PROVISION_ACTION_RE, PROVISION_ITEM_FAMILIES, PROVISION_GENERIC_ITEMS,
@@ -71,6 +72,10 @@ def _subject(unit: str) -> str:
 
 
 def _compatible_subject(claim: str, source: str) -> bool:
+    # 주어 생략은 기존 계약을 유지하되 명시 복수 산업 주어의 회사 승격은 막는다.
+    if (INDUSTRY_COLLECTIVE_SUBJECT_RE.match(_surface(source))
+            and not INDUSTRY_COLLECTIVE_SUBJECT_RE.match(_surface(claim))):
+        return False
     candidate_subject, source_subject = _subject(claim), _subject(source)
     # 문장 주어가 잘린 원문은 새 사실로 승격하지 않는다. 주어 밖 관계는 기존 검수가 맡는다.
     if not candidate_subject:
@@ -78,6 +83,14 @@ def _compatible_subject(claim: str, source: str) -> bool:
     if not source_subject:
         return True
     return candidate_subject in source_subject or source_subject in candidate_subject
+
+
+def _relation_units(own_sources: Mapping[str, str], claim: str) -> tuple[str, ...]:
+    """명시 산업 문맥에서는 관계 자체의 회사·부문 주어를 요구한다."""
+    general_claim = bool(INDUSTRY_COLLECTIVE_SUBJECT_RE.match(_surface(claim)))
+    return tuple(unit for source in own_sources.values() for unit in _units(source)
+                 if general_claim or not INDUSTRY_RELATION_CONTEXT_RE.search(_surface(source))
+                 or COMPANY_RELATION_ACTOR_RE.search(_surface(unit)))
 
 
 def _state_supported(claim: str, source: str, source_pattern: re.Pattern) -> bool:
@@ -343,11 +356,11 @@ def business_relation_scope_problem(
         problem = revenue_activity_scope_problem(text, own_sources)
         if problem:
             return problem
-        # 참인 계정 정의도 회사의 실제 수익방식 칸을 대신 채울 수 없다.
+        # 참인 계정 정의·인식정책도 실제 수익방식과 거래 대가 칸을 대신 채울 수 없다.
         # 원문에 실제 상품 수익이 섞이면 그 절과 다른 의미칸은 그대로 남긴다.
-        if claim_slot == REVENUE_SLOT and (
-            business_slot_scope_problem(text, REVENUE_SLOT)
-            or all(business_slot_scope_problem(source, REVENUE_SLOT)
+        if claim_slot in REVENUE_RELATION_SLOTS and (
+            business_slot_scope_problem(text, claim_slot)
+            or all(business_slot_scope_problem(source, claim_slot)
                    for source in own_sources.values())
         ):
             return BUSINESS_RELATION_PROBLEM
@@ -363,6 +376,7 @@ def business_relation_scope_problem(
     source_units = tuple(unit for value in own_sources.values() for unit in _units(value))
     for claim in _units(text):
         candidate = _surface(claim)
+        relation_units = _relation_units(own_sources, claim)
         if section_id == "business_model":
             for match in RECEIVABLE_COLLECTION_RE.finditer(candidate):
                 item = match["object"]
@@ -399,7 +413,7 @@ def business_relation_scope_problem(
                 continue
             if not any(source_pattern.search(_surface(unit))
                        and _compatible_subject(claim, unit)
-                       and _state_supported(claim, unit, source_pattern) for unit in source_units):
+                       and _state_supported(claim, unit, source_pattern) for unit in relation_units):
                 return BUSINESS_RELATION_PROBLEM
         if CUSTOMER_CLAIM_RE.search(candidate):
             for _, family in CUSTOMER_FAMILIES:
@@ -409,6 +423,6 @@ def business_relation_scope_problem(
                            and CUSTOMER_SOURCE_RELATION_RE.search(_surface(unit))
                            and ACTUAL_ACTION_RE.search(_surface(unit))
                            and _compatible_subject(claim, unit)
-                           and _state_supported(claim, unit, family) for unit in source_units):
+                           and _state_supported(claim, unit, family) for unit in relation_units):
                     return BUSINESS_RELATION_PROBLEM
     return ""

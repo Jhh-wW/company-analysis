@@ -173,7 +173,7 @@ def test_제조담당_경력과_실제업무가_섞여도_원문과_현재업무
 def test_새분류와_겹치는_문맥창_범위의_캐시를_갱신한다():
     from features.evidence_collection import constants as c
     # 원문은 보존하지만 제품 역할 채점 계약이 달라 옛 수집 캐시와 구분한다.
-    assert c.COLLECTOR_VERSION == "evidence_collection/3.15"
+    assert c.COLLECTOR_VERSION == "evidence_collection/3.16"
     assert c.PARSER_VERSION == "evidence_collection_segment/2.3"
 
 

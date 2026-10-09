@@ -12,6 +12,7 @@ import hashlib
 import re
 import urllib.parse
 from collections.abc import Mapping
+from src.shared.report_evidence.practice_context import parse_practice_context
 
 from src.features.company_comparison.official_sources import (
     OfficialCandidateSentence,
@@ -329,11 +330,14 @@ def build_typed_comparison_candidate_inputs(
     documents = _document_registry(result)
     expected_contexts: dict[tuple[str, str], set[str]] = {}
     expected_sections: dict[tuple[str, str, str], set[str]] = {}
+    expected_practices: dict[tuple[str, str, str], set[str]] = {}
     for candidate in result.candidates:
         for fragment in candidate.fragments:
             expected_contexts.setdefault((fragment.document_id, fragment.text_sha256), set()).add(fragment.source_context_json)
             expected_sections.setdefault((fragment.document_id, fragment.location, fragment.text_sha256), set()).add(fragment.section_context_json)
+            expected_practices.setdefault((fragment.document_id, fragment.location, fragment.text_sha256), set()).add(fragment.practice_context_json)
     copied = {int(number): dict(raw) for number, raw in fragments.items()}
+    practice_numbers: set[int] = set()
 
     sources: list[Source] = []
     for number, raw in sorted(copied.items()):
@@ -368,6 +372,15 @@ def build_typed_comparison_candidate_inputs(
         context_values = expected_contexts.get((document_id, raw_digest), set())
         raw_context = raw.get("source_context_json", "")
         raw_section = raw.get("section_context_json", "")
+        raw_practice = raw.get("practice_context_json", "")
+        practice_values = expected_practices.get((document_id, str(raw.get("원문위치", "")), raw_digest), set())
+        if type(raw_practice) is not str or (practice_values and practice_values != {raw_practice}) or (raw_practice and not practice_values):
+            raise ValueError("typed 비교 후보가 원문 예시 문맥을 삭제하거나 바꿨습니다")
+        if parse_practice_context(raw_practice, document_id=document_id,
+                                  document_sha256=document.content_sha256,
+                                  fragment_location=str(raw.get("원문위치", "")),
+                                  fragment_sha256=raw_digest, fragment_text=raw_text):
+            practice_numbers.add(number)
         section_values = expected_sections.get((document_id, str(raw.get("원문위치", "")), raw_digest), set())
         if type(raw_section) is not str or (section_values and section_values != {raw_section}) or (raw_section and not section_values):
             raise ValueError("typed 비교 후보가 원문 사업 범위 문맥을 삭제하거나 바꿨습니다")
@@ -412,7 +425,9 @@ def build_typed_comparison_candidate_inputs(
     # 문서·위치·content hash에 결속된 Source와 한 문장만 만든다.
     comparison_rows: list[OfficialCandidateSentence] = []
     next_candidate_number = max(copied, default=0) + 1
-    initial_rows = candidate_sentences_from_fragments(copied, sources)
+    initial_rows = candidate_sentences_from_fragments(
+        {number: raw for number, raw in copied.items() if number not in practice_numbers}, sources,
+    )
     existing_candidate_keys = {
         (
             row.document_identity,
@@ -446,6 +461,9 @@ def build_typed_comparison_candidate_inputs(
             raise ValueError("typed DART 비교 후보 URL이 올바르지 않습니다") from error
         if _DART_RECEIPT.fullmatch(receipt) is None or host != "dart.fss.or.kr":
             raise ValueError("typed DART 비교 후보의 문서 신원이 올바르지 않습니다")
+        if parse_practice_context(item.practice_context_json, document_id=item.document_id,
+                                  document_sha256=item.document_content_sha256):
+            continue
         source = seal_collected_source(
             Source(
                 number=next_candidate_number,
