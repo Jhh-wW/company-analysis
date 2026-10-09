@@ -41,6 +41,7 @@ from src.features.composer.writer_schema_constants import (
 )
 from src.features.composer.supplement_feedback import supplement_feedback
 from src.features.composer.scope_supplement_feedback import ScopeSupplementFailure, render_scope_supplement_feedback
+from src.features.composer.challenge_response_feedback import ResponseSupplementFailure, render_response_supplement_feedback
 from src.features.composer.partial_evidence import PartialEvidenceView
 from src.features.composer.partial_evidence_constants import (
     EXACT_EVIDENCE_SCOPE_GUIDE,
@@ -1969,6 +1970,7 @@ def compose_selected_sections(
     section_ids: tuple[str, ...],
     missing_slots_by_section: Mapping[str, tuple[str, ...]] | None = None,
     scope_failures_by_section: Mapping[str, tuple[ScopeSupplementFailure, ...]] | None = None,
+    response_failures_by_section: Mapping[str, tuple[ResponseSupplementFailure, ...]] | None = None,
 ) -> ComposedReport:
     """승인된 FULL 장만 각자의 기존 typed packet으로 한 번씩 다시 쓴다.
 
@@ -2008,9 +2010,13 @@ def compose_selected_sections(
         scope_feedback = render_scope_supplement_feedback(
             packet, (scope_failures_by_section or {}).get(section_id, ()),
         )
+        response_feedback = render_response_supplement_feedback(
+            packet, (response_failures_by_section or {}).get(section_id, ()),
+            (missing_slots_by_section or {}).get(section_id, ()),
+        )
         section = _compose_one_section(
             section_id,
-            supplement_feedback(section_id, missing_slots_by_section, packet=packet) + scope_feedback + build_section_prompt(
+            supplement_feedback(section_id, missing_slots_by_section, packet=packet) + scope_feedback + response_feedback + build_section_prompt(
                 company_name,
                 section_id,
                 prepared.packets[section_id],

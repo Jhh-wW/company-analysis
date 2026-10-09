@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import asdict
 import datetime as dt
 import json
+import re
 
 from src.features.news_intake import industry_constants as ic
 from src.features.news_intake.industry_assessment import normalize_assessments, observe_assessments
@@ -16,6 +17,23 @@ from src.features.news_intake.models import NewsCandidate, NewsCompanyContext
 from src.features.news_intake.quote_selection import quote_response_sha256, restore_quote_response
 from src.shared.business_challenge_context import IndustryProblemEvidence, INDUSTRY_GEOGRAPHIES
 from src.shared.report_generation.models import exact_text_sha256
+
+
+def _current_problem_before_response(problem: str, clause: str) -> bool:
+    """같은 문제의 명시 현재 술어와 뒤의 대응 가능성만 분리한다."""
+    possibilities = tuple(ic.INDUSTRY_POSSIBILITY_RE.finditer(clause))
+    for boundary in ic.INDUSTRY_RESPONSE_CLAUSE_BOUNDARY_RE.finditer(clause):
+        head = clause[:boundary.end()]
+        if any(match.start() < boundary.end() for match in possibilities):
+            continue
+        if ic.INDUSTRY_CURRENT_CONSTRAINT_UNBOUND_RE.search(head):
+            continue
+        for start in (match.start() for match in re.finditer(re.escape(problem), head)):
+            end = start + len(problem)
+            for current in ic.INDUSTRY_CURRENT_CONSTRAINT_RE.finditer(head, start):
+                if current.start() < end or ic.INDUSTRY_CURRENT_CONSTRAINT_BRIDGE_RE.fullmatch(head[end:current.start()]):
+                    return True
+    return False
 
 
 def _has_supported_problem_and_geography(entry: dict[str, object], text: str) -> bool:
@@ -28,7 +46,11 @@ def _has_supported_problem_and_geography(entry: dict[str, object], text: str) ->
                             if problem in clause)
     if problem_clauses and all(ic.INDUSTRY_ACCOUNTING_POLICY_RE.search(clause) for clause in problem_clauses):
         return False
-    if problem_clauses and all(ic.INDUSTRY_POSSIBILITY_RE.search(clause) for clause in problem_clauses):
+    if problem_clauses and all(
+        ic.INDUSTRY_POSSIBILITY_RE.search(clause)
+        and not _current_problem_before_response(problem, clause)
+        for clause in problem_clauses
+    ):
         return False
     region = str(entry["geography_evidence"]).casefold()
     detail = str(entry["geography_detail"]).casefold()
