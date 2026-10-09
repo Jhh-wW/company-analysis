@@ -53,6 +53,25 @@ INDUSTRY_REPORT_SCOPE_RE = re.compile(r"(?:산업|시장)\s*(?:환경|수준|전
 INDUSTRY_REPORT_FUTURE_RE = re.compile(
     r"(?:향후|앞으로|미래)[^.!?。;|\n]{0,400}(?:전망|예상|가능성)"
 )
+# 회사가 자료를 발표했다는 행위만으로 시장의 어려움을 자기 피해로 만들지 않는다.
+# 명시한 단일 주어와 완결된 보고 종결만 읽으며 인용 원문을 변경하지 않는다.
+COMPANY_INDUSTRY_REPORT_RE = re.compile(
+    rf"^\s*(?P<subject>[가-힣A-Za-z0-9·&()㈜_-]{{2,{INDUSTRY_SUBJECT_MAX_CHARS}}})"
+    r"(?:은|는|이|가)\s+(?P<body>.+?)\s*"
+    r"(?:직접\s*)?(?:(?:언급|발표|설명|보고|공시|기술|밝히)"
+    r"(?:하고\s*있다|하고\s*있습니다|했다|하였다|한다|합니다|고\s*있다|고\s*있습니다)"
+    r"|밝혔다|밝혔습니다)"
+    r"[.!?。]?\s*$"
+)
+COMPANY_REPORTED_INDUSTRY_SCOPE_RE = re.compile(r"(?:산업|시장|업계|경기\s*상황)")
+COMPANY_REPORTED_OWN_SCOPE_RE = re.compile(
+    r"(?:당사|자사|자기\s*회사|우리\s*회사)"
+)
+# 실제 겪음·중단 등의 행위가 명시된 보고는 기존 회사 귀속 검수에 남긴다.
+COMPANY_REPORTED_EXPERIENCE_RE = re.compile(
+    r"(?:겪|입|받|중단|취소|지연)(?:고\s*있|었|았|됐|되었|했|하였|한다|했다)|"
+    r"(?:손실|피해)(?:이|가|을|를)?\s*(?:발생|입|겪)|발생(?:했|하였)"
+)
 # 같은 후보에 회사 주체나 회사 소유의 사업 관계가 있으면 의미 검수에 남긴다.
 # 자기 원문의 다른 문장에 있는 회사 주체를 후보에 대여하지 않는다.
 COMPANY_SCOPE_RE = re.compile(

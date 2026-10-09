@@ -13,6 +13,8 @@ from src.features.composer.challenge_industry_scope_constants import (
     INDUSTRY_ENVIRONMENT_PREFIX_RE, INDUSTRY_GROUP_SUBJECT_RE,
     INDUSTRY_SCOPE_DIRECT_ISSUE_SLOTS,
     INDUSTRY_CLAUSE_SUBJECT_RE,
+    COMPANY_INDUSTRY_REPORT_RE, COMPANY_REPORTED_INDUSTRY_SCOPE_RE,
+    COMPANY_REPORTED_OWN_SCOPE_RE, COMPANY_REPORTED_EXPERIENCE_RE,
 )
 from src.shared.report_evidence.challenge_eligibility import challenge_issue_problem
 from src.shared.report_evidence.challenge_eligibility_constants import (
@@ -77,6 +79,17 @@ def industry_only_challenge_problem(text: str, *, claim_slot: str = "") -> str:
         background = MARKET_BACKGROUND_RE.fullmatch(normalized)
         surface = "".join(normalized.split())
         environment = INDUSTRY_ENVIRONMENT_PREFIX_RE.fullmatch(normalized)
+        company_report = COMPANY_INDUSTRY_REPORT_RE.fullmatch(
+            environment.group("body") if environment else normalized,
+        )
+        if (company_report
+                and COMPANY_REPORTED_INDUSTRY_SCOPE_RE.search(company_report.group("body"))
+                and not COMPANY_REPORTED_OWN_SCOPE_RE.search(company_report.group("body"))
+                and not COMPANY_REPORTED_EXPERIENCE_RE.search(company_report.group("body"))):
+            # 보고한 회사와 보고 내용 속 피해 주체는 다르다. 빈 사유로 피해를
+            # 승인하지 않으며 실제 자기 사업의 제약이 섞이면 기존 검수에 남긴다.
+            found_industry_subject = True
+            continue
         # 산업 배경 뒤 일반 업계 집단의 변화·전망을 회사 직접 과제로 세지 않는다.
         # 같은 주장에 명시 회사 제약이 있으면 기존 의미 검수에 남긴다. 해석 칸과
         # 별도 산업 맥락의 원문 검증·등록은 이 분기로 승인하거나 바꾸지 않는다.

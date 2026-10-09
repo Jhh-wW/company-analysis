@@ -91,3 +91,38 @@ def test_negative_forecast_and_quoted_assertion_do_not_prove_actual_share(verb):
 ])
 def test_later_subject_and_other_owner_do_not_borrow_the_first_subject(candidate):
     assert revenue_population_claim_problem(candidate, {"1": TABLE + DIRECT})
+
+
+@pytest.mark.parametrize('candidate', [
+    '개별재무제표 기준으로는 설비 사업 매출이 전체 매출의 약 55%를 차지한다.',
+    '별도재무제표 기준으로는 설비 사업이 전체 매출의 약 55%를 차지한다.',
+    '설비 매출이 개별 기준 전체 매출의 약 55%를 차지한다.',
+    '회사는 설비 사업 매출이 개별재무제표 기준 전체 매출의 약 55%를 차지한다고 밝혔다.',
+    '회사의 사업은 설비와 부품이며, 이 가운데 설비 매출이 개별 기준 전체 매출의 약 55%를 차지한다.',
+])
+def test_basis_particle_and_same_subject_basis_survive(candidate):
+    source = '개별재무제표 기준 매출액 ' + TABLE + DIRECT
+    assert not revenue_population_claim_problem(candidate, {'1': source})
+
+
+def test_named_business_tail_basis_requires_same_basis_company_title():
+    candidate = '가람제작의 사업은 설비와 부품이며, 이 가운데 설비 매출이 개별 기준 전체 매출의 약 55%를 차지한다.'
+    source = '개별재무제표 기준 매출액 (주)가람제작 (단위: 천원) ' + TABLE + DIRECT
+    assert not revenue_population_claim_problem(candidate, {'1': source})
+
+
+@pytest.mark.parametrize('candidate', [
+    '연결재무제표 기준으로는 설비 사업 매출이 전체 매출의 약 55%를 차지한다.',
+    '개별재무제표 기준으로는 부품 사업 매출이 전체 매출의 약 55%를 차지한다.',
+    '설비 매출이 연결 기준 전체 매출의 약 55%를 차지한다.',
+    '다른 회사는 설비 매출이 개별 기준 전체 매출의 약 55%를 차지한다.',
+    '다른 회사의 사업은 설비와 부품이며, 이 가운데 설비 매출이 개별 기준 전체 매출의 약 55%를 차지한다.',
+    '가람제작의 사업은 설비와 부품이며, 이 가운데 설비 매출이 개별 기준 전체 매출의 약 55%를 차지한다.',
+    '회사의 사업은 설비와 부품이며, 이 가운데 부품 매출이 개별 기준 전체 매출의 약 55%를 차지한다.',
+    '회사의 사업은 연결 기준 설비와 부품이며, 이 가운데 설비 매출이 개별 기준 전체 매출의 약 55%를 차지한다.',
+    '개별 기준으로는 설비 사업 매출이 연결 기준 전체 매출의 약 55%를 차지한다.',
+    '회사의 사업은 설비와 부품이며, 이 가운데 설비 매출이 전체 매출의 약 55%를 차지한다.',
+])
+def test_new_basis_forms_keep_population_item_and_owner_boundaries(candidate):
+    source = '개별재무제표 기준 매출액 ' + TABLE + DIRECT
+    assert revenue_population_claim_problem(candidate, {'1': source})

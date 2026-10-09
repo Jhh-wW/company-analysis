@@ -18,9 +18,15 @@ SCHEDULE_FUTURE_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:예정(?:이다|입니다|이며|인)|계획(?:이다|입니다|이며)|계획하고\s*있)"
 )
 SCHEDULE_MODIFIER_RE: Final[re.Pattern[str]] = re.compile(
-    rf"(?:{SCHEDULE_ACTION})\s*예정인\s*(?:제\s*\d+\s*기\s*)?"
+    rf"(?:{SCHEDULE_ACTION})\s*예정인\s*(?:제\s*(?P<term>\d+)\s*기\s*)?"
     r"(?P<event>[가-힣A-Za-z][가-힣A-Za-z0-9·]*)\s*(?:에서|에|을|를)"
 )
+SCHEDULE_REFERENCE_PREFIX: Final[str] = r"(?:같은|해당|이번)"
+SCHEDULE_PERIODIC_EVENT_PREFIX_RE: Final[re.Pattern[str]] = re.compile(r"^(?:정기|임시)")
+SCHEDULE_AGENDA_RE: Final[re.Pattern[str]] = re.compile(r"안건|의\s*건")
+SCHEDULE_AGENDA_ACTION_RE: Final[re.Pattern[str]] = re.compile(r"선임|해임|개정|승인")
+SCHEDULE_RELATED_AGENDA_RE: Final[re.Pattern[str]] = re.compile(r"(?P<agenda>.+)(?:과|와)관련하여$")
+SCHEDULE_UNQUALIFIED_REAPPOINTMENT_RE: Final[re.Pattern[str]] = re.compile(r"^중임(?:의)?건")
 SCHEDULE_OBJECT_RE: Final[re.Pattern[str]] = re.compile(
     r"(?P<object>[가-힣A-Za-z][가-힣A-Za-z0-9·]*)\s*(?:을|를)\s*$"
 )

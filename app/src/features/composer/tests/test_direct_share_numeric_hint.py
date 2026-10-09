@@ -83,3 +83,46 @@ def test_denominator_fallback_cannot_borrow_another_item_direct_unit():
 def test_denominator_fallback_still_rejects_other_item_even_with_equal_value():
     source = SOURCE.replace('센서 매출이 전체 매출', '설비매출이 전체매출')
     assert not direct_share_numeric_hint(CANDIDATE, {'1': source})
+
+
+@pytest.mark.parametrize('candidate', [
+    '개별재무제표 기준으로는 센서 사업 매출이 전체 매출의 약 60%를 차지한다.',
+    '개별재무제표 기준으로는 센서 사업이 전체 매출의 약 60%를 차지한다고 밝혔다.',
+])
+def test_valid_basis_variants_get_exact_existing_numeric_proof_hint(candidate):
+    hint = direct_share_numeric_hint(candidate, {'1': SOURCE})
+    proof = json.loads(hint.splitlines()[0].removeprefix(DIRECT_SHARE_NUMERIC_HINT_GUIDE))
+    assert proof['표현'] == candidate and proof['원문'] in SOURCE
+    assert proof['근거'] == '1' and proof['후보값'] == proof['원문값'] == '60%'
+    assert '약 60%' in proof['표현'] and '약 60%' in proof['원문']
+    assert _numeric_valid(candidate, [proof], {'1': SOURCE})
+    assert hint in grounding_hint(candidate, {'1': SOURCE})
+
+
+@pytest.mark.parametrize('candidate', [
+    '센서 매출이 개별 기준 전체 매출의 약 60%를 차지한다.',
+    '회사의 사업은 센서와 설비이며, 이 가운데 센서 매출이 개별 기준 전체 매출의 약 60%를 차지한다.',
+])
+def test_post_subject_basis_keeps_existing_numeric_constraint_and_no_hint(candidate):
+    from src.shared.revenue_population_scope import revenue_population_claim_problem
+    assert not revenue_population_claim_problem(candidate, {'1': SOURCE})
+    proof = {'표현': candidate, '항목': '전체 매출', '근거': '1',
+             '원문': SOURCE[SOURCE.index('당사의'):].rstrip('.'),
+             '원문항목': '전체 매출', '원문값': '60%', '후보값': '60%'}
+    detail = {}
+    assert not _numeric_valid(candidate, [proof], {'1': SOURCE}, detail)
+    assert detail['stage'] == 'value_constraint_mismatch'
+    assert not direct_share_numeric_hint(candidate, {'1': SOURCE})
+
+
+@pytest.mark.parametrize('candidate', [
+    '개별재무제표 기준으로는 설비 사업이 전체 매출의 약 60%를 차지한다.',
+    '센서 매출이 연결 기준 전체 매출의 약 60%를 차지한다.',
+    '센서 매출이 개별 기준 약 60%를 차지한다.',
+    '센서 매출이 개별 기준 전체 시장 매출의 약 60%를 차지한다.',
+    '다른 회사는 센서 매출이 개별 기준 전체 매출의 약 60%를 차지한다.',
+    '회사의 사업은 센서와 설비이며, 이 가운데 센서 매출이 전체 매출의 약 60%를 차지한다.',
+    '개별재무제표 기준으로는 센서 사업이 전체 매출의 약 61%를 차지한다.',
+])
+def test_denominator_only_hint_keeps_same_item_basis_owner_and_amount(candidate):
+    assert not direct_share_numeric_hint(candidate, {'1': SOURCE})

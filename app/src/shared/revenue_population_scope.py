@@ -173,13 +173,26 @@ def _explicit_company_share_support(candidate: str, position: int, sources: Mapp
                     and _same_business_clause_owner(prefix.rsplit(',', 1)[0], source,
                                                     source_bases[-1].start() if source_bases else start, start)):
                 prefixes.append(tail_prefix)
+            # 같은 사업 설명 뒤의 품목 주어에 직접 붙은 기준도 해당 비중 절이다.
+            # 이 생략 주어는 앞 사업절의 자기 소유가 확인되고 전체 접두 기준이 같을 때만 쓴다.
+            if (tail_prefix != prefix and item
+                    and re.fullmatch(c.DIRECT_SHARE_BUSINESS_TAIL_PREFIX + re.escape(item)
+                                     + c.DIRECT_SHARE_CANDIDATE_SUBJECT + c.DIRECT_SHARE_BASIS_TEXT,
+                                     tail_prefix)
+                    and {_share_reporting_basis(match['basis'])
+                          for match in c.DIRECT_SHARE_REPORTING_BASIS_RE.finditer(prefix)} == {source_basis}
+                    and not c.DIRECT_SHARE_FOREIGN_OWNER_RE.search(prefix)
+                    and _same_business_clause_owner(prefix.rsplit(',', 1)[0], source,
+                                                    source_bases[-1].start() if source_bases else start, start)):
+                prefixes.append(tail_prefix)
             for own_prefix in prefixes:
                 candidate_bases = {_share_reporting_basis(match['basis'])
                                    for match in c.DIRECT_SHARE_REPORTING_BASIS_RE.finditer(own_prefix)}
                 if candidate_bases != ({source_basis} if source_basis else set()):
                     continue
                 subject = re.match(c.DIRECT_SHARE_SUBJECT_PREFIX + re.escape(item)
-                                   + c.DIRECT_SHARE_CANDIDATE_SUBJECT, own_prefix) if item else None
+                                   + c.DIRECT_SHARE_CANDIDATE_SUBJECT
+                                   + c.DIRECT_SHARE_POST_SUBJECT_BASIS, own_prefix) if item else None
                 if subject and not c.DIRECT_SHARE_OTHER_SUBJECT_RE.search(own_prefix[subject.end():]):
                     return True
     return False

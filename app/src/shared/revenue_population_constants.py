@@ -47,10 +47,14 @@ DIRECT_COMPANY_SHARE_RE = re.compile(
 DIRECT_SHARE_ITEM_SUFFIX_RE = re.compile(r"(?:사업|제품|서비스)$")
 DIRECT_SHARE_CANDIDATE_SUBJECT = r"(?:사업|제품|서비스)?(?:매출액|매출)?(?:은|는|이|가)"
 DIRECT_SHARE_COMPANY_CASE = r"(?:당사|회사)의경우(?:도|는)?(?:마찬가지로)?"
+DIRECT_SHARE_BASIS_TEXT = r"(?:연결|별도|개별)(?:재무제표)?기준"
 DIRECT_SHARE_SUBJECT_PREFIX = (
-    r"^(?:(?:연결|별도|개별)(?:재무제표)?기준으로)?"
+    rf"^(?:{DIRECT_SHARE_BASIS_TEXT}으로(?:는)?)?"
     rf"(?:당사는|회사는|{DIRECT_SHARE_COMPANY_CASE})?"
+    r"(?:이가운데)?"
 )
+DIRECT_SHARE_POST_SUBJECT_BASIS = rf"(?:{DIRECT_SHARE_BASIS_TEXT})?"
+DIRECT_SHARE_BUSINESS_TAIL_PREFIX = r"^(?:이가운데)?"
 DIRECT_SHARE_CASE_START_RE = re.compile(rf"^{DIRECT_SHARE_COMPANY_CASE}")
 DIRECT_SHARE_REPORTING_BASIS_RE = re.compile(r"(?P<basis>연결|별도|개별)(?:재무제표)?\s*기준")
 DIRECT_SHARE_BASIS_CLAUSE_START_RE = re.compile(r"^(?:연결|별도|개별)(?:재무제표)?기준으로")

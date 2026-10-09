@@ -14,7 +14,7 @@ def direct_share_numeric_hint(text: str, sources: Mapping[str, str]) -> str:
     compact = ''.join(text.split())
     claims = tuple(population_constants.WHOLE_REVENUE_CLAIM_RE.finditer(compact))
     metric = c.DIRECT_SHARE_COMMON_METRIC_RE.search(text)
-    if (len(claims) != 1 or metric is None or revenue_population_claim_problem(text, sources)
+    if (len(claims) != 1 or revenue_population_claim_problem(text, sources)
             or not _explicit_company_share_support(compact, claims[0].start(), sources)):
         return ''
     # grounding_hint 호출 시점에는 기존 검증기 모듈이 이미 로드돼 있다.
@@ -25,12 +25,12 @@ def direct_share_numeric_hint(text: str, sources: Mapping[str, str]) -> str:
             direct = population_constants.DIRECT_COMPANY_SHARE_RE.fullmatch(''.join(quote.split()))
             source_metric = c.DIRECT_SHARE_COMMON_METRIC_RE.search(quote)
             value = c.DIRECT_SHARE_PERCENT_RE.search(direct['share']) if direct else None
-            if source_metric is None or value is None:
+            if value is None:
                 continue
             if not _explicit_company_share_support(compact, claims[0].start(),
                                                    {source_id: source}, direct_unit=quote):
                 continue
-            metrics = [(metric.group(), source_metric.group())]
+            metrics = [(metric.group(), source_metric.group())] if metric and source_metric else []
             candidate_denominator = c.DIRECT_SHARE_DENOMINATOR_METRIC_RE.search(text)
             source_denominator = c.DIRECT_SHARE_DENOMINATOR_METRIC_RE.search(quote)
             if candidate_denominator and source_denominator:

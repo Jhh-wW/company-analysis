@@ -15,6 +15,9 @@ from src.features.composer.scheduled_plan_date_constants import (
     SCHEDULE_DATE_LINK_RE, SCHEDULE_DATE_RE, SCHEDULE_FUTURE_RE,
     SCHEDULE_MODIFIER_RE, SCHEDULE_NON_TARGET_RE, SCHEDULE_NORMALIZE_RE,
     SCHEDULE_OBJECT_RE, SCHEDULE_REPORTED_PLAN_RE,
+    SCHEDULE_REFERENCE_PREFIX, SCHEDULE_PERIODIC_EVENT_PREFIX_RE,
+    SCHEDULE_AGENDA_RE, SCHEDULE_AGENDA_ACTION_RE,
+    SCHEDULE_RELATED_AGENDA_RE, SCHEDULE_UNQUALIFIED_REAPPOINTMENT_RE,
 )
 
 
@@ -88,13 +91,47 @@ def _dated_plans(clause: str):
         yield stamp, end_date, predicate, tail
 
 
+def _same_agenda(source_body: str, claim_body: str, claim_intro: str) -> bool:
+    """안건 상정의 마지막 '결의'만으로 다른 안건의 날짜를 빌리지 않는다."""
+    if not (SCHEDULE_AGENDA_RE.search(source_body) or SCHEDULE_AGENDA_RE.search(claim_body)):
+        return True
+    source_action = SCHEDULE_AGENDA_ACTION_RE.search(source_body)
+    claim_action = SCHEDULE_AGENDA_ACTION_RE.search(claim_body)
+    if claim_action is None and SCHEDULE_UNQUALIFIED_REAPPOINTMENT_RE.match(claim_body):
+        # '감사 선임과 관련하여 같은 행사에서 중임 건'의 명시된 앞 안건만 잇는다.
+        related = SCHEDULE_RELATED_AGENDA_RE.search(claim_intro)
+        if related:
+            claim_body = related["agenda"]
+            claim_action = SCHEDULE_AGENDA_ACTION_RE.search(claim_body)
+    if not (source_action and claim_action) or source_action.group() != claim_action.group():
+        return False
+    target = _surface(source_body[:source_action.start()]).rstrip("의")
+    return bool(target and target in _surface(claim_body[:claim_action.start()]))
+
+
 def _same_undated_event(claim: str, source_clause: str, tail: str) -> bool:
     """자기 원문의 같은 행사와 같은 목적어·예정행위만 날짜 제약으로 운반한다."""
     event = SCHEDULE_MODIFIER_RE.search(tail)
     if event is None:
         return False
     compact = _surface(claim)
-    if not re.search(re.escape(event["event"]) + r"(?:에서|에|을|를)", compact):
+    event_name = event["event"]
+    shortened = SCHEDULE_PERIODIC_EVENT_PREFIX_RE.sub("", event_name, count=1)
+    reference = re.search(
+        SCHEDULE_REFERENCE_PREFIX + r"(?:제(?P<term>\d+)기)?"
+        + "(?:" + "|".join(re.escape(value) for value in dict.fromkeys((event_name, shortened))) + ")"
+        + r"(?:에서|에|을|를)", compact,
+    )
+    direct = re.search(r"(?:제(?P<term>\d+)기)?" + re.escape(event_name) + r"(?:에서|에|을|를)", compact)
+    claim_event = reference or direct
+    if claim_event is None:
+        return False
+    # 지시어 유무와 무관하게 명시된 다른 회차의 날짜는 운반하지 않는다.
+    if claim_event["term"] and claim_event["term"] != event["term"]:
+        return False
+    source_compact = _surface(source_clause)
+    source_event = re.search(re.escape(event_name) + r"(?:에서|에|을|를)", source_compact)
+    if source_event is None:
         return False
     for predicate in SCHEDULE_FUTURE_RE.finditer(source_clause):
         obj = SCHEDULE_OBJECT_RE.search(source_clause[:predicate.start()])
@@ -104,7 +141,10 @@ def _same_undated_event(claim: str, source_clause: str, tail: str) -> bool:
             claim_object = SCHEDULE_OBJECT_RE.search(claim[:claim_predicate.start()])
             if (claim_object and _surface(obj["object"]) == _surface(claim_object["object"])
                     and predicate["action"] == claim_predicate["action"]):
-                return True
+                source_body = source_compact[source_event.end():len(_surface(source_clause[:predicate.start()]))]
+                claim_body = compact[claim_event.end():len(_surface(claim[:claim_predicate.start()]))]
+                if _same_agenda(source_body, claim_body, compact[:claim_event.start()]):
+                    return True
     return False
 
 
