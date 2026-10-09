@@ -688,7 +688,8 @@ FINANCIAL_COMPANY_REVENUE_KEYWORDS: Final[tuple[str, ...]] = (
 #: 3.9: 자기 영업표의 검색 근거 보충과 회계 목적절의 과제 오분류 제한.
 #: 3.11: 자기 영업표의 명시 기간 열이 전기·예정인 행을 현재 사업에서 제외한다.
 #: 명시 사업 성장 제약과 같은 주체의 현재 대응은 원문 범위 그대로 5장 후보에 전달한다.
-COLLECTOR_VERSION: Final[str] = "evidence_collection/3.13"
+#: 3.14: 수익 계정의 포함·제외 정의만으로 사업 수익방식을 채우지 않는다.
+COLLECTOR_VERSION: Final[str] = "evidence_collection/3.14"
 DOCUMENT_IDENTITY_HEADER_MAX_BYTES: Final[int] = 16 * 1024
 #: 2.0: EOF 후보 반복자·유한 문단 구간·제목 오인 방지. 1.x의 저장 한도
 #: 잘림 기록을 새 완료 증명으로 재사용하지 않는다.

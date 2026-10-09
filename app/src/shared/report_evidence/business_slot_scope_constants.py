@@ -2,10 +2,37 @@
 import re
 
 CUSTOMER_SLOT = "business_model:customer_type"
+REVENUE_SLOT = "business_model:revenue_model"
 OPERATING_ROLE_SLOT = "operations_partners:operating_role"
-BUSINESS_SCOPE_SLOTS = frozenset({CUSTOMER_SLOT, OPERATING_ROLE_SLOT})
+BUSINESS_SCOPE_SLOTS = frozenset({CUSTOMER_SLOT, REVENUE_SLOT, OPERATING_ROLE_SLOT})
 SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[가-힣)])[.!?]\s*|[;\n]+")
 CLAUSE_BOUNDARY_RE = re.compile(r"(?<![0-9]),(?![0-9])|(?<=으며)\s+|(?<=이며)\s+")
+# 수익 계정의 포함·제외 정의만 제한한다. 실제 매출 종류의 구성은 그대로 둔다.
+REVENUE_CLASSIFICATION_WINDOW_CHARS = 160
+REVENUE_ACCOUNT_RE = re.compile(
+    r"(?:기타|금융|영업외)(?:영업)?수익(?:항목|계정)?|수익(?:항목|계정)"
+    r"|(?:이자|배당금)수익(?:은|는|이|가|에)")
+# 각주가 계정 표제를 생략한 '기타에는'은 복수의 명시 계정명과 함께 판단한다.
+REVENUE_IMPLICIT_ACCOUNT_RE = re.compile(r"기타(?:항목|계정)?(?:에는|는|에)")
+REVENUE_ACCOUNT_ITEM_RE = re.compile(r"수입기술료|수입수수료|이자수익|배당금수익")
+MIN_REVENUE_ACCOUNT_ITEMS = 2
+REVENUE_CLASSIFICATION_RE = re.compile(
+    rf"(?:수익|항목|계정|수입기술료|수입수수료).{{0,{REVENUE_CLASSIFICATION_WINDOW_CHARS}}}"
+    r"(?:포함|제외|분류|계상|구성)(?:되|된|됩|됨|하|한|합|함)")
+REVENUE_CLAUSE_BOUNDARY_RE = re.compile(
+    CLAUSE_BOUNDARY_RE.pattern
+    + r"|(?<=포함되고)\s+|(?<=제외되고)\s+|(?<=분류하고)\s+|(?<=계상하고)\s+"
+    + r"|(?<=포함되며)\s+|(?<=제외되며)\s+|(?<=분류하며)\s+|(?<=계상하며)\s+")
+REVENUE_ACTIVITY_WINDOW_CHARS = 80
+# 금융업의 대출취급·보험판매처럼 실제 상품 활동을 나타내는 명사도 보존한다.
+# 이자수익·수입수수료·수입기술료의 계정명만으로 활동을 추정하지 않는다.
+REVENUE_ACTIVITY_RE = re.compile(
+    rf"(?:상품|제품|장비|부품|설비|서비스|용역|콘텐츠|기술사용권|라이선스|대출|여신|신탁|보험|자산관리|결제|중개)"
+    rf".{{0,{REVENUE_ACTIVITY_WINDOW_CHARS}}}"
+    r"(?:판매|제공|공급|납품|취급|인수|운용|중개|임대|구독|허여)"
+    rf"|(?:상품|제품|서비스|용역|콘텐츠).{{0,{REVENUE_ACTIVITY_WINDOW_CHARS}}}매출"
+    rf"|(?:기업|개인|고객|차주)(?:대출|여신).{{0,{REVENUE_ACTIVITY_WINDOW_CHARS}}}(?:이자|수수료)"
+)
 CUSTOMER_ADMIN_RE = re.compile(
     r"신용(?:위험|등급|(?:을|를)?평가|정보|도)|매출채권|대손(?:충당|손실)|거래한도|채무불이행")
 CUSTOMER_ADMIN_ACTION_RE = re.compile(
@@ -76,5 +103,6 @@ OPERATING_ACTION_RE = re.compile(
 REJECT_BUSINESS_SLOT_SCOPE = "business_slot_scope_unsupported"
 REMAINING_SUPPORT_RE = {
     CUSTOMER_SLOT: re.compile(r"고객사|거래처|수요처"),
+    REVENUE_SLOT: re.compile(r"판매에서발생|수익원|과금|수수료|매출구조|수익의형태|매출(?:등)?으로구성|매출유형"),
     OPERATING_ROLE_SLOT: re.compile(r"생산|제조|운영한다"),
 }

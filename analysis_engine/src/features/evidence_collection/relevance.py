@@ -501,7 +501,7 @@ def score_fragment_slots_with_signal(
             hits.append("business_incident_response")
         revenue_mix = (
             slot_id == "business_model:revenue_model"
-            and _has_revenue_type_mix(text)
+            and _has_revenue_type_mix(score_text)
         )
         if revenue_mix:
             hits.append("revenue_type_mix")

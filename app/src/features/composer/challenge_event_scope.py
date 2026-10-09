@@ -49,6 +49,7 @@ def _activity_records(text: str, *, claim: bool, additional_actions: tuple[str, 
             current = bool(c.RESPONSE_CURRENT_STATE_RE.search(tail)
                            or c.RESPONSE_ACTIVITY_PROGRESS_TAIL_RE.search(tail)
                            or c.RESPONSE_PERFORMING_TAIL_RE.search(tail)
+                           or c.RESPONSE_PASSIVE_PERFORMING_TAIL_RE.search(tail)
                            or header_current)
             if not claim and not current:
                 current = bool(c.RESPONSE_PRESENT_VERB_TAIL_RE.search(tail)
@@ -58,7 +59,7 @@ def _activity_records(text: str, *, claim: bool, additional_actions: tuple[str, 
                 # 상태를 함께 읽는다. 앞 활동의 성과·이후 절차까지 넓히지 않는다.
                 current = bool(c.RESPONSE_ACTION_JOIN_RE.search(tail)
                                and not c.RESPONSE_FOREIGN_ACTOR_RE.search(tail))
-            if c.RESPONSE_OTHER_STATE_RE.search(tail):
+            if c.RESPONSE_OTHER_STATE_RE.search(c.RESPONSE_CONTINUATION_RE.sub('', tail)):
                 current = False
             if not claim and c.RESPONSE_UNREAL_PREFIX_RE.search(unit[:match.start()]):
                 current = False
@@ -69,7 +70,8 @@ def _activity_records(text: str, *, claim: bool, additional_actions: tuple[str, 
 
 def response_current_activity_problem(candidate: str, sources: Mapping[str, str]) -> str:
     """명사형 대응에 없는 현재진행을 붙이는 경계만 닫고 원문 활동은 보존한다."""
-    performing = tuple(c.RESPONSE_PERFORMING_RE.finditer(candidate))
+    passive_performing = tuple(c.RESPONSE_PASSIVE_PERFORMING_RE.finditer(candidate))
+    performing = (*c.RESPONSE_PERFORMING_RE.finditer(candidate), *passive_performing)
     if not c.RESPONSE_CURRENT_STATE_RE.search(candidate) and not performing:
         return ''
     additional_actions = tuple(dict.fromkeys(
@@ -100,6 +102,10 @@ def response_current_activity_problem(candidate: str, sources: Mapping[str, str]
         source, claim=False, additional_actions=additional_actions)}
     for action, head, actor, _, head_words in claim_records:
         if action not in all_actions:
+            if any(match['activity'] == action for match in passive_performing):
+                # 새로 읽는 명시 수동 진행은 활동명 자체가 없는 원문에도
+                # 현재 상태를 빌리지 않는다. 일반 활동의 의미 검수는 유지한다.
+                return c.TIME_BINDING_PROBLEM
             continue  # 없는 활동 자체의 의미 검수는 기존 계약이 담당한다.
         if not any(source_action == action and current and (not head or not source_head or source_head == head or source_head in head_words)
                    and (not source_actor or source_actor == actor)

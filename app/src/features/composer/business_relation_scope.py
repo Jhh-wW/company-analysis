@@ -6,7 +6,7 @@
 from collections.abc import Mapping
 from src.shared.report_evidence.partnership_scope import research_partnership_claim_problem
 from src.shared.report_evidence.business_slot_scope import business_slot_scope_problem
-from src.shared.report_evidence.business_slot_scope_constants import CUSTOMER_SLOT
+from src.shared.report_evidence.business_slot_scope_constants import CUSTOMER_SLOT, REVENUE_SLOT
 from src.features.composer.portfolio_product_scope import portfolio_product_scope_problem
 from src.features.composer.revenue_activity_scope import revenue_activity_scope_problem
 import re
@@ -337,6 +337,14 @@ def business_relation_scope_problem(
         problem = revenue_activity_scope_problem(text, own_sources)
         if problem:
             return problem
+        # 참인 계정 정의도 회사의 실제 수익방식 칸을 대신 채울 수 없다.
+        # 원문에 실제 상품 수익이 섞이면 그 절과 다른 의미칸은 그대로 남긴다.
+        if claim_slot == REVENUE_SLOT and (
+            business_slot_scope_problem(text, REVENUE_SLOT)
+            or all(business_slot_scope_problem(source, REVENUE_SLOT)
+                   for source in own_sources.values())
+        ):
+            return BUSINESS_RELATION_PROBLEM
     # 원문 사실이 참이어도 회수관리만으로 고객유형 칸을 충족하지 않는다.
     # 혼합 원문은 유지하고 실제 후보의 해당 절만 같은 수집 계약으로 검사한다.
     if (section_id == "business_model" and claim_slot == CUSTOMER_SLOT
