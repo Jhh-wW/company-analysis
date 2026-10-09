@@ -27,6 +27,10 @@ INDUSTRY_TOPIC_PREFIX = "industry_"
 INDUSTRY_QUERY_COUNT = 4
 INDUSTRY_COMPANY_QUERY_COUNT = 2
 INDUSTRY_BODY_DIVISOR = 6
+# 같은 원기사의 새 검증 사업앵커로 탐색할 기회만 예약한다. 의미 승인은 아니다.
+INDUSTRY_ANCHOR_BODY_REVIEW_LIMIT = 1
+INDUSTRY_ANCHOR_BODY_SCOPE_RE = re.compile(r"산업|업계|시장|\b(?:industry|sector|market)\b", re.I)
+INDUSTRY_ANCHOR_BODY_QUESTION_RE = re.compile(r"과제|부담", re.I)
 # 산업·업계의 문제와 동향을 탐색하며 검색어가 실제 문제를 증명하지는 않는다.
 # 첫 질의는 지역을 지정하지 않는다. 국내 탐색 몫의 후보도 본문 지역 검수가 필요하다.
 INDUSTRY_QUERY_EXPRESSIONS = (

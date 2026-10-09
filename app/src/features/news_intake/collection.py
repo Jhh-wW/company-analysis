@@ -123,6 +123,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     industry_analysis_ids: set[str] = set()
     industry_fallback_records: list[dict[str, str]] = []
     industry_initial_reservations = 0
+    anchor_body_reviews: Counter[str] = Counter()
+    reviewed_anchor_bodies: Counter[str] = Counter()
     industry_fallback_ceiling = policy.max_body_articles // ic.INDUSTRY_BODY_DIVISOR
     windows: list[int] = []
     window_counts: dict[str, dict[str, int]] = {}
@@ -169,11 +171,11 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         """조기 중단과 최종 판정이 함께 쓰는 유일한 충분성 평가 — 입력 정의도 같다."""
         return evidence_is_sufficient(all_excerpts, policy, frozenset(republished_urls))
 
-    def analyze_batch(batch: list[tuple[NewsCandidate, str]]) -> None:
+    def analyze_batch(batch: list[tuple[NewsCandidate, str]], *, anchor_body_review: bool = False) -> None:
         nonlocal company
         nonlocal analysis_calls, prompt_chars, response_chars, stopped, analysis_cache_hits
         nonlocal analysis_provider_calls, analysis_provider_unobserved
-        if not batch:
+        if not batch or stopped or lane.stop_event.is_set():
             return
         if analysis_calls >= policy.max_analysis_calls or time.monotonic() >= deadline:
             budget_codes.append(c.ANALYSIS_BUDGET_EXHAUSTED_CODE)
@@ -189,13 +191,16 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         if len(prompt) > policy.max_prompt_chars:
             if len(batch) > 1:
                 middle = len(batch) // 2
-                analyze_batch(batch[:middle])
-                analyze_batch(batch[middle:])
+                analyze_batch(batch[:middle], anchor_body_review=anchor_body_review)
+                analyze_batch(batch[middle:], anchor_body_review=anchor_body_review)
                 return
             excluded["analysis_prompt_budget"] += len(batch)
             budget_codes.append("analysis_prompt_budget")
             return
         analysis_calls += 1
+        if anchor_body_review:
+            anchor_body_reviews["분석호출"] += 1
+            anchor_body_reviews["입력기사"] += len(batch)
         prompt_chars += len(prompt)
         if company.business_anchors:
             industry_observations["검수입력기사"] += len(batch)
@@ -248,6 +253,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         response = restore_quote_response(response, articles=batch, company=company,
                                           selection_enabled=selection)
         analysis_quote_traces.append({
+            "사업앵커본문재검수": anchor_body_review,
             "선택프로토콜": selection, "캐시복원": bool(request.cache_hits),
             "원응답정규JSON_SHA256": source_response_sha256,
             "복원응답정규JSON_SHA256": quote_response_sha256(response),
@@ -263,8 +269,11 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         )
         if normalization_traces:
             analysis_quote_traces[-1].update(normalization_traces[0])
-        industry_problems.extend(industry_found)
+        industry_problems.extend(item for item in industry_found if item not in industry_problems)
         excluded.update(industry_rejected)
+        # 재검수는 산업 판단만 받는다. 첫 회사 인용의 실패·완전성·주체 집계를 다시 세지 않는다.
+        if anchor_body_review:
+            return
         direct_batch = batch
         if company.business_anchors:
             direct_batch = [(candidate, body) for candidate, body in batch if mentions_target(body, company)]
@@ -288,10 +297,47 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             failures.append("grounded_response_incomplete")
         all_excerpts.extend(excerpts)
         relevant_articles.update(item.candidate.source_url for item in excerpts)
-        # 새 원문은 다음 기존 배치부터만 쓴다. 현재 응답을 소급해서 구제하지 않는다.
+        # 새 앵커는 검증 이후의 새 요청에만 쓴다. 현재 응답을 소급해서 구제하지 않는다.
+        previous_anchor_ids = {anchor.anchor_id for anchor in company.business_anchors}
         company = extend_verified_news_business_anchors(
             company, excerpts, document_hashes=document_hashes, as_of=as_of,
         )
+        new_anchors = tuple(anchor for anchor in company.business_anchors
+                            if anchor.source_kind == c.SOURCE_KIND_NEWS
+                            and anchor.anchor_id not in previous_anchor_ids)
+        if not new_anchors or industry_problems:
+            return
+        selected, _ = select_diverse_excerpts(all_excerpts, policy)
+        selected_fragments = tuple(to_evidence_fragment(item) for item in selected)
+        review_batch = []
+        for candidate, body in batch:
+            if reviewed_anchor_bodies[candidate.source_url] >= ic.INDUSTRY_ANCHOR_BODY_REVIEW_LIMIT:
+                continue
+            matching = tuple(anchor for anchor in new_anchors
+                             if anchor.source_url == candidate.source_url
+                             and anchor.document_id == candidate.source_url
+                             and anchor.document_content_sha256 == document_hashes.get(candidate.source_url)
+                             and any(fragment.text == anchor.exact_text and fragment.url == anchor.source_url
+                                     and f"기사 본문 · {fragment.fragment_id}" == anchor.location
+                                     for fragment in selected_fragments))
+            if not matching or not ic.INDUSTRY_ANCHOR_BODY_SCOPE_RE.search(body):
+                continue
+            if not (ic.INDUSTRY_SEARCH_PROBLEM_RE.search(body)
+                    or ic.INDUSTRY_SEARCH_QUESTION_RE.search(body)
+                    or ic.INDUSTRY_ANCHOR_BODY_QUESTION_RE.search(body)):
+                continue
+            anchor_body_reviews["기회기사"] += 1
+            if analysis_calls >= policy.max_analysis_calls:
+                anchor_body_reviews["분석예산없음"] += 1
+                continue
+            if stopped or lane.stop_event.is_set() or clock() >= deadline:
+                anchor_body_reviews["중단또는기한"] += 1
+                continue
+            reviewed_anchor_bodies[candidate.source_url] += 1
+            review_batch.append((candidate, body))
+        # 같은 바이트를 새 앵커가 포함된 새 요청에만 넣는다. 검색·본문 예산을 다시 소비하지 않는다.
+        if review_batch:
+            analyze_batch(review_batch, anchor_body_review=True)
 
     def queue_body(candidate: NewsCandidate, full_body: str,
                    batch: list[tuple[NewsCandidate, str]]) -> None:
@@ -713,6 +759,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             "조각선택제외앵커": len(news_anchors) - len(retained_news_anchors),
             "연결산업문제선택제외": removed_industry_problems,
         },
+        "뉴스사업앵커본문재검수": dict(anchor_body_reviews),
         "산업과제지역": dict(Counter(item.geography for item in industry_problems)),
         "조각글자": sum(len(item.text) for item in fragments), "독립기사": len(articles),
         "실질사건": len(chosen), "주제": dict(Counter(item.topic for item in chosen)),
