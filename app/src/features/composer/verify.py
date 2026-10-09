@@ -56,6 +56,9 @@ from src.features.composer.numeric_proof_selection_constants import NUMERIC_SELE
 from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_VERSION
 from src.features.composer.source_actor_scope import source_actor_problem
 from src.features.composer.challenge_event_scope import sanction_response_completed_problem
+from src.features.composer.research_table_status_scope import research_table_status_problem
+from src.features.composer.accounting_scope_guard import accounting_scope_problem
+from src.features.composer.accounting_scope_constants import ACCOUNTING_TABLE_SCOPE_LABELS
 from src.features.composer.business_population_scope import section_investment_plan_problem
 from src.features.composer.flow_target_relation import (
     flow_target_relation_hint, flow_target_relation_problem,
@@ -2517,6 +2520,21 @@ def _apply_grounding(
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
                 continue
+        problem = accounting_scope_problem(
+            text, sources,
+            allow_bound_table=_numeric_binding_uses_table(review_evidence.get(number)),
+        )
+        if problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = problem
+            continue
+        problem = research_table_status_problem(
+            text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+        )
+        if problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = problem
+            continue
         slot = (claim_slots_by_number or {}).get(number, "")
         problem = sanction_response_completed_problem(
             text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
@@ -2791,6 +2809,9 @@ def _table_grounding_source(table: Optional[PerformanceTable]) -> str:
             lines.append(
                 f"{metric} | {period} | {raw_text}{TABLE_RAW_VALUE_ROW_SUFFIX}"
             )
+    scope_label = ACCOUNTING_TABLE_SCOPE_LABELS.get(table.entity_scope)
+    if lines and scope_label:
+        lines.insert(0, scope_label)
     return "\n".join(lines)
 
 
