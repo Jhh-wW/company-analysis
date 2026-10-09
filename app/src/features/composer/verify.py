@@ -164,6 +164,7 @@ from src.features.composer.plan_status_scope import (
 )
 from src.features.composer.business_relation_scope import business_relation_scope_problem
 from src.features.composer.payment_method_scope import payment_method_scope_problem
+from src.features.composer.project_business_scope import project_business_scope_problem
 from src.features.composer.source_attribution_scope import source_attribution_problem
 from src.features.composer.role_binding_constants import (
     ROLE_BINDING_REASON_TEXTS, ROLE_BINDING_REVIEW_GUIDE,
@@ -2327,6 +2328,14 @@ def _apply_grounding(
             continue
         context = (diagnostic_contexts or {}).get(number)
         if context and context[1] == DIAGNOSTIC_KIND_BODY:
+            if context[0] == "portfolio":
+                problem = project_business_scope_problem(
+                    text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+                )
+                if problem:
+                    constrained[number] = REVIEW_GROUNDING_REJECTED
+                    problems[number] = problem
+                    continue
             problem = payment_method_scope_problem(
                 text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
                 section_id=context[0],

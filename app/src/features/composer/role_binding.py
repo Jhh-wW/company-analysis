@@ -88,6 +88,7 @@ from src.features.composer.role_binding_constants import (
     ROLE_BINDING_WAIVER_VERBATIM_CONDITION,
     ROLE_AS_PREDICATE_RE,
     ROLE_CELL_MARKER_RE,
+    ROLE_COMPOUND_TAIL_RE,
     ROLE_CONDITION_MARKERS,
     ROLE_DENIAL_MARKERS,
     SUBJECT_TOKEN_RE,
@@ -361,6 +362,10 @@ def _claim_markers(
         ):
             for match in pattern.finditer(unit.surface):
                 start, end = match.span(1)
+                if kind == RELATION_ROLE:
+                    raw_end = unit.index[end - 1] + 1
+                    if ROLE_COMPOUND_TAIL_RE.match(unit.raw, raw_end) is not None:
+                        continue
                 if CLAIM_ROLE_NEGATED_RE.match(unit.surface, end) is not None:
                     continue
                 markers.append((position, start, end, kind))

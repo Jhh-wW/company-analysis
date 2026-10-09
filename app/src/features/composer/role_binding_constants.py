@@ -29,9 +29,12 @@ ROLE_CELL_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"(" + _ROLE_ALT + r")(
 #:   「크리에이티브한 광고 제작 역량」)까지 결속을 요구하면 정상 문장이 대량으로
 #:   지워진다. 그래서 역할 낱말 «바로 뒤»에 용언 어간이 붙은 꼴만 본다.
 PROSE_ROLE_MARKER_RE: Final[re.Pattern[str]] = re.compile(
-    r"(" + _ROLE_ALT + r")(?:되|돼|됐|된|하|해|했|한|할|함|합|하여|되어|"
+    r"(" + _ROLE_ALT + r")(?:되|돼|됐|된|하|해|했|한|할|함|합(?:니다|니까|시다)|하여|되어|"
     r"(?:을|를)\s*(?:담당|수행|영위))"
 )
+# '합'은 단독 용언 활용형이 아니다. 역할 뒤 붙은 합성 명사의 일부를
+# 제조합니다 같은 실제 종결형과 구분한다. 공백으로 나뉜 역할·다음 명사는 유지한다.
+ROLE_COMPOUND_TAIL_RE: Final[re.Pattern[str]] = re.compile(r"합(?!니다|니까|시다)")
 
 # ══════════════════════════════════════════════════════════
 # ② 후보가 «대가·반복»을 단언한 자리 — 발동 표지
@@ -246,7 +249,7 @@ ROLE_BINDING_ENTRY_TYPE_UNKNOWN: Final[str] = "role_binding_entry_type_unknown"
 
 #: 규칙 버전 — 진단이 «어느 규칙으로 판정했는지»를 남긴다. 발동·면제·대조 규칙이
 #: 바뀔 때마다 올린다. 회사·날짜·사례가 아니라 규칙의 판만 가리킨다.
-ROLE_BINDING_RULE_VERSION: Final[str] = "role-binding-rules/2"
+ROLE_BINDING_RULE_VERSION: Final[str] = "role-binding-rules/3"
 #: 결속 요구를 «제외»한 사유표 — 진단·안내문이 같은 이름을 쓴다.
 ROLE_BINDING_WAIVER_VERBATIM_CONDITION: Final[str] = "verbatim_news_participation_condition"
 ROLE_BINDING_WAIVER_TEXTS: Final[dict[str, str]] = {
