@@ -33,6 +33,12 @@ def _activity_records(text: str, *, claim: bool, additional_actions: tuple[str, 
             tail = unit[match.end():end]
             rest = unit[match.end():]
             words = c.RESPONSE_ACTIVITY_WORD_RE.findall(unit[:match.start()])
+            # 명시 목적어 두 어절을 고르기 전에 닫힌 방식 부사만 제외한다.
+            # 숫자·정도·부정·시점 표현과 활동 상태 검사는 그대로 남긴다.
+            if (len(words) >= c.RESPONSE_ACTIVITY_HEAD_WORDS
+                    and words[-1] in c.RESPONSE_ACTIVITY_MANNER_WORDS
+                    and c.RESPONSE_ACTIVITY_MANNER_OBJECT_RE.search(words[-2])):
+                words = words[:-1]
             selected_words = words[-c.RESPONSE_ACTIVITY_HEAD_WORDS:]
             selected_words = [word for word in selected_words if word not in c.RESPONSE_ACTIVITY_HEAD_CONNECTORS]
             if len(selected_words) > 1 and c.RESPONSE_ACTIVITY_SUBJECT_WORD_RE.search(selected_words[0]):

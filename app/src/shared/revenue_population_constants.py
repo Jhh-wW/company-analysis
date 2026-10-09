@@ -45,7 +45,7 @@ DIRECT_COMPANY_SHARE_RE = re.compile(
     r"차지(?:한다|합니다|하고있(?:다|습니다))$"
 )
 DIRECT_SHARE_ITEM_SUFFIX_RE = re.compile(r"(?:사업|제품|서비스)$")
-DIRECT_SHARE_CANDIDATE_SUBJECT = r"(?:사업|제품|서비스|매출액|매출)?(?:은|는|이|가)"
+DIRECT_SHARE_CANDIDATE_SUBJECT = r"(?:사업|제품|서비스)?(?:매출액|매출)?(?:은|는|이|가)"
 DIRECT_SHARE_COMPANY_CASE = r"(?:당사|회사)의경우(?:도|는)?(?:마찬가지로)?"
 DIRECT_SHARE_SUBJECT_PREFIX = (
     r"^(?:(?:연결|별도|개별)(?:재무제표)?기준으로)?"
@@ -53,4 +53,9 @@ DIRECT_SHARE_SUBJECT_PREFIX = (
 )
 DIRECT_SHARE_CASE_START_RE = re.compile(rf"^{DIRECT_SHARE_COMPANY_CASE}")
 DIRECT_SHARE_REPORTING_BASIS_RE = re.compile(r"(?P<basis>연결|별도|개별)(?:재무제표)?\s*기준")
+DIRECT_SHARE_BASIS_CLAUSE_START_RE = re.compile(r"^(?:연결|별도|개별)(?:재무제표)?기준으로")
+DIRECT_SHARE_FOREIGN_OWNER_RE = re.compile(r"(?:타사|다른회사|다른기업|경쟁사|고객사|자회사|종속기업|관계기업)(?:의|는|은|이|가)")
+DIRECT_SHARE_BUSINESS_OWNER_RE = re.compile(r"^(?P<owner>[^,.!?]{1,80}?)의사업(?:은|는)")
+DIRECT_SHARE_TABLE_COMPANY_RE = re.compile(r"(?:\(주\)|㈜|주식회사)\s*(?P<owner>[가-힣A-Za-z0-9&·._-]{1,80})(?=\s*\(단위\s*:)")
+DIRECT_SHARE_SELF_OWNERS = frozenset({'회사', '당사'})
 DIRECT_SHARE_OTHER_SUBJECT_RE = re.compile(r"(?:사업|제품|서비스|매출액|매출)(?:은|는|이|가)")

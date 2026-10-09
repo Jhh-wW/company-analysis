@@ -16,6 +16,7 @@ from src.shared.report_evidence.constants import OFFICIAL_WEB_SOURCE_KINDS
 from src.shared.report_evidence.industry_candidates import OfficialIndustrySupplement
 from src.shared.report_quality.source_identity import collected_document_identity
 from src.features.composer.port import CollectedFragment
+from src.features.composer.challenge_industry_scope import industry_only_challenge_problem
 
 
 def discovery_fragments_for_supplement(
@@ -67,6 +68,9 @@ def has_verified_direct_business_issue(report: object) -> bool:
     return any(
         sentence.verification_state == "verified" and sentence.grade == "확인"
         and sentence.planned_claim_slot == "current_challenges:issue"
+        and not industry_only_challenge_problem(
+            sentence.text, claim_slot=sentence.planned_claim_slot,
+        )
         for section in report.sections if section.section_id == INDUSTRY_CONTEXT_SECTION
         for sentence in section.sentences
     )

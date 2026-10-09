@@ -9,6 +9,29 @@ DIRECT_CHALLENGE_CLAIM_SLOTS: Final[frozenset[str]] = frozenset({
     "current_challenges:unresolved_gap", "current_challenges:next_check",
 })
 INDUSTRY_SUBJECT_MAX_CHARS: Final[int] = 100
+INDUSTRY_ENVIRONMENT_MODIFIER_MAX_CHARS: Final[int] = 40
+# 산업 배경을 먼저 적은 문장은 뒤의 실제 주체를 따로 읽는다.
+# 원문·공개 문장을 자르지 않으며 이 표지는 회사의 제약을 승인하지 않는다.
+INDUSTRY_ENVIRONMENT_PREFIX_RE = re.compile(
+    rf"^\s*(?:이러한|이같은|이런)\s+[^.!?。;|\n]{{0,{INDUSTRY_SUBJECT_MAX_CHARS}}}?"
+    rf"(?:산업|시장)\s*(?:환경|구조|상황|변화)[^.!?。;|\n]{{0,{INDUSTRY_ENVIRONMENT_MODIFIER_MAX_CHARS}}}?"
+    r"(?:속에서|가운데|하에서)\s+(?P<body>.+)$"
+)
+# 일반 업계 집단은 특정 회사의 직접 주체와 다르다. 접두 수식어 없이
+# 임의 기업명을 매체·사업자로 판별하지 않는다.
+INDUSTRY_GROUP_SUBJECT_RE = re.compile(
+    r"(?:전통|기존|일반|각|여러|다수(?:의)?|많은)\s*"
+    r"(?:매체|기업|업체|사업자)(?:들)?(?:은|는|이|가)\s*"
+)
+# 새 산업 배경 분기에서 다른 명시 주어의 제약을 과잉제거하지 않는 경계다.
+# 이 주어를 목표 회사로 승인하지 않고 기존 자기 원문·의미 검수에 남긴다.
+INDUSTRY_CLAUSE_SUBJECT_RE = re.compile(
+    rf"(?:^|[,，]\s*|(?<=고)\s+|(?<=며)\s+)"
+    rf"(?P<subject>[가-힣A-Za-z0-9·&_-]{{2,{INDUSTRY_SUBJECT_MAX_CHARS}}}(?:은|는|이|가))\s*"
+)
+INDUSTRY_SCOPE_DIRECT_ISSUE_SLOTS: Final[frozenset[str]] = frozenset({
+    "", "current_challenges:issue", "current_challenges:initial_signal",
+})
 # 산업·시장이 문장의 주어인 설명만 읽는다. 이름이나 업종을 판별하지 않는다.
 INDUSTRY_SUBJECT_RE = re.compile(
     rf"^\s*(?P<subject>[^.!?。;|\n]{{1,{INDUSTRY_SUBJECT_MAX_CHARS}}}?"

@@ -196,9 +196,11 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 # 2026-10-08: 역할 안내 +347자만 HEAD로 역치환하면 본문 네 지문이 정확 복구된다.
 # 도식은 같은 안내와 경로 헤더 +1자만 역치환했다. 원문·번호·schema는 바뀌지 않았다.
 # 증거: tmp/audit-20260930/paid/514031-schema-six-baseline-private.json.
+# 5장 일반 노력과 구체 활동 구분 안내 116자만 역치환하면 기존 네 지문이 복원된다.
+# paid/7408-generic-prompt-baseline-private.json: 원문·번호·스키마·캐시 경계 불변.
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "aa1fd1c7099559aba2f8146a53996617fec48b59be894525b25b6051880f19a7"),
-    (_golden_case, True, "10c65b144d265daa46cf5ef472ccd36077c6320ad6634dd92ab8e3a9becc3590"),
+    (_golden_case, False, "c88c57834c6d1e02d8248fa61af85c01d6db76a5b3a8667af1587dfee6ed5a1a"),
+    (_golden_case, True, "f4dcad4903ec16471ce8d36a4b09134592e6c91a9b98f8075643e0c34de3a4f2"),
     (_boundary_case, False, "cef6e5c04b5a0456cf576af3bcd70791f5c65f7df37576bd65680fe40a79064b"),
     (_boundary_case, True, "e4e2cc35aa2ac3b02471f15f9b03c3417e8ee25532f8e71846e87e8380e0bce2"),
 ))

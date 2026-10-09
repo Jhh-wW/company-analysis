@@ -16,6 +16,7 @@ from src.features.composer.challenge_accounting_constants import (
 )
 from src.features.composer.challenge_event_constants import RESPONSE_FOREIGN_ACTOR_RE
 from src.features.composer.challenge_industry_scope import industry_only_challenge_problem
+from src.features.composer.challenge_generic_response import generic_response_problem
 from src.features.composer.constants import CHALLENGE_FLOW_SECTION_ID
 from src.features.composer.challenge_constants import (
     CHALLENGE_RESPONSE_CELL_COUNT, CHALLENGE_RESPONSE_CELL_INDEX,
@@ -158,6 +159,12 @@ def challenge_business_problem(text: str, sources: Mapping[str, str], *, cells: 
         return ACCOUNTING_POLICY_BOILERPLATE
     problem = challenge_event_scope_problem(text, sources, cells=cells)
     if problem or not require_current:
+        return problem
+    response_text = (cells[CHALLENGE_RESPONSE_CELL_INDEX]
+                     if cells is not None and len(cells) == CHALLENGE_RESPONSE_CELL_COUNT
+                     else text)
+    problem = generic_response_problem(response_text)
+    if problem:
         return problem
     # 표의 대응 셀이나 같은 인용의 다른 절에서 문제 관계를 빌리지 않는다.
     issue_text = cells[0] if cells else text

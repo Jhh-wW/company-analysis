@@ -18,6 +18,48 @@ def test_explicit_individual_basis_uses_the_same_source_basis():
     candidate = "개별재무제표 기준으로 설비 사업이 전체 매출의 약 55%를 차지하고 있다."
     assert not revenue_population_claim_problem(candidate, {"1": "개별재무제표 기준 매출액 " + TABLE + DIRECT})
 
+
+@pytest.mark.parametrize('label', ['사업 매출이', '제품 매출액은', '서비스 매출이'])
+def test_same_item_compound_revenue_subject_preserves_individual_basis(label):
+    candidate = f'개별재무제표 기준으로 설비 {label} 전체 매출의 약 55%를 차지한다.'
+    source = '연결재무제표 기준 매출액 ' + TABLE + '개별재무제표 기준 매출액 ' + TABLE + DIRECT
+    assert not revenue_population_claim_problem(candidate, {'1': source})
+
+
+def test_independent_basis_clause_after_business_description_survives():
+    candidate = '회사의 사업은 설비 사업과 부품 사업으로 구성되며, 개별재무제표 기준으로 설비 사업 매출이 전체 매출의 약 55%를 차지한다.'
+    assert not revenue_population_claim_problem(candidate, {'1': '개별재무제표 기준 매출액 ' + TABLE + DIRECT})
+
+
+def test_named_business_clause_uses_the_same_basis_table_company_title():
+    candidate = '가람제작의 사업은 설비 사업과 부품 사업이며, 개별재무제표 기준으로 설비 사업 매출이 전체 매출의 약 55%를 차지한다.'
+    source = '개별재무제표 기준 매출액 (주)가람제작 (단위: 천원, %) ' + TABLE + DIRECT
+    assert not revenue_population_claim_problem(candidate, {'1': source})
+
+
+@pytest.mark.parametrize('source', [
+    '개별재무제표 기준 매출액 ' + TABLE + DIRECT,
+    '개별재무제표 기준 매출액 (주)누리공업 (단위: 천원, %) ' + TABLE + DIRECT,
+    '연결재무제표 기준 매출액 (주)가람제작 (단위: 천원, %) ' + TABLE + '개별재무제표 기준 매출액 (주)누리공업 (단위: 천원, %) ' + TABLE + DIRECT,
+    '개별재무제표 기준 매출액 ' + TABLE + '거래처 가람제작. ' + DIRECT,
+])
+def test_named_business_clause_does_not_borrow_another_company_title(source):
+    candidate = '가람제작의 사업은 설비 사업과 부품 사업이며, 개별재무제표 기준으로 설비 사업 매출이 전체 매출의 약 55%를 차지한다.'
+    assert revenue_population_claim_problem(candidate, {'1': source})
+
+
+@pytest.mark.parametrize('candidate', [
+    '설비 사업 매출이 전체 매출의 약 55%를 차지한다.',
+    '연결재무제표 기준으로 설비 사업 매출이 전체 매출의 약 55%를 차지한다.',
+    '개별재무제표 기준으로 부품 사업 매출이 전체 매출의 약 55%를 차지한다.',
+    '개별재무제표 기준으로 설비 사업 매출이 전체 매출의 약 70%를 차지한다.',
+    '회사의 사업은 설비 사업이며, 개별재무제표 기준으로 다른 회사의 설비 사업 매출이 전체 매출의 약 55%를 차지한다.',
+    '다른 회사의 사업은 설비 사업이며, 개별재무제표 기준으로 설비 사업 매출이 전체 매출의 약 55%를 차지한다.',
+    '회사의 사업은 설비 사업이며, 개별재무제표 기준으로 자회사의 설비 사업 매출이 전체 매출의 약 55%를 차지한다.',
+])
+def test_compound_subject_does_not_remove_basis_or_borrow_another_actor(candidate):
+    assert revenue_population_claim_problem(candidate, {'1': '개별재무제표 기준 매출액 ' + TABLE + DIRECT})
+
 @pytest.mark.parametrize("candidate, source", [
     ("부품 사업은 전체 매출의 약 55%를 차지한다.", TABLE + DIRECT),
     ("설비 사업은 전체 매출의 약 70%를 차지한다.", TABLE + DIRECT),

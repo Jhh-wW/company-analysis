@@ -141,3 +141,56 @@ def test_grouped_display_id_normalizes_before_selected_proof_restore():
         return json.dumps(payload, ensure_ascii=False)
 
     assert verify._ask_grouped_verdicts(ask, (item,), {'1': fragment}, None) == {1: '참'}
+
+
+@pytest.mark.parametrize('text,source', [
+    ('회사는 고객의 편의성을 높이는 장치를 마련하겠다고 밝혔다.',
+     '회사는 고객의 편의성을 높이는 장치를 마련하겠습니다.'),
+    ('회사는 신공장을 증설할 것이라고 밝혔다.',
+     '회사는 신공장을 증설할 것이다.'),
+])
+def test_reported_future_discovers_only_prevalidated_proofs(text, source):
+    options, candidates, sections, slots, fragments = prepared(text, source)
+    assert options[1]
+    restored, failed = restore_future_proof_selections(
+        selected(options[1][0].option_id), options, candidates, sections, slots, fragments)
+    assert not failed
+    assert not future_plan_prose_problem(text, candidates[1][1],
+        json.loads(restored)['판정'][0]['검증근거'], claim_slot=STATED_PLAN_SLOT)
+
+
+@pytest.mark.parametrize('source,text', [
+    ('회사는 신공장을 증설했다.', '회사는 신공장을 증설하겠다고 밝혔다.'),
+    ('회사는 신공장을 증설하고 있다.', '회사는 신공장을 증설하겠다고 밝혔다.'),
+    ('협력사는 신공장을 증설할 것이다.', '회사는 신공장을 증설할 것이라고 밝혔다.'),
+    ('회사는 신공장을 증설하지 않을 것이다.', '회사는 신공장을 증설할 것이라고 밝혔다.'),
+    ('회사는 허가를 받으면 신공장을 증설할 것이다.', '회사는 신공장을 증설할 것이라고 밝혔다.'),
+])
+def test_reported_future_does_not_override_owner_state_or_condition(source, text):
+    assert prepared(text, source)[0] == {}
+
+
+def test_flat_review_auxiliary_table_preserves_selected_own_proof():
+    fragment = prepared()[4]['1']
+    item = verify._ReviewItem(1, ComposedSentence(TEXT, ('1',), '확인',
+        planned_claim_slot=STATED_PLAN_SLOT), section_id='future_strategy')
+    def ask(prompt):
+        choices = prompt.split('미래증명 선택지(JSON): ', 1)[1].split('\n', 1)[0]
+        return selected(json.loads(choices)[0]['ID'])
+    assert verify._ask_verdicts(ask, (item,), {'1': fragment}, '', '별도 보조 실적표') == {1: '참'}
+
+
+def test_auxiliary_table_never_replaces_or_adds_actual_cited_source():
+    from src.features.composer.grounding_constants import TABLE_SOURCE_ID
+    options, candidates, sections, slots, fragments = prepared()
+    raw = selected(options[1][0].option_id)
+    candidates[1][1][TABLE_SOURCE_ID] = '별도 실적표'
+    assert not restore_future_proof_selections(raw, options, candidates, sections, slots, fragments)[1]
+    changed = deepcopy(candidates)
+    changed[1][1]['1'] = '변조 원문'
+    assert restore_future_proof_selections(raw, options, changed, sections, slots, fragments)[1] == {1}
+    added = deepcopy(candidates)
+    added[1][1]['2'] = '회사는 신공장을 증설할 계획이다.'
+    assert restore_future_proof_selections(raw, options, added, sections, slots, fragments)[1] == {1}
+    removed = {1: (TEXT, {TABLE_SOURCE_ID: SOURCE})}
+    assert restore_future_proof_selections(raw, options, removed, sections, slots, fragments)[1] == {1}

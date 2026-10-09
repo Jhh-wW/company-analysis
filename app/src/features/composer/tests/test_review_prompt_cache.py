@@ -87,8 +87,8 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "aa1fd1c7099559aba2f8146a53996617fec48b59be894525b25b6051880f19a7"),
-    (_golden_case, True, "10c65b144d265daa46cf5ef472ccd36077c6320ad6634dd92ab8e3a9becc3590"),
+    (_golden_case, False, "c88c57834c6d1e02d8248fa61af85c01d6db76a5b3a8667af1587dfee6ed5a1a"),
+    (_golden_case, True, "f4dcad4903ec16471ce8d36a4b09134592e6c91a9b98f8075643e0c34de3a4f2"),
     (_boundary_case, False, "cef6e5c04b5a0456cf576af3bcd70791f5c65f7df37576bd65680fe40a79064b"),
     (_boundary_case, True, "e4e2cc35aa2ac3b02471f15f9b03c3417e8ee25532f8e71846e87e8380e0bce2"),
 ))
@@ -118,6 +118,8 @@ def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     # 2026-10-07 검수 12항·근거대조 안내·5장 작성범위만 역치환하면 HEAD 네 지문이 정확복구된다.
     # 공통 접두부 +435자, 5장이 있는 골든 suffix만 +204자이며 원문·번호·스키마는 동일하다.
     # 증거: tmp/audit-20260930/paid/8f3e-review-prompt-baseline-complete-private.json.
+    # 5장의 추상적 노력 제외 안내만 역치환하면 ce5ac298의 네 지문이 복원된다.
+    # 고정 접두부·다른 장·근거는 그대로다. paid/7408-generic-prompt-baseline-private.json.
     monkeypatch.setenv(REVIEW_PROMPT_CACHE_ENV, "1")
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected

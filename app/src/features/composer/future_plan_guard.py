@@ -34,6 +34,8 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 
 from src.features.composer.future_plan_constants import (
+    PLAN_CONDITION_END_RE,
+    PLAN_CONDITION_CLAUSE_RE,
     CANDIDATE_DONE_RE,
     CANDIDATE_OUTLOOK_RE,
     CITATION_RE,
@@ -874,6 +876,14 @@ def _bind_prose_position(
             if subject_problem:
                 problems.append(subject_problem)
                 continue
+            # 선택형과 자유형 모두 같은 미래 활동의 명시 조건을 남겨야 한다.
+            # 앞의 별도 완료·현재·계획 절의 조건을 이 활동으로 옮기지 않는다.
+            condition = _prose_plan_condition(source_sentence, activity_span[0])
+            if condition and condition != _prose_plan_condition(
+                candidate_sentence, candidate_span[0]
+            ):
+                problems.append(FUTURE_MODALITY_NOT_BOUND)
+                continue
             mode, modality_problem, negation = _source_modality(
                 source_sentence, activity_span)
             if modality_problem:
@@ -894,6 +904,22 @@ def _bind_prose_position(
                 continue
             return True
     return False
+
+
+def _prose_plan_condition(sentence: str, activity_start: int) -> str:
+    """같은 활동절 앞의 명시 조건 구절을 공백 정규화 범위에서 대조한다."""
+    head = sentence[:activity_start]
+    boundaries = list(PLAN_CONDITION_CLAUSE_RE.finditer(head))
+    if boundaries:
+        head = head[boundaries[-1].end():]
+    head = head.strip()
+    subject = PROSE_SUBJECT_RE.match(head)
+    if subject:
+        head = head[subject.end():].lstrip()
+    conditions = list(PLAN_CONDITION_END_RE.finditer(head))
+    if not conditions:
+        return ""
+    return _compact(head[:conditions[-1].end()])
 
 
 def future_plan_prose_problem(

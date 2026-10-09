@@ -1101,6 +1101,7 @@ def grounding_hint(
       1단계에서 발동하지 않는다(combined_relation_report와 같은 계약).
     """
 
+    from src.features.composer.direct_share_numeric_hint import direct_share_numeric_hint
     required = grounding_requirements(text, tuple(sources.values()))
     binding = role_binding_requirements(text, sources, cells, verbatim_source)
     triggers = combined_relation_triggers(text) if cells is None else ()
@@ -1110,6 +1111,7 @@ def grounding_hint(
         "  추가 검증 필요: " + (", ".join(required) or "없음") + "\n"
         + role_binding_hint_lines(binding, cells is not None)
         + combined_relation_hint(triggers)
+        + (direct_share_numeric_hint(text, sources) if cells is None else '')
     )
 
 

@@ -6,6 +6,10 @@ FUTURE_SELECTION_KEY = "미래증명선택"
 FUTURE_SELECTION_VERSION = "future-proof-selection-v1"
 FUTURE_SELECTION_STAGE = "future_proof_selection_unbound"
 FUTURE_SELECTION_SECTION = "future_strategy"
+# 발견만 넓힌다. 선택지는 기존 미래 근거 검사를 통과해야 한다.
+REPORTED_FUTURE_DISCOVERY_RE = re.compile(
+    r"(?:겠(?:습니다|다)|(?:겠다고|할\s*것이라고)\s*(?:밝혔|밝히|설명했|설명하))"
+)
 LEADING_CONNECTIVE_RE = re.compile(r"(?:및|과|와|그러나|하지만)(?:\s|$)")
 MAX_SOURCE_CHARS = 2400
 MAX_SENTENCE_CHARS = 600

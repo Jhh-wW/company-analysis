@@ -17,7 +17,7 @@ from src.features.composer.future_plan_guard import (
     _bounded_spans, _normalized, _sentences, _slot_problem, _modality_kind,
     future_plan_prose_problem,
 )
-from src.features.composer.grounding_constants import GROUNDING_KEY, REVIEW_ENTRIES_KEY
+from src.features.composer.grounding_constants import GROUNDING_KEY, REVIEW_ENTRIES_KEY, TABLE_SOURCE_ID
 from src.features.composer.port import CollectedFragment
 from src.features.composer.verdict_number import coerce_verdict_number
 from src.features.composer.business_population_scope import section_investment_plan_problem
@@ -118,7 +118,9 @@ def prepare_future_proof_options(
     result = {}
     for number, row in candidates.items():
         if (number != row.number or row.section_id != c.FUTURE_SELECTION_SECTION
-                or row.claim_slot != STATED_PLAN_SLOT or not FUTURE_SECTION_FORWARD_RE.search(row.text)):
+                or row.claim_slot != STATED_PLAN_SLOT or not (
+                    FUTURE_SECTION_FORWARD_RE.search(row.text)
+                    or c.REPORTED_FUTURE_DISCOVERY_RE.search(row.text))):
             continue
         own = {f.fragment_id: f.text for f in row.fragments}
         if len(own) != len(row.fragments):
@@ -137,7 +139,8 @@ def prepare_future_proof_options(
             for raw_quote in _sentences(fragment.text):
                 quote = raw_quote.strip()
                 if (not quote or len(quote) > c.MAX_SENTENCE_CHARS
-                        or not FUTURE_SECTION_FORWARD_RE.search(quote)
+                        or not (FUTURE_SECTION_FORWARD_RE.search(quote)
+                                or c.REPORTED_FUTURE_DISCOVERY_RE.search(quote))
                         or SOURCE_NEGATION_RE.search(quote)):
                     continue
                 start = fragment.text.find(quote)
@@ -225,6 +228,8 @@ def restore_future_proof_selections(raw, options_by_number, candidates, sections
         seen.add(number)
         if valid:
             text, own = actual
+            # 평문 검수의 보조 실적표는 자기 인용 조각이 아니다. 수치 검사는 원래 입력을 쓴다.
+            own = {fid: value for fid, value in own.items() if fid != TABLE_SOURCE_ID}
             valid = (option.number == number and option.section_id == sections.get(number)
                      and option.claim_slot == slots.get(number) == STATED_PLAN_SLOT
                      and option.candidate_sha256 == _sha(text)
@@ -233,16 +238,17 @@ def restore_future_proof_selections(raw, options_by_number, candidates, sections
         if valid:
             proof = json.loads(option.proof_json)
             binding = json.loads(option.binding_json)
-            source = actual[1].get(proof['근거'], '')
+            source = own.get(proof['근거'], '')
             fragment = fragments.get(proof['근거'])
             valid = (fragment is not None
                      and _json(binding['fragment']) == _json(_fragment_snapshot(fragment))
-                     and set(actual[1]).issubset(fragments)
+                     and proof['근거'] != TABLE_SOURCE_ID
+                     and set(own).issubset(fragments)
                      and _json(binding['sources']) == _json({fid: _fragment_snapshot(fragments[fid])
-                                                            for fid in actual[1]})
+                                                            for fid in own})
                      and source[binding['quote_start']:binding['quote_end']] == proof['원문']
                      and _sha(proof['원문']) == binding['quote_sha256']
-                     and not future_plan_prose_problem(actual[0], actual[1], {FUTURE_KEY: [proof]},
+                     and not future_plan_prose_problem(actual[0], own, {FUTURE_KEY: [proof]},
                                                        claim_slot=option.claim_slot))
         if valid:
             expanded[FUTURE_KEY] = [proof]

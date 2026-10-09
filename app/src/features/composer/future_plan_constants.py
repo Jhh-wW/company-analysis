@@ -390,6 +390,15 @@ CANDIDATE_DONE_RE: Final[re.Pattern[str]] = re.compile(
 PROSE_SUBJECT_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:\A|[\s,·])(" + WORD_CHAR + r"{2,}?)(?:은|는|이|가)(?=\s)"
 )
+# 같은 활동 앞의 명시 조건형만 대조한다. 조건의 성립이나 해제를 추정하지 않는다.
+PLAN_CONDITION_END_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:받으면|얻으면|되면|하면|있으면|없으면|"
+    r"(?:하는|할|받는|받을|되는|될|충족하는|충족할)\s*경우)(?=\s|[,，]|$)"
+)
+PLAN_CONDITION_CLAUSE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:있으며|있고|있지만|했고|했으며|하였고|하였으며|"
+    r"것이며|것이고|것이지만|예정이며|계획이며|[;；]|그리고|또한)\s*"
+)
 
 #: 주어 대신 「회사의 … 전략의 일환이다」처럼 회사에 계획을 명시적으로
 #: 귀속한 서술. 소유격만으로 열지 않고 계획 명사와 단정 서술어까지 요구한다.

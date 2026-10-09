@@ -126,7 +126,8 @@ def revenue_population_context_problem(candidate: str, sources: Mapping[str, str
     return revenue_population_claim_problem(candidate, constrained)
 
 
-def _explicit_company_share_support(candidate: str, position: int, sources: Mapping[str, str]) -> bool:
+def _explicit_company_share_support(candidate: str, position: int, sources: Mapping[str, str],
+                                    *, direct_unit: str | None = None) -> bool:
     """표의 추정 분모와 별개인 회사 명시 비중을 같은 품목·비율에서만 인정한다.
 
     원문 표·수치는 바꾸지 않으며 수치와 의미 검수도 면제하지 않는다.
@@ -147,6 +148,8 @@ def _explicit_company_share_support(candidate: str, position: int, sources: Mapp
             unit_start = boundary.end()
         units.append((unit_start, source[unit_start:]))
         for start, unit in units:
+            if direct_unit is not None and unit.strip() != direct_unit:
+                continue
             if "|" in unit:
                 continue
             direct = c.DIRECT_COMPANY_SHARE_RE.match("".join(unit.split()))
@@ -154,12 +157,8 @@ def _explicit_company_share_support(candidate: str, position: int, sources: Mapp
                 continue
             # 표와 별개인 직접 비중도 연결/개별 범위는 바꿀 수 없다.
             # 명시 후보 기준을 해당 직접 문장 앞의 가장 가까운 원기준에 결속한다.
-            candidate_bases = {_share_reporting_basis(match['basis'])
-                               for match in c.DIRECT_SHARE_REPORTING_BASIS_RE.finditer(prefix)}
             source_bases = tuple(c.DIRECT_SHARE_REPORTING_BASIS_RE.finditer(source, 0, start))
             source_basis = _share_reporting_basis(source_bases[-1]['basis']) if source_bases else ''
-            if candidate_bases and candidate_bases != {source_basis}:
-                continue
             item = c.DIRECT_SHARE_ITEM_SUFFIX_RE.sub("", direct["item"])
             prefixes = [prefix]
             # 쉼표 뒤 회사 자신으로 명시 전환한 해당 비중 절만 읽는다.
@@ -167,12 +166,37 @@ def _explicit_company_share_support(candidate: str, position: int, sources: Mapp
             tail_prefix = prefix.rsplit(',', 1)[-1]
             if tail_prefix != prefix and c.DIRECT_SHARE_CASE_START_RE.match(tail_prefix):
                 prefixes.append(tail_prefix)
+            # 앞 설명절 뒤 새로 명시한 재무 기준과 같은 품목 주어만 읽는다.
+            # 타회사 소유를 이어 받거나 새 주어가 끼어든 절에는 앞 주어를 빌려주지 않는다.
+            if (tail_prefix != prefix and c.DIRECT_SHARE_BASIS_CLAUSE_START_RE.match(tail_prefix)
+                    and not c.DIRECT_SHARE_FOREIGN_OWNER_RE.search(prefix)
+                    and _same_business_clause_owner(prefix.rsplit(',', 1)[0], source,
+                                                    source_bases[-1].start() if source_bases else start, start)):
+                prefixes.append(tail_prefix)
             for own_prefix in prefixes:
+                candidate_bases = {_share_reporting_basis(match['basis'])
+                                   for match in c.DIRECT_SHARE_REPORTING_BASIS_RE.finditer(own_prefix)}
+                if candidate_bases != ({source_basis} if source_basis else set()):
+                    continue
                 subject = re.match(c.DIRECT_SHARE_SUBJECT_PREFIX + re.escape(item)
                                    + c.DIRECT_SHARE_CANDIDATE_SUBJECT, own_prefix) if item else None
                 if subject and not c.DIRECT_SHARE_OTHER_SUBJECT_RE.search(own_prefix[subject.end():]):
                     return True
     return False
+
+
+def _same_business_clause_owner(prefix: str, source: str, basis_start: int, direct_start: int) -> bool:
+    """앞 사업절의 주어는 자기 지칭 또는 같은 기준 표의 법인 표제와 같아야 한다."""
+    owner = c.DIRECT_SHARE_BUSINESS_OWNER_RE.match(prefix)
+    if not owner:
+        return False
+    name = owner['owner']
+    if name in c.DIRECT_SHARE_SELF_OWNERS:
+        return True
+    # 문장 중 다른 회사 이름의 언급은 소유 증명이 아니다. 명시 법인 표제만 읽는다.
+    title_owners = {''.join(match['owner'].split()) for match in c.DIRECT_SHARE_TABLE_COMPANY_RE.finditer(
+        source[basis_start:direct_start])}
+    return title_owners == {name}
 
 
 def _share_reporting_basis(basis: str) -> str:
