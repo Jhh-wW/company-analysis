@@ -69,6 +69,17 @@ def test_different_named_actor_cannot_lend_relation():
     ) == TRANSACTION_INDEPENDENCE_UNBOUND
 
 
+@pytest.mark.parametrize('source,expected', [
+    ('회사는 가정용 정수기 공급 계약을 추가로 체결했다.', ''),
+    ('회사는 가정용 정수기 공급 계약을 추가로 체결했다고 가정한다.', TRANSACTION_INDEPENDENCE_UNBOUND),
+    ('회사는 가정용 정수기 공급 계약을 추가로 체결한 것으로 추정된다.', TRANSACTION_INDEPENDENCE_UNBOUND),
+])
+def test_household_product_does_not_mean_hypothetical_contract(source, expected):
+    assert transaction_independence_problem(
+        '회사는 가정용 정수기 공급 계약을 추가로 체결했다.', {'a': source},
+    ) == expected
+
+
 def test_separate_disclosure_does_not_prove_separate_contract():
     claim = '회사는 원재료 구매 계약을 별도로 체결한다.'
     source = '회사는 별도로 공시한 원재료 구매 계약을 체결한다.'

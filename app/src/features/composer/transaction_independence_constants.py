@@ -24,7 +24,9 @@ TRANSACTION_GENERIC_WORDS = frozenset({
     '별도로도', '별도로', '별도의', '별개로', '추가로', '추가적인', '추가의',
     '별도', '추가', '다수', '다수의',
 })
-TRANSACTION_NONACTUAL_RE = re.compile(r'않|아니|없|미체결|가정|추정')
+TRANSACTION_NONACTUAL_RE = re.compile(
+    r'않|아니|없|미체결|(?:가정|추정)(?:하|했|한|되|된|임|이다|이며|입니다|으로)'
+)
 TRANSACTION_SUBJECT_RE = re.compile(r'(?P<actor>[가-힣A-Za-z0-9㈜()]+)(?:은|는|이|가)\s')
 TRANSACTION_GENERIC_ACTORS = frozenset({'회사', '당사', '연결회사', '본사'})
 TRANSACTION_FOREIGN_ACTORS = frozenset({'타사', '다른회사', '협력회사', '경쟁회사', '경쟁사'})
