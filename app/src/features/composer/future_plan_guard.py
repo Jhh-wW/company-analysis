@@ -81,6 +81,7 @@ from src.features.composer.future_plan_constants import (
     FUTURE_TARGET_NOT_IN_QUOTE,
     FUTURE_TARGET_TOO_SHORT,
     FUTURE_TEMPORAL_RE,
+    FUTURE_DIRECTION_OBJECT_RE,
     GENERIC_SUBJECTS,
     GENERIC_TARGETS,
     MIN_ACTIVITY_CHARS,
@@ -378,6 +379,11 @@ def _source_modality(sentence: str, activity_span: tuple[int, int]) -> tuple[str
     tail = sentence[activity_span[1]:]
     match = _first_modality(tail)
     if match is not None:
+        # 시점 부사는 뒤에 오는 활동을 수식한다. 앞 활동 뒤의 '향후 방향성을'
+        # 앞 활동의 계획 양태로 쓰면 현재 보고를 미래 이행으로 바꾸게 된다.
+        # 활동 앞 시점은 아래 기존 경로에서 같은 활동과 계속 대조한다.
+        if FUTURE_TEMPORAL_RE.fullmatch(match.group()):
+            return "", FUTURE_MODALITY_NOT_BOUND, ""
         kind = _modality_kind(match)
         if kind not in MODALITY_FUTURE_KINDS:
             return "", FUTURE_SOURCE_STATES_CURRENT, ""
@@ -389,6 +395,8 @@ def _source_modality(sentence: str, activity_span: tuple[int, int]) -> tuple[str
     head = sentence[:activity_span[0]]
     adverbs = list(FUTURE_TEMPORAL_RE.finditer(head))
     if adverbs:
+        if FUTURE_DIRECTION_OBJECT_RE.fullmatch(head[adverbs[-1].start():].strip()):
+            return "", FUTURE_MODALITY_NOT_BOUND, ""
         bridge = head[adverbs[-1].end():]
         blocking = _first_modality(bridge)
         if blocking is None or _modality_kind(blocking) in MODALITY_FUTURE_KINDS:
@@ -646,11 +654,15 @@ def has_forward_marker(text: str) -> bool:
 
     surface = _normalized(text)
     for match in FUTURE_SECTION_FORWARD_RE.finditer(surface):
+        if FUTURE_DIRECTION_OBJECT_RE.match(surface[match.start():]):
+            continue
         if not _plan_denied_after_marker(surface, match.end()):
             return True
     for sentence in _sentences(surface):
         for match in MODALITY_RE.finditer(sentence):
             if _modality_kind(match) not in MODALITY_FUTURE_KINDS:
+                continue
+            if FUTURE_DIRECTION_OBJECT_RE.match(sentence[match.start():]):
                 continue
             if not _plan_denied_after_marker(sentence, match.end()):
                 return True
@@ -700,7 +712,8 @@ def _prose_plan_claims(
                 or PROSE_COMPANY_ATTRIBUTION_RE.search(sentence)):
             continue
         markers = [match for match in MODALITY_RE.finditer(sentence)
-                   if _modality_kind(match) in MODALITY_FUTURE_KINDS]
+                   if _modality_kind(match) in MODALITY_FUTURE_KINDS
+                   and not FUTURE_DIRECTION_OBJECT_RE.match(sentence[match.start():])]
         # ★ 「향후·내년·앞으로」처럼 시점만 말하는 부사는 그 자체가 «별도의 계획
         #   주장»이 아니다. 그 주장은 같은 문장의 서술어 표지(「…할 계획이다」)가
         #   진다. 부사를 주장 자리로 세우면 활동이 언제나 그 «뒤»에 오므로,

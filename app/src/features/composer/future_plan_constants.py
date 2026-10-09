@@ -324,6 +324,11 @@ FUTURE_TEMPORAL_RE: Final[re.Pattern[str]] = re.compile(
     r"향후|앞으로|추후|중장기적으로|장기적으로|내년|차년도"
     r"|[0-9]{4}\s*년\s*(?:까지|부터)"
 )
+# '향후 방향성'은 논의 대상인 명사구다. 명시 실행 양태 없이 이를 논의의
+# 미래 시점으로 바꾸지 않는다. 내년·연도 같은 실제 시기 표현은 포함하지 않는다.
+FUTURE_DIRECTION_OBJECT_RE: Final[re.Pattern[str]] = re.compile(
+    r"\A향후\s+방향성(?:을|에\s*대해|에\s*관해)?(?=\s|\Z)"
+)
 # 단순 명사형 도입은 뒤의 미래 서술과 같은 주장이다. ‘할 계획’은 별도 서술이다.
 NOMINAL_PLAN_INTRO_RE: Final[re.Pattern[str]] = re.compile(r"계획으로\Z")
 #: 본문 대상과 활동 사이에는 기존 미래 시점과 닫힌 기간 조사만 허용한다.
