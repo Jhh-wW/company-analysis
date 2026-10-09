@@ -111,3 +111,30 @@ def test_explicit_other_owner_in_candidate_is_left_to_existing_semantic_review()
     assert entity_relationship_problem(candidate, {"1": source}) == ""
     # 같은 이름을 보고 회사의 소속으로 바꾸면 이 검사가 발동한다.
     assert entity_relationship_problem(candidate.replace("라온기업㈜의", "당사의"), {"1": source})
+
+
+@pytest.mark.parametrize("predicate", ["보유했었으나 경과규정에 따라 제외되었다", "보유하고 있지 않다"])
+def test_noncurrent_ownership_predicate_is_not_a_positive_current_membership_claim(predicate):
+    source = {"1": "다온설비㈜는 경과규정에 따라 종속기업에서 제외되었다."}
+    candidate = "회사는 종속기업 다온설비㈜를 " + predicate + "."
+    assert entity_relationship_problem(candidate, source) == ""
+    assert entity_relationship_problem(candidate.replace("종속기업", "당사의 종속기업"), source)
+    assert entity_relationship_problem(candidate.replace("종속기업", "현재 종속기업"), source)
+
+
+@pytest.mark.parametrize("predicate", ["제재를 받았다", "제재를 받지 않았다", "대여하지 않았다"])
+def test_other_action_tense_or_negation_does_not_waive_the_membership_qualifier(predicate):
+    assert entity_relationship_problem(
+        "회사의 종속기업 다온설비㈜는 " + predicate + ".", {"1": "다온설비㈜ | " + predicate},
+    ) == SCOPE_CONDITION_UNBOUND
+
+
+@pytest.mark.parametrize("predicate", [
+    "소유하지 않는다는 주장을 부인하고 있다",
+    "보유했던 사실이 없다는 주장을 부인한다",
+    "보유하지 않는다고 밝힌 전례와 달리 현재 소유한다",
+])
+def test_reported_or_reversed_negation_is_not_a_closed_noncurrent_predicate(predicate):
+    assert entity_relationship_problem(
+        "회사는 종속회사 다온설비㈜를 " + predicate + ".", {"1": "다온설비㈜는 개선조치를 완료했다."},
+    ) == SCOPE_CONDITION_UNBOUND

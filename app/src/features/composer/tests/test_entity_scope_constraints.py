@@ -205,9 +205,12 @@ P11_ROUTES = pytest.mark.parametrize(
 )
 
 
-def _p11_review(text, citations):
+def _p11_review(text, citations, *, cited_relationship=False):
+    footnote = P11_FOOTNOTE
+    if cited_relationship:
+        footnote += "\n" + P11_RELATED
     frags = _by_id(_fragment("1", LEGACY_KIND_RELATED_PARTY, P11_RELATED),
-                   _fragment("2", LEGACY_KIND_ENTITY_SCOPE_FOOTNOTE, P11_FOOTNOTE))
+                   _fragment("2", LEGACY_KIND_ENTITY_SCOPE_FOOTNOTE, footnote))
 
     def ask(prompt):
         row = {"번호": 1, "근거대조": "원문 대조", "결과": "참"}
@@ -255,7 +258,9 @@ def test_P11_수치가_든_단정도_범위_방어가_수치_결속보다_먼저
     "회사는 자회사 가람 Holdings에 운영자금을 대여하였다.",
 ], ids=["제외와_지분_함께", "종속기업_대여만", "자회사_대여만"])
 def test_P11_제외_사실을_함께_적은_지분_문장과_현재_거래_서술은_검수를_통과한다(citations, text):
-    verdicts, problems = _p11_review(text, citations)
+    # 종속기업 수식까지 남기는 정상 거래는 같은 인용에 그 분류가 있어야 한다.
+    # 인용하지 않은 1번의 긍정 관계를 2번에 자동 대여하지 않는다.
+    verdicts, problems = _p11_review(text, citations, cited_relationship=True)
     assert verdicts == {1: "참"} and problems == {}
 
 

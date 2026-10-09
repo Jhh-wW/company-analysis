@@ -13,6 +13,7 @@ from src.features.composer.entity_relationship_constants import (
     FOREIGN_OWNER_RE, FORMAL_NAME_RE, LEGAL_FORM_RE, NAMED_RELATION_RE,
     RELATION_KINDS, RELATION_NEGATION_RE, RELATION_PATTERN, TABLE_ENTITY_HEADERS,
     NAMED_OWNER_RE, SELF_OWNER_KEYS,
+    OWNERSHIP_NONASSERTION_RE, CURRENT_RELATION_PREFIX_RE,
     TABLE_RELATION_HEADERS,
 )
 from src.features.composer.scope_constants import SCOPE_CONDITION_UNBOUND
@@ -98,7 +99,15 @@ def entity_relationship_problem(candidate: str, sources: Mapping[str, str]) -> s
     candidate = unicodedata.normalize("NFKC", candidate)
     originals = tuple(unicodedata.normalize("NFKC", source) for source in sources.values())
     for match in NAMED_RELATION_RE.finditer(candidate):
-        if _foreign_owner(candidate[:match.start()]):
+        prefix = candidate[:match.start()]
+        if _foreign_owner(prefix):
+            continue
+        # 소유를 부정하거나 과거에만 보유했다는 주술어를 현재 소속 단정으로 읽지 않는다.
+        # 명시 소유격·현재 수식이 남거나 다른 행동의 과거·부정이면 관계 증명이 필요하다.
+        if (match["particle"] in {"을", "를"}
+                and not NAMED_OWNER_RE.search(LEGAL_FORM_RE.sub("", prefix))
+                and not CURRENT_RELATION_PREFIX_RE.search(prefix)
+                and OWNERSHIP_NONASSERTION_RE.fullmatch(_key(candidate[match.end():]))):
             continue
         actor = match["actor"].strip()
         if not _formal_actor(actor, originals):
