@@ -125,9 +125,9 @@ def test_each_diagram_cell_keeps_its_own_time_binding():
 def test_extension_does_not_gain_or_lose_other_grounding_requirements():
     text = "회사는 2025년 사업 개시 목표를 2027년으로 연장했으며 거점 구축을 진행 중이다."
     assert plan_timing_problem(text, {"1": text}, baseline_date=BASELINE) == ""
-    # 기존 역할 검수가 '으로 연장'에 별도 결속을 요구한다. 시점 변경 보존을
-    # 위해 그 별개 계약을 열어 주거나 모든 검수의 합격을 주장하지 않는다.
-    assert _constrain(text) == ({1: "근거결속실패"}, {1: "role_binding_evidence_missing"})
+    # 사업 개시 목표의 일정 연장은 유료·금융 흐름이 아니다. 갱신 규칙/4는
+    # 이 자리에 과금 증명을 요구하지 않으며, 원문과 같은 시점 서술을 유지한다.
+    assert _constrain(text) == ({1: "참"}, {})
 
 
 def test_an_already_rejected_verdict_keeps_its_disposition():

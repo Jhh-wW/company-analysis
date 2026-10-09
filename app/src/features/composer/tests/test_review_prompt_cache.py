@@ -63,7 +63,9 @@ def test_explicit_opt_in_only_attaches_metadata(monkeypatch, configured):
 # 직접 비중 안내 185자만 역치환해 기존 본문·도식 여섯 지문을 정확 복원했다.
 # 증거: paid/5e30-direct-share-six-baseline-private.json. 근거·번호·스키마는 같다.
 # 안내만 역치환한 여섯 프롬프트 exact 증거: paid/8ae2-review-guide-baseline-private.json.
-@pytest.mark.parametrize("grouped,prefix_chars", ((False, 13468), (True, 14647)))
+# 갱신 과금 안내 +140자와 identity 안내 +87자만 역치환해 기존 여섯 지문을 복원했다.
+# paid/9c46-role-origin-prompt-baseline-private.json: 후보·원문·번호·스키마는 같다.
+@pytest.mark.parametrize("grouped,prefix_chars", ((False, 13608), (True, 14787)))
 @pytest.mark.parametrize("factory", (_golden_case, _large_case, _boundary_case))
 def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
     monkeypatch, grouped, prefix_chars, factory,
@@ -87,10 +89,10 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "82919b93f8d774ab60a6768dac1bbf4756c93785cdbce0a22951fdb8d1fac9aa"),
-    (_golden_case, True, "a66f6ecef4c62aee58f41470e4ba74305b1126ab513f0992fd4fba7843cb4050"),
-    (_boundary_case, False, "cef6e5c04b5a0456cf576af3bcd70791f5c65f7df37576bd65680fe40a79064b"),
-    (_boundary_case, True, "e4e2cc35aa2ac3b02471f15f9b03c3417e8ee25532f8e71846e87e8380e0bce2"),
+    (_golden_case, False, "488e178bd26ab885b56a9de44fa1cca8192aa349238a8eb5b02c0307bcc2ccc7"),
+    (_golden_case, True, "1efb359975c96bfb488481757cfe5350c266efffe9ffc4657c04a2871c739587"),
+    (_boundary_case, False, "2fe7617a6fa477e75e09daf1195c7f41f6ad40d932eb3ed578459ab389e7f649"),
+    (_boundary_case, True, "29dc6e6b7ce5236fe40734435fa39124518629cb34b2f41bcc6a741b006f0d00"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
@@ -173,7 +175,7 @@ def test_diagram_cache_excludes_card_switch_sources_and_rows(monkeypatch, items)
     reference = diagram_check._review_prompt((), {})
     assert cached.encode("utf-8") == plain.encode("utf-8")
     # 계획 증명의 공통 literal 안내 +257자: 9343 → 9600. 개별 원문은 캐시 밖이다.
-    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 9600
+    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 9740
     assert cached[:cached.cache_prefix_chars] == reference[:reference.cache_prefix_chars]
     assert texts["2"] not in cached[:cached.cache_prefix_chars]
     assert getattr(cached, "response_schema", None) is None

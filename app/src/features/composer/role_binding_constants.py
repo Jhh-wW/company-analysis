@@ -71,6 +71,16 @@ PROSE_REPEAT_WORDS: Final[tuple[str, ...]] = (
 )
 PROSE_REPEAT_MARKER_RE: Final[re.Pattern[str]] = re.compile(
     r"(" + "|".join(PROSE_REPEAT_WORDS) + r")")
+# 계약의 기간 변경 자체는 대가를 받는 방식이 아니다. 갱신·연장 자리의
+# 명시 유료/구독/금융 대상 또는 그 자리의 수익 서술만 기존 과금 검사를 받는다.
+RENEWAL_WORDS: Final[frozenset[str]] = frozenset({"갱신", "연장"})
+RENEWAL_FINANCIAL_PREFIX_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:유료(?:로)?|구독(?:료)?|이용료|서비스요금|수수료|로열티|보험료|보험|예금|예치|대출|금리|이자)"
+    r"(?:서비스|상품|계약|기간|만기|대금)?(?:을|를|이|가|은|는|의)?"
+    r"(?:(?:매년|매월|정기적으로|정기|자동|만기때|다시)(?:에|로)?)*$")
+RENEWAL_FINANCIAL_SUFFIX_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:(?:하|해|한|할|되|되어|되는|된|됨|로|으로|을|를|에|하여|해서))*"
+    r"(?:반복)?(?:수익|매출|구독료|이용료|요금|수수료|로열티|보험료|이자)")
 #: 산문에서 «대가를 주고받는 서술»로 보는 낱말. 아래 정규식과 안내문이 함께 쓴다.
 PROSE_FEE_WORDS: Final[tuple[str, ...]] = ("수수료", "로열티", "보수", "대가", "우대금리")
 #: ⚠️ 뒤따르는 동사는 «활용형까지» 적는다. 「부과」·「청구」를 명사 두 글자로 두면
@@ -249,7 +259,7 @@ ROLE_BINDING_ENTRY_TYPE_UNKNOWN: Final[str] = "role_binding_entry_type_unknown"
 
 #: 규칙 버전 — 진단이 «어느 규칙으로 판정했는지»를 남긴다. 발동·면제·대조 규칙이
 #: 바뀔 때마다 올린다. 회사·날짜·사례가 아니라 규칙의 판만 가리킨다.
-ROLE_BINDING_RULE_VERSION: Final[str] = "role-binding-rules/3"
+ROLE_BINDING_RULE_VERSION: Final[str] = "role-binding-rules/4"
 #: 결속 요구를 «제외»한 사유표 — 진단·안내문이 같은 이름을 쓴다.
 ROLE_BINDING_WAIVER_VERBATIM_CONDITION: Final[str] = "verbatim_news_participation_condition"
 ROLE_BINDING_WAIVER_TEXTS: Final[dict[str, str]] = {
@@ -364,7 +374,10 @@ ROLE_BINDING_REVIEW_GUIDE: Final[str] = (
     "«주요 수익원» 꼴과 이어질 때만, 도식 칸은 낱말만 있어도 항목이 필요하다.\n"
     f"· 반복 낱말 «{_JOIN.join(REPEAT_WORDS)}» → 유형 「{RELATION_FEE}」(반복 거래도 "
     f"과금 유형이다 — 「{RELATION_ROLE}」이 아니다). 산문은 «{_JOIN.join(PROSE_REPEAT_WORDS)}»에서, "
-    "도식 칸은 위 목록 전체에서 발동한다.\n"
+    "도식 칸은 위 목록 전체에서 발동한다. 단, 갱신·연장은 그 자리의 명시 유료·구독·"
+    "이용료·금융 대상이나 갱신·연장 수익/매출이 있을 때만 과금 요구가 된다. 원재료·공급 "
+    "계약의 기간 갱신·연장만으로 과금 항목을 만들지 않는다. 다른 절의 서비스 요금은 "
+    "그 요금 자리에서 별도로 검증한다.\n"
     f"항목은 검증근거의 '{RELATION_KEY}' 배열에 넣고 다섯 칸을 모두 «문자열»로 채운다: "
     f'{{"{RELATION_SOURCE_KEY}": "<그 후보가 인용한 근거 id>", '
     f'"{RELATION_TARGET_KEY}": "<그 역할·대가가 걸린 대상, 후보의 표현 그대로>", '

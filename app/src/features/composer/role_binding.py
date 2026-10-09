@@ -56,6 +56,9 @@ from src.features.composer.role_binding_constants import (
     RELATION_TARGET_KEY,
     RELATION_TYPE_KEY,
     REPEAT_CELL_MARKER_RE,
+    RENEWAL_WORDS,
+    RENEWAL_FINANCIAL_PREFIX_RE,
+    RENEWAL_FINANCIAL_SUFFIX_RE,
     ROLE_BINDING_ACTOR_BOUNDARY,
     ROLE_BINDING_CLAIM_UNCOVERED,
     ROLE_BINDING_CONDITION_DROPPED,
@@ -362,6 +365,11 @@ def _claim_markers(
         ):
             for match in pattern.finditer(unit.surface):
                 start, end = match.span(1)
+                if (kind == RELATION_FEE and pattern is fee_patterns[1]
+                        and unit.surface[start:end] in RENEWAL_WORDS
+                        and RENEWAL_FINANCIAL_PREFIX_RE.search(unit.surface[:start]) is None
+                        and RENEWAL_FINANCIAL_SUFFIX_RE.match(unit.surface[end:]) is None):
+                    continue
                 if kind == RELATION_ROLE:
                     raw_end = unit.index[end - 1] + 1
                     if ROLE_COMPOUND_TAIL_RE.match(unit.raw, raw_end) is not None:
