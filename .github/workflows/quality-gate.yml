@@ -54,6 +54,8 @@ jobs:
     needs: tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      DOCKER_CONFIG: ${{ runner.temp }}/docker-public-auth-${{ github.run_id }}-${{ github.run_attempt }}
     permissions:
       contents: read
     steps:
@@ -61,6 +63,10 @@ jobs:
         uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
         with:
           persist-credentials: false
+      - name: 공개 이미지 인증 설정 분리
+        run: |
+          install -d -m 700 "$DOCKER_CONFIG"
+          printf '%s\n' '{"auths":{"https://index.docker.io/v1/":{}}}' > "$DOCKER_CONFIG/config.json"
       - name: 배포 컨테이너 빌드
         run: docker build --file app/Dockerfile --tag company-analysis-smoke:ci .
       - name: 컨테이너 cron·비밀 파일 계약 확인
