@@ -10,6 +10,8 @@ from src.features.composer.flow_target_relation_constants import (
     FLOW_TARGET_RELATION_GUIDE, FLOW_TARGET_LOCAL_ACTION_RE,
     FLOW_TARGET_ROLE_TAIL_RE, FLOW_TARGET_ROLE_PARTICLE_RE,
     FLOW_TARGET_ROLE_PREFIX_RE, FLOW_TARGET_ROLE_GROUP_RE,
+    FLOW_TARGET_ROLE_JOIN_RE, FLOW_TARGET_EXPLICIT_ROLE_RE,
+    FLOW_TARGET_ACTION_LIST_PREFIX_RE,
     FLOW_TARGET_PRODUCT_ACTIONS, FLOW_TARGET_FOREIGN_SUBJECT_RE,
     FLOW_TARGET_RELATION_SECTION, FLOW_TARGET_RELATION_TYPE,
     FLOW_TARGET_RELATION_UNBOUND, FLOW_TARGET_SUBJECT_RE,
@@ -22,9 +24,24 @@ def _surface(text: str) -> str:
                    if not char.isspace() and char not in "'‘’“”\"")
 
 
+def _role_groups(text: str) -> tuple[str, ...]:
+    """양쪽에 대상·행동을 명시한 접속만 나누고 대상·행동 목록은 유지한다."""
+    groups = []
+    for group in FLOW_TARGET_ROLE_GROUP_RE.split(text):
+        start = 0
+        for join in FLOW_TARGET_ROLE_JOIN_RE.finditer(group):
+            if (FLOW_TARGET_EXPLICIT_ROLE_RE.search(group[start:join.start()])
+                    and FLOW_TARGET_EXPLICIT_ROLE_RE.search(group[join.end():])
+                    and not FLOW_TARGET_ACTION_LIST_PREFIX_RE.match(group[join.end():])):
+                groups.append(group[start:join.start()])
+                start = join.end()
+        groups.append(group[start:])
+    return tuple(groups)
+
+
 def flow_target_relation_pairs(cells: Sequence[str], sources: Mapping[str, str],
                                *, section_id: str) -> tuple[tuple[str, str], ...]:
-    """자기 원문과 전달 칸에 실제 등장한 명시 이름·대상만 요구한다."""
+    """명시 역할의 모든 대상과 자기 원문에서 발견한 목록 대상을 요구한다."""
     if section_id != FLOW_TARGET_RELATION_SECTION or len(cells) != FLOW_TARGET_CELL_COUNT:
         return ()
     action, recipient = cells[FLOW_TARGET_ACTION_INDEX], cells[FLOW_TARGET_RECIPIENT_INDEX]
@@ -35,7 +52,7 @@ def flow_target_relation_pairs(cells: Sequence[str], sources: Mapping[str, str],
     pairs = []
     # 열거의 끝 '등 ...' 설명은 앞의 이름과 같은 대상으로 중복 요구하지 않는다.
     literal = FLOW_TARGET_LIST_TAIL_RE.split(recipient, maxsplit=1)[0]
-    for group in FLOW_TARGET_ROLE_GROUP_RE.split(literal):
+    for group in _role_groups(literal):
         local = tuple(match.group() for match in FLOW_TARGET_LOCAL_ACTION_RE.finditer(group))
         # 칸에서 역할을 직접 구분한 대상에 다른 대상의 행동까지 요구하지 않는다.
         scoped_actions = tuple(activity for activity in actions
@@ -46,8 +63,9 @@ def flow_target_relation_pairs(cells: Sequence[str], sources: Mapping[str, str],
             part = FLOW_TARGET_ROLE_PREFIX_RE.sub("", part.strip())
             if local:
                 part = FLOW_TARGET_ROLE_PARTICLE_RE.sub("", part).strip()
+            # 명시 역할의 미지원 대상도 남겨 관계 검사가 원문 누락을 거절한다.
             if (part and _surface(part) not in FLOW_TARGET_GENERIC_TERMS
-                    and any(_surface(part) in source for source in source_keys)):
+                    and (local or any(_surface(part) in source for source in source_keys))):
                 targets.append(part)
         for source in sources.values():
             for match in FLOW_TARGET_QUOTED_NAME_RE.finditer(source):
