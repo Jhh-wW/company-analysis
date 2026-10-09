@@ -1,5 +1,6 @@
 """모델의 참 판정도 자기 원문이 지원하지 않는 범위·상태를 통과시키지 않는다."""
 import json
+from hashlib import sha256
 
 import pytest
 
@@ -15,13 +16,25 @@ def test_research_title_is_not_current_execution_even_when_model_says_true(kind,
     claim = '회사는 저소음 구동기 과제를 추진하고 있으며 소음 개선을 기대효과로 제시했다.'
     source = '연구과제 | 연구기간 | 연구결과 및 기대효과; 저소음 구동기 | 22/01~25/12 | 소음 개선'
     entry = {'번호': 1, '결과': '참', '근거': ['a']}
-    raw = json.dumps({'검수결과': {'competitive_position': [entry]}} if wrapped else {'판정': [entry]}, ensure_ascii=False)
+    section_id = 'summary' if kind == '요약' else 'competitive_position'
+    raw = json.dumps({'검수결과': {section_id: [entry]}} if wrapped
+                     else {'판정': [entry]}, ensure_ascii=False)
     problems = {}
+    diagnostics = []
     result = _apply_grounding(raw, {1: '참'}, {1: (claim, {'a': source})},
-                             diagnostic_contexts={1: ('competitive_position', kind, '확인')},
+                             diagnostics=diagnostics,
+                             diagnostic_contexts={1: (section_id, kind, claim)},
                              grounding_problems=problems)
     assert result[1] != '참'
     assert problems[1] == 'time_invalid'
+    observed = observed_review_outcomes(diagnostics)
+    assert len(observed) == 1
+    assert observed[0]['reason_code'] == 'time_invalid'
+    assert observed[0]['verification_items'] == ('시점',)
+    assert observed[0]['candidate_sha256'] == sha256(claim.encode('utf-8')).hexdigest()
+    assert observed[0]['section_id'] == section_id
+    assert observed[0]['kind'] == kind
+    assert 'candidate_text' not in observed[0]
 
 
 @pytest.mark.parametrize('claim,source', [
