@@ -1693,7 +1693,7 @@ def test_ref가_다른_두_scope는_저장문서_ID와_scope_digest가_서로_�
     assert alpha.identity_binding != beta.identity_binding
 
 
-def test_v4_산출은_버전이_ID에_봉인되어_v1_따뜻한캐시와_섞이지_않는다():
+def test_v5_산출은_버전이_ID에_봉인되어_이전_따뜻한캐시와_섞이지_않는다():
     base = "https://company.example"
     pages = {
         f"{base}/robots.txt": _page(
@@ -1717,12 +1717,18 @@ def test_v4_산출은_버전이_ID에_봉인되어_v1_따뜻한캐시와_섞이�
         "homepage-wide-collector/3", "homepage-wide-parser/2",
     )).encode("utf-8")).hexdigest()
 
-    assert WIDE_COLLECTOR_VERSION == "homepage-wide-collector/4"
+    legacy_v4_id = hashlib.sha256("\0".join((
+        f"{base}/", hashlib.sha256(f"{base}/".encode("utf-8")).hexdigest(),
+        "homepage-wide-collector/4", "homepage-wide-parser/2",
+    )).encode("utf-8")).hexdigest()
+
+    assert WIDE_COLLECTOR_VERSION == "homepage-wide-collector/5"
     assert WIDE_PARSER_VERSION == "homepage-wide-parser/2"
     assert first_document.collector_version == WIDE_COLLECTOR_VERSION
     assert first_document.parser_version == WIDE_PARSER_VERSION
     assert first_document.document_id != legacy_v1_id
     assert first_document.document_id != legacy_v3_id
+    assert first_document.document_id != legacy_v4_id
     assert first_document.document_id == second_document.document_id
 
 
