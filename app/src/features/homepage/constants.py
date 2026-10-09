@@ -513,7 +513,7 @@ WIDE_ATTEMPT_FAILED: Final[str] = "FAILED"
 WIDE_ATTEMPT_TRUNCATED: Final[str] = "TRUNCATED"
 
 #: 원문 위치·수집기 계약에 함께 봉인할 버전 문자열.
-WIDE_COLLECTOR_VERSION: Final[str] = "homepage-wide-collector/3"
+WIDE_COLLECTOR_VERSION: Final[str] = "homepage-wide-collector/4"
 WIDE_PARSER_VERSION: Final[str] = "homepage-wide-parser/2"
 
 #: 채용·IR·뉴스룸·블로그 호스트·경로를 먼저 살펴보게 하는 우선순위 키워드.

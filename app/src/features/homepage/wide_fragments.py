@@ -48,6 +48,10 @@ from src.features.homepage.constants import (
     WIDE_SOURCE_KIND_WEB_PAGE,
 )
 from src.features.homepage.wide_domain import classify_official_page_url
+from src.features.homepage.education_product import (
+    EDUCATION_PRODUCT_SLOT,
+    education_product_range_indices,
+)
 from src.features.homepage.wide_types import (
     WideCollectionResult,
     WideDocumentIdentity,
@@ -63,6 +67,7 @@ _SCORE_BODY_KEYWORD_MATCH = 700
 
 _REASON_PAGE_TYPE_SIGNAL = "page_type_signal"
 _REASON_BODY_KEYWORD_MATCH = "body_keyword_match"
+_REASON_EDUCATION_PRODUCT_RELATION = "education_product_relation"
 
 _VERIFIED_CASE_MARKERS: tuple[str, ...] = (
     "사례", "후기", "인터뷰", "스토리", "프로젝트", "수상", "인증"
@@ -174,6 +179,9 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
             slot_id for slot_id in WIDE_REQUIRED_SLOT_IDS if slot_id in owned_slots
         )
     challenge_evidence = classify_challenge_evidence(document.usable_ranges)
+    education_product_indices = education_product_range_indices(
+        document, page_slots if uses_page_slot_hint else ()
+    )
 
     fragments: list[WideFragment] = []
     for index, text in enumerate(document.usable_ranges):
@@ -183,12 +191,15 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
             range_index=index,
             challenge_evidence=challenge_evidence,
         )
+        if index in education_product_indices and EDUCATION_PRODUCT_SLOT not in slots_for_range:
+            slots_for_range += (EDUCATION_PRODUCT_SLOT,)
         if not slots_for_range:
             continue
         score = _SCORE_BODY_KEYWORD_MATCH
         reason_codes = (
             ((_REASON_PAGE_TYPE_SIGNAL,) if page_slots and uses_page_slot_hint else ())
-            + (_REASON_BODY_KEYWORD_MATCH,)
+            + ((_REASON_EDUCATION_PRODUCT_RELATION,) if index in education_product_indices
+               else (_REASON_BODY_KEYWORD_MATCH,))
         )
 
         text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -210,7 +221,11 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
                     section_id=section_id,
                     slot_id=primary_slot_id,
                     score_millis=score,
-                    reason_codes=reason_codes,
+                    reason_codes=(
+                        reason_codes if section_id == "portfolio" or index not in education_product_indices
+                        else tuple(_REASON_BODY_KEYWORD_MATCH if code == _REASON_EDUCATION_PRODUCT_RELATION
+                                   else code for code in reason_codes)
+                    ),
                     covered_slot_ids=tuple(covered_slot_ids),
                     range_index=index,
                     item_title=item[1] if item else "",
