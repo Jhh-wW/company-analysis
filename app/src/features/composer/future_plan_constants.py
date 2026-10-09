@@ -329,6 +329,12 @@ FUTURE_TEMPORAL_RE: Final[re.Pattern[str]] = re.compile(
 FUTURE_DIRECTION_OBJECT_RE: Final[re.Pattern[str]] = re.compile(
     r"\A향후\s+방향성(?:을|에\s*대해|에\s*관해)?(?=\s|\Z)"
 )
+# 앞에서 목적어로 든 활동 자체를 정해진 시기까지 완료하는 명시 계획이다.
+# 새로운 목적어·다른 행동이 끼어들면 이 연결로 미래 양태를 빌릴 수 없다.
+POST_ACTIVITY_TIMED_COMPLETION_RE: Final[re.Pattern[str]] = re.compile(
+    r"\A\s*(?:을|를)?\s*(?:" + FUTURE_TEMPORAL_RE.pattern + r")"
+    r"\s*(?:까지|부터|에)?\s*(?:완료|마무리)할\s*(?:계획|예정|방침)"
+)
 # 단순 명사형 도입은 뒤의 미래 서술과 같은 주장이다. ‘할 계획’은 별도 서술이다.
 NOMINAL_PLAN_INTRO_RE: Final[re.Pattern[str]] = re.compile(r"계획으로\Z")
 #: 본문 대상과 활동 사이에는 기존 미래 시점과 닫힌 기간 조사만 허용한다.

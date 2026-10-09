@@ -60,3 +60,22 @@ def test_current_direction_discussion_does_not_require_future_proof():
     assert not has_forward_marker(source)
     assert not future_plan_prose_problem(source, {'own': source}, None, claim_slot=STATED_PLAN_SLOT)
     assert has_forward_marker('당사는 향후 방향성을 논의할 계획이다.')
+
+
+@pytest.mark.parametrize('tail,expected', [
+    ('을 내년까지 완료할 계획이다.', True),
+    ('을 내년까지 완료할 예정이다.', True),
+    ('을 2028년까지 마무리할 계획이다.', True),
+    ('을 내년까지 완료할 계획은 없다.', False),
+    ('을 내년까지 완료했다.', False),
+    ('을 내년까지 물류센터 매각을 완료할 계획이다.', False),
+    ('하고 향후 방향성을 논의하며 운영한다.', False),
+    ('을 내년까지 완료하고 별도 사업을 시작할 계획이다.', False),
+])
+def test_timed_completion_binds_same_nominal_activity(tail, expected):
+    source = '당사는 신공장 증설' + tail
+    activity = '증설'
+    start = source.index(activity)
+    mode, reason, _ = _source_modality(source, (start, start + len(activity)))
+    assert bool(mode) is expected
+    assert bool(reason) is not expected

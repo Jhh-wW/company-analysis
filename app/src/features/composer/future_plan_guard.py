@@ -82,6 +82,7 @@ from src.features.composer.future_plan_constants import (
     FUTURE_TARGET_TOO_SHORT,
     FUTURE_TEMPORAL_RE,
     FUTURE_DIRECTION_OBJECT_RE,
+    POST_ACTIVITY_TIMED_COMPLETION_RE,
     GENERIC_SUBJECTS,
     GENERIC_TARGETS,
     MIN_ACTIVITY_CHARS,
@@ -383,6 +384,11 @@ def _source_modality(sentence: str, activity_span: tuple[int, int]) -> tuple[str
         # 앞 활동의 계획 양태로 쓰면 현재 보고를 미래 이행으로 바꾸게 된다.
         # 활동 앞 시점은 아래 기존 경로에서 같은 활동과 계속 대조한다.
         if FUTURE_TEMPORAL_RE.fullmatch(match.group()):
+            completion = POST_ACTIVITY_TIMED_COMPLETION_RE.match(tail)
+            if completion:
+                if _plan_denied_after_marker(tail, completion.end()):
+                    return "", FUTURE_PLAN_DENIED_IN_SOURCE, ""
+                return FUTURE_MODE_PLAN, "", ""
             return "", FUTURE_MODALITY_NOT_BOUND, ""
         kind = _modality_kind(match)
         if kind not in MODALITY_FUTURE_KINDS:
