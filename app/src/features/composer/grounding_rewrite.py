@@ -103,6 +103,11 @@ def _fragment_lines(
             if fragment is None:
                 continue
             seen.add(citation)
+            if fragment.section_context_json:
+                from src.shared.report_evidence.section_context import parse_section_context
+                from src.features.composer.section_context_constants import SECTION_CONTEXT_LABEL
+                context = parse_section_context(fragment.section_context_json)
+                lines.append(SECTION_CONTEXT_LABEL + ": " + json.dumps(context["text"], ensure_ascii=False) + "\n")
             lines.append(
                 f"[조각 {citation}] 원문(JSON 문자열): "
                 f"{json.dumps(fragment.text, ensure_ascii=False)}\n"

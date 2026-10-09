@@ -2,6 +2,8 @@
 
 GROUNDING_DETAIL_VERSION = "grounding-detail-v1"
 GROUNDING_DETAIL_GUIDES = {
+    "review_evidence_id_binding": "근거 ID가 이 문장에 배정된 출처와 일치하지 않거나 중복됩니다.",
+    "numeric_selection_unbound": "수치 선택 ID가 이번 번호·장·자기 인용에 결속되지 않거나 자유 수치 증명과 충돌합니다.",
     "entries_missing": "수치 근거 배열이 비었거나 배열이 아닙니다.",
     "entry_type": "수치 근거 항목이 객체가 아닙니다.",
     "expression_fields": "표현·항목·원문항목이 없거나 문자열이 아닙니다.",
@@ -11,6 +13,7 @@ GROUNDING_DETAIL_GUIDES = {
     "candidate_value_missing": "후보 숫자 표기가 없거나 둘 이상이라 결속할 수 없습니다.",
     "candidate_value_scope": "후보 숫자가 해당 항목·표현의 범위에 결속되지 않습니다.",
     "source_value_scope": "원문 숫자를 해당 항목·원문 구절에서 확인하지 못했습니다.",
+    "value_constraint_mismatch": "후보와 원문의 숫자 상한·하한 또는 연결·별도 기준이 다릅니다.",
     "value_mismatch": "후보 숫자가 원문 값과 허용된 환산·반올림으로 일치하지 않습니다.",
     "dimension_mismatch": "후보의 금액·수량·외화·비율 차원이 원문과 다릅니다.",
     "period_mismatch": "후보 숫자의 기간과 원문 숫자의 기간이 다릅니다.",

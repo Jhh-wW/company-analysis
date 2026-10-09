@@ -178,7 +178,9 @@ EXEMPT_CASES: tuple[tuple[str, str, str], ...] = (
         "당기말 현재 회사가 유동성위험에 노출된 금융부채의 잔액은 1,234백만원이며 "
         "1년 이내 만기가 도래한다.",
         "화폐금액",
-        "유동성관리",
+        # 실제 노출액은 표준 관리 설명이 아니다. '유동성위험' 단어만으로
+        # 상용구를 단정하던 규칙을 좁혔으므로 금액 면제 전에도 해당하지 않는다.
+        "",
     ),
     (
         "회사는 당기말 이연법인세자산 3,059백만원을 인식하고 있다.",
@@ -264,7 +266,8 @@ def test_회사_고유_금액이_든_문장은_면제로_통과한다(
 
     ★ 「통과한다」만 단정하면 규칙이 애초에 안 걸려서 통과한 것과 구분이
       안 된다. 그래서 «면제가 없었다면 걸렸을 규칙»까지 함께 단정한다 —
-      이 값이 빈칸이 되는 날 면제는 아무것도 지켜 주지 않는 장식이 된다.
+      실제 노출액은 이제 표준 관리 문형에 해당하지 않는다. 다른 회계 문형은
+      금액·사건 면제가 실제로 차단을 해제했는지 함께 확인한다.
     """
 
     assert accounting_policy_rules_ignoring_exemptions(text) == (blocked_rule,)
@@ -411,11 +414,8 @@ def test_verify_report가_모든_장_본문에서_회계정책_상용구를_뺀�
     assert blocked not in repr(diagnostics)
 
 
-def test_금액이_든_회사_고유_문장은_실제_경로에서도_살아남는다():
-    """5장 「당면 과제」의 유동성위험 «노출액» 문장이 실제로 이 모양이다.
-
-    단위 판정만 초록이고 운영 경로에서 그대로 빠지면 아무것도 고쳐지지 않는다.
-    """
+def test_금액만_있는_재무위험은_사업_과제에_승격되지_않는다():
+    """사용자 새 5장 계약: 금액 면제는 사업상 문제의 직접 근거가 아니다."""
 
     text = EXEMPT_CASES[0][0]
     report = ComposedReport((ComposedSection("current_challenges", (
@@ -426,8 +426,8 @@ def test_금액이_든_회사_고유_문장은_실제_경로에서도_살아남�
     checked = verify_report(
         report, fragments, None, _approval(calls), diagnostics=diagnostics,
     )
-    assert [s.text for s in checked.sections[0].sentences] == [text]
-    assert [d["reason_code"] for d in diagnostics] == []
+    assert [s.text for s in checked.sections[0].sentences] == []
+    assert "accounting_policy_boilerplate" in repr(diagnostics)
 
 
 def test_8장은_기존_경로와_기존_사유코드를_그대로_쓴다():

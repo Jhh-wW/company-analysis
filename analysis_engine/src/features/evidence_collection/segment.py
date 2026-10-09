@@ -30,6 +30,8 @@ class FragmentCandidate:
     text: str
     section_heading: str
     is_short: bool = False
+    source_context_json: str = ""
+    section_context_json: str = ""
 
 
 @dataclass
@@ -264,5 +266,15 @@ def segment_sections(text: str) -> list[TextSegment]:
 
 
 def usable_ranges_from_candidates(candidates: list[FragmentCandidate]) -> tuple[DocumentTextRange, ...]:
-    return tuple(sorted((DocumentTextRange(candidate.start, candidate.end) for candidate in candidates),
-                        key=lambda value: (value.start, value.end)))
+    # 추가 문맥창과 기존 행 조각이 겹쳐도 원조각은 삭제하지 않는다.
+    # 문서의 사용 범위만 정확한 합집합으로 보관하며 빈 틈은 연결하지 않는다.
+    ordered = sorted((DocumentTextRange(candidate.start, candidate.end) for candidate in candidates),
+                     key=lambda value: (value.start, value.end))
+    merged: list[DocumentTextRange] = []
+    for value in ordered:
+        if merged and value.start <= merged[-1].end:
+            previous = merged[-1]
+            merged[-1] = DocumentTextRange(previous.start, max(previous.end, value.end))
+        else:
+            merged.append(value)
+    return tuple(merged)

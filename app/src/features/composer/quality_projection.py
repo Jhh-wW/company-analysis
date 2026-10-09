@@ -501,6 +501,16 @@ def build_generation_quality_candidate(
             )
         )
 
+    context_sources = {
+        source_id
+        for section in rendered.sections for context in section.industry_contexts
+        for source_id in (context.anchor.source_id, context.problem.source_id)
+    }
+    direct_fact_sources = {
+        source_id for fact in rendered.fact_records
+        for source_id in (fact.source_id, *fact.supporting_source_ids)
+        if source_id
+    }
     sources = tuple(
         SourceDocument(
             source_id=source.source_id,
@@ -511,7 +521,10 @@ def build_generation_quality_candidate(
             # 부풀리지 못하게 한다.
             document_content_sha256=source.document_content_sha256,
             publisher=source.publisher,
-            counts_toward_document_floor=source.kind is not SourceKind.NEWS,
+            counts_toward_document_floor=(
+                source.kind is not SourceKind.NEWS
+                and (source.source_id not in context_sources or source.source_id in direct_fact_sources)
+            ),
             source_kind=(
                 "news" if source.kind is SourceKind.NEWS
                 else (source.formal_source_kind or OFFICIAL_PROSE_LEGACY_FILING_KIND)

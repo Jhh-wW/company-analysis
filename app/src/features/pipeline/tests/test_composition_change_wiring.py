@@ -102,8 +102,9 @@ def test_다개년_구성표를_수집해_실적표_뒤_4장에_제품_지역_�
     assert len(by_section["business_model"]) == 1
     assert [table.caption for table in by_section["past_changes"]] == [
         "3개년 실적",
-        "제품·서비스별 매출 비중 변화 (2023~2025)",
-        "지역별 매출 비중 변화 (2023~2025)",
+        # 새 생성 표는 표 합계와 원문 머리말의 기간·기준을 함께 공개한다.
+        "제품·서비스별 매출 비중 변화 (2023~2025) · 집계 범위: 원문 표 합계 기준 · 2025년 · 2024년 · 2023년",
+        "지역별 매출 비중 변화 (2023~2025) · 집계 범위: 원문 표 합계 기준 · 연결재무제표 · 2025년 · 2024년 · 2023년",
     ]
     composition_step = next(step for step in steps if step["step"] == "7_구성변화표")
     assert composition_step == {

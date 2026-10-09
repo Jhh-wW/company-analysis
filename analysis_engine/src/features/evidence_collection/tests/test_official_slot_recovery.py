@@ -76,7 +76,8 @@ def test_영업수익의_형태_구성_문형은_수익모델을_지원한다() 
         _REVENUE_COMPOSITION, allowed_slot_ids=_AUDIT_CANDIDATE_SLOTS
     )
     assert scores[0].slot_id == "business_model:revenue_model"
-    assert "business_model:value_exchange" in {score.slot_id for score in scores}
+    # 고객에게 무엇을 넘기고 어떤 대가를 받는지는 회계 측정 문장만으로 입증되지 않는다.
+    assert "business_model:value_exchange" not in {score.slot_id for score in scores}
 
 
 def test_전사_연간_실적은_수익모델이_아니다() -> None:

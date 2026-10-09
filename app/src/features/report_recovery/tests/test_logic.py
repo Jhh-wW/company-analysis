@@ -439,13 +439,15 @@ def test_해석보충뒤_틀린수치가_남으면_세번째호출없이_무차�
     assert not final.charge_allowed
 
 
-def test_얇은장이_세개면_비싼보충을_시작하지않는다() -> None:
+def test_three_thin_sections_authorize_only_two_sections_once() -> None:
     primary = _primary(_recoverable("identity", "culture", "portfolio"))
 
     decision = decide_post_validation(primary)
 
-    assert decision.action is RecoveryAction.STOP_NO_CHARGE
-    assert decision.projected_total_ai_calls == _PRIMARY_CALLS
+    assert decision.action is RecoveryAction.RUN_SUPPLEMENTS
+    assert decision.supplement_section_ids == ('identity', 'portfolio')
+    assert decision.projected_total_ai_calls == _PRIMARY_CALLS + _supplement_calls(2)
+    assert not decision.publish_allowed and not decision.charge_allowed
 
 
 @pytest.mark.parametrize(
@@ -490,8 +492,13 @@ def test_품질때문에_닫은중단만_품질코드를_함께_싣는다() -> N
             )
         )
     )
-    too_many = decide_post_validation(
-        _primary(_recoverable("identity", "culture", "portfolio"))
+    # 대상 셋 중 둘을 보충해도 전체 품질 부족이 남으면 중단 사유를 보존한다.
+    primary = _primary(_recoverable("identity", "culture", "portfolio"))
+    first = decide_post_validation(primary)
+    still_underfilled = decide_post_validation(
+        primary, supplement_authorization=first.supplement_authorization,
+        supplement_receipt=_supplement(primary, first.supplement_authorization,
+                                      _recoverable("culture")),
     )
     safety = decide_post_validation(_primary(_assessment(safety_blocked=True)))
 
@@ -499,11 +506,11 @@ def test_품질때문에_닫은중단만_품질코드를_함께_싣는다() -> N
     # str(enum)은 "QualityProblemCode.X"라서 최종 게이트 분류기와 안 맞는다.
     assert nonrecoverable.reason_code == "post_validation_nonrecoverable_quality"
     assert "too_few_document_sources" in nonrecoverable.quality_problem_codes
-    assert too_many.reason_code == "too_many_underfilled_sections"
-    assert too_many.quality_problem_codes
+    assert still_underfilled.reason_code == "post_supplement_quality_failed"
+    assert still_underfilled.quality_problem_codes
     assert all(
         isinstance(code, str) and not code.startswith("QualityProblemCode")
-        for code in too_many.quality_problem_codes
+        for code in still_underfilled.quality_problem_codes
     )
     # 안전 실패는 품질 사유가 아니다 — 코드를 싣지 않는다.
     assert safety.reason_code == "post_validation_safety_blocked"

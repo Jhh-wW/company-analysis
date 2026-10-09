@@ -128,6 +128,10 @@ def canonical_value(value: Any) -> Any:
                 item.metadata.get("canonical_omit_empty")
                 and getattr(value, item.name) == ()
             )
+            and not (
+                item.metadata.get("canonical_omit_empty_string")
+                and getattr(value, item.name) == ""
+            )
         }
     if isinstance(value, Mapping):
         return {

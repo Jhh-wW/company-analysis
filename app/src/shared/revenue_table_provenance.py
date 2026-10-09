@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from typing import Final, Literal, Optional, TypeAlias
+from src.shared.revenue_population_constants import POPULATION_CAPTION_SEPARATOR
+from src.shared.revenue_population_scope import revenue_population_caption_matches, revenue_population_header_from_rows, revenue_product_name_span, revenue_population_context_start, revenue_population_heading
 
 
 RevenueAxis: TypeAlias = Literal["product", "region"]
@@ -615,6 +617,7 @@ def revenue_table_source_excerpt(evidence_rows: Sequence[str]) -> str:
 
 
 def _caption_matches_axis(axis: RevenueAxis, caption: str) -> bool:
+    caption = caption.split(POPULATION_CAPTION_SEPARATOR, 1)[0]
     single_year = REVENUE_CAPTION_BY_AXIS[axis]
     change = REVENUE_CHANGE_CAPTION_BY_AXIS[axis]
     amount_only = REVENUE_AMOUNT_ONLY_CAPTION_BY_AXIS[axis]
@@ -764,6 +767,12 @@ def revenue_table_axis_matches(
         return False
     excerpt = revenue_table_source_excerpt(evidence_rows)
     if not excerpt or _text_axis(excerpt) != typed_axis:
+        return False
+    try:
+        population_header = revenue_population_header_from_rows(evidence_rows)
+        if not revenue_population_caption_matches(caption, excerpt, header_text=population_header):
+            return False
+    except (ValueError, TypeError, KeyError):
         return False
     if cited_source_text and cited_source_text != excerpt:
         return False
@@ -1213,7 +1222,12 @@ def _header_span_matches(
         and start == excerpt_absolute_start + local_start
         and end == excerpt_absolute_start + local_end
         and end - start == len(text)
-        and local_start == 0
+        and (local_start == 0 or (
+            0 < local_start < len(excerpt)
+            and revenue_population_heading(excerpt[:local_start])
+            and revenue_population_context_start(excerpt, local_start) == 0
+            and REVENUE_RATIO_HEAD_RE.search(excerpt[:local_start]) is None
+        ))
         and 0 <= local_end <= len(excerpt)
         and excerpt[local_start:local_end] == text
         and payload.get("sha256") == sha256_text(text)
@@ -1252,7 +1266,7 @@ def _unit_agrees(amount_header: str, header_text: str) -> bool:
 
 
 def _row_fields_match_a_known_shape(
-    raw_match: str, fields: Mapping[str, object]
+    raw_match: str, fields: Mapping[str, object], header: str = ""
 ) -> bool:
     """봉인된 칸 좌표가 «알려진 행 모양 하나»로 정확히 다시 잘리는지 본다.
 
@@ -1275,6 +1289,12 @@ def _row_fields_match_a_known_shape(
         }
         if all(fields.get(name) == span for name, span in expected.items()):
             return True
+        product_span = revenue_product_name_span(structural_match.group(1), header)
+        if product_span and all(fields.get(name) == expected[name] for name in ("amount", "ratio")):
+            start = structural_match.start(1) + product_span[0]
+            end = structural_match.start(1) + product_span[1]
+            if fields.get("name") == _span_payload(raw_match, start, end):
+                return True
     return False
 
 
@@ -1649,7 +1669,12 @@ def _amount_only_header_matches(
         and start == excerpt_absolute_start + local_start
         and end == excerpt_absolute_start + local_end
         and end - start == len(text)
-        and local_start == 0
+        and (local_start == 0 or (
+            0 < local_start < len(excerpt)
+            and revenue_population_heading(excerpt[:local_start])
+            and revenue_population_context_start(excerpt, local_start) == 0
+            and REVENUE_RATIO_HEAD_RE.search(excerpt[:local_start]) is None
+        ))
         and 0 <= local_end <= len(excerpt)
         and excerpt[local_start:local_end] == text
         and payload.get("sha256") == sha256_text(text)
@@ -2049,7 +2074,10 @@ def revenue_row_evidence_matches(
             expected_selected_index=expected_selected_index,
             expected_row_count=expected_row_count,
         )
-    if not _row_fields_match_a_known_shape(raw_match, fields):
+    raw_table = payload.get("table")
+    raw_header = raw_table.get("header", {}) if isinstance(raw_table, Mapping) else {}
+    if not _row_fields_match_a_known_shape(raw_match, fields,
+        raw_header.get("text", "") if isinstance(raw_header, Mapping) else ""):
         return False
     source_index = _integer(row.get("source_index"))
     selected_index = _integer(row.get("selected_index"))

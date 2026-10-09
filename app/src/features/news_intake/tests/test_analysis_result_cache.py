@@ -365,7 +365,11 @@ def test_full_collection_equal_with_same_search_fetch_selection_and_logical_limi
     assert cold == replace(warm, diagnostics={**warm.diagnostics,
         "분석캐시적중": 0, "분석캐시보존호출": 0,
         "분석provider호출": cold.diagnostics["분석provider호출"],
-        "분석provider미관측": cold.diagnostics["분석provider미관측"]})
+        "분석provider미관측": cold.diagnostics["분석provider미관측"],
+        "원문선택변환": cold.diagnostics["원문선택변환"]})
+    for cold_trace, warm_trace in zip(cold.diagnostics["원문선택변환"], warm.diagnostics["원문선택변환"]):
+        assert cold_trace["원응답정규JSON_SHA256"] == warm_trace["원응답정규JSON_SHA256"]
+        assert cold_trace["복원응답정규JSON_SHA256"] == warm_trace["복원응답정규JSON_SHA256"]
     assert len(calls) == cold.diagnostics["분석AI호출"]
     assert len(hits) == warm.diagnostics["분석AI호출"]
     if policy.max_analysis_calls == 0:

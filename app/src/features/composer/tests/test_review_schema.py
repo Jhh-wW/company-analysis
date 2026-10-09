@@ -103,11 +103,11 @@ def _schema_sha(schema):
     (FLAT_REVIEW_SCHEMA,
      "ec40152ca2ad8aa43192180dd0583bff4a6c3f5e52042ac1f2b915bc7fd0b94d",
      "ff4e031accf5776e3f189483531e5c5270bea8c8d1ec8cd6da75008384f901ab",
-     "bb974f18bc5d33def32725d9d6a401a3eb0265f878af6ac624bcb7ff2af966cf"),
+     "7cdc5e597a878676b5110e32f2ea094e722ff45791c0116027e1396c0b46f39c"),
     (DIAGRAM_REVIEW_SCHEMA,
      "ba1d778829286673bd6cde6ebb5d559274c78f0202b92d6e4128891736dfc1c8",
      "43db498656efc5545d712fcc1f0c9893fe69fbd1f2dcca8a42a470c03e4bcb8a",
-     "5e650e7f2d7b91af0d6a9d45f632f0880accfd835b8c3d801207880d02660201"),
+     "3ee464ce729bde5c0599e765ee5502c729155a3933f36e691733a5754315998f"),
 ))
 def test_retry_schema_hash_matches_provider_accepted_schema(schema, accepted, recognition, current):
     assert _schema_sha(schema) == current
@@ -116,6 +116,41 @@ def test_retry_schema_hash_matches_provider_accepted_schema(schema, accepted, re
     assert relation["required"] == ["근거", "원문", "유형"]
     assert relation["additionalProperties"] is False
     previous = deepcopy(schema)
+    # 운영 도식 대상·행동 증명의 새 유형 한 항목만 제거하면 직전 스키마가 같다.
+    previous["$defs"]["grounding"]["properties"]["관계"]["items"]["properties"]["유형"]["enum"].remove("경로")
+    assert _schema_sha(previous) == (
+        "b3b082e80ec2cb420056f17683ea46962bf853dbdba0f131aec86d1e8405dbae"
+        if schema is FLAT_REVIEW_SCHEMA
+        else "75ad2c9cc2175cd91d96878ce42b4a4d87fb027cef1233ee61ce3b41c7b97691"
+    )
+    if schema is FLAT_REVIEW_SCHEMA:
+        # 요청별 미래 증명 선택 문자열만 제거하면 이전 정본 전체가 정확히 복원된다.
+        assert previous["$defs"]["grounding"]["properties"].pop("미래증명선택") == {"type": "string"}
+        assert _schema_sha(previous) == "d5ed95c706f46a243cec736eaea60d9b2540dfb716d628150b52b5f08f1af073"
+    # 6장 현재 계획 상태에만 쓰는 선택 배열을 제거하면 직전 전체 스키마가 같다.
+    # 제공자의 실제 컴파일 성공은 이 무과금 구조 대조와 별개다.
+    grounding = previous["$defs"]["grounding"]
+    assert "계획진행근거" not in grounding["required"]
+    assert grounding["properties"].pop("계획진행근거") == {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {key: {"type": "string"} for key in ("계획원문", "근거", "대상", "진행원문", "활동")},
+            "required": ["계획원문", "근거", "대상", "진행원문", "활동"],
+            "additionalProperties": False,
+        },
+    }
+    assert _schema_sha(previous) == (
+        "971e6a1d87c3292025b973121577bd91b8fabd07077e7f28614407093ac17c89"
+        if schema is FLAT_REVIEW_SCHEMA
+        else "5e650e7f2d7b91af0d6a9d45f632f0880accfd835b8c3d801207880d02660201"
+    )
+    if schema is FLAT_REVIEW_SCHEMA:
+        # 새 본문 스키마는 선택 문자열 하나만 추가했다. 종전 정본 전체를 복원한다.
+        assert previous["$defs"]["grounding"]["properties"].pop("수치선택") == {"type": "string"}
+        assert _schema_sha(previous) == "bb974f18bc5d33def32725d9d6a401a3eb0265f878af6ac624bcb7ff2af966cf"
+    else:
+        assert "수치선택" not in previous["$defs"]["grounding"]["properties"]
     for key in ("범위", "관계"):
         del previous["$defs"]["grounding"]["properties"]["관계"]["items"]["properties"][key]
     assert _schema_sha(previous) == recognition
@@ -156,13 +191,41 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 #   c9a8489a / a370eb2b·f769528b)과 같음을 재생해 확인했다(tmp 무과금 재생 기록).
 # 2026-09-27 수치 증명 필드 축자 안내 307자를 더한 현재 builder 결과로
 #   아래 전체 프롬프트 해시 여섯 개를 재계산했다. 위 2026-09-23 값은 역사 기록이다.
+# 2026-09-30: 5장 정책241자와 5·8장 범위 안내 변경만 되돌려 직전 네 해시를
+# 재현한 뒤 본문 기준값만 갱신했다. JSON schema·도식 기준값은 그대로다.
+# 재현 증거: tmp/audit-20260930/review-policy-snapshots.json.
+# 2026-10-01: 5장 사건 발생기간·완료/진행 안내 205자만 제거해 기존 네 해시를
+# 재현했다. 전체 원문·번호·스키마·경계/도식 해시는 유지하고 골든 두 값만 갱신한다.
+# 증거: tmp/audit-20260930/validation/ci-flow-header-prompt-baseline.json.
+# 후속 3장 부문 비율의 전사 확대 금지 안내 138자만 제거하면 15756e95의
+# 골든 전체 바이트·해시 두 값이 재현된다. 경계·도식·스키마는 바꾸지 않는다.
+# 증거: tmp/audit-20260930/validation/ab926-review-prompt-baseline.json.
+# 2026-10-08: 역할 안내 +347자만 HEAD로 역치환하면 본문 네 지문이 정확 복구된다.
+# 도식은 같은 안내와 경로 헤더 +1자만 역치환했다. 원문·번호·schema는 바뀌지 않았다.
+# 증거: tmp/audit-20260930/paid/514031-schema-six-baseline-private.json.
+# 5장 일반 노력과 구체 활동 구분 안내 116자만 역치환하면 기존 네 지문이 복원된다.
+# paid/7408-generic-prompt-baseline-private.json: 원문·번호·스키마·캐시 경계 불변.
+# 갱신 과금 안내 +140자와 identity 안내 +87자만 역치환해 기존 여섯 지문을 복원했다.
+# paid/9c46-role-origin-prompt-baseline-private.json: 후보·원문·번호·스키마는 같다.
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "546f0dfd5c84fc631a7b1f03c15f7a1abeeaaffc225047ffb95db0010a1b0a39"),
-    (_golden_case, True, "70aa9f5345741474c2cc8e355acf940a37c2a7072e585c5acf32ea05d3d5f198"),
-    (_boundary_case, False, "a05ed45f8a4acffc1757d129947864c73b8f6bacf5742e6287f24eb20b0a6a0c"),
-    (_boundary_case, True, "028221dba6a98551334e93c3e9e1a6f53fbe3630bf4dda4f087d3668c5f2a410"),
+    (_golden_case, False, "488e178bd26ab885b56a9de44fa1cca8192aa349238a8eb5b02c0307bcc2ccc7"),
+    (_golden_case, True, "1efb359975c96bfb488481757cfe5350c266efffe9ffc4657c04a2871c739587"),
+    (_boundary_case, False, "2fe7617a6fa477e75e09daf1195c7f41f6ad40d932eb3ed578459ab389e7f649"),
+    (_boundary_case, True, "29dc6e6b7ce5236fe40734435fa39124518629cb34b2f41bcc6a741b006f0d00"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
+    # 2장 매출 모집단 안내 101자만 역치환해 기존 네 지문과 전체 바이트를 복원했다.
+    # paid/97-prompt-baseline-private.json: 원문·번호·스키마·캐시 접두부 불변.
+    # 6장 주어 범위 안내 64자만 제거하면 3728의 네 지문이 복원된다.
+    # paid/2dc-future-subject-guide-baseline-private.json: 경계 두 지문·검수 계약 불변.
+    # 3·5·7장 안내 342자만 HEAD로 역치환해 기존 네 지문을 복원했다.
+    # paid/1d65-review-guide-baseline-private.json: 원문·번호·schema·고정 접두부 불변.
+    # 자기 인용·활동 상태 안내만 역치환해 직전 네 지문을 재현했다.
+    # 증거: paid/6755-prompt-baseline-private.json. 스키마·후보·원문은 같다.
+    # 2026-10-08: 2·3·5·7장 안내 417자만 역치환해 직전 전체 지문을 복구했다.
+    # paid/0346-prompt-baseline-private.json: 원문·번호·스키마·고정 접두부 불변.
+    # 2026-10-08: packet 표시 ID 안내 125자만 제거하면 직전 두 지문이 복구된다.
+    # 증거: paid/a82b-review-id-prompt-baseline-private.json. 원문·번호·스키마 불변.
     # 현재 builder와 현재 안내문으로 재생한 전체 UTF-8 프롬프트 해시다.
     # ★ 기준값은 «스키마 포장 이전 builder»가 «현재 안내문»으로 만든 프롬프트다. 안내문이
     #   바뀌면(2026-09-14: 역할·과금 안내의 유형 이름을 「」로 교체) 값도 함께 갱신한다 —
@@ -172,15 +235,24 @@ def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected)
     #   (뤼튼 실측 요청 50·응답 20). 묶음(grouped) 안내문은 그대로라 그쪽 해시는 같다.
     # 2026-09-23 원칙/특례·제품 귀속·제외 주석·발표/실행 시점 안내 추가.
     # 추가 안내만 제거한 4개 해시는 변경 직전 프롬프트와 같음을 재생해 확인했다.
+    # 사건 행 결속 안내 127자만 제거하면 a901의 전체 바이트와 지문이 재현된다.
+    # 증거: tmp/audit-20260930/validation/35361-review-prompt-baseline-02.json.
+    # 2026-10-04 검수 13항 211자와 5장 작성범위 안내 182자를 제거하면 직전
+    # 네 지문이 재현된다. 스키마·근거 원문·번호·캐시 표식은 변경하지 않는다.
+    # 2026-10-07 검수 12항·근거대조 안내·5장 작성범위만 역치환하면 HEAD 네 지문이 정확복구된다.
+    # 공통 접두부 +435자, 5장이 있는 골든 suffix만 +204자이며 원문·번호·스키마는 동일하다.
+    # 증거: tmp/audit-20260930/paid/8f3e-review-prompt-baseline-complete-private.json.
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
 
 
 @pytest.mark.parametrize("items,expected", (
-    ((), "98eecee196c4923c61721f21d3a2bcb2111f003d0e5a59bcfd210a0d86d3dfc3"),
-    (FLOW_ITEMS, "53007c2d0c3a73425cda5b26022847e19e01ef217f4338c5a09f795ffbba4514"),
+    ((), "9958f3b62281f662308164dc8c41f96ce8906a4e5b98e2efa4b036855655a4fe"),
+    (FLOW_ITEMS, "d29617841ca48289aef2e3424c3ea54d34bceb796a0b35bc7e593da34d8e4bbc"),
 ))
 def test_diagram_prompt_bytes_match_pre_schema_baseline(items, expected):
+    # 계획 증명 안내 257자만 역치환하면 기존 도식 두 지문·전체 바이트가 복원된다.
+    # 증거: paid/8ae2-review-guide-baseline-private.json. 스키마 단정은 그대로다.
     prompt = diagram_check._review_prompt(items, {"1": TEXT})
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
 

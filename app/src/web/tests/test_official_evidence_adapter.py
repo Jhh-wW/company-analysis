@@ -1070,7 +1070,10 @@ def test_adapter는_무분류조각에_주장슬롯을_붙인_우회를_거절�
         )
 
 
-def test_비교후보_차선은_짧은_공식원문_한문장만_문서hash에_결속한다() -> None:
+@pytest.mark.parametrize("identity_check", (
+    "unverifiable_no_fetcher_metadata", "verified_filing_list_match",
+))
+def test_비교후보_차선은_짧은_공식원문_한문장만_문서hash에_결속한다(identity_check: str) -> None:
     competition = "가나다전자는 베타전자와 경쟁합니다."
     noise = "잡음"
     document_id = "dart_business_report:20250315000001"
@@ -1116,7 +1119,7 @@ def test_비교후보_차선은_짧은_공식원문_한문장만_문서hash에_�
                 "identity_binding": (
                     "corp_code=00126380;rcept_no=20250315000001;"
                     "source_kind=dart_business_report;"
-                    "identity_check=unverifiable_no_fetcher_metadata"
+                    f"identity_check={identity_check}"
                 ),
                 "collector_version": "evidence_collection/1.0",
                 "parser_version": "evidence_collection_segment/1.0",

@@ -121,7 +121,7 @@ ACCOUNTING_REVENUE_LABEL_RE: Final[re.Pattern[str]] = re.compile(
 )
 
 OPERATIONS_FLOW_ORIGIN_HEADER: Final[str] = "무엇으로 시작하나"
-OPERATIONS_FLOW_TARGET_HEADER: Final[str] = "누구에게 닿나"
+OPERATIONS_FLOW_TARGET_HEADER: Final[str] = "전달 대상·경로"
 FLOW_UNINFORMATIVE_OPERATIONS_CODE: Final[str] = "flow_uninformative_operations"
 # 파서와 검수는 FLOW_GENERIC_CELL_TERMS의 같은 판정 함수를 쓴다.
 

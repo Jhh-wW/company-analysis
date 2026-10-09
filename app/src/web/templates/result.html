@@ -588,6 +588,12 @@
       {% for t in sec.tables %}
         {{ sealed_table_block(sec, loop.index0, 'report-table-v2-' ~ loop.index0 ~ '-' ~ loop.index) }}
       {% endfor %}
+      {% for item in sec.industry_contexts %}
+      <aside class="section-content-card" data-industry-context="{{ item.context.problem.evidence_id }}">
+        <h3>{{ item.caption }} <span class="section-tag">해석</span></h3>
+        {% for line in item.lines %}<p>{{ inline_refs(line) }}</p>{% endfor %}
+      </aside>
+      {% endfor %}
     </section>
   {% endfor %}
 </div>
@@ -670,6 +676,12 @@
       {% for t in s.tables %}
         {{ report_table_block(t, 'report-table-v2-' ~ loop.index0 ~ '-' ~ loop.index) }}
       {% endfor %}
+      {% if s.industry_contexts %}{% for item in industry_context_displays(s.industry_contexts, report.citations) %}
+      <aside class="section-content-card" data-industry-context="{{ item.context.problem.evidence_id }}">
+        <h3>{{ item.caption }} <span class="section-tag">해석</span></h3>
+        {% for line in item.lines %}<p>{{ inline_refs(line) }}</p>{% endfor %}
+      </aside>
+      {% endfor %}{% endif %}
     </section>
   {% endfor %}
 </div>

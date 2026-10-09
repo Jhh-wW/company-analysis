@@ -35,6 +35,7 @@ from src.shared.report_generation.table_citations import validated_row_cites
 from src.shared.report_quality.constants import STRICT_QUALITY_CONTRACT_VERSION
 from src.shared.report_quality.output_constants import SUMMARY_MIN_SENTENCES, SUMMARY_MAX_SENTENCES
 from src.shared.report_quality.models import PublicationPolicy
+from src.shared.business_challenge_context import IndustryContextDisplay
 
 #: 조립·렌더 결함이 남기는 영문 내부 키 모양 — 값 «전체» 일치만 본다.
 INTERNAL_KEY_SHAPE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -107,6 +108,16 @@ def _rendered_display_values(report: object, visible_sources) -> Iterator[tuple[
             yield (f"{where} 표시 문단", paragraph)
         for guidance in section.guidance_lines:
             yield (f"{where} 안내", guidance)
+        contexts = getattr(section, "industry_contexts", ())
+        source_numbers = {
+            source.source_id: source.number for source in visible_sources
+        } if contexts else {}
+        for context in contexts:
+            for text in IndustryContextDisplay(
+                context, source_numbers.get(context.anchor.source_id, 0),
+                source_numbers.get(context.problem.source_id, 0),
+            ).lines:
+                yield (f"{where} 산업 과제", text)
         for table in section.tables:
             yield (f"{where} 표 캡션", table.caption)
             yield (f"{where} 표 단위", table.display_unit)
@@ -166,7 +177,15 @@ def _paragraph_projection_problems(report: object) -> list[str]:
 def _cited_numbers_in_body(report: object, citation_number) -> set[int]:
     """본문·요약 표시 번호와 표가 구조로 보존한 전체 출처 번호."""
     numbers: set[int] = set()
+    has_contexts = any(getattr(section, "industry_contexts", ()) for section in report.sections)
+    context_sources = {
+        source.source_id: source.number for source in report.citations
+    } if has_contexts else {}
     for section in report.sections:
+        for context in getattr(section, "industry_contexts", ()):
+            for source_id in (context.anchor.source_id, context.problem.source_id):
+                if source_id in context_sources:
+                    numbers.add(context_sources[source_id])
         for text, cite in section.prose_lines:
             numbers.update(int(value) for value in CITATION_MARKER_RE.findall(text))
             cite_number = citation_number(cite)

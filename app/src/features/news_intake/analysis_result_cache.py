@@ -24,6 +24,7 @@ from typing import Any, Callable, Iterator
 from src.features.news_intake import analysis_cache_constants as c
 from src.features.news_intake.grounded import validate_grounded_response
 from src.features.news_intake.models import NewsCandidate, NewsCollectionPolicy, NewsCompanyContext
+from src.features.news_intake.quote_selection import quote_response_sha256, restore_quote_response
 from src.shared.news_analysis_port import (
     AnalysisNamespace, ProviderAnalysis, analyze_with_cache, news_analysis_scope,
 )
@@ -55,6 +56,7 @@ class AnalysisRequest:
     max_tokens: int
     cache_hits: int = 0
     provider_calls: int | None = None
+    source_response_sha256: str | None = None
 
     def key(self, namespace: AnalysisNamespace | None) -> str | None:
         if type(namespace) is not AnalysisNamespace or not namespace.usable():
@@ -64,9 +66,12 @@ class AnalysisRequest:
             if not hashes or any(type(value) is not str or not re.fullmatch(r"[0-9a-f]{64}", value)
                                  for value in hashes):
                 return None
+            company_payload = asdict(self.company)
+            if not self.company.business_anchors:
+                company_payload.pop("business_anchors", None)
             return _hash(_bytes({
                 "version": c.ANALYSIS_CACHE_VERSION, "model": namespace.model,
-                "build": namespace.build.wire, "company": asdict(self.company),
+                "build": namespace.build.wire, "company": company_payload,
                 "as_of": self.as_of.isoformat(), "policy": asdict(self.policy),
                 "articles": [{"candidate": asdict(candidate), "full_body_sha256": full_hash,
                               "input_body_sha256": _hash(body.encode("utf-8"))}
@@ -81,6 +86,27 @@ class AnalysisRequest:
         if type(payload) is not dict:
             return False
         try:
+            if self.company.business_anchors:
+                from src.features.news_intake.industry_context import split_response
+                from src.features.news_intake.industry_constants import INDUSTRY_ASSESSMENT_FIELD
+                from src.features.news_intake.identity_names import mentions_target
+                from src.features.news_intake.grounded import parse_grounded_payload
+                items = parse_grounded_payload(payload)
+                if (items is None or len(items) != len(self.articles)
+                        or {item.get("id") for item in items if type(item) is dict}
+                        != {candidate.id for candidate, _ in self.articles}):
+                    return False
+                direct, problems, industry_rejected = split_response(
+                    payload, articles=self.articles, company=self.company, as_of=self.as_of,
+                    full_body_hashes=self.full_body_hashes,
+                    assessment_required=INDUSTRY_ASSESSMENT_FIELD in self.schema["properties"]["items"]["items"]["required"],
+                )
+                named = [(candidate, body) for candidate, body in self.articles if mentions_target(body, self.company)]
+                named_ids = {candidate.id for candidate, _ in named}
+                direct["items"] = [item for item in direct["items"] if item["id"] in named_ids]
+                excerpts, rejected = validate_grounded_response(direct, articles=named, company=self.company, as_of=self.as_of)
+                covered = {item.candidate.id for item in excerpts} | {item.document_id for item in problems}
+                return not rejected and not industry_rejected and covered == {candidate.id for candidate, _ in self.articles}
             excerpts, rejected = validate_grounded_response(
                 payload, articles=self.articles, company=self.company, as_of=self.as_of,
             )
@@ -107,10 +133,12 @@ class _Entry:
     expires_at: float
     encoded: bytes
     checksum: str
+    source_response_sha256: str | None = None
 
 
-def _entry_checksum(key: str, expires_at: float, encoded: bytes) -> str:
-    return _hash(_bytes([key, expires_at]) + encoded)
+def _entry_checksum(key: str, expires_at: float, encoded: bytes, source_response_sha256: str | None = None) -> str:
+    metadata = [key, expires_at] if source_response_sha256 is None else [key, expires_at, source_response_sha256]
+    return _hash(_bytes(metadata) + encoded)
 
 
 def _span(text: str, body: str) -> list[int]:
@@ -149,6 +177,14 @@ def _project(payload: dict, request: AnalysisRequest, *, restore: bool) -> dict:
                         excerpt[name] = convert(raw)
                 elif raw and raw in body:
                     excerpt[name] = convert(raw)
+        if request.company.business_anchors:
+            from src.features.news_intake.industry_constants import INDUSTRY_ASSESSMENT_FIELD, INDUSTRY_CACHE_SOURCE_FIELDS
+            problems = item.get("industry_problems", [])
+            if INDUSTRY_ASSESSMENT_FIELD in request.schema["properties"]["items"]["items"]["required"]:
+                problems = [entry for entry in item[INDUSTRY_ASSESSMENT_FIELD] if entry["status"] == "proposed"]
+            for problem in problems:
+                for name in INDUSTRY_CACHE_SOURCE_FIELDS:
+                    problem[name] = convert(problem[name])
     return value
 
 
@@ -199,7 +235,9 @@ class AnalysisResultCache:
                 return None
             try:
                 if (type(entry.encoded) is not bytes or len(entry.encoded) > self._entry_max_bytes
-                        or _entry_checksum(key, entry.expires_at, entry.encoded) != entry.checksum):
+                        or (entry.source_response_sha256 is not None and
+                            not re.fullmatch(r"[0-9a-f]{64}", entry.source_response_sha256))
+                        or _entry_checksum(key, entry.expires_at, entry.encoded, entry.source_response_sha256) != entry.checksum):
                     raise ValueError("손상된 분석 캐시")
                 payload = _project(json.loads(entry.encoded), request, restore=True)
             except (TypeError, ValueError, KeyError, IndexError, AttributeError, RecursionError):
@@ -209,6 +247,7 @@ class AnalysisResultCache:
         if not request.valid(payload):
             self.discard(key)
             return None
+        request.source_response_sha256 = entry.source_response_sha256
         return payload
 
     def _put(self, key: str, request: AnalysisRequest, payload: dict) -> None:
@@ -226,7 +265,8 @@ class AnalysisResultCache:
         with self._lock:
             self._prune()
             expires_at = self._clock() + self._ttl
-            self._entries[key] = _Entry(expires_at, encoded, _entry_checksum(key, expires_at, encoded))
+            self._entries[key] = _Entry(expires_at, encoded,
+                _entry_checksum(key, expires_at, encoded, request.source_response_sha256), request.source_response_sha256)
             self._entries.move_to_end(key)
             while (len(self._entries) > self._max_entries
                    or sum(len(item.encoded) for item in self._entries.values()) > self._max_bytes):
@@ -244,8 +284,12 @@ class AnalysisResultCache:
                 request.cache_hits += 1
                 return payload
         result = provider()
-        if key is not None and result.complete is True and request.valid(result.payload):
-            self._put(key, request, result.payload)
+        request.source_response_sha256 = quote_response_sha256(result.payload)
+        item_properties = request.schema.get("properties", {}).get("items", {}).get("items", {}).get("properties", {})
+        restored = restore_quote_response(result.payload, articles=request.articles, company=request.company,
+                                          selection_enabled="entity_evidence_quote_id" in item_properties)
+        if key is not None and result.complete is True and request.valid(restored):
+            self._put(key, request, restored)
         return result.payload
 
 

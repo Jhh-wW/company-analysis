@@ -28,6 +28,7 @@ from src.features.pipeline.collection_recovery import raise_if_request_interrupt
 from src.shared import generation_coordination
 from src.shared.generation_cache_identity import GenerationCacheNamespace
 from src.features.pipeline.official_evidence_preflight import empty_collector_sections
+from src.features.pipeline.official_industry_context_constants import INDUSTRY_DISCOVERY_REASON
 from src.features.storage import evidence_reclassify_cache
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
 
@@ -83,6 +84,7 @@ def plain_official_evidence(
         candidates=result.candidates,
         unclassified_evidence=result.unclassified_evidence,
         comparison_candidates=result.comparison_candidates,
+        industry_candidates=result.industry_candidates,
         provenance_documents=result.provenance_documents,
     )
 
@@ -103,6 +105,7 @@ def attach_reclassify_source(
         candidates=result.candidates,
         unclassified_evidence=result.unclassified_evidence,
         comparison_candidates=result.comparison_candidates,
+        industry_candidates=result.industry_candidates,
         provenance_documents=result.provenance_documents,
         reclassify_source=ReclassifySource(
             company_type=str(company_type),
@@ -135,6 +138,9 @@ def _candidate_paragraphs(source: ReclassifySource) -> list[dict[str, Any]]:
         (False, "fragments"),
     ):
         for fragment in _mapping_rows(dart_envelope, key):
+            # 산업 보조 전용 원문은 회사 장 슬롯을 채우는 재분류 AI에 보내지 않는다.
+            if is_unclassified and INDUSTRY_DISCOVERY_REASON in fragment.get("reason_codes", ()):
+                continue
             score = fragment.get("score_millis", 0)
             if (
                 not is_unclassified
@@ -403,6 +409,7 @@ def _merge_result(
         candidates=candidates,
         unclassified_evidence=original.unclassified_evidence,
         comparison_candidates=original.comparison_candidates,
+        industry_candidates=original.industry_candidates,
         provenance_documents=original.provenance_documents,
     )
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from src.shared.business_challenge_context import industry_context_displays
+
 import datetime as dt
 import ipaddress
 import logging
@@ -208,6 +210,7 @@ def _ctx(request: Request, **kwargs) -> dict:
         "cover_metrics": cover_metrics,
         "section_content_blocks": section_content_blocks,
         "source_verification_label": source_verification_label,
+        "industry_context_displays": industry_context_displays,
         "external_news_notice": external_news_notice,
         "source_label_display": source_label_display,
         "source_status_display": source_status_display,

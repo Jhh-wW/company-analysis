@@ -5,8 +5,11 @@ from dataclasses import dataclass
 from collections import OrderedDict
 
 from features.evidence_collection import constants as c
+from features.evidence_collection.business_constraint_signal_constants import DIRECT_RELATION_REASONS_BY_SLOT
 from features.evidence_collection.relevance import SlotScore
 from features.evidence_collection.segment import FragmentCandidate
+from features.evidence_collection.official_industry_discovery import official_industry_discovery
+from features.evidence_collection import official_industry_discovery_constants as industry_c
 
 
 @dataclass(frozen=True)
@@ -14,6 +17,11 @@ class ScoredCandidate:
     index: int
     candidate: FragmentCandidate
     scores: tuple[SlotScore, ...]
+    rank_index: int
+
+
+def _direct_relation_priority(score: SlotScore) -> bool:
+    return bool(DIRECT_RELATION_REASONS_BY_SLOT.get(score.slot_id, frozenset()).intersection(score.reason_codes))
 
 
 class _UnclassifiedPool:
@@ -25,28 +33,36 @@ class _UnclassifiedPool:
         self.chars = 0
         self.ordinary: OrderedDict[str, tuple[int, FragmentCandidate]] = OrderedDict()
         self.important: OrderedDict[str, tuple[int, FragmentCandidate]] = OrderedDict()
+        self.industry: OrderedDict[str, tuple[int, FragmentCandidate]] = OrderedDict()
 
     def __len__(self) -> int:
-        return len(self.ordinary) + len(self.important)
+        return len(self.ordinary) + len(self.important) + len(self.industry)
 
-    def offer(self, index: int, candidate: FragmentCandidate) -> None:
+    def offer(self, index: int, candidate: FragmentCandidate, *, industry: bool = False) -> None:
         body = candidate.text
         if self.count_limit <= 0 or len(body) > self.char_limit:
             return
         important = bool(c.UNCLASSIFIED_PRIORITY_PATTERN.search(body)) or any(
             marker in body for marker in c.CHANGE_CONTEXT_MARKERS
         )
-        pool = self.important if important else self.ordinary
+        pool = self.industry if industry else self.important if important else self.ordinary
         if pool.pop(body, None) is None:
             self.chars += len(body)
         pool[body] = (index, candidate)
+        # 산업 탐색은 기존 총량의 작은 몫만 보호한다. 그 몫 안에서도 최근
+        # 원문을 보관하며 신원·일반 무분류 후보의 전체 몫을 독점하지 않는다.
+        if industry:
+            while (len(self.industry) > industry_c.DISCOVERY_RETAINED_COUNT
+                   or sum(len(value) for value in self.industry) > industry_c.DISCOVERY_RETAINED_CHARS):
+                old_body, _ = self.industry.popitem(last=False)
+                self.chars -= len(old_body)
         while len(self) > self.count_limit or self.chars > self.char_limit:
-            evicted = self.ordinary if self.ordinary else self.important
+            evicted = self.ordinary if self.ordinary else self.important if self.important else self.industry
             old_body, _ = evicted.popitem(last=False)
             self.chars -= len(old_body)
 
     def selected(self) -> list[tuple[int, FragmentCandidate]]:
-        return sorted((*self.ordinary.values(), *self.important.values()))
+        return sorted((*self.ordinary.values(), *self.important.values(), *self.industry.values()))
 
 
 class CandidateRetention:
@@ -70,9 +86,10 @@ class CandidateRetention:
         self.slot_count_limit = c.MAX_LONG_FRAGMENT_CANDIDATES_PER_DOCUMENT // self.slot_count
         self.slot_char_limit = c.MAX_LONG_FRAGMENT_CHARS_PER_DOCUMENT // self.slot_count
 
-    def offer_scored(self, index: int, candidate: FragmentCandidate, scores: tuple[SlotScore, ...]) -> None:
+    def offer_scored(self, index: int, candidate: FragmentCandidate, scores: tuple[SlotScore, ...],
+                     *, rank_index: int | None = None) -> None:
         self.scored_seen += 1
-        item = ScoredCandidate(index, candidate, scores)
+        item = ScoredCandidate(index, candidate, scores, index if rank_index is None else rank_index)
         change = any(marker in candidate.text for marker in c.CHANGE_CONTEXT_MARKERS)
         lane_specs = (("top", c.RETAINED_TOP_PER_SLOT), ("recent", c.RETAINED_RECENT_PER_SLOT),
                       ("change", c.RETAINED_CHANGE_PER_SLOT if change else 0))
@@ -90,9 +107,12 @@ class CandidateRetention:
                 pool[:] = [old for old in pool if old.candidate.text != candidate.text]
                 pool.append(item)
                 if lane == "top":
-                    pool.sort(key=lambda value: (-next(s.score_millis for s in value.scores if s.slot_id == score.slot_id), value.index))
+                    def priority(value: ScoredCandidate) -> tuple[int, bool, int]:
+                        own_score = next(s for s in value.scores if s.slot_id == score.slot_id)
+                        return (-own_score.score_millis, not _direct_relation_priority(own_score), value.rank_index)
+                    pool.sort(key=priority)
                 else:
-                    pool.sort(key=lambda value: -value.index)
+                    pool.sort(key=lambda value: -value.rank_index)
                 while len(pool) > count_limit or sum(len(value.candidate.text) for value in pool) > char_limit:
                     pool.pop()
 
@@ -103,7 +123,9 @@ class CandidateRetention:
         else:
             self.unclassified_seen += 1
             pool = self.unclassified
-        pool.offer(index, candidate)
+        # 기존 무분류 상한 안에서 산업 보조 조사 원문을 먼저 보관한다.
+        # 장 점수·필수 칸·작성 순위에는 이 표지를 사용하지 않는다.
+        pool.offer(index, candidate, industry=not candidate.is_short and official_industry_discovery(candidate.text))
 
     def selected_scored(self) -> list[tuple[int, FragmentCandidate, tuple[SlotScore, ...]]]:
         selected = {item.index: item for pool in self.pools.values() for item in pool}

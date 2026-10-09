@@ -11,7 +11,12 @@ from dataclasses import dataclass, replace
 import re
 from typing import Final, Mapping, Sequence
 
-from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
+from src.features.composer.constants import (
+    CHALLENGE_FLOW_SECTION_ID,
+    CHALLENGE_RESPONSE_CLAIM_SLOT,
+    GRADE_CONFIRMED,
+    GRADE_INTERPRETED,
+)
 from src.features.composer.extractive_summary_constants import (
     SUMMARY_FORMAL_ENDING_PATTERN,
     SUMMARY_FORMAL_ENDING_SCORE,
@@ -313,6 +318,10 @@ def select_extractive_summary(
             continue
         candidates: list[ExtractiveSummaryItem] = []
         for sentence in section.sentences:
+            # 사실 원장에 결속돼도 대응 자체가 현재 과제라는 뜻은 아니다.
+            if (section_id == CHALLENGE_FLOW_SECTION_ID
+                    and sentence.planned_claim_slot == CHALLENGE_RESPONSE_CLAIM_SLOT):
+                continue
             fact = _bound_fact_for_sentence(
                 section_id,
                 sentence,

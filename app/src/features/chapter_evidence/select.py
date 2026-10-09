@@ -3,11 +3,15 @@
 우선순위는 세 단계다.
 1) 슬롯 커버리지 — 정책이 정한 순서로 각 수집 슬롯의 최고점 조각을 먼저 담는다.
    슬롯 하나가 예산 때문에 통째로 비지 않도록 하기 위함이다.
+   사업 정의 대표는 변경·취소 다음으로 대상 회사의 구체적인 현재 사업 명시를
+   우선한다. 단어 점수가 높은 인수 설명·임원 경력이 사업 설명을 밀지 않게 한다.
 1.5) 선택 사실 다양성 — 필수 대표가 아직 덮지 않은 선택 후보 칸(policy의
    OPTIONAL_CANDIDATE_SLOTS_BY_SECTION)의 대표를 같은 예산 안에서 담는다. 고득점
    반복 근거가 2단계에서 원문이 뒷받침하는 선택 사실을 밀어내지 않게 한다. 선택
    칸은 필수 커버리지로 세지 않으며 예산을 늘리지도 않는다.
-2) 남는 예산 — 아직 못 담은 조각을 점수(score_millis) 내림차순으로 채운다.
+2) 남는 예산 — 취소·변경 문맥을 먼저 보존하고 최근 문맥·명시된 5장 사업
+   관계 후보를 같은 그룹에 담는다. 그룹 안에서는 점수, 동점인 직접 관계,
+   공시일 순으로 채운다. 관계가 없는 후보의 기존 순서와 예산은 유지한다.
 
 ⚠️ 설계상 한계 — 슬롯 대표 조각들의 합이 그 자체로 예산을 넘을 만큼 크면
 (예: 슬롯마다 몇천자짜리 대표 조각), 이 구현은 «예산을 어겨서라도 대표를
@@ -44,12 +48,16 @@ from src.features.chapter_evidence.constants import (
     AUDITOR_JUDGED_SOURCE_KINDS,
     AUDITOR_STRUCTURE_GATED_SOURCE_KINDS,
     CHARS_PER_ESTIMATED_TOKEN,
+    CHALLENGE_DIRECT_RELATION_REASONS_BY_SLOT,
+    CHALLENGE_DIRECT_RELATION_SOURCE_KINDS,
     DEFAULT_MAX_CHARS_PER_SECTION,
     DEFAULT_MAX_ESTIMATED_TOKENS_PER_SECTION,
     SELECTION_CHANGE_CONTEXT,
     SELECTION_RECENT_CONTEXT,
 )
 from src.shared.report_evidence.models import CollectedEvidenceDocument, EvidenceFragment
+from src.shared.report_evidence.business_activity import current_business_item
+from src.shared.report_evidence.business_slot_scope import business_slot_scope_problem
 from src.shared.report_evidence.constants import (
     SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE,
     SOURCE_KIND_OFFICIAL_IR_PDF,
@@ -98,14 +106,17 @@ def _published_date_priority(published_on: str) -> int:
 def _selection_priority(
     fragment: EvidenceFragment,
     published_priorities: dict[str, int],
-) -> tuple[bool, int, bool, int, int, str]:
+    direct_relation_ids: frozenset[str] = frozenset(),
+) -> tuple[bool, int, bool, int, bool, int, str]:
     """뒤쪽 취소·변경을 대표/추가 후보 단계 모두에서 보존한다."""
     is_change = SELECTION_CHANGE_CONTEXT in fragment.reason_codes
     start = fragment.location.partition("-")[0]
     source_order = int(start) if is_change and start.isdecimal() else 0
+    is_relation = not is_change and fragment.fragment_id in direct_relation_ids
     return (not is_change, -source_order,
-            SELECTION_RECENT_CONTEXT not in fragment.reason_codes,
+            not (SELECTION_RECENT_CONTEXT in fragment.reason_codes or is_relation),
             -fragment.score_millis,
+            not is_relation,
             published_priorities.get(fragment.document_id, 0),
             fragment.fragment_id)
 
@@ -270,6 +281,7 @@ def select_section_fragments(
     missing_document_count = 0
     unbound_count = 0
     auditor_boilerplate_count = 0
+    business_slot_scope_counts: Counter[str] = Counter()
     # 「무시했다」만 남기면 다음 실행 진단에서 원인을 찾을 수 없다. 어느 닫힌
     # 사유로 Writer 자격을 잃었는지 사유별로 따로 센다(2026-09-16 운영 실측:
     # 사유 이름이 없어 연차 공시 문제를 홈페이지 문제로 읽었다).
@@ -326,6 +338,17 @@ def select_section_fragments(
         ):
             auditor_boilerplate_count += 1
             continue
+        rejected_business_slots = tuple(
+            slot_id for slot_id in eligible_slot_ids
+            if business_slot_scope_problem(fragment.text, slot_id)
+        )
+        business_slot_scope_counts.update(rejected_business_slots)
+        eligible_slot_ids = tuple(
+            slot_id for slot_id in eligible_slot_ids
+            if not business_slot_scope_problem(fragment.text, slot_id)
+        )
+        if not eligible_slot_ids:
+            continue
         eligible.append(
             replace(
                 fragment,
@@ -338,18 +361,48 @@ def select_section_fragments(
             )
         )
 
+    # 중복 통합 전의 같은 칸·사유 결속만 사용한다. 합집합된 사유가 다른 칸의
+    # 우선순위까지 빌리지 않으며, 출처·원문 결속을 통과한 DART 후보만 대상이다.
+    relation_slots_by_range: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    for fragment in eligible:
+        document = own_documents_by_id[fragment.document_id]
+        if document.source_kind not in CHALLENGE_DIRECT_RELATION_SOURCE_KINDS:
+            continue
+        for slot_id in fragment.covered_slot_ids:
+            allowed_reasons = CHALLENGE_DIRECT_RELATION_REASONS_BY_SLOT.get(slot_id, ())
+            if allowed_reasons and any(reason in allowed_reasons for reason in fragment.reason_codes):
+                relation_slots_by_range[(fragment.document_id, fragment.location, fragment.text_sha256)].add(slot_id)
     deduped, duplicate_count = _dedupe_by_evidence_range(eligible)
+    direct_relation_ids_by_slot: dict[str, frozenset[str]] = {
+        slot_id: frozenset(
+            fragment.fragment_id for fragment in deduped
+            if slot_id in relation_slots_by_range.get(
+                (fragment.document_id, fragment.location, fragment.text_sha256), (),
+            )
+        ) for slot_id in CHALLENGE_DIRECT_RELATION_REASONS_BY_SLOT
+    }
+    direct_relation_ids = frozenset().union(*direct_relation_ids_by_slot.values())
 
     by_slot: dict[str, list[EvidenceFragment]] = defaultdict(list)
     for fragment in deduped:
         for slot_id in fragment.covered_slot_ids:
             if slot_id in carried_slot_set:
                 by_slot[slot_id].append(fragment)
-    for items in by_slot.values():
-        # 최근 문맥은 추가 몫에서 보존하며, 슬롯 대표는 변경 근거만 우선한다.
+    explicit_business_ids = {
+        fragment.fragment_id
+        for fragment in by_slot.get("identity:business_definition", ())
+        if current_business_item(fragment, company_name)
+    }
+    for slot_id, items in by_slot.items():
+        # 최근 문맥은 추가 몫에서 보존한다. 변경 근거를 먼저 지키고 사업 정의의
+        # 대표에만 명시적인 현재 사업을 우선한다. 지원 칸과 예산은 바꾸지 않는다.
         items.sort(key=lambda fragment: (
             *_selection_priority(fragment, published_priorities)[:2],
+            slot_id == "identity:business_definition"
+            and fragment.fragment_id not in explicit_business_ids,
             -fragment.score_millis,
+            SELECTION_CHANGE_CONTEXT in fragment.reason_codes
+            or fragment.fragment_id not in direct_relation_ids_by_slot.get(slot_id, ()),
             published_priorities.get(fragment.document_id, 0),
             fragment.fragment_id,
         ))
@@ -423,7 +476,7 @@ def select_section_fragments(
             if fragment.fragment_id not in included_ids
             and fragment.fragment_id not in excluded_ids
         ),
-        key=lambda fragment: _selection_priority(fragment, published_priorities),
+        key=lambda fragment: _selection_priority(fragment, published_priorities, direct_relation_ids),
     )
     for fragment in remaining:
         cost_chars = len(fragment.text)
@@ -458,6 +511,8 @@ def select_section_fragments(
         reason_codes.append(
             f"{AUDITOR_BOILERPLATE_FRAGMENT_IGNORED}:{auditor_boilerplate_count}"
         )
+    for slot_id, count in sorted(business_slot_scope_counts.items()):
+        reason_codes.append(f"business_slot_scope_unsupported:{count}:{slot_id}")
     # 사유 이름은 개수 «뒤»에 붙인다 — 기존 진단 읽기가 쓰는 앞부분과 개수
     # 자리를 그대로 두기 위함이다.
     for reason, count in sorted(low_trust_ir_counts.items()):

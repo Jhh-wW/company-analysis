@@ -700,6 +700,9 @@ def test_스위치OFF면_3장_부족_바이트골든을_유지한다(
     #   2장 해석 문장 1개가 공개된다. 필드별 대조로 확인한 변화는 그 한 줄과 메타
     #   (문장 통과 수 34→35, 부족 안내의 확인 사실 29→30건)뿐이다. 도우미만 옛 판으로
     #   되돌리면 옛 골든과 바이트가 같다(7999바이트).
+    # 2026-10-08: 7장 도식의 마지막 헤더를 '전달 대상·경로'로 바꾼다.
+    # gzip 해제 바이트를 해당 헤더 한 칸만 역치환하면 옛 골든과 정확히 같고,
+    # 회사 필드·본문·재무·인용·부족 계약은 그대로다(8157→8159바이트).
     actual = _stable_result_bytes(result)
     golden = json.loads(_GOLDEN_FIXTURE.read_text(encoding="utf-8"))
     assert golden["byte_count"] == len(actual)
@@ -796,7 +799,11 @@ def test_real_session_binds_final_partial_identity_and_waiter_reuses_without_ai(
 ):
     from src.core import clock
     from src.features.budget import spend_store, state_machine
-    from src.features.budget.constants import SPEND_PHASE_PIPELINE
+    from src.features.budget.constants import (
+        PAID_PHASE_PROVIDER_BUDGET_KRW,
+        SONNET_WRITER_PIPELINE_BUDGET_KRW,
+        SPEND_PHASE_PIPELINE,
+    )
     from src.features.report_delivery import artifact, store
     from src.features.report_delivery.models import ContentSnapshot
     from src.features.report_delivery.source_identity import SourceSnapshot
@@ -811,9 +818,18 @@ def test_real_session_binds_final_partial_identity_and_waiter_reuses_without_ai(
     paid_runtime._seed_ledger()
     # 가짜모델은 보수 단가를 쓰므로 기존 무과금 픽스처와 같은 시험 한도를 예약한다.
     begin_phase = paid_runtime._begin_paid_phase
+
+    def begin_fixture_phase(*, requested_cost_krw, **kwargs):
+        # 요청별 선택 예약액은 검증·소비하고 가짜모델의 시험 예약만 한 번 전달한다.
+        assert requested_cost_krw in (
+            PAID_PHASE_PROVIDER_BUDGET_KRW[SPEND_PHASE_PIPELINE],
+            SONNET_WRITER_PIPELINE_BUDGET_KRW,
+        )
+        return begin_phase(**kwargs, requested_cost_krw=100_000)
+
     monkeypatch.setattr(
         paid_runtime, "_begin_paid_phase",
-        lambda **kwargs: begin_phase(**kwargs, requested_cost_krw=100_000),
+        begin_fixture_phase,
     )
     build = real.engine_build_identity.process_engine_build_identity()
     installed = []

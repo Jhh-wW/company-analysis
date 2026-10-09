@@ -15,7 +15,9 @@ from src.features.composer.combined_relation_guard import (
     combined_relation_hint, combined_relation_problem, combined_relation_triggers,
 )
 from src.features.composer.future_plan_constants import FUTURE_KEY
+from src.features.composer.plan_status_constants import PLAN_STATUS_KEY
 from src.features.composer.grounding_constants import REVIEW_SUPPORT_CANDIDATE_VERDICTS
+from src.features.composer.grounding_constants import BOUND_VALUE_RE, BOUND_TAIL_RE, RATIO_BASIS_RE
 from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_VERSION
 
 from collections import Counter
@@ -34,7 +36,9 @@ from src.features.composer.role_binding import (
 from src.features.composer.numeric_quote_refs import resolve_numeric_quote_refs
 from src.features.composer.entity_scope_constraint_constants import ENTITY_SCOPE_EXCLUSION_STAGE
 from src.features.composer.entity_scope_constraints import EntityScopeContext
+from src.features.composer.entity_relationship_scope import entity_relationship_problem
 from src.features.composer.scope_guard import document_entity_scope_problem, scope_problem
+from src.features.composer.loan_execution_scope import loan_execution_problem
 # 정성 인식 주장의 발동·결속 문법은 scope 가드와 «같은 상수»를 쓴다 — 두 벌로
 # 적으면 한쪽만 고쳐져 요구와 판정이 어긋난다.
 from src.features.composer.scope_constants import (
@@ -46,6 +50,9 @@ from src.features.composer.quantified_relation_guard import quantified_dividend_
 from src.features.composer.verbatim_news import VerbatimNewsSource
 
 from src.features.composer.grounding_constants import (
+    ACTIVITY_DATE_RE, HISTORICAL_ACTIVITY_RE, HISTORICAL_OVERLAP_MIN_LENGTH,
+    RELATIVE_COMPLETED_PERIOD_RE, COMPLETED_ACTIVITY_RE, ACTIVITY_SENTENCE_SPLIT_RE,
+    HISTORICAL_OVERLAP_MIN_TOKENS, HISTORICAL_GENERIC_TOPIC_WORDS, ACTIVITY_SUBJECT_RE,
     COMPARATIVE_RE, CONTINUOUS_RE, COUNTED_CONTINUOUS_RE,
     CONTINUOUS_POINTS_OVER_PERIODS, DOWN_RE, GROUNDING_INVALID, GROUNDING_KEY,
     GROUNDING_SOURCE_FIELD,
@@ -163,6 +170,51 @@ def _retrospective_years(text: str, sources: Sequence[str]) -> frozenset[str]:
     return frozenset(years)
 
 
+def _dated_activity_requires_time(text: str, sources: Sequence[str]) -> bool:
+    """날짜가 앞뒤로 붙은 완료 실적을 현재 활동으로 옮긴 주장만 발동한다."""
+    current_matches = tuple(PRESENT_RE.finditer(text))
+    if not current_matches or (PLANNED_END_RE.search(text) and not any(
+            match.group() not in ("현재", "지금") for match in current_matches)):
+        return False
+    claim_tokens = _content_tokens(text)
+    for source in sources:
+        # 기존 날짜 과제의 문장 경계는 유지한다. 상대 과거 실적만 붙은 종결
+        # 문장을 따로 읽어 뒤의 무관한 현재 활동에 흡수되지 않게 한다.
+        clauses = [(clause, False) for clause in SENTENCE_SPLIT_RE.split(source)]
+        clauses.extend((clause, True) for clause in ACTIVITY_SENTENCE_SPLIT_RE.split(source))
+        for clause, relative_only in clauses:
+            relative_completed = relative_only and RELATIVE_COMPLETED_PERIOD_RE.search(clause) and COMPLETED_ACTIVITY_RE.search(clause)
+            historical = relative_completed if relative_only else (
+                ACTIVITY_DATE_RE.search(clause) and HISTORICAL_ACTIVITY_RE.search(clause))
+            if (not historical
+                    or PRESENT_RE.search(clause) or PLANNED_END_RE.search(clause)):
+                continue
+            source_tokens = _content_tokens(clause)
+            source_subjects = {_label(match.group()) for match in ACTIVITY_SUBJECT_RE.finditer(clause)}
+            claim_subjects = {_label(match.group()) for match in ACTIVITY_SUBJECT_RE.finditer(text)}
+            if relative_completed and source_subjects and claim_subjects and not source_subjects.intersection(claim_subjects):
+                continue
+            matched = {
+                token for token in claim_tokens if any(
+                    min(len(token), len(other)) >= HISTORICAL_OVERLAP_MIN_LENGTH
+                    and (token.startswith(other) or other.startswith(token))
+                    for other in source_tokens
+                )
+            }
+            matched -= source_subjects & claim_subjects
+            # 상대 기간의 실적 표와 일반 사업 설명이 공유하는 부문명 하나는
+            # 같은 현재 활동의 증명이 아니다. 구체 근거어 둘 이상을 요구한다.
+            if relative_completed and len(matched) < HISTORICAL_OVERLAP_MIN_TOKENS:
+                continue
+            # 같은 대상의 과거 개발을 현재 연구·생산으로 바꾸면 동사 어휘는
+            # 달라져도 시점 증명이 필요하다. 일반 결과어 하나만 겹친 경우는 제외한다.
+            topics = {token for token in matched
+                      if not any(token.startswith(word) for word in HISTORICAL_GENERIC_TOPIC_WORDS)}
+            if len(matched) >= HISTORICAL_OVERLAP_MIN_TOKENS or topics:
+                return True
+    return False
+
+
 def _recognition_basis_clauses(text: str) -> tuple[str, ...]:
     """수익 인식 기준(완료·진행)을 단정한 절 — 정성 인식 주장의 닫힌 발동 범위.
 
@@ -201,8 +253,9 @@ def grounding_requirements(text: str, sources: Sequence[str]) -> tuple[str, ...]
         and not direct and not PLANNED_END_RE.search(text)):
         required.append(TREND_KEY)
     years = _retrospective_years(text, sources)
-    if (years and not direct
-        and (not years.intersection(YEAR_RE.findall(text)) or PRESENT_RE.search(text))):
+    if (not direct and ((years
+        and (not years.intersection(YEAR_RE.findall(text)) or PRESENT_RE.search(text)))
+        or _dated_activity_requires_time(text, sources))):
         required.append(TIME_KEY)
     return tuple(required)
 
@@ -222,6 +275,11 @@ def _quote(entry: Mapping, sources: Mapping[str, str]) -> str | None:
         if (match.end() < len(source) and quote[-1].isdigit()
             and VALUE_CONTINUATION_RE.fullmatch(source[match.end()])):
             continue
+        # 숫자 단위 바로 뒤의 상한·하한을 잘라 등가의 실제 값처럼 증명하지 못한다.
+        if BOUND_TAIL_RE.match(source, match.end()):
+            amounts = _amount_spans(quote)
+            if amounts and amounts[-1].end == len(quote.rstrip()):
+                continue
         return quote
     return None
 
@@ -249,6 +307,8 @@ class _BoundAmount:
     text: str
     value: Decimal
     dimension: str
+    comparison_bound: str = ""
+    ratio_basis: str = ""
 
 
 def _unit_header_scale(text: str, position: int) -> Decimal | None:
@@ -414,23 +474,48 @@ def _period_at(text: str, position: int) -> tuple[int, int | None] | None:
     return year, int(quarters[-1].group(1)) if quarters else None
 
 
+def _adjacent_ratio_bases(text: str, position: int) -> tuple[str, ...]:
+    """지표나 숫자 바로 앞의 기준만 읽고 다른 내용은 건너지 않는다."""
+    return tuple(
+        _surface(match.group())
+        for match in RATIO_BASIS_RE.finditer(text, 0, position)
+        if not PAIR_SEPARATOR_RE.sub("", RATIO_BASIS_RE.sub("", text[match.end():position]))
+    )
+
+
 def _metric_value_spans(metric: str, value: str, text: str) -> tuple[_BoundAmount, ...]:
     """다년도 열거를 허용하되 중간에 새 항목이 나오면 결속을 끊는다."""
     from src.features.composer.verify import _DATE_EXPR_RE
 
+    bounded_value = BOUND_VALUE_RE.fullmatch(value.strip())
+    numeric_value = bounded_value["value"] if bounded_value else value
+    declared_bound = bounded_value["bound"] if bounded_value else ""
     results: list[_BoundAmount] = []
     for clause_match in re.finditer(r"[^;\n]+", text):
         clause = clause_match.group()
         for anchor in re.finditer(re.escape(metric), clause):
             if anchor.start() and WORD_CHARACTER_RE.fullmatch(clause[anchor.start() - 1]):
                 continue
+            # 지표 바로 앞의 '(연결기준) 부채비율'도 같은 지표의 조건이다.
+            # 사이에 다른 지표·숫자·서술이 있으면 그 기준을 빌리지 않는다.
+            prefix_bases = _adjacent_ratio_bases(clause, anchor.start())
+            if len(set(prefix_bases)) > 1:
+                continue
             for number in _amount_spans(clause):
-                if _surface(number.text) != _surface(value):
+                if _surface(number.text) != _surface(numeric_value):
+                    continue
+                tail = BOUND_TAIL_RE.match(clause, number.end)
+                actual_bound = tail[1] if tail else ""
+                if declared_bound and declared_bound != actual_bound:
                     continue
                 if number.end <= anchor.start():
                     # '37.02% 점유율'처럼 단위값 바로 뒤에 지표를 쓰는
                     # 도식·명사구도 정상이다. 다른 명사나 숫자는 건너지 않는다.
                     between = clause[number.end:anchor.start()]
+                    number_bases = (_adjacent_ratio_bases(clause, number.start)
+                                    if number.dimension == DIMENSION_RATIO else ())
+                    if len(set(number_bases)) > 1:
+                        continue
                     following = [item for item in _amount_spans(clause) if item.start >= anchor.end()]
                     own_following_value = any(not PAIR_SEPARATOR_RE.sub("", NUMERIC_BRIDGE_RE.sub(
                         "", _DATE_EXPR_RE.sub("", clause[anchor.end():item.start])
@@ -439,11 +524,17 @@ def _metric_value_spans(metric: str, value: str, text: str) -> tuple[_BoundAmoun
                         and not PAIR_SEPARATOR_RE.sub("", PARTICLE_RE.sub("", between.strip()))):
                         offset = clause_match.start()
                         results.append(_BoundAmount(number.start + offset, number.end + offset,
-                                                    number.text, number.value, number.dimension))
+                                                    number.text, number.value, number.dimension,
+                                                    comparison_bound=actual_bound,
+                                                    ratio_basis=number_bases[0] if number_bases else ""))
                     continue
                 if number.start < anchor.end():
                     continue
                 between = clause[anchor.end():number.start]
+                bases = prefix_bases + tuple(_surface(match.group()) for match in RATIO_BASIS_RE.finditer(between))
+                if len(set(bases)) > 1:
+                    continue
+                ratio_basis = bases[0] if bases else ""
                 remainder = _DATE_EXPR_RE.sub("", between)
                 remainder = QUARTER_RE.sub("", remainder)
                 for previous in reversed(_amount_spans(remainder)):
@@ -451,13 +542,16 @@ def _metric_value_spans(metric: str, value: str, text: str) -> tuple[_BoundAmoun
                 remainder = ORDINAL_RE.sub("", remainder)
                 if number.dimension == DIMENSION_RATIO:
                     remainder = RATIO_QUALIFIER_RE.sub("", remainder)
+                    remainder = RATIO_BASIS_RE.sub("", remainder)
                 remainder = NUMERIC_BRIDGE_RE.sub("", remainder)
                 remainder = PAIR_SEPARATOR_RE.sub("", remainder)
                 if remainder:
                     continue
                 offset = clause_match.start()
                 results.append(_BoundAmount(number.start + offset, number.end + offset,
-                                            number.text, number.value, number.dimension))
+                                            number.text, number.value, number.dimension,
+                                            comparison_bound=actual_bound,
+                                            ratio_basis=ratio_basis))
     return tuple(dict.fromkeys(results))
 
 
@@ -585,6 +679,13 @@ def _numeric_valid(
         value = _bound_value(entry, quote)
         if value is None:
             return fail("source_value_scope", index)
+        source_bounds = _metric_value_spans(source_metric, entry["원문값"], quote)
+        if source_bounds and not any(
+            number.comparison_bound == candidate.comparison_bound
+            and number.ratio_basis == candidate.ratio_basis
+            for number in source_bounds
+        ):
+            return fail("value_constraint_mismatch", index)
         values = _amount_values(candidate_value)
         from src.features.composer.verify import _number_matches_by_math
         # 차원은 «검수가 적어 낸 글자»가 아니라 원문에서 그 수가 무엇이었나로 본다.
@@ -913,6 +1014,7 @@ def grounding_problem(
     # 승인하지 않는다. 다른 문장과 기존 수치·시점 검증 경로는 그대로 둔다.
     scope_issue = (
         modality_problem(text, sources) or scope_problem(text, sources)
+        or entity_relationship_problem(text, sources)
         or quantified_dividend_problem(text, sources)
     )
     if scope_issue:
@@ -956,7 +1058,7 @@ def grounding_problem(
         # 미래 근거는 6장 성장 계획 표와 그 장의 본문 계획 문장에서 쓰이며,
         # future_plan_guard 가 그 줄의 칸·인용 또는 그 문장·인용에 따로 결속한다.
         # 여기서는 모양만 보고 넘긴다 — 관계 근거와 같다.
-        if kind == FUTURE_KEY:
+        if kind in (FUTURE_KEY, PLAN_STATUS_KEY):
             if not isinstance(payload, list) or any(not isinstance(item, Mapping) for item in payload):
                 return invalid_shape()
             continue
@@ -1001,6 +1103,7 @@ def grounding_hint(
       1단계에서 발동하지 않는다(combined_relation_report와 같은 계약).
     """
 
+    from src.features.composer.direct_share_numeric_hint import direct_share_numeric_hint
     required = grounding_requirements(text, tuple(sources.values()))
     binding = role_binding_requirements(text, sources, cells, verbatim_source)
     triggers = combined_relation_triggers(text) if cells is None else ()
@@ -1010,6 +1113,7 @@ def grounding_hint(
         "  추가 검증 필요: " + (", ".join(required) or "없음") + "\n"
         + role_binding_hint_lines(binding, cells is not None)
         + combined_relation_hint(triggers)
+        + (direct_share_numeric_hint(text, sources) if cells is None else '')
     )
 
 
@@ -1076,10 +1180,17 @@ def constrain_verdicts(
         # 도식 후보만 칸 경계를 함께 준다. 본문·요약은 None 이므로 한 문장
         # 안에서 절을 넘는 연결이 새로 허용되지 않는다.
         cells = (cells_by_number or {}).get(number)
+        # 배열형 legacy 응답도 같은 후보 검사를 거친다. 대출 실행은 근거 JSON
+        # 유무와 무관하며, 표의 다른 용도·기관 실행을 빌릴 수 없다.
+        execution_problem = loan_execution_problem(text, sources)
+        if execution_problem:
+            result[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = execution_problem
+            continue
         # 같은 공시의 인용 밖 제외 각주가 부정한 현재 종속·연결 단정(제약만 소비, 등급 무관).
         # 공개 사유 코드는 기존 그대로이고, 어느 단계였는지는 세부 진단에만 남긴다(원문 없음).
         entity_scope = (entity_scope_by_number or {}).get(number)
-        entity_problem = document_entity_scope_problem(text, entity_scope) if entity_scope else ""
+        entity_problem = document_entity_scope_problem(text, entity_scope, cells=cells) if entity_scope else ""
         if entity_problem and details_by_number is not None:
             details_by_number[number] = {
                 "version": GROUNDING_DETAIL_VERSION, "check_kind": "근거",

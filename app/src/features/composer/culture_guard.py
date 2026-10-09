@@ -34,6 +34,8 @@ from src.features.composer.culture_constants import (
     CULTURE_EMPLOYEE_FINANCIAL_BENEFIT_RE,
     CULTURE_EVIDENCE_SCOPE_MISMATCH,
     CULTURE_EXTERNAL_AUDIT_RE,
+    CULTURE_EXTERNAL_COMMUNICATION_RE,
+    CULTURE_INTERNAL_COMMUNICATION_RE,
     CULTURE_ORG_UNIT_STOPWORDS,
     CULTURE_FINANCIAL_RISK_CATEGORY_RE,
     CULTURE_FINANCIAL_RISK_DERIVATIVE_RE,
@@ -50,6 +52,13 @@ from src.features.composer.culture_constants import (
     CULTURE_FLOW_CELL_COUNT,
     CULTURE_GOVERNANCE_TRANSACTION_RE,
     CULTURE_PEOPLE_INSTITUTION_RE,
+    CULTURE_PERFORMANCE_INSTRUMENTS,
+    CULTURE_PERFORMANCE_COMMUNICATION_RE,
+    CULTURE_PERFORMANCE_ACTION_RE,
+    CULTURE_PERFORMANCE_PEOPLE_RE,
+    CULTURE_PERFORMANCE_CADENCE_RE,
+    CULTURE_PERFORMANCE_NON_CURRENT_RE,
+    CULTURE_PERFORMANCE_SURFACE_ALIASES,
     CULTURE_SECTION_EVIDENCE_OFFCONTRACT,
     CULTURE_SECTION_ORG_ACTION_NEGATION_RE,
     CULTURE_SECTION_ORG_ACTION_RE,
@@ -310,8 +319,16 @@ def _clause_carries_section_subject(clause: str) -> bool:
         # 「정관」은 사람·기관 규정을 말한 절에서만 이 장의 소재다 — 그냥 받으면
         # 「정관에 따라 이익잉여금을 처분한다」류 회계 절이 함께 열린다.
         return True
-    return bool(CULTURE_PEOPLE_INSTITUTION_RE.search(surface_clause)
-                or EXPLICIT_CULTURE_RE.search(surface_clause))
+    people_matches = tuple(CULTURE_PEOPLE_INSTITUTION_RE.finditer(surface_clause))
+    explicit_culture = bool(EXPLICIT_CULTURE_RE.search(surface_clause))
+    if (people_matches and all(match.group() == "소통" for match in people_matches)
+            and not explicit_culture
+            and CULTURE_EXTERNAL_COMMUNICATION_RE.search(surface_clause)
+            and not CULTURE_INTERNAL_COMMUNICATION_RE.search(surface_clause)):
+        # 고객 접점 소통만으로 내부 문화 소재를 만들지 않는다. 앞에서 확인한
+        # 조직 주체·업무 실행과 같은 절의 다른 임직원 제도는 그대로 보존한다.
+        return False
+    return bool(people_matches or explicit_culture)
 
 
 def culture_problem(text: str, sources_mapping: Mapping[str, str]) -> str:
@@ -381,10 +398,104 @@ def culture_section_evidence_problem(
 
     if not _surface(text):
         return ""  # 실을 내용이 없는 후보는 이 계약의 대상이 아니다.
+    performance = _performance_communication_support(text, sources_mapping)
+    if performance is not None:
+        return "" if performance else CULTURE_SECTION_EVIDENCE_OFFCONTRACT
+    if _candidate_external_communication_only(text):
+        # 외부 고객 후보를 원문 뒤의 비슷한 사내 소통 문장으로 살리지 않는다.
+        # 후보 자체의 혼합 절·직원 업무 실행은 기존 인용 검수에 남긴다.
+        return CULTURE_SECTION_EVIDENCE_OFFCONTRACT
     if any(_clause_carries_section_subject(clause)
            for clause in _supporting_clauses(text, sources_mapping)):
         return ""
     return CULTURE_SECTION_EVIDENCE_OFFCONTRACT
+
+
+def _performance_instruments(surface: str) -> frozenset[str]:
+    return frozenset(name for name, pattern in CULTURE_PERFORMANCE_INSTRUMENTS
+                     if pattern.search(surface))
+
+
+def _performance_alias_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text).casefold()
+    for original, translated in CULTURE_PERFORMANCE_SURFACE_ALIASES:
+        normalized = normalized.replace(original, translated)
+    return normalized
+
+
+def _performance_communication_support(
+    text: str, sources_mapping: Mapping[str, str]
+) -> bool | None:
+    """현재 성과 소통의 같은 수단·행동과 가까운 직원 문맥만 보존한다.
+
+    바로 앞 절에서 직원 대상을 이어받을 수 있다. 다른 인용·문단·다른 주체의
+    사람 낱말을 빌리지 않는다. 평가를 소통 수단으로 합친 후보는 실제 소통
+    절에도 그 수단이 있을 때만 남긴다. 수치 증명과 의미 검수는 별도로 유지한다.
+    """
+    communication_clauses = tuple(
+        _surface(clause) for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
+        if (CULTURE_PERFORMANCE_COMMUNICATION_RE.search(_surface(clause))
+            and _performance_instruments(_surface(clause)))
+    )
+    if not communication_clauses:
+        return None
+    # 같은 제도의 영문 표기를 옮긴 짧은 후보도 기존 겹침 문턱으로 대조한다.
+    alias_sources = {key: _performance_alias_text(source)
+                     for key, source in sources_mapping.items()}
+    supporting = frozenset(_surface(clause) for clause in _supporting_clauses(
+        _performance_alias_text(text), alias_sources))
+    for candidate in communication_clauses:
+        action = CULTURE_PERFORMANCE_ACTION_RE.search(candidate)
+        if (action is None or OTHER_ORGANIZATION_RE.search(candidate)
+                or CULTURE_PERFORMANCE_NON_CURRENT_RE.search(candidate)):
+            return False
+        instruments = _performance_instruments(candidate)
+        cadence = frozenset(CULTURE_PERFORMANCE_CADENCE_RE.findall(candidate))
+        found = False
+        for source in sources_mapping.values():
+            # 다른 행·문단에서 직원 문맥을 빌리지 않는다.
+            for paragraph in source.splitlines():
+                clauses = tuple(_surface(clause)
+                                for clause in SOURCE_CLAUSE_SPLIT_RE.split(paragraph)
+                                if _surface(clause))
+                for index, clause in enumerate(clauses):
+                    source_action = CULTURE_PERFORMANCE_ACTION_RE.search(clause)
+                    if (_surface(_performance_alias_text(clause)) not in supporting
+                            or source_action is None
+                            or source_action.group("action") != action.group("action")
+                            or not instruments.issubset(_performance_instruments(clause))
+                            or not cadence.issubset(
+                                CULTURE_PERFORMANCE_CADENCE_RE.findall(clause))
+                            or OTHER_ORGANIZATION_RE.search(clause)
+                            or CULTURE_PERFORMANCE_NON_CURRENT_RE.search(clause)):
+                        continue
+                    people = clause
+                    if not CULTURE_PERFORMANCE_PEOPLE_RE.search(people) and index:
+                        previous = clauses[index - 1]
+                        if (not OTHER_ORGANIZATION_RE.search(previous)
+                                and not CULTURE_PERFORMANCE_NON_CURRENT_RE.search(previous)):
+                            people = previous
+                    if CULTURE_PERFORMANCE_PEOPLE_RE.search(people):
+                        found = True
+                        break
+                if found:
+                    break
+            if found:
+                break
+        if not found:
+            return False
+    return True
+
+
+def _candidate_external_communication_only(text: str) -> bool:
+    """외부 소통만 말한 후보는 다른 원문 절의 사내 소재를 빌릴 수 없다."""
+
+    clauses = tuple(clause for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
+                    if _surface(clause))
+    external = any(CULTURE_EXTERNAL_COMMUNICATION_RE.search(_surface(clause))
+                   for clause in clauses)
+    return external and not any(_clause_carries_section_subject(clause)
+                                for clause in clauses)
 
 
 def culture_accounting_policy_problem(text: str) -> str:
@@ -691,6 +802,8 @@ def culture_flow_cells_evidence_problem(
     """
 
     for cell in cells:
+        if _candidate_external_communication_only(str(cell)):
+            return CULTURE_SECTION_EVIDENCE_OFFCONTRACT
         지지 = _supporting_clauses(str(cell), sources_mapping)
         if not 지지:
             continue  # 기댄 절을 못 찾았다 — 이 계약은 이 칸을 판정하지 않는다.

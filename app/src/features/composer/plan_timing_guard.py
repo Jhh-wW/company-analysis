@@ -9,6 +9,8 @@ from datetime import date
 from re import Match
 import unicodedata
 
+from src.features.composer.scheduled_plan_date_guard import scheduled_plan_date_problem
+
 from src.features.composer.plan_timing_constants import (
     DATE_PERIOD_FIRST_COMPONENT, PLAN_CHANGED_RE, PLAN_CHANGE_DENIED_RE, PLAN_CURRENT_DATE_RE,
     PLAN_GOAL_RE, PLAN_HISTORICAL_REPORT_RE, PLAN_LINK_INTERRUPTED_RE,
@@ -89,6 +91,11 @@ def plan_timing_problem(
         baseline = date.fromisoformat(baseline_date)
     except (TypeError, ValueError):
         return ""
+    scheduled_problem = scheduled_plan_date_problem(
+        text, sources, cells, baseline_date=baseline_date,
+    )
+    if scheduled_problem:
+        return scheduled_problem
     # 도식에서는 다른 칸의 연도·계획을 연결해 새 의미를 만들지 않는다.
     for candidate in (cells if cells is not None else (text,)):
         for clause in PLAN_SENTENCE_SPLIT_RE.split(candidate):

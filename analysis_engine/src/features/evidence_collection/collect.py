@@ -12,6 +12,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import date
+from dataclasses import replace
 
 from core.dart_client import DartAuthenticationError, DartLimitReached
 from features.evidence_collection import classify, constants as c, filing_select, relevance, segment
@@ -20,7 +21,17 @@ from features.evidence_collection.fetch_failure import (
 )
 from features.evidence_collection.filing_select import DartFetcher, DocumentFetchResult, SelectedFiling
 from features.evidence_collection.retention import CandidateRetention
+from features.evidence_collection.official_industry_discovery import official_industry_discovery
+from features.evidence_collection.official_industry_discovery_constants import DISCOVERY_REASON
+from features.evidence_collection.source_context import context_for_candidate, heading_source_scopes, different_document_actor, validate_source_context, prepare_table_contexts
+from features.evidence_collection.source_context import SourceContextBudgetExceeded
+from features.evidence_collection.business_activity_table import activity_table_ranges
+from features.evidence_collection.business_constraint_signal import business_constraint_signals
+from features.evidence_collection import business_activity_table_constants as activity_c
+from features.evidence_collection.source_context_constants import CONTEXT_BUDGET_REASON
 from features.evidence_collection.scan_contract import DocumentScan
+from features.evidence_collection.section_scope import section_scopes, context_for_section_candidate
+from features.evidence_collection.section_context import SectionContextBudgetExceeded
 from features.evidence_collection.models import (
     CollectedDocument,
     CollectionAttempt,
@@ -147,12 +158,16 @@ def _deadline_attempt(company_id: str, filing: SelectedFiling) -> CollectionAtte
 def _identity_binding(company_id: str, filing: SelectedFiling, fetch_result: DocumentFetchResult) -> str:
     """요청 corp_code와 fetcher 메타를 정직하게 대조한 결과까지 문자열에 남긴다(P1-4).
 
-    fetcher가 corp_code를 돌려주지 못하면(메타 없음) 「검증했다」고 거짓으로
-    주장하지 않고 unverifiable로 남긴다 — 실제 mismatch는 이 함수 호출 전에
-    이미 걸러졌으므로 여기 도달했다면 일치하거나 확인 불가한 경우뿐이다.
+    문서 메타와 실제 목록 응답 행의 회사 코드 검증을 구분한다. 문서 메타가
+    없더라도 선택한 접수번호의 목록 행이 같은 회사임을 증명하면 별도 상태를
+    남긴다. 둘 다 없으면 unverifiable이며 요청 코드를 증거로 대신하지 않는다.
     """
-    verified = bool(fetch_result.corp_code)
-    check = c.IDENTITY_CHECK_VERIFIED if verified else c.IDENTITY_CHECK_UNVERIFIED
+    if fetch_result.corp_code:
+        check = c.IDENTITY_CHECK_VERIFIED
+    elif filing.filing_list_corp_code and filing.filing_list_corp_code == company_id:
+        check = c.IDENTITY_CHECK_FILING_LIST_VERIFIED
+    else:
+        check = c.IDENTITY_CHECK_UNVERIFIED
     return (
         f"corp_code={company_id};rcept_no={filing.rcept_no};source_kind={filing.source_kind};"
         f"identity_check={check}"
@@ -224,6 +239,9 @@ def collect_dart_evidence(
             continue
 
         fetch_result = _safe_fetch_document(fetcher, filing.rcept_no)
+        if not fetch_result.source_context_complete:
+            attempts.append(_document_attempt(company_id, filing, c.ATTEMPT_STATE_TRUNCATED, CONTEXT_BUDGET_REASON, fetch_result))
+            continue
 
         if fetch_result.state == c.ATTEMPT_STATE_MISSING:
             # 확인된 부재 — 전송 장애(FAILED)와 분리해서 남긴다.
@@ -321,21 +339,116 @@ def collect_dart_evidence(
         # 커버리지 주장은 아래·위 _document_attempt가 계속 필수 칸만 쓴다.
         allowed_slot_ids = frozenset(c.SOURCE_KIND_CANDIDATE_SLOT_SCOPE[filing.source_kind])
         retention = CandidateRetention(allowed_slot_ids)
+        try:
+            source_scopes = heading_source_scopes(fetch_result.text, document_actor=fetch_result.document_actor)
+            business_scopes = section_scopes(fetch_result.text)
+        except (SourceContextBudgetExceeded, SectionContextBudgetExceeded):
+            attempts.append(_document_attempt(company_id, filing, c.ATTEMPT_STATE_TRUNCATED, CONTEXT_BUDGET_REASON, fetch_result))
+            continue
+        table_scopes = prepare_table_contexts(fetch_result.source_contexts, document_text=fetch_result.text)
+        constraint_count = 0
         for candidate_index, candidate in enumerate(segment.iter_document_candidates(
             fetch_result.text, progress=progress, deadline_at=deadline_at,
             short_filter=short_observation_filter,
         )):
+            context_json = context_for_candidate(
+                text=candidate.text, start=candidate.start, end=candidate.end,
+                table_contexts=table_scopes, scopes=source_scopes,
+            )
+            validate_source_context(context_json, document_text=fetch_result.text)
+            candidate = replace(
+                candidate, source_context_json=context_json,
+                section_context_json=context_for_section_candidate(
+                    business_scopes, text=candidate.text, start=candidate.start, end=candidate.end,
+                    document_id=document_id, document_sha256=content_sha256,
+                ),
+            )
             if candidate.is_short:
                 retention.offer_unclassified(candidate_index, candidate)
                 continue
             slot_scores, has_any_direct_signal = relevance.score_fragment_slots_with_signal(
                 candidate.text, candidate.section_heading, allowed_slot_ids=allowed_slot_ids,
             )
+            # 다른 법인의 사업 소개를 대상 회사의 정체성 준비 칸으로 세지 않는다.
+            # 해당 원문과 다른 장의 그룹·관계 근거는 그대로 남는다.
+            if different_document_actor(context_json):
+                slot_scores = tuple(score for score in slot_scores if score.section_id != "identity")
             if slot_scores:
                 retention.offer_scored(candidate_index, candidate, slot_scores)
+                # 기존 장별 선별을 바꾸지 않고, 산업 검수 기회만 기존 무분류
+                # 원문 몫에도 보관한다. 회사 issue/response 지원 쌍은 추가하지 않는다.
             elif not has_any_direct_signal:
                 retention.offer_unclassified(candidate_index, candidate)
+            if official_industry_discovery(candidate.text) and (slot_scores or has_any_direct_signal):
+                retention.offer_unclassified(candidate_index, candidate)
 
+            # 같은 문단의 기존 장 배정은 그대로 둔다. 명시 사업 제약→현재 대응만
+            # 정확 부분구간으로 기존 5장 몫에서 경쟁하며 다른 장 몫은 건드리지 않는다.
+            for signal in business_constraint_signals(candidate.text, source_context_json=context_json):
+                constraint_scores = tuple(score for score in relevance.business_constraint_scores()
+                                          if score.slot_id in allowed_slot_ids)
+                if not constraint_scores:
+                    continue
+                start, end = candidate.start + signal.start, candidate.start + signal.end
+                exact_text = fetch_result.text[start:end]
+                derived = segment.FragmentCandidate(
+                    start, end, exact_text, candidate.section_heading,
+                    source_context_json=context_for_candidate(
+                        text=exact_text, start=start, end=end,
+                        table_contexts=table_scopes, scopes=source_scopes,
+                    ),
+                    section_context_json=context_for_section_candidate(
+                        business_scopes, text=exact_text, start=start, end=end,
+                        document_id=document_id, document_sha256=content_sha256,
+                    ),
+                )
+                validate_source_context(derived.source_context_json, document_text=fetch_result.text)
+                # 일반 후보 index는 문서 문자 수보다 작다. ID용 번호와 원순회
+                # 순위를 분리해 후처리·부분구간을 문서 끝의 최근 근거로 올리지 않는다.
+                retention.offer_scored(len(fetch_result.text) + constraint_count, derived,
+                                       constraint_scores, rank_index=candidate_index)
+                constraint_count += 1
+                progress.candidates_seen += 1
+
+        # 행만으로 자기 사업을 확정하지 않는다. 명시 당사 표제와 당기 종류별
+        # 실적이 결속되는 연속 원문창만 기존 identity 보관몫에 더한다.
+        # 기존 개별 계약 조각·총 문자/개수 상한·장별 보관몫은 그대로 유지한다.
+        activity_slot = activity_c.ACTIVITY_TABLE_SLOT_ID
+        if progress.complete and activity_slot in allowed_slot_ids:
+            for activity_start, activity_end in activity_table_ranges(fetch_result.text, fetch_result.document_actor):
+                if deadline_at is not None and time.monotonic() > deadline_at:
+                    progress.truncation_reason = c.REASON_DEADLINE_EXCEEDED
+                    progress.complete = False
+                    break
+                activity_text = fetch_result.text[activity_start:activity_end]
+                context_json = context_for_candidate(
+                    text=activity_text, start=activity_start, end=activity_end,
+                    table_contexts=table_scopes, scopes=source_scopes,
+                )
+                if different_document_actor(context_json):
+                    continue
+                candidate = segment.FragmentCandidate(
+                    activity_start, activity_end, activity_text, "",
+                    source_context_json=context_json,
+                    section_context_json=context_for_section_candidate(
+                        business_scopes, text=activity_text, start=activity_start,
+                        end=activity_end, document_id=document_id,
+                        document_sha256=content_sha256,
+                    ),
+                )
+                previous_indices = {index for index, _candidate, _scores in retention.selected_scored()}
+                previous_pools = {key: list(pool) for key, pool in retention.pools.items()}
+                # 새 5장 후보 관측을 더해도 기존 표 후보의 ID·순위는 이동하지 않는다.
+                retention.offer_scored(progress.candidates_seen - constraint_count, candidate, (
+                    relevance.SlotScore("identity", activity_slot, c.RELEVANCE_KEYWORD_HIT_SCORE_MILLIS,
+                                        (activity_c.ACTIVITY_TABLE_REASON,)),
+                ))
+                current_indices = {index for index, _candidate, _scores in retention.selected_scored()}
+                if not previous_indices <= current_indices:
+                    # 검색 보충 때문에 이미 선택한 표시용 조각을 밀어내지 않는다.
+                    # 여유 몫이 없으면 새 표 후보를 보관하지 않고 압축 관측만 남긴다.
+                    retention.pools = previous_pools
+                progress.candidates_seen += 1
         scored = retention.selected_scored()
         classify_probe_keywords.update(progress.classification_keywords)
         unclassified_candidates = retention.selected_unclassified()
@@ -350,7 +463,12 @@ def collect_dart_evidence(
             state=c.SCAN_STATE_COMPLETE if progress.complete else c.SCAN_STATE_INCOMPLETE,
             total_chars=len(fetch_result.text), scanned_chars=progress.scanned_chars,
             candidates_seen=progress.candidates_seen,
-            candidates_retained=len(scored) + len(unclassified_candidates),
+            # 같은 순회 원문을 작성·산업 보조 두 차선에 보관해도 검사한 후보는
+            # 한 건이다. 각 차선의 자료는 별도로 유지하되 순회 계수만 합집합으로 센다.
+            candidates_retained=len(
+                {(candidate.start, candidate.end) for _, candidate, _ in scored}
+                | {(candidate.start, candidate.end) for _, candidate in unclassified_candidates}
+            ),
             unclassified_seen=retention.unclassified_seen + retention.short_seen,
             unclassified_retained=len(unclassified_candidates),
             selection_compressed=selection_compressed,
@@ -399,10 +517,14 @@ def collect_dart_evidence(
                             candidate.text.encode("utf-8")
                         ).hexdigest(),
                         text=candidate.text,
+                        source_context_json=candidate.source_context_json,
+                        section_context_json=candidate.section_context_json,
                         section_id="",
                         slot_id="",
                         score_millis=0,
-                        reason_codes=(c.REASON_NO_SIGNAL,),
+                        reason_codes=((c.REASON_NO_SIGNAL, DISCOVERY_REASON)
+                                      if official_industry_discovery(candidate.text)
+                                      else (c.REASON_NO_SIGNAL,)),
                         covered_slot_ids=(),
                     )
                     for candidate_suffix, candidate in unclassified_candidates
@@ -490,6 +612,8 @@ def collect_dart_evidence(
                         location=f"{candidate.start}-{candidate.end}",
                         text_sha256=hashlib.sha256(candidate.text.encode("utf-8")).hexdigest(),
                         text=candidate.text,
+                        source_context_json=candidate.source_context_json,
+                        section_context_json=candidate.section_context_json,
                         section_id=primary_score.section_id,
                         slot_id=primary_score.slot_id,
                         score_millis=primary_score.score_millis,

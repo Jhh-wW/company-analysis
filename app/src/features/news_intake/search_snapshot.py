@@ -16,12 +16,15 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from src.features.news_intake import constants as c
+from src.features.news_intake import industry_constants as ic
 from src.features.news_intake.identity_names import company_query_names, mentions_target
+from src.features.news_intake.observation import NewsObserver, observe_news
 from src.features.news_intake.models import (
     NewsCandidate, NewsCollectionPolicy, NewsCompanyContext, NewsQueryAttempt,
     NewsSearchSnapshot,
 )
 from src.shared.report_generation.models import exact_text_sha256
+from src.shared.business_challenge_context import BusinessActivityAnchor
 from src.shared.report_quality.source_identity import canonical_url
 
 
@@ -30,7 +33,12 @@ def stable_digest(value: object) -> str:
 
 
 def company_digest(company: NewsCompanyContext) -> str:
-    return stable_digest(asdict(company))
+    value = asdict(company)
+    if not company.business_anchors:
+        value.pop("business_anchors", None)
+    if not company.company_id:
+        value.pop("company_id", None)
+    return stable_digest(value)
 
 
 def policy_digest(policy: NewsCollectionPolicy) -> str:
@@ -76,6 +84,42 @@ def source_category(url: str, company: NewsCompanyContext, policy: NewsCollectio
     return ""
 
 
+def industry_search_expression(business_item: str) -> str:
+    """검색용 공백 경계만 파생한다. 원 앵커와 사실 검수의 사업명은 그대로 둔다."""
+    match = ic.INDUSTRY_SEARCH_ACTIVITY_RE.fullmatch(business_item)
+    if match is None:
+        return business_item
+    return match["object"] + " " + match["activity"]
+
+
+def industry_anchor_search_expression(anchor: BusinessActivityAnchor) -> tuple[str, str]:
+    """자기 앵커의 유일 현재 역할만 탐색어로 덧붙이며 원 사업명은 바꾸지 않는다."""
+    expression = industry_search_expression(anchor.business_item)
+    roles = _industry_self_roles(anchor.exact_text)
+    if len(roles) != 1 or roles[0].casefold() in anchor.business_item.casefold():
+        return expression, ""
+    return expression + " " + roles[0], roles[0]
+
+
+def industry_query_derivation(company: NewsCompanyContext, query: str, topic: str) -> dict[str, str] | None:
+    """실제로 전달한 질의와 공식 원 앵커의 관계를 관측에만 기록한다."""
+    if not topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) or ":" not in topic:
+        return None
+    anchor = next((item for item in company.business_anchors
+                   if item.anchor_id == topic.split(":", 1)[1]), None)
+    if anchor is None:
+        return None
+    expression = industry_search_expression(anchor.business_item)
+    qualified_expression, role = industry_anchor_search_expression(anchor)
+    return {
+        "anchor_id": anchor.anchor_id, "original_business_item": anchor.business_item,
+        "search_expression": expression, "query": query,
+        "transformation": "activity_suffix_spacing" if expression != anchor.business_item else "unchanged",
+        "anchor_location": anchor.location, "anchor_text_sha256": anchor.text_sha256,
+        "role_qualifier": role, "qualified_search_expression": qualified_expression,
+    }
+
+
 def search_plan(company: NewsCompanyContext, as_of: dt.date) -> tuple[tuple[str, str, str, int], ...]:
     """최근 후보를 먼저 찾고, 본문 탈락에 대비한 과거 후보도 미리 고정한다."""
 
@@ -95,7 +139,28 @@ def search_plan(company: NewsCompanyContext, as_of: dt.date) -> tuple[tuple[str,
     # 실제 기간은 모든 응답의 발행일로 다시 검사한다.
     for years in range(1, len(c.WINDOW_MONTHS) + 1):
         plan.append((f"{primary} {as_of.year - years}", "sim", "archive", archive_months))
-    return tuple(dict.fromkeys(plan))
+    plan = list(dict.fromkeys(plan))
+    if company.business_anchors:
+        original_length = len(plan)
+        industry_queries = []
+        query_count = min(ic.INDUSTRY_QUERY_COUNT, original_length - ic.INDUSTRY_COMPANY_QUERY_COUNT)
+        for index in range(query_count):
+            region_count = len(ic.INDUSTRY_QUERY_REGIONS)
+            group = index // region_count
+            anchor = company.business_anchors[group % len(company.business_anchors)]
+            region_index = index % region_count
+            _, topic = ic.INDUSTRY_QUERY_REGIONS[region_index]
+            region, theme = ic.INDUSTRY_QUERY_EXPRESSIONS[index % len(ic.INDUSTRY_QUERY_EXPRESSIONS)]
+            expression, _ = industry_anchor_search_expression(anchor)
+            # 첫 질의의 국내 topic은 탐색 배분이다. 지역 없는 검색어로 지리를 승인하지 않는다.
+            query = " ".join(part for part in (expression, region, theme) if part)
+            industry_queries.append((query, "sim",
+                                     f"industry_{topic}:{anchor.anchor_id}", recent_months))
+        # 회사 검색 두 개를 유지하고 기존 뒤쪽 탐색을 대체한다. 총 호출은 늘리지 않는다.
+        industry_queries = list(dict.fromkeys(industry_queries))
+        plan = plan[:ic.INDUSTRY_COMPANY_QUERY_COUNT] + industry_queries + plan[ic.INDUSTRY_COMPANY_QUERY_COUNT:]
+        plan = plan[:original_length]
+    return tuple(plan)
 
 
 def _value(item: object, field: str) -> str:
@@ -167,7 +232,215 @@ def _candidate(metadata: dict[str, str], *, company: NewsCompanyContext,
     )
 
 
-def diverse_candidates(candidates: list[NewsCandidate], limit: int) -> tuple[NewsCandidate, ...]:
+def _industry_business_linked(item: NewsCandidate, company: NewsCompanyContext | None,
+                              metadata: str | None = None) -> bool:
+    if metadata is None:
+        metadata = item.title + " " + item.description
+    anchors = {anchor.anchor_id: anchor.business_item for anchor in company.business_anchors} if company else {}
+    linked = [anchors.get(topic.split(":", 1)[1], "") for topic in item.topics
+              if topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) and ":" in topic]
+    return any(business_item and re.search(
+        r"(?<![가-힣A-Za-z0-9])" + re.escape(business_item)
+        + ic.INDUSTRY_BUSINESS_TOKEN_END, metadata, re.I) for business_item in linked)
+
+
+def _industry_problem_linked(item: NewsCandidate, company: NewsCompanyContext | None) -> bool:
+    return any(_industry_business_linked(item, company, clause) and ic.INDUSTRY_SEARCH_PROBLEM_RE.search(clause)
+               for clause in ic.INDUSTRY_SEARCH_CLAUSE_RE.split(item.title + "\n" + item.description))
+
+
+def _industry_exploration_linked(item: NewsCandidate, company: NewsCompanyContext | None,
+                                 metadata: str | None = None) -> bool:
+    """공백·사업 접미어의 탐색 신호만 비교하며 본문 사업 관계는 승인하지 않는다."""
+    if company is None:
+        return False
+    metadata = item.title + "\n" + item.description if metadata is None else metadata
+    anchors = {anchor.anchor_id: anchor.business_item for anchor in company.business_anchors}
+    for topic in item.topics:
+        business = anchors.get(topic.split(":", 1)[1], "") if ":" in topic and topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) else ""
+        if not business:
+            continue
+        expressions = [business]
+        suffix = ic.INDUSTRY_SEARCH_BUSINESS_SUFFIX_RE.fullmatch(business)
+        if suffix is not None:
+            expressions.append(suffix[1].strip())
+        for expression in expressions:
+            characters = "".join(expression.split())
+            if len(characters) < ic.INDUSTRY_SEARCH_MIN_CORE_CHARS:
+                continue
+            spaced = r"\s*".join(re.escape(character) for character in characters)
+            ending = ic.INDUSTRY_BUSINESS_TOKEN_END
+            if expression != business:
+                ending = f"(?:{ic.INDUSTRY_SEARCH_REVENUE_SUFFIX})?" + ending
+            if re.search(ic.INDUSTRY_SEARCH_TOKEN_START + spaced + ending, metadata, re.I):
+                return True
+    return False
+
+
+def _industry_exploration_problem(item: NewsCandidate, company: NewsCompanyContext | None) -> bool:
+    return any(_industry_exploration_linked(item, company, clause)
+               and (ic.INDUSTRY_SEARCH_PROBLEM_RE.search(clause)
+                    or ic.INDUSTRY_SEARCH_QUESTION_RE.search(clause))
+               for clause in ic.INDUSTRY_SEARCH_CLAUSE_RE.split(item.title + "\n" + item.description))
+
+
+def _industry_self_roles(exact_text: str) -> tuple[str, ...]:
+    """자기 앵커의 닫힌 업종 정의에서 명사 원문만 가져온다. 수단·대상은 제외한다."""
+    roles = []
+    for pattern in (ic.INDUSTRY_SEARCH_SELF_ROLE_RE, ic.INDUSTRY_SEARCH_PROFESSIONAL_ROLE_RE):
+        for match in pattern.finditer(exact_text):
+            role = match["role"]
+            if (any(role.casefold().endswith(generic) for generic in ic.INDUSTRY_SEARCH_GENERIC_ROLES)
+                    or ic.INDUSTRY_SEARCH_ROLE_FOREIGN_RE.search(match["prefix"])
+                    or ic.INDUSTRY_SEARCH_ROLE_RECIPIENT_RE.match(exact_text[match.end():])):
+                continue
+            if pattern is ic.INDUSTRY_SEARCH_PROFESSIONAL_ROLE_RE:
+                tail = ic.INDUSTRY_SEARCH_CLAUSE_RE.split(exact_text[match.end():], maxsplit=1)[0]
+                if (not ic.INDUSTRY_SEARCH_ROLE_CURRENT_END_RE.search(tail)
+                        or ic.INDUSTRY_SEARCH_ROLE_TAIL_NEGATIVE_RE.search(tail)):
+                    continue
+            roles.append(role)
+    return tuple(dict.fromkeys(roles))
+
+
+def _industry_role_problem(item: NewsCandidate, company: NewsCompanyContext | None) -> bool:
+    """같은 사업·문제 절에 자기 업종 원문이 있는 메타만 추가 우선한다."""
+    if company is None:
+        return False
+    anchors = {anchor.anchor_id: anchor for anchor in company.business_anchors}
+    for topic in item.topics:
+        anchor = anchors.get(topic.split(":", 1)[1]) if ":" in topic and topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) else None
+        if anchor is None:
+            continue
+        specific = replace(item, topics=(topic,))
+        roles = _industry_self_roles(anchor.exact_text)
+        for clause in ic.INDUSTRY_SEARCH_CLAUSE_RE.split(item.title + "\n" + item.description):
+            if not (_industry_exploration_linked(specific, company, clause)
+                    and (ic.INDUSTRY_SEARCH_PROBLEM_RE.search(clause)
+                         or ic.INDUSTRY_SEARCH_QUESTION_RE.search(clause))):
+                continue
+            if any(re.search(ic.INDUSTRY_SEARCH_TOKEN_START + re.escape(role)
+                             + ic.INDUSTRY_BUSINESS_TOKEN_END, clause, re.I) for role in roles):
+                return True
+    return False
+
+
+def _industry_rank(item: NewsCandidate, company: NewsCompanyContext | None) -> tuple:
+    return (
+        not _industry_information_only(item, company),
+        _industry_business_linked(item, company),
+        _industry_problem_linked(item, company) and _industry_business_linked(item, company, item.title),
+        _industry_problem_linked(item, company),
+        _industry_business_linked(item, company, item.title),
+        _industry_role_problem(item, company),
+        _industry_exploration_problem(item, company),
+        _industry_exploration_linked(item, company),
+        _industry_problem_signal(item, title_only=True),
+        _industry_problem_signal(item),
+        item.published_on, item.source_url,
+    )
+
+
+def _industry_problem_signal(item: NewsCandidate, *, title_only: bool = False) -> bool:
+    """사업명 exact 신호가 없어도 문제 논점이 있는 본문의 조사 기회를 먼저 준다."""
+    metadata = item.title if title_only else item.title + "\n" + item.description
+    return bool(ic.INDUSTRY_SEARCH_PROBLEM_RE.search(metadata)
+                or ic.INDUSTRY_SEARCH_QUESTION_RE.search(metadata))
+
+
+def _industry_information_only(item: NewsCandidate, company: NewsCompanyContext | None) -> bool:
+    """명시 인물 프로필·관련주 목록의 요약 키워드가 사건 제목을 앞서지 않게 한다."""
+    return bool(ic.INDUSTRY_SEARCH_INFORMATION_TITLE_RE.search(item.title)
+                and not _industry_problem_signal(item, title_only=True)
+                and not _industry_problem_linked(item, company))
+
+
+def _industry_candidates(candidates: list[NewsCandidate], *,
+                         company: NewsCompanyContext | None = None) -> list[NewsCandidate]:
+    """문제 신호가 있는 산업 검색 후보에 본문 조사 기회를 먼저 준다.
+
+    제목·요약 신호가 없어도 후보는 보존한다. 회사 관련성·산업 적용 관계·지역은
+    기존 본문 검증에서 판정하며 검색 주제나 이 순위로 승인하지 않는다.
+    """
+    industry = [item for item in candidates if any(
+        topic.startswith(ic.INDUSTRY_TOPIC_PREFIX) for topic in item.topics)]
+    # 검색 요약에 공식 사업명의 통단어가 없어도 제한된 본문 탐색은 가능하다.
+    # 실제 공식 앵커에 연결된 질의만 탐색하며, 사업·문제·지역 승인은 본문 검수에 남긴다.
+    if company is not None:
+        anchor_ids = {anchor.anchor_id for anchor in company.business_anchors}
+        industry = [item for item in industry if any(
+            topic == f"{ic.INDUSTRY_TOPIC_PREFIX}{region}:{anchor_id}"
+            for topic in item.topics for _, region in ic.INDUSTRY_QUERY_REGIONS
+            for anchor_id in anchor_ids)]
+
+    return sorted(industry, key=lambda item: _industry_rank(item, company), reverse=True)
+
+
+def _reserved_industry_candidates(industry: list[NewsCandidate], reserved: int, *,
+                                  company: NewsCompanyContext | None,
+                                  assignments: dict[str, str] | None = None) -> list[NewsCandidate]:
+    """같은 예약 몫을 질의별로 나누고 빈 군의 몫은 남은 고유 기사에 돌린다.
+
+    query 주제는 탐색 기회에만 사용한다. 실제 지역과 현재 문제는 본문 검수가
+    판정하며, 타산업 후보나 부족한 지역의 근거를 보충하지 않는다.
+    """
+    if reserved <= 0:
+        return []
+    if company is not None:
+        topics = [f"{ic.INDUSTRY_TOPIC_PREFIX}{region}:{anchor.anchor_id}"
+                  for anchor in company.business_anchors
+                  for _, region in ic.INDUSTRY_QUERY_REGIONS][:ic.INDUSTRY_QUERY_COUNT]
+    else:
+        topics = list(dict.fromkeys(topic for item in industry for topic in item.topics
+                                    if topic.startswith(ic.INDUSTRY_TOPIC_PREFIX)))[:ic.INDUSTRY_QUERY_COUNT]
+    groups = {topic: sorted((item for item in industry if topic in item.topics),
+                            key=lambda item: _industry_rank(replace(item, topics=(topic,)), company),
+                            reverse=True) for topic in topics}
+    chosen: list[NewsCandidate] = []
+    selected_ids: set[str] = set()
+    assigned_regions: set[str] = set()
+    while groups and len(chosen) < reserved:
+        available = {topic: next((item for item in items if item.id not in selected_ids), None)
+                     for topic, items in groups.items()}
+        available = {topic: item for topic, item in available.items() if item is not None}
+        if not available:
+            break
+        # 작은 예산에서도 두 지역을 먼저 탐색한다. 한 기사가 다른 질의의 새 몫을 대신하지 않는다.
+        uncovered = {topic: item for topic, item in available.items()
+                     if topic.split(":", 1)[0] not in assigned_regions}
+        options = uncovered or available
+        topic = max(options, key=lambda value: _industry_rank(
+            replace(options[value], topics=(value,)), company))
+        item = options[topic]
+        chosen.append(item)
+        if assignments is not None:
+            assignments[item.id] = topic
+        selected_ids.add(item.id)
+        assigned_regions.add(topic.split(":", 1)[0])
+        del groups[topic]
+    for item in industry:
+        if len(chosen) >= reserved:
+            break
+        if item.id not in selected_ids:
+            chosen.append(item)
+            selected_ids.add(item.id)
+            if assignments is not None:
+                assignments[item.id] = next((topic for topic in topics if topic in item.topics), "")
+    return chosen
+
+
+def industry_body_reservations(candidates: list[NewsCandidate], budget: int, *,
+                               company: NewsCompanyContext) -> dict[str, str]:
+    """초기 고유 기사 예약이 실제 배정받은 질의군을 그대로 돌려준다."""
+    assignments: dict[str, str] = {}
+    industry = _industry_candidates(candidates, company=company)
+    _reserved_industry_candidates(industry, min(len(industry), budget // ic.INDUSTRY_BODY_DIVISOR),
+                                  company=company, assignments=assignments)
+    return {identifier: topic for identifier, topic in assignments.items() if topic}
+
+
+def diverse_candidates(candidates: list[NewsCandidate], limit: int, *,
+                       company: NewsCompanyContext | None = None) -> tuple[NewsCandidate, ...]:
     """같은 기간 안에서 이름 관측을 우선하고 각 순위의 주제를 번갈아 읽는다."""
 
     ordered = sorted(candidates, key=lambda item: (item.published_on, item.source_url), reverse=True)
@@ -184,7 +457,12 @@ def diverse_candidates(candidates: list[NewsCandidate], limit: int) -> tuple[New
                     del groups[topic]
                 if len(selected) >= limit:
                     break
-    return tuple(selected)
+    industry = _industry_candidates(ordered, company=company)
+    reserved = min(len(industry), limit // ic.INDUSTRY_BODY_DIVISOR)
+    if reserved:
+        first = _reserved_industry_candidates(industry, reserved, company=company)
+        selected = first + [item for item in selected if item.id not in {candidate.id for candidate in first}]
+    return tuple(selected[:limit])
 
 
 def metadata_probe_budget(*, total_budget: int, attempted: int,
@@ -201,13 +479,14 @@ def metadata_probe_budget(*, total_budget: int, attempted: int,
 
 def body_ranked_candidates(candidates: list[NewsCandidate], *, attempt_budget: int,
                            probe_budget: int,
-                           replacement: bool = False) -> tuple[NewsCandidate, ...]:
+                           replacement: bool = False,
+                           company: NewsCompanyContext | None = None) -> tuple[NewsCandidate, ...]:
     """기본 본문 탐색에서 메타 이름 비일치 후보를 제한적으로 분산한다.
 
     검색 예비집합과 접근 거절 보충 순위는 바꾸지 않는다. 비일치 후보도 기존
     신뢰 출처·기간·본문 법인 검증을 그대로 거쳐야만 조각이 된다.
     """
-    ranked = diverse_candidates(candidates, len(candidates))
+    ranked = diverse_candidates(candidates, len(candidates), company=company)
     budget = min(max(attempt_budget, 0), len(ranked))
     if replacement or budget == 0:
         return ranked
@@ -226,6 +505,11 @@ def body_ranked_candidates(candidates: list[NewsCandidate], *, attempt_budget: i
         selected.append((preferred if preferred else fallback).popleft())
     selected.extend(matched)
     selected.extend(unmatched)
+    industry = _industry_candidates(list(ranked), company=company)
+    reserved = min(len(industry), budget // ic.INDUSTRY_BODY_DIVISOR)
+    if reserved:
+        first = _reserved_industry_candidates(industry, reserved, company=company)
+        selected = first + [item for item in selected if item.id not in {candidate.id for candidate in first}]
     return tuple(selected)
 
 
@@ -303,13 +587,16 @@ def _transport_observation(result: object, *, supported: bool, remaining: int) -
 
 
 def collect_search_snapshot(*, search_news: Callable[..., Any], company: NewsCompanyContext,
-                            as_of: dt.date, policy: NewsCollectionPolicy | None = None) -> NewsSearchSnapshot:
+                            as_of: dt.date, policy: NewsCollectionPolicy | None = None,
+                            observer: NewsObserver | None = None) -> NewsSearchSnapshot:
     policy = policy or NewsCollectionPolicy()
     attempts: list[NewsQueryAttempt] = []
     excluded: Counter[str] = Counter()
     unverified_publishers: Counter[str] = Counter()
     reasons: list[str] = []
     by_url: dict[str, NewsCandidate] = {}
+    observed_queries: list[dict[str, object]] = []
+    observed_query_failures = 0
     deadline = time.monotonic() + policy.max_search_seconds
     plan = search_plan(company, as_of)
     budget_supported = _supports_transport_budget(search_news)
@@ -354,6 +641,18 @@ def collect_search_snapshot(*, search_news: Callable[..., Any], company: NewsCom
             **observation,
         )
         attempts.append(attempt)
+        if observer is not None:
+            try:
+                observed_queries.append({
+                    "attempt": asdict(attempt),
+                    "query_derivation": industry_query_derivation(company, query, topic),
+                    # 검색 제공자가 해석한 허용 필드만 보관한다. HTTP 원응답이 아니다.
+                    "parsed_rows": [{field: _value(item, field) for field in
+                                     ("title", "description", "originallink", "link", "pubDate")}
+                                    for item in items],
+                })
+            except Exception:
+                observed_query_failures += 1
         if state != "success":
             reasons.append(reason)
             # 인증·미설정·제공자 장애는 쿼리를 바꿔 반복하지 않는다.
@@ -381,7 +680,7 @@ def collect_search_snapshot(*, search_news: Callable[..., Any], company: NewsCom
     # 과거 예비후보가 최신 메타데이터 양에 밀려 통째로 사라지지 않게 기간별로 배분한다.
     buckets = {months: [item for item in by_url.values() if candidate_window(item, as_of) == months]
                for months in c.WINDOW_MONTHS}
-    ordered = [list(diverse_candidates(buckets[months], policy.max_candidates)) for months in c.WINDOW_MONTHS]
+    ordered = [list(diverse_candidates(buckets[months], policy.max_candidates, company=company)) for months in c.WINDOW_MONTHS]
     candidates: list[NewsCandidate] = []
     while any(ordered) and len(candidates) < policy.max_candidates:
         for bucket in ordered:
@@ -404,4 +703,21 @@ def collect_search_snapshot(*, search_news: Callable[..., Any], company: NewsCom
         exclusion_counts={key: count for key, count in excluded.items() if count},
         unverified_publishers=dict(unverified_publishers),
     )
-    return replace(snapshot, digest=snapshot_digest(snapshot))
+    snapshot = replace(snapshot, digest=snapshot_digest(snapshot))
+    if observer is not None:
+        observe_news(observer, "search_snapshot", lambda: {
+            "queries": observed_queries, "query_capture_failures": observed_query_failures,
+            "snapshot": {
+                "digest": snapshot.digest, "company_digest": snapshot.company_digest,
+                "policy_digest": snapshot.policy_digest, "as_of": snapshot.as_of,
+                "window_months": snapshot.window_months,
+                "status": snapshot.status, "reason_codes": snapshot.reason_codes,
+                "cache_eligible": snapshot.cache_eligible,
+                "candidates": [asdict(item) for item in snapshot.candidates],
+                "query_attempts": [asdict(item) for item in snapshot.query_attempts],
+                "exclusion_counts": dict(snapshot.exclusion_counts),
+                "unverified_publishers": dict(snapshot.unverified_publishers),
+            },
+            "business_anchors": [asdict(anchor) for anchor in company.business_anchors],
+        })
+    return snapshot

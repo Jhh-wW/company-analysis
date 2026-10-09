@@ -20,6 +20,7 @@ from src.features.composer.news_block import _is_news_fragment, news_ownership_f
 from src.features.composer.port import ComposedSentence
 from src.features.composer.constants import GRADE_CONFIRMED
 from src.shared.report_evidence.constants import NEWS_EXCLUDED_SECTION_IDS
+from src.shared.report_evidence.partnership_scope import research_partnership_problem
 from src.shared.report_quality.supplementary_prose import news_number_tokens, NEWS_PROTECTED_SECTIONS
 from src.shared.report_generation.models import exact_text_sha256
 
@@ -115,7 +116,9 @@ def supplement_news_candidates(report, fragments, ownership=None):
                     or canonical_candidate in existing_news_sentences
                     or _original_claim_key(fragment) in original_claims):
                 continue
-            slots = tuple(slot for slot in fragment.supported_claim_slots if slot.startswith(section.section_id + ":"))
+            slots = tuple(slot for slot in fragment.supported_claim_slots
+                          if slot.startswith(section.section_id + ":")
+                          and not research_partnership_problem(fragment.text, slot))
             if not slots:
                 continue
             # 법인 정체 슬롯의 공식 사실을 뉴스로 대체하지 않는다.

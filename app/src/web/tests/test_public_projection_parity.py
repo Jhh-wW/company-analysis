@@ -664,8 +664,8 @@ def test_웹_v2는_ledger를_렌더하지_않는다(monkeypatch: pytest.MonkeyPa
 #:   ``<dd>`` 앞 네 글자만 빠졌고 다른 줄은 한 글자도 안 바뀌었다.
 _V1_GOLDEN = Path(__file__).with_name("result_v1_article_golden.html")
 _V1_GOLDEN_TEXT_SHA256_CURRENT_APPROVED = (
-    # 2026-09-23: 기존 날짜 점 표기와 부록 안내·공식 웹 라벨을 반영했다.
-    "92b71ad8a91b264643d3c794365d51f96dea4cf072a7218898443048f7ba7a57"
+    # 2026-10-06: 구성비 안내 한 줄만 변경. 옛 안내 복원 시 직전 HTML 전체와 같다.
+    "6b117cc6cc9df557d120a5dcb3070f2e5ee49709b325674d51c618852fe8e90c"
 )
 
 

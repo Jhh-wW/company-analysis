@@ -38,6 +38,7 @@ from tools.evaluation_constants import (
     MANIFEST_SCHEMA, MAX_CASES, MIN_DUPLICATE_LINE_CHARACTERS,
     NEWS_USAGE_STEP_NAMES,
     PERFORMANCE_SETTING_ALLOWED_VALUES,
+    MODEL_SETTING_ALLOWED_VALUES,
     POLL_INTERVAL_SECONDS, POLL_TIMEOUT_SECONDS,
 )
 
@@ -303,6 +304,19 @@ class HttpEvaluation:
                 )
             ):
                 raise EvaluationError("성능시험 설정의 네 항목과 허용 값이 일치하지 않습니다")
+        # 명시 비교 설정만 기록한다. 옛 영수증의 생략을 현재 기본값으로 채우지 않는다.
+        if "model_settings" in self.settings:
+            model_settings = self.settings["model_settings"]
+            if (
+                not isinstance(model_settings, dict)
+                or set(model_settings) != set(MODEL_SETTING_ALLOWED_VALUES)
+                or any(
+                    type(model_settings[key]) is not str
+                    or model_settings[key] not in allowed
+                    for key, allowed in MODEL_SETTING_ALLOWED_VALUES.items()
+                )
+            ):
+                raise EvaluationError("평가 작성 모델 설정과 허용 값이 일치하지 않습니다")
         if self.settings.get("paid_providers_enabled") and (
             self.settings.get("code_identity_verified") is not True
             or self.settings.get("execution_source_clean") is not True
@@ -372,9 +386,12 @@ class HttpEvaluation:
                 self.state = {**binding, "cases": {case.case_id: {"state": "pending"} for case in self.cases}}
                 self.save()
             if not execute and not resume_only:
-                return {"mode": "사전검사", "cases": len(self.cases), "paid_posts": 0,
+                result = {"mode": "사전검사", "cases": len(self.cases), "paid_posts": 0,
                         "performance_settings": self.settings.get("performance_settings"),
                         "production_parity": self.settings.get("production_parity", "not_verified")}
+                if "model_settings" in self.settings:
+                    result["model_settings"] = self.settings["model_settings"]
+                return result
             if not self.settings.get("paid_providers_enabled"):
                 raise EvaluationError("유료 공급자가 비활성화된 실행 설정입니다")
             self.save_session()  # 첫 유료 경계 전에 복구 저장소를 검증한다.

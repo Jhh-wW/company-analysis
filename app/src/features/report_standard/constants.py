@@ -36,6 +36,14 @@ RELATION_PAIR_HEADERS: Final[tuple[str, str]] = (
     "지금 겪는 과제",
     "회사가 밝힌 대응",
 )
+RELATION_PAIR_TIME_STATUS_HEADERS: Final[tuple[str, str]] = (
+    "사업 과제·확인 시점",
+    "회사가 밝힌 대응·상태",
+)
+RELATION_PAIR_HEADER_VARIANTS: Final[tuple[tuple[str, str], ...]] = (
+    RELATION_PAIR_HEADERS,
+    RELATION_PAIR_TIME_STATUS_HEADERS,
+)
 RELATION_PAIR_MIN_ROWS: Final[int] = 2
 RELATION_PAIR_MAX_ROWS: Final[int] = 5
 RELATION_PAIR_MAX_TEXT_LINES: Final[int] = 2

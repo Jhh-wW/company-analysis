@@ -14,6 +14,11 @@ EVIDENCE_MAX_CHARS = 64_000
 PLAIN_METRIC_WINDOW_CHARS = 260
 #: 평문에서 주석 열이 확인된 경우에만 허용하는 단일 주석 번호의 상한.
 PLAIN_NOTE_NUMBER_MAX = 999
+#: 계정명에 붙은 명시 주석 번호만 금액 앞에서 분리한다. 손실 괄호는 해당하지 않는다.
+PLAIN_INLINE_NOTE_PATTERN = (
+    r"^\s*\(\s*주\s*석\s*"
+    r"(?P<numbers>[1-9][0-9]*(?:\s*,\s*[1-9][0-9]*)*)\s*\)"
+)
 AUDIT_REPORT_STATEMENT_SOURCE = "audit_report_statement"
 
 DIAGNOSTIC_STATEMENT_NOT_FOUND = "손익계산서 미탐"

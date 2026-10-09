@@ -41,6 +41,14 @@ def rejected_sentence_fingerprint(text: str) -> str:
     return hashlib.sha256("".join(normalized.split()).encode("utf-8")).hexdigest()
 
 
+def _section_context_metadata(fragment: CollectedFragment) -> dict[str, str]:
+    if not fragment.section_context_json:
+        return {}
+    from src.shared.report_evidence.section_context import parse_section_context
+    from src.features.composer.section_context_constants import SECTION_CONTEXT_LABEL
+    return {SECTION_CONTEXT_LABEL: parse_section_context(fragment.section_context_json)["text"]}
+
+
 def recovery_evidence(fragments: Sequence[CollectedFragment]) -> dict[str, tuple[CollectedFragment, ...]]:
     """이미 신원이 결속된 공식 조각의 해당 장 slot만 사용한다."""
     result = {}
@@ -408,7 +416,8 @@ def recover_empty_sections(
         section_id: {
             "작성범위": SECTION_GUIDES[section_id],
             "공식근거": [{"id": f.fragment_id, "원문": f.text,
-                       "의미칸": list(supported_slots[section_id][f.fragment_id])}
+                       "의미칸": list(supported_slots[section_id][f.fragment_id]),
+                       **_section_context_metadata(f)}
                       for f in evidence[section_id]],
         }
         for section_id in targets

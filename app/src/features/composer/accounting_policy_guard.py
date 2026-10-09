@@ -28,12 +28,18 @@
 from __future__ import annotations
 
 import unicodedata
+from src.features.composer.challenge_accounting_policy import is_challenge_accounting_policy
 from collections.abc import Mapping, Sequence
 
 from src.features.composer.accounting_policy_constants import (
     ACCOUNTING_POLICY_BOILERPLATE,
+    ACCOUNTING_POLICY_CLAUSE_SPLIT_RE,
     ACCOUNTING_POLICY_EXEMPTIONS,
     ACCOUNTING_POLICY_RULES,
+    OVERHEAD_ALLOCATION_RULE_NAME,
+    LIQUIDITY_ACTUAL_PRESSURE_RE,
+    LIQUIDITY_BUSINESS_OFFERING_RE,
+    LIQUIDITY_BUSINESS_EVENT_RE,
     PROGRESS_ALLOCATION_EVENT_RE,
     PROGRESS_ALLOCATION_BUSINESS_RELATION_RE,
     PROGRESS_ALLOCATION_ACTION_RE,
@@ -56,6 +62,10 @@ from src.features.composer.accounting_policy_constants import (
 )
 from src.features.composer.culture_constants import SOURCE_CLAUSE_SPLIT_RE
 from src.features.composer.culture_guard import culture_accounting_policy_problem
+from src.shared.report_evidence.overhead_allocation_scope import (
+    amortization_accounting_policy, overhead_allocation_policy,
+)
+from src.shared.report_evidence.overhead_allocation_constants import ASSET_AMORTIZATION_RULE_NAME
 # 같은 feature 안의 기준·조건 문법을 그대로 빌린다 — 규칙을 두 벌로 만들면
 # 한쪽만 고쳐져 두 잣대가 생긴다(진행·완료·기간 한정은 scope 가드와 같은 잣대).
 from src.features.composer.scope_constants import (
@@ -215,6 +225,14 @@ def _exemption_with_sources(
     if name:
         return name
     rule = _rule_hit(clause, section_id)
+    if rule == "유동성관리":
+        # 회계 상용구와 실제 압박·판매 서비스를 구분한다. 회사 주어·시점·
+        # 조건·인용 결속 검사는 이후의 의미 검수가 그대로 맡는다.
+        surface_clause = _surface(clause)
+        if (LIQUIDITY_ACTUAL_PRESSURE_RE.search(surface_clause)
+                or LIQUIDITY_BUSINESS_OFFERING_RE.search(surface_clause)
+                or LIQUIDITY_BUSINESS_EVENT_RE.search(surface_clause)):
+            return "유동성실제사업사실"
     if (
         rule in {PROGRESS_ALLOCATION_RULE_NAME, PROGRESS_COST_RULE_NAME}
         and (
@@ -272,6 +290,8 @@ def _rule_hit(clause: str, section_id: str = "") -> str:
     for name, subject_pattern, treatment_pattern in ACCOUNTING_POLICY_RULES:
         if (subject_pattern.search(surface_clause)
                 and treatment_pattern.search(surface_clause)):
+            if name == OVERHEAD_ALLOCATION_RULE_NAME and not overhead_allocation_policy(clause):
+                continue
             return name
     return ""
 
@@ -292,6 +312,12 @@ def _matched_rule(
       호출자가 2장 본문에만 원문을 넘기므로 다른 장의 판정은 종전 그대로다.
     """
 
+    # 금액·수익원 이름이 있어도 평상시 인식 기준은 당면 사업 과제가 아니다.
+    # 실제 사건·회계 서비스 제공은 좁은 절 판정에서 먼저 보존한다.
+    if section_id == "current_challenges" and is_challenge_accounting_policy(clause):
+        return "사업문제미결속재무회계조건"
+    if section_id == "operations_partners" and amortization_accounting_policy(clause):
+        return ASSET_AMORTIZATION_RULE_NAME
     if _exemption_with_sources(clause, sources, section_id):
         return ""
     return _rule_hit(clause, section_id)
@@ -308,7 +334,7 @@ def _clause_verdicts(
 
     return tuple(
         bool(_matched_rule(clause, sources, section_id))
-        for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
+        for clause in ACCOUNTING_POLICY_CLAUSE_SPLIT_RE.split(text)
         if _surface(clause)
     )
 
@@ -361,7 +387,7 @@ def accounting_policy_matched_rules(
 
     return tuple(
         _matched_rule(clause, sources, section_id)
-        for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
+        for clause in ACCOUNTING_POLICY_CLAUSE_SPLIT_RE.split(text)
         if _surface(clause)
     )
 
@@ -377,7 +403,7 @@ def accounting_policy_exemptions(
 
     return tuple(
         _exemption_with_sources(clause, sources, section_id)
-        for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
+        for clause in ACCOUNTING_POLICY_CLAUSE_SPLIT_RE.split(text)
         if _surface(clause)
     )
 
@@ -393,6 +419,6 @@ def accounting_policy_rules_ignoring_exemptions(
 
     return tuple(
         _rule_hit(clause, section_id)
-        for clause in SOURCE_CLAUSE_SPLIT_RE.split(text)
+        for clause in ACCOUNTING_POLICY_CLAUSE_SPLIT_RE.split(text)
         if _surface(clause)
     )

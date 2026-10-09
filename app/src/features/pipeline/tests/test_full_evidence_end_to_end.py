@@ -429,7 +429,10 @@ def test_생산_매출원문은_보존하되_비교생산물없는_직접_FULL�
         # 1차 검수 재요청 호출자는 «보낼 때» 푸는 callable 상한을 받는다.
         max_tokens,
         reserved_calls: int = 0,
+        timeout_sec: float | None = None,
     ):
+        assert timeout_sec in (None, real.INITIAL_REVIEW_TIMEOUT_SEC)
+        assert timeout_sec is None or stage == "v2_review"
         assert (max_tokens() if callable(max_tokens) else max_tokens) > 0
         if stage == "v2_compose":
             return writer

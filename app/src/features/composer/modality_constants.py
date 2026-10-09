@@ -5,6 +5,7 @@ import re
 from typing import Final
 
 MODALITY_PLAN_ASSERTED: Final[str] = "planned_claim_asserted"
+MODALITY_POSSIBILITY_ASSERTED: Final[str] = "possible_activity_asserted"
 MIN_ACTIVITY_ANCHOR_CHARS: Final[int] = 2
 MAX_ACTIVITY_STEM_CHARS: Final[int] = 24
 QUOTE_CHARACTERS: Final[str] = "\"'“”‘’「」『』〈〉《》"
@@ -34,7 +35,7 @@ ROLE_ASSERTED_TAIL_PATTERN: Final[str] = (
     r"하는\s*역할을\s*(?:수행)?(?:하고\s*있|해\s*왔|하였|했|합니다|한다)"
 )
 PLAN_TAIL_PATTERN: Final[str] = (
-    r"(?:해\s*나가고자|해\s*나갈\s*(?:계획|예정)|하고자|하려고|하려는\s*(?:계획|목표)|"
+    r"(?:하겠습니다|해\s*나가고자|해\s*나갈\s*(?:계획|예정)|하고자|하려고|하려는\s*(?:계획|목표)|"
     r"할\s*(?:계획|예정|방침)|하기\s*위해|하기를\s*(?:목표|희망)|"
     r"하는\s*것을?\s*목표|하는\s*것이\s*목표|한다는\s*(?:계획|목표|방침)|"
     r"(?:을|를)\s*(?:목표|계획)(?:로|으로)|(?:이|가)\s*(?:목표|계획)|"
@@ -46,3 +47,13 @@ ASSERTED_TAIL_PATTERN: Final[str] = (
 )
 PLAN_RE = re.compile(r"(?<![가-힣])" + ACTIVITY_STEM_PATTERN + r"\s*" + PLAN_TAIL_PATTERN)
 ASSERTED_RE = re.compile(r"(?<![가-힣])" + ACTIVITY_STEM_PATTERN + r"\s*" + ASSERTED_TAIL_PATTERN)
+
+# 명사 목적어의 가능성을 같은 목적어의 실제 추진·실현으로 바꾼 좁은 구문이다.
+# 임의 동의어, '영향을 미칠 수 있다'의 평가행위 추론 등은 판정하지 않는다.
+NOMINAL_ACTIVITY_OBJECT_PATTERN: Final[str] = r"(?P<object>[가-힣A-Za-z0-9]{2,}(?:\s*[/·]\s*[가-힣A-Za-z0-9]{2,})*)"
+POSSIBILITY_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])" + NOMINAL_ACTIVITY_OBJECT_PATTERN
+    + r"\s*(?:이|가)?\s*가능(?:하다|합니다|하며|한|함|$|[.;\n])"
+)
+NOMINAL_ACTIVITY_OBJECT_RE = re.compile(NOMINAL_ACTIVITY_OBJECT_PATTERN + r"\s*$")
+POSSIBILITY_ASSERTED_STEMS: Final[frozenset[str]] = frozenset({"추진", "실현"})

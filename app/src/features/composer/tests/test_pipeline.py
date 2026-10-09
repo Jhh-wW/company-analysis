@@ -759,6 +759,13 @@ def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
         "여섯째 한계를 공식 자료에서 확인했다.",
     )
 
+    def complete_sentence(section_index, index):
+        # 명시 계획 두 행은 확인 placeholder 대신 자기 원문·미래근거가 있는 계획이다.
+        # 기존 검수 대역이 이 정확 문장에만 대상·활동·양태 증명을 공급한다.
+        if SECTION_IDS[section_index] == "future_strategy" and index in (0, 5):
+            return _SECTION_CLAIMS["future_strategy"][index // 5][1]
+        return f"가나다전자는 {topics[section_index]}의 {endings[index]}"
+
     class CompleteWriter(_FakeWriter):
         def __call__(self, prompt: str) -> str:
             self.prompts.append(prompt)
@@ -773,8 +780,9 @@ def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
                 {
                     "문장들": [
                         {
-                            "글": f"가나다전자는 {topics[section_index]}의 {ending}",
-                            "인용": [str((section_index * 6 + index) % 8 + 1)],
+                            "글": complete_sentence(section_index, index),
+                            "인용": [str(index // 5 + 1) if section_id == "future_strategy" and index in (0, 5)
+                                     else str((section_index * 6 + index) % 8 + 1)],
                             "등급": GRADE_CONFIRMED,
                             "주장슬롯": slots[index % len(slots)],
                         }
@@ -790,9 +798,9 @@ def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
         fragment_number=9
     )
     expected_sentences = tuple(
-        f"가나다전자는 {topic}의 {ending}"
-        for topic in topics
-        for ending in endings
+        complete_sentence(section_index, index)
+        for section_index in range(len(topics))
+        for index in range(len(endings))
     )
     output = run_v2(
         "가나다전자",

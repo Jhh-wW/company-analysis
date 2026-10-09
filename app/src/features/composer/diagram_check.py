@@ -21,7 +21,7 @@
   앞 두 글자가 같아도 서로 다른 3-그램이 된다. **문장끼리 비교(dedupe)에는
   맞지만, 짧은 딱지를 긴 문장에 대보는 일에는 못 쓰는 도구**였다.
 
-  더 근본적으로 — 흐름도의 첫 칸(무엇으로 시작하나)과 끝 칸(누구에게 닿나)은
+  더 근본적으로 — 흐름도의 첫 칸(무엇으로 시작하나)과 끝 칸(전달 대상·경로)은
   **원래 작가가 요약해 붙이는 이름**이다. 원문에 「음악 소비자」·「데뷔
   아티스트」가 글자 그대로 있을 리 없다. 글자 일치를 요구하는 것은
   흐름도라는 물건의 성질과 어긋난다.
@@ -69,6 +69,7 @@ from typing import Callable, Final, Optional
 from src.features.composer.constants import (
     BUSINESS_FLOW_SECTION_ID,
     CHALLENGE_FLOW_SECTION_ID,
+    IDENTITY_TABLE_SECTION_ID,
     FLOW_ARROW_SECTION_IDS,
     FLOW_HEADERS_BY_SECTION,
     FLOW_RELATION_REVIEW_GUIDE,
@@ -81,6 +82,7 @@ from src.features.composer.constants import (
 from src.features.composer.logic import extract_json_payload
 from src.features.composer.flow_generic_cells import is_generic_flow_cell
 from src.features.composer.flow_review_binding import bind_reviewed_flow_row
+from src.features.composer.entity_scope_constraints import build_entity_scope_contexts
 from src.features.composer.flow_review_constants import FLOW_REVIEW_BINDING_INVALID
 from src.shared.report_generation.models import exact_text_sha256
 from src.features.composer.verdict_number import coerce_verdict_number
@@ -135,6 +137,14 @@ from src.features.composer.portfolio_name_constants import (
 )
 from src.features.composer.role_binding_constants import ROLE_BINDING_REVIEW_GUIDE
 from src.features.composer.scope_guard import flow_scope_problem
+from src.features.composer.business_population_scope import section_investment_plan_problem
+from src.features.composer.flow_target_relation import (
+    flow_target_relation_hint, flow_target_relation_problem,
+)
+from src.features.composer.direct_support import support_entries_by_number
+from src.features.composer.business_relation_scope import business_relation_scope_problem
+from src.features.composer.identity_flow_scope import identity_flow_scope_problem
+from src.features.composer.role_binding import company_flow_actor_problem
 from src.features.composer.absence_claim_guard import absence_claim_problem
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_financial_risk_goal_problem,
@@ -929,6 +939,7 @@ def _labelled_cells(section_id: str, row: FlowRow) -> list[str]:
 def _review_prompt(
     items: Sequence[tuple[int, str, FlowRow]],
     texts: Mapping[str, str],
+    *, fragments_by_id: Optional[Mapping[str, CollectedFragment]] = None,
 ) -> str:
     has_card_rows = any(
         section_id not in FLOW_ARROW_SECTION_IDS for _n, section_id, _r in items
@@ -948,7 +959,7 @@ def _review_prompt(
         FUTURE_PLAN_REVIEW_GUIDE,
         "아래는 보고서에 실릴 «사업 경로 도식»의 각 줄이다.",
         "칸마다 «칸 이름: 값» 꼴로 준다. 칸 이름은 장마다 다르다 — 「무엇으로",
-        "시작하나 → 회사가 하는 일 → 누구에게 닿나」인 장도 있고, 「지금 겪는",
+        "시작하나 → 회사가 하는 일 → 전달 대상·경로」인 장도 있고, 「지금 겪는",
         "과제 → 회사가 밝힌 대응」처럼 두 칸인 장도 있다. 칸 이름을 보고 그",
         "칸이 무엇을 주장하는지 판단하라.",
         "★ 값이 없는 칸은 «아예 주지 않는다». 보고서에도 인쇄되지 않으므로",
@@ -999,6 +1010,17 @@ def _review_prompt(
             "",
         )
     )
+    scoped_sources = {
+        fid: fragment for fid, fragment in (fragments_by_id or {}).items()
+        if fid in source_dictionary and fragment.section_context_json
+    }
+    if scoped_sources:
+        from src.shared.report_evidence.section_context import parse_section_context
+        from src.features.composer.section_context_constants import SECTION_CONTEXT_LABEL
+        lines.append(SECTION_CONTEXT_LABEL + " (조각별 JSON 자료): " + json.dumps({
+            fid: parse_section_context(fragment.section_context_json)["text"]
+            for fid, fragment in scoped_sources.items()
+        }, ensure_ascii=False, separators=(",", ":")))
     for number, section_id, row in items:
         # 경로·원문은 신뢰할 수 없는 데이터다. JSON 문자열로 봉인해
         # 안의 줄바꿈·가짜 번호·지시가 검수 프롬프트 구조를 바꾸지 못한다.
@@ -1012,6 +1034,9 @@ def _review_prompt(
         ))
         sources = {fid: texts[fid] for fid in row.citations if fid in texts}
         lines.append(grounding_hint(FLOW_CELL_JOIN.join(row.cells), sources, row.cells))
+        flow_relation_hint = flow_target_relation_hint(row.cells, sources, section_id=section_id)
+        if flow_relation_hint:
+            lines.append(flow_relation_hint)
     lines.extend(
         (
             "",
@@ -1107,7 +1132,7 @@ def _review_rows(
             blank_dropped,
         )
 
-    prompt = _review_prompt(items, texts)
+    prompt = _review_prompt(items, texts, fragments_by_id=fragments_by_id)
     raw = _safe_ask(ask, prompt)
     verdicts = _parse_verdicts(raw)
     retries = 0
@@ -1147,9 +1172,15 @@ def _review_rows(
         # ★ 보고서 기준일. 안 넘기면 executive_status_guard 가 날짜 문턱 없이
         #   이탈 «표지» 존재만으로 판정한다(가드 머리말 참고).
         baseline_date=baseline_date,
+        # 본문·묶음 검수와 같은 인용 법인·예정 단계 및 제약 각주를 소비한다.
+        entity_scope_by_number={
+            number: build_entity_scope_contexts(row.citations, fragments_by_id or {})
+            for number, _section, row in items
+        },
     )
     # 같은 파서로 미래 근거를 읽고, 중복 번호는 근거 없음으로 처리한다.
     future_evidence = future_plan_entries_by_number(raw)
+    relation_evidence = support_entries_by_number(raw)
     kept: dict[str, list[FlowRow]] = {section_id: [] for section_id, _ in by_section}
     dropped: list[str] = list(blank_dropped)
     for number, _section, row in items:
@@ -1163,7 +1194,26 @@ def _review_rows(
             flow_problem = (
                 cellwise_problem(row.cells, absence_claim_problem)
                 or flow_scope_problem(row.cells, sources)
+                or section_investment_plan_problem(
+                    FLOW_CELL_JOIN.join(row.cells), sources,
+                    {fid: fragment.section_context_json
+                     for fid, fragment in (fragments_by_id or {}).items()
+                     if fragment.section_context_json},
+                    cells=row.cells,
+                )
             )
+            if not flow_problem and section_id == "business_model":
+                flow_problem = next((value for cell in row.cells if (value := business_relation_scope_problem(
+                    cell, sources, section_id="business_model",
+                ))), "")
+            if not flow_problem and section_id == IDENTITY_TABLE_SECTION_ID:
+                flow_problem = identity_flow_scope_problem(row.cells, sources)
+            if not flow_problem and section_id == OPERATIONS_FLOW_SECTION_ID:
+                flow_problem = company_flow_actor_problem(row.cells, sources)
+                flow_problem = flow_problem or flow_target_relation_problem(
+                    row.cells, sources, relation_evidence.get(number),
+                    section_id=section_id,
+                )
             if not flow_problem and section_id == CHALLENGE_FLOW_SECTION_ID:
                 # 빈 대응 칸 → 근거 없는 대응 칸 순서로 본다. 앞의 검사가
                 # 「비었는가」만 보므로, 채워졌지만 원문에 없는 말은 여기서만

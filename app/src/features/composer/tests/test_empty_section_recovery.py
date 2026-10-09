@@ -354,9 +354,12 @@ def _full_packets(*, culture_owns_recovery_fragment: bool):
     ``culture_owns_recovery_fragment`` 가 거짓이면 그 조각을 8장 packet에서만
     뺀다 — union에는 남으므로 «장이 들고 있지 않은 근거»를 재현한다.
     """
-    from src.features.composer.tests.test_pipeline import _strict_packet_set
+    from src.features.composer.tests.test_pipeline import _SECTION_CLAIMS, _strict_packet_set
 
-    base = _strict_packet_set(evidence_texts=(COMPETITIVE_TEXT,))
+    # 6장 정상 계획은 현재 근거 계약대로 자기 원문과 미래 증명을 함께 공급한다.
+    base = _strict_packet_set(evidence_texts=(
+        COMPETITIVE_TEXT, _SECTION_CLAIMS["future_strategy"][0][1],
+    ))
     extra = _culture_recovery_fragment()
     return SectionEvidencePacketSet(
         company_id=base.company_id,
@@ -385,9 +388,20 @@ def _full_writer_leaving_culture_empty():
     다른 쪽이 «비지 않는» 입력으로 조용히 바뀐다.
     """
     from src.features.composer.tests.test_evidence_available_report import _StrictThinWriter
+    from src.features.composer.tests.test_pipeline import _SECTION_CLAIMS
 
     class _Writer(_StrictThinWriter):
         def __call__(self, prompt: str) -> str:
+            if self.section_calls < len(_ALL_SECTION_IDS) and (
+                _ALL_SECTION_IDS[self.section_calls] == "future_strategy"
+            ):
+                self.prompts.append(prompt)
+                self.section_calls += 1
+                slot, text = _SECTION_CLAIMS["future_strategy"][0]
+                return json.dumps({"문장들": [{
+                    "글": text, "인용": ["1"], "등급": GRADE_CONFIRMED,
+                    "주장슬롯": slot,
+                }]}, ensure_ascii=False)
             if self.section_calls < len(_ALL_SECTION_IDS) and (
                 _ALL_SECTION_IDS[self.section_calls] == "competitive_position"
             ):

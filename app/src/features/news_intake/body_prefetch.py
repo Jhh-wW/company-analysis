@@ -33,6 +33,9 @@ from dataclasses import dataclass, field, replace
 from typing import Callable, Iterator
 
 from src.features.news_intake import constants as c
+from src.features.news_intake.article_text_scope import auxiliary_only_body, outside_auxiliary_parts
+from src.features.news_intake.identity_names import mentions_target
+from src.features.news_intake.article_text_scope_constants import EXCLUDED_AUXILIARY_ONLY_BODY
 from src.features.news_intake.fetch import body_fetch_urls, decode_looks_broken, normalize_body_result
 from src.features.news_intake.models import NewsCandidate, NewsCollectionPolicy, NewsCompanyContext
 from src.features.news_intake.search_snapshot import (
@@ -296,6 +299,11 @@ def fetch_article_body(job: ArticleFetchJob, candidate: NewsCandidate, lease: Ca
             all_callback_variants_denied = False
             if result.stage == c.BODY_STAGE_META_DESCRIPTION:
                 excluded["metadata_only_not_body"] += 1
+                continue
+            if auxiliary_only_body(result.text) and not any(
+                mentions_target(part, job.company) for part in outside_auxiliary_parts(result.text)
+            ):
+                excluded[EXCLUDED_AUXILIARY_ONLY_BODY] += 1
                 continue
             if c.UNPARSED_BODY_HTML_RE.search(result.text):
                 excluded["unparsed_html_not_body"] += 1

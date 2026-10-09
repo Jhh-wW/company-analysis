@@ -29,6 +29,10 @@ from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Optional
 
+from src.shared.business_challenge_context import (
+    BusinessActivityAnchor,
+    IndustryProblemEvidence,
+)
 from src.shared.report_evidence.constants import ReleaseMode
 from src.shared.final_gate_diagnostics import (
     FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT,
@@ -45,7 +49,8 @@ from src.shared.report_quality.generation import (
     assess_and_observe_generation,
     assert_observation_matches_assessment,
 )
-from src.shared.report_quality.models import PublicationPolicy
+from src.shared.report_quality.models import PublicationPolicy, VerificationState
+from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_quality.contract import contract_for_generation
 from src.shared.report_quality.review_diagnostic_constants import REVIEW_SCOPE_ITEMS
 from src.shared.report_quality.composition_diagnostic_constants import (
@@ -98,7 +103,6 @@ from src.features.composer.logic import (
 from src.features.composer.constants import (
     AI_STAGE_COMPOSE_VERIFY,
     AI_STAGE_DIAGRAM,
-    AI_STAGE_FULL_SUPPLEMENT,
     AI_STAGE_REWRITE,
     AI_STAGE_SUMMARY,
     DEFAULT_CITATION_STYLE,
@@ -117,7 +121,16 @@ from src.features.composer.constants import (
     SHORTFALL_TABLE_EVIDENCE_UNBOUND,
     SUMMARY_NOTICE_EMPTY,
     SUMMARY_NOTICE_THIN,
+    SUPPLEMENT_RETAINED_BODY_REASON,
+    INDUSTRY_CONTEXT_SELECTION_STEP,
 )
+from src.features.composer.industry_context import (
+    has_verified_direct_business_issue, select_industry_context_for_fragments,
+    discovery_fragments_for_supplement,
+)
+from src.shared.report_evidence.industry_candidates import OfficialIndustrySupplement
+from src.features.composer.supplement_feedback import missing_writer_slots
+from src.features.composer.scope_supplement_feedback import collect_scope_supplement_failures
 from src.features.composer.evidence_availability import (
     COLLECTION_STATE_PARTIAL,
     EvidenceAvailability,
@@ -163,6 +176,7 @@ from src.features.composer.portfolio_name_table import (
 from src.features.composer.portfolio_names import portfolio_name_usage
 from src.features.composer.port import (
     AskFatalError,
+    CollectedFragment,
     ComposedReport,
     ComposedSection,
     ComposedSentence,
@@ -210,6 +224,7 @@ from src.features.composer.quality_observation_log import (
     log_generation_quality_observation,
     record_full_safety_block,
     record_primary_quality_stop,
+    record_supplement_quality_stop,
 )
 from src.features.composer.quality_projection import (
     build_generation_quality_candidate,
@@ -970,25 +985,64 @@ def _merge_selected_sections(
     base: ComposedReport,
     replacements: ComposedReport,
     section_ids: tuple[str, ...],
+    *,
+    retention_diagnostics: list[dict[str, str]] | None = None,
 ) -> ComposedReport:
-    """정책 순서의 승인 장만 교체하고 나머지 객체를 그대로 보존한다."""
+    """승인 장을 교체하되 보충에서 빠진 의미칸의 이전 검증 본문을 보존한다."""
 
     if tuple(section.section_id for section in base.sections) != SECTION_IDS:
         raise V2ValidationError(("report_recovery:base_section_order_invalid",))
     if tuple(section.section_id for section in replacements.sections) != section_ids:
         raise V2ValidationError(("report_recovery:replacement_section_order_invalid",))
     by_id = {section.section_id: section for section in replacements.sections}
-    return ComposedReport(
-        sections=tuple(
-            # 보도표는 병합 뒤 검수 결과를 반영해 다시 만든다. 이 복사는
-            # 병합 도중 표만 누락되는 것을 막으며 공개 승인으로 쓰지 않는다.
-            replace(
-                by_id[section.section_id], news_rows=section.news_rows,
+
+    def selected_section(section: ComposedSection) -> ComposedSection:
+        replacement = by_id.get(section.section_id)
+        if replacement is None:
+            return section
+        allowed_slots = frozenset(CLAIM_SLOTS_BY_SECTION[section.section_id])
+        replacement_slots = {
+            sentence.planned_claim_slot for sentence in replacement.sentences
+            if sentence.verification_state == VerificationState.VERIFIED.value
+        }
+        replacement_texts = {
+            _normalized_text(sentence.text) for sentence in replacement.sentences
+            if sentence.verification_state == VerificationState.VERIFIED.value
+        }
+        retained = tuple(
+            sentence for sentence in section.sentences
+            if sentence.verification_state == VerificationState.VERIFIED.value
+            and sentence.planned_claim_slot in allowed_slots - replacement_slots
+            and _normalized_text(sentence.text) not in replacement_texts
+        )
+        if retained:
+            # 동일 의미칸은 새 검증 본문으로 교체하되 새 본문에 없는 의미칸까지
+            # 지우지 않는다. 같은 글을 다른 의미칸으로 복제하지 않으며 병합 뒤
+            # 인용·수치·도식·공개 결속과 품질을 다시 검사한다.
+            retained_texts = {_normalized_text(sentence.text) for sentence in retained}
+            new_sentences = tuple(
+                sentence for sentence in replacement.sentences
+                if _normalized_text(sentence.text) not in retained_texts
             )
-            if section.section_id in by_id
-            else section
-            for section in base.sections
-        ),
+            replacement = replace(
+                replacement, sentences=(*new_sentences, *retained),
+                flow_rows=(replacement.flow_rows or section.flow_rows
+                           if not new_sentences else replacement.flow_rows),
+                notice=(replacement.notice if new_sentences else section.notice),
+                moved_to_sections=(replacement.moved_to_sections if new_sentences
+                                   else section.moved_to_sections),
+            )
+            if retention_diagnostics is not None:
+                retention_diagnostics.append({
+                    "section_id": section.section_id,
+                    "reason_code": SUPPLEMENT_RETAINED_BODY_REASON,
+                })
+        # 보도표는 병합 뒤 검수 결과를 반영해 다시 만든다. 기존 행 보존은
+        # 공개 승인으로 쓰지 않는다.
+        return replace(replacement, news_rows=section.news_rows)
+
+    return ComposedReport(
+        sections=tuple(selected_section(section) for section in base.sections),
         summary=(),
     )
 
@@ -1513,6 +1567,44 @@ def _record_fact_summary(
     })
 
 
+def _late_official_industry_problems(
+    report: ComposedReport, *, callback: Callable | None,
+    anchors: tuple[BusinessActivityAnchor, ...], problems: tuple[IndustryProblemEvidence, ...],
+    fragments: FragmentsInput, company_id: str,
+    diagnostics: list[dict],
+    discovery_fragments_sink: list[CollectedFragment] | None = None,
+) -> tuple[IndustryProblemEvidence, ...]:
+    """최종 검수 본문의 직접 과제가 없을 때만 별도 산업 근거를 보충한다."""
+    if (callback is None or problems or has_verified_direct_business_issue(report)
+            or not any(sentence.verification_state == "verified"
+                       for section in report.sections for sentence in section.sentences)):
+        return problems
+    selected = _normalize_fragments(fragments)
+    added = callback(selected)
+    if not added:
+        return problems
+    try:
+        extra = ()
+        if type(added) is OfficialIndustrySupplement:
+            if discovery_fragments_sink is None:
+                raise ValueError("공식 산업 조사 원문의 최종 등록 경로가 없습니다")
+            extra = discovery_fragments_for_supplement(added, fragments=selected, company_id=company_id)
+            added = added.problems
+        available = (*selected, *extra)
+        _, bound, _ = select_industry_context_for_fragments(
+            anchors=anchors, problems=tuple(added), original_fragments=available,
+            selected_fragments=available, company_id=company_id,
+        )
+    except ValueError:
+        # 선택에 결속되지 않은 새 산업 보조만 제외한다. 기존 본문 등록부의
+        # 충돌이나 renderer 오류는 여기서 감추지 않는다.
+        diagnostics.append({"step": "공식_산업_선택결속", "상태": "결속불가", "산업근거수": 0})
+        return problems
+    if discovery_fragments_sink is not None and bound:
+        discovery_fragments_sink.extend(extra)
+    return bound
+
+
 def _finish_evidence_available(
     company_name: str,
     verified: ComposedReport,
@@ -1544,8 +1636,14 @@ def _finish_evidence_available(
     program_registry_sources: Sequence[Source] = (),
     moved_facts: Sequence[MovedFactRecord] = (),
     news_block_result: NewsBlockResult | None = None,
+    industry_anchors: tuple[BusinessActivityAnchor, ...] = (),
+    industry_problems: tuple[IndustryProblemEvidence, ...] = (),
+    official_industry_fallback: Callable[[tuple[CollectedFragment, ...]], tuple[IndustryProblemEvidence, ...]] | None = None,
 ) -> V2RunOutput:
-    """검증된 본문(또는 안내뿐인 본문)에서 AI 0회로 확보 근거 보고서를 마무리한다.
+    """검증된 본문(또는 안내뿐인 본문)으로 확보 근거 보고서를 마무리한다.
+
+    기본 진입은 AI 0회다. 작성 뒤 강등 경로가 전달한 공식 산업 콜백만
+    최종 검수 본문에서 한 번 선택 호출할 수 있으며 그 뒤에는 AI를 쓰지 않는다.
 
     ``tail_already_applied``가 참이면(FULL 후처리에서 내려온 본문) 수치 claim·
     보도표·조사 안내를 다시 붙이지 않는다 — 두 번 붙이면 같은 문장이 겹친다.
@@ -1608,6 +1706,7 @@ def _finish_evidence_available(
             verified_program_facts=verified_program_facts,
             program_registry_sources=program_registry_sources,
             name_table=name_table, style_diagnostics=style_diagnostics,
+            **_industry_render_kwargs(industry_anchors, industry_problems),
         )
     body_rendered = _render_available(body)
     selection = select_bound_public_sentences(body, body_rendered)
@@ -1629,6 +1728,15 @@ def _finish_evidence_available(
         body, sections_with_program_tables(performance_table, composition_tables),
         moved_facts=final_moved_facts, fragments=_normalize_fragments(fragments),
     )
+    discovery_fragments: list[CollectedFragment] = []
+    industry_problems = _late_official_industry_problems(
+        body, callback=official_industry_fallback, anchors=industry_anchors,
+        problems=industry_problems, fragments=fragments, company_id=company_id,
+        diagnostics=composition_diagnostics,
+        discovery_fragments_sink=discovery_fragments,
+    )
+    if discovery_fragments:
+        fragments = (*_normalize_fragments(fragments), *discovery_fragments)
     extractive = select_extractive_summary(body, body_rendered.fact_records)
     _record_fact_summary(len(selection.fact_ids), len(extractive.items), composition_diagnostics)
     final = ComposedReport(sections=body.sections, summary=extractive.bound_sentences)
@@ -1714,6 +1822,8 @@ def compose_evidence_available_report(
     composition_diagnostics_sink: list[dict] | None = None,
     degraded_reason: str = "",
     degraded_cause_kind: str = "",
+    industry_anchors: tuple[BusinessActivityAnchor, ...] = (),
+    industry_problems: tuple[IndustryProblemEvidence, ...] = (),
 ) -> V2RunOutput:
     """AI를 한 번도 부르지 않고 확보한 자료만으로 부분 보고서를 만든다.
 
@@ -1775,7 +1885,20 @@ def compose_evidence_available_report(
         ),
         draft_body_count=0,
         news_review_candidates=frozenset(),
+        industry_anchors=industry_anchors,
+        industry_problems=industry_problems,
     )
+
+
+def _industry_render_kwargs(
+    anchors: tuple[BusinessActivityAnchor, ...],
+    problems: tuple[IndustryProblemEvidence, ...],
+) -> dict[str, object]:
+    """산업 근거가 있을 때만 같은 입력을 모든 렌더·봉인 경로에 전달한다."""
+
+    if not anchors or not problems:
+        return {}
+    return {"industry_anchors": anchors, "industry_problems": problems}
 
 
 def run_v2(
@@ -1785,6 +1908,9 @@ def run_v2(
     *,
     writer_ask: AskFn,
     reviewer_ask: AskFn,
+    industry_anchors: tuple[BusinessActivityAnchor, ...] = (),
+    industry_problems: tuple[IndustryProblemEvidence, ...] = (),
+    official_industry_fallback: Callable[[tuple[CollectedFragment, ...]], tuple[IndustryProblemEvidence, ...]] | None = None,
     initial_reviewer_ask: Optional[AskFn] = None,
     initial_retry_reviewer_ask: Optional[AskFn] = None,
     rewrite_ask: Optional[AskFn] = None,
@@ -1944,6 +2070,8 @@ def run_v2(
                 company_id=company_id,
                 review_diagnostics_sink=review_diagnostics_sink,
                 composition_diagnostics_sink=composition_diagnostics_sink,
+                industry_anchors=industry_anchors,
+                industry_problems=industry_problems,
             )
             if _downgraded_from:
                 # FULL 사전 검사가 AI 호출 «전»에 SHADOW 로 다시 돌린 실행이다. 이
@@ -2208,6 +2336,9 @@ def run_v2(
                         ),
                         evidence_available_fallback=True,
                         _downgraded_from=release_mode.value,
+                        industry_anchors=industry_anchors,
+                        industry_problems=industry_problems,
+                        official_industry_fallback=official_industry_fallback,
                     )
                 raise V2ValidationError(
                     (
@@ -2215,6 +2346,22 @@ def run_v2(
                         + FINAL_GATE_DETAIL_PREFLIGHT_OFFICIAL_EVIDENCE_INSUFFICIENT,
                     )
                 )
+
+    if industry_problems:
+        collected_problem_count = len(industry_problems)
+        industry_anchors, industry_problems, excluded_problem_count = select_industry_context_for_fragments(
+            anchors=industry_anchors,
+            problems=industry_problems,
+            original_fragments=_normalize_fragments(fragments),
+            selected_fragments=_normalize_fragments(verification_fragments),
+            company_id=company_id,
+        )
+        composition_diagnostics.append({
+            "step": INDUSTRY_CONTEXT_SELECTION_STEP,
+            "수집산업문제": collected_problem_count,
+            "선택산업문제": len(industry_problems),
+            "공식사업근거_선택탈락": excluded_problem_count,
+        })
 
     # 출고 모드 진단 한 줄 — 첫 AI 호출 «전»에 «미확정»으로 열고, 출고 모드가 정해지는
     # 반환 지점마다 채운다. 사전 검사에서 SHADOW 로 다시 도는 실행은 안쪽 실행이 자기
@@ -2658,8 +2805,14 @@ def run_v2(
                 evidence_availability
                 or EvidenceAvailability(COLLECTION_STATE_PARTIAL)
             ),
-            degraded_reason=reason,
-            degraded_cause_kind="",
+            # 공급자 장애 뒤 안내 본문이 품질 하한에 걸려도 최초 장애를
+            # 품질 부족으로 덮지 않는다. 품질 중단 진단은 별도로 보존한다.
+            degraded_reason=(
+                _degraded_reason_of(ai_failure) if ai_failure is not None else reason
+            ),
+            degraded_cause_kind=(
+                type(ai_failure.cause).__name__ if ai_failure is not None else ""
+            ),
             ai_stages_skipped=(*ai_stages_skipped, *stages),
             downgraded_from=release_mode.value,
             tail_already_applied=True,
@@ -2680,6 +2833,9 @@ def run_v2(
             name_table=name_table,
             moved_facts=moved_facts,
             news_block_result=news_block,
+            industry_anchors=industry_anchors,
+            industry_problems=industry_problems,
+            official_industry_fallback=(official_industry_fallback if ai_failure is None else None),
             # 본문은 FULL 작성본 그대로라 프로그램 등록부에 결속된 문장이 살아
             # 있다. 같은 등록부를 넘겨야 renderer가 그 문장의 짝을 찾는다 —
             # 빼면 무차감 중단이 생성 실패로 뒤집힌다.
@@ -2812,7 +2968,10 @@ def run_v2(
             filing_meta=filing_meta,
             composition_tables=composition_tables,
             citation_style=citation_style,
-            company_id=(str(company_id).strip() if release_mode is ReleaseMode.FULL else ""),
+            company_id=(
+                str(company_id).strip()
+                if release_mode is ReleaseMode.FULL or industry_problems else ""
+            ),
             release_mode=release_mode.value,
             verified_program_facts=(
                 prepared_evidence.program_facts
@@ -2825,6 +2984,7 @@ def run_v2(
                 else ()
             ),
             name_table=name_table,
+            **_industry_render_kwargs(industry_anchors, industry_problems),
         )
     body_rendered = _render_bound_body()
     public_selection = select_bound_public_sentences(verified, body_rendered)
@@ -2850,6 +3010,16 @@ def run_v2(
     _record_public_binding(public_selection, composition_diagnostics, review_diagnostics)
     if public_selection.excluded or superseded:
         body_rendered = _render_bound_body()
+    if release_mode is ReleaseMode.SHADOW and ai_failure is None:
+        discovery_fragments = []
+        industry_problems = _late_official_industry_problems(
+            verified, callback=official_industry_fallback, anchors=industry_anchors,
+            problems=industry_problems, fragments=verification_fragments, company_id=company_id,
+            diagnostics=composition_diagnostics,
+            discovery_fragments_sink=discovery_fragments,
+        )
+        if discovery_fragments:
+            verification_fragments = (*_normalize_fragments(verification_fragments), *discovery_fragments)
     extractive = select_extractive_summary(verified, body_rendered.fact_records)
     # FULL 하한은 뒤의 권위 있는 품질/복구 정책이 판정한다. 확보자료 보고서는
     # 근거가 0~2개뿐이면 그 범위만 보여 주며 요약 길이를 맞추려고 호출하지 않는다.
@@ -2900,6 +3070,7 @@ def run_v2(
             citation_style=citation_style,
             program_registry_sources=prepared_evidence.program_sources,
             name_table=name_table,
+            **_industry_render_kwargs(industry_anchors, industry_problems),
         )
 
     # ⑤ 렌더 — 웹·PDF가 이미 소비하는 공용 구조로
@@ -2943,6 +3114,7 @@ def run_v2(
         ),
         name_table=name_table,
         style_diagnostics=style_diagnostics,
+        **_industry_render_kwargs(industry_anchors, industry_problems),
         **seal_render_kwargs,
     )
     _record_style_diagnostics(
@@ -3059,6 +3231,10 @@ def run_v2(
                 supplement_writer,
                 section_evidence_packets=section_evidence_packets,
                 section_ids=targets,
+                missing_slots_by_section=missing_writer_slots(quality_candidate, targets),
+                scope_failures_by_section=collect_scope_supplement_failures(
+                    draft, review_diagnostics, section_evidence_packets,
+                ),
             )
             supplement_draft, supplement_news = supplement_news_candidates(
                 supplement_draft, _normalize_fragments(verification_fragments),
@@ -3128,10 +3304,12 @@ def run_v2(
             )
 
             base_body = verified
+            supplement_retention_diagnostics: list[dict[str, str]] = []
             merged_body = _merge_selected_sections(
                 base_body,
                 supplement_verified,
                 targets,
+                retention_diagnostics=supplement_retention_diagnostics,
             )
             # 병합 뒤 전역 수치 안전을 다시 계산한다. 비대상 장은 값뿐 아니라
             # ComposedSection 전체(본문·도식·structured fact)가 exact 동일해야 한다.
@@ -3221,6 +3399,7 @@ def run_v2(
                 verified_program_facts=prepared_evidence.program_facts,
                 program_registry_sources=prepared_evidence.program_sources,
                 name_table=name_table,
+                **_industry_render_kwargs(industry_anchors, industry_problems),
             )
             supplement_selection = select_bound_public_sentences(verified, body_rendered)
             _record_public_binding(supplement_selection, composition_diagnostics, review_diagnostics)
@@ -3285,6 +3464,7 @@ def run_v2(
                 citation_style=citation_style,
                 program_registry_sources=prepared_evidence.program_sources,
                 name_table=name_table,
+                **_industry_render_kwargs(industry_anchors, industry_problems),
             )
             # 본 경로와 같은 이유로 중간 렌더가 아닌 병합본의 «최종» 렌더에서만
             # 받는다. 이 기록은 «보충» 렌더로 구별돼 위 1차 기록과 더해지지 않는다.
@@ -3311,6 +3491,7 @@ def run_v2(
                 program_registry_sources=prepared_evidence.program_sources,
                 name_table=name_table,
                 style_diagnostics=supplement_style_diagnostics,
+                **_industry_render_kwargs(industry_anchors, industry_problems),
             )
             _record_style_diagnostics(
                 supplement_style_diagnostics, composition_diagnostics,
@@ -3360,8 +3541,8 @@ def run_v2(
                     base_receipt_sha256=primary_receipt.receipt_sha256,
                     supplemented_section_ids=targets,
                     section_block_sha256s=supplement_block_sha256s,
-                    # 근거 결속 계약이 그 장의 후보를 «전부» 제외해 내용이
-                    # 그대로인 경우를 사유 코드와 함께 적는다. 적지 않으면
+                    # 보충 후보 배제 또는 검증 본문 보존으로 내용이 그대로인
+                    # 경우를 실제 관측 사유와 함께 적는다. 적지 않으면
                     # 결속 검사가 종전대로 «무동작 보충»으로 보고 닫는다.
                     unchanged_sections=supplement_unchanged_sections(
                         approved_section_ids=targets,
@@ -3369,7 +3550,9 @@ def run_v2(
                         result_section_sha256s=(
                             public_structure_seal.section_sha256s
                         ),
-                        review_diagnostics=review_diagnostics,
+                        review_diagnostics=(
+                            *review_diagnostics, *supplement_retention_diagnostics,
+                        ),
                     ),
                 )
                 recovery_decision = decide_post_validation(
@@ -3383,23 +3566,29 @@ def run_v2(
                     ("report_recovery:supplement_receipt_invalid",)
                 ) from error
             if recovery_decision.action is not RecoveryAction.RELEASE_COMPLETE:
+                record_supplement_quality_stop(
+                    composition_diagnostics, recovery_decision.reason_code,
+                    logger=logger,
+                )
                 if fallback_allowed and _is_quality_stop(recovery_decision):
                     return _downgrade_after_write(
                         DEGRADED_REASON_QUALITY_FLOOR,
-                        stages=(AI_STAGE_FULL_SUPPLEMENT,),
                     )
                 _raise_recovery_stop(
                     recovery_decision.reason_code,
                     recovery_decision.quality_problem_codes,
                 )
             if not supplement_summary_release_ready:
+                record_supplement_quality_stop(
+                    composition_diagnostics, "supplement_summary_insufficient",
+                    logger=logger,
+                )
                 # 두 번째 후보의 manifest·render·품질 평가·receipt·정책 결정을
                 # 모두 다시 만든 뒤에야 닫는다. 조기 예외로 파생물 재계산을
                 # 건너뛰거나 세 번째 보충으로 흐르지 않는다.
                 if fallback_allowed:
                     return _downgrade_after_write(
                         DEGRADED_REASON_QUALITY_FLOOR,
-                        stages=(AI_STAGE_FULL_SUPPLEMENT,),
                     )
                 _raise_recovery_stop("supplement_summary_insufficient")
             validation_receipts = (primary_receipt, supplement_receipt)

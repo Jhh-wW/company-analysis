@@ -129,8 +129,19 @@ def test_constraint_is_not_borrowed_across_documents_entities_or_periods(review,
 @pytest.mark.parametrize("review", [_flat, _grouped], ids=["flat", "grouped"])
 @pytest.mark.parametrize("text", KEPT_CLAIMS)
 def test_transactions_exclusion_descriptions_and_history_survive(review, text, captured):
-    verdicts, problems = review(text, _fragments(), [])
+    fragments = _fragments()
+    # 새 소속 수식 검사는 긍정 근거도 요구한다. 정상 거래 fixture의 자기 인용에
+    # 실제 관계 분류를 명시하고, 인용 밖 제외 각주는 여전히 제약으로만 전달한다.
+    fragments["1"] = replace(fragments["1"], text="특수관계자 내역: 종속기업 가람 Holdings\n" + RELATED)
+    verdicts, problems = review(text, fragments, [])
     assert verdicts == {1: "참"} and problems == {}
+
+
+@pytest.mark.parametrize("review", [_flat, _grouped], ids=["flat", "grouped"])
+def test_transaction_source_without_membership_does_not_support_added_qualifier(review):
+    verdicts, problems = review("회사는 종속기업 가람 Holdings에 운영자금을 대여하였다.", _fragments(), [])
+    assert verdicts == {1: REVIEW_GROUNDING_REJECTED}
+    assert problems == {1: SCOPE_CONDITION_UNBOUND}
 
 
 def test_without_the_constraint_the_same_candidate_passes():

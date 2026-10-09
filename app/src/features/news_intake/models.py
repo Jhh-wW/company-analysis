@@ -10,6 +10,7 @@ from types import MappingProxyType
 from src.features.news_intake import constants as c
 from src.shared.report_evidence.policy import REQUIRED_EVIDENCE_SECTION_IDS
 from src.shared.report_generation.models import exact_text_sha256
+from src.shared.business_challenge_context import BusinessActivityAnchor, IndustryProblemEvidence
 
 
 def _text(value: str, *, label: str, allow_empty: bool = False) -> str:
@@ -431,6 +432,8 @@ class NewsCompanyContext:
     domain: str = ""
     executive_names: tuple[str, ...] = ()
     identity_context: str = ""
+    business_anchors: tuple[BusinessActivityAnchor, ...] = ()
+    company_id: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "company_name", _text(self.company_name, label="회사명"))
@@ -438,8 +441,14 @@ class NewsCompanyContext:
         object.__setattr__(self, "executive_names", _unique(self.executive_names, label="임원명"))
         _text(self.domain, label="공식 도메인", allow_empty=True)
         _text(self.identity_context, label="법인 정체성 문맥", allow_empty=True)
+        if self.company_id and (len(self.company_id) != 8 or not self.company_id.isdecimal()):
+            raise ValueError("뉴스 사업 연결에는 확인된 회사 고유번호가 필요합니다")
         if len(self.identity_context) > c.COMPANY_CONTEXT_CHARS:
             raise ValueError("법인 정체성 문맥이 글자 상한을 넘었습니다")
+        if (type(self.business_anchors) is not tuple
+                or any(type(item) is not BusinessActivityAnchor for item in self.business_anchors)
+                or len({item.anchor_id for item in self.business_anchors}) != len(self.business_anchors)):
+            raise ValueError("공식 사업 앵커의 타입 또는 식별자가 올바르지 않습니다")
 
 
 @dataclass(frozen=True)
@@ -630,6 +639,8 @@ class NewsCollectionResult:
     diagnostics: Mapping[str, object]
     snapshot_digest: str
     articles: tuple[GroundedNewsArticle, ...] = ()
+    industry_problems: tuple[IndustryProblemEvidence, ...] = ()
+    business_anchors: tuple[BusinessActivityAnchor, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "document_hashes", MappingProxyType(dict(self.document_hashes)))

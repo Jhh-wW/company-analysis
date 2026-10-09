@@ -101,10 +101,14 @@ def _돌린다(
         # 1차 검수 재요청 호출자는 «보낼 때» 상한을 푸는 callable 을 받는다.
         max_tokens: int | Callable[[], int],
         reserved_calls: int = 0,
+        timeout_sec: float | None = None,
     ):
+        assert timeout_sec in (None, real.INITIAL_REVIEW_TIMEOUT_SEC)
+        assert timeout_sec is None or stage == "v2_review"
         속 = 가짜팩토리(
             _engine, _client, stage=stage, max_tokens=max_tokens,
             reserved_calls=reserved_calls,
+            timeout_sec=timeout_sec,
         )
 
         # ★ 생성마다 «새» 객체여야 한다. 가짜 팩토리는 stage 가 같으면 같은

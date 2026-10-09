@@ -10,12 +10,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from features.evidence_collection import auditor_boilerplate, constants as c
+from features.evidence_collection import auditor_boilerplate, constants as c, liquidity_boilerplate
+from features.evidence_collection.liquidity_constants import CHALLENGE_POLICY_SLOTS
+from features.evidence_collection.challenge_accounting_policy import split_challenge_accounting_policy
+from features.evidence_collection.challenge_slot_scope import challenge_table_scope
+from features.evidence_collection.business_slot_scope import business_slot_scope
+from features.evidence_collection.business_activity_declaration import declared_business_item
 from features.evidence_collection.weak_signal_context import (
     accounting_value_table_only,
     future_signal_has_context,
     pure_officer_compensation_table,
     stock_admin_production_only,
+    value_exchange_has_payment_route,
+    value_exchange_has_direct_relation,
+    value_exchange_policy_observed,
+    value_exchange_supported_hits,
 )
 
 def _has_revenue_type_mix(text: str) -> bool:
@@ -347,6 +356,17 @@ class SlotScore:
     reason_codes: tuple[str, ...]
 
 
+def business_constraint_scores() -> tuple[SlotScore, ...]:
+    """관계 helper가 확인한 부분구간에만 기존 한 신호 점수를 부여한다."""
+    from features.evidence_collection import business_constraint_signal_constants as constraint_c
+    return (
+        SlotScore("current_challenges", constraint_c.ISSUE_SLOT,
+                  c.RELEVANCE_KEYWORD_HIT_SCORE_MILLIS, (constraint_c.SIGNAL_REASON,)),
+        SlotScore("current_challenges", constraint_c.RESPONSE_SLOT,
+                  c.RELEVANCE_KEYWORD_HIT_SCORE_MILLIS, (constraint_c.RESPONSE_REASON,)),
+    )
+
+
 def score_fragment_text(text: str, section_heading: str = "") -> SlotScore | None:
     """조각 원문 하나에 가장 잘 맞는 (장, 슬롯)을 고른다. 신호가 없으면 None.
 
@@ -421,6 +441,10 @@ def score_fragment_slots_with_signal(
     AI 재판정이 감사인의 감사 행위 문장에 사업 칸을 다시 붙일 수 있기 때문이다
     (2026-09-23 5차 실측: 「감사인의 책임」 단락이 「위험」·「대응」으로 5장
     과제·대응 칸을 받았다). 회사 서술이 섞인 문단은 그 절만으로 채점한다.
+
+    유동성 회계 상용구는 5장 과제·대응 채점에서 해당 절만 제외한다. 전절이
+    상용구면 다른 장의 약신호로 이주시키지 않고 신호 관측만 남긴다. 혼합
+    원문은 다른 장의 직접 채점 입력을 바꾸지 않으며 1차 장 재선택은 가능하다.
     """
 
     # 절 제목도 구조 표지를 볼 자리로 넘긴다 — 머리말 없이 잘린 감사인 책임 문단이
@@ -435,10 +459,46 @@ def score_fragment_slots_with_signal(
     if pure_officer_compensation_table(text):
         return (), True
 
+    # 혼합 조각에서는 5장 과제·대응 두 칸의 채점에서만 절을 제외한다.
+    # 실제 조각 원문·좌표·지문과 다른 장의 신호는 그대로 보존한다.
+    liquidity_split = liquidity_boilerplate.split_liquidity_clauses(text)
+    if liquidity_split.only_boilerplate:
+        # 전절이 상용구인 조각은 다른 약신호 장으로 이주시키지 않는다.
+        return (), True
+
     scored: list[tuple[int, int, bool, SlotScore]] = []
-    has_any_direct_signal = False
+    # 가린 상용구도 관측된 신호다. 무분류 AI 재판정으로 다시 붙이지 않는다.
+    # 공통 전처리에서 issue 전용 경계로 정상 대응까지 지우지 않는다.
+    challenge_business_scope = business_slot_scope(text, "current_challenges:response")
+    challenge_liquidity = liquidity_boilerplate.split_liquidity_clauses(challenge_business_scope.score_text)
+    incident_table = challenge_table_scope(challenge_liquidity.score_text)
+    accounting_split = split_challenge_accounting_policy(incident_table.issue_text)
+    has_any_direct_signal = bool(liquidity_split.excluded_clauses or accounting_split.excluded_clauses
+                                 or challenge_business_scope.excluded_clauses
+                                 or incident_table.excluded_rows)
     for declaration_index, (slot_id, keywords) in enumerate(SLOT_KEYWORDS.items()):
-        hits = [keyword for keyword in keywords if keyword_has_direct_hit(keyword, text)]
+        score_text = (
+            accounting_split.score_text
+            if slot_id in CHALLENGE_POLICY_SLOTS
+            else text
+        )
+        business_scope = business_slot_scope(score_text, slot_id)
+        if business_scope.excluded_clauses:
+            # 제외한 신호를 무신호 AI 재판정으로 되살리지 않는다.
+            has_any_direct_signal = True
+            score_text = business_scope.score_text
+        hits = [keyword for keyword in keywords if keyword_has_direct_hit(keyword, score_text)]
+        business_declaration = (
+            slot_id == "identity:business_definition" and bool(declared_business_item(score_text))
+        )
+        if business_declaration:
+            hits.append("current_company_business_declaration")
+        incident_row = slot_id == "current_challenges:issue" and incident_table.has_incident_row
+        incident_response = slot_id == "current_challenges:response" and incident_table.has_response_row
+        if incident_row:
+            hits.append("business_incident_row")
+        if incident_response:
+            hits.append("business_incident_response")
         revenue_mix = (
             slot_id == "business_model:revenue_model"
             and _has_revenue_type_mix(text)
@@ -463,6 +523,26 @@ def score_fragment_slots_with_signal(
         )
         if investment_plan:
             hits.append("stated_investment_plan")
+        payment_route = (
+            slot_id == "business_model:value_exchange"
+            and value_exchange_has_payment_route(text)
+        )
+        direct_exchange = (
+            slot_id == "business_model:value_exchange"
+            and value_exchange_has_direct_relation(text)
+        )
+        if slot_id == "business_model:value_exchange":
+            raw_hits = tuple(hits)
+            hits = list(value_exchange_supported_hits(
+                text, keywords, keyword_has_direct_hit,
+            ))
+            if raw_hits or payment_route or direct_exchange or value_exchange_policy_observed(text):
+                # 부적격 약신호는 재판정용 무신호 자료가 되지 않도록 관측만 남긴다.
+                has_any_direct_signal = True
+            if payment_route:
+                hits.append("payment_route")
+            if direct_exchange and not hits:
+                hits.append("customer_exchange")
         if not hits:
             continue
         has_any_direct_signal = True
@@ -488,17 +568,27 @@ def score_fragment_slots_with_signal(
         score = min(c.RELEVANCE_MAX_SCORE_MILLIS, len(hits) * c.RELEVANCE_KEYWORD_HIT_SCORE_MILLIS)
         reason_codes = (
             [f"keyword_hit:{slot_id}"]
-            if len(hits) > int(revenue_mix) + int(sales_table) + int(supply_contract) + int(investment_plan)
+            if len(hits) > int(revenue_mix) + int(sales_table) + int(supply_contract) + int(investment_plan) + int(incident_row) + int(incident_response)
             else []
         )
         if revenue_mix:
             reason_codes.append("direct_pattern:revenue_type_mix")
+        if business_declaration:
+            reason_codes.append("direct_pattern:current_company_business_declaration")
         if sales_table:
             reason_codes.append("direct_pattern:sales_channel_table")
         if supply_contract:
             reason_codes.append("direct_pattern:supply_contract")
         if investment_plan:
             reason_codes.append("direct_pattern:stated_investment_plan")
+        if incident_row:
+            reason_codes.append("direct_pattern:business_incident_row")
+        if incident_response:
+            reason_codes.append("direct_pattern:business_incident_response")
+        if payment_route:
+            reason_codes.append("direct_pattern:payment_route")
+        if direct_exchange:
+            reason_codes.append("direct_pattern:customer_exchange")
         for hint in SECTION_HEADING_HINTS.get(section_id, ()):
             if hint in section_heading:
                 score = min(c.RELEVANCE_MAX_SCORE_MILLIS, score + c.RELEVANCE_HEADING_BONUS_MILLIS)

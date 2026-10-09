@@ -114,6 +114,7 @@ from src.features.pipeline.port import ReportTable
 from src.features.report_standard.constants import (
     RELATION_PAIR_CAPTION,
     RELATION_PAIR_HEADERS,
+    RELATION_PAIR_HEADER_VARIANTS,
     RELATION_PAIR_LINE_HALF_UNITS,
     RELATION_PAIR_MAX_ROWS,
     RELATION_PAIR_MAX_TEXT_LINES,
@@ -352,11 +353,7 @@ def _composition(table: ReportTable) -> TableVisualization | None:
         caption=table.caption,
         reading=_composition_reading(items),
         unit="%",
-        note=(
-            f"원문 비율을 {_decimal_place_label(table.scale_places)}로 반올림해 표시"
-            if table.raw_rows
-            else "공개 표의 비율을 계산 없이 표시"
-        ),
+        note="공개 표의 비율을 그대로 표시",
         items=items,
     )
 
@@ -485,14 +482,14 @@ def _is_relation_pair_candidate(table: ReportTable) -> bool:
 
     return (
         str(table.caption) == RELATION_PAIR_CAPTION
-        or tuple(str(header) for header in table.headers) == RELATION_PAIR_HEADERS
+        or tuple(str(header) for header in table.headers) in RELATION_PAIR_HEADER_VARIANTS
     )
 
 
 def _relation_pairs(table: ReportTable) -> TableVisualization | None:
     """5장 과제·대응 2열 표를 원·선 관계도 명세로 그대로 투영한다."""
 
-    if tuple(str(header) for header in table.headers) != RELATION_PAIR_HEADERS:
+    if tuple(str(header) for header in table.headers) not in RELATION_PAIR_HEADER_VARIANTS:
         return None
     if not RELATION_PAIR_MIN_ROWS <= len(table.rows) <= RELATION_PAIR_MAX_ROWS:
         return None

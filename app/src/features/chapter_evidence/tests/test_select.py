@@ -96,6 +96,73 @@ def test_다른_장의_조각은_제외한다() -> None:
     assert selection.fragments == ()
 
 
+@pytest.mark.parametrize("indirect", (
+    "회사는 정밀부품 사업을 영위하는 다온제조의 지분을 인수하였습니다.",
+    "임원은 업종실무위원장으로 재직 중입니다.",
+    "당사는 정관 사업목적으로 정밀부품 제조를 정했습니다.",
+    "당사는 정밀부품을 생산할 계획입니다.",
+    "다온제조의 사업개요입니다. 당사는 정밀부품을 제조합니다.",
+))
+def test_explicit_current_business_is_representative_within_same_budget(indirect):
+    identity = _fragment(fragment_id="identity", section_id="identity",
+                         slot_id="identity:corporate_identity", text="가온기업은 설립되었습니다.")
+    actual = _fragment(fragment_id="actual", section_id="identity",
+                       slot_id="identity:business_definition", text="당사는 산업용 센서를 제조합니다.",
+                       score_millis=250)
+    incidental = _fragment(fragment_id="incidental", section_id="identity",
+                           slot_id="identity:business_definition", text=indirect, score_millis=900)
+    fragments = (identity, incidental, actual)
+    budget = len(identity.text) + max(len(actual.text), len(incidental.text))
+    selection = select_section_fragments(
+        section_id="identity", company_id="corp-1", company_name="가온기업",
+        documents=(_document(exact_evidence_hashes=tuple(f.text_sha256 for f in fragments)),),
+        fragments=fragments, max_chars=budget,
+    )
+    assert {f.fragment_id for f in selection.fragments} == {"identity", "actual"}
+    assert sum(len(f.text) for f in selection.fragments) <= budget
+    assert {s for f in selection.fragments for s in f.covered_slot_ids} == {
+        "identity:corporate_identity", "identity:business_definition",
+    }
+
+
+def test_business_representative_preserves_change_priority_and_unknown_company_order():
+    actual = _fragment(fragment_id="actual", section_id="identity",
+                       slot_id="identity:business_definition", text="당사는 산업용 센서를 제조합니다.",
+                       score_millis=250)
+    ended = replace(_fragment(fragment_id="changed", section_id="identity",
+                    slot_id="identity:business_definition", text="당사는 산업용 센서 사업을 중단했습니다.",
+                    score_millis=100), reason_codes=(SELECTION_CHANGE_CONTEXT,), location="100-125")
+    documents = (_document(exact_evidence_hashes=(actual.text_sha256, ended.text_sha256)),)
+    selected = select_section_fragments(
+        section_id="identity", company_id="corp-1", company_name="가온기업",
+        documents=documents, fragments=(actual, ended), max_chars=max(len(actual.text), len(ended.text)),
+    )
+    assert tuple(f.fragment_id for f in selected.fragments) == ("changed",)
+    higher = replace(ended, score_millis=900, reason_codes=("official_direct_statement",))
+    selected = select_section_fragments(
+        section_id="identity", company_id="corp-1", company_name="",
+        documents=documents, fragments=(actual, higher), max_chars=max(len(actual.text), len(higher.text)),
+    )
+    assert tuple(f.fragment_id for f in selected.fragments) == ("changed",)
+
+
+def test_business_representative_keeps_explicit_business_before_acquisition_context():
+    actual = _fragment(fragment_id="actual", section_id="identity",
+                       slot_id="identity:business_definition",
+                       text="당사는 산업용 센서를 제조합니다. 다온제조의 지분을 인수했습니다.",
+                       score_millis=250)
+    indirect = _fragment(fragment_id="indirect", section_id="identity",
+                         slot_id="identity:business_definition", text="임원은 업종 자문을 수행합니다.",
+                         score_millis=900)
+    selected = select_section_fragments(
+        section_id="identity", company_id="corp-1", company_name="가온기업",
+        documents=(_document(exact_evidence_hashes=(actual.text_sha256, indirect.text_sha256)),),
+        fragments=(actual, indirect), max_chars=len(actual.text),
+    )
+    assert tuple(f.fragment_id for f in selected.fragments) == ("actual",)
+    assert selected.fragments[0].text == actual.text
+
+
 def test_다른장_예산에서_밀린_공식자기선언은_9장_자체예산에서_선정한다() -> None:
     declaration = _fragment(
         fragment_id="declaration",

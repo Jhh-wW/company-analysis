@@ -81,6 +81,18 @@ def _검증된_배포에서_캐시를_시험한다(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
 
 
+def test_검수_모델_변경은_v2_캐시만_구분한다(monkeypatch):
+    identity = build_identity_contract.process_engine_build_identity()
+    engine = SimpleNamespace(MODEL="기본 모델")
+    def namespace(mode):
+        return real._generation_cache_namespace(engine, identity, mode, release_mode=None)
+    v1 = namespace(real.engine_mode.EngineMode.V1)
+    v2 = namespace(real.engine_mode.EngineMode.V2)
+    monkeypatch.setattr(real, "V2_REVIEW_MODEL", "다른 검수 모델")
+    assert namespace(real.engine_mode.EngineMode.V1) == v1
+    assert namespace(real.engine_mode.EngineMode.V2) != v2
+
+
 def test_생성cache_namespace는_교대하는_raw환경도_한_snapshot만_쓴다(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

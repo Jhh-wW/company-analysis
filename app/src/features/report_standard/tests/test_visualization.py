@@ -465,6 +465,31 @@ def test_관계도는_표_셀_문자열을_한_글자도_바꾸지_않는다() -
     ]
 
 
+def test_신규_5장_시점상태_머리글도_원래_행과_인용을_그대로_관계도로_낸다() -> None:
+    table = ReportTable(
+        caption="과제와 대응",
+        headers=["사업 과제·확인 시점", "회사가 밝힌 대응·상태"],
+        rows=[["2023년 과태료", "납부·개선 완료"], ["2025년 납기 지연", "설비 개선 진행"]],
+        row_cites=[["[1]"], ["[2]"]],
+        presentation="flow",
+    )
+    visual = table_visualization(table)
+    assert visual is not None and visual.kind == "relation_pairs"
+    assert visual.flows == tuple(tuple(row) for row in table.rows)
+    assert visual.row_cites == (("[1]",), ("[2]",))
+    assert table.headers == ["사업 과제·확인 시점", "회사가 밝힌 대응·상태"]
+
+
+def test_옛_머리글과_새_머리글을_섞은_표는_관계도_계약으로_추정하지_않는다() -> None:
+    table = ReportTable(
+        caption="과제와 대응",
+        headers=["지금 겪는 과제", "회사가 밝힌 대응·상태"],
+        rows=[["납기 지연", "설비 개선"], ["고객 수요 감소", "판매처 다변화"]],
+        presentation="flow",
+    )
+    assert table_visualization(table) is None
+
+
 @pytest.mark.parametrize(
     "table",
     [

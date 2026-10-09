@@ -218,3 +218,53 @@ def test_three_period_fixture_keeps_zero_in_the_current_period(use_xml: bool) ->
         ["2025", "0", "49,318,276", "-254,385,318"],
         ["2024", "2,255,648,536", "184,045,287", "-3,431,847"],
     ]
+
+
+@pytest.mark.parametrize("note", ("(주석19)", "(주석19,20)", " ( 주 석 19, 20 )"))
+@pytest.mark.parametrize("notes", (False, True))
+def test_계정명에_붙은_명시주석은_기간별_금액과_분리한다(note: str, notes: bool) -> None:
+    source = re.sub(r"\s+", " ", _plain((f"{note} 100 90", "20,000 (10,000)", "(주석24) 0 4,000"), notes=notes))
+
+    result = parse_audit_financials(source)
+
+    assert result.table is not None
+    assert result.table.raw_rows == [["2025", "100", "20,000", "0"], ["2024", "90", "-10,000", "4,000"]]
+    assert result.evidence is not None
+    assert result.evidence.excerpt in source
+    assert note.strip() in result.evidence.excerpt
+
+
+@pytest.mark.parametrize("row", (
+    "(주석19,20) 100", "(주석19) - 90", "(주석19) 100 -",
+    "(주석19) 19 100 90", "(주석19)(주석20) 100 90",
+    "(주석0) 100 90", "(주석1000) 100 90", "(주석19,) 100 90",
+    "(19,20) 100 90", "(주석19 기타) 100 90",
+    "(주석19) 100 다른계정 90", "(주석19) 100 2024년",
+))
+def test_명시주석을_빼도_결측과_여분값은_금액으로_채우지_않는다(row: str) -> None:
+    result = parse_audit_financials(_plain((row, "20,000 10,000", "5,000 4,000"), notes=True))
+
+    assert result.table is None
+
+
+def test_선행공백이_있는_운영평문도_근거좌표는_원입력의_정확구간이다() -> None:
+    source = " " + _plain(("(주석19,20) 100 90", "20 10", "(주석24) 5 4"))
+
+    result = parse_audit_financials(source)
+
+    assert result.table is not None and result.evidence is not None
+    evidence = result.evidence
+    assert source[evidence.start:evidence.end] == evidence.excerpt
+    assert evidence.start == 1
+
+
+def test_첫표의_공백이_다르다고_뒤의_동일표로_좌표를_이동하지않는다() -> None:
+    canonical = _plain(("(주석19) 100 90", "20 10", "5 4"))
+    first = canonical.replace(" ", "  ")
+    source = " " + first + " " + canonical
+
+    result = parse_audit_financials(source)
+
+    assert result.table is not None and result.evidence is not None
+    # 비정규 평문은 기존 정규화 좌표 계약을 따르며 뒤 표의 좌표를 빌리지 않는다.
+    assert result.evidence.start < len(first)

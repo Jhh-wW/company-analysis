@@ -28,6 +28,9 @@ from src.shared.comparison_candidate_basis import (
     comparison_evidence_sentences,
     comparison_source_sentence_has_marker,
 )
+from src.shared.report_evidence.source_context import (
+    parse_source_context, source_context_company_subject_problem,
+)
 from src.shared.official_ir import (
     IR_COLLECTED_ON_FIELD,
     IR_DART_WWW_REDIRECT_FIELD,
@@ -52,6 +55,20 @@ class OfficialCandidateSentence:
     evidence_text: str
     document_identity: str = ""
     document_content_sha256: str = ""
+    source_context_json: str = ""
+    section_context_json: str = ""
+
+    def __post_init__(self) -> None:
+        parse_source_context(self.source_context_json)
+        from src.shared.report_evidence.section_context import parse_section_context
+        parse_section_context(self.section_context_json,
+                              document_sha256=self.document_content_sha256)
+
+    @property
+    def source_context_problem(self) -> str:
+        return source_context_company_subject_problem(
+            self.evidence_text, self.source_context_json, company_name=self.source.publisher,
+        )
 
 
 @dataclass(frozen=True)
@@ -255,6 +272,8 @@ def candidate_sentences_from_fragments(
                         document_content_sha256=str(
                             fragment.get("_evidence_document_content_sha256") or ""
                         ).strip(),
+                        source_context_json=str(fragment.get("source_context_json") or ""),
+                        section_context_json=fragment.get("section_context_json", ""),
                     )
                 )
     return tuple(out)

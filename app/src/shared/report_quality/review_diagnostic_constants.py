@@ -13,11 +13,16 @@ REVIEW_SCOPE_ITEMS = {
     "public_sentence_fact_unbound": "공개 사실 결속",
     "public_sentence_fact_duplicate": "공개 사실 결속",
     "planned_claim_asserted": "계획·성과",
+    "possible_activity_asserted": "계획·성과",
     "scope_condition_unbound": "조건·적용대상",
     "culture_evidence_scope_mismatch": "공식 조직설명",
     "culture_accounting_policy_misplaced": "장별 작성범위",
     "challenge_response_missing": "장별 작성범위",
+    "challenge_current_problem_unbound": "장별 작성범위",
+    "challenge_business_relation_unbound": "장별 작성범위",
+    "challenge_response_problem_unbound": "장별 작성범위",
     "future_section_no_forward_statement": "장별 작성범위",
+    "completed_execution_state_mismatch": "계획·성과",
     "culture_financial_risk_scope_misplaced": "장별 작성범위",
     "culture_section_evidence_offcontract": "장별 작성범위",
     # ★ 전 장 공통 회계정책 상용구 가드(composer.accounting_policy_constants).
@@ -138,9 +143,11 @@ CANDIDATE_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
 CANDIDATE_FINGERPRINT_VERSION = "candidate-raw-utf8-v1"
 GROUNDING_DETAIL_VERSION = "grounding-detail-v1"
 GROUNDING_DETAIL_STAGES = frozenset({
+    "review_evidence_id_binding",
+    "numeric_selection_unbound",
     "entries_missing", "entry_type", "expression_fields", "expression_not_in_candidate",
     "quote_not_bound", "metric_mismatch", "candidate_value_missing", "candidate_value_scope",
-    "source_value_scope", "value_mismatch", "dimension_mismatch", "period_mismatch",
+    "source_value_scope", "value_constraint_mismatch", "value_mismatch", "dimension_mismatch", "period_mismatch",
     "parenthetical_scope", "numeric_coverage", "grounding_missing", "grounding_shape",
     "trend_invalid", "time_invalid", "recognition_invalid",
     # 같은 공시의 인용 밖 관계법인 회계범위 각주가 막은 현재 종속·연결 단정 —

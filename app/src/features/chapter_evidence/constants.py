@@ -26,6 +26,26 @@ CHAPTER_EVIDENCE_PRODUCER_VERSION: Final[str] = "chapter-evidence-producer-v1"
 SELECTION_CHANGE_CONTEXT: Final[str] = "selection_change_context"
 SELECTION_RECENT_CONTEXT: Final[str] = "selection_recent_context"
 
+# 수집기가 원문 관계로 확인한 5장 후보만 최근 문맥과 함께 보관한다.
+# 단순 단어 점수나 다른 칸의 사유를 직접 사업 관계로 해석하지 않는다.
+CHALLENGE_DIRECT_RELATION_REASONS_BY_SLOT: Final[dict[str, frozenset[str]]] = {
+    "current_challenges:issue": frozenset({
+        "direct_pattern:business_growth_constraint",
+        "direct_pattern:business_incident_row",
+    }),
+    "current_challenges:response": frozenset({
+        "direct_pattern:business_constraint_response",
+        "direct_pattern:business_incident_response",
+    }),
+}
+CHALLENGE_DIRECT_RELATION_SOURCE_KINDS: Final[frozenset[str]] = frozenset({
+    SOURCE_KIND_DART_BUSINESS_REPORT,
+    SOURCE_KIND_DART_QUARTERLY_REPORT,
+    SOURCE_KIND_DART_SEMIANNUAL_REPORT,
+    SOURCE_KIND_DART_AUDIT_REPORT,
+    SOURCE_KIND_DART_CONSOLIDATED_AUDIT_REPORT,
+})
+
 # ── 감사인 표준 문구 조각 — 근거 선별에서 사업 칸을 주지 않는다 ─────────────
 # ★ 왜 필요한가(2026-09-23 5차 유료 실행, 독립 검수 상-3) — 감사보고서 「감사인의
 #   책임」 단락(주어는 감사인 「우리」)이 5장 과제·대응 칸을 받아 작가가 감사인의

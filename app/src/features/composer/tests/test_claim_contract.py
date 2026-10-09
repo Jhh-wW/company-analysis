@@ -91,7 +91,8 @@ def test_FULL프롬프트는_근거번호와_지원슬롯을_먼저_짝짓고_�
     assert "- business_model:revenue_model\n" not in prompt
     assert "근거선택 ID가 가리키는 원문 조각" in prompt
     assert "«주장슬롯»과 «인용»은 별도로 고르지 않는다" in prompt
-    assert '"근거선택": ["<지원쌍 ID>"]' in prompt
+    assert '"근거선택": {"첫근거": "<지원쌍 ID>", "추가근거": ""}' in prompt
+    assert '"근거선택": ["<지원쌍 ID>"]' not in prompt
     assert '"주장슬롯": "<인용한 조각의 지원 주장슬롯 id>"' not in prompt
     assert "허용된 id 또는 빈 문자열" not in prompt
     assert "어느 자리에도 맞지 않으면 빈 문자열" not in prompt

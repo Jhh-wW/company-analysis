@@ -14,11 +14,10 @@ from types import SimpleNamespace
 import pytest
 
 from src.core import deployment_identity
-from src.core.constants import MAX_AI_CALLS_PER_REQUEST
+from src.core.constants import REPORT_PROVIDER_WAIT_MAX_SEC, REPORT_PROVIDER_SINGLE_TIMEOUT_MAX_SEC
 from src.features.budget import spend_store
 from src.features.budget.constants import PAID_PHASE_LEASE_SEC
 from src.features.export_pdf import release_store as pdf_release_store
-from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC
 from src.features.pipeline.port import (
     CompanyCard,
     Grade,
@@ -993,8 +992,11 @@ def test_owner마감은_기존_호출수_timeout_lease계약에_결속된다() -
         == generation_singleflight.OWNER_MAX_AGE
     )
     assert (
-        MAX_AI_CALLS_PER_REQUEST * ANTHROPIC_TIMEOUT_SEC
+        REPORT_PROVIDER_WAIT_MAX_SEC
         <= generation_singleflight.OWNER_PROVIDER_ADMISSION_AGE.total_seconds()
+    )
+    assert generation_singleflight.PROVIDER_IN_FLIGHT_GRACE.total_seconds() == (
+        REPORT_PROVIDER_SINGLE_TIMEOUT_MAX_SEC + 2 * generation_singleflight.HEARTBEAT_INTERVAL_SEC
     )
     assert generation_singleflight.WAITER_MAX_AGE_SEC == PAID_PHASE_LEASE_SEC
 

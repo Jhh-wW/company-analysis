@@ -32,6 +32,9 @@ PERFORMANCE_SETTING_ALLOWED_VALUES = {
     "NEWS_BODY_FETCH_CONCURRENCY": ("1", "2", "3"),
     "COMPOSER_REVIEW_PROMPT_CACHE_ENABLED": ("0", "1"),
 }
+MODEL_SETTING_ALLOWED_VALUES = {
+    "REPORT_V2_WRITER_MODEL": ("claude-haiku-4-5", "claude-sonnet-4-6"),
+}
 DIAGNOSTIC_EXPORTS = {
     "observability_run_lifecycle": ("run_id", "state", "elapsed_sec", "final_record_json"),
     "observability_run_steps": ("run_id", "steps_json", "step_count", "omitted_count"),

@@ -18,6 +18,7 @@ from html.parser import HTMLParser
 from typing import Final
 
 from src.features.news_intake import constants as c
+from src.features.news_intake.article_body_dom import recover_article_body
 from src.features.news_intake.body_boundary import (
     BodyBoundaryParser,
     body_boundary,
@@ -386,6 +387,13 @@ def extract_article_text(
             text = str(extractor(boundary.html) or "").strip()
         except Exception:  # noqa: BLE001 - 한 겹이 깨져도 다음 겹은 시도한다
             continue
+        if stage == c.BODY_STAGE_JSON_LD and len(text) >= c.BODY_MIN_CHARS:
+            try:
+                recovered = recover_article_body(boundary.html, text, excluded)
+            except Exception:  # noqa: BLE001 - 선택적 복구 실패는 정상 JSON-LD를 버리지 않는다
+                recovered = ""
+            if recovered:
+                return recovered, c.BODY_STAGE_BOUND_DOM
         if len(text) >= c.BODY_MIN_CHARS and not contains_excluded_text(text, excluded):
             return text, stage
     return "", ""

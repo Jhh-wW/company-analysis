@@ -2,13 +2,29 @@
 
 from typing import Final
 
+from src.core.constants import PROVIDER_BASE_TIMEOUT_SEC
+
+# 본문 검수는 원문의 대상·시점·계약 범위를 대조할 별도 모델을 쓴다.
+# 요청/모듈 MODEL을 바꾸지 않고 계량 경계에서 단계별로 고정한다.
+V2_REVIEW_MODEL: Final[str] = "claude-sonnet-4-6"
+V2_REVIEW_MODEL_STAGES: Final[frozenset[str]] = frozenset({
+    "v2_review", "v2_diagram", "official_industry_context",
+})
+
+# 명시 비교 요청만 작성 모델을 고른다. 빈 설정은 기존 엔진 모델을 유지한다.
+V2_WRITER_MODEL_ENV: Final[str] = "REPORT_V2_WRITER_MODEL"
+V2_WRITER_MODEL_STAGE: Final[str] = "v2_compose"
+V2_WRITER_ALLOWED_MODELS: Final[frozenset[str]] = frozenset({
+    "claude-haiku-4-5", "claude-sonnet-4-6",
+})
+
 #: DART OpenAPI가 요청을 정상 처리했음을 뜻하는 상태 코드.
 #: 목록이 비어 있는 정상 응답과 한도·인증·서버 오류를 가르려면 반드시 확인한다.
 DART_SUCCESS_STATUS: Final[str] = "000"
 
-#: Anthropic 호출 한 번의 최대 대기 시간. SDK 기본 retry는 별도로
-#: 끄므로, 이 값은 단일 호출이 서버 worker를 무한정 점유하지 못하게 한다.
-ANTHROPIC_TIMEOUT_SEC: Final[float] = 180.0
+#: Anthropic SDK의 기본 연결·읽기 대기 설정. 기본 retry는 별도로 끈다.
+#: 최초 본문 검수 두 자리만 별도 긴 설정을 사용하며 전체 실행 lease와 함께 계산한다.
+ANTHROPIC_TIMEOUT_SEC: Final[float] = PROVIDER_BASE_TIMEOUT_SEC
 
 #: DART 법인목록(corpCode)을 몇 일마다 다시 받을지. ``download_corpcode``는
 #: 파일이 있으면 영원히 재사용하므로(운영 영속 디스크에서는 최초 배포 이후

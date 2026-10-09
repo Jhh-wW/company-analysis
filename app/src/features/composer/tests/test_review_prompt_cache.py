@@ -48,7 +48,24 @@ def test_explicit_opt_in_only_attaches_metadata(monkeypatch, configured):
 # 2026-09-23: 공용 GROUNDING_GUIDE «인식기준» 안내 177자 → 11142→11319, 12196→12373.
 #   그 177자만 되돌리면 옛 값이 그대로 재현되고, 아래 분할 표식 단정은 값과 무관하다.
 # 2026-09-27: 수치 증명 필드 축자 결속 안내 307자 → 11626/12680.
-@pytest.mark.parametrize("grouped,prefix_chars", ((False, 11626), (True, 12680)))
+# 2026-09-30: 5장 사업 과제 검수 안내 241자 → 11867/12921.
+# 2026-10-04: 검수 13항의 현재 사업 영향·진행 대응 안내 211자 → 12078/13132.
+# 정책과 변경된 5·8장 범위 안내만 되돌리면 직전 해시 네 개를 재현한다.
+# tmp/audit-20260930/review-policy-snapshots.json에 무과금 비교를 보존했다.
+# 2026-10-07: 검수 12항 +253자·근거대조 안내 +182자 → 12513/13567.
+# 세 신규 5장 안내만 HEAD로 역치환한 증거는 paid/8f3e-review-prompt-baseline-complete-private.json.
+# 2026-10-07 회사·고객 행위와 외주 부정 범위 지침 +347자. 원문·번호·스키마는 동일하다.
+# paid/514031-prompt-baseline-private.json에서 지침 역치환으로 직전 네 지문을 확인했다.
+# 2026-10-08: packet 표시 ID 안내 125자 추가. 안내만 역치환해 직전 지문을 확인했다.
+# 증거: paid/a82b-review-id-prompt-baseline-private.json.
+# 2026-10-08: 자기 인용·활동 상태 안내 +166자, 5장 범위 +86자.
+# paid/6755-prompt-baseline-private.json에서 안내만 역치환해 직전 네 지문을 재현했다.
+# 직접 비중 안내 185자만 역치환해 기존 본문·도식 여섯 지문을 정확 복원했다.
+# 증거: paid/5e30-direct-share-six-baseline-private.json. 근거·번호·스키마는 같다.
+# 안내만 역치환한 여섯 프롬프트 exact 증거: paid/8ae2-review-guide-baseline-private.json.
+# 갱신 과금 안내 +140자와 identity 안내 +87자만 역치환해 기존 여섯 지문을 복원했다.
+# paid/9c46-role-origin-prompt-baseline-private.json: 후보·원문·번호·스키마는 같다.
+@pytest.mark.parametrize("grouped,prefix_chars", ((False, 13608), (True, 14787)))
 @pytest.mark.parametrize("factory", (_golden_case, _large_case, _boundary_case))
 def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
     monkeypatch, grouped, prefix_chars, factory,
@@ -72,15 +89,39 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "546f0dfd5c84fc631a7b1f03c15f7a1abeeaaffc225047ffb95db0010a1b0a39"),
-    (_golden_case, True, "70aa9f5345741474c2cc8e355acf940a37c2a7072e585c5acf32ea05d3d5f198"),
-    (_boundary_case, False, "a05ed45f8a4acffc1757d129947864c73b8f6bacf5742e6287f24eb20b0a6a0c"),
-    (_boundary_case, True, "028221dba6a98551334e93c3e9e1a6f53fbe3630bf4dda4f087d3668c5f2a410"),
+    (_golden_case, False, "488e178bd26ab885b56a9de44fa1cca8192aa349238a8eb5b02c0307bcc2ccc7"),
+    (_golden_case, True, "1efb359975c96bfb488481757cfe5350c266efffe9ffc4657c04a2871c739587"),
+    (_boundary_case, False, "2fe7617a6fa477e75e09daf1195c7f41f6ad40d932eb3ed578459ab389e7f649"),
+    (_boundary_case, True, "29dc6e6b7ce5236fe40734435fa39124518629cb34b2f41bcc6a741b006f0d00"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
 ):
-    # test_review_schema와 같은 현재 안내문 기준이다. 캐시 포장은 원문을 바꾸지 않는다.
+    # 2장 매출 모집단 안내 101자만 역치환해 기존 네 지문과 전체 바이트를 복원했다.
+    # paid/97-prompt-baseline-private.json: 원문·번호·스키마·캐시 접두부 불변.
+    # 6장 주어 범위 안내 64자만 제거하면 3728의 네 지문이 복원된다.
+    # paid/2dc-future-subject-guide-baseline-private.json: 경계 두 지문·검수 계약 불변.
+    # 3·5·7장 안내 342자만 HEAD로 역치환해 기존 네 지문을 복원했다.
+    # paid/1d65-review-guide-baseline-private.json: 원문·번호·schema·고정 접두부 불변.
+    # 6장 범위 안내 162자만 역치환하면 직전 지문이 복원된다. 고정 접두부는 같다.
+    # 증거: paid/2dc-prompt-schema-baseline-private.json. 후보·원문·번호를 바꾸지 않았다.
+    # 2026-10-08: 2·3·5·7장 안내 417자만 역치환해 직전 전체 지문을 복구했다.
+    # paid/0346-prompt-baseline-private.json: 원문·번호·스키마·고정 접두부 불변.
+    # 5장 발생기간·완료/진행 안내 205자만 제거하면 직전 네 지문이 재현된다.
+    # 근거·번호·캐시 접두부·스키마는 그대로이며 5장 없는 경계 지문은 유지한다.
+    # 증거: tmp/audit-20260930/validation/ci-flow-header-prompt-baseline.json.
+    # 후속 3장 부문 비율의 전사 확대 금지 안내 138자만 제거하면 15756e95의
+    # 전체 프롬프트 바이트와 해시가 재현된다. 경계·캐시 접두부는 그대로다.
+    # 증거: tmp/audit-20260930/validation/ab926-review-prompt-baseline.json.
+    # 사건 행의 주체·날짜·조치 결속 안내 127자만 빼면 a901의 전체 바이트와 같다.
+    # 증거: tmp/audit-20260930/validation/35361-review-prompt-baseline-02.json.
+    # 2026-10-04 검수 13항 211자와 5장 작성범위 안내 182자를 제거하면 직전
+    # 네 지문이 재현된다. 5장이 없는 경계 fixture에는 211자만 추가됐다.
+    # 2026-10-07 검수 12항·근거대조 안내·5장 작성범위만 역치환하면 HEAD 네 지문이 정확복구된다.
+    # 공통 접두부 +435자, 5장이 있는 골든 suffix만 +204자이며 원문·번호·스키마는 동일하다.
+    # 증거: tmp/audit-20260930/paid/8f3e-review-prompt-baseline-complete-private.json.
+    # 5장의 추상적 노력 제외 안내만 역치환하면 ce5ac298의 네 지문이 복원된다.
+    # 고정 접두부·다른 장·근거는 그대로다. paid/7408-generic-prompt-baseline-private.json.
     monkeypatch.setenv(REVIEW_PROMPT_CACHE_ENV, "1")
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
@@ -133,8 +174,8 @@ def test_diagram_cache_excludes_card_switch_sources_and_rows(monkeypatch, items)
     cached = diagram_check._review_prompt(items, texts)
     reference = diagram_check._review_prompt((), {})
     assert cached.encode("utf-8") == plain.encode("utf-8")
-    # 2026-09-27 수치 증명 필드 축자 안내 307자: 8503 → 8810.
-    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 8810
+    # 계획 증명의 공통 literal 안내 +257자: 9343 → 9600. 개별 원문은 캐시 밖이다.
+    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 9740
     assert cached[:cached.cache_prefix_chars] == reference[:reference.cache_prefix_chars]
     assert texts["2"] not in cached[:cached.cache_prefix_chars]
     assert getattr(cached, "response_schema", None) is None

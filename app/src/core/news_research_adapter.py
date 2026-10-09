@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Callable, Iterator
 
+from src.shared.business_challenge_context import BusinessActivityAnchor
+
 if TYPE_CHECKING:
     from src.features.news_intake.body_prefetch import BodyFetchConcurrency
 
@@ -69,6 +71,7 @@ class NewsResearchSession:
     as_of: dt.date
     snapshot: Any
     policy: Any = None
+    observer: Callable[[str, dict[str, Any]], object] | None = None
 
     def collect(
         self,
@@ -87,6 +90,7 @@ class NewsResearchSession:
             analyze_grounded=analyze_grounded,
             policy=self.policy,
             body_fetch=body_fetch,
+            observer=self.observer,
         )
 
 
@@ -101,6 +105,9 @@ def prepare_news_research(
     as_of: dt.date,
     policy: Any = None,
     max_analysis_calls: int | None = None,
+    business_anchors: tuple[BusinessActivityAnchor, ...] = (),
+    company_id: str = "",
+    observer: Callable[[str, dict[str, Any]], object] | None = None,
 ) -> NewsResearchSession:
     """AI 없이 검색을 고정하고 나중 분석에 같은 입력을 전달한다."""
 
@@ -122,8 +129,11 @@ def prepare_news_research(
         domain=domain,
         executive_names=executive_names,
         identity_context=identity_context,
+        business_anchors=business_anchors,
+        company_id=company_id,
     )
     snapshot = collect_search_snapshot(
-        search_news=search_news, company=company, as_of=as_of, policy=policy
+        search_news=search_news, company=company, as_of=as_of, policy=policy, observer=observer
     )
-    return NewsResearchSession(company=company, as_of=as_of, snapshot=snapshot, policy=policy)
+    return NewsResearchSession(company=company, as_of=as_of, snapshot=snapshot, policy=policy,
+                               observer=observer)

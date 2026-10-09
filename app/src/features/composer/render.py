@@ -23,6 +23,14 @@ from typing import Final, Optional
 from urllib.parse import urlsplit
 
 from src.core.citations import citation_number
+from src.shared.business_challenge_context import (
+    BusinessActivityAnchor, IndustryProblemEvidence, INDUSTRY_CONTEXT_SECTION,
+)
+from src.features.composer.industry_context import (
+    bind_industry_context_sources, assert_industry_context_sources,
+    has_verified_direct_business_issue,
+)
+from src.features.composer.challenge_presentation import challenge_response_only_notice
 from src.features.composer.constants import (
     CITATION_STYLE_MERGED,
     PARAGRAPH_MAX_SENTENCES,
@@ -135,11 +143,11 @@ PERFORMANCE_TABLE_SECTION_ID: Final[str] = "past_changes"
 #: 표 모양을 함께 보고 100% 누적 막대를 그릴지 정한다.
 COMPOSITION_PRESENTATION: Final[str] = "composition"
 
-#: 시간 장 표시 태그 — report_standard SECTION_SPECS와 같은 값을 «복사»했다.
-#: (composer→report_standard import 금지 규칙. 정본이 바뀌면 같이 바꾼다.)
+#: 새 v2 보고서의 장 태그. 5장의 과거 사건을 현재 미해결 문제로 표시하지 않는다.
+#: 독립 public_manifest의 태그와 일치시킨다. 저장된 v1·v2 정본은 다시 쓰지 않는다.
 SECTION_TAGS: Final[dict[str, str]] = {
     "past_changes": "#과거",
-    "current_challenges": "#현재",
+    "current_challenges": "#사업과제",
     "future_strategy": "#미래",
 }
 
@@ -172,6 +180,8 @@ class _FragmentMeta:
     #: 검수에 실제로 건넨 조각 바이트. 공개 부록에는 싣지 않고 정확한
     #: 증거 해시와 일반 산문 FactRecord를 만들 때만 쓴다.
     text: str = ""
+    source_context_json: str = ""
+    section_context_json: str = ""
     source_url: str = ""
     document_title: str = ""
     item_title: str = ""
@@ -193,6 +203,9 @@ class _FragmentMeta:
     source_document_id: str = ""
     source_publisher: str = ""
     identity_binding: str = ""
+    news_claim_kind: str = ""
+    news_temporal_status: str = ""
+    news_grounded: bool = False
     source_collected_on: str = ""
     domain_attestation_source_id: str = ""
     domain_attestation_evidence: str = ""
@@ -212,6 +225,18 @@ class _FragmentMeta:
     from_filing: bool = False
     #: 선택된 사업보고서가 아니라 별도로 받은 OpenDART 주요계정 응답인가.
     from_financial_api: bool = False
+
+    def __post_init__(self) -> None:
+        if self.section_context_json == "":
+            return
+        from src.shared.report_evidence.section_context import parse_section_context
+        if any(type(value) is not str or not value for value in (
+            self.source_document_id, self.document_content_sha256, self.location,
+        )):
+            raise ValueError("사업 범위 문맥에 원문 문서·해시·조각 위치 결속이 필요합니다")
+        parse_section_context(self.section_context_json, document_id=self.source_document_id,
+            document_sha256=self.document_content_sha256, fragment_location=self.location,
+            fragment_sha256=exact_evidence_text_hash(self.text))
 
 
 def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
@@ -234,6 +259,12 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
                     fragment_id=str(number),
                     kind=str(item.get("종류") or "").strip(),
                     text=text,
+                    source_context_json=str(item.get("source_context_json") or ""),
+                    section_context_json=item.get("section_context_json", ""),
+                    **({
+                        "source_document_id": str(item.get("문서ID") or ""),
+                        "document_content_sha256": str(item.get("_evidence_document_content_sha256") or ""),
+                    } if item.get("section_context_json") else {}),
                     source_url=source_url,
                     document_title=str(item.get("문서명") or "").strip(),
                     item_title=str(item.get("item_title") or "").strip(),
@@ -252,6 +283,8 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
             fragment_id=str(fragment.fragment_id),
             kind=str(getattr(fragment, "kind", "") or ""),
             text=str(getattr(fragment, "text", "") or ""),
+            source_context_json=str(getattr(fragment, "source_context_json", "") or ""),
+            section_context_json=getattr(fragment, "section_context_json", ""),
             source_url=str(getattr(fragment, "source_url", "") or ""),
             document_title=str(getattr(fragment, "document_title", "") or ""),
             item_title=fragment.item_title,
@@ -278,6 +311,9 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
             identity_binding=str(
                 getattr(fragment, "identity_binding", "") or ""
             ).strip(),
+            news_claim_kind=getattr(fragment, "news_claim_kind", ""),
+            news_temporal_status=getattr(fragment, "news_temporal_status", ""),
+            news_grounded=getattr(fragment, "news_grounded", False),
             source_collected_on=str(
                 getattr(fragment, "source_collected_on", "") or ""
             ).strip(),
@@ -859,6 +895,7 @@ def _build_source(
             used_in=list(used_in),
             evidence_hashes=evidence_hashes,
             exact_evidence_hashes=exact_evidence_hashes,
+            identity_binding=meta.identity_binding,
         )
     elif identity_host and identity_document_id:
         source = Source(
@@ -1140,6 +1177,8 @@ def render_report(
     program_registry_sources: Sequence[Source] = (),
     name_table: Optional[PortfolioNameTable] = None,
     style_diagnostics: dict[str, int] | None = None,
+    industry_anchors: tuple[BusinessActivityAnchor, ...] = (),
+    industry_problems: tuple[IndustryProblemEvidence, ...] = (),
 ) -> Report:
     """검증 끝난 ComposedReport를 웹·PDF 공용 pipeline Report로 바꾼다.
 
@@ -1176,7 +1215,7 @@ def render_report(
         (번호는 본문 [n]과 1:1), 핵심 요약. schema_version은
         ENGINE_V2_SCHEMA_VERSION — canonical(v4) 게이트 대상이 아니다.
     """
-    metas = _fragment_metas(fragments)
+    metas = _fragment_metas(_normalize_fragments(fragments) if industry_problems else fragments)
     numbers = _citation_numbers(metas)
     meta_by_number = {numbers[meta.fragment_id]: meta for meta in metas}
     metas_by_fragment = {meta.fragment_id: meta for meta in metas}
@@ -1253,6 +1292,8 @@ def render_report(
                                 filing_meta,
                             ),
                             exact_text=meta.text,
+                            source_context_json=meta.source_context_json,
+                            section_context_json=meta.section_context_json,
                         )
                     )
                 fact = build_verified_prose_fact(
@@ -1627,12 +1668,31 @@ def render_report(
         citations.append(source)
         citations_by_id[source.source_id] = source
         used_numbers.add(source.number)
+    industry_contexts, citations = bind_industry_context_sources(
+        anchors=industry_anchors, problems=industry_problems, fragments=metas,
+        sources=citations, numbers=numbers, company_id=company_id,
+        reference_date=as_of_date, has_direct_issue=has_verified_direct_business_issue(report),
+        build_official_source=lambda meta, number: _build_source(
+            meta, number, company_name, [INDUSTRY_CONTEXT_SECTION], filing_meta,
+        ),
+    )
+    response_notice = challenge_response_only_notice(
+        report, has_industry_context=bool(industry_contexts),
+    )
+    sections = [replace(
+                    section, industry_contexts=industry_contexts,
+                    guidance_lines=list(dict.fromkeys([
+                        *section.guidance_lines, *([response_notice] if response_notice else []),
+                    ])),
+                )
+                if section.cell == INDUSTRY_CONTEXT_SECTION else section for section in sections]
     complete_registry = ensure_dart_profile_attesters(
         citations,
         company_name=company_name,
     )
     citations = sorted(complete_registry, key=lambda source: source.number)
     complete_registry = tuple(citations)
+    assert_industry_context_sources(industry_contexts, company_id=company_id, sources=complete_registry, reference_date=as_of_date)
     for source in complete_registry:
         if problem := full_typed_source_registry_problem(
             source,

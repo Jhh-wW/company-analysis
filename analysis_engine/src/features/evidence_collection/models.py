@@ -172,8 +172,17 @@ class EvidenceFragment:
     period_end: str = ""
     unit: str = ""
     company_scope: str = ""
+    source_context_json: str = ""
+    section_context_json: str = ""
 
     def __post_init__(self) -> None:
+        from features.evidence_collection.source_context import validate_source_context
+        validate_source_context(self.source_context_json)
+        from features.evidence_collection.section_context import parse_section_context
+        parse_section_context(
+            self.section_context_json, document_id=self.document_id,
+            fragment_location=self.location, fragment_sha256=self.text_sha256,
+        )
         for value, name in (
             (self.company_id, "company_id"),
             (self.fragment_id, "fragment_id"),
@@ -397,6 +406,14 @@ class DartEvidenceHarvest:
                     f"문서 {document.document_id}의 company_id가 harvest와 다릅니다"
                 )
         for fragment in (*self.fragments, *self.unclassified_fragments):
+            from features.evidence_collection.section_context import parse_section_context
+            documents = self.documents if fragment.section_id else self.unclassified_documents
+            source_document = next(doc for doc in documents if doc.document_id == fragment.document_id)
+            parse_section_context(
+                fragment.section_context_json, document_id=source_document.document_id,
+                document_sha256=source_document.content_sha256,
+                fragment_location=fragment.location, fragment_sha256=fragment.text_sha256,
+            )
             if fragment.company_id != self.company_id:
                 raise EvidenceCollectionError(
                     f"조각 {fragment.fragment_id}의 company_id가 harvest와 다릅니다"

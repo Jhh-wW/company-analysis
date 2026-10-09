@@ -19,10 +19,13 @@ from dataclasses import InitVar, dataclass, field
 from typing import Any, Final
 
 from src.core import clock
-from src.core.constants import MAX_AI_CALLS_PER_REQUEST
+from src.core.constants import (
+    REPORT_PROVIDER_SINGLE_TIMEOUT_MAX_SEC,
+    REPORT_PROVIDER_WAIT_MAX_SEC,
+)
 from src.features.budget.constants import PAID_PHASE_LEASE_SEC, SPEND_PHASE_PIPELINE
-from src.features.pipeline.constants import ANTHROPIC_TIMEOUT_SEC
 from src.features.budget.sharing import REPORT_LINK_MAX_AGE_DAYS
+from src.features.budget.writer_phase_policy import writer_pipeline_reservation_krw
 from src.features.report_delivery import artifact as delivery_artifact
 from src.features.report_delivery import authority as authority_store
 from src.features.report_delivery import singleflight
@@ -60,15 +63,15 @@ PREPARATION_FAILED_CODE: Final[str] = "preparation_failed"
 # ``MAX_RESPONSE_SEC=300``은 진행 화면의 안내 기준이지 작업 강제 종료 시간이
 # 아니다. 실제 유료 경계의 근거 있는 상한은 다음 두 기존 계약이다.
 #
-# * 한 요청의 provider 호출은 최대 15회
-# * 한 호출의 SDK timeout은 180초
+# * 한 요청의 provider 호출은 최대 20회
+# * 최초 검수 두 자리만 600초, 나머지는 180초
 #
-# 최악의 provider 대기 45분에 DART·공식 웹 수집과 로컬 검증 여유 15분을 더한
-# 기존 paid-phase lease 1시간을 single-flight owner의 절대 상한으로도 쓴다.
+# 단계별 provider 대기 합과 마지막 호출 여유를 담은 paid-phase lease를
+# single-flight owner의 절대 상한으로도 쓴다.
 # 이 값 뒤에는 heartbeat를 더 연장하지 않아 멈춘 thread가 영구 owner가 될 수 없다.
 OWNER_MAX_AGE: Final[dt.timedelta] = dt.timedelta(seconds=PAID_PHASE_LEASE_SEC)
 PROVIDER_IN_FLIGHT_GRACE: Final[dt.timedelta] = dt.timedelta(
-    seconds=ANTHROPIC_TIMEOUT_SEC + (2 * HEARTBEAT_INTERVAL_SEC)
+    seconds=REPORT_PROVIDER_SINGLE_TIMEOUT_MAX_SEC + (2 * HEARTBEAT_INTERVAL_SEC)
 )
 OWNER_PROVIDER_ADMISSION_AGE: Final[dt.timedelta] = (
     OWNER_MAX_AGE - PROVIDER_IN_FLIGHT_GRACE
@@ -180,7 +183,7 @@ def _quarantine_completion_receipt(
         conn.commit()
 
 
-if MAX_AI_CALLS_PER_REQUEST * ANTHROPIC_TIMEOUT_SEC > (
+if REPORT_PROVIDER_WAIT_MAX_SEC > (
     OWNER_PROVIDER_ADMISSION_AGE.total_seconds()
 ):  # pragma: no cover - 서로 다른 정본 상수가 어긋나면 import부터 실패한다.
     raise RuntimeError("provider 최악 대기보다 single-flight owner 상한이 짧습니다")
@@ -358,6 +361,8 @@ class GenerationSession:
     _final_release_mode: ReleaseMode | None = field(default=None, init=False)
     _paid_phase: paid_runtime.PaidPhase | None = field(default=None, init=False)
     _provider_stack: contextlib.ExitStack | None = field(default=None, init=False)
+    _writer_selection: tuple[str, bool] | None = field(default=None, init=False)
+    _writer_reservation_krw: float | None = field(default=None, init=False)
     _cancel_wait: threading.Event = field(default_factory=threading.Event, init=False)
     _stop_heartbeat: threading.Event = field(default_factory=threading.Event, init=False)
     _heartbeat_thread: threading.Thread | None = field(default=None, init=False)
@@ -396,6 +401,7 @@ class GenerationSession:
             check_active=self.check_active,
             paid_preparation=self.paid_preparation,
             bind_release_mode=self.bind_release_mode,
+            bind_writer_model=self.bind_writer_model,
         )
 
     @property
@@ -1278,6 +1284,23 @@ class GenerationSession:
             ) from lease_error
         self._bounded_owner_ttl(clock.now_kst())
 
+    def bind_writer_model(self, writer_model: str, is_v2: bool) -> None:
+        """요청별 선택과 예약액을 고정한다. 늦은 단가 변경은 같은 phase로 보내지 않는다."""
+        try:
+            requested = writer_pipeline_reservation_krw(writer_model, is_v2=is_v2)
+        except ValueError as exc:
+            raise GenerationSingleflightUnavailable(str(exc)) from exc
+        selection = (writer_model, is_v2)
+        with self._lock:
+            if self._writer_selection is not None:
+                if self._writer_selection != selection:
+                    raise GenerationSingleflightUnavailable("한 요청의 작성 모델 선택을 변경할 수 없습니다")
+                return
+            if self._paid_phase is not None or self._provider_stack is not None:
+                raise GenerationSingleflightUnavailable("본조사 예약 뒤에 작성 모델을 선택할 수 없습니다")
+            self._writer_selection = selection
+            self._writer_reservation_krw = requested
+
     def ensure_paid_phase(self) -> None:
         """owner/bypass만 첫 provider 전에 비용 phase와 attempt 문맥을 연다."""
 
@@ -1308,11 +1331,15 @@ class GenerationSession:
             self._require_provider_admission_time(None, clock.now_kst())
         if provider_context_is_open:
             return
+        # 기존 대역·미지정 기본은 옛 호출 형태를 유지한다. 명시 선택만 예약액을 운반한다.
+        reservation = ({"requested_cost_krw": self._writer_reservation_krw}
+                       if self._writer_selection is not None else {})
         ticket = paid_runtime._begin_paid_phase(
             run_id=self.run_id,
             phase=SPEND_PHASE_PIPELINE,
             share_key=self.share_key,
             cap_krw=self.cap_krw,
+            **reservation,
         )
         if ticket is None:
             raise PaidGenerationAdmissionUnavailable(

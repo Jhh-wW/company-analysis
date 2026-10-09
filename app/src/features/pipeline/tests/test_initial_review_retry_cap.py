@@ -117,8 +117,10 @@ def 검수_진단():
         collector.finish()
 
 
-def test_줄인_상한이_사고와_같은_잔액에서_재요청을_통과시킨다(검수_진단) -> None:
+def test_줄인_상한이_사고와_같은_잔액에서_재요청을_통과시킨다(검수_진단, monkeypatch) -> None:
     """713원을 쓴 뒤: 24,000 상한은 막히고 12,000 상한은 실제로 전송된다."""
+    # 보존된 사고의 모델·원가 조건을 그대로 재현한다. 현재 모델 비용 예측이 아니다.
+    monkeypatch.setattr(real, "V2_REVIEW_MODEL", _모델)
     messages = RecordingMessages(
         "end_turn", input_tokens=_입력토큰, output_tokens=_첫답출력,
     )

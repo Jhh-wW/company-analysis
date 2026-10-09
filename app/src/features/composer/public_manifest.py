@@ -21,6 +21,15 @@ from typing import Any, Final
 from urllib.parse import urlsplit
 
 from src.core.citations import citation_number
+from src.shared.business_challenge_context import (
+    BusinessActivityAnchor, IndustryProblemEvidence, INDUSTRY_CONTEXT_SECTION,
+    industry_context_to_dict,
+)
+from src.features.composer.industry_context import (
+    bind_industry_context_sources, assert_industry_context_sources,
+    has_verified_direct_business_issue,
+)
+from src.features.composer.challenge_presentation import challenge_response_only_notice
 from src.features.composer.constants import (
     DART_DOCUMENT_HOST,
     DART_DOCUMENT_URL_TEMPLATE,
@@ -123,7 +132,7 @@ _SOURCE_LABEL_FALLBACK: Final[str] = "수집 자료"
 _FILING_LABEL_PREFIX: Final[str] = "전자공시"
 _SECTION_TAGS: Final[dict[str, str]] = {
     "past_changes": "#과거",
-    "current_challenges": "#현재",
+    "current_challenges": "#사업과제",
     "future_strategy": "#미래",
 }
 _BINDING_KEYS: Final[frozenset[str]] = frozenset(
@@ -1537,6 +1546,8 @@ def _expected_public_content_projection(
     citation_style: str,
     filing_meta: FilingMeta | None,
     program_registry_sources: Sequence[Source] = (),
+    industry_anchors: tuple[BusinessActivityAnchor, ...] = (),
+    industry_problems: tuple[IndustryProblemEvidence, ...] = (),
 ) -> dict[str, object]:
     # ★ 인용 번호 «표시 규칙»만은 렌더러 정본을 그대로 부른다. 나머지 기대
     #   구조(글자 조립·문단 나눔·표·차례)는 여전히 이 파일이 독립으로 다시
@@ -1673,6 +1684,24 @@ def _expected_public_content_projection(
         citations.append(source)
         citations_by_id[source.source_id] = source
         used_numbers.add(source.number)
+    industry_contexts, citations = bind_industry_context_sources(
+        anchors=industry_anchors, problems=industry_problems, fragments=fragments,
+        sources=citations, numbers=numbers, company_id=company_id,
+        reference_date=as_of_date, has_direct_issue=has_verified_direct_business_issue(report),
+        build_official_source=lambda fragment, number: _expected_source(
+            fragment, number=number, company_name=company_name,
+            used_in=[INDUSTRY_CONTEXT_SECTION], filing_meta=filing_meta,
+        ),
+    )
+    response_notice = challenge_response_only_notice(
+        report, has_industry_context=bool(industry_contexts),
+    )
+    for section in public_sections:
+        if section["cell"] == INDUSTRY_CONTEXT_SECTION:
+            if industry_contexts:
+                section["industry_contexts"] = [industry_context_to_dict(value) for value in industry_contexts]
+            if response_notice and response_notice not in section["guidance_lines"]:
+                section["guidance_lines"].append(response_notice)
     try:
         complete_registry = ensure_dart_profile_attesters(
             citations,
@@ -1682,6 +1711,7 @@ def _expected_public_content_projection(
         raise PublicManifestError(str(exc)) from exc
     citations = sorted(complete_registry, key=lambda source: source.number)
     complete_registry = tuple(citations)
+    assert_industry_context_sources(industry_contexts, company_id=company_id, sources=complete_registry, reference_date=as_of_date)
     for source in complete_registry:
         if problem := full_typed_source_registry_problem(
             source,
@@ -1735,6 +1765,8 @@ def build_public_structure_seal(
     citation_style: str,
     program_registry_sources: Sequence[Source] = (),
     name_table: PortfolioNameTable | None = None,
+    industry_anchors: tuple[BusinessActivityAnchor, ...] = (),
+    industry_problems: tuple[IndustryProblemEvidence, ...] = (),
 ) -> PublicStructureSeal:
     """검증된 pre-render 입력만으로 공개 표·flow 정본을 만든다.
 
@@ -1988,6 +2020,8 @@ def build_public_structure_seal(
         citation_style=citation_style,
         filing_meta=filing_meta,
         program_registry_sources=program_registry_sources,
+        industry_anchors=industry_anchors,
+        industry_problems=industry_problems,
     )
     public_sections = public_content["sections"]
     section_sha256s = tuple(

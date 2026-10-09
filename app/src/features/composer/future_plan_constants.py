@@ -18,6 +18,8 @@ from typing import Final
 # ══════════════════════════════════════════════════════════
 #: 기존 «검증근거» 객체 안에 놓는 배열 이름. 「관계」와 같은 자리다.
 FUTURE_KEY: Final[str] = "미래근거"
+# 선택한 회사 계획 슬롯은 고유명사·위원회·생략 주어에도 같은 근거 계약을 적용한다.
+STATED_PLAN_SLOT: Final[str] = "future_strategy:stated_plan"
 FUTURE_SOURCE_KEY: Final[str] = "근거"
 FUTURE_TARGET_KEY: Final[str] = "대상"
 FUTURE_ACTIVITY_KEY: Final[str] = "활동"
@@ -322,6 +324,25 @@ FUTURE_TEMPORAL_RE: Final[re.Pattern[str]] = re.compile(
     r"향후|앞으로|추후|중장기적으로|장기적으로|내년|차년도"
     r"|[0-9]{4}\s*년\s*(?:까지|부터)"
 )
+# '향후 방향성'은 논의 대상인 명사구다. 명시 실행 양태 없이 이를 논의의
+# 미래 시점으로 바꾸지 않는다. 내년·연도 같은 실제 시기 표현은 포함하지 않는다.
+FUTURE_DIRECTION_OBJECT_RE: Final[re.Pattern[str]] = re.compile(
+    r"\A향후\s+방향성(?:을|에\s*대해|에\s*관해)?(?=\s|\Z)"
+)
+# 앞에서 목적어로 든 활동 자체를 정해진 시기까지 완료하는 명시 계획이다.
+# 새로운 목적어·다른 행동이 끼어들면 이 연결로 미래 양태를 빌릴 수 없다.
+POST_ACTIVITY_TIMED_COMPLETION_RE: Final[re.Pattern[str]] = re.compile(
+    r"\A\s*(?:을|를)?\s*(?:" + FUTURE_TEMPORAL_RE.pattern + r")"
+    r"\s*(?:까지|부터|에)?\s*(?:완료|마무리)할\s*(?:계획|예정|방침)"
+)
+# 단순 명사형 도입은 뒤의 미래 서술과 같은 주장이다. ‘할 계획’은 별도 서술이다.
+NOMINAL_PLAN_INTRO_RE: Final[re.Pattern[str]] = re.compile(r"계획으로\Z")
+#: 본문 대상과 활동 사이에는 기존 미래 시점과 닫힌 기간 조사만 허용한다.
+#: 전체 다리를 소비해야 하므로 다른 목적어·조건·활동은 시점으로 지워지지 않는다.
+PROSE_TEMPORAL_ACTIVITY_BRIDGE_RE: Final[re.Pattern[str]] = re.compile(
+    r"\A(?:" + PARTICLE_TAIL + r")?\s*(?P<time>(?:"
+    + FUTURE_TEMPORAL_RE.pattern + r")\s*(?:초|중|말)?\s*(?:부터|까지|에)?)\s*\Z"
+)
 #: 원문 쪽 부정·축소·보류. 원문은 완결된 문장이므로 넓게 본다.
 SOURCE_NEGATION_RE: Final[re.Pattern[str]] = re.compile(
     r"지\s*않|치\s*않|하지\s*못|없|아니|중단|철회|보류|연기|취소|철수|폐지|종료"
@@ -379,6 +400,15 @@ CANDIDATE_DONE_RE: Final[re.Pattern[str]] = re.compile(
 #: 않고, 본문 발동 전용으로 따로 둔다.
 PROSE_SUBJECT_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:\A|[\s,·])(" + WORD_CHAR + r"{2,}?)(?:은|는|이|가)(?=\s)"
+)
+# 같은 활동 앞의 명시 조건형만 대조한다. 조건의 성립이나 해제를 추정하지 않는다.
+PLAN_CONDITION_END_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:받으면|얻으면|되면|하면|있으면|없으면|"
+    r"(?:하는|할|받는|받을|되는|될|충족하는|충족할)\s*경우)(?=\s|[,，]|$)"
+)
+PLAN_CONDITION_CLAUSE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:있으며|있고|있지만|했고|했으며|하였고|하였으며|"
+    r"것이며|것이고|것이지만|예정이며|계획이며|[;；]|그리고|또한)\s*"
 )
 
 #: 주어 대신 「회사의 … 전략의 일환이다」처럼 회사에 계획을 명시적으로

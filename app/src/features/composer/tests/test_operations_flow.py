@@ -397,15 +397,14 @@ def test_작성_단계가_표를_같은_응답에서_읽는다():
     def ask(prompt: str) -> str:
         calls.append(prompt)
         # 그 장이 요구하는 «칸 수»에 맞춰 답한다 — 실제 작가처럼.
+        # 작성 지침의 '회사가 하는 일' 같은 단어가 다른 장 헤더와 우연히
+        # 겹칠 수 있다. 실제 응답 형식의 헤더 전체를 읽어 칸 수를 결정한다.
+        schema_guide = prompt[prompt.index("출력 형식") :]
         칸수 = 3
         for headers in FLOW_HEADERS_BY_SECTION.values():
-            for name in headers:
-                if name in prompt:
-                    칸수 = len(headers)
-                    break
-            else:
-                continue
-            break
+            if all(name in schema_guide for name in headers):
+                칸수 = len(headers)
+                break
         flow = (
             [{"칸": [f"칸{i + 1}" for i in range(칸수)], "인용": ["1"]}]
             if "경로표" in prompt

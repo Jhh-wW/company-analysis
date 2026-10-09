@@ -574,6 +574,28 @@ def test_item3_corp_code가_없는_행은_지금처럼_통과한다() -> None:
     assert not any(a.reason_code == c.REASON_LIST_ROW_IDENTITY_MISMATCH for a in result.attempts)
 
 
+def test_목록회사코드는_실제선택한_정정본과_이전연도_행에서만_보존한다():
+    rows = (
+        RawFilingRow('20260315000001', '사업보고서 (2025.12)', '20260315', corp_code='00126380'),
+        RawFilingRow('20260320000002', '[기재정정]사업보고서 (2025.12)', '20260320'),
+        RawFilingRow('20250315000003', '사업보고서 (2024.12)', '20250315', corp_code='00126380'),
+    )
+    fetcher = FakeFetcher(list_responses_by_pblntf_ty={'A': FilingListResult(state='OK', rows=rows)})
+    result = select_related_filings(fetcher, '00126380')
+    selected = {row.rcept_no: row for row in result.selected}
+    assert selected['20260320000002'].filing_list_corp_code == ''
+    assert selected['20260320000002'].lineage_original_rcept_no == '20260315000001'
+    assert selected['20250315000003'].filing_list_corp_code == '00126380'
+
+
+def test_실제목록회사코드가_없으면_요청코드를_대입하지_않는다():
+    fetcher = FakeFetcher(list_responses_by_pblntf_ty={
+        'A': FilingListResult(state='OK', rows=(_row('20250315000001', '사업보고서 (2025.03)'),)),
+    })
+    result = select_related_filings(fetcher, '00126380')
+    assert result.selected[0].filing_list_corp_code == ''
+
+
 # ══════════════════════════════════════════════════════════
 # generation=8 후속 item 4 — 「행을 봤지만 전부 필터로 제외」와 「행이 아예
 # 없음」을 다른 사유 코드로 구분

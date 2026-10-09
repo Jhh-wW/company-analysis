@@ -20,16 +20,21 @@ import re
 ROLE_WORDS: Final[tuple[str, ...]] = ("기획", "제작", "개발", "제조", "생산")
 _ROLE_ALT: Final[str] = "|".join(ROLE_WORDS)
 #: 도식 칸은 «칸 하나가 하나의 주장»이라 낱말만으로 발동한다.
-ROLE_CELL_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"(" + _ROLE_ALT + r")")
+# ‘생산성 향상’처럼 성질을 나타내는 파생 명사는 생산 역할 단언이 아니다.
+# 생산·제작의 동사형과 ‘생산 및 제작’ 같은 실제 역할 나열은 그대로 검사한다.
+ROLE_CELL_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"(" + _ROLE_ALT + r")(?!성)")
 #: 산문은 그 낱말이 «서술어로 쓰였을 때»만 발동한다.
 #:
 #: ★ 명사 나열(「공연 기획, 영상 콘텐츠 제작」·「자체 개발 소비자 조사 데이터」·
 #:   「크리에이티브한 광고 제작 역량」)까지 결속을 요구하면 정상 문장이 대량으로
 #:   지워진다. 그래서 역할 낱말 «바로 뒤»에 용언 어간이 붙은 꼴만 본다.
 PROSE_ROLE_MARKER_RE: Final[re.Pattern[str]] = re.compile(
-    r"(" + _ROLE_ALT + r")(?:되|돼|됐|된|하|해|했|한|할|함|합|하여|되어|"
+    r"(" + _ROLE_ALT + r")(?:되|돼|됐|된|하|해|했|한|할|함|합(?:니다|니까|시다)|하여|되어|"
     r"(?:을|를)\s*(?:담당|수행|영위))"
 )
+# '합'은 단독 용언 활용형이 아니다. 역할 뒤 붙은 합성 명사의 일부를
+# 제조합니다 같은 실제 종결형과 구분한다. 공백으로 나뉜 역할·다음 명사는 유지한다.
+ROLE_COMPOUND_TAIL_RE: Final[re.Pattern[str]] = re.compile(r"합(?!니다|니까|시다)")
 
 # ══════════════════════════════════════════════════════════
 # ② 후보가 «대가·반복»을 단언한 자리 — 발동 표지
@@ -66,6 +71,16 @@ PROSE_REPEAT_WORDS: Final[tuple[str, ...]] = (
 )
 PROSE_REPEAT_MARKER_RE: Final[re.Pattern[str]] = re.compile(
     r"(" + "|".join(PROSE_REPEAT_WORDS) + r")")
+# 계약의 기간 변경 자체는 대가를 받는 방식이 아니다. 갱신·연장 자리의
+# 명시 유료/구독/금융 대상 또는 그 자리의 수익 서술만 기존 과금 검사를 받는다.
+RENEWAL_WORDS: Final[frozenset[str]] = frozenset({"갱신", "연장"})
+RENEWAL_FINANCIAL_PREFIX_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:유료(?:로)?|구독(?:료)?|이용료|서비스요금|수수료|로열티|보험료|보험|예금|예치|대출|금리|이자)"
+    r"(?:서비스|상품|계약|기간|만기|대금)?(?:을|를|이|가|은|는|의)?"
+    r"(?:(?:매년|매월|정기적으로|정기|자동|만기때|다시)(?:에|로)?)*$")
+RENEWAL_FINANCIAL_SUFFIX_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:(?:하|해|한|할|되|되어|되는|된|됨|로|으로|을|를|에|하여|해서))*"
+    r"(?:반복)?(?:수익|매출|구독료|이용료|요금|수수료|로열티|보험료|이자)")
 #: 산문에서 «대가를 주고받는 서술»로 보는 낱말. 아래 정규식과 안내문이 함께 쓴다.
 PROSE_FEE_WORDS: Final[tuple[str, ...]] = ("수수료", "로열티", "보수", "대가", "우대금리")
 #: ⚠️ 뒤따르는 동사는 «활용형까지» 적는다. 「부과」·「청구」를 명사 두 글자로 두면
@@ -244,7 +259,7 @@ ROLE_BINDING_ENTRY_TYPE_UNKNOWN: Final[str] = "role_binding_entry_type_unknown"
 
 #: 규칙 버전 — 진단이 «어느 규칙으로 판정했는지»를 남긴다. 발동·면제·대조 규칙이
 #: 바뀔 때마다 올린다. 회사·날짜·사례가 아니라 규칙의 판만 가리킨다.
-ROLE_BINDING_RULE_VERSION: Final[str] = "role-binding-rules/2"
+ROLE_BINDING_RULE_VERSION: Final[str] = "role-binding-rules/4"
 #: 결속 요구를 «제외»한 사유표 — 진단·안내문이 같은 이름을 쓴다.
 ROLE_BINDING_WAIVER_VERBATIM_CONDITION: Final[str] = "verbatim_news_participation_condition"
 ROLE_BINDING_WAIVER_TEXTS: Final[dict[str, str]] = {
@@ -359,7 +374,10 @@ ROLE_BINDING_REVIEW_GUIDE: Final[str] = (
     "«주요 수익원» 꼴과 이어질 때만, 도식 칸은 낱말만 있어도 항목이 필요하다.\n"
     f"· 반복 낱말 «{_JOIN.join(REPEAT_WORDS)}» → 유형 「{RELATION_FEE}」(반복 거래도 "
     f"과금 유형이다 — 「{RELATION_ROLE}」이 아니다). 산문은 «{_JOIN.join(PROSE_REPEAT_WORDS)}»에서, "
-    "도식 칸은 위 목록 전체에서 발동한다.\n"
+    "도식 칸은 위 목록 전체에서 발동한다. 단, 갱신·연장은 그 자리의 명시 유료·구독·"
+    "이용료·금융 대상이나 갱신·연장 수익/매출이 있을 때만 과금 요구가 된다. 원재료·공급 "
+    "계약의 기간 갱신·연장만으로 과금 항목을 만들지 않는다. 다른 절의 서비스 요금은 "
+    "그 요금 자리에서 별도로 검증한다.\n"
     f"항목은 검증근거의 '{RELATION_KEY}' 배열에 넣고 다섯 칸을 모두 «문자열»로 채운다: "
     f'{{"{RELATION_SOURCE_KEY}": "<그 후보가 인용한 근거 id>", '
     f'"{RELATION_TARGET_KEY}": "<그 역할·대가가 걸린 대상, 후보의 표현 그대로>", '
@@ -392,8 +410,43 @@ ROLE_BINDING_REVIEW_GUIDE: Final[str] = (
     "원문이 「그 수수료는 주로 A 부문에서 발생한다」라고 적은 것을 「A의 주요 수익원은 "
     "수수료」로 뒤집지 마라. 방향이 다른 주장이다.\n"
     "역할·대가·반복을 적지 않은 후보에는 이 항목을 넣지 않는다. 「제작하지 않는다」처럼 "
-    "«부정»한 문장도 단언이 아니므로 필요 없다. 기존 수치·추세·시점·인과 배열과 판정 "
-    "규칙은 그대로다.\n"
+    "역할을 부정한 문장에는 긍정 역할의 추가 관계 항목을 요구하지 않지만, 부정 사실도 "
+    "자기 인용에서 같은 대상·주체·범위가 확인돼야 한다. 외주·위탁이나 공시 기재 생략만으로 "
+    "특정 공정을 전혀 직접 수행하지 않는다고 확대하지 마라. 같은 대상의 전량 외주나 "
+    "직접 수행하지 않는다는 명시 원문은 그 범위대로 보존한다. "
+    "기존 수치·추세·시점·인과 배열과 판정 규칙은 그대로다.\n"
+    "7장 경로표는 칸의 주체도 따로 대조한다. 가운데 ‘회사가 하는 일’은 "
+    "회사 자신의 행위여야 한다. 고객의 구매·이용, 고객이 할 수 있도록 만든 "
+    "시스템의 목적·능력을 회사가 구매·이용하는 행동으로 바꾸지 마라. "
+    "앞뒤 칸이나 다른 인용에 같은 낱말이 있다는 이유로 주체를 빌리지 않는다. "
+    "회사가 실제로 구매·구독하는 원문은 그 회사 행위대로 보존한다.\n"
+)
+
+# 7장 가운데 칸의 명시 주어·목적 구문만 대조한다. 업종·상품 목록이 아니다.
+COMPANY_FLOW_ACTION_INDEX: Final[int] = 1
+COMPANY_FLOW_SELF_ACTORS: Final[frozenset[str]] = frozenset({
+    "회사", "당사", "동사", "본사", "연결회사", "연결기업", "우리회사",
+})
+COMPANY_FLOW_SENTENCE_RE: Final[re.Pattern[str]] = re.compile(r"(?<=[다요])[.!?。]\s*|[;|]")
+COMPANY_FLOW_PARTICLE_RE: Final[str] = r"(?:\s*(?:을|를|의))?\s*"
+# 행동의 결과로 만든 능력·목적을 그 행동의 실행으로 올리지 않는다.
+COMPANY_FLOW_NONACTION_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*(?:할\s*수\s*(?:있|없|있도록|없도록)|(?:하|할|하는)\s*(?:도록|게)|하기\s*위(?:해|하여))"
+)
+COMPANY_FLOW_NEGATIVE_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*(?:하|해|했)?\s*지\s*(?:않|못)|^\s*(?:하지|하지는)\s*(?:않|못)"
+)
+COMPANY_FLOW_WORD_EDGE: Final[str] = r"[A-Za-z0-9가-힣]"
+COMPANY_FLOW_ACTION_TAIL_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?:하|해|했|한|할|합|함|되|돼|됐|된|을|를|의|은|는|이|가)"
+)
+COMPANY_FLOW_CUSTOMER_ACTORS: Final[frozenset[str]] = frozenset({
+    "고객", "고객사", "소비자", "사용자", "이용자", "구독자", "독자", "구매자",
+})
+# 관형절의 ‘-하는’ 등을 명사 주어의 조사로 오독하지 않는다.
+COMPANY_FLOW_ATTRIBUTIVE_ACTOR_TAILS: Final[tuple[str, ...]] = ("하", "되", "있", "없")
+COMPANY_FLOW_RELATIVE_PREDICATE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:한|하는|된|되는|받은|도록|게)\s*$"
 )
 
 # ══════════════════════════════════════════════════════════

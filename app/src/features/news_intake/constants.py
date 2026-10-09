@@ -264,6 +264,7 @@ ACCESS_DENIAL_REASONS: Final[frozenset[str]] = frozenset({
 #: steps에 단계별 수를 남겨 사람이 가를 수 있게 한다.
 BODY_STAGE_USABLE_RANGES: Final[str] = "usable_ranges"
 BODY_STAGE_JSON_LD: Final[str] = "json_ld_article_body"
+BODY_STAGE_BOUND_DOM: Final[str] = "bound_article_body_dom"
 BODY_STAGE_ARTICLE_TAG: Final[str] = "article_tag"
 BODY_STAGE_META_DESCRIPTION: Final[str] = "meta_description"
 #: 파이프라인 밖에서 본문 글자를 그대로 주입받은 경우(시험·대체 수집기).
@@ -316,6 +317,15 @@ BODY_TEXT_BLOCK_TAGS: Final[frozenset[str]] = frozenset({
     "article", "div", "section", "p", "br", "li", "ul", "ol", "blockquote",
     "h1", "h2", "h3", "h4", "h5", "h6", "table", "tr", "td", "th",
 })
+# JSON-LD의 생략된 본문은 유일한 명시 구획의 실제 문단으로만 복구한다.
+BODY_DOM_PARAGRAPH_TAGS: Final[frozenset[str]] = frozenset({"p"})
+BODY_DOM_HEADING_TAGS: Final[frozenset[str]] = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
+BODY_DOM_MIN_PARAGRAPHS: Final[int] = 2
+BODY_DOM_RELATED_MIN_LINKS: Final[int] = 2
+BODY_DOM_RELATED_CONTAINER_TAGS: Final[frozenset[str]] = frozenset({"div", "section", "nav", "aside"})
+BODY_DOM_RELATED_HEADINGS: Final[frozenset[str]] = frozenset({
+    "관련기사", "추천기사", "주요뉴스", "함께보면좋은기사", "꼭봐야할주요뉴스",
+})
 #: 해독이 깨졌다고 볼 대체문자 비율. 정상 문서에도 U+FFFD가 한두 개 섞일 수
 #: 있으므로 개수가 아니라 비율로 본다.
 DECODE_REPLACEMENT_RATIO_LIMIT: Final[float] = 0.02
@@ -349,7 +359,8 @@ URL_VARIANT_ORDER: Final[tuple[str, ...]] = (
 MAX_URL_VARIANTS: Final[int] = 3
 
 # 새 수집 경로의 상한은 기사 수를 채우는 목표가 아니라 요청 비용의 경계다.
-COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v10"
+COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v31"
+EXCLUDED_DUPLICATE_BODY_CHAIN_URL: Final[str] = "duplicate_body_chain_url"
 NAME_ACRONYM_MIN_CHARS: Final[int] = 2
 NAME_ACRONYM_MAX_CHARS: Final[int] = 8
 NAME_RETAINED_SUFFIX_MIN_CHARS: Final[int] = 2
@@ -605,12 +616,18 @@ GROUNDED_SECTION_GUIDE: Final[tuple[tuple[str, str], ...]] = (
                      "change_context(여러 해 누적이면 cumulative_change), 완료된 투자·출시·"
                      "조직 개편은 completed_execution, 변화의 한계는 change_limit. "
                      "공식 실적표 칸은 뉴스로 채우지 않습니다."),
-    ("current_challenges", "지금 겪는 문제(issue)와 회사가 밝힌 대응(response). "
-                           "회사·대표에게 귀속된 발언만."),
+    ("current_challenges", "핵심 제품·서비스·사업이 지금 겪는 문제(issue)와 회사가 "
+                           "밝힌 대응(response). 회사·대표에게 귀속된 발언만. "
+                           "재무지표 증감이나 일반적인 재무 위험 관리 규정으로 "
+                           "채우지 않고 산업 일반의 문제를 회사 직접 사실로 "
+                           "승격하지 않음."),
     ("future_strategy", "회사가 밝힌 미실현 계획(stated_plan)과 진행 상태(plan_status). "
                         "완료 실적과 섞거나 본문에 없는 계획을 추측하지 않습니다."),
     ("operations_partners", "가치사슬·운영 역할·공급·유통 관계·제휴."),
-    ("culture", "회사가 밝힌 리더십·일하는 원칙·의사결정·조직 변화·검증된 사례."),
+    ("culture", "회사가 밝힌 임직원 인재상·인사제도·내부 일하는 원칙·의사결정·조직 변화와 "
+                "그 문화의 검증된 사례. 소비자·고객·인플루언서 대상 마케팅이나 외부 고객 접점 "
+                "확대만으로 이 장을 채우지 않습니다. 직원의 구체적인 업무·협업 방식이 같은 "
+                "인용에 명시된 실행은 기존 의미 검수 대상으로 남깁니다."),
 )
 
 # ── 주장 역할의 좁은 기계 경계 (claim_role) ────────────────────────────
