@@ -27,6 +27,7 @@ from src.shared import engine_build_identity
 
 
 MODEL = "claude-haiku-4-5"
+NEWS_MODEL = real.V2_REVIEW_MODEL
 CAP = 128
 INPUT = 100
 NEWS_OUTPUT = 10
@@ -214,12 +215,12 @@ def test_real_bounded_ask_cannot_reuse_saved_logical_slot_for_optional_call(atte
 def test_monetary_headroom_can_change_optional_work_so_default_remains_off(monkeypatch, attempts):
     # 기존 금액 admission의 반례를 숨기지 않는다. 논리 상한보다 금액이 먼저 닿는 경우다.
     optional_reserve = pricing.usage_cost_krw(
-        MODEL, INPUT + real.provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS, CAP,
+        NEWS_MODEL, INPUT + real.provider_budget.REQUEST_ESTIMATE_MARGIN_TOKENS, CAP,
     )
     spends, sent = [], []
     for _ in range(2):
         engine, client, messages = setup_engine()
-        optional = real._v2_ask_via_provider(engine, client, stage="v2_rewrite", max_tokens=CAP)
+        optional = real._v2_ask_via_provider(engine, client, stage="v2_review", max_tokens=CAP)
         with real.provider_budget.activate(optional_reserve) as budget:
             collect(engine, client)
             try:
@@ -343,7 +344,7 @@ def test_runtime_unclear_namespace_or_default_off_always_uses_provider(monkeypat
     for _ in range(2):
         engine, client, messages = setup_engine()
         if kind == "unknown_model":
-            engine.MODEL = "unknown"
+            monkeypatch.setattr(real, "V2_REVIEW_MODEL", "unknown")
         with real.provider_budget.activate(1000):
             result = collect(engine, client)
         assert result.fragments and result.diagnostics["분석provider호출"] == 1

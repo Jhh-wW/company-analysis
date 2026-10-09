@@ -8,7 +8,7 @@ from src.core.constants import PROVIDER_BASE_TIMEOUT_SEC
 # 요청/모듈 MODEL을 바꾸지 않고 계량 경계에서 단계별로 고정한다.
 V2_REVIEW_MODEL: Final[str] = "claude-sonnet-4-6"
 V2_REVIEW_MODEL_STAGES: Final[frozenset[str]] = frozenset({
-    "v2_review", "v2_diagram", "official_industry_context",
+    "v2_review", "v2_diagram", "official_industry_context", "news_grounding",
 })
 
 # 명시 비교 요청만 작성 모델을 고른다. 빈 설정은 기존 엔진 모델을 유지한다.

@@ -45,6 +45,7 @@ from src.shared.report_evidence.source_kind_policy import (
     formal_document_is_writer_eligible,
     formal_document_writer_ineligibility_reason,
 )
+from src.shared.report_evidence.practice_context import practice_context_fingerprint
 
 
 def to_evidence_mappings(
@@ -73,6 +74,18 @@ def to_evidence_mappings(
     """
     hashes_by_document = _exact_hashes_by_document(fragments)
     bindings_by_document = _exact_bindings_by_document(fragments)
+    practice_bindings_by_document: dict[str, list[dict[str, str]]] = {}
+    for fragment in fragments:
+        if fragment.practice_context_json:
+            binding = {
+                "location": fragment.location, "text_sha256": fragment.text_sha256,
+                "practice_context_sha256": practice_context_fingerprint(fragment.practice_context_json),
+            }
+            target = practice_bindings_by_document.setdefault(fragment.document_id, [])
+            if binding not in target:
+                target.append(binding)
+    for bindings in practice_bindings_by_document.values():
+        bindings.sort(key=lambda value: (value["location"], value["text_sha256"]))
     documents_by_id = {document.document_id: document for document in result.documents}
     ineligible_fragment_document_ids = sorted(
         {
@@ -89,13 +102,14 @@ def to_evidence_mappings(
             "Writer 자격이 없는 formal 문서에 근거 조각이 붙었습니다: "
             + ", ".join(ineligible_fragment_document_ids)
         )
-    return {
+    mapped = {
         "company_id": result.company_id,
         "documents": [
             _document_mapping(
                 document,
                 hashes_by_document[document.document_id],
                 bindings_by_document[document.document_id],
+                practice_bindings_by_document.get(document.document_id, []),
             )
             for document in result.documents
             if hashes_by_document.get(document.document_id)
@@ -119,6 +133,9 @@ def to_evidence_mappings(
             if not hashes_by_document.get(document.document_id)
         ],
     }
+    if result.redirect_discoveries:
+        mapped["redirect_discoveries"] = [dict(item.to_mapping(), sha256=item.sha256) for item in result.redirect_discoveries]
+    return mapped
 
 
 def _exact_hashes_by_document(fragments: tuple[WideFragment, ...]) -> dict[str, list[str]]:
@@ -177,6 +194,7 @@ def _document_mapping(
     document: WideDocumentIdentity,
     exact_evidence_hashes: list[str],
     exact_evidence_bindings: list[dict[str, str]],
+    exact_practice_context_bindings: list[dict[str, str]],
 ) -> dict[str, object]:
     return {
         "company_id": document.company_id,
@@ -209,6 +227,8 @@ def _document_mapping(
         # location을 같은 문서의 다른 구간으로 바꾸고 hash만 재사용하는
         # 내부 배선 오류를 공식 adapter가 exact 비교할 수 있게 함께 보낸다.
         "exact_evidence_bindings": exact_evidence_bindings,
+        **({"exact_practice_context_bindings": exact_practice_context_bindings}
+           if exact_practice_context_bindings else {}),
     }
 
 
@@ -265,6 +285,8 @@ def _fragment_mapping(fragment: WideFragment) -> dict[str, object]:
         "covered_slot_ids": list(fragment.covered_slot_ids),
         "score_millis": fragment.score_millis,
         "reason_codes": list(fragment.reason_codes),
+        **({"practice_context_json": fragment.practice_context_json}
+           if fragment.practice_context_json else {}),
     }
 
 

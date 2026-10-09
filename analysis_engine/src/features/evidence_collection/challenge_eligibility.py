@@ -103,6 +103,7 @@ def challenge_eligibility_scope(text: str, slot_id: str = "") -> ChallengeEligib
     pending_header = None
     saw_header = False
     positive_context = False
+    grade_definition: tuple[int, int] | None = None
     full_surface = _surface(text)
     credit_context = bool(c.CREDIT_MEASUREMENT_CONTEXT_RE.search(full_surface))
     policy_units = tuple(unit for first, second, unit in c.POLICY_CONTEXT_RULES
@@ -135,6 +136,23 @@ def challenge_eligibility_scope(text: str, slot_id: str = "") -> ChallengeEligib
     for end, next_start in (*bounds, (len(text), len(text))):
         unit = text[start:end]
         if unit.strip():
+            cells = tuple(_surface(cell) for cell in unit.split("|"))
+            grade_index = next((index for index, cell in enumerate(cells)
+                                if cell in c.CREDIT_GRADE_HEADERS), None)
+            grade_definition_header = bool(
+                grade_index is not None
+                and any(cell in c.CREDIT_GRADE_DEFINITION_HEADERS for cell in cells)
+                and not any(cell in c.CREDIT_GRADE_EVENT_HEADERS for cell in cells)
+            )
+            grade_definition_row = bool(
+                grade_definition is not None and len(cells) == grade_definition[0]
+                and (c.CREDIT_GRADE_VALUE_RE.fullmatch(cells[grade_definition[1]])
+                     or all(not cell or c.CREDIT_GRADE_ALIGNMENT_RE.fullmatch(cell) for cell in cells))
+            )
+            if grade_definition_header:
+                grade_definition = (len(cells), grade_index)
+            elif not grade_definition_row:
+                grade_definition = None
             header = "|" in unit and bool(c.TABLE_HEADER_RE.search(_surface(unit)))
             if header:
                 table_record = True
@@ -145,6 +163,8 @@ def challenge_eligibility_scope(text: str, slot_id: str = "") -> ChallengeEligib
                 pending_header = None
             reason = _reason(unit, credit_context=credit_context, table_record=table_record and not header,
                              positive_context=positive_context, policy_units=policy_units)
+            if grade_definition_header or grade_definition_row:
+                reason = c.ADMINISTRATIVE_EVENT_ONLY
             if not reason and slot_id == "current_challenges:issue":
                 reason = challenge_issue_problem(unit)
             positive_context = reason == c.POSITIVE_RESPONSE_ONLY

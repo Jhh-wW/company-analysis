@@ -77,7 +77,12 @@ def _rows(source: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
         labelled_items = tuple(item + " " + columns[i] for i, cell in enumerate(headers)
                                if _surface(cell) in c.PRODUCT_TABLE_TYPE_HEADERS
                                and _surface(columns[i]) in c.PRODUCT_TABLE_TYPES)
-        found.append((actor, (item, *labelled_items, *descriptions)))
+        service_items = tuple(c.PRODUCT_NAME_SUFFIX_RE.sub("", name).strip() + " " + label
+                              for i, cell in enumerate(headers)
+                              if _surface(cell) in c.PRODUCT_TABLE_TYPE_HEADERS
+                              and _surface(columns[i]) in c.PRODUCT_TABLE_SERVICE_TYPES
+                              for name in c.PRODUCT_LIST_RE.split(item) for label in ("서비스", "용역"))
+        found.append((actor, (item, *labelled_items, *service_items, *descriptions)))
     return tuple(found)
 
 
@@ -119,7 +124,7 @@ def _name_supported(item: str, cells: tuple[str, ...]) -> bool:
 
 
 def _claims(text: str):
-    """명시 주어와 목적격 공급 대상만 읽는다."""
+    """명시 주어와 목적격·주격 제품 대상만 읽는다."""
     for clause in c.PRODUCT_CLAUSE_RE.split(unicodedata.normalize("NFKC", text)):
         if "|" in clause:
             continue
@@ -128,10 +133,19 @@ def _claims(text: str):
             continue
         actor = actors[-1]
         content = clause[actor.end():]
-        if c.PRODUCT_DENIAL_RE.search(content):
-            continue
         object_match = c.PRODUCT_OBJECT_RE.fullmatch(content.strip())
         if not object_match or not c.PRODUCT_ACTION_RE.search(object_match["tail"]):
+            object_match = c.PRODUCT_PASSIVE_OBJECT_RE.fullmatch(content.strip())
+            if not object_match or not c.PRODUCT_PASSIVE_ACTION_RE.search(object_match["tail"]):
+                continue
+            action = c.PRODUCT_DIVISION_ACTION_RE.search(object_match["tail"])
+            if action and c.PRODUCT_DIVISION_DENIAL_RE.match(object_match["tail"][action.start():]):
+                continue
+            # 부모의 하위 사업을 명시한 수동형은 부모 부문에 결속한다.
+            divisions = tuple(c.PRODUCT_DIVISION_ACTOR_RE.finditer(clause))
+            if divisions:
+                actor = divisions[-1]
+        elif c.PRODUCT_DENIAL_RE.search(content):
             continue
         items = tuple(item for item in c.PRODUCT_LIST_RE.split(object_match["items"]) if item.strip())
         yield actor["actor"], items
@@ -150,6 +164,17 @@ def portfolio_product_scope_problem(text: str, own_sources: Mapping[str, str]) -
     direct = tuple((actor, (item,)) for source in own_sources.values()
                    for line in source.splitlines() if "|" not in line
                    for actor, items in _claims(line) for item in items)
+    # '부문에서는 서비스가 운영된다'도 표제의 부모 부문을 바꾸지 못한다.
+    # 명시 부문·활동에만 적용한다. 회사 일반 주어나 표 없는 산문은 건드리지 않는다.
+    for clause in (c.PRODUCT_CLAUSE_RE.split(unicodedata.normalize("NFKC", text)) if rows else ()):
+        for match in c.PRODUCT_DIVISION_ACTOR_RE.finditer(clause):
+            content = clause[match.end():]
+            action = c.PRODUCT_DIVISION_ACTION_RE.search(content)
+            if not action or c.PRODUCT_DIVISION_DENIAL_RE.match(content[action.start():]):
+                continue
+            if not any(_same_actor(match["actor"], actor)
+                       for actor in (row[0] for row in (*rows, *direct))):
+                return SCOPE_CONDITION_UNBOUND
     for actor, items in _claims(text):
         matching = tuple(cells for row_actor, cells in (*rows, *direct) if _same_actor(actor, row_actor))
         for item in items:

@@ -19,10 +19,13 @@ from __future__ import annotations
 import hashlib
 import time
 import urllib.parse
+from src.features.homepage.safe_http import BlockedRedirectDiscovery
 from dataclasses import dataclass, field, replace
 from typing import Callable
 
 from src.features.homepage.constants import (
+    WIDE_REDIRECT_DISCOVERY_PREFIX,
+    WIDE_REDIRECT_DISCOVERY_LABEL,
     PRIORITY_PATH_KEYWORDS,
     WIDE_COLLECTION_TIMEOUT_SEC,
     WIDE_COLLECTOR_VERSION,
@@ -91,6 +94,10 @@ from src.shared.report_evidence.identity_verified_web import (
 from src.shared.report_evidence.profile_domain_attestation import (
     build_registered_subdomain_profile_attestation,
     parse_dart_profile_domain_attestation,
+)
+from src.shared.report_evidence.permanent_homepage_relocation import (
+    build_permanent_homepage_relocation,
+    permanent_homepage_relocation_allows_url,
 )
 from src.shared.report_evidence.source_kind_policy import (
     formal_document_writer_ineligibility_reason,
@@ -237,6 +244,8 @@ class _CollectionState:
     # 다른 등록 도메인 exact URL. 링크 사실만으로는 절대 문서가 되지 않고,
     # 수집 후 official_identity의 법인명+등록번호 이중 검증을 다시 거친다.
     cross_domain_candidates: dict[str, str] = field(default_factory=dict)
+    redirect_discoveries: dict[str, BlockedRedirectDiscovery] = field(default_factory=dict)
+    permanent_relocation_proofs: dict[str, str] = field(default_factory=dict)
     # 외부 exact 링크의 계보를 주장할 수 있는 실제 고신뢰 페이지 URL.
     # DART root 신원 검증을 통과한 origin에서 이번 실행 중 성공적으로 읽은
     # 페이지만 들어간다. 호출자가 넘긴 URL 문자열만으로는 채우지 않는다.
@@ -411,6 +420,9 @@ def _has_official_discovery_lineage(
     if promote_verified_root:
         return True
     source = str(source_page_url or "").strip()
+    discovery = state.redirect_discoveries.get(source)
+    if discovery is not None:
+        return _identity_candidate_https_url(discovery.target_url) == candidate_url
     if source == _DART_IR_DISCOVERY:
         return True
     provenance = parse_dart_filing_url_provenance(source)
@@ -471,6 +483,12 @@ def _profile_attestation_for_url(
         return "", "", "", "", ""
     if source_host == dart_host:
         return source_id, evidence, "", "", ""
+    relocation = state.permanent_relocation_proofs.get(source_host, "")
+    if relocation and permanent_homepage_relocation_allows_url(
+        profile_evidence=evidence, verification=relocation, source_url=source_url,
+        from_host=dart_host, to_host=source_host,
+    ):
+        return source_id, evidence, relocation, dart_host, source_host
     subdomain_evidence = build_registered_subdomain_profile_attestation(
         evidence,
         source_url=source_url,
@@ -706,6 +724,7 @@ def collect_official_web_documents(
         company_id=state.company_id,
         documents=tuple(state.documents),
         attempts=tuple(state.attempts),
+        redirect_discoveries=tuple(state.redirect_discoveries.values()),
     )
 
 
@@ -1168,11 +1187,23 @@ def _collect_identity_verified_candidate(
         response = transport(origin.root_url, origin.allows_content_url)
     except WideTransportError as exc:
         error = exc
+        discovery = exc.redirect_discovery
+        # 등록 root 요청의 관측만 새 후보의 계보가 된다. 목적지는 따라가지 않고
+        # 기존 후보 루프에서 자기 robots·SSRF·법인명/번호를 다시 확인한다.
+        if discovery is not None and promote_verified_root and origin.allows_content_url(discovery.source_url):
+            source_id = WIDE_REDIRECT_DISCOVERY_PREFIX + discovery.sha256
+            state.redirect_discoveries[source_id] = discovery
+            target = _identity_candidate_https_url(discovery.target_url)
+            target_origin = parse_official_origin(target)
+            if target_origin is not None and target_origin.host != origin.host:
+                state.add_cross_domain_candidate(url=target, source_page_url=source_id)
     elapsed_ms = int((state.clock() - started) * 1000)
     state.pages_fetched += 1
     _record_page_section(state, candidate_url)
 
     page_state, reason_code = classify_general_outcome(response, error)
+    if error is not None and error.redirect_discovery is not None:
+        reason_code = "redirect_scope_blocked"
     response_bytes = len(
         (response.text if response else "").encode("utf-8", errors="ignore")
     )
@@ -1261,6 +1292,7 @@ def _collect_identity_verified_candidate(
                 else "cross_domain_identity_mismatch"
             )
 
+    relocated_root = False
     if match is not None and response is not None:
         filing_provenance = parse_dart_filing_url_provenance(source_page_url)
         verified_filing_binding = build_verified_dart_filing_official_web_binding(
@@ -1285,14 +1317,43 @@ def _collect_identity_verified_candidate(
                 else (
                     "DART company.json ir_url"
                     if source_page_url == _DART_IR_DISCOVERY
-                    else "검증된 DART root 문서의 exact 링크"
+                    else (
+                        WIDE_REDIRECT_DISCOVERY_LABEL
+                        if source_page_url in state.redirect_discoveries
+                        else "검증된 DART root 문서의 exact 링크"
+                    )
                 )
             )
         )
         source_digest = provenance_digest(source_page_url or candidate_url)
+        discovery = state.redirect_discoveries.get(source_page_url)
+        relocation_proof = ""
+        profile = parse_dart_profile_domain_attestation(state.domain_attestation_evidence)
+        if (discovery is not None and profile is not None
+                and not profile.is_registered_subdomain
+                and profile.corp_code == state.company_id
+                and state.domain_attestation_source_id == f"dart-company-profile-{state.company_id}"):
+            relocation_proof = build_permanent_homepage_relocation(
+                profile_evidence=state.domain_attestation_evidence,
+                redirect=discovery.to_mapping(), candidate_url=candidate_url,
+                scope_sha256=origin.scope_digest,
+                identity_evidence_sha256=match.evidence_sha256,
+                matched_name_sha256=match.matched_name_sha256,
+                registration_number_sha256=match.registration_number_sha256,
+                expected_registration_hashes=tuple(
+                    hashlib.sha256(number.encode("ascii")).hexdigest()
+                    for number in identity.registration_numbers
+                ),
+            )
+            if relocation_proof and response.effective_url != candidate_url:
+                # 목적지 자체의 추가 이동은 영구 root 검증과 섞지 않는다.
+                relocation_proof = ""
+        if relocation_proof:
+            state.permanent_relocation_proofs[host] = relocation_proof
+            relocated_root = True
         # 이름-단독 결속도 DART가 보증한 host라는 계보는 같으므로 root의
         # 기존 신뢰 등급을 그대로 쓴다. 대신 라벨과 사유 코드로 구분한다.
-        is_high_confidence = bool(promote_verified_root or verified_filing_binding)
+        is_high_confidence = bool(promote_verified_root or verified_filing_binding or relocated_root)
         identity_label = (
             _ROOT_NAME_ONLY_IDENTITY_LABEL
             if name_only_root
@@ -1315,7 +1376,7 @@ def _collect_identity_verified_candidate(
         )
         state.bound_hosts[host] = binding
         state.bound_origins[host] = origin
-        if binding.is_high_confidence:
+        if binding.is_high_confidence and not relocated_root:
             state.official_link_source_urls.update(
                 _scoped_canonical_url(item.effective_url, origin)
                 for item in identity_responses
@@ -1330,7 +1391,7 @@ def _collect_identity_verified_candidate(
                 origin=origin,
                 source_kind=(
                     response_classification.source_kind
-                    if promote_verified_root
+                    if promote_verified_root or relocated_root
                     else WIDE_SOURCE_KIND_IDENTITY_VERIFIED_WEB_PAGE
                 ),
                 requirement=(
@@ -1362,7 +1423,7 @@ def _collect_identity_verified_candidate(
             _scoped_canonical_url(item.effective_url, origin)
             for item in identity_responses
         }
-        if binding.is_high_confidence:
+        if binding.is_high_confidence and not relocated_root:
             _discover_sitemap(
                 state,
                 origin=origin,
@@ -1383,7 +1444,7 @@ def _collect_identity_verified_candidate(
                     link=link,
                     source_page_url=source_response.effective_url,
                     origin=origin,
-                    promote_verified_root=binding.is_high_confidence,
+                    promote_verified_root=binding.is_high_confidence and not relocated_root,
                     queue=queue,
                     seen_canonical=seen_canonical,
                 )
@@ -1406,7 +1467,17 @@ def _collect_identity_verified_candidate(
                     WIDE_SOURCE_KIND_WEB_PAGE, "truncated_byte_cap"
                 )
                 break
-            item = _pop_next_page(state, queue)
+            # 이동 root의 공식 원문을 보조 host의 동일 본문이 먼저 소비하지 않게 한다.
+            # 같은 origin 안에서는 기존 장별 우선순위를 유지하고 전역 중복 규칙은 그대로 둔다.
+            same_origin_queue = (
+                [item for item in queue if urllib.parse.urlsplit(item.url).hostname == origin.host]
+                if relocated_root else []
+            )
+            if same_origin_queue:
+                item = _pop_next_page(state, same_origin_queue)
+                queue.remove(item)
+            else:
+                item = _pop_next_page(state, queue)
             _visit_page(
                 state,
                 item=item,
@@ -1443,7 +1514,7 @@ def _collect_identity_verified_candidate(
     attempt_classification = classify_official_page_url(landing_url)
     source_kind = (
         attempt_classification.source_kind
-        if promote_verified_root
+        if promote_verified_root or relocated_root
         else WIDE_SOURCE_KIND_IDENTITY_VERIFIED_WEB_PAGE
     )
     slot_ids = attempt_classification.slot_ids
@@ -1478,6 +1549,16 @@ def _visit_page(
     # 회사 query scope는 host가 바뀌어도 최초 DART 시작 URL이 정본이다.
     # 이 검사는 candidate canonicalize·robots·본문 transport보다 먼저 한다.
     if not root_origin.allows_query_scope(item.url):
+        return
+    relocation = state.permanent_relocation_proofs.get(root_host, "")
+    profile = parse_dart_profile_domain_attestation(state.domain_attestation_evidence)
+    if (relocation and urllib.parse.urlsplit(item.url).hostname == root_host
+            and not permanent_homepage_relocation_allows_url(
+        profile_evidence=state.domain_attestation_evidence,
+        verification=relocation, source_url=item.url,
+        from_host=profile.root_host if profile is not None else "",
+        to_host=root_host,
+    )):
         return
     candidate_origin = parse_official_origin(item.url)
     if candidate_origin is None:
@@ -1521,7 +1602,9 @@ def _visit_page(
                 identity_binding=derived_binding,
                 is_high_confidence=True,
             )
-        elif root_binding is not None and not root_binding.is_high_confidence:
+        elif root_binding is not None and (
+            not root_binding.is_high_confidence or root_host in state.permanent_relocation_proofs
+        ):
             # 법인명+등록번호로 확인한 교차 도메인은 OPTIONAL 보조 경로다.
             # 그 하위호스트가 같은 eTLD+1이라는 이유만으로 다시 REQUIRED로
             # 강해지면 보조 채용/제품 host 장애가 전체 조사를 막게 된다.
@@ -1605,6 +1688,7 @@ def _visit_page(
     if page_state == ATTEMPT_STATE_OK and response is not None:
         if (
             binding.is_high_confidence
+            and root_host not in state.permanent_relocation_proofs
             and origin.allows_content_url(response.effective_url)
             and host_policy.can_fetch(response.effective_url)
         ):
@@ -1644,6 +1728,7 @@ def _visit_page(
                     if (
                         bind_registered_subdomain(root_host, link_host) is None
                         and binding.is_high_confidence
+                        and root_host not in state.permanent_relocation_proofs
                     ):
                         state.add_cross_domain_candidate(
                             url=link,

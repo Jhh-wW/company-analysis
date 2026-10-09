@@ -33,6 +33,7 @@ from src.shared.report_quality.numeric_detection import has_public_numeric_token
 from src.shared.report_quality.source_identity import document_identity
 from src.shared.report_evidence.source_context import source_context_fingerprint
 from src.shared.report_evidence.section_context import parse_section_context, section_context_fingerprint
+from src.shared.report_evidence.practice_context import parse_practice_context, practice_context_fingerprint
 
 
 PROSE_FACT_BINDING_VERSION: Final[str] = "verified-prose-binding-v1"
@@ -53,8 +54,15 @@ class ProseEvidence:
     exact_text: str
     source_context_json: str = ""
     section_context_json: str = ""
+    practice_context_json: str = ""
 
     def __post_init__(self) -> None:
+        if self.practice_context_json != "":
+            parse_practice_context(
+                self.practice_context_json, fragment_sha256=exact_evidence_text_hash(self.exact_text),
+                fragment_location=self.source.location,
+                document_sha256=self.source.document_content_sha256, fragment_text=self.exact_text,
+            )
         if self.section_context_json == "":
             return
         # 공개 Source의 문서 ID는 접수번호로 투영될 수 있어 typed ID와 직접 비교하지 않는다.
@@ -156,6 +164,14 @@ def evaluate_verified_prose_fact(
     )
     if not subject_scope:
         return ProseFactBuildResult(None, "prose_source_actor_scope_unbound")
+    from src.features.composer.education_practice_scope import education_practice_scope_problem
+    practice_problem = education_practice_scope_problem(
+        claim, {item.fragment_id: item.exact_text for item in evidence},
+        section_id=section_id, claim_slot=claim_slot,
+        practice_context_by_source_id={item.fragment_id: item.practice_context_json for item in evidence},
+    )
+    if practice_problem:
+        return ProseFactBuildResult(None, practice_problem)
 
     # FULL에서 확인 등급 산문에 숫자 토큰이 있으면 공식 출처 조각의 원문을 함께 싣는다.
     # 싣는 조건은 안전 판정이 수치 결속을 요구하는 조건(공개 숫자 감지)과 같은 술어다.
@@ -194,6 +210,8 @@ def evaluate_verified_prose_fact(
             manifest[-1]["source_context_sha256"] = source_context_fingerprint(item.source_context_json)
         if item.section_context_json:
             manifest[-1]["section_context_sha256"] = section_context_fingerprint(item.section_context_json)
+        if item.practice_context_json:
+            manifest[-1]["practice_context_sha256"] = practice_context_fingerprint(item.practice_context_json)
         if source.kind is SourceKind.NEWS:
             # 보도 수치는 계산값이 아니다. 최종 품질 검사가 날짜·출처와 함께
             # 실제 숫자·단위를 재대조할 정확 원문을 사실 결속 안에 남긴다.

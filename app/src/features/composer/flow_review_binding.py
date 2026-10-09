@@ -56,6 +56,8 @@ def _binding(
             source_scope["source_context_json"] = fragment.source_context_json
         if fragment.section_context_json:
             source_scope["section_context_json"] = fragment.section_context_json
+        if fragment.practice_context_json:
+            source_scope["practice_context_json"] = fragment.practice_context_json
         refs.append(FlowEvidenceRef(
             fragment_id=fid,
             document_identity=fragment.document_identity,

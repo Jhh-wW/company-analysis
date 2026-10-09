@@ -10,6 +10,7 @@ from datetime import date
 from src.shared.business_challenge_context import IndustryProblemEvidence
 from src.shared.report_evidence.models import CollectedEvidenceDocument
 from src.shared.report_evidence.section_context import parse_section_context
+from src.shared.report_evidence.practice_context import parse_practice_context
 from src.shared.report_evidence.source_context import parse_source_context
 from src.shared.report_evidence.source_kind_policy import formal_document_is_writer_eligible
 
@@ -28,6 +29,7 @@ class OfficialIndustryCandidateEvidence:
     text: str
     source_context_json: str = ""
     section_context_json: str = ""
+    practice_context_json: str = ""
 
     def __post_init__(self) -> None:
         if type(self.document) is not CollectedEvidenceDocument:
@@ -51,7 +53,18 @@ class OfficialIndustryCandidateEvidence:
         ):
             raise ValueError("산업 후보 원문과 문서 사용 구간이 다릅니다")
         date.fromisoformat(self.document.published_on)
-        parse_source_context(self.source_context_json)
+        parse_source_context(
+            self.source_context_json, document_id=self.document_id,
+            document_sha256=self.document.content_sha256,
+            fragment_location=self.location, fragment_sha256=self.text_sha256,
+            section_context_json=self.section_context_json, binding_scope='fragment',
+        )
+        parse_practice_context(
+            self.practice_context_json, document_id=self.document_id,
+            document_sha256=self.document.content_sha256,
+            fragment_location=self.location, fragment_sha256=self.text_sha256,
+            fragment_text=self.text,
+        )
         parse_section_context(
             self.section_context_json, document_id=self.document_id,
             document_sha256=self.document.content_sha256,

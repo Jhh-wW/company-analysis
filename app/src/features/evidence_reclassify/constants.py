@@ -107,6 +107,8 @@ REJECT_PLAN_TERM_OUTSIDE_FUTURE: Final[str] = "plan_term_outside_future_strategy
 REJECT_PARAGRAPH_SLOT_LIMIT: Final[str] = "paragraph_slot_limit"
 REJECT_DUPLICATE_ASSIGNMENT: Final[str] = "duplicate_assignment"
 REJECT_INVALID_REMOVAL_REASON: Final[str] = "invalid_removal_reason"
+COMPLETED_EXECUTION_SLOT: Final[str] = "past_changes:completed_execution"
+REJECT_PRACTICE_COMPLETION: Final[str] = "practice_context_not_completed_execution"
 
 AI_RECLASSIFIED_REASON_CODE: Final[str] = "ai_reclassified"
 REMOVAL_REASON_CODE_PREFIX: Final[str] = "ai_reclassified_removed"

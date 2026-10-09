@@ -41,6 +41,7 @@ from src.features.composer.writer_schema_constants import (
 )
 from src.features.composer.supplement_feedback import supplement_feedback
 from src.features.composer.scope_supplement_feedback import ScopeSupplementFailure, render_scope_supplement_feedback
+from src.features.composer.challenge_response_feedback import ResponseSupplementFailure, render_response_supplement_feedback
 from src.features.composer.partial_evidence import PartialEvidenceView
 from src.features.composer.partial_evidence_constants import (
     EXACT_EVIDENCE_SCOPE_GUIDE,
@@ -98,6 +99,7 @@ from src.features.composer.constants import (
     PARSE_RETRY_LIMIT,
     PROMPT_FRAGMENTS_HEAD,
     PROMPT_FRAGMENT_LOCATION_LABEL,
+    PLAN_DISCLOSURE_DATE_LABEL, PLAN_DISCLOSURE_DATE_PURPOSE,
     PROMPT_HEADER,
     PROMPT_TABLE_HEAD,
     SOURCE_KIND_DISPLAY_NAMES,
@@ -414,6 +416,10 @@ def _render_fragments(
             label += " · 메타데이터 " + news_metadata(fragment)
         if not use_header and fragment.document_title:
             label = f"{label}·{fragment.document_title}"
+        if fragment.document_date:
+            label += (f" · {PLAN_DISCLOSURE_DATE_LABEL}: "
+                      + json.dumps(fragment.document_date, ensure_ascii=False)
+                      + f" ({PLAN_DISCLOSURE_DATE_PURPOSE})")
         show_location = fragment.location and (
             not omit_numeric_location
             or not _is_numeric_offset_location(fragment.location)
@@ -445,6 +451,12 @@ def _render_fragments(
             from src.features.composer.section_context_constants import SECTION_CONTEXT_LABEL
             section_context = parse_section_context(fragment.section_context_json)
             label += " · " + SECTION_CONTEXT_LABEL + ": " + json.dumps(section_context["text"], ensure_ascii=False)
+        if fragment.practice_context_json:
+            from src.shared.report_evidence.practice_context import parse_practice_context
+            from src.features.composer.education_practice_scope_constants import PRACTICE_WRITER_GUIDE
+            practice_context = parse_practice_context(fragment.practice_context_json)
+            label += " · 원문 예시·안내 문맥: " + json.dumps(practice_context["text"], ensure_ascii=False)
+            label += PRACTICE_WRITER_GUIDE
         evidence_text = json.dumps(fragment.text, ensure_ascii=False) if _is_news_fragment(fragment) else fragment.text
         lines.append(f"[조각 {fragment.fragment_id}] ({label}) {evidence_text}\n")
     return "".join(lines)
@@ -1349,6 +1361,7 @@ def _normalize_packet_fragments(
             bound_source=fragment.bound_source,
             source_context_json=fragment.source_context_json,
             section_context_json=fragment.section_context_json,
+            practice_context_json=fragment.practice_context_json,
         )
         for fragment in normalized
     )
@@ -1969,6 +1982,7 @@ def compose_selected_sections(
     section_ids: tuple[str, ...],
     missing_slots_by_section: Mapping[str, tuple[str, ...]] | None = None,
     scope_failures_by_section: Mapping[str, tuple[ScopeSupplementFailure, ...]] | None = None,
+    response_failures_by_section: Mapping[str, tuple[ResponseSupplementFailure, ...]] | None = None,
 ) -> ComposedReport:
     """승인된 FULL 장만 각자의 기존 typed packet으로 한 번씩 다시 쓴다.
 
@@ -2008,9 +2022,13 @@ def compose_selected_sections(
         scope_feedback = render_scope_supplement_feedback(
             packet, (scope_failures_by_section or {}).get(section_id, ()),
         )
+        response_feedback = render_response_supplement_feedback(
+            packet, (response_failures_by_section or {}).get(section_id, ()),
+            (missing_slots_by_section or {}).get(section_id, ()),
+        )
         section = _compose_one_section(
             section_id,
-            supplement_feedback(section_id, missing_slots_by_section, packet=packet) + scope_feedback + build_section_prompt(
+            supplement_feedback(section_id, missing_slots_by_section, packet=packet) + scope_feedback + response_feedback + build_section_prompt(
                 company_name,
                 section_id,
                 prepared.packets[section_id],

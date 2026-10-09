@@ -32,6 +32,49 @@ PROCEDURAL_ACTION_ISSUE_RE = re.compile(
 )
 PROCEDURAL_EVENT_LABEL_RE = re.compile(rf"{_OWNER}{_LABEL}")
 
+# 날짜·심급은 사건의 메타데이터이며 임의의 괄호 설명은 지우지 않는다.
+_LITIGATION_DATE = r"(?:\d{4}년\d{1,2}월\d{1,2}일|\d{4}[-.]\d{1,2}[-.]\d{1,2}일?)"
+_LITIGATION_STAGE = r"(?:\d+심|상고심|항소심|재판|심리)"
+LITIGATION_DATE_METADATA_RE = re.compile(
+    rf"\((?:{_LITIGATION_DATE},?)?(?:{_COURT},?)?{_LITIGATION_STAGE}(?:판결|선고)\)"
+)
+LITIGATION_ENTITY_NAME_MAX_CHARS = 80
+_LITIGATION_ENTITY_NAME = rf"[가-힣A-Za-z0-9·ㆍ]{{1,{LITIGATION_ENTITY_NAME_MAX_CHARS}}}"
+_LITIGATION_ENTITY = (
+    rf"(?:연결회사|회사|당사|본사|자사|"
+    rf"{_LITIGATION_ENTITY_NAME}(?:㈜|\(주\)|주식회사)|"
+    rf"(?:㈜|\(주\)|주식회사){_LITIGATION_ENTITY_NAME})"
+)
+_LITIGATION_OWNER = rf"(?:{_LITIGATION_ENTITY}(?:는|가|의))?"
+_LITIGATION_CONTEXT = r"(?:(?:당기말|보고기간말|기말)?현재)?"
+_LITIGATION_STATUS = (
+    rf"(?:{_LITIGATION_STAGE}){{0,2}}(?:이|가)?(?:진행|계류|심리)중"
+    r"(?:이다|에있다|이며|에있으며|이고|에있고)?"
+)
+# 추정부담금의 불확실성만 닫힌 형식으로 읽는다. 실제 지급·회수·대응은 포함하지 않는다.
+_LITIGATION_AMOUNT_SUBJECT = r"(?:최종)?(?:부담금액|부담금|부담액)(?:은|는|이|가)"
+_LITIGATION_ESTIMATE = (
+    rf"(?:{_LITIGATION_ENTITY}(?:가|는))?"
+    r"추정한(?:금액|부담금액|부담금|부담액)(?:과|와)"
+    r"(?:달라질수있다|다를수있다|달라질수있으며|다를수있으며)"
+)
+LITIGATION_BURDEN_ASSESSMENT_RE = re.compile(
+    rf"{_LITIGATION_AMOUNT_SUBJECT}{_LITIGATION_ESTIMATE}"
+)
+LITIGATION_PROCEDURE_RE = re.compile(
+    rf"{_LITIGATION_OWNER}{_LITIGATION_CONTEXT}{_LABEL}(?:은|는|이|가|도)?(?:각각)?"
+    rf"(?:{_COURTS}(?:에서|에))?{_LITIGATION_STATUS}"
+    rf"(?:,?{_LITIGATION_AMOUNT_SUBJECT}{_LITIGATION_ESTIMATE})?"
+)
+# 사업 분쟁 자체인 제품·권리·고객 서비스 문맥은 절차 설명이어도 의미 검수에 남긴다.
+LITIGATION_BUSINESS_SUBJECT_RE = re.compile(
+    r"제품결함|제조물|특허|지식재산|납품|대출|보험|신탁|법률서비스"
+)
+# 명사형 사건명에 실제 행동 절이 섞이면 절차만인 후보로 확정하지 않는다.
+LITIGATION_LABEL_PREDICATE_RE = re.compile(
+    r"(?:했|하였|됐|되었)(?:다|으며|고)|하고|하며|되어|되며|있으며|있고"
+)
+
 # 표의 명사형 셀은 사건명 뒤에 절차 상태와 괄호 속 법원·심급을 적기도 한다.
 # 괄호 안에 임의 설명을 허용하지 않아 실제 사업 영향까지 절차로 지우지 않는다.
 _TABLE_COURTS = rf"{_COURT}(?:(?:,|·|ㆍ|및|과|와){_COURT})*"

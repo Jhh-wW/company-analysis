@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from src.features.composer.constants import CLAIM_SLOTS_BY_SECTION, SECTION_IDS
 from src.features.composer.port import CollectedFragment
 from src.shared.report_evidence.policy import injected_slots_for
+from src.features.composer.education_practice_scope import education_practice_scope_problem
 
 
 EvidencePairMap = Mapping[str, tuple[str, str]]
@@ -32,6 +33,12 @@ def build_evidence_pair_map(
         for fragment in fragments:
             pair = (slot, fragment.fragment_id)
             if slot not in fragment.supported_claim_slots or pair in seen:
+                continue
+            if education_practice_scope_problem(
+                fragment.text, {fragment.fragment_id: fragment.text},
+                section_id=section_id, claim_slot=slot,
+                practice_context_by_source_id={fragment.fragment_id: fragment.practice_context_json},
+            ):
                 continue
             seen.add(pair)
             choice_id = f"p{SECTION_IDS.index(section_id) + 1}-{len(choices) + 1:03d}"

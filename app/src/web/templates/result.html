@@ -529,7 +529,7 @@
         {% for item in report.summary_items %}
         <li>
           <span class="summary-number">{{ "%02d"|format(loop.index) }}</span>
-          <span class="summary-topic">{{ summary_topic(item.section_id) }}</span>
+          <span class="summary-topic">{{ summary_topic(item.section_id, report, item) }}</span>
           <span class="summary-text">{{ item.text }}</span>{% if reader_summary_notes(report).get('%02d'|format(loop.index)) %}<span class="muted section-note">{{ reader_summary_notes(report).get('%02d'|format(loop.index)) }}</span>{% endif %}
           <span class="summary-section">
             {% for section in report.sections %}{% if section.cell == item.section_id %}{{ section.display_number }}장{% endif %}{% endfor %}

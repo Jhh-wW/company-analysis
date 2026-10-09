@@ -13,7 +13,7 @@ SELECTED_DOCUMENT_FIELDS = (
     ("document_content_sha256", "content_sha256"),
     ("identity_binding", "identity_binding"),
 )
-SELECTED_FRAGMENT_FIELDS = ("text", "location", "source_context_json", "section_context_json")
+SELECTED_FRAGMENT_FIELDS = ("text", "location", "source_context_json", "section_context_json", "practice_context_json")
 SELECTED_PROVENANCE_FIELDS = (
     ("source_collected_on", "collected_at"),
     ("domain_attestation_source_id", "domain_attestation_source_id"),

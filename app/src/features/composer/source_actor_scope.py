@@ -11,6 +11,9 @@ from src.features.composer.entity_scope_constraint_constants import (
 from src.features.composer.scope_constants import SCOPE_CONDITION_UNBOUND
 from src.shared.company_identity import exact_company_names_equivalent
 from src.shared.report_evidence.source_context import parse_source_context, source_context_pending_state_problem
+from src.features.composer.source_actor_prefix_constants import (
+    BUSINESS_PREFIX_MAX_CHARS, BUSINESS_PREFIX_RE, BUSINESS_PREFIX_UNBOUND_RE,
+)
 
 
 def _name(value: str) -> str:
@@ -24,6 +27,23 @@ def _relation_recorded(actor: str, sources: Mapping[str, str]) -> bool:
         + r"|" + label + r"(?:는|은|가|이)(?:종속회사|종속기업|자회사|계열사)(?:입니다|이다|다|로)",
         _name(source),
     ) for source in sources.values())
+
+
+def _subject_surface(unit: str, actor_key: str) -> str:
+    """사업 범위 명사구 한 개 뒤의 직접 행위자만 같은 주어로 읽는다."""
+    candidate = _name(unit)
+    match = BUSINESS_PREFIX_RE.match(unit)
+    if match is None or match.end() > BUSINESS_PREFIX_MAX_CHARS:
+        return candidate
+    # 법인 표기는 주어 비교에서만 정규화한다. 범위구의 다른 회사 표지를 지우지 않는다.
+    prefix = re.sub(r"\s+", "", match.group())
+    if prefix.count("에서") != 1 or BUSINESS_PREFIX_UNBOUND_RE.search(prefix):
+        return candidate
+    remainder = _name(unit[match.end():])
+    # 범위구만 떼어 일반 회사 주어·주어 없는 문장을 승인하지 않는다.
+    if re.match(re.escape(actor_key) + r"(?:는|은|가|이)", remainder):
+        return remainder
+    return candidate
 
 
 def source_actor_problem(candidate_text: str, context_json: str, sources: Mapping[str, str] | None = None,
@@ -61,7 +81,7 @@ def source_actor_problem(candidate_text: str, context_json: str, sources: Mappin
     relation_recorded = _relation_recorded(actor, source_texts)
     units = re.split(r"(?<=[.。;])\s*|\s+(?=(?:회사|당사|동사|본사)(?:는|가|의)\s)", candidate_text)
     for unit in units:
-        candidate = _name(unit)
+        candidate = _subject_surface(unit, actor_key)
         self_subject = bool(SOURCE_CONTEXT_SELF_RE.search(unit))
         named_subject = bool(re.match(r"(?:종속회사|종속기업|자회사|계열사)?" + re.escape(actor_key) + r"(?:는|은|가|이|의)", candidate))
         through_actor = bool(re.search(re.escape(actor_key) + r"(?:를|을)통해", candidate))

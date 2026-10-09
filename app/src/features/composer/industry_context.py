@@ -55,6 +55,7 @@ def discovery_fragments_for_supplement(
             domain_redirect_from_host=document.domain_redirect_from_host,
             domain_redirect_to_host=document.domain_redirect_to_host,
             source_context_json=candidate.source_context_json, section_context_json=candidate.section_context_json,
+            practice_context_json=candidate.practice_context_json,
         )
         if not any(_matches_official_problem(item, problem) for problem in supplement.problems):
             raise ValueError("채택된 산업 설명과 무관한 원문을 출처에 추가할 수 없습니다")

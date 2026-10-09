@@ -55,6 +55,11 @@ from src.features.composer.future_proof_selection_constants import FUTURE_SELECT
 from src.features.composer.numeric_proof_selection_constants import NUMERIC_SELECTION_STAGE
 from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_VERSION
 from src.features.composer.source_actor_scope import source_actor_problem
+from src.features.composer.challenge_event_scope import sanction_response_completed_problem
+from src.features.composer.research_table_status_scope import research_table_status_problem
+from src.features.composer.accounting_scope_guard import accounting_scope_problem
+from src.features.composer.transaction_independence_scope import transaction_independence_problem
+from src.features.composer.accounting_scope_constants import ACCOUNTING_TABLE_SCOPE_LABELS
 from src.features.composer.business_population_scope import section_investment_plan_problem
 from src.features.composer.flow_target_relation import (
     flow_target_relation_hint, flow_target_relation_problem,
@@ -143,6 +148,7 @@ from src.features.composer.challenge_response_evidence import (
 from src.features.composer.constants import (
     CHALLENGE_FLOW_SECTION_ID, STRATEGY_TABLE_SECTION_ID, IDENTITY_TABLE_SECTION_ID,
     OPERATIONS_FLOW_SECTION_ID,
+    PLAN_DISCLOSURE_REVIEW_GUIDE,
 )
 from src.features.composer.future_plan_constants import (
     FUTURE_PLAN_REVIEW_GUIDE,
@@ -453,7 +459,8 @@ NOTICE_VERIFICATION_INTERNAL_ERROR: Final[str] = (
 REVIEW_PROMPT_RULES: Final[str] = (
     "\n■ 판정 규칙\n"
     "1. «확인» 문장은 모든 내용이 근거에 직접 있어야 한다. 근거에 없는 "
-    "정보가 한 조각이라도 들어 있으면 «거짓»이다.\n"
+    "정보가 한 조각이라도 들어 있으면 «거짓»이다. 계약 존재만 지원하는 근거로 "
+    "별도·추가·독립 체결 한정어까지 «참»으로 처리하지 않는다.\n"
     "2. 숫자·연도·고유명사가 근거와 다르면 «거짓»이다. "
     "단, 값이 정확히 일치하는 단위 환산(예: 569,500,000,000원 ↔ 5,695억원)"
     "만 같은 것으로 본다. 단위가 달라 값이 달라지면(예: 5,695억원을 "
@@ -503,6 +510,7 @@ REVIEW_PROMPT_RULES: Final[str] = (
     "같은 인용에서 구체 사업 문제와 대응 관계가 확인되어야 5장의 대응이다. "
     "금융서비스 회사의 실제 상품·고객 문제는 금융 용어가 있다는 이유로 "
     "거절하지 않는다.\n"
+    + PLAN_DISCLOSURE_REVIEW_GUIDE
 )
 REVIEW_JSON_GUIDE: Final[str] = (
     "\n출력 형식 — 설명 없이 아래 모양의 JSON만 출력한다:\n"
@@ -1230,6 +1238,9 @@ def _review_fragment_metadata(fragment: CollectedFragment) -> str:
         from src.shared.report_evidence.section_context import parse_section_context
         from src.features.composer.section_context_constants import SECTION_CONTEXT_LABEL
         metadata[SECTION_CONTEXT_LABEL] = parse_section_context(fragment.section_context_json)["text"]
+    if fragment.practice_context_json:
+        from src.shared.report_evidence.practice_context import parse_practice_context
+        metadata["원문 예시·안내 문맥"] = parse_practice_context(fragment.practice_context_json)["text"]
     # JSON 구분자 공백만 줄인다. 빈 필드와 문자열 안의 공백도 출처 자료다.
     return "출처 분류(JSON 자료): " + json.dumps(
         metadata, ensure_ascii=False, separators=(",", ":")
@@ -1616,6 +1627,31 @@ def _prepare_review_future_options(items, frag_by_id):
                                       if fid in frag_by_id),
         ) for item in items if item.sentence is not None
     })
+
+
+def _future_selection_candidates(candidates, diagnostic_contexts, fragments):
+    """미래 선택의 전체 후보를 기존 검수 몸통과 정확히 다시 결속한다.
+
+    보도 접두사는 일반 수치 검수에서 제외하지만 선택지의 후보 SHA에는 포함된다.
+    실제 검수 문장을 같은 정규화 함수로 돌린 결과가 원래 몸통·자기 근거와 모두
+    같을 때만 전체 문장을 복원한다. 다른 날짜·매체·본문을 추정해 보정하지 않는다.
+    """
+    result = dict(candidates)
+    for number, (text, sources) in candidates.items():
+        context = (diagnostic_contexts or {}).get(number)
+        if not context or len(context) < 3 or not isinstance(context[2], str):
+            continue
+        full_text = context[2]
+        if full_text == text:
+            continue
+        source_ids = tuple(fid for fid in sources if fid != TABLE_SOURCE_ID)
+        table_source = sources.get(TABLE_SOURCE_ID, "")
+        normalized, own_sources = _grounding_candidate(
+            full_text, source_ids, fragments or {}, table_source,
+        )
+        if normalized == text and own_sources == sources:
+            result[number] = (full_text, sources)
+    return result
 
 
 def _ask_grouped_verdicts(
@@ -2230,7 +2266,9 @@ def _apply_grounding(
     grounding_details: dict[int, dict[str, object]] = {}
     original_future_raw = raw
     raw, invalid_future_selections = restore_future_proof_selections(
-        raw, future_options_by_number or {}, candidates,
+        raw, future_options_by_number or {}, _future_selection_candidates(
+            candidates, diagnostic_contexts, source_fragments_by_id,
+        ),
         {number: context[0] for number, context in (diagnostic_contexts or {}).items()},
         claim_slots_by_number or {},
         source_fragments_by_id or {},
@@ -2364,6 +2402,36 @@ def _apply_grounding(
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
                 continue
+            from src.features.composer.education_practice_scope import education_practice_scope_problem
+            problem = education_practice_scope_problem(
+                text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+                section_id=context[0],
+                claim_slot=(claim_slots_by_number or {}).get(number, ""),
+                practice_context_by_source_id={
+                    fid: fragment.practice_context_json
+                    for fid, fragment in (source_fragments_by_id or {}).items()
+                    if fid in sources and fragment.practice_context_json
+                },
+            )
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
+        if context and context[1] == DIAGNOSTIC_KIND_SUMMARY:
+            from src.features.composer.education_practice_scope import education_practice_scope_problem
+            problem = education_practice_scope_problem(
+                text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+                section_id="summary",
+                practice_context_by_source_id={
+                    fid: fragment.practice_context_json
+                    for fid, fragment in (source_fragments_by_id or {}).items()
+                    if fid in sources and fragment.practice_context_json
+                },
+            )
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
         # ★ «확인» 산문은 본문이든 요약이든 자기 인용 원문에 걸린다. 여기서
         #   걸러야 본문·요약·부록·빈 장 안내가 «같은 판정»을 보게 된다.
         #
@@ -2454,7 +2522,35 @@ def _apply_grounding(
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
                 continue
+        problem = transaction_independence_problem(text, sources)
+        if problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = problem
+            continue
+        problem = accounting_scope_problem(
+            text, sources,
+            allow_bound_table=_numeric_binding_uses_table(review_evidence.get(number)),
+        )
+        if problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = problem
+            continue
+        problem = research_table_status_problem(
+            text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+        )
+        if problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = problem
+            continue
         slot = (claim_slots_by_number or {}).get(number, "")
+        problem = sanction_response_completed_problem(
+            text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+            claim_slot=slot,
+        )
+        if problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = problem
+            continue
         if not (flow_cells_by_number and number in flow_cells_by_number):
             problem = completed_execution_status_problem(text, slot)
             if problem:
@@ -2527,6 +2623,17 @@ def _apply_grounding(
             #   표지가 결합해 정상 행이 지워진다(cellwise_problem 머리말).
             problem = cellwise_problem(cells, absence_claim_problem)
             problem = problem or flow_scope_problem(cells, sources)
+            if not problem and context and context[0] == "past_changes":
+                from src.features.composer.education_practice_scope import education_practice_scope_problem
+                problem = education_practice_scope_problem(
+                    text, sources, section_id="past_changes",
+                    claim_slot="past_changes:completed_execution",
+                    practice_context_by_source_id={
+                        fid: fragment.practice_context_json
+                        for fid, fragment in (source_fragments_by_id or {}).items()
+                        if fid in sources and fragment.practice_context_json
+                    },
+                )
             if not problem and context and context[0] == "business_model":
                 problem = next((value for cell in cells if (value := business_relation_scope_problem(
                     cell, sources, section_id="business_model",
@@ -2709,6 +2816,9 @@ def _table_grounding_source(table: Optional[PerformanceTable]) -> str:
             lines.append(
                 f"{metric} | {period} | {raw_text}{TABLE_RAW_VALUE_ROW_SUFFIX}"
             )
+    scope_label = ACCOUNTING_TABLE_SCOPE_LABELS.get(table.entity_scope)
+    if lines and scope_label:
+        lines.insert(0, scope_label)
     return "\n".join(lines)
 
 

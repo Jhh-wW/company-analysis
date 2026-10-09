@@ -10,11 +10,15 @@ DART가 준 주소와 내려받은 HTML의 링크는 모두 신뢰하지 않는�
 from __future__ import annotations
 
 import functools
+import datetime as dt
+import hashlib
 import http.client
 import ipaddress
 import math
+import json
 import multiprocessing
 import socket
+import string
 import ssl
 import threading
 import time
@@ -25,6 +29,11 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from email.message import Message
 from typing import Callable, Final, Iterator
+
+from src.features.homepage.constants import (
+    WIDE_REDIRECT_DISCOVERY_STATUS_CODES,
+    WIDE_REDIRECT_LOCATION_MAX_CHARS,
+)
 
 ALLOWED_SCHEMES: Final[frozenset[str]] = frozenset({"http", "https"})
 # 일반 웹 포트와 흔한 대체 웹 포트만 허용한다. 임의 포트를 받으면 이 기능이 내부
@@ -49,6 +58,56 @@ _SYSTEM_GETADDRINFO = socket.getaddrinfo
 
 class UnsafeHomepageUrlError(ValueError):
     """일반적인 안전한 공개 웹 주소가 아니다."""
+
+
+@dataclass(frozen=True)
+class BlockedRedirectDiscovery:
+    """전송이 거절한 Location의 관측이며 목적지의 공식성·접속 허용 증거는 아니다."""
+
+    source_url: str
+    target_url: str
+    status: int
+    raw_location: str
+    observed_at: str
+
+    def __post_init__(self) -> None:
+        if self.status not in WIDE_REDIRECT_DISCOVERY_STATUS_CODES:
+            raise ValueError("redirect 발견 상태 코드가 올바르지 않습니다")
+        for value in (self.source_url, self.target_url, self.raw_location, self.observed_at):
+            if not isinstance(value, str) or not value or len(value) > WIDE_REDIRECT_LOCATION_MAX_CHARS or any(ord(char) < 32 or ord(char) == 127 for char in value):
+                raise ValueError("redirect 발견 문자열이 올바르지 않습니다")
+        source = urllib.parse.urlsplit(self.source_url)
+        target = urllib.parse.urlsplit(self.target_url)
+        if any(value.scheme != "https" or not value.hostname or value.username is not None or value.password is not None for value in (source, target)) or source.fragment:
+            raise ValueError("redirect 발견 URL은 계정정보 없는 HTTPS여야 합니다")
+        # urllib의 Location 해석과 같은 방법으로 원 header와 목적지를 결속한다.
+        parts = urllib.parse.urlparse(self.raw_location)
+        if parts.netloc and not parts.path:
+            parts = parts._replace(path="/")
+        try:
+            resolved = urllib.parse.urljoin(self.source_url, urllib.parse.quote(urllib.parse.urlunparse(parts), encoding="iso-8859-1", safe=string.punctuation))
+        except UnicodeError:
+            raise ValueError("redirect Location의 원바이트 표현이 올바르지 않습니다") from None
+        resolved = _https_upgraded_same_host_url(self.source_url, resolved) or resolved
+        if resolved != self.target_url:
+            raise ValueError("redirect 원 Location과 목적지 URL 결속이 다릅니다")
+
+    def to_mapping(self) -> dict[str, str | int]:
+        return {"source_url": self.source_url, "target_url": self.target_url,
+                "status": self.status, "raw_location": self.raw_location,
+                "observed_at": self.observed_at}
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(json.dumps(self.to_mapping(), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+class BlockedHomepageRedirectError(UnsafeHomepageUrlError):
+    """동일 요청 정책의 차단은 유지하고 미신뢰 발견 관측만 전달한다."""
+
+    def __init__(self, discovery: BlockedRedirectDiscovery) -> None:
+        super().__init__("공식 URL 범위 밖의 HTTP Location을 차단했습니다")
+        self.discovery = discovery
 
 
 class HomepageResponseError(Exception):
@@ -1023,7 +1082,18 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         _require_no_https_downgrade(request.full_url, newurl)
         # 다음 요청을 만들기 전에 모든 Location을 검사한다. 실제 연결 순간 프로토콜
         # 처리기가 한 번 더 검사·고정해 DNS 재바인딩의 시간차 틈을 닫는다.
-        _require_url_allowed(newurl, self._url_allowed)
+        try:
+            _require_url_allowed(newurl, self._url_allowed)
+        except UnsafeHomepageUrlError as policy_error:
+            try:
+                discovery = BlockedRedirectDiscovery(
+                    source_url=request.full_url, target_url=newurl, status=code,
+                    raw_location=str(headers.get("Location", "")),
+                    observed_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+                )
+            except ValueError:
+                raise policy_error from None
+            raise BlockedHomepageRedirectError(discovery) from None
         if self._deadline is not None:
             resolve_safe_target(newurl, deadline=self._deadline)
         else:
@@ -1038,6 +1108,10 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         # 본문을 비운다. 악성 서버가 거대한 본문을 붙이지 못하게 읽지 않고 닫는다.
         body = _UndrainedRedirectBody(fp)
         try:
+            get_all = getattr(headers, "get_all", None)
+            locations = get_all("Location", []) if callable(get_all) else [value for name, value in headers.items() if str(name).casefold() == "location"]
+            if len(locations) != 1:
+                raise UnsafeHomepageUrlError("redirect Location은 정확히 하나여야 합니다")
             return super().http_error_302(request, body, code, msg, headers)
         finally:
             fp.close()

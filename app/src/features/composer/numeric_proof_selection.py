@@ -64,6 +64,8 @@ def _fragment_snapshot(fragment: CollectedFragment) -> dict[str, str]:
     )}
     if fragment.section_context_json:
         snapshot['section_context_json'] = fragment.section_context_json
+    if fragment.practice_context_json:
+        snapshot['practice_context_json'] = fragment.practice_context_json
     return snapshot
 
 

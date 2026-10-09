@@ -513,7 +513,7 @@ WIDE_ATTEMPT_FAILED: Final[str] = "FAILED"
 WIDE_ATTEMPT_TRUNCATED: Final[str] = "TRUNCATED"
 
 #: 원문 위치·수집기 계약에 함께 봉인할 버전 문자열.
-WIDE_COLLECTOR_VERSION: Final[str] = "homepage-wide-collector/2"
+WIDE_COLLECTOR_VERSION: Final[str] = "homepage-wide-collector/5"
 WIDE_PARSER_VERSION: Final[str] = "homepage-wide-parser/2"
 
 #: 채용·IR·뉴스룸·블로그 호스트·경로를 먼저 살펴보게 하는 우선순위 키워드.
@@ -691,3 +691,7 @@ WIDE_SLOT_BODY_KEYWORDS: Final[dict[str, tuple[str, ...]]] = {
     "culture:verified_case": ("사례", "후기", "인터뷰", "스토리"),
     "competitive_position:self_context": ("강점", "차별화", "경쟁력", "1위", "선도"),
 }
+WIDE_REDIRECT_DISCOVERY_PREFIX = "blocked-http-location:"
+WIDE_REDIRECT_DISCOVERY_LABEL = "DART 등록 URL의 차단된 HTTP Location(후보별 이중 신원 확인)"
+WIDE_REDIRECT_LOCATION_MAX_CHARS = 4096
+WIDE_REDIRECT_DISCOVERY_STATUS_CODES = frozenset({301, 302, 303, 307, 308})

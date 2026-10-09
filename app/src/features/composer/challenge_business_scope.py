@@ -28,6 +28,9 @@ from src.features.composer.challenge_business_scope_constants import (
     PROCEDURAL_ISSUE_ONLY, PROCEDURAL_ISSUE_UNIT_RE, PROCEDURAL_LABEL_RELATION_RE,
     PROCEDURAL_COURT_ISSUE_RE, PROCEDURAL_ACTION_ISSUE_RE, PROCEDURAL_EVENT_LABEL_RE,
     PROCEDURAL_TABLE_ISSUE_RE, TABLE_ACCOUNTING_RESPONSE_UNIT_RE,
+    LITIGATION_DATE_METADATA_RE, LITIGATION_PROCEDURE_RE,
+    LITIGATION_BURDEN_ASSESSMENT_RE, LITIGATION_BUSINESS_SUBJECT_RE,
+    LITIGATION_LABEL_PREDICATE_RE,
     TABLE_ACCOUNTING_RESPONSE_ONLY_RE,
     EXPENSE_COMPARISON_RE, EXPENSE_ROW_VALUES_RE, EXPENSE_ACTIVITY_EVENT_RE,
     EXPENSE_NONACTUAL_CONTEXT_RE, EXPENSE_ACTOR_RE, EXPENSE_OWNER_RE, EXPENSE_SELF_ACTORS,
@@ -40,12 +43,34 @@ from src.shared.report_evidence.challenge_eligibility import (
 )
 
 
+def _litigation_procedure_problem(text: str) -> str:
+    """선택한 후보가 소송 진행과 추정부담금 평가로만 닫히는지 읽는다."""
+    compact = "".join(text.split())
+    normalized = LITIGATION_DATE_METADATA_RE.sub("", compact)
+    units = tuple(value for value in PROCEDURAL_ISSUE_UNIT_RE.split(normalized) if value)
+    has_procedure = False
+    for unit in units:
+        match = LITIGATION_PROCEDURE_RE.fullmatch(unit)
+        if match:
+            label = match.group("label")
+            if (PROCEDURAL_LABEL_RELATION_RE.search(label)
+                    or LITIGATION_BUSINESS_SUBJECT_RE.search(label)
+                    or LITIGATION_LABEL_PREDICATE_RE.search(label)):
+                return ""
+            has_procedure = True
+        elif not LITIGATION_BURDEN_ASSESSMENT_RE.fullmatch(unit):
+            return ""
+    return PROCEDURAL_ISSUE_ONLY if has_procedure else ""
+
+
 def _procedural_issue_problem(text: str, *, table_cell: bool = False) -> str:
     """사건명·법원·심급·절차 상태만인 후보를 직접 사업 문제로 세지 않는다.
 
     형식 밖의 술어·사업 영향이 섞이면 의미 검수에 남긴다. 자기 인용의 다른 절이나
     표의 대응 셀은 절차 전용 후보에 사업 영향을 빌려주지 않는다.
     """
+    if problem := _litigation_procedure_problem(text):
+        return problem
     units = tuple(unit for unit in PROCEDURAL_ISSUE_UNIT_RE.split(text) if unit.strip())
     if not units:
         return ""
@@ -55,7 +80,9 @@ def _procedural_issue_problem(text: str, *, table_cell: bool = False) -> str:
                  or PROCEDURAL_ACTION_ISSUE_RE.fullmatch(compact)
                  or PROCEDURAL_EVENT_LABEL_RE.fullmatch(compact)
                  or (PROCEDURAL_TABLE_ISSUE_RE.fullmatch(compact) if table_cell else None))
-        if not match or PROCEDURAL_LABEL_RELATION_RE.search(match.group("label")):
+        if (not match or PROCEDURAL_LABEL_RELATION_RE.search(match.group("label"))
+                or LITIGATION_BUSINESS_SUBJECT_RE.search(match.group("label"))
+                or LITIGATION_LABEL_PREDICATE_RE.search(match.group("label"))):
             return ""
     return PROCEDURAL_ISSUE_ONLY
 

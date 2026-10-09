@@ -194,16 +194,22 @@ def different_document_actor(context_json: str) -> bool:
     return key(actor) != key(item["document_actor"])
 
 
-def validate_source_context(raw: str, *, document_text: str | None = None) -> dict[str, str]:
+def validate_source_context(
+    raw: str, *, document_text: str | None = None, document_id: str = '',
+    document_sha256: str = '', fragment_location: str = '', fragment_sha256: str = '',
+    section_context_json: str | None = None,
+) -> dict[str, str]:
     """닫힌 원문 문맥과, 수집 경계에서는 실제 문서 범위까지 대조한다."""
     if not raw:
         return {}
     item = json.loads(raw)
-    if (type(item) is not dict or set(item) not in (c.CONTEXT_KEYS, c.CONTEXT_KEYS | {"item"})
+    self_section = item.get("origin") == c.SELF_SECTION_ORIGIN if type(item) is dict else False
+    allowed_keys = (c.CONTEXT_KEYS | c.SELF_SECTION_EXTRA_KEYS,) if self_section else (c.CONTEXT_KEYS, c.CONTEXT_KEYS | {"item"})
+    if (type(item) is not dict or set(item) not in allowed_keys
             or any(type(value) is not str for value in item.values())
             or item["version"] != c.CONTEXT_VERSION
-            or item["origin"] not in ("company_heading", "table_row")
-            or not item["actor"] or item["actor"] not in item["text"]
+            or item["origin"] not in ("company_heading", "table_row", c.SELF_SECTION_ORIGIN)
+            or not item["actor"] or (not self_section and item["actor"] not in item["text"])
             or not item["document_actor"] or len(item["text"]) > c.MAX_CONTEXT_TEXT_CHARS
             or item["status"] not in item["text"]):
         raise ValueError("회사 주어 문맥 형식이나 명시 원문이 다릅니다")
@@ -218,7 +224,24 @@ def validate_source_context(raw: str, *, document_text: str | None = None) -> di
             raise ValueError("회사 주어 문맥이 실제 문서 원문과 다릅니다")
     if json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")) != raw:
         raise ValueError("회사 주어 문맥의 직렬화가 정본과 다릅니다")
-    if item["origin"] == "table_row":
+    if self_section:
+        from features.evidence_collection.section_context import parse_section_context
+        section = parse_section_context(
+            item["section_context_json"], document_text=document_text, document_id=document_id,
+            document_sha256=document_sha256, fragment_location=fragment_location,
+            fragment_sha256=fragment_sha256,
+        )
+        if section_context_json is not None and item['section_context_json'] != section_context_json:
+            raise ValueError("자기 사업부문 소속과 조각의 사업 범위 문맥이 다릅니다")
+        parts = {re.sub(r"\s+", "", part) for part in c.SELF_DECLARATION_PART_RE.findall(item["text"])}
+        if (item["actor"] != item["document_actor"] or item["status"]
+                or c.SELF_DECLARATION_RE.fullmatch(item["text"]) is None
+                or c.SELF_DECLARATION_EXCLUDED_RE.search(item["text"])
+                or item["declaration_part"] not in parts
+                or re.sub(r"\s+", "", section["text"][1:-1]) != item["declaration_part"]
+                or int(item["location"].split("-")[1]) >= int(section["location"].split("-")[0])):
+            raise ValueError("자기 사업부문 선언과 제품 원문 범위가 결속되지 않았습니다")
+    elif item["origin"] == "table_row":
         cells = re.split(r"\n\n| \| ", item["text"])
         if item["actor"] not in cells or (item["status"] and item["status"] not in cells) or (item.get("item") and item["item"] not in cells):
             raise ValueError("회사 주어·상태는 표의 완전한 셀 원문이어야 합니다")

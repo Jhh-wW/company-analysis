@@ -12,6 +12,16 @@ from typing import Final
 from src.shared.report_quality.constants import COMPARISON_JUDGMENTS
 
 
+# 검증 사실의 의미 칸만 읽는다. 본문 어휘로 새 사업 의미를 추정하지 않는다.
+BUSINESS_SUMMARY_TOPICS: Final[dict[str, str]] = {
+    "customer_type": "고객 대상",
+    "sales_channel": "판매 경로",
+    "value_exchange": "제공 가치와 대가",
+    "revenue_model": "수익 모델",
+}
+BUSINESS_SUMMARY_FALLBACK: Final[str] = "사업 구조"
+
+
 CANONICAL_SCHEMA_VERSION: Final[str] = "company-report-v4-canonical"
 
 # 완료 사업연도 두 개만 확인돼도 동일한 추세 막대로 비교할 수 있다.
