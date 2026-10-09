@@ -71,7 +71,8 @@ def test_explicit_opt_in_only_attaches_metadata(monkeypatch, configured):
 # 근거: tmp/audit-20261010/plan-disclosure-prompt-baseline-private.json.
 # 제재표 상태 안내 209자만 역치환해 직전 전체 바이트와 접두부를 복원했다.
 # 근거: tmp/audit-20261010/sanction-response-prompt-baseline-private.json.
-@pytest.mark.parametrize("grouped,prefix_chars", ((False, 14486), (True, 15665)))
+# 거래 존재와 독립 체결을 구분하는 안내 50자만 역치환하면 직전 지문이 복원된다.
+@pytest.mark.parametrize("grouped,prefix_chars", ((False, 14536), (True, 15715)))
 @pytest.mark.parametrize("factory", (_golden_case, _large_case, _boundary_case))
 def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
     monkeypatch, grouped, prefix_chars, factory,
@@ -95,10 +96,10 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-        (_golden_case, False, "475c7e4963fb824674a49c4f890eb6b9f828186f668c688249cfb916ac8174df"),
-        (_golden_case, True, "519ef54144aad114df9f94d5710b223f133876c965e6684370ea261b9a9b84c4"),
-        (_boundary_case, False, "fd1b6b4f65e78c5eb89d4aee8642be867d4c9c8c69307811550b172516f580d8"),
-        (_boundary_case, True, "481a235c34cf4e9f41dd1b9fd41da6c628252b540a4a1939453112f8785de2f8"),
+        (_golden_case, False, "66811c4f7c637c489ea4a04410b18b71a2be2c234fc86615b031950a6d1be61f"),
+        (_golden_case, True, "78ebdf6952eb113692469a5edda74b1ea22c919251c98dab119e872db90766c0"),
+        (_boundary_case, False, "71335a9a68930aefb05ec45fa13904de73164bf1c8f7ff8ac99f24a2c65103cc"),
+        (_boundary_case, True, "2ddae513cedefc551365a11f1a7e43ac5c289cd5d163303e6e69e72e046b70c0"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,

@@ -58,6 +58,7 @@ from src.features.composer.source_actor_scope import source_actor_problem
 from src.features.composer.challenge_event_scope import sanction_response_completed_problem
 from src.features.composer.research_table_status_scope import research_table_status_problem
 from src.features.composer.accounting_scope_guard import accounting_scope_problem
+from src.features.composer.transaction_independence_scope import transaction_independence_problem
 from src.features.composer.accounting_scope_constants import ACCOUNTING_TABLE_SCOPE_LABELS
 from src.features.composer.business_population_scope import section_investment_plan_problem
 from src.features.composer.flow_target_relation import (
@@ -458,7 +459,8 @@ NOTICE_VERIFICATION_INTERNAL_ERROR: Final[str] = (
 REVIEW_PROMPT_RULES: Final[str] = (
     "\n■ 판정 규칙\n"
     "1. «확인» 문장은 모든 내용이 근거에 직접 있어야 한다. 근거에 없는 "
-    "정보가 한 조각이라도 들어 있으면 «거짓»이다.\n"
+    "정보가 한 조각이라도 들어 있으면 «거짓»이다. 계약 존재만 지원하는 근거로 "
+    "별도·추가·독립 체결 한정어까지 «참»으로 처리하지 않는다.\n"
     "2. 숫자·연도·고유명사가 근거와 다르면 «거짓»이다. "
     "단, 값이 정확히 일치하는 단위 환산(예: 569,500,000,000원 ↔ 5,695억원)"
     "만 같은 것으로 본다. 단위가 달라 값이 달라지면(예: 5,695억원을 "
@@ -2520,6 +2522,11 @@ def _apply_grounding(
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
                 continue
+        problem = transaction_independence_problem(text, sources)
+        if problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = problem
+            continue
         problem = accounting_scope_problem(
             text, sources,
             allow_bound_table=_numeric_binding_uses_table(review_evidence.get(number)),
