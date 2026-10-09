@@ -2844,13 +2844,13 @@ def _add_projection_section(
 
 def _add_industry_contexts(story: list[Flowable], display: PublicSectionDisplay, styles: dict[str, ParagraphStyle]) -> None:
     for item in display.industry_contexts:
-        story.append(Paragraph("공식 자료에 나온 사업과 관련된 산업 과제 · 해석", styles["small"]))
+        story.append(Paragraph(_escape(item.caption + " · 해석"), styles["small"]))
         story.extend(Paragraph(_escape(text), styles["body"]) for text in item.lines)
 
 
 def _add_unsealed_industry_contexts(story: list[Flowable], report: Report, section: ReportSection, styles: dict[str, ParagraphStyle]) -> None:
     for item in industry_context_displays(section.industry_contexts, tuple(report.citations)):
-        story.append(Paragraph("공식 자료에 나온 사업과 관련된 산업 과제 · 해석", styles["small"]))
+        story.append(Paragraph(_escape(item.caption + " · 해석"), styles["small"]))
         story.extend(Paragraph(_escape(text), styles["body"]) for text in item.lines)
 
 

@@ -17,9 +17,14 @@ from src.shared.report_evidence.constants import (
     FORMAL_DOCUMENT_SOURCE_KINDS, OFFICIAL_WEB_SOURCE_KINDS,
 )
 from src.shared.report_evidence.source_verification import SourceVerifier
+from src.shared.report_evidence.news_business_activity import (
+    news_business_anchor_problem, parse_news_business_binding,
+)
+from src.shared.report_evidence.constants import SOURCE_KIND_NEWS
 
 INDUSTRY_CONTEXT_SECTION: Final[str] = "current_challenges"
 INDUSTRY_CONTEXT_CAPTION: Final[str] = "공식 자료에 나온 사업과 관련된 산업 과제"
+NEWS_INDUSTRY_CONTEXT_CAPTION: Final[str] = "검증된 보도 사업과 관련된 산업 과제"
 INDUSTRY_CONTEXT_LIMITATION: Final[str] = (
     "산업 자료와 공식 사업 자료를 연결한 해석이다. 이 회사의 직접 피해와 "
     "실제 대응은 확인되지 않았다."
@@ -83,7 +88,12 @@ class BusinessActivityAnchor:
     def __post_init__(self) -> None:
         for name in ("anchor_id", "company_id", "document_id", "source_url", "business_item"):
             _text(getattr(self, name), name)
-        if self.source_kind not in FORMAL_DOCUMENT_SOURCE_KINDS:
+        if self.source_kind == SOURCE_KIND_NEWS:
+            if news_business_anchor_problem(
+                self, company_id=self.company_id, reference_date=self.published_on,
+            ):
+                raise ValueError("뉴스 사업의 자기 회사·원문·행동 결속이 올바르지 않습니다")
+        elif self.source_kind not in FORMAL_DOCUMENT_SOURCE_KINDS:
             raise ValueError("산업 과제의 회사 사업 근거는 공식 자료여야 합니다")
         _span(self.exact_text, self.text_sha256, self.location)
         if self.business_item not in self.exact_text:
@@ -184,10 +194,22 @@ class IndustryChallengeContext:
 
     @property
     def interpretation(self) -> str:
+        if self.anchor.source_kind == SOURCE_KIND_NEWS:
+            return f"보도에서 확인한 사업 ‘{self.anchor.business_item}’에 이 산업 문제가 적용되는지 점검할 필요가 있다."
         return f"공식 자료에서 확인한 사업 ‘{self.anchor.business_item}’에 이 산업 문제가 적용되는지 점검할 필요가 있다."
 
     @property
     def limitation(self) -> str:
+        if self.anchor.source_kind == SOURCE_KIND_NEWS:
+            role = parse_news_business_binding(self.anchor.identity_binding).get("business_role")
+            basis = "인수한 사업의 관련성" if role == "acquired_business" else "보도된 현재 사업의 관련성"
+            limitation = (
+                f"{basis}과 산업 자료를 연결한 해석이다. 회사의 직접 피해·실제 대응·"
+                "주력 순위·최초 사업 개시는 확인되지 않았다."
+            )
+            if self.problem.geography == OFFICIAL_UNSPECIFIED_GEOGRAPHY:
+                limitation += " " + UNSPECIFIED_GEOGRAPHY_LIMITATION
+            return limitation
         if self.problem.geography == OFFICIAL_UNSPECIFIED_GEOGRAPHY:
             return INDUSTRY_CONTEXT_LIMITATION + " " + UNSPECIFIED_GEOGRAPHY_LIMITATION
         return INDUSTRY_CONTEXT_LIMITATION
@@ -206,6 +228,13 @@ class IndustryContextDisplay:
     industry_source_number: int
     lines: tuple[str, ...] = ()
 
+    @property
+    def caption(self) -> str:
+        """기존 공식 표시와 뉴스 사업의 출처 종류를 구분한다."""
+        return (NEWS_INDUSTRY_CONTEXT_CAPTION
+                if self.context.anchor.source_kind == SOURCE_KIND_NEWS
+                else INDUSTRY_CONTEXT_CAPTION)
+
     def __post_init__(self) -> None:
         if type(self.context) is not IndustryChallengeContext:
             raise ValueError("산업 과제 표시의 근거 계약이 올바르지 않습니다")
@@ -222,7 +251,7 @@ class IndustryContextDisplay:
         )
         expected = (
             f"{problem_label}({geography}): {self.context.problem.problem} [{self.industry_source_number}]",
-            f"공식 사업 근거: {self.context.anchor.business_item} [{self.business_source_number}]",
+            f"{'보도 사업 근거' if self.context.anchor.source_kind == SOURCE_KIND_NEWS else '공식 사업 근거'}: {self.context.anchor.business_item} [{self.business_source_number}]",
             f"{self.context.interpretation} [{self.business_source_number}] [{self.industry_source_number}] — 해석",
             self.context.limitation,
         )
@@ -308,7 +337,20 @@ def industry_context_problems(
                     or verified.content_sha256 != span.document_content_sha256
                     or verified.source_id != span.source_id):
                 problems.append("industry_context_unbound_source")
-            elif official and not verified.official:
+            elif official and span.source_kind == SOURCE_KIND_NEWS and (
+                not verified.news
+                or news_business_anchor_problem(
+                    span, company_id=company_id, reference_date=reference_date,
+                )
+                or str(getattr(source, "identity_binding", "")) != span.identity_binding
+                or str(getattr(source, "document_id", "")) != span.document_id
+                or str(getattr(source, "location", "")) != span.location
+                or str(getattr(source, "published_at", "")) != span.published_on
+                or str(getattr(source, "publisher", "")) != span.publisher
+                or str(getattr(source, "title", "")) != span.title
+            ):
+                problems.append("industry_context_unbound_news_anchor")
+            elif official and span.source_kind != SOURCE_KIND_NEWS and not verified.official:
                 problems.append("industry_context_unofficial_anchor")
             elif not official and not (verified.news or verified.official):
                 problems.append("industry_context_unqualified_industry_source")

@@ -203,6 +203,9 @@ class _FragmentMeta:
     source_document_id: str = ""
     source_publisher: str = ""
     identity_binding: str = ""
+    news_claim_kind: str = ""
+    news_temporal_status: str = ""
+    news_grounded: bool = False
     source_collected_on: str = ""
     domain_attestation_source_id: str = ""
     domain_attestation_evidence: str = ""
@@ -308,6 +311,9 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
             identity_binding=str(
                 getattr(fragment, "identity_binding", "") or ""
             ).strip(),
+            news_claim_kind=getattr(fragment, "news_claim_kind", ""),
+            news_temporal_status=getattr(fragment, "news_temporal_status", ""),
+            news_grounded=getattr(fragment, "news_grounded", False),
             source_collected_on=str(
                 getattr(fragment, "source_collected_on", "") or ""
             ).strip(),
@@ -889,6 +895,7 @@ def _build_source(
             used_in=list(used_in),
             evidence_hashes=evidence_hashes,
             exact_evidence_hashes=exact_evidence_hashes,
+            identity_binding=meta.identity_binding,
         )
     elif identity_host and identity_document_id:
         source = Source(

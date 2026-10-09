@@ -2,7 +2,7 @@
 
 import re
 
-INDUSTRY_PROMPT_VERSION = "industry-context-v5"
+INDUSTRY_PROMPT_VERSION = "industry-context-v6"
 INDUSTRY_ASSESSMENT_MAX_ANCHORS = 3
 INDUSTRY_ASSESSMENT_FIELD = "industry_assessments"
 INDUSTRY_ASSESSMENT_STATUSES = (

@@ -8,6 +8,7 @@ import time
 from collections import Counter, deque
 from concurrent.futures import CancelledError, Future
 from dataclasses import dataclass
+from src.features.news_intake.business_anchors import extend_verified_news_business_anchors
 from functools import partial
 from typing import Any, Callable, Mapping
 
@@ -80,6 +81,8 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     """
 
     policy = policy or NewsCollectionPolicy()
+    initial_news_anchor_ids = {anchor.anchor_id for anchor in company.business_anchors
+                               if anchor.source_kind == c.SOURCE_KIND_NEWS}
     if (snapshot.digest != snapshot_digest(snapshot) or snapshot.company_digest != company_digest(company)
             or snapshot.policy_digest != policy_digest(policy) or snapshot.as_of != as_of.isoformat()):
         raise ValueError("뉴스 스냅샷의 회사·기준일·정책·내용 결속이 일치하지 않습니다")
@@ -167,6 +170,7 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         return evidence_is_sufficient(all_excerpts, policy, frozenset(republished_urls))
 
     def analyze_batch(batch: list[tuple[NewsCandidate, str]]) -> None:
+        nonlocal company
         nonlocal analysis_calls, prompt_chars, response_chars, stopped, analysis_cache_hits
         nonlocal analysis_provider_calls, analysis_provider_unobserved
         if not batch:
@@ -284,6 +288,10 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
             failures.append("grounded_response_incomplete")
         all_excerpts.extend(excerpts)
         relevant_articles.update(item.candidate.source_url for item in excerpts)
+        # 새 원문은 다음 기존 배치부터만 쓴다. 현재 응답을 소급해서 구제하지 않는다.
+        company = extend_verified_news_business_anchors(
+            company, excerpts, document_hashes=document_hashes, as_of=as_of,
+        )
 
     def queue_body(candidate: NewsCandidate, full_body: str,
                    batch: list[tuple[NewsCandidate, str]]) -> None:
@@ -630,6 +638,23 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     chosen, selection_exclusions = select_diverse_excerpts(all_excerpts, policy)
     excluded.update(selection_exclusions)
     fragments = tuple(to_evidence_fragment(item) for item in chosen)
+    retained_anchors = tuple(
+        anchor for anchor in company.business_anchors
+        if anchor.source_kind != c.SOURCE_KIND_NEWS or any(
+            fragment.text == anchor.exact_text and fragment.url == anchor.source_url
+            and f"기사 본문 · {fragment.fragment_id}" == anchor.location
+            for fragment in fragments
+        )
+    )
+    retained_ids = {anchor.anchor_id for anchor in retained_anchors}
+    news_anchors = tuple(anchor for anchor in company.business_anchors
+                         if anchor.source_kind == c.SOURCE_KIND_NEWS)
+    retained_news_anchors = tuple(anchor for anchor in retained_anchors
+                                  if anchor.source_kind == c.SOURCE_KIND_NEWS)
+    removed_industry_problems = sum(problem.business_anchor_id not in retained_ids
+                                    for problem in industry_problems)
+    industry_problems = [problem for problem in industry_problems
+                         if problem.business_anchor_id in retained_ids]
     chosen_urls = tuple(dict.fromkeys(item.candidate.source_url for item in chosen))
     articles = tuple(GroundedNewsArticle(
         candidate=next(item.candidate for item in chosen if item.candidate.source_url == url),
@@ -679,6 +704,15 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
         "분류프롬프트글자": prompt_chars, "분석입력글자": prompt_chars, "분석응답글자": response_chars,
         "관련성통과": len(relevant_articles), "조각": len(fragments),
         "산업과제근거": len(industry_problems),
+        "뉴스사업앵커선택": {
+            "단위": "사업앵커·산업문제",
+            "검증뉴스앵커": len(news_anchors),
+            "추가뉴스앵커": sum(anchor.anchor_id not in initial_news_anchor_ids
+                                  for anchor in news_anchors),
+            "최종보존앵커": len(retained_news_anchors),
+            "조각선택제외앵커": len(news_anchors) - len(retained_news_anchors),
+            "연결산업문제선택제외": removed_industry_problems,
+        },
         "산업과제지역": dict(Counter(item.geography for item in industry_problems)),
         "조각글자": sum(len(item.text) for item in fragments), "독립기사": len(articles),
         "실질사건": len(chosen), "주제": dict(Counter(item.topic for item in chosen)),
@@ -765,5 +799,6 @@ def collect_from_snapshot(snapshot: NewsSearchSnapshot, *, company: NewsCompanyC
     return NewsCollectionResult(
         fragments=fragments, document_hashes={url: document_hashes[url] for url in chosen_urls},
         diagnostics=diagnostics, snapshot_digest=snapshot.digest, articles=articles,
+        business_anchors=retained_anchors,
         industry_problems=tuple(industry_problems),
     )

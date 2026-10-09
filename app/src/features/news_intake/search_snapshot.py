@@ -36,6 +36,8 @@ def company_digest(company: NewsCompanyContext) -> str:
     value = asdict(company)
     if not company.business_anchors:
         value.pop("business_anchors", None)
+    if not company.company_id:
+        value.pop("company_id", None)
     return stable_digest(value)
 
 

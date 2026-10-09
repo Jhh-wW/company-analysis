@@ -199,8 +199,8 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 # 5장 일반 노력과 구체 활동 구분 안내 116자만 역치환하면 기존 네 지문이 복원된다.
 # paid/7408-generic-prompt-baseline-private.json: 원문·번호·스키마·캐시 경계 불변.
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "c88c57834c6d1e02d8248fa61af85c01d6db76a5b3a8667af1587dfee6ed5a1a"),
-    (_golden_case, True, "f4dcad4903ec16471ce8d36a4b09134592e6c91a9b98f8075643e0c34de3a4f2"),
+    (_golden_case, False, "82919b93f8d774ab60a6768dac1bbf4756c93785cdbce0a22951fdb8d1fac9aa"),
+    (_golden_case, True, "a66f6ecef4c62aee58f41470e4ba74305b1126ab513f0992fd4fba7843cb4050"),
     (_boundary_case, False, "cef6e5c04b5a0456cf576af3bcd70791f5c65f7df37576bd65680fe40a79064b"),
     (_boundary_case, True, "e4e2cc35aa2ac3b02471f15f9b03c3417e8ee25532f8e71846e87e8380e0bce2"),
 ))

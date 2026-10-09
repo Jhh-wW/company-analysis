@@ -8,6 +8,7 @@ from src.shared.report_evidence.partnership_scope import research_partnership_cl
 from src.shared.report_evidence.business_slot_scope import business_slot_scope_problem
 from src.shared.report_evidence.business_slot_scope_constants import CUSTOMER_SLOT
 from src.features.composer.portfolio_product_scope import portfolio_product_scope_problem
+from src.features.composer.revenue_activity_scope import revenue_activity_scope_problem
 import re
 import unicodedata
 from decimal import Decimal
@@ -332,6 +333,10 @@ def business_relation_scope_problem(
                 or portfolio_product_scope_problem(text, own_sources))
     if section_id not in BUSINESS_RELATION_SECTIONS or not own_sources:
         return ""
+    if section_id == "business_model":
+        problem = revenue_activity_scope_problem(text, own_sources)
+        if problem:
+            return problem
     # 원문 사실이 참이어도 회수관리만으로 고객유형 칸을 충족하지 않는다.
     # 혼합 원문은 유지하고 실제 후보의 해당 절만 같은 수집 계약으로 검사한다.
     if (section_id == "business_model" and claim_slot == CUSTOMER_SLOT

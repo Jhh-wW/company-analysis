@@ -10,6 +10,16 @@ CLASSIFICATION_RE = re.compile(
     r"|관련\s*(?:시설\s*)?(?:공사|사업|프로젝트))"
 )
 CLASS_LIST_SPLIT_RE = re.compile(CLASS_LIST_SEPARATOR)
+PROJECT_CONTEXT_RE = re.compile(r"(?:도급|계약|공사|프로젝트|사업)(?:명|목록|범위|분야|종류|현장)?")
+FACILITY_KIND_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])(?P<kind>" + CLASS_WORD + r")\s*(?:시설|공장|플랜트|인프라)"
+    r"(?=$|[^가-힣]|(?:은|는|을|를|이|가|에|로)(?=\s|$))"
+)
+PROJECT_FIELD_WORD = CLASS_WORD + r"(?:\s*(?:시설|공장|플랜트|인프라))?"
+PROJECT_FIELD_LIST_RE = re.compile(
+    r"(?P<classes>" + PROJECT_FIELD_WORD + r"(?:" + CLASS_LIST_SEPARATOR + PROJECT_FIELD_WORD + r")+)"
+    r"\s*등(?:의)?\s*(?:(?:다양한|여러|각종)\s*)?(?:시설|현장|공사|사업)"
+)
 GENERIC_CLASSES = frozenset({"주요", "대형", "각종", "관련", "일반", "당기", "전기", "기타"})
 PROJECT_HEADERS = frozenset({"공사명", "계약명", "프로젝트명", "사업명"})
 CLASS_HEADERS = frozenset({"시설분류", "시설종류", "사업분야", "사업종류", "공사종류", "프로젝트분류"})

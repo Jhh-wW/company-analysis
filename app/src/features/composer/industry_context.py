@@ -13,6 +13,8 @@ from src.shared.business_challenge_context import (
     INDUSTRY_CONTEXT_MAX_ITEMS, INDUSTRY_CONTEXT_SECTION, industry_context_problems,
 )
 from src.shared.report_evidence.constants import OFFICIAL_WEB_SOURCE_KINDS
+from src.shared.report_evidence.constants import SOURCE_KIND_NEWS
+from src.shared.report_evidence.news_business_activity import news_business_fragment_matches
 from src.shared.report_evidence.industry_candidates import OfficialIndustrySupplement
 from src.shared.report_quality.source_identity import collected_document_identity
 from src.features.composer.port import CollectedFragment
@@ -77,7 +79,7 @@ def has_verified_direct_business_issue(report: object) -> bool:
 
 
 def _matches_business_anchor(fragment: object, anchor: BusinessActivityAnchor) -> bool:
-    return bool(
+    matched = bool(
         fragment.text == anchor.exact_text
         and fragment.source_document_id == anchor.document_id
         and fragment.source_url == anchor.source_url
@@ -88,6 +90,11 @@ def _matches_business_anchor(fragment: object, anchor: BusinessActivityAnchor) -
         and fragment.source_publisher == anchor.publisher
         and fragment.document_title == anchor.title
         and fragment.document_date == anchor.published_on
+    )
+    if anchor.source_kind != SOURCE_KIND_NEWS:
+        return matched
+    return matched and news_business_fragment_matches(
+        fragment, anchor, company_id=anchor.company_id, reference_date=anchor.published_on,
     )
 
 

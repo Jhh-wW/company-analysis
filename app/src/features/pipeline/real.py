@@ -4460,6 +4460,7 @@ class RealPipeline:
         )
         news_session: news_research_adapter.NewsResearchSession | None = None
         industry_problems: list[IndustryProblemEvidence] = []
+        collected_business_anchors: list[BusinessActivityAnchor] = []
         news_preparation_failed = False
         if comparison_outcome is not None:
             steps.extend(comparison_outcome.steps)
@@ -4827,6 +4828,7 @@ class RealPipeline:
                     collected_on=business_date.isoformat(),
                     steps=steps,
                     industry_problem_sink=industry_problems,
+                    business_anchor_sink=collected_business_anchors,
                 )
             except (gateway.ProviderCallFailed, provider_budget.ProviderBudgetExceeded, provider_budget.ProviderBudgetUnavailable) as error:
                 raise_if_request_interrupted(error)
@@ -4870,7 +4872,7 @@ class RealPipeline:
                 performance_table=performance_table, revenue_tables=revenue_tables,
                 sources=sources, business_date=business_date, model=model,
                 steps=steps, reason_code=reason_code, official_evidence=official_evidence,
-                industry_anchors=tuple(
+                industry_anchors=tuple(collected_business_anchors) or tuple(
                     getattr(getattr(news_session, "company", None), "business_anchors", ())
                 ),
                 industry_problems=tuple(industry_problems),
@@ -4925,7 +4927,7 @@ class RealPipeline:
                 ),
                 official_evidence_context=official_evidence,
                 official_company_profile=profile,
-                industry_anchors=tuple(
+                industry_anchors=tuple(collected_business_anchors) or tuple(
                     getattr(getattr(news_session, "company", None), "business_anchors", ())
                 ),
                 industry_problems=tuple(industry_problems),
@@ -6399,6 +6401,7 @@ def _run_news_search_branch(
                     as_of=business_date,
                     max_analysis_calls=news_analysis_call_budget,
                     business_anchors=business_anchors,
+                    company_id=str(profile.get("corp_code") or ""),
                     observer=_local_news_research_observer(),
                 )
                 news_digest = news_session.snapshot.digest
@@ -7029,6 +7032,7 @@ def _run_v2_composer(
         collection=official_evidence_context, profile=official_company_profile,
         company_id=corp_id, reference_date=business_date.isoformat(),
         anchors=industry_anchors,
+        news_fragments=input_conversion.fragments if input_conversion is not None else (),
         analyze=_official_industry_analyzer(engine, client, fatal_error_type=AskFatalError),
         available_calls=lambda: engine.available_provider_calls(reserved_calls=0),
         diagnostics=steps, budget_exceptions=(provider_budget.ProviderBudgetExceeded,),
@@ -8084,6 +8088,7 @@ def _collect_grounded_news(
     collected_on: str,
     steps: list[dict[str, Any]],
     industry_problem_sink: list[IndustryProblemEvidence] | None = None,
+    business_anchor_sink: list[BusinessActivityAnchor] | None = None,
 ) -> list[dict[str, object]]:
     """같은 검색 snapshot에서 검증된 뉴스만 보고서 입력으로 옮긴다."""
 
@@ -8111,6 +8116,17 @@ def _collect_grounded_news(
                 )
                 for fragment in result.fragments
             ]
+            retained_business_anchors = tuple(getattr(result, "business_anchors", ()))
+            for raw_fragment in raw_fragments:
+                anchor = next((value for value in retained_business_anchors
+                               if value.source_kind == "news"
+                               and value.exact_text == raw_fragment["원문"]
+                               and value.source_url == raw_fragment["출처"]
+                               and value.location == raw_fragment["원문위치"]), None)
+                if anchor is not None:
+                    raw_fragment[RAW_EVIDENCE_IDENTITY_BINDING_KEY] = anchor.identity_binding
+            if business_anchor_sink is not None:
+                business_anchor_sink.extend(retained_business_anchors)
             diagnostics = dict(result.diagnostics)
             diagnostics.update(
                 {

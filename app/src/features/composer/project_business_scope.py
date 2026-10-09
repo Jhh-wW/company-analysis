@@ -16,9 +16,16 @@ def _surface(text: str) -> str:
 
 
 def _classifications(text: str) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(value for match in c.CLASSIFICATION_RE.finditer(text)
-                               for part in c.CLASS_LIST_SPLIT_RE.split(match['classes'])
-                               if (value := _surface(part)) not in c.GENERIC_CLASSES))
+    values = [value for match in c.CLASSIFICATION_RE.finditer(text)
+              for part in c.CLASS_LIST_SPLIT_RE.split(match['classes'])
+              if (value := _surface(part)) not in c.GENERIC_CLASSES]
+    # 개별 계약과 종합 목록의 시설 분류는 같은 자기 계약 관계로 대조한다.
+    if c.PROJECT_CONTEXT_RE.search(text):
+        values.extend(_surface(match['kind']) for match in c.FACILITY_KIND_RE.finditer(text))
+        values.extend(c.FACILITY_SUFFIX_RE.sub('', _surface(part))
+                      for match in c.PROJECT_FIELD_LIST_RE.finditer(text)
+                      for part in c.CLASS_LIST_SPLIT_RE.split(match['classes']))
+    return tuple(dict.fromkeys(value for value in values if value not in c.GENERIC_CLASSES))
 
 
 def _contract_rows(source: str) -> tuple[tuple[str, str], ...]:

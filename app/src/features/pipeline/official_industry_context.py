@@ -16,6 +16,10 @@ from src.shared.business_challenge_context import BusinessActivityAnchor
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
 from src.shared.report_evidence.industry_candidates import OfficialIndustryCandidateEvidence, OfficialIndustrySupplement
 from src.shared.report_evidence.source_kind_policy import formal_document_is_writer_eligible
+from src.shared.report_evidence.constants import SOURCE_KIND_NEWS
+from src.shared.report_evidence.news_business_activity import (
+    news_business_anchor_problem, news_business_fragment_matches,
+)
 
 
 def _matches_selected(fragment: object, document: object, selected: object) -> bool:
@@ -35,6 +39,7 @@ def prepare_official_industry_fallback(
     available_calls: Callable[[], int], diagnostics: list[dict],
     budget_exceptions: tuple[type[Exception], ...] = (),
     collect: Callable = collect_official_industry_context,
+    news_fragments: tuple = (),
 ) -> tuple[tuple[BusinessActivityAnchor, ...], Callable | None]:
     """누락 신원은 호출하지 않으며, 선택 후 exact 원문에 한 번만 분석을 허용한다."""
     if (type(collection) is not OfficialEvidenceCollectionResult
@@ -47,9 +52,21 @@ def prepare_official_industry_fallback(
         if collection.company_id != company_id:
             return anchors, None
         validated_anchors = build_business_activity_anchors(collection, profile=profile)
-        # 기존 뉴스 앵커도 현재 공식 원문으로 재확인하며 순서를 바꾸지 않는다.
+        # 공식 앵커는 공식 원문, 뉴스 앵커는 선택된 검증 뉴스 원문으로 각각 재확인한다.
+        def matching_news_fragment(anchor, fragment):
+            return news_business_fragment_matches(
+                fragment, anchor, company_id=company_id, reference_date=reference_date,
+            )
+
         usable_anchors = tuple(value for value in (anchors or validated_anchors)
-                               if value in validated_anchors)
+                               if value in validated_anchors or (
+                                   value.source_kind == SOURCE_KIND_NEWS
+                                   and not news_business_anchor_problem(
+                                       value, company_id=company_id, reference_date=reference_date,
+                                   )
+                                   and any(matching_news_fragment(value, fragment)
+                                           for fragment in news_fragments)
+                               ))
         originals = []
         industry_originals = []
         seen = set()
@@ -100,7 +117,8 @@ def prepare_official_industry_fallback(
             fragment.text == anchor.exact_text and fragment.location == anchor.location
             and document.document_id == anchor.document_id
             for fragment, document in selected_originals
-        ))
+        ) or (anchor.source_kind == SOURCE_KIND_NEWS
+              and any(matching_news_fragment(anchor, fragment) for fragment in selected)))
         if not selected_originals or not selected_anchors:
             return ()
         candidates = selected_originals + tuple(industry_originals)

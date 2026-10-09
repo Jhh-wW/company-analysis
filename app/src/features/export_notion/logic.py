@@ -473,7 +473,7 @@ def _v2_section_blocks(display: PublicSectionDisplay) -> list[NotionBlock]:
         if visual is not None and visual.reading:
             blocks.append(_paragraph(visual.reading))
     for item in display.industry_contexts:
-        blocks.append(_paragraph("공식 자료에 나온 사업과 관련된 산업 과제 · 해석"))
+        blocks.append(_paragraph(item.caption + " · 해석"))
         blocks.extend(_paragraph(text) for text in item.lines)
     return blocks
 
@@ -679,7 +679,7 @@ def _unsealed_v2_blocks(report: Report) -> list[NotionBlock]:
             if markers:
                 blocks.append(_paragraph(markers))
         for item in industry_context_displays(section.industry_contexts, tuple(report.citations)):
-            blocks.append(_paragraph("공식 자료에 나온 사업과 관련된 산업 과제 · 해석"))
+            blocks.append(_paragraph(item.caption + " · 해석"))
             blocks.extend(_paragraph(text) for text in item.lines)
     source_blocks = _source_list_blocks(report)
     if source_blocks:

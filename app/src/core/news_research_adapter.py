@@ -106,6 +106,7 @@ def prepare_news_research(
     policy: Any = None,
     max_analysis_calls: int | None = None,
     business_anchors: tuple[BusinessActivityAnchor, ...] = (),
+    company_id: str = "",
     observer: Callable[[str, dict[str, Any]], object] | None = None,
 ) -> NewsResearchSession:
     """AI 없이 검색을 고정하고 나중 분석에 같은 입력을 전달한다."""
@@ -129,6 +130,7 @@ def prepare_news_research(
         executive_names=executive_names,
         identity_context=identity_context,
         business_anchors=business_anchors,
+        company_id=company_id,
     )
     snapshot = collect_search_snapshot(
         search_news=search_news, company=company, as_of=as_of, policy=policy, observer=observer

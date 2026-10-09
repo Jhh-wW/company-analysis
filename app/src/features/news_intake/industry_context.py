@@ -136,7 +136,17 @@ def extend_prompt(prompt: str, company: NewsCompanyContext, *, priority: bool = 
         guide = guide.replace("두 검사가 각각 충족되면 두 배열에 모두 제안하고, 한쪽이 비거나 실패했다는 이유로 다른 쪽을 비우지 마세요.",
                               "회사 직접 검수와 산업 검수를 각각 수행하고, 회사 인용의 실패로 산업 판정을 생략하지 마세요.")
         guide = guide.replace("industry_problems", ic.INDUSTRY_ASSESSMENT_FIELD)
-    return (ic.INDUSTRY_PRIORITY_GUIDE if priority else "") + guide + "\n" + prompt
+    priority_guide = ic.INDUSTRY_PRIORITY_GUIDE if priority else ""
+    if any(anchor.source_kind == "news" for anchor in company.business_anchors):
+        # 출처 종류를 바꾸어 부르거나 인수한 사업을 직접 생산·주력으로 승격하지 않는다.
+        guide = guide.replace("공식 사업", "검증된 사업").replace("공식원문", "자기 사업 원문").replace("공식 앵커", "검증된 사업 앵커")
+        priority_guide = priority_guide.replace("공식 사업", "검증된 사업").replace("공식 anchor_id", "검증된 anchor_id").replace("공식 앵커", "검증된 사업 앵커")
+        guide += (
+            "\n뉴스 사업앵커는 검증된 대상 회사의 연속 인용에 나온 현재 사업 또는 "
+            "인수한 사업의 관련성만 뜻합니다. 인수 사업을 주력·최초 개시·직접 생산으로 "
+            "확대하지 마세요. 산업 문제는 별도 자기 원문과 동일 사업 활동·지역·기간을 검증하세요."
+        )
+    return priority_guide + guide + "\n" + prompt
 
 
 def split_response(raw: object, *, articles: list[tuple[NewsCandidate, str]],
