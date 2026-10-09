@@ -2,7 +2,7 @@
 
 import re
 
-PROMPT_VERSION = "official-industry-context-v3"
+PROMPT_VERSION = "official-industry-context-v4"
 MAX_CANDIDATES = 6
 MAX_ANCHORS = 3
 MAX_FRAGMENT_CHARS = 6000
@@ -33,12 +33,18 @@ SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?。])(?=[ \t\r\n]|$)|\n+")
 ASSESSMENT_CLAUSE_RE = re.compile(r"[.!?。\n,;]+|하지만|그러나|반면|한편")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 YEAR_RE = re.compile(r"(?:19|20)[0-9]{2}")
+EXACT_PERIOD_OPTION_RE = re.compile(
+    r"(?<![0-9])(?:19|20)[0-9]{2}"
+    r"(?:년(?:\s*(?:현재|상반기|하반기|[1-4]분기))?|[.\-/](?:0?[1-9]|1[0-2])"
+    r"(?:[.\-/](?:0?[1-9]|[12][0-9]|3[01]))?)?"
+    r"(?![0-9])"
+)
 PERIOD_RE = re.compile(r"(?:19|20)[0-9]{2}(?:년|[.\-/][0-9]{1,2})?|당기|현재|최근|상반기|하반기|[1-4]분기")
 DOMESTIC_MARKERS = ("국내", "한국", "대한민국", "south korea", "republic of korea")
 FOREIGN_SCOPE_MARKERS = ("해외", "외국")
 WORLD_MARKERS = ("세계", "글로벌", "global", "worldwide")
 EXPLICIT_WORLD_MARKERS = ("전세계", "전 세계", "세계 전역", "세계 각국", "세계적으로", "worldwide")
-GLOBAL_ACTOR_RE = re.compile(r"(?:글로벌|global)\s*(?:기업|회사|업체|매체|플랫폼)", re.I)
+GLOBAL_ACTOR_RE = re.compile(r"(?:글로벌|global)\s*(?:기업|회사|업체|매체|플랫폼|고객)", re.I)
 # 지명이 제품·기업 이름에 들어갔다는 이유로 지역 범위를 단정하지 않는다.
 # 명시된 지역 시장을 미확인 경로로 우회하는 경우만 닫는 보조 검사다.
 NAMED_REGION_PATTERN = (
@@ -51,7 +57,7 @@ NAMED_REGION_PATTERN = (
 )
 REGION_ACTOR_RE = re.compile(
     r"(?:국내|한국|해외|외국|세계|글로벌|global|" + NAMED_REGION_PATTERN + r")"
-    r"\s*(?:기업|회사|업체|매체|플랫폼)", re.I,
+    r"\s*(?:기업|회사|업체|매체|플랫폼|고객)", re.I,
 )
 NAMED_REGION_SCOPE_RE = re.compile(
     NAMED_REGION_PATTERN +
@@ -72,6 +78,13 @@ POLICY_END_RE = re.compile(r"측정(?:합니다|한다)|평가(?:합니다|한�
 CUSTOMER_USE_RE = re.compile(r"(?:광고주|고객|이용자|사용자|운송업체)[^.!?。]{0,45}(?:광고비|사용|운행|주차|이용료)|광고를\s*구매하는\s*(?:기업|회사|업체)[^.!?。]{0,45}(?:집행\s*비용|광고비)")
 SUPPLIER_IMPACT_RE = re.compile(r"(?:판매|제공|공급|생산|제조|매출|수익)[^.!?。]{0,40}(?:감소|하락|차질|부담|피해|악화|둔화)")
 GUIDE = (
+    "observation_period는 해당 자료 exact_period_options의 문자열을 그대로 선택하세요. "
+    "applicability_quote는 같은 조각의 applicability_quote_options에서 해당 anchor_id를 지원하며 "
+    "선택한 sentence_ids의 연속 평가 범위 안에 있는 text를 그대로 선택하세요. "
+    "적용 선택값의 좌표는 첫 출현 위치이며 sentence_ids는 같은 문구가 있는 모든 문장입니다. "
+    "앵커는 사업 비교 근거이며 적용 인용을 앵커 문구로 대신할 수 없습니다. "
+    "기간 또는 적용 인용 선택값이 없거나 의미 연결이 불확실하면 비제안 상태를 반환하세요. "
+    "선택값은 원문 탐색 후보일 뿐 같은 사업·문제·시점의 의미 승인을 대신하지 않습니다. "
     "공식 자료와 회사의 공식 사업 앵커를 연결하는 산업 검수입니다. 회사 직접 피해나 대응을 만들지 마세요. "
     "각 fragment_id×anchor_id를 한 번씩 판정하세요. 문제 없거나 불확실하면 비제안 상태를 반환하세요. "
     "proposed는 같은 사업 활동의 명시한 보고기간에 관찰된 산업 문제와 명확한 자료 기간이 지원될 때만 사용합니다. "

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter
 from collections.abc import Callable
 from datetime import date
@@ -166,8 +167,54 @@ def _object(properties: dict) -> dict:
     return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
 
 
+def exact_field_options(selected: tuple, anchors: tuple) -> dict:
+    """원문 좌표를 보존한 유한 선택값이며 의미 판정은 기존 검수가 맡는다."""
+    result = {}
+    for fragment, document, sentences in selected:
+        periods = []
+        seen = set()
+        for text in (document.title, fragment.text):
+            for match in c.EXACT_PERIOD_OPTION_RE.finditer(text):
+                value = match.group()
+                if value in seen:
+                    continue
+                seen.add(value)
+                periods.append(value)
+        applications = {}
+        for anchor in anchors:
+            item = "".join(anchor.business_item.split())
+            core = c.BUSINESS_ACTIVITY_SUFFIX_RE.sub("", item)
+            if len(core) < c.MIN_BUSINESS_CORE_CHARS:
+                core = item
+            for match in re.finditer(r"\s*".join(re.escape(char) for char in core), fragment.text):
+                covered = [s for s in sentences if s["start"] < match.end() and match.start() < s["end"]]
+                if (not covered or len(covered) > c.MAX_ASSESSMENT_SENTENCES
+                        or covered[-1]["end"] - covered[0]["start"] > c.MAX_ASSESSMENT_CHARS
+                        or not covered[0]["start"] <= match.start() < match.end() <= covered[-1]["end"]):
+                    continue
+                value = match.group()
+                row = applications.setdefault(value, {
+                    "text": value, "anchor_ids": [], "sentence_ids": [],
+                    "start": match.start(), "end": match.end(),
+                })
+                if anchor.anchor_id not in row["anchor_ids"]:
+                    row["anchor_ids"].append(anchor.anchor_id)
+                for sentence in covered:
+                    if sentence["id"] not in row["sentence_ids"]:
+                        row["sentence_ids"].append(sentence["id"])
+        result[fragment.fragment_id] = {
+            "exact_period_options": periods, "applicability_quote_options": list(applications.values()),
+        }
+    return result
+
+
 def response_schema(selected: tuple, anchors: tuple[BusinessActivityAnchor, ...]) -> dict:
     """각 조각×앵커의 제안/비제안을 한 판정으로 반환하는 닫힌 합집합."""
+    if not selected or not anchors:
+        return _object({"assessments": {"type": "array", "items": _object({}), "maxItems": 0}})
+    options = exact_field_options(selected, anchors)
+    periods = list(dict.fromkeys(period for value in options.values() for period in value["exact_period_options"]))
+    applications = list(dict.fromkeys(row["text"] for value in options.values() for row in value["applicability_quote_options"]))
     base = {"fragment_id": {"type": "string", "enum": [f.fragment_id for f, _, _ in selected]}, "anchor_id": {"type": "string", "enum": [a.anchor_id for a in anchors]}}
     # 문장 enum을 조각×앵커마다 복제하지 않는다. 실제 닫힌 membership은 서버가
     # 검산하며 SDK가 pattern을 설명으로 옮겨도 해당 검증은 그대로다.
@@ -177,6 +224,8 @@ def response_schema(selected: tuple, anchors: tuple[BusinessActivityAnchor, ...]
         **{name: {"type": "boolean"} for name in c.COMMON_BOOL_FIELDS},
         **{name: {"type": "string", "minLength": 1} for name in (*c.COMMON_QUOTE_FIELDS, "observation_period")},
     }
+    proposed["observation_period"] = {"type": "string", "enum": periods}
+    proposed["applicability_quote"] = {"type": "string", "enum": applications}
     branches = [_object({**base, "status": {"type": "string", "enum": list(c.STATUSES[1:])}}), _object({
         **proposed,
         "geography_supported": {"type": "boolean", "enum": [True]},
@@ -188,14 +237,17 @@ def response_schema(selected: tuple, anchors: tuple[BusinessActivityAnchor, ...]
         **{name: {"type": "string", "enum": [""]} for name in c.GEOGRAPHY_QUOTE_FIELDS},
         "geography": {"type": "string", "enum": [OFFICIAL_UNSPECIFIED_GEOGRAPHY]},
     })]
+    if not periods or not applications:
+        branches = branches[:1]
     return _object({"assessments": {"type": "array", "items": {"anyOf": branches}, "maxItems": len(selected) * len(anchors)}})
 
 
 def build_prompt(selected: tuple, anchors: tuple, company_id: str, reference_date: str) -> str:
+    options = exact_field_options(selected, anchors)
     payload = {
         "version": c.PROMPT_VERSION, "company_id": company_id, "reference_date": reference_date,
         "anchors": [{"anchor_id": a.anchor_id, "company_id": a.company_id, "business_item": a.business_item, "exact_text": a.exact_text, "location": a.location, "text_sha256": a.text_sha256, "source_kind": a.source_kind, "document_content_sha256": a.document_content_sha256, "identity_binding": a.identity_binding} for a in anchors],
-        "materials": [{"fragment_id": f.fragment_id, "document_id": d.document_id, "source_kind": d.source_kind, "source_url": d.canonical_url, "publisher": d.publisher, "title": d.title, "published_on": d.published_on, "location": f.location, "text_sha256": f.text_sha256, "document_content_sha256": d.content_sha256, "identity_binding": d.identity_binding, "reporting_period": d.reporting_period, "text": f.text, "sentences": list(sentences)} for f, d, sentences in selected],
+        "materials": [{"fragment_id": f.fragment_id, "document_id": d.document_id, "source_kind": d.source_kind, "source_url": d.canonical_url, "publisher": d.publisher, "title": d.title, "published_on": d.published_on, "location": f.location, "text_sha256": f.text_sha256, "document_content_sha256": d.content_sha256, "identity_binding": d.identity_binding, "reporting_period": d.reporting_period, "text": f.text, "sentences": list(sentences), **options[f.fragment_id]} for f, d, sentences in selected],
     }
     return c.GUIDE + "\n다음 자료만 이번 검수 대상으로 사용하세요.\n" + _json(payload)
 

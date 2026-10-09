@@ -15,7 +15,7 @@ def test_observed_previous_reporting_year_keeps_explicit_period():
     assert result[0].assessment_quote == result[0].exact_text == text
     assert diagnostics["model_calls"] == len(calls) == 1
     assert "보고기간의 관찰을 오늘 현재 회사 피해로 단정하지 말고" in calls[0][0]
-    assert c.PROMPT_VERSION == "official-industry-context-v3"
+    assert c.PROMPT_VERSION == "official-industry-context-v4"
 
 
 def test_future_period_after_publication_is_not_current_observation():
