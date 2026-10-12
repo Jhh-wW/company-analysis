@@ -23,6 +23,7 @@ def bound_supplementary_fact_sources(
     registry: tuple[object, ...],
     source_verifier: SourceVerifier,
     reference_date: str,
+    failure_detail: dict[str, object] | None = None,
 ) -> tuple[SourceVerification, ...]:
     """manifest 산문과 원문형 사실을 구분하고 모든 직접 출처를 확인한다.
 
@@ -30,8 +31,14 @@ def bound_supplementary_fact_sources(
     자기 선언을 믿지 않고 이미 수집·봉인된 출처와 지문을 대조하는 일만 한다.
     """
 
-    if type(fact) is not FactRecord or type(registry) is not tuple:
+    def reject(check: str, *, fields: tuple[str, ...] = ()) -> tuple:
+        if failure_detail is not None:
+            failure_detail.update(stage="fact_binding", reason_code="supplementary_fact_binding_invalid",
+                                  check_items=[check], metadata_fields=list(fields))
         return ()
+
+    if type(fact) is not FactRecord or type(registry) is not tuple:
+        return reject("fact_or_registry_type")
     try:
         if (
             fact.status != "verified"
@@ -41,7 +48,12 @@ def bound_supplementary_fact_sources(
             or not fact.evidence_binding
             or fact.evidence_binding != fact_evidence_binding(fact)
         ):
-            return ()
+            check = ("fact_status" if fact.status != "verified"
+                     else "verification_status" if fact.verification_status != "verified"
+                     else "claim_empty" if not fact.claim.strip()
+                     else "claim_slot" if fact.claim_slot not in CLAIM_SLOTS_BY_SECTION.get(fact.section_owner, ())
+                     else "evidence_binding_missing" if not fact.evidence_binding else "evidence_binding_mismatch")
+            return reject(check)
         ids = tuple(fact.supporting_source_ids)
         identities = tuple(fact.supporting_source_identities)
         hashes = tuple(fact.supporting_evidence_hashes)
@@ -52,13 +64,21 @@ def bound_supplementary_fact_sources(
             or len(ids) != len(set(ids))
             or ids[0] != fact.source_id
         ):
-            return ()
+            check = ("supporting_source_ids_empty" if not ids
+                     else "supporting_source_identities_length" if len(ids) != len(identities)
+                     else "supporting_evidence_hashes_length" if len(ids) != len(hashes)
+                     else "supporting_source_ids_unique" if len(ids) != len(set(ids))
+                     else "supporting_primary_source_id")
+            return reject(check)
         by_id = {getattr(source, "source_id", None): source for source in registry}
         if len(by_id) != len(registry):
-            return ()
+            return reject("registry_source_id_unique")
         primary = by_id.get(fact.source_id)
-        if primary is None or fact_primary_source_metadata_mismatches(fact, primary):
-            return ()
+        if primary is None:
+            return reject("primary_source_missing")
+        mismatches = fact_primary_source_metadata_mismatches(fact, primary)
+        if mismatches:
+            return reject("primary_source_metadata", fields=mismatches)
 
         verified_sources: list[SourceVerification] = []
         for source_id, identity, evidence_hash in zip(ids, identities, hashes):
@@ -73,17 +93,25 @@ def bound_supplementary_fact_sources(
                 or evidence_hash not in verified.exact_evidence_hashes
                 or not (verified.official or verified.news)
             ):
-                return ()
+                check = ("source_verification" if type(verified) is not SourceVerification
+                         else "verified_source_id" if verified.source_id != source_id
+                         else "document_identity" if verified.document_identity != identity
+                         else "exact_evidence_hash" if evidence_hash not in verified.exact_evidence_hashes
+                         else "official_or_news")
+                return reject(check)
             verified_sources.append(verified)
 
         if fact.claim_type in {VERIFIED_PROSE_CLAIM_TYPE, INTERPRETATION_CLAIM_TYPE}:
-            manifest = json.loads(fact.state_evidence)
+            try:
+                manifest = json.loads(fact.state_evidence)
+            except (TypeError, ValueError):
+                return reject("manifest_json")
             if type(manifest) is not list or len(manifest) != len(ids):
-                return ()
+                return reject("manifest_shape")
             fragment_ids: set[str] = set()
             for index, item in enumerate(manifest):
                 if type(item) is not dict:
-                    return ()
+                    return reject("manifest_item_type")
                 fragment_id = item.get("fragment_id")
                 if (
                     type(fragment_id) is not str
@@ -93,7 +121,12 @@ def bound_supplementary_fact_sources(
                     or item.get("document_identity") != identities[index]
                     or item.get("exact_sha256") != hashes[index]
                 ):
-                    return ()
+                    check = ("manifest_fragment_id" if type(fragment_id) is not str or not fragment_id.strip()
+                             or fragment_id in fragment_ids
+                             else "manifest_source_id" if item.get("source_id") != ids[index]
+                             else "manifest_document_identity" if item.get("document_identity") != identities[index]
+                             else "manifest_exact_sha256")
+                    return reject(check)
                 fragment_ids.add(fragment_id)
                 if verified_sources[index].news:
                     news_verification = source_verifier(
@@ -102,7 +135,7 @@ def bound_supplementary_fact_sources(
                         evidence_text=item.get("news_exact_text"),
                     )
                     if news_verification is None or not news_verification.evidence_bound:
-                        return ()
+                        return reject("news_exact_evidence")
         else:
             verified_primary = source_verifier(
                 primary, registry,
@@ -110,7 +143,7 @@ def bound_supplementary_fact_sources(
                 evidence_text=fact.state_evidence,
             )
             if verified_primary is None or not verified_primary.evidence_bound:
-                return ()
+                return reject("primary_exact_evidence")
         return tuple(verified_sources)
     except (AttributeError, KeyError, TypeError, ValueError):
-        return ()
+        return reject("binding_exception")

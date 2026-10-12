@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from typing import Final, Iterable
 
 from src.core import clock
-from src.features.pipeline.port import FactRecord, Report, ReportSection
+from src.features.pipeline.port import FactRecord, Report, ReportSection, SummaryItem
 from src.features.pipeline.section567_contract import (
     PLAN_STATUS_LABELS,
     RELATIONSHIP_TYPE_LABELS,
@@ -23,6 +23,8 @@ from src.features.pipeline.section567_contract import (
 )
 from src.features.provenance.sources import Source
 from src.features.report_standard.constants import (
+    BUSINESS_SUMMARY_FALLBACK,
+    BUSINESS_SUMMARY_TOPICS,
     COMPARISON_JUDGMENT_LABELS,
     RELATIONSHIP_KEY_FALLBACK_LABEL,
     RELATIONSHIP_KEY_LABELS,
@@ -51,7 +53,7 @@ class SectionContentBlock:
 
 SUMMARY_TOPICS: dict[str, str] = {
     "identity": "기업정체",
-    "business_model": "수익구조",
+    "business_model": BUSINESS_SUMMARY_FALLBACK,
     "portfolio": "제품역할",
     "past_changes": "주요변화",
     "current_challenges": "현재과제",
@@ -62,10 +64,35 @@ SUMMARY_TOPICS: dict[str, str] = {
 }
 
 
-def summary_topic(section_id: str) -> str:
-    """핵심요약 카드에 쓰는 2~6자 짧은 제목."""
+def summary_topic(
+    section_id: str, report: Report | None = None, item: SummaryItem | None = None,
+) -> str:
+    """요약에 직접 연결된 검증 사실의 의미로 짧은 제목을 붙인다."""
 
-    return SUMMARY_TOPICS.get(str(section_id or "").strip(), "핵심결론")
+    section_id = str(section_id or "").strip()
+    if section_id != "business_model":
+        return SUMMARY_TOPICS.get(section_id, "핵심결론")
+    fact_ids = tuple(getattr(item, "fact_ids", ()) or ())
+    if report is None or not fact_ids:
+        return BUSINESS_SUMMARY_FALLBACK
+    facts = {fact.fact_id: fact for fact in report.fact_records}
+    topics: set[str] = set()
+    for fact_id in fact_ids:
+        fact = facts.get(fact_id)
+        if (fact is None or fact.section_owner != section_id
+                or fact.status != "verified" or fact.verification_status != "verified"):
+            return BUSINESS_SUMMARY_FALLBACK
+        slot = str(fact.claim_slot or "").strip()
+        if slot and not slot.startswith("business_model:"):
+            return BUSINESS_SUMMARY_FALLBACK
+        slot_key = slot.removeprefix("business_model:")
+        action = str(fact.relationship_or_action or "").strip()
+        keys = [key for key in (slot_key, action) if key]
+        labels = {BUSINESS_SUMMARY_TOPICS.get(key) for key in keys}
+        if len(labels) != 1 or None in labels:
+            return BUSINESS_SUMMARY_FALLBACK
+        topics.update(labels)
+    return next(iter(topics)) if len(topics) == 1 else BUSINESS_SUMMARY_FALLBACK
 
 
 #: ``report.generated_at``이 ISO 날짜(YYYY-MM-DD)로 시작할 때만 표시한다.

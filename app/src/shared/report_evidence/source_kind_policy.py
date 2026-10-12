@@ -56,6 +56,7 @@ from src.shared.report_evidence.profile_domain_attestation import (
     dart_profile_attestation_matches_company,
     parse_dart_profile_domain_attestation,
 )
+from src.shared.report_evidence.permanent_homepage_relocation import PERMANENT_RELOCATION_PREFIX
 
 if TYPE_CHECKING:
     from src.shared.report_evidence.models import ChapterEvidenceCandidates
@@ -610,6 +611,14 @@ def formal_source_writer_ineligibility_reason(
     ):
         return "formal_writer_trust_not_eligible"
 
+    if str(domain_redirect_verification or "").startswith(PERMANENT_RELOCATION_PREFIX):
+        if not dart_profile_attestation_allows_source_url(
+            domain_attestation_evidence, source_url=canonical_url,
+            redirect_verification=domain_redirect_verification,
+            redirect_from_host=domain_redirect_from_host,
+            redirect_to_host=domain_redirect_to_host,
+        ):
+            return "permanent_homepage_relocation_proof_invalid"
     if source_kind == SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE:
         if not verified_dart_filing_binding_allows_url(
             identity_binding,

@@ -5,6 +5,7 @@ PRODUCT_TABLE_OWNER_HEADERS = frozenset({"사업부문", "사업부", "부문"})
 PRODUCT_TABLE_DESCRIPTION_HEADERS = frozenset({"구체적용도", "용도", "제품설명", "서비스설명"})
 PRODUCT_TABLE_TYPE_HEADERS = frozenset({"매출유형", "품목유형"})
 PRODUCT_TABLE_TYPES = frozenset({"제품", "상품", "서비스", "용역"})
+PRODUCT_TABLE_SERVICE_TYPES = frozenset({"공임", "임대업"})
 PRODUCT_TABLE_BOUNDARY_RE = re.compile(r"\r?\n|;")
 PRODUCT_TABLE_HEADING_RE = re.compile(r"^\s*\[(?P<owner>[^\]\n]+)\]")
 PRODUCT_OWNER_SUFFIX_RE = re.compile(r"(?:사업부문|사업부|부문|사업)$")
@@ -15,9 +16,11 @@ PRODUCT_TABLE_OWNER_RE = re.compile(
     r"(?:의|는|은|이|가)[^.。;\n|]*?(?:제품|상품|서비스|품목)"
 )
 PRODUCT_CLAUSE_RE = re.compile(r"[;。]|(?<=[다요])\.\s*|(?:하고|하며)\s*,?\s*(?=[^,;。]+?(?:은|는)\s)")
-PRODUCT_ACTOR_RE = re.compile(r"(?:^|,\s*)(?P<actor>[가-힣A-Za-z0-9&()_\- ]+?)(?:은|는)\s+")
+PRODUCT_ACTOR_RE = re.compile(r"(?:^|,\s*)(?P<actor>[가-힣A-Za-z0-9&()_\- ]+?)(?:에서는|에서|은|는)\s+")
 PRODUCT_ACTION_RE = re.compile(r"(?:공급|판매|제공|생산|제조|제작)(?:하|한|된|중|$)")
 PRODUCT_OBJECT_RE = re.compile(r"(?P<items>.+)(?:을|를)\s+(?P<tail>[^,;。]*)$")
+PRODUCT_PASSIVE_OBJECT_RE = re.compile(r"(?P<items>.+?)(?:이|가)\s+(?P<tail>[^,;。]*)$")
+PRODUCT_PASSIVE_ACTION_RE = re.compile(r"(?:공급|판매|제공|생산|제조|제작|운영|계상)(?:되|된|됩|하|한|합)")
 PRODUCT_LIST_RE = re.compile(r"\s*(?:[,，·]|\s+및\s+|\s+와\s+|\s+과\s+)\s*")
 PRODUCT_NAME_PREFIX_RE = re.compile(r"^.*(?:을|를)\s*위한\s+|^.*\S+인\s+")
 PRODUCT_NAME_SUFFIX_RE = re.compile(r"\s*(?:등|등의\s*제품|등의\s*서비스)$")
@@ -25,3 +28,12 @@ PRODUCT_MODIFIER_RE = re.compile(r"관련|(?:을|를)?위한")
 PRODUCT_GENERIC_ITEMS = frozenset({"제품", "상품", "서비스", "용역", "기타", "사업", "역할"})
 PRODUCT_DENIAL_RE = re.compile(r"하지\s*않|하지\s*못|아니|없|확인되지|미확인")
 PRODUCT_ALIGNMENT_RE = re.compile(r":?-+:?")
+# 표 아래 행의 범주를 독립 부문으로 바꾼 명시 주장도 같은 부모에 묶는다.
+PRODUCT_DIVISION_ACTOR_RE = re.compile(
+    r"(?:^|,\s*)(?P<actor>[가-힣A-Za-z0-9&()_\- ]+?(?:사업부문|사업부|부문))"
+    r"(?:\s*(?:의|내|산하)\s+[^,;。]+?)?(?:에서는|에서|은|는|이|가)\s+"
+)
+PRODUCT_DIVISION_ACTION_RE = re.compile(r"공급|판매|제공|생산|제조|제작|운영|계상")
+PRODUCT_DIVISION_DENIAL_RE = re.compile(
+    r"(?:공급|판매|제공|생산|제조|제작|운영|계상)(?:하|되)?지\s*(?:않|못)"
+)

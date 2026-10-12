@@ -6,6 +6,7 @@ from src.features.evidence_reclassify.tests.test_logic import _candidate, _assig
 
 
 @pytest.mark.parametrize("slot,quote", [
+    ("business_model:revenue_model", "기타 수익 항목에는 수입기술료와 수입수수료가 포함된다."),
     ("business_model:customer_type", "회사는 신용등급이 높은 거래처와만 거래하고 담보를 수취한다."),
     ("operations_partners:operating_role", "회사는 제조물책임법에 따라 보험계약을 체결한다."),
     ("operations_partners:operating_role", "회사는 공정거래위원회의 제조위탁 조사결과에 이의를 제기했다."),

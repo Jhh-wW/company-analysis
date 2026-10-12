@@ -8025,6 +8025,8 @@ def _news_grounded_analyzer(
             return payload
         metered = engine
 
+        requested_model = _provider_model_for_stage(engine, "news_grounding")
+
         def provider() -> ProviderAnalysis:
             from src.features.pipeline.private_replay import local_provider_replay_enabled
 
@@ -8063,13 +8065,14 @@ def _news_grounded_analyzer(
             if metered._provider_dispatch_count - before_dispatch == 1:
                 _record_local_news_analysis_replay(
                     prompt=prompt, payload=payload, schema=schema, usage=usage,
-                    model=str(events[0].get(USAGE_MODEL_KEY) or engine.MODEL) if len(events) == 1 else str(engine.MODEL),
+                    model=str(events[0].get(USAGE_MODEL_KEY) or requested_model)
+                    if len(events) == 1 else requested_model,
                     max_tokens=max_tokens, started=started,
                 )
             return ProviderAnalysis(payload, complete=complete)
 
         namespace = AnalysisNamespace(
-            model=engine.MODEL, build=engine_build_identity.process_engine_build_identity(),
+            model=requested_model, build=engine_build_identity.process_engine_build_identity(),
         )
         return analyze_with_cache(
             provider, namespace=namespace, reserve_hit=engine.reserve_cached_provider_call,

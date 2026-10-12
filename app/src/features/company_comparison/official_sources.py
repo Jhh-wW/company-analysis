@@ -59,7 +59,26 @@ class OfficialCandidateSentence:
     section_context_json: str = ""
 
     def __post_init__(self) -> None:
-        parse_source_context(self.source_context_json)
+        # 비교 문장은 원 조각의 부분집합이므로 문서와 원 사업 범위만 대조한다.
+        document_id = self.source.document_id
+        context = parse_source_context(self.source_context_json)
+        if context.get('origin') == 'self_section_declaration':
+            from src.shared.report_evidence.constants import (
+                FORMAL_DOCUMENT_SOURCE_KINDS, OFFICIAL_WEB_SOURCE_KINDS,
+            )
+            from src.shared.report_quality.source_identity import collected_document_identity
+            kind = self.source.formal_source_kind
+            if (kind not in FORMAL_DOCUMENT_SOURCE_KINDS - OFFICIAL_WEB_SOURCE_KINDS
+                    or not collected_document_identity(source_kind=kind,
+                        document_id=document_id, url=self.source.url)):
+                raise ValueError('자기부문 비교 문장의 공식 문서 신원이 없습니다')
+            receipt = document_id.rpartition(':')[2]
+            document_id = f'{kind}:{receipt}'
+        parse_source_context(
+            self.source_context_json, document_id=document_id,
+            document_sha256=self.document_content_sha256,
+            section_context_json=self.section_context_json, binding_scope='document',
+        )
         from src.shared.report_evidence.section_context import parse_section_context
         parse_section_context(self.section_context_json,
                               document_sha256=self.document_content_sha256)

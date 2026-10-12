@@ -19,6 +19,7 @@ from src.features.evidence_reclassify.constants import (
     ALLOWED_SLOT_IDS,
     ALLOWED_SLOT_IDS_BY_SECTION,
     ASSIGNMENTS_KEY,
+    COMPLETED_EXECUTION_SLOT,
     MAX_PROMPT_CHARS,
     MAX_SLOTS_PER_PARAGRAPH,
     PLAN_FORECAST_TERMS,
@@ -36,6 +37,7 @@ from src.features.evidence_reclassify.constants import (
     REJECT_PARAGRAPH_NOT_FOUND,
     REJECT_PARAGRAPH_SLOT_LIMIT,
     REJECT_PLAN_TERM_OUTSIDE_FUTURE,
+    REJECT_PRACTICE_COMPLETION,
     REJECT_QUOTE_NOT_FOUND,
     REJECT_SECTION_SLOT_MISMATCH,
     REMOVAL_REASON_CODE_PREFIX,
@@ -54,6 +56,7 @@ from src.features.evidence_reclassify.models import (
 )
 from src.shared.report_generation.models import exact_text_sha256
 from src.shared.report_evidence.business_slot_scope import business_slot_quote_problem
+from src.shared.report_evidence.practice_context import parse_practice_context
 
 
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -115,6 +118,16 @@ def _candidate_paragraphs(
             raise ValueError(f"후보 문단 식별자가 중복됐습니다: {paragraph_id}")
         if type(text) is not str or not text.strip():
             raise ValueError(f"후보 문단 원문이 비었습니다: {paragraph_id}")
+        practice_context_json = raw.get("practice_context_json", "")
+        practice_location = _clean_identifier(_first(raw, ("location", "원문위치"), ""))
+        if practice_context_json and not (_clean_identifier(raw.get("document_id")) and practice_location):
+            raise ValueError("재판정 예시·안내 문맥에는 원래 문서와 조각 위치가 필요합니다")
+        parse_practice_context(
+            practice_context_json, document_id=_clean_identifier(raw.get("document_id")),
+            document_sha256=raw.get("content_sha256", ""),
+            fragment_location=practice_location,
+            fragment_sha256=exact_text_sha256(text), fragment_text=text,
+        )
         score = raw.get("score_millis", 0)
         if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 1000:
             raise ValueError(f"후보 문단 점수가 올바르지 않습니다: {paragraph_id}")
@@ -269,11 +282,15 @@ def _candidate_block(candidate: CandidateParagraph) -> str:
         for key in ("section_heading", "heading", "location", "원문위치")
         if str(candidate.source.get(key) or "").strip()
     )
+    practice_context_json = candidate.source.get("practice_context_json", "")
+    practice_line = ("원문 예시·안내 문맥(JSON 자료): " + practice_context_json + "\n"
+                     if practice_context_json else "")
     return (
         f"\n[후보 문단 {candidate.paragraph_id}]\n"
         f"상태: {state}\n"
         f"구간: {heading or '구간 정보 없음'}\n"
-        "원문(JSON 문자열): "
+        + practice_line
+        + "원문(JSON 문자열): "
         + json.dumps(candidate.text, ensure_ascii=False)
         + "\n"
     )
@@ -297,7 +314,8 @@ def build_reclassify_request(
         "3. 한 문단은 최대 3개 의미 칸에만 배정한다. 장과 slot 접두어를 맞춘다.\n"
         "4. 계획·예정·전망·향후 같은 미래 표현이 든 인용은 future_strategy에만 둔다.\n"
         "5. 이미 배정됐지만 장 목적에 맞지 않는 상투문구는 removals에 넣는다.\n"
-        "6. 근거가 없으면 배열을 비운다. 설명 문장이나 schema 밖 필드는 내지 않는다.\n\n"
+        "6. 근거가 없으면 배열을 비운다. 설명 문장이나 schema 밖 필드는 내지 않는다.\n"
+        "7. 예시·안내 문맥에 속한 인용은 회사의 완료된 실행 칸에 배정하지 않는다.\n\n"
         "비어 있는 장과 의미 칸\n"
         + "\n".join(section_lines)
         + "\n\n후보 문단(앞에 올수록 우선 검토)\n"
@@ -470,6 +488,9 @@ def parse_and_verify(
             quote_span = _exact_quote_span(candidate_by_id[paragraph_id].text, quote)
             if quote_span is None:
                 reason_code = REJECT_QUOTE_NOT_FOUND
+            elif (slot_id == COMPLETED_EXECUTION_SLOT
+                    and candidate_by_id[paragraph_id].source.get("practice_context_json", "")):
+                reason_code = REJECT_PRACTICE_COMPLETION
             elif section_id != "future_strategy" and _has_plan_term(quote_span[0]):
                 reason_code = REJECT_PLAN_TERM_OUTSIDE_FUTURE
             else:
@@ -716,7 +737,21 @@ def to_typed_fragments(
             document_sha256=_metadata_value(candidate, source_record, ("content_sha256",), ""),
             fragment_location=location, fragment_sha256=actual_hash,
         )
+        practice_context_json = candidate.source.get("practice_context_json", "")
+        source_context_json = source_record.get("practice_context_json", "")
+        source_is_fragment = (any(key in source_record for key in ("paragraph_id", "fragment_id"))
+                              or _clean_identifier(source_record.get("id")) == candidate.paragraph_id)
+        if (("practice_context_json" in source_record or source_is_fragment)
+                and practice_context_json != source_context_json):
+            raise ValueError("재판정 예시·안내 문맥이 원래 후보와 다릅니다")
+        parse_practice_context(
+            practice_context_json, document_id=document_id,
+            document_sha256=_metadata_value(candidate, source_record, ("content_sha256",), ""),
+            fragment_location=location, fragment_sha256=actual_hash, fragment_text=candidate.text,
+        )
         slot_ids = tuple(dict.fromkeys(item.slot_id for item in assignments))
+        if practice_context_json and COMPLETED_EXECUTION_SLOT in slot_ids:
+            raise ValueError("예시·안내 문맥을 완료된 실행으로 변환할 수 없습니다")
         reason_codes = _metadata_value(
             candidate, source_record, ("reason_codes",), ()
         )
@@ -739,6 +774,7 @@ def to_typed_fragments(
                 "text_sha256": actual_hash,
                 "text": candidate.text,
                 **({"section_context_json": section_context_json} if section_context_json else {}),
+                **({"practice_context_json": practice_context_json} if practice_context_json else {}),
                 "section_id": section_id,
                 "section_ids": (section_id,),
                 "slot_id": slot_ids[0],

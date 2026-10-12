@@ -8,6 +8,9 @@ from src.shared.report_quality.review_diagnostics import observed_review_outcome
 
 
 def test_transport_contract_matches_the_actual_producer():
+    from src.features.composer.transaction_independence_constants import TRANSACTION_INDEPENDENCE_UNBOUND
+    from src.features.composer.research_table_status_scope_constants import RESEARCH_TABLE_STATE_UNSUPPORTED
+    from src.features.composer.accounting_scope_constants import ACCOUNTING_SCOPE_UNBOUND
     from src.features.composer.direct_support_constants import DIRECT_SUPPORT_REASON_TEXTS
     from src.features.composer.constants import SECTION_IDS
     from src.features.composer.grounding_constants import (
@@ -63,6 +66,9 @@ def test_transport_contract_matches_the_actual_producer():
     )
     from src.features.composer.competitive_scope_constants import COMPETITIVE_SECTION_EVIDENCE_OFFCONTRACT
     assert set(REVIEW_SCOPE_ITEMS) == {
+        TRANSACTION_INDEPENDENCE_UNBOUND,
+        RESEARCH_TABLE_STATE_UNSUPPORTED,
+        ACCOUNTING_SCOPE_UNBOUND,
         "public_sentence_fact_unbound", "public_sentence_fact_duplicate",
         COMPETITIVE_SECTION_EVIDENCE_OFFCONTRACT,
         FLOW_REVIEW_BINDING_INVALID, FLOW_REVIEW_BINDING_MISSING,

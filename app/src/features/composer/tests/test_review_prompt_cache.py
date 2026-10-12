@@ -65,7 +65,14 @@ def test_explicit_opt_in_only_attaches_metadata(monkeypatch, configured):
 # 안내만 역치환한 여섯 프롬프트 exact 증거: paid/8ae2-review-guide-baseline-private.json.
 # 갱신 과금 안내 +140자와 identity 안내 +87자만 역치환해 기존 여섯 지문을 복원했다.
 # paid/9c46-role-origin-prompt-baseline-private.json: 후보·원문·번호·스키마는 같다.
-@pytest.mark.parametrize("grouped,prefix_chars", ((False, 13608), (True, 14787)))
+# 2026-10-10: 자기 원문과 후보의 공통 표현을 그대로 고르는 안내 138자 추가.
+# 안내만 역치환하여 기존 전체 지문·접두부를 복원하고, 근거·번호·스키마는 유지한다.
+# 자료 발표 시점 안내만 역치환해 기존 8개 지문을 복원했다.
+# 근거: tmp/audit-20261010/plan-disclosure-prompt-baseline-private.json.
+# 제재표 상태 안내 209자만 역치환해 직전 전체 바이트와 접두부를 복원했다.
+# 근거: tmp/audit-20261010/sanction-response-prompt-baseline-private.json.
+# 거래 존재와 독립 체결을 구분하는 안내 50자만 역치환하면 직전 지문이 복원된다.
+@pytest.mark.parametrize("grouped,prefix_chars", ((False, 14536), (True, 15715)))
 @pytest.mark.parametrize("factory", (_golden_case, _large_case, _boundary_case))
 def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
     monkeypatch, grouped, prefix_chars, factory,
@@ -89,10 +96,10 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-    (_golden_case, False, "488e178bd26ab885b56a9de44fa1cca8192aa349238a8eb5b02c0307bcc2ccc7"),
-    (_golden_case, True, "1efb359975c96bfb488481757cfe5350c266efffe9ffc4657c04a2871c739587"),
-    (_boundary_case, False, "2fe7617a6fa477e75e09daf1195c7f41f6ad40d932eb3ed578459ab389e7f649"),
-    (_boundary_case, True, "29dc6e6b7ce5236fe40734435fa39124518629cb34b2f41bcc6a741b006f0d00"),
+        (_golden_case, False, "66811c4f7c637c489ea4a04410b18b71a2be2c234fc86615b031950a6d1be61f"),
+        (_golden_case, True, "78ebdf6952eb113692469a5edda74b1ea22c919251c98dab119e872db90766c0"),
+        (_boundary_case, False, "71335a9a68930aefb05ec45fa13904de73164bf1c8f7ff8ac99f24a2c65103cc"),
+        (_boundary_case, True, "2ddae513cedefc551365a11f1a7e43ac5c289cd5d163303e6e69e72e046b70c0"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
@@ -175,7 +182,7 @@ def test_diagram_cache_excludes_card_switch_sources_and_rows(monkeypatch, items)
     reference = diagram_check._review_prompt((), {})
     assert cached.encode("utf-8") == plain.encode("utf-8")
     # 계획 증명의 공통 literal 안내 +257자: 9343 → 9600. 개별 원문은 캐시 밖이다.
-    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 9740
+    assert cached.cache_prefix_chars == reference.cache_prefix_chars == 10024
     assert cached[:cached.cache_prefix_chars] == reference[:reference.cache_prefix_chars]
     assert texts["2"] not in cached[:cached.cache_prefix_chars]
     assert getattr(cached, "response_schema", None) is None

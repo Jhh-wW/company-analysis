@@ -28,6 +28,9 @@ REVIEW_SCOPE_ITEMS = {
     # ★ 전 장 공통 회계정책 상용구 가드(composer.accounting_policy_constants).
     #   코드 문자열은 그 모듈의 상수와 «반드시 같은 값»이어야 한다.
     "accounting_policy_boilerplate": "장별 작성범위",
+    "accounting_scope_unbound": "회계 범위",
+    "transaction_independence_unbound": "거래 독립성",
+    "time_invalid": "시점",
     # ★ 장과 무관한 부재 단언(composer.absence_claim_constants). 코드 문자열은
     #   그 모듈의 상수와 «반드시 같은 값»이어야 한다.
     "absence_claim_unsupported": "자료 부재 단언",

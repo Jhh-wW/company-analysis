@@ -480,7 +480,7 @@ def test_요약_짧은제목과_부록_사실검증_표시는_정해진_형식�
     topics = [summary_topic(item.section_id) for item in report.summary_items]
 
     assert len(topics) == len(report.summary_items)
-    assert all(re.fullmatch(r"[가-힣]{2,6}", topic) for topic in topics)
+    assert all(re.fullmatch(r"[가-힣 ]{2,6}", topic) for topic in topics)
     assert all(
         source_verification_label(report, source.source_id) == "사실 검증 완료"
         for source in report.citations

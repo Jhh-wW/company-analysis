@@ -664,8 +664,8 @@ def test_웹_v2는_ledger를_렌더하지_않는다(monkeypatch: pytest.MonkeyPa
 #:   ``<dd>`` 앞 네 글자만 빠졌고 다른 줄은 한 글자도 안 바뀌었다.
 _V1_GOLDEN = Path(__file__).with_name("result_v1_article_golden.html")
 _V1_GOLDEN_TEXT_SHA256_CURRENT_APPROVED = (
-    # 2026-10-06: 구성비 안내 한 줄만 변경. 옛 안내 복원 시 직전 HTML 전체와 같다.
-    "6b117cc6cc9df557d120a5dcb3070f2e5ee49709b325674d51c618852fe8e90c"
+    # 2026-10-10: 레거시 요약 라벨 하나만 '수익구조'에서 '사업 구조'로 변경했다.
+    "bb412d858fcbd84935662490c9f3d19a91d06171833c45b0c83f752cd6fd81d5"
 )
 
 

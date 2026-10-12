@@ -131,6 +131,7 @@ from src.features.composer.industry_context import (
 from src.shared.report_evidence.industry_candidates import OfficialIndustrySupplement
 from src.features.composer.supplement_feedback import missing_writer_slots
 from src.features.composer.scope_supplement_feedback import collect_scope_supplement_failures
+from src.features.composer.challenge_response_feedback import collect_response_supplement_failures
 from src.features.composer.evidence_availability import (
     COLLECTION_STATE_PARTIAL,
     EvidenceAvailability,
@@ -3233,6 +3234,9 @@ def run_v2(
                 section_ids=targets,
                 missing_slots_by_section=missing_writer_slots(quality_candidate, targets),
                 scope_failures_by_section=collect_scope_supplement_failures(
+                    draft, review_diagnostics, section_evidence_packets,
+                ),
+                response_failures_by_section=collect_response_supplement_failures(
                     draft, review_diagnostics, section_evidence_packets,
                 ),
             )

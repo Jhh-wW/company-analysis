@@ -42,6 +42,8 @@ from src.features.homepage.safe_http import (
     READ_CHUNK_BYTES,
     HomepageResponseError,
     UnsafeHomepageUrlError,
+    BlockedHomepageRedirectError,
+    BlockedRedirectDiscovery,
     response_deadline,
     safe_urlopen,
 )
@@ -63,6 +65,10 @@ UrlAllowPredicate = Callable[[str], bool]
 
 class WideTransportError(Exception):
     """상태 코드를 못 받은 전송 실패(시간초과·DNS·연결거부·응답 검증 실패 등)."""
+
+    def __init__(self, message: str = "", *, redirect_discovery: BlockedRedirectDiscovery | None = None) -> None:
+        super().__init__(message)
+        self.redirect_discovery = redirect_discovery
 
 
 @dataclass(frozen=True)
@@ -113,7 +119,10 @@ def default_wide_transport(
         OSError,
         http.client.HTTPException,
     ) as exc:
-        raise WideTransportError(f"{type(exc).__name__}: {exc}") from exc
+        raise WideTransportError(
+            f"{type(exc).__name__}: {exc}",
+            redirect_discovery=exc.discovery if isinstance(exc, BlockedHomepageRedirectError) else None,
+        ) from exc
 
 
 def _read_bounded_text(response: object, *, timeout: float) -> tuple[str, str]:

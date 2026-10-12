@@ -2,6 +2,15 @@
 from __future__ import annotations
 
 import re
+
+# 회사의 실제 평가일·등급 변화가 없는 등급 정의 표만 구분한다.
+CREDIT_GRADE_HEADERS = frozenset({"신용등급", "등급"})
+CREDIT_GRADE_DEFINITION_HEADERS = frozenset({"등급의정의", "등급정의", "등급정의내용"})
+CREDIT_GRADE_EVENT_HEADERS = frozenset({
+    "평가일", "평가일자", "신용평가일", "등급변경일", "발행회사", "평가대상회사", "대상회사", "회사명",
+})
+CREDIT_GRADE_VALUE_RE = re.compile(r"(?:AAA|AA|A[123]?|BBB|BB|B|CCC|CC|C|D)[+-]?")
+CREDIT_GRADE_ALIGNMENT_RE = re.compile(r":?-{3,}:?")
 from typing import Final
 
 CHALLENGE_SLOTS: Final[frozenset[str]] = frozenset({

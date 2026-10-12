@@ -5,6 +5,7 @@
 """
 
 from dataclasses import replace
+from hashlib import sha256
 
 from src.core.citations import (
     INTERPRETATION_SUFFIX, citation_number, split_citation_markers, split_interpretation_marker,
@@ -151,6 +152,7 @@ def filter_supplementary_research_report(
     *,
     official_evidence: OfficialEvidenceCollectionResult,
     source_verifier: SourceVerifier,
+    exclusion_diagnostics: list[dict[str, object]] | None = None,
 ) -> Report:
     """등록부 검사를 통과한 보고서를 받아 변경 없으면 같은 객체를 반환한다."""
     collected = _collected_documents(official_evidence)
@@ -182,13 +184,43 @@ def filter_supplementary_research_report(
         if verified.source_id in invalid_sources
     }
     invalid_ids: set[str] = set()
+    failure_by_id: dict[str, list[dict[str, object]]] = {}
+
+    def observe(fact_id: str, detail: dict[str, object]) -> None:
+        if exclusion_diagnostics is not None:
+            failures = failure_by_id.setdefault(fact_id, [])
+            if detail not in failures:
+                failures.append(detail)
+
+    def document_failure(source) -> dict[str, object]:
+        # 이 함수는 이미 기존 판정에서 제외된 출처만 설명한다. 승인에 쓰지 않는다.
+        document = collected.get(source.document_identity)
+        checks = (["news_formal_kind"] if source.news else
+                  ["collected_document_missing"] if document is None else [
+                      check for check, valid in (
+                          ("official_source", source.official),
+                          ("formal_source_kind", source.formal_kind == document.source_kind),
+                          ("document_content_sha256", source.content_sha256 == document.document_content_sha256),
+                          ("exact_evidence_hashes", frozenset(source.exact_evidence_hashes) <= document.exact_evidence_hashes),
+                      ) if not valid
+                  ])
+        return {"stage": "document_binding", "reason_code": "supplementary_document_binding_invalid",
+                "check_items": checks}
+
     for fact_id in governed:
+        binding_failure: dict[str, object] = {}
         bindings = bound_supplementary_fact_sources(
             facts[fact_id], registry=registry, source_verifier=source_verifier,
             reference_date=report.as_of_date,
+            failure_detail=binding_failure if exclusion_diagnostics is not None else None,
         )
         if not bindings or any(source.source_id in invalid_sources for source in bindings):
             invalid_ids.add(fact_id)
+            if not bindings:
+                observe(fact_id, binding_failure)
+            for source in bindings:
+                if source.source_id in invalid_sources:
+                    observe(fact_id, document_failure(source))
 
     def prose_matches(section: ReportSection, text: str):
         body, _interpreted = split_interpretation_marker(text)
@@ -222,6 +254,12 @@ def filter_supplementary_research_report(
             ):
                 rejected_lines.add((section.cell, index))
                 invalid_ids.update(ids)
+                for fact_id in ids:
+                    observe(fact_id, {
+                        "stage": "public_claim_binding", "reason_code": "supplementary_public_claim_binding_invalid",
+                        "check_items": ["invalid_citation_source" if numbers.intersection(invalid_numbers)
+                                        else "visible_fact_source_binding"],
+                    })
 
     # 제거한 사실을 해석·변화·대응의 기초로 재사용하지 않는다.
     while True:
@@ -233,7 +271,21 @@ def filter_supplementary_research_report(
         }
         if dependants <= invalid_ids:
             break
+        for fact_id in dependants - invalid_ids:
+            fact = facts[fact_id]
+            observe(fact_id, {"stage": "fact_dependency", "reason_code": "supplementary_fact_dependency_invalid",
+                              "check_items": [field for field, references in (
+                                  ("basis_fact_ids", fact.basis_fact_ids),
+                                  ("revenue_model_fact_id", [fact.revenue_model_fact_id]),
+                                  ("response_to_fact_id", [fact.response_to_fact_id]),
+                              ) if invalid_ids.intersection(references)]})
         invalid_ids.update(dependants)
+
+    if exclusion_diagnostics is not None:
+        exclusion_diagnostics.extend({
+            "claim_sha256": sha256(facts[fact_id].claim.encode("utf-8")).hexdigest(),
+            "failures": failure_by_id[fact_id],
+        } for fact_id in sorted(invalid_ids))
 
     invalid_claims = {claim for fact_id in invalid_ids
                       for claim in _display_claims(facts[fact_id], reference_date=report.as_of_date)}

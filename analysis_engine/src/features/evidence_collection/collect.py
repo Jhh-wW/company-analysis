@@ -27,6 +27,13 @@ from features.evidence_collection.source_context import context_for_candidate, h
 from features.evidence_collection.source_context import SourceContextBudgetExceeded
 from features.evidence_collection.business_activity_table import activity_table_ranges
 from features.evidence_collection.business_constraint_signal import business_constraint_signals
+from features.evidence_collection.product_role_relation import (
+    product_role_actor_matches, product_role_context_allows, product_role_hypothetical_ranges,
+)
+from features.evidence_collection.product_role_table import (
+    self_section_declarations, self_section_product_context,
+)
+from features.evidence_collection import product_role_table_constants as product_table_c
 from features.evidence_collection import business_activity_table_constants as activity_c
 from features.evidence_collection.source_context_constants import CONTEXT_BUDGET_REASON
 from features.evidence_collection.scan_contract import DocumentScan
@@ -346,7 +353,12 @@ def collect_dart_evidence(
             attempts.append(_document_attempt(company_id, filing, c.ATTEMPT_STATE_TRUNCATED, CONTEXT_BUDGET_REASON, fetch_result))
             continue
         table_scopes = prepare_table_contexts(fetch_result.source_contexts, document_text=fetch_result.text)
+        product_hypothetical_ranges = product_role_hypothetical_ranges(fetch_result.text)
+        product_declarations = self_section_declarations(
+            fetch_result.text, document_actor=fetch_result.document_actor,
+        )
         constraint_count = 0
+        product_table_count = 0
         for candidate_index, candidate in enumerate(segment.iter_document_candidates(
             fetch_result.text, progress=progress, deadline_at=deadline_at,
             short_filter=short_observation_filter,
@@ -356,12 +368,21 @@ def collect_dart_evidence(
                 table_contexts=table_scopes, scopes=source_scopes,
             )
             validate_source_context(context_json, document_text=fetch_result.text)
+            section_context_json = context_for_section_candidate(
+                business_scopes, text=candidate.text, start=candidate.start, end=candidate.end,
+                document_id=document_id, document_sha256=content_sha256,
+            )
+            if not context_json:
+                context_json = self_section_product_context(
+                    candidate.text, candidate.section_heading,
+                    start=candidate.start, end=candidate.end,
+                    document_text=fetch_result.text, document_actor=fetch_result.document_actor,
+                    source_context_json=context_json, section_context_json=section_context_json,
+                    declarations=product_declarations,
+                )
             candidate = replace(
                 candidate, source_context_json=context_json,
-                section_context_json=context_for_section_candidate(
-                    business_scopes, text=candidate.text, start=candidate.start, end=candidate.end,
-                    document_id=document_id, document_sha256=content_sha256,
-                ),
+                section_context_json=section_context_json,
             )
             if candidate.is_short:
                 retention.offer_unclassified(candidate_index, candidate)
@@ -381,6 +402,38 @@ def collect_dart_evidence(
                 retention.offer_unclassified(candidate_index, candidate)
             if official_industry_discovery(candidate.text) and (slot_scores or has_any_direct_signal):
                 retention.offer_unclassified(candidate_index, candidate)
+
+            product_scores = tuple(score for score in relevance.product_role_relation_scores(
+                candidate.text, candidate.section_heading,
+            ) if score.slot_id in allowed_slot_ids)
+            if product_scores and not product_role_context_allows(
+                candidate.text, start=candidate.start, end=candidate.end,
+                document_text=fetch_result.text, hypothetical_ranges=product_hypothetical_ranges,
+            ):
+                product_scores = ()
+            if product_scores and not product_role_actor_matches(
+                candidate.text, candidate.section_heading,
+                document_actor=fetch_result.document_actor,
+                source_context_json=context_json,
+            ):
+                product_scores = ()
+            if product_scores and not any(score.slot_id == product_scores[0].slot_id for score in slot_scores):
+                previous_pools = {key: list(pool) for key, pool in retention.pools.items()}
+                previous_indices = {index for index, _candidate, _scores in retention.selected_scored()}
+                # 동일 원문·위치·문맥을 유지하고 원래 운영 후보와 ID만 분리한다.
+                is_product_table = validate_source_context(context_json).get('origin') == product_table_c.SELF_SECTION_ORIGIN
+                auxiliary_index = (len(fetch_result.text) * product_table_c.TABLE_AUXILIARY_INDEX_MULTIPLIER + product_table_count
+                                   if is_product_table else len(fetch_result.text) + constraint_count)
+                retention.offer_scored(auxiliary_index, candidate,
+                                       product_scores, rank_index=candidate_index)
+                current_indices = {index for index, _candidate, _scores in retention.selected_scored()}
+                if not previous_indices <= current_indices:
+                    retention.pools = previous_pools
+                if is_product_table:
+                    product_table_count += 1
+                else:
+                    constraint_count += 1
+                progress.candidates_seen += 1
 
             # 같은 문단의 기존 장 배정은 그대로 둔다. 명시 사업 제약→현재 대응만
             # 정확 부분구간으로 기존 5장 몫에서 경쟁하며 다른 장 몫은 건드리지 않는다.

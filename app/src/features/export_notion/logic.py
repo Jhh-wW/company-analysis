@@ -270,7 +270,7 @@ def _summary_blocks(report: Report) -> list[NotionBlock]:
         rows.append(
             [
                 f"{index:02d}",
-                summary_topic(item.section_id),
+                summary_topic(item.section_id, report, item),
                 "\n".join(filter(None, (item.text.strip(), reader_summary_notes(report).get(f"{index:02d}", "")))),
                 f"{spec.display_number}장" if spec is not None else "",
             ]

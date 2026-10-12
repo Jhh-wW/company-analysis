@@ -33,7 +33,7 @@ import importlib
 import json
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +41,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from src.features.chapter_evidence.produce import produce_chapter_evidence_candidates
+from src.features.composer import logic as composer_logic
 from src.features.composer import pipeline as composer_pipeline
 from src.features.composer.evidence_availability import (
     COLLECTION_STATE_PARTIAL,
@@ -186,7 +187,7 @@ _OWNCITE_WITHOUT_FOOTNOTE = (
     "회사는 Alpha Global Holdings를 종속기업으로 두고 있으며 운영자금을 대여했다."
 )
 
-_FRAGMENT_HEAD = re.compile(r"(?m)^\[조각 (\S+)\] \(([^\n]*?)\) ")
+_FRAGMENT_HEAD = re.compile(r"(?m)^\[조각 (\S+)\] \(")
 _REWRITE_TARGET = re.compile(
     r"(?m)^번호 (\d+) · [^\n]*\n  원문장\(JSON 문자열\): ([^\n]*)$"
 )
@@ -264,10 +265,54 @@ def _filing_meta():
 def _fragment_blocks(prompt: str) -> tuple[tuple[str, str, str], ...]:
     heads = list(_FRAGMENT_HEAD.finditer(prompt))
     ends = [head.start() for head in heads[1:]] + [len(prompt)]
-    return tuple(
-        (head.group(1), head.group(2), prompt[head.end():end])
-        for head, end in zip(heads, ends)
+    blocks = []
+    for head, end in zip(heads, ends):
+        # 자료 날짜의 안내 괄호와 JSON 인용은 바깥 라벨의 종결이 아니다.
+        depth, quoted, escaped = 1, False, False
+        for offset in range(head.end(), end):
+            char = prompt[offset]
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    quoted = False
+            elif char == '"':
+                quoted = True
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    assert prompt[offset + 1:offset + 2] == " "
+                    blocks.append((head.group(1), prompt[head.end():offset],
+                                   prompt[offset + 2:end]))
+                    break
+            elif char == "\n":
+                raise AssertionError("가짜 작가의 조각 라벨이 닫히지 않았습니다")
+        else:
+            raise AssertionError("가짜 작가의 조각 라벨이 닫히지 않았습니다")
+    return tuple(blocks)
+
+
+@pytest.mark.parametrize("document_date", (
+    "2026-04-14", '날짜 확인 불가: \"닫는 ) 괄호\"', "줄바꿈\n날짜 미확인",
+))
+def test_가짜작가는_실제_날짜메타와_지원슬롯을_한_라벨로_읽는다(document_date):
+    fragment = next(item for item in _composer_fragments()
+                    if _DEFINITION_SLOT in item.supported_claim_slots)
+    fragment = replace(fragment, document_date=document_date)
+    prompt = composer_logic._render_fragments(
+        (fragment,), show_supported_claim_slots=True,
     )
+
+    ((fragment_id, label, body),) = _fragment_blocks(prompt)
+    assert fragment_id == fragment.fragment_id
+    assert json.dumps(document_date, ensure_ascii=False) in label
+    assert _DEFINITION_SLOT in label
+    assert body.strip() == fragment.text
+    assert _cite("본점을 두고", label=_DEFINITION_SLOT)(prompt) == [fragment_id]
 
 
 def _cite(

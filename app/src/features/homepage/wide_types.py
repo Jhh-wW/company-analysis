@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import hashlib
+from src.features.homepage.safe_http import BlockedRedirectDiscovery
 import re
 from dataclasses import dataclass
 
@@ -257,8 +258,15 @@ class WideFragment:
     item_title: str = ""
     item_published_on: str = ""
     item_url: str = ""
+    practice_context_json: str = ""
 
     def __post_init__(self) -> None:
+        from src.shared.report_evidence.practice_context import parse_practice_context
+        parse_practice_context(
+            self.practice_context_json, document_id=self.document_id,
+            fragment_location=self.location, fragment_sha256=self.text_sha256,
+            fragment_text=self.text,
+        )
         for name in (
             "company_id",
             "fragment_id",
@@ -319,9 +327,12 @@ class WideCollectionResult:
     company_id: str
     documents: tuple[WideDocumentIdentity, ...]
     attempts: tuple[WideCollectionAttempt, ...]
+    redirect_discoveries: tuple[BlockedRedirectDiscovery, ...] = ()
 
     def __post_init__(self) -> None:
         _require_nonblank(self.company_id, "company_id")
+        if not isinstance(self.redirect_discoveries, tuple) or any(not isinstance(item, BlockedRedirectDiscovery) for item in self.redirect_discoveries):
+            raise ValueError("redirect 발견 관측은 올바른 tuple이어야 합니다")
         if not isinstance(self.documents, tuple):
             raise ValueError("documents는 tuple[WideDocumentIdentity, ...]이어야 합니다")
         if not isinstance(self.attempts, tuple):

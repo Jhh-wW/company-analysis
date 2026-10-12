@@ -50,14 +50,17 @@ def enforce_supplementary_research_release(
                 filter_supplementary_research_report,
             )
 
+            exclusion_diagnostics: list[dict[str, object]] = []
             filtered = filter_supplementary_research_report(
                 result.report, official_evidence=official_evidence,
                 source_verifier=supplementary_research_source_verifier(),
+                exclusion_diagnostics=exclusion_diagnostics,
             )
             if filtered is not result.report:
                 steps.append({
                     "step": SUPPLEMENTARY_RESEARCH_FILTER_STEP,
                     "제외사실수": len(result.report.fact_records) - len(filtered.fact_records),
+                    "제외사실진단": exclusion_diagnostics,
                 })
                 return replace(
                     result, report=filtered, generation_cache_eligible=False,

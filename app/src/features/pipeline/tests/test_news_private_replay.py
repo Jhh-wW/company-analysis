@@ -10,7 +10,7 @@ from src.features.pipeline.private_replay_constants import (
     REPLAY_PARSED_CAPTURE_SCHEMA, REPLAY_PARSED_SCHEMA_VERSION, REPLAY_DIAGNOSTIC_STEP,
 )
 from src.features.pipeline.tests.test_news_analysis_exact_cache import (
-    attempts, collect, environment, setup_engine, MODEL, INPUT, NEWS_OUTPUT, Messages,
+    attempts, collect, environment, setup_engine, NEWS_MODEL, INPUT, NEWS_OUTPUT, Messages,
 )
 from src.core.pricing import usage_cost_krw
 from src.features.pipeline.tests.test_private_replay import local_replay
@@ -34,7 +34,7 @@ def test_뉴스응답_보관여부가_실제호출과_정산을_바꾸지_않는
     try:
         with real.provider_budget.activate(1000) as budget:
             result = collect(engine, client)
-        assert result.fragments and budget.accounted_krw == usage_cost_krw(MODEL, INPUT, NEWS_OUTPUT)
+        assert result.fragments and budget.accounted_krw == usage_cost_krw(NEWS_MODEL, INPUT, NEWS_OUTPUT)
         assert len(messages.requests) == len(engine.usages) == len(attempts[0]) == len(attempts[1]) == 1
         steps = [row for row in diagnostics.steps if row["step"] == REPLAY_DIAGNOSTIC_STEP]
         if mode in {"disabled", "deployment"}:

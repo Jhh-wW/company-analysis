@@ -48,6 +48,10 @@ from src.features.homepage.constants import (
     WIDE_SOURCE_KIND_WEB_PAGE,
 )
 from src.features.homepage.wide_domain import classify_official_page_url
+from src.features.homepage.education_product import (
+    EDUCATION_PRODUCT_SLOT,
+    education_product_range_indices,
+)
 from src.features.homepage.wide_types import (
     WideCollectionResult,
     WideDocumentIdentity,
@@ -57,12 +61,14 @@ from src.shared.report_evidence.source_kind_policy import (
     document_slots_for_formal_source_kind,
     formal_document_is_writer_eligible,
 )
+from src.shared.report_evidence.practice_context import build_practice_context
 
 #: 구간 본문에 후보 슬롯의 직접 신호 키워드가 있을 때의 점수.
 _SCORE_BODY_KEYWORD_MATCH = 700
 
 _REASON_PAGE_TYPE_SIGNAL = "page_type_signal"
 _REASON_BODY_KEYWORD_MATCH = "body_keyword_match"
+_REASON_EDUCATION_PRODUCT_RELATION = "education_product_relation"
 
 _VERIFIED_CASE_MARKERS: tuple[str, ...] = (
     "사례", "후기", "인터뷰", "스토리", "프로젝트", "수상", "인증"
@@ -174,6 +180,9 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
             slot_id for slot_id in WIDE_REQUIRED_SLOT_IDS if slot_id in owned_slots
         )
     challenge_evidence = classify_challenge_evidence(document.usable_ranges)
+    education_product_indices = education_product_range_indices(
+        document, page_slots if uses_page_slot_hint else ()
+    )
 
     fragments: list[WideFragment] = []
     for index, text in enumerate(document.usable_ranges):
@@ -183,17 +192,25 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
             range_index=index,
             challenge_evidence=challenge_evidence,
         )
+        if index in education_product_indices and EDUCATION_PRODUCT_SLOT not in slots_for_range:
+            slots_for_range += (EDUCATION_PRODUCT_SLOT,)
         if not slots_for_range:
             continue
         score = _SCORE_BODY_KEYWORD_MATCH
         reason_codes = (
             ((_REASON_PAGE_TYPE_SIGNAL,) if page_slots and uses_page_slot_hint else ())
-            + (_REASON_BODY_KEYWORD_MATCH,)
+            + ((_REASON_EDUCATION_PRODUCT_RELATION,) if index in education_product_indices
+               else (_REASON_BODY_KEYWORD_MATCH,))
         )
 
         text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
         item = next((item for item in document.list_items if item[0] == text), None)
         location = item[3] if item else f"{document.canonical_url} · 목록 {index + 1}번째 항목"
+        practice_context_json = build_practice_context(
+            ranges=document.usable_ranges, document_id=document.document_id,
+            document_sha256=document.content_sha256, fragment_index=index,
+            fragment_location=location, company_name=document.publisher,
+        )
         slots_by_section: dict[str, list[str]] = {}
         for slot_id in slots_for_range:
             slots_by_section.setdefault(slot_id.split(":", 1)[0], []).append(slot_id)
@@ -210,12 +227,17 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
                     section_id=section_id,
                     slot_id=primary_slot_id,
                     score_millis=score,
-                    reason_codes=reason_codes,
+                    reason_codes=(
+                        reason_codes if section_id == "portfolio" or index not in education_product_indices
+                        else tuple(_REASON_BODY_KEYWORD_MATCH if code == _REASON_EDUCATION_PRODUCT_RELATION
+                                   else code for code in reason_codes)
+                    ),
                     covered_slot_ids=tuple(covered_slot_ids),
                     range_index=index,
                     item_title=item[1] if item else "",
                     item_published_on=item[2] if item else "",
                     item_url=item[3] if item else "",
+                    practice_context_json=practice_context_json,
                 )
             )
     return tuple(fragments)

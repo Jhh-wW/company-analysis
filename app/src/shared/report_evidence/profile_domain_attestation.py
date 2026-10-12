@@ -27,6 +27,10 @@ from src.shared.report_evidence.identity_verified_web import (
     canonical_identity_verified_web_url,
     is_disallowed_identity_host,
 )
+from src.shared.report_evidence.permanent_homepage_relocation import (
+    PERMANENT_RELOCATION_PREFIX,
+    permanent_homepage_relocation_allows_url,
+)
 
 
 REGISTERED_SUBDOMAIN_ATTESTATION_PREFIX: Final[str] = (
@@ -262,6 +266,17 @@ def dart_profile_attestation_allows_source_url(
     source_host = (
         urllib.parse.urlsplit(canonical_url).hostname or ""
     ).casefold().rstrip(".")
+    if redirect_verification.startswith(PERMANENT_RELOCATION_PREFIX):
+        return bool(
+            not profile.is_registered_subdomain
+            and permanent_homepage_relocation_allows_url(
+                profile_evidence=profile.base_evidence,
+                verification=redirect_verification,
+                source_url=canonical_url,
+                from_host=redirect_from_host,
+                to_host=redirect_to_host,
+            )
+        )
     if profile.is_registered_subdomain:
         return bool(
             not any(item.strip() for item in redirect_values)

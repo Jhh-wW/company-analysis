@@ -434,9 +434,10 @@ def test_report_evidence_스키마는_import하지_않고_정본정책만_공유
         stripped = line.strip()
         assert not stripped.startswith("import src.shared.report_evidence")
         if stripped.startswith("from src.shared.report_evidence"):
-            assert stripped.startswith(
-                "from src.shared.report_evidence.source_kind_policy import"
-            )
+            assert stripped.startswith((
+                "from src.shared.report_evidence.source_kind_policy import",
+                "from src.shared.report_evidence.practice_context import",
+            ))
 
 def test_시도한_문서수는_등록한_문서수와_따로_직렬화된다():
     """「문서 0개 시도 · 수십만 바이트 수신」 같은 모순 표시를 막는 칸이다."""

@@ -3,6 +3,7 @@ import pytest
 
 from src.features.composer import verify as v
 from src.features.composer.challenge_business_scope import challenge_business_problem
+from src.features.composer.challenge_event_scope import response_current_activity_problem
 from src.features.composer.industry_context import has_verified_direct_business_issue
 from src.features.composer.logic import summary_candidates
 from src.features.composer.port import CollectedFragment, ComposedReport, ComposedSection, FlowRow
@@ -22,6 +23,35 @@ BUSINESS_RESPONSE = "회사는 미지급 공사대금 회수 소송을 진행하
 def test_table_procedure_label_has_no_direct_business_effect(issue):
     sources = {"a": issue + ". " + BUSINESS_ISSUE + ". " + BUSINESS_RESPONSE}
     assert challenge_business_problem(issue, sources, cells=(issue, BUSINESS_RESPONSE)) == PROCEDURE_REASON
+
+
+def test_current_activity_does_not_borrow_another_sentence_stop():
+    source = '저탄소 시스템 개발 진행 중. 고객의 공사대금 미지급으로 공사가 중단됐다.'
+    claim = '저탄소 시스템 개발이 진행되고 있다.'
+    assert response_current_activity_problem(claim, {'a': source}) == ''
+
+
+def test_current_activity_question_does_not_establish_current_support():
+    source = '광학 센서 개발 진행 중? 공장 가동이 중단됐다.'
+    claim = '광학 센서 개발이 진행되고 있다.'
+    assert response_current_activity_problem(claim, {'a': source}) == 'time_invalid'
+
+
+def test_stopped_activity_does_not_borrow_another_sentence_progress():
+    source = '저탄소 시스템 개발 진행 중단. 고객의 공사는 진행 중이다.'
+    claim = '저탄소 시스템 개발이 진행되고 있다.'
+    assert response_current_activity_problem(claim, {'a': source}) == 'time_invalid'
+
+
+def test_quote_newline_and_repeated_punctuation_do_not_create_current_support():
+    claim = '저탄소 시스템 개발이 진행되고 있다.'
+    sources = (
+        "'저탄소 시스템 개발 진행 중.'은 가정이며 중단됐다.",
+        '저탄소 시스템 개발 진행 중.. 그러나 중단됐다.',
+        '저탄소 시스템 개발 중단\n대체 설비가 진행 중이다.',
+    )
+    for source in sources:
+        assert response_current_activity_problem(claim, {'a': source}) == 'time_invalid'
 
 
 @pytest.mark.parametrize("response", [

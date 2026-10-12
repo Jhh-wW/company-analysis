@@ -7,6 +7,8 @@ from src.features.chapter_evidence.tests.fixtures import make_document, make_fra
 
 
 @pytest.mark.parametrize("section,slot,other,text", [
+    ("business_model", "business_model:revenue_model", "business_model:customer_type",
+     "기타 수익 항목에는 수입기술료와 수입수수료가 포함되며 배당금수익은 제외된다. 주요 고객사는 의료기관이다."),
     ("business_model", "business_model:customer_type", "business_model:revenue_model",
      "회사는 투자등급 거래처에 한해 거래하고 신용등급을 평가하며 매출채권을 관리한다."),
     ("operations_partners", "operations_partners:operating_role", "operations_partners:value_chain",

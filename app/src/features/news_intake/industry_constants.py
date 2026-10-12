@@ -2,7 +2,7 @@
 
 import re
 
-INDUSTRY_PROMPT_VERSION = "industry-context-v6"
+INDUSTRY_PROMPT_VERSION = "industry-context-v7"
 INDUSTRY_ASSESSMENT_MAX_ANCHORS = 3
 INDUSTRY_ASSESSMENT_FIELD = "industry_assessments"
 INDUSTRY_ASSESSMENT_STATUSES = (
@@ -112,6 +112,22 @@ INDUSTRY_GLOBAL_MARKERS = ("세계", "글로벌", "global", "worldwide")
 INDUSTRY_POSSIBILITY_RE = re.compile(
     r"가능성|(?:할|될|겪을|발생할)\s*수\s*있|"
     r"예상(?:된|되는)|전망(?:된|되는)|발생할\s*(?:것|전망)"
+)
+# 현재 제약의 명시 술어 뒤 별도 대응절로 넘어갈 때만 가능성 범위를 나눈다.
+# 쉼표·명사 목록만으로 문장을 나누거나 의미를 승인하지 않는다.
+INDUSTRY_RESPONSE_CLAUSE_BOUNDARY_RE = re.compile(
+    r"(?:하며|하고|이며|이고|있으며|있지만|하지만)\s*,\s*"
+)
+INDUSTRY_CURRENT_CONSTRAINT_RE = re.compile(
+    r"충족하지\s*못하는\s*상황(?=이기\s*때문에|이다(?:\W|$)|이며(?:\W|$)|입니다(?:\W|$)|\W|$)|"
+    r"(?:겪고|발생하고|늦어지고)\s*있(?:다|으며|습니다)(?![가-힣A-Za-z0-9])"
+)
+INDUSTRY_CURRENT_CONSTRAINT_BRIDGE_RE = re.compile(
+    r"\s*(?:문제\s*)?(?:를|을|이|가|은|는)?\s*"
+)
+INDUSTRY_CURRENT_CONSTRAINT_UNBOUND_RE = re.compile(
+    r"가능성|예상|전망|경우|가정|(?:이|라|한다|된다)면|"
+    r"부인|반박|거짓|(?:않|아니)(?:다|다는|라고|라고\s*했다)"
 )
 INDUSTRY_GLOBAL_COMPANY_MODIFIER_RE = re.compile(
     r"(?:글로벌|global)\s*(?:[가-힣A-Za-z0-9]+\s+){0,5}"

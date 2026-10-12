@@ -1021,6 +1021,16 @@ def _review_prompt(
             fid: parse_section_context(fragment.section_context_json)["text"]
             for fid, fragment in scoped_sources.items()
         }, ensure_ascii=False, separators=(",", ":")))
+    practice_sources = {
+        fid: fragment for fid, fragment in (fragments_by_id or {}).items()
+        if fid in source_dictionary and fragment.practice_context_json
+    }
+    if practice_sources:
+        from src.shared.report_evidence.practice_context import parse_practice_context
+        lines.append("원문 예시·안내 문맥 (조각별 JSON 자료): " + json.dumps({
+            fid: parse_practice_context(fragment.practice_context_json)["text"]
+            for fid, fragment in practice_sources.items()
+        }, ensure_ascii=False, separators=(",", ":")))
     for number, section_id, row in items:
         # 경로·원문은 신뢰할 수 없는 데이터다. JSON 문자열로 봉인해
         # 안의 줄바꿈·가짜 번호·지시가 검수 프롬프트 구조를 바꾸지 못한다.
@@ -1206,6 +1216,17 @@ def _review_rows(
                 flow_problem = next((value for cell in row.cells if (value := business_relation_scope_problem(
                     cell, sources, section_id="business_model",
                 ))), "")
+            if not flow_problem and section_id == "past_changes":
+                from src.features.composer.education_practice_scope import education_practice_scope_problem
+                flow_problem = education_practice_scope_problem(
+                    FLOW_CELL_JOIN.join(row.cells), sources, section_id=section_id,
+                    claim_slot="past_changes:completed_execution",
+                    practice_context_by_source_id={
+                        fid: fragment.practice_context_json
+                        for fid, fragment in (fragments_by_id or {}).items()
+                        if fid in sources and fragment.practice_context_json
+                    },
+                )
             if not flow_problem and section_id == IDENTITY_TABLE_SECTION_ID:
                 flow_problem = identity_flow_scope_problem(row.cells, sources)
             if not flow_problem and section_id == OPERATIONS_FLOW_SECTION_ID:

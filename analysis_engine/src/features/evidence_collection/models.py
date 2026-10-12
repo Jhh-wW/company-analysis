@@ -177,7 +177,11 @@ class EvidenceFragment:
 
     def __post_init__(self) -> None:
         from features.evidence_collection.source_context import validate_source_context
-        validate_source_context(self.source_context_json)
+        validate_source_context(
+            self.source_context_json, document_id=self.document_id,
+            fragment_location=self.location, fragment_sha256=self.text_sha256,
+            section_context_json=self.section_context_json,
+        )
         from features.evidence_collection.section_context import parse_section_context
         parse_section_context(
             self.section_context_json, document_id=self.document_id,
@@ -413,6 +417,13 @@ class DartEvidenceHarvest:
                 fragment.section_context_json, document_id=source_document.document_id,
                 document_sha256=source_document.content_sha256,
                 fragment_location=fragment.location, fragment_sha256=fragment.text_sha256,
+            )
+            from features.evidence_collection.source_context import validate_source_context
+            validate_source_context(
+                fragment.source_context_json, document_id=source_document.document_id,
+                document_sha256=source_document.content_sha256,
+                fragment_location=fragment.location, fragment_sha256=fragment.text_sha256,
+                section_context_json=fragment.section_context_json,
             )
             if fragment.company_id != self.company_id:
                 raise EvidenceCollectionError(

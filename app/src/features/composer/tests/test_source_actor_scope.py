@@ -101,3 +101,45 @@ def test_mixed_status_uses_pending_stage_instead_of_first_completed_stage():
 
 def test_development_pending_does_not_become_development_completed():
     assert source_actor_problem("회사는 산업장비 개발을 완료했다.", _context(_OWNER, status="개발 예정")) == SCOPE_CONDITION_UNBOUND
+
+
+@pytest.mark.parametrize("prefix", [
+    "산업 장비 사업에서 ", "자동차 열 관리 시스템 부문에서 ",
+    "비제조부문 프로토타입 사업에서 ", "정밀·전자 장비 분야에서 ",
+])
+def test_business_prefix_keeps_explicit_actual_actor(prefix):
+    text = prefix + f"{_OTHER}는 산업장비를 제조한다."
+    assert source_actor_problem(text, _context(), {"1": text}) == ""
+    assert source_actor_subject_scope(text, (_context(),), company_name=_OWNER,
+                                      sources={"1": text}) == _OTHER
+
+
+@pytest.mark.parametrize("text", [
+    f"타사 사업에서 {_OTHER}는 산업장비를 제조한다.",
+    f"다른 회사의 사업에서 {_OTHER}는 산업장비를 제조한다.",
+    f"별빛주식회사의 사업에서 {_OTHER}는 산업장비를 제조한다.",
+    f"업계 일반 사업에서 {_OTHER}는 산업장비를 제조한다.",
+    f"산업 전반의 사업에서 {_OTHER}는 산업장비를 제조한다.",
+    f"제조한다는 사업에서 {_OTHER}는 산업장비를 제조한다.",
+    f"사업이 아닌 분야에서 {_OTHER}는 산업장비를 제조한다.",
+    f"조건부로 추진하는 사업에서 {_OTHER}는 산업장비를 제조한다.",
+    f"사업을 수행할 경우 {_OTHER}는 산업장비를 제조한다.",
+    f"타사의 설명에 따르면 산업장비 사업에서 {_OTHER}는 제조한다.",
+    f"향후 산업장비 사업에서 {_OTHER}는 산업장비를 제조한다.",
+    f"산업장비 사업에서 {_OTHER}의 설명에 따르면 회사는 제조한다.",
+    f"산업장비 사업에서 다른주식회사는 제조하고 {_OTHER}는 판매한다.",
+    "산업장비 사업에서 회사는 산업장비를 제조한다.",
+    "산업장비 사업에서 산업장비를 제조한다.",
+    f"산업장비 사업에서 종속회사 {_OTHER}는 제조한다.",
+    f"산업장비 사업에서 정밀장비 분야에서 {_OTHER}는 제조한다.",
+])
+def test_business_prefix_does_not_hide_other_subject_or_condition(text):
+    assert source_actor_problem(text, _context(), {"1": text}) == SCOPE_CONDITION_UNBOUND
+
+
+def test_business_prefix_keeps_pending_stage_and_later_wrong_subject_guard():
+    text = f"산업장비 사업에서 {_OTHER}는 산업장비 양산을 완료했다."
+    assert source_actor_problem(text, _context(status="양산 적용 예정"),
+                                {"1": text}) == SCOPE_CONDITION_UNBOUND
+    text = f"산업장비 사업에서 {_OTHER}는 산업장비를 제조한다. 회사는 판매한다."
+    assert source_actor_problem(text, _context(), {"1": text}) == SCOPE_CONDITION_UNBOUND

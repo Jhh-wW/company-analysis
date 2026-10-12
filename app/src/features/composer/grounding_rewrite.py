@@ -103,6 +103,10 @@ def _fragment_lines(
             if fragment is None:
                 continue
             seen.add(citation)
+            if fragment.practice_context_json:
+                from src.shared.report_evidence.practice_context import parse_practice_context
+                context = parse_practice_context(fragment.practice_context_json)
+                lines.append("원문 예시·안내 문맥: " + json.dumps(context["text"], ensure_ascii=False) + "\n")
             if fragment.section_context_json:
                 from src.shared.report_evidence.section_context import parse_section_context
                 from src.features.composer.section_context_constants import SECTION_CONTEXT_LABEL

@@ -182,6 +182,7 @@ class _FragmentMeta:
     text: str = ""
     source_context_json: str = ""
     section_context_json: str = ""
+    practice_context_json: str = ""
     source_url: str = ""
     document_title: str = ""
     item_title: str = ""
@@ -227,6 +228,14 @@ class _FragmentMeta:
     from_financial_api: bool = False
 
     def __post_init__(self) -> None:
+        from src.shared.report_evidence.practice_context import parse_practice_context
+        if self.practice_context_json and any(type(value) is not str or not value for value in (
+            self.source_document_id, self.document_content_sha256, self.location,
+        )):
+            raise ValueError("예시·안내 문맥에 원문 문서·해시·조각 위치 결속이 필요합니다")
+        parse_practice_context(self.practice_context_json, document_id=self.source_document_id,
+            document_sha256=self.document_content_sha256, fragment_location=self.location,
+            fragment_sha256=exact_evidence_text_hash(self.text), fragment_text=self.text)
         if self.section_context_json == "":
             return
         from src.shared.report_evidence.section_context import parse_section_context
@@ -261,10 +270,11 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
                     text=text,
                     source_context_json=str(item.get("source_context_json") or ""),
                     section_context_json=item.get("section_context_json", ""),
+                    practice_context_json=item.get("practice_context_json", ""),
                     **({
                         "source_document_id": str(item.get("문서ID") or ""),
                         "document_content_sha256": str(item.get("_evidence_document_content_sha256") or ""),
-                    } if item.get("section_context_json") else {}),
+                    } if item.get("section_context_json") or item.get("practice_context_json") else {}),
                     source_url=source_url,
                     document_title=str(item.get("문서명") or "").strip(),
                     item_title=str(item.get("item_title") or "").strip(),
@@ -285,6 +295,7 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
             text=str(getattr(fragment, "text", "") or ""),
             source_context_json=str(getattr(fragment, "source_context_json", "") or ""),
             section_context_json=getattr(fragment, "section_context_json", ""),
+            practice_context_json=getattr(fragment, "practice_context_json", ""),
             source_url=str(getattr(fragment, "source_url", "") or ""),
             document_title=str(getattr(fragment, "document_title", "") or ""),
             item_title=fragment.item_title,
@@ -1294,6 +1305,7 @@ def render_report(
                             exact_text=meta.text,
                             source_context_json=meta.source_context_json,
                             section_context_json=meta.section_context_json,
+                            practice_context_json=meta.practice_context_json,
                         )
                     )
                 fact = build_verified_prose_fact(

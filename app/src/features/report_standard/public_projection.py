@@ -277,7 +277,7 @@ def _summary_rows(report: Report) -> tuple[PublicSummaryRow, ...]:
         rows.append(
             PublicSummaryRow(
                 ordinal=f"{position:0{_SUMMARY_ORDINAL_WIDTH}d}",
-                topic=summary_topic(section_id),
+                topic=summary_topic(section_id, report, item),
                 section_display_number="" if spec is None else spec.display_number,
                 text=str(item.text or ""),
                 section_id=section_id,

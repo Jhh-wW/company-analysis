@@ -69,7 +69,8 @@ def challenge_table_scope(text: str) -> ChallengeTableScope:
         if actor is not None and date is not None:
             event = accident if accident is not None else sanction
             mapping = ((actor, date, event, _index(cells, c.PLACE_HEADERS), accident is not None,
-                        len(cells), _index(cells, c.RESPONSE_HEADERS))
+                        len(cells), next((index for index, cell in enumerate(cells)
+                                          if cell in c.RESPONSE_HEADERS and index != event), None))
                        if event is not None else None)
             excluded += 1
             continue
