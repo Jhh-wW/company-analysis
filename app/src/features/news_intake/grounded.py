@@ -149,6 +149,8 @@ def build_grounded_prompt(company: NewsCompanyContext, articles: list[tuple[News
         "start/end는 서버 위치 정보이며 직접 숫자를 세거나 반환할 필요가 없습니다. text/entity_evidence/"
         "subject_evidence/time_evidence 대신 같은 이름의 _quote_id 필드를 반환하세요. "
         "날짜와 관계 근거가 필요 없을 때는 해당 ID를 빈 문자열로 두세요. "
+        "text_quote_id 인용에 대상 법인명이 직접 있으면 subject와 subject_evidence_quote_id는 모두 빈 문자열입니다. "
+        "별도 subject_is_target 판정은 생략하지 마세요. "
         "산업문맥도 text 대신 text_quote_id를 선택하고 나머지 짧은 사실 문구는 그 인용 안의 원문을 그대로 쓰세요. "
         "ID는 같은 기사의 후보만 허용됩니다. 넓은 인용에 회사 이름이 있어도 타법인·개인의 사건을 대상 회사 사건으로 바꾸지 마세요. "
         "각 인용은 subject_is_target에 해당 사건의 실제 주어가 대상 법인인지 별도로 판정하세요. "
@@ -318,7 +320,16 @@ def _bound_subject(raw: dict[str, str], body: str, company: NewsCompanyContext,
     if target_is_only_interview_recipient(text, article_context):
         return _subject_rejected(diagnostics, SUBJECT_INTERVIEW_RECIPIENT_ONLY)
     if mentions_target(text, article_context) or starts_relation_target(text, article_context):
-        if subject or evidence:
+        # 전체 회사명과 선택 원문을 그대로 반복한 필드만 중복으로 본다.
+        # 다른 관계 근거를 무시하거나 제품·관계사 이름을 대상회사로 바꾸지 않는다.
+        names = {normalize_company_name(name) for name in company_query_names(article_context)}
+        redundant_subject = (
+            not subject or (
+                len(subject) <= c.GROUNDED_SUBJECT_CHARS
+                and normalize_company_name(subject) in names
+            )
+        )
+        if not redundant_subject or evidence not in ("", text):
             return _subject_rejected(diagnostics, c.SUBJECT_DIRECT_NAME_EXTRA_FIELDS)
         bound = bind_relation_subject(text, body, article_context, start,
                                       max_chars=c.GROUNDED_MAX_EXCERPT_CHARS)

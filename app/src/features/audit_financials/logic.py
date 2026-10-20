@@ -26,6 +26,7 @@ from src.features.audit_financials.constants import (
     OUTPUT_YEAR_COUNT,
     PLAIN_INLINE_NOTE_PATTERN,
     PLAIN_METRIC_WINDOW_CHARS,
+    PLAIN_NOTE_LIST_PATTERN,
     PLAIN_NOTE_NUMBER_MAX,
     UNIT_DIVISORS,
 )
@@ -66,6 +67,7 @@ _PLAIN_NUMERIC_PREFIX_RE = re.compile(r"[\d\s,().+△▲−-]*")
 _PLAIN_SEPARATED_SIGN_RE = re.compile(r"[△▲+−-](?:\s|$)")
 _PLAIN_NOTE_HEADER_RE = re.compile(r"주\s*석")
 _PLAIN_INLINE_NOTE_RE = re.compile(PLAIN_INLINE_NOTE_PATTERN)
+_PLAIN_NOTE_LIST_RE = re.compile(PLAIN_NOTE_LIST_PATTERN)
 _PLAIN_PERIOD_SUFFIX_RE = re.compile(
     r"(?:년(?:도|말|초)?|월|일|기말|기초)(?=\s|$|\d|부터|까지)"
 )
@@ -456,6 +458,19 @@ def _loose_alias_pattern(alias: str) -> str:
 def _plain_row_amounts(
     window: str, *, period_count: int, force_negative: bool, has_note_column: bool
 ) -> tuple[_Amount, ...]:
+    note_list = _PLAIN_NOTE_LIST_RE.match(window) if has_note_column else None
+    if note_list is not None:
+        note_text = note_list.group("numbers")
+        # '18,27'은 주석 번호 목록이지만 '18,027'은 금액일 수 있다.
+        # 숫자처럼도 읽히는 목록은 추정해서 제거하지 않는다.
+        if _AMOUNT_TOKEN_RE.fullmatch(note_text) is None:
+            if any(
+                int(number.strip()) > PLAIN_NOTE_NUMBER_MAX
+                for number in note_text.split(",")
+            ):
+                return ()
+            window = window[note_list.end():]
+            has_note_column = False
     # 다른 계정·설명문을 넘어 수치를 주워 오지 않고 계정 직후의 숫자 구간만 읽는다.
     prefix = _PLAIN_NUMERIC_PREFIX_RE.match(window)
     if prefix is None:

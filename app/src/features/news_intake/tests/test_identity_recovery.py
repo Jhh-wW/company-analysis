@@ -147,7 +147,7 @@ def test_excess_excerpt_count_cannot_recover_identity():
 
 @pytest.mark.parametrize("change", [
     {"event_key": None},
-    {"subject": "가나다전자"},
+    {"subject": "다른기술"},
     {"claim_kind": "unknown"},
     {"section_id": "future_strategy", "claim_slot": "future_strategy:stated_plan"},
 ])

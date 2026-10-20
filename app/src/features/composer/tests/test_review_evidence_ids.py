@@ -132,7 +132,7 @@ def test_쓰이지_않는_외부증명도_근거검사에서_거절한다():
     row = _row(ids=["1"])
     row["검증근거"] = {"미래근거": [{"근거": "외부"}]}
     raw = json.dumps({"판정": [row]}, ensure_ascii=False)
-    text = "회사의 상호는 예시법인이다."
+    text = "회사는 반도체 검사장비 전문기업이다."
     diagnostics = []
     result = verify._apply_grounding(raw, {1: "참"}, {1: (text, {"1": text})}, review_evidence_context=_context(),
                                      diagnostics=diagnostics,
