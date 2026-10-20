@@ -3,8 +3,9 @@
 ★ 왜 필요한가(2026-09-23 4차 실측) — 공식 개요 문단의 소재지·사업 정의와 수익인식
   주석의 수익 구성은 원문에 있었지만 선택 후보 칸이 운반되지 않아 검수 전에
   사라졌다. evidence 수정은 이 세 사실이 «검수 입력»까지 오는 것만 증명했다. 이
-  시험은 같은 세 역할을 익명 합성 원문으로 재현해, 검수 뒤 scope·근거 결속·중복
-  정리를 지나 canonical fact·공개 본문 문장·표지 요약에 살아남는지 본다. 같은
+  시험은 같은 세 역할을 익명 합성 원문으로 재현한다. 주소 근거의 운반은 유지하되
+  행정정보만인 문장은 정체성·요약에서 빼고, 사업 정의·수익 구성은 검수 뒤
+  canonical fact·공개 본문 문장·표지 요약에 살아남는지 본다. 같은
   실행에서 원문에 없는 완료기준 수익인식(L1)과 설립 결정에 덧붙인 목적 해석(L2)은
   가짜 검수자가 «참»이라고 답해도 실제 검증기가 공개에서 빼는지 대칭으로 확인한다.
 
@@ -536,10 +537,10 @@ def _cited_ids(fact) -> tuple[str, ...]:
     return tuple(item["fragment_id"] for item in json.loads(fact.state_evidence))
 
 
-# ── 살릴 것: 세 정답이 검수 뒤 fact·공개 본문·표지 요약까지 ─────────────
+# ── 사업정의·수익구성은 공개하고 행정정보의 운반과 공개 적합성은 구분 ──
 
 
-def test_세_정답은_검수_뒤_canonical_fact와_공개본문과_표지요약까지_살아남는다() -> None:
+def test_사업정의와_수익구성은_공개하고_행정정보는_정체성과_요약을_채우지_않는다() -> None:
     chain = _run_chain()
     report = chain.report
     by_id = {fragment.fragment_id: fragment for fragment in chain.fragments}
@@ -549,10 +550,14 @@ def test_세_정답은_검수_뒤_canonical_fact와_공개본문과_표지요약
     assert _LOCATION_SLOT in chain.writer.prompts["identity"]
 
     targets = {
-        _LOCATION: ("identity", _LOCATION_SLOT),
         _DEFINITION: ("identity", _DEFINITION_SLOT),
         _COMPOSITION: ("business_model", _REVENUE_MODEL_SLOT),
     }
+    # 주소 원문과 슬롯은 사실 확인 자료로 보존한다. 다만 주소·설립일만 나열한
+    # 문장은 기업 정체성의 답이 아니므로 공개 본문·표지의 분량을 채우지 않는다.
+    assert not any(fact.claim == _LOCATION for fact in report.fact_records)
+    assert _LOCATION not in chain.section_prose("identity")
+    assert all(_LOCATION not in item.text for item in report.summary_items)
     target_fact_ids: dict[str, str] = {}
     for claim, (section_id, slot) in targets.items():
         fact = chain.fact(claim)

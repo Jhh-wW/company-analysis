@@ -141,6 +141,8 @@ from src.features.composer.entity_scope_constraints import (
 )
 from src.features.composer.scope_guard import flow_scope_problem
 from src.features.composer.identity_flow_scope import identity_flow_scope_problem
+from src.features.composer.identity_content import identity_content_problem
+from src.features.composer.past_execution_period import past_completed_execution_period_problem
 from src.features.composer.challenge_guard import challenge_response_problem
 from src.features.composer.challenge_response_evidence import (
     challenge_response_evidence_problem,
@@ -2375,6 +2377,11 @@ def _apply_grounding(
             continue
         context = (diagnostic_contexts or {}).get(number)
         if context and context[1] == DIAGNOSTIC_KIND_BODY:
+            problem = identity_content_problem(text, section_id=context[0])
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
             if context[0] == "portfolio":
                 problem = project_business_scope_problem(
                     text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
@@ -2553,6 +2560,10 @@ def _apply_grounding(
             continue
         if not (flow_cells_by_number and number in flow_cells_by_number):
             problem = completed_execution_status_problem(text, slot)
+            if context and context[:2] == ("past_changes", DIAGNOSTIC_KIND_BODY):
+                problem = problem or past_completed_execution_period_problem(
+                    text, claim_slot=slot, baseline_date=baseline_date,
+                )
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem

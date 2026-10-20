@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import io
 from types import SimpleNamespace
@@ -13,6 +14,26 @@ from types import SimpleNamespace
 import pytest
 
 from src.features.auth import constants as auth_constants
+
+
+@pytest.fixture
+def canonical_demo_clock(monkeypatch):
+    """선택한 데모 화면 시험만 자료 생성일의 시계로 고정한다."""
+
+    from src.core import clock  # noqa: PLC0415
+    from src.features.pipeline.canonical_demo import build_demo_report  # noqa: PLC0415
+    from src.features.report_access import logic as access_logic  # noqa: PLC0415
+    from src.features.report_access import store as access_store  # noqa: PLC0415
+
+    generated_day = dt.date.fromisoformat(build_demo_report().generated_at)
+    fixed_now = dt.datetime.combine(generated_day, dt.time(hour=12), tzinfo=clock.KST)
+    monkeypatch.setattr(clock, "now_kst", lambda: fixed_now)
+    # 공개 grant의 발급·결속·조회도 같은 시험 시계를 쓴다. 개별 만료 시험이
+    # clock을 이동하면 함께 따라가며 전역 time·monotonic은 변경하지 않는다.
+    access_time = SimpleNamespace(time=lambda: clock.now_kst().timestamp())
+    monkeypatch.setattr(access_store, "time", access_time)
+    monkeypatch.setattr(access_logic, "time", access_time)
+    return fixed_now
 
 
 @pytest.fixture(autouse=True)

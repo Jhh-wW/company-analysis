@@ -31,6 +31,30 @@ def test_actual_declared_strength_and_stated_limitations_survive(claim, source):
     assert competitive_section_evidence_problem(claim, {"1": source}) == ""
 
 
+@pytest.mark.parametrize("claim", [
+    "당사는 국내 시장점유율 1위를 유지하고 있다고 공식 자료에서 설명한다.",
+    "회사는 국내 결제 서비스 부문 1위에 선정되었다고 밝혔다.",
+    "회사는 고객 만족도 조사에서 1 위를 기록했다고 공시한다.",
+    "회사는 고객 만족도 1위라는 평가를 받았다고 밝혔다.",
+    "회사는 국내 시장점유율 1위임을 공시한다.",
+    "회사의 국내 시장점유율 순위는 1위다.",
+    "회사는 지난해 국내 시장점유율 1위였다고 밝혔다.",
+])
+def test_explicit_first_place_declaration_survives(claim):
+    assert competitive_section_evidence_problem(claim, {"1": claim}) == ""
+
+
+@pytest.mark.parametrize("claim", [
+    "회사는 시장점유율 11위를 기록했다고 설명한다.",
+    "회사는 시장점유율 21위를 기록했다고 설명한다.",
+    "회사의 시장점유율 1위 여부는 확인할 수 없다고 설명한다.",
+    "회사는 제1위원회를 설치해 심의를 진행한다.",
+    "회사는 내부 규정의 1위험 항목을 설명한다.",
+])
+def test_other_rank_and_unconfirmed_rank_do_not_create_declaration(claim):
+    assert competitive_section_evidence_problem(claim, {"1": claim}) == "competitive_section_evidence_offcontract"
+
+
 @pytest.mark.parametrize("grade", ["확인", "해석"])
 @pytest.mark.parametrize("verdict", ["참", "애매"])
 def test_true_or_unclear_cannot_publish_wrong_ninth_topic(grade, verdict):

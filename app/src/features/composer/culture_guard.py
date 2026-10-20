@@ -30,6 +30,8 @@ from src.features.composer.culture_constants import (
     CULTURE_BOARD_BODY_RE,
     CULTURE_BOARD_CHARTER_RE,
     CULTURE_BOARD_PEOPLE_PROCEDURE_RE,
+    CULTURE_BOARD_STRUCTURE_RE,
+    CULTURE_BOARD_EMPLOYEE_PROCEDURE_RE,
     CULTURE_EMPLOYEE_BENEFICIARY_RE,
     CULTURE_EMPLOYEE_FINANCIAL_BENEFIT_RE,
     CULTURE_EVIDENCE_SCOPE_MISMATCH,
@@ -257,6 +259,9 @@ def _is_board_charter_clause(surface_clause: str) -> bool:
 def _is_statutory_governance_clause(surface_clause: str) -> bool:
     """일반 기관 구성·거래 승인 규정을 실제 사람·업무 제도와 구분한다."""
 
+    if (CULTURE_BOARD_STRUCTURE_RE.search(surface_clause)
+            and not CULTURE_BOARD_EMPLOYEE_PROCEDURE_RE.search(surface_clause)):
+        return True
     if (CULTURE_AUDIT_COMMITTEE_RE.search(surface_clause)
             and CULTURE_AUDIT_COMPOSITION_RE.search(surface_clause)
             and CULTURE_AUDIT_QUALIFICATION_RE.search(surface_clause)):

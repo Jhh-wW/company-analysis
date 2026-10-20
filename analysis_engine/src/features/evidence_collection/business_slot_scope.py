@@ -18,7 +18,8 @@ def _surface(text: str) -> str:
 def _administration(text: str, slot_id: str) -> bool:
     surface = _surface(text)
     if slot_id == c.PRODUCT_ROLE_SLOT:
-        return bool(c.PRODUCT_POSITIONING_RE.search(surface))
+        return bool(c.PRODUCT_POSITIONING_RE.search(surface)
+                    or c.PRODUCT_CORPORATE_FACT_RE.search(surface))
     if slot_id in c.REVENUE_RELATION_SLOTS:
         account = (c.REVENUE_ACCOUNT_RE.search(surface)
                    or (c.REVENUE_IMPLICIT_ACCOUNT_RE.search(surface)
@@ -48,6 +49,8 @@ def _personal_past_role(text: str, context: str = "") -> bool:
 def _business_fact(text: str, slot_id: str, context: str = "") -> bool:
     surface = _surface(text)
     if slot_id == c.PRODUCT_ROLE_SLOT:
+        if c.PRODUCT_CORPORATE_FACT_RE.search(surface):
+            return bool(c.PRODUCT_CORPORATE_CURRENT_ROLE_RE.search(surface))
         return bool(c.OPERATING_ACTION_RE.search(surface)
                     or c.PRODUCT_NAMED_SOLUTION_RE.search(text)
                     or "|" in text)
@@ -163,6 +166,13 @@ def business_slot_scope_problem(text: str, slot_id: str) -> str:
         _business_fact(scoped.score_text, slot_id, text)
         or (remaining and remaining.search(_surface(scoped.score_text)))
     ) else ""
+
+
+def product_corporate_only_problem(text: str) -> str:
+    """의미칸 없는 구형 조각도 순수 법인 행정·연혁으로 제품 설명을 대신하지 않는다."""
+    if not c.PRODUCT_CORPORATE_FACT_RE.search(_surface(text)):
+        return ""
+    return business_slot_scope_problem(text, c.PRODUCT_ROLE_SLOT)
 
 
 def business_slot_quote_problem(text: str, slot_id: str, quote_start: int, quote_end: int) -> str:

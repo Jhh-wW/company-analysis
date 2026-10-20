@@ -32,11 +32,15 @@ from src.features.composer.extractive_summary_constants import (
     SUMMARY_REVENUE_ROUTE_COUNTS,
     SUMMARY_REVENUE_STREAM_SEPARATOR,
     SUMMARY_REVENUE_MIN_STREAMS,
+    SUMMARY_RECOGNITION_ONLY_PATTERN,
+    SUMMARY_BUSINESS_EXCHANGE_PATTERN,
 )
 from src.features.composer.logic import SummaryCandidate
+from src.features.composer.identity_content import administrative_identity_only
 from src.features.composer.port import ComposedReport, ComposedSentence
 from src.features.pipeline.port import FactRecord
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+from src.shared.report_evidence.business_slot_scope import product_corporate_only_problem
 from src.shared.report_quality.evidence_support import prose_evidence_support_ready
 from src.shared.report_quality.fact_binding import fact_evidence_binding
 
@@ -150,6 +154,12 @@ def distinct_summary_candidates(
     단어 수로 의미를 추정하지 않으며 검증 상태·인용·본문은 그대로 둔다.
     """
 
+    # 사실성과 요약 적합성은 다르다. 주소·설립일·자본금 단독 문장으로
+    # 부족한 요약 장수를 채우지 않으며 본문·인용·사실 결속은 바꾸지 않는다.
+    candidates = tuple(
+        candidate for candidate in candidates
+        if _summary_content_ready(candidate)
+    )
     keys = [
         _revenue_composition_key(candidate.sentence.text, company_name)
         if candidate.sentence.verification_state == "verified" else None
@@ -194,6 +204,26 @@ def distinct_summary_candidates(
         if not any(repeats(index, previous) for previous in kept):
             kept.append(index)
     return tuple(candidates[index] for index in sorted(kept))
+
+
+def _summary_content_ready(candidate: SummaryCandidate) -> bool:
+    """사실 결속·슬롯 이름만으로 핵심 역할과 무관한 문장을 요약에 올리지 않는다."""
+
+    text = candidate.sentence.text
+    if administrative_identity_only(text):
+        return False
+    if (
+        candidate.section_id == "business_model"
+        and re.search(SUMMARY_RECOGNITION_ONLY_PATTERN, text)
+        and not re.search(SUMMARY_BUSINESS_EXCHANGE_PATTERN, text)
+    ):
+        return False
+    if (
+        candidate.section_id == "portfolio"
+        and product_corporate_only_problem(text)
+    ):
+        return False
+    return True
 
 
 def _fact_key(

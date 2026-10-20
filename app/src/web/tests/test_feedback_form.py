@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
@@ -45,6 +46,9 @@ from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.web import job_runtime, main, runtime
 from src.web.routers import feedback
+
+
+pytestmark = pytest.mark.usefixtures("canonical_demo_clock")
 
 
 def _session_client(

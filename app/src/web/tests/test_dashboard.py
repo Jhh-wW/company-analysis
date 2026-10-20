@@ -32,6 +32,9 @@ from src.web.routers import maintenance as maintenance_router
 from src.web.routers import reports as reports_router
 
 
+pytestmark = pytest.mark.usefixtures("canonical_demo_clock")
+
+
 def _identity_subject(email: str) -> str:
     digest = hashlib.sha256(email.lower().encode("utf-8")).hexdigest()[:24]
     return f"google:test-{digest}"

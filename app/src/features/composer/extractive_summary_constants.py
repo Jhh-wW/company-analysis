@@ -29,6 +29,19 @@ SUMMARY_REVENUE_ROUTE_SUFFIX: Final[str] = r"\s*(?P<count>두|세|네) 가지 (?
 SUMMARY_REVENUE_ROUTE_COUNTS: Final[dict[str, int]] = {"두": 2, "세": 3, "네": 4}
 SUMMARY_REVENUE_STREAM_SEPARATOR: Final[str] = r"(?:과|와|및)\s+"
 SUMMARY_REVENUE_MIN_STREAMS: Final[int] = 2
+# 본문에서 허용한 회계 인식조건도 그 자체가 제공 가치·대가 요약은 아니다.
+# 구체 거래·제공물이나 대금 수취가 함께 있으면 혼합 사실을 보존한다.
+SUMMARY_RECOGNITION_ONLY_PATTERN: Final[str] = (
+    r"수행\s*의무[^.!?\n]*(?:완료|이행)"
+    r"|수익\s*인식\s*(?:시점|기준|조건|정책)"
+    r"|(?:시점|기간|간편법)[^.!?\n]*수익[^.!?\n]*인식"
+    r"|거래\s*가격[^.!?\n]*(?:배분|차감)"
+)
+SUMMARY_BUSINESS_EXCHANGE_PATTERN: Final[str] = (
+    r"(?:상품|제품|장비|부품|서비스|용역|콘텐츠|소프트웨어|사용권|라이선스|대출|보험|신탁)"
+    r"[^.!?\n]*(?:판매|제공|공급|납품|임대|중개|취급|구독|허여)(?:하|한|할|해|했|받|되)"
+    r"|(?:대금|대가|이용료|구독료|수수료|보험료|운용보수)[^.!?\n]*(?:받|수취|회수|청구)"
+)
 SUMMARY_LOW_VALUE_PATTERNS: Final[tuple[str, ...]] = (
     "인식한다",
     "인식하고",

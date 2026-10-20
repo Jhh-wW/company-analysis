@@ -34,6 +34,7 @@ from src.features.composer.grounding_constants import (
     GROUNDING_INVALID,
     GROUNDING_MISSING,
 )
+from src.features.composer.identity_content_constants import IDENTITY_ADMINISTRATIVE_ONLY
 from src.features.composer.prose_own_source_constants import (
     PROSE_OWN_SOURCE_UNSUPPORTED,
 )
@@ -57,6 +58,9 @@ GROUNDING_REWRITE_EXCLUDED_REASONS: Final[frozenset[str]] = frozenset({
     "accounting_policy_boilerplate", "culture_accounting_policy_misplaced",
     "competitive_section_evidence_offcontract",
     "source_practice_unbound",
+    # 행정정보 자체는 틀린 말이 아니며 같은 위치 슬롯의 바꿔쓰기로 사업 설명이
+    # 되지 않는다. 장별 사업 근거를 고르는 빈 장 복구의 기회는 그대로 둔다.
+    IDENTITY_ADMINISTRATIVE_ONLY,
 })
 
 #: 묶음 재작성 프롬프트 전체의 글자 상한. 완전한 자기 인용이 들어갈 후보만 담는다.

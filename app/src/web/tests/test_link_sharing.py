@@ -36,6 +36,9 @@ from src.web.routers import reports as reports_router
 from src.web.tests._visible_text import visible_text
 
 
+pytestmark = pytest.mark.usefixtures("canonical_demo_clock")
+
+
 @pytest.fixture
 def client():
     """★ 반드시 `with`로 연다.

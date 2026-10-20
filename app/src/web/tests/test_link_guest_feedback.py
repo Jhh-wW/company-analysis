@@ -43,6 +43,9 @@ from src.features.storage import reports as report_store
 from src.web import main, runtime
 from src.web.routers import feedback as feedback_router
 
+
+pytestmark = pytest.mark.usefixtures("canonical_demo_clock")
+
 _카카오열쇠 = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
 
 

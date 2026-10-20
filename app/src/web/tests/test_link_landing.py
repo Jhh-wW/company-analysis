@@ -42,6 +42,8 @@ from src.features.sharelink import tracks as share_tracks
 from src.web import main, paid_runtime, request_helpers, runtime
 from src.web.tests._visible_text import visible_text
 
+pytestmark = pytest.mark.usefixtures("canonical_demo_clock")
+
 _열쇠 = "b7c1d2e3f4a5b6c7b7c1d2e3f4a5b6c7"
 _없는열쇠 = "0123456789abcdef0123456789abcdef"
 _짧은열쇠 = "b7c1d2e3f4a5b6c7"

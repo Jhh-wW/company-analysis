@@ -96,10 +96,10 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
 
 
 @pytest.mark.parametrize("factory,grouped,expected", (
-        (_golden_case, False, "66811c4f7c637c489ea4a04410b18b71a2be2c234fc86615b031950a6d1be61f"),
-        (_golden_case, True, "78ebdf6952eb113692469a5edda74b1ea22c919251c98dab119e872db90766c0"),
-        (_boundary_case, False, "71335a9a68930aefb05ec45fa13904de73164bf1c8f7ff8ac99f24a2c65103cc"),
-        (_boundary_case, True, "2ddae513cedefc551365a11f1a7e43ac5c289cd5d163303e6e69e72e046b70c0"),
+        (_golden_case, False, "8df32dd2909611b1ad2ae430bd546e1ffe6d856e3b464f87cdaec00b37190d36"),
+        (_golden_case, True, "9c27f3cd346466370b47178a271cab6367a7beda1da559d2608bd18938076201"),
+        (_boundary_case, False, "1c2b6858beaaf4d592b5605be78b52dfb2efeb5a5a4766d9f7b4b3eaad9bb82c"),
+        (_boundary_case, True, "1a64e3ee324f5f7b2c04ff6e87c21f754a3b9fcbb0caeb8fb816afec722fd0a0"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch, factory, grouped, expected,
@@ -129,6 +129,9 @@ def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     # 증거: tmp/audit-20260930/paid/8f3e-review-prompt-baseline-complete-private.json.
     # 5장의 추상적 노력 제외 안내만 역치환하면 ce5ac298의 네 지문이 복원된다.
     # 고정 접두부·다른 장·근거는 그대로다. paid/7408-generic-prompt-baseline-private.json.
+    # 2026-10-20: 1장 사업 우선 안내 세 문장(130자·UTF-8 325바이트)만 제거하면
+    # 직전 네 지문과 HEAD 안내로 재생한 전체 바이트가 같다. 캐시 접두부·스키마 불변.
+    # 증거: tmp/quality-audit-20261020-prompt-baselines.json.
     monkeypatch.setenv(REVIEW_PROMPT_CACHE_ENV, "1")
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected

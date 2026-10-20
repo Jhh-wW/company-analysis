@@ -59,6 +59,8 @@ from src.shared.report_source_identity import (
 
 
 _REAL_FINALIZE_REPORT_DELIVERY = job_runtime._finalize_report_delivery
+# 고정된 데모 원본의 내용 나이·공개 권한·출고 시각을 같은 시험 시계로 계산한다.
+pytestmark = pytest.mark.usefixtures("canonical_demo_clock")
 
 
 @pytest.fixture(autouse=True)
@@ -92,7 +94,7 @@ def _demo_report():
 
 
 def _public_job_for_save(report, *, report_id: str) -> job_runtime.Job:
-    issued_at = dt.datetime.now(clock.KST)
+    issued_at = clock.now_kst()
     expires_at = issued_at + dt.timedelta(days=REPORT_LINK_MAX_AGE_DAYS)
     return job_runtime.Job(
         job_id=report_id,
@@ -492,9 +494,19 @@ def test_worker는_한번잡은_완료시각으로_모든권한종류를_실제�
     monkeypatch,
     tmp_path: Path,
     track: str,
+    canonical_demo_clock: dt.datetime,
 ):
     """단위 함수가 아니라 실제 worker 합성 순서의 μs 시각 역전을 막는다."""
 
+    observed_at = canonical_demo_clock
+
+    def advancing_now() -> dt.datetime:
+        nonlocal observed_at
+        observed_at += dt.timedelta(microseconds=1)
+        return observed_at
+
+    # 날짜는 고정하되 조회마다 시각을 전진시켜 완료시각 재계산 버그를 가리지 않는다.
+    monkeypatch.setattr(clock, "now_kst", advancing_now)
     report = _demo_report()
     report_id = uuid.uuid4().hex
 
@@ -714,7 +726,7 @@ def test_PUBLIC_최종출고는_실제60일만료보다_grant가짧으면_청구
 ):
     report = _demo_report()
     report_id = uuid.uuid4().hex
-    completed_at = dt.datetime.now(clock.KST).replace(microsecond=0)
+    completed_at = clock.now_kst().replace(microsecond=0)
     delivery_expires_at = completed_at + dt.timedelta(
         days=REPORT_LINK_MAX_AGE_DAYS
     )
@@ -827,7 +839,7 @@ def test_PUBLIC_waiter와cache도_최종grant결속False면_출고와청구를_r
             source_identity_digest=preflight_digest,
             engine_epoch_digest=_current_build_identity().epoch_digest,
         )
-        now = dt.datetime.now(dt.timezone.utc)
+        now = clock.now_kst().astimezone(dt.timezone.utc)
         with storage_db.connect() as conn:
             acquired = singleflight.acquire(
                 conn,
@@ -1480,7 +1492,7 @@ def test_cache_key없는_waiter도_정확한_singleflight완료증거면_재사�
         source_identity_digest=preflight_digest,
         engine_epoch_digest=_current_build_identity().epoch_digest,
     )
-    now = dt.datetime.now(dt.timezone.utc)
+    now = clock.now_kst().astimezone(dt.timezone.utc)
     with storage_db.connect() as conn:
         acquired = singleflight.acquire(
             conn,
@@ -1698,7 +1710,7 @@ def test_일시적수집실패_보고서는_전달하되_정식캐시에는_묶�
                 content_max_age=dt.timedelta(days=60),
                 public_link_lifetime=dt.timedelta(days=60),
             ),
-            delivered_at=dt.datetime.now(dt.timezone.utc),
+            delivered_at=clock.now_kst().astimezone(dt.timezone.utc),
         ) is None
 
     # 캐시에 없더라도 돈을 쓴 현재 사용자에게는 승인 본문·PDF를 그대로 준다.
@@ -1765,7 +1777,7 @@ def test_손상PDF캐시와_남은완료fanout은_격리하고_provider한번으
         source_identity_digest=preflight_digest,
         engine_epoch_digest=_current_build_identity().epoch_digest,
     )
-    completed_at = dt.datetime.now(dt.timezone.utc)
+    completed_at = clock.now_kst().astimezone(dt.timezone.utc)
     with storage_db.connect() as conn:
         acquired = singleflight.acquire(
             conn,
@@ -1845,7 +1857,7 @@ def test_손상PDF캐시와_남은완료fanout은_격리하고_provider한번으
                 content_max_age=dt.timedelta(days=60),
                 public_link_lifetime=dt.timedelta(days=60),
             ),
-            delivered_at=dt.datetime.now(dt.timezone.utc),
+            delivered_at=clock.now_kst().astimezone(dt.timezone.utc),
         ) is None
         reasons = tuple(
             str(row[0])

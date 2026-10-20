@@ -32,6 +32,9 @@ from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.web import main, request_helpers, runtime
 
+
+pytestmark = pytest.mark.usefixtures("canonical_demo_clock")
+
 _열쇠 = "7a7a7a7a8b8b8b8b9c9c9c9c0d0d0d0d"
 
 #: 옛 규칙(리터럴). 이 날 수로 굳은 링크는 그날부터 닫혀 있어야 한다.
