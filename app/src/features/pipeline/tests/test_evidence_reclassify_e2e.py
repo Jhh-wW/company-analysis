@@ -650,6 +650,21 @@ def test_스위치OFF면_3장_부족_바이트골든을_유지한다(
         assert any(fact.metric == metric and fact.display_value == display
                    and fact.verification_status == "verified"
                    for fact in result.report.fact_records)
+    # 같은 4장에서는 검증된 재무 계산값을 과거 파트너십 소식보다 먼저 요약한다.
+    # 골든 문자열만 맞추지 않고 요약이 실제 매출액 정본을 가리키는지도 확인한다.
+    financial_summary = next(item for item in result.report.summary_items
+                             if item.section_id == "past_changes")
+    assert financial_summary.text == (
+        "연결 매출액의 2023년부터 2025년까지 누적 증감률은 137.61%이다. [11]"
+    )
+    assert financial_summary.verification_status == "verified"
+    assert any(
+        fact.fact_id in financial_summary.fact_ids
+        and fact.section_owner == "past_changes"
+        and fact.metric == "매출액" and fact.display_value == "137.61"
+        and fact.verification_status == "verified"
+        for fact in result.report.fact_records
+    )
     # 인용이 둘인 정상 해석 문장도 공개돼야 한다 — 가짜 검수 응답의 인용 판독 결함이
     # 이 문장을 빼던 상태를 골든으로 다시 굳히지 않게 의미로 먼저 못 박는다.
     business = next(section for section in result.report.sections
@@ -703,6 +718,9 @@ def test_스위치OFF면_3장_부족_바이트골든을_유지한다(
     # 2026-10-08: 7장 도식의 마지막 헤더를 '전달 대상·경로'로 바꾼다.
     # gzip 해제 바이트를 해당 헤더 한 칸만 역치환하면 옛 골든과 정확히 같고,
     # 회사 필드·본문·재무·인용·부족 계약은 그대로다(8157→8159바이트).
+    # 2026-10-21: 검증된 구조화 실적을 같은 장의 과거 소식보다 먼저 요약한다.
+    # 바뀐 필드는 summary_items[4].text 한 곳뿐이다(8159→8160바이트).
+    # 그 필드만 역치환하면 이전 골든과 정확히 같으며 본문·표·지표·인용은 그대로다.
     actual = _stable_result_bytes(result)
     golden = json.loads(_GOLDEN_FIXTURE.read_text(encoding="utf-8"))
     assert golden["byte_count"] == len(actual)

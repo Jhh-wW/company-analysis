@@ -7,7 +7,7 @@ from src.features.composer.accounting_policy_guard import accounting_policy_prob
 from src.features.composer.port import CollectedFragment, ComposedSentence
 from src.features.composer import portfolio_revenue_content_constants as c
 from src.shared.report_evidence.constants import FORMAL_DOCUMENT_SOURCE_KINDS
-from src.shared.report_evidence.service_revenue_declaration import service_revenue_declaration_spans
+from src.features.composer.service_revenue_declaration import service_revenue_declaration_spans
 from src.shared.report_evidence.practice_context_constants import HYPOTHETICAL_MARKER_RE
 
 logger = logging.getLogger(__name__)

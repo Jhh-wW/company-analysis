@@ -11,7 +11,7 @@ from src.features.composer.port import CollectedFragment, ComposedReport, Compos
 from src.features.composer.portfolio_revenue_content import portfolio_accounting_only_problem, supplement_portfolio_revenue_source
 from src.features.composer.portfolio_revenue_content_constants import PORTFOLIO_REVENUE_SLOT
 from src.features.composer.verify import _apply_grounding, DIAGNOSTIC_KIND_BODY
-from src.shared.report_evidence.service_revenue_declaration import service_revenue_declaration_spans
+from src.features.composer.service_revenue_declaration import service_revenue_declaration_spans
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/payment_portfolio_followup.json").read_text(encoding="utf-8"))
 SOURCE = FIXTURE["fragments"]["75"]
@@ -20,9 +20,9 @@ SOURCE = FIXTURE["fragments"]["75"]
 def test_service_declaration_engine_mirror_remains_identical():
     root = Path(__file__).resolve().parents[5]
     for name in ("service_revenue_declaration.py", "service_revenue_declaration_constants.py"):
-        app_source = (root / "app/src/shared/report_evidence" / name).read_text(encoding="utf-8")
+        app_source = (root / "app/src/features/composer" / name).read_text(encoding="utf-8")
         engine_source = (root / "analysis_engine/src/features/evidence_collection" / name).read_text(encoding="utf-8")
-        assert app_source.replace("src.shared.report_evidence", "features.evidence_collection") == engine_source
+        assert app_source.replace("src.shared.report_evidence", "features.evidence_collection").replace("src.features.composer", "features.evidence_collection") == engine_source
 
 
 def _fragment(text=SOURCE, **changes):

@@ -1,6 +1,6 @@
 """새 문장을 만들지 않고 명시된 현재 서비스 수익원의 원문 좌표를 반환한다."""
 from src.shared.report_evidence.business_slot_scope import business_declaration_scope_allows
-from src.shared.report_evidence import service_revenue_declaration_constants as c
+from src.features.composer import service_revenue_declaration_constants as c
 
 
 def service_revenue_declaration_spans(text: str) -> tuple[tuple[int, int], ...]:
