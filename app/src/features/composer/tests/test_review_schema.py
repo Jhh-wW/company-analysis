@@ -220,12 +220,14 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 # 직전 네 지문과 HEAD 안내로 재생한 전체 바이트가 같다. 캐시 접두부·스키마 불변.
 # 증거: tmp/quality-audit-20261020-prompt-baselines.json.
 @pytest.mark.parametrize("factory,grouped,expected", (
-        (_golden_case, False, "8df32dd2909611b1ad2ae430bd546e1ffe6d856e3b464f87cdaec00b37190d36"),
-        (_golden_case, True, "9c27f3cd346466370b47178a271cab6367a7beda1da559d2608bd18938076201"),
-        (_boundary_case, False, "1c2b6858beaaf4d592b5605be78b52dfb2efeb5a5a4766d9f7b4b3eaad9bb82c"),
-        (_boundary_case, True, "1a64e3ee324f5f7b2c04ff6e87c21f754a3b9fcbb0caeb8fb816afec722fd0a0"),
+        (_golden_case, False, "13e9f69e1fac486178ada9bfd4016995a69a5b0596a3e5c4230bbc4afba23a07"),
+        (_golden_case, True, "6af78fd2aa06a74f35e26a00f3d5dad86a0ded08adf3031576a5b4c15ab0a768"),
+        (_boundary_case, False, "337b02ccdf0da86f9e17b69095c792222630f518376edb7a5f1735dd370cee9d"),
+        (_boundary_case, True, "2ec618ef7ba7a9543d84f48f411ca12137f1714b54c9bdf7022e09759b5af8cb"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
+    # 2026-10-22: 4·7·9장 안내만 역치환해 직전 네 지문·전체 바이트를 복원했다.
+    # 후보·원문·번호·스키마·캐시 접두부 불변: sixth-review-prompt-byte-proof.json.
     # 2장 매출 모집단 안내 101자만 역치환해 기존 네 지문과 전체 바이트를 복원했다.
     # paid/97-prompt-baseline-private.json: 원문·번호·스키마·캐시 접두부 불변.
     # 6장 주어 범위 안내 64자만 제거하면 3728의 네 지문이 복원된다.
