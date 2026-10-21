@@ -43,6 +43,7 @@ from src.features.composer.supplement_feedback import supplement_feedback
 from src.features.composer.scope_supplement_feedback import ScopeSupplementFailure, render_scope_supplement_feedback
 from src.features.composer.challenge_response_feedback import ResponseSupplementFailure, render_response_supplement_feedback
 from src.features.composer.partial_evidence import PartialEvidenceView
+from src.features.composer.revenue_source_slot import normalize_revenue_source_slot
 from src.features.composer.partial_evidence_constants import (
     EXACT_EVIDENCE_SCOPE_GUIDE,
     PARTIAL_EVIDENCE_SCOPE_GUIDE,
@@ -1205,6 +1206,7 @@ def _compose_one_section(
     reject_inline_citation_markers: bool = False,
     parse_retry_limit: int = PARSE_RETRY_LIMIT,
     evidence_pairs: EvidencePairMap | None = None,
+    source_fragments: Sequence[CollectedFragment] = (),
 ) -> ComposedSection:
     """장 하나를 쓴다. 실패 시 재요청 1회, 그래도 실패면 정직한 안내문으로 남긴다."""
     sentences, raw = _ask_and_parse(
@@ -1265,6 +1267,9 @@ def _compose_one_section(
             flow_rows=flow_rows,
             news_decisions=parse_news_decisions(extract_json_payload(raw)),
         )
+    if section_id == "business_model":
+        fragments_by_id = {fragment.fragment_id: fragment for fragment in source_fragments}
+        sentences = tuple(normalize_revenue_source_slot(sentence, fragments_by_id) for sentence in sentences)
     return ComposedSection(
         section_id=section_id,
         sentences=sentences,
@@ -1905,6 +1910,7 @@ def compose_sections(
                 ),
             ),
             section_ask,
+            source_fragments=section_fragments,
             reject_inline_citation_markers=independent,
             # packet/FULL 호출 계약은 장마다 정확히 한 번이다. 형식 오류를
             # 재호출로 감추지 않고 해당 장을 fail-closed 안내문으로 남긴다.

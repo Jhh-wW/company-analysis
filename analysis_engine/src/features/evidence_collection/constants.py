@@ -312,6 +312,40 @@ VALUE_EXCHANGE_COMPLETED_EVENT_PATTERN: Final[re.Pattern[str]] = re.compile(
 VALUE_EXCHANGE_LOAN_EXECUTION_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"대출(?:상품|금)?(?:을|를)?\s*실행(?:했|하였|하고|하여|합니다|한다)"
 )
+# 같은 거래 안의 결제대행·대금 수취·가맹점 정산을 모두 요구한다.
+VALUE_EXCHANGE_SETTLEMENT_WINDOW: Final[int] = 120
+VALUE_EXCHANGE_SETTLEMENT_RECIPIENT_WINDOW: Final[int] = 30
+VALUE_EXCHANGE_SETTLEMENT_DEDUCTION_WINDOW: Final[int] = 25
+VALUE_EXCHANGE_SETTLEMENT_SUBJECT_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(?:^|[.!?])(?:\(\d+\)(?:금융)?예수금)?(?:회사|당사)는"
+)
+VALUE_EXCHANGE_SETTLEMENT_PATTERN: Final[re.Pattern[str]] = re.compile(
+    rf"결제대행(?:업|서비스)[^.!?;]{{0,{VALUE_EXCHANGE_SETTLEMENT_WINDOW}}}"
+    rf"대금을(?:받은후|수취한후)[^.!?;]{{0,{VALUE_EXCHANGE_SETTLEMENT_RECIPIENT_WINDOW}}}가맹점(?:으로|에)"
+    rf"수수료[^.!?;]{{0,{VALUE_EXCHANGE_SETTLEMENT_DEDUCTION_WINDOW}}}(?:제외|공제)하여지급"
+    r"(?:합니다|한다|하고있습니다|하고있다)(?=$|[.!?;])"
+)
+PORTFOLIO_REVENUE_SOURCE_SLOT: Final[str] = "portfolio:revenue_link"
+PORTFOLIO_REVENUE_SOURCE_REASON: Final[str] = "direct_pattern:current_service_revenue_source"
+PORTFOLIO_REVENUE_SOURCE_LIST_MAX_CHARS: Final[int] = 120
+PORTFOLIO_REVENUE_SOURCE_NAME_MAX_CHARS: Final[int] = 70
+CURRENT_COMPANY_REVENUE_SUBJECT_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(?:(?:[①-⑳]|\(\d+\))서비스의제공)?(?:회사|당사)"
+    r"(?:는|의(?:수익|매출)(?:은|는))"
+)
+PORTFOLIO_REVENUE_SOURCE_LIST_PATTERN: Final[re.Pattern[str]] = re.compile(
+    rf"^(?:(?:[①-⑳]|\(\d+\))서비스의제공)?(?:회사|당사)는"
+    rf"(?P<items>[^.!?;]{{1,{PORTFOLIO_REVENUE_SOURCE_LIST_MAX_CHARS}}}?)"
+    r"(?:으로부터|로부터|에서)(?:수익|매출)을"
+)
+PORTFOLIO_REVENUE_SOURCE_ITEM_SEPARATOR: Final[re.Pattern[str]] = re.compile(r",|및|그리고")
+PORTFOLIO_REVENUE_SOURCE_ITEM_PATTERN: Final[re.Pattern[str]] = re.compile(
+    rf"(?P<name>[가-힣A-Za-z0-9()·/&-]{{1,{PORTFOLIO_REVENUE_SOURCE_NAME_MAX_CHARS}}}?)(?:서비스|용역)"
+)
+PORTFOLIO_REVENUE_SOURCE_GENERIC_NAMES: Final[frozenset[str]] = frozenset({
+    "기타", "일반", "해당", "상기", "모든", "다양한", "여러", "신규",
+})
+PORTFOLIO_REVENUE_SOURCE_PAST_PATTERN: Final[re.Pattern[str]] = re.compile(r"과거|이전|종전|당시")
 OFFICER_PAY_HEADER_GROUPS: Final[tuple[tuple[str, ...], ...]] = (
     ("이름", "성명"),
     ("보수의 종류", "소득구분"),
@@ -692,8 +726,8 @@ FINANCIAL_COMPANY_REVENUE_KEYWORDS: Final[tuple[str, ...]] = (
 #: 3.15: 구체 제품 없는 회사 포지셔닝 문구의 제품 역할 칸을 제한한다.
 #: 3.16: 실제 거래 없는 회계 인식정책의 수익·대가 칸 채점만 제한한다.
 # 3.17: 자기부문 선언과 제품 현황표의 품목·용도를 정확 원문 문맥으로 결속한다.
-# 3.18: 구체 기능과 현재 제공이 명시된 서비스의 제품 역할·거래 상대를 보존한다.
-COLLECTOR_VERSION: Final[str] = "evidence_collection/3.18"
+# 3.19: 명시 수익원·정산 흐름과 현재 업종 수행의 의미칸을 보존한다.
+COLLECTOR_VERSION: Final[str] = "evidence_collection/3.19"
 DOCUMENT_IDENTITY_HEADER_MAX_BYTES: Final[int] = 16 * 1024
 #: 2.0: EOF 후보 반복자·유한 문단 구간·제목 오인 방지. 1.x의 저장 한도
 #: 잘림 기록을 새 완료 증명으로 재사용하지 않는다.

@@ -2,12 +2,23 @@
 
 import re
 
+DECLARATION_IDENTITY_SLOT = "identity:business_definition"
+DECLARATION_OPERATION_ITEM_MAX_CHARS = 69
+DECLARATION_OPERATION_BODY_MAX_CHARS = 360
+
 DECLARATION_UNIT_RE = re.compile(r"[;\n]|(?<=[.!?。])(?:\s+|(?=[가-힣(]))")
 DECLARATION_RE = re.compile(
     r"^(?:당사|우리\s*회사|본\s*회사|회사)의\s*"
     r"(?:(?:주요|주된|핵심)\s*)?사업은\s*"
     r"(?P<items>[^.;\n]{2,240}?)\s*(?:으로|로)\s*"
     r"구성되어\s*(?:있습니다|있다|있음)\s*[.。]?$"
+)
+# 실제 업종을 수행하는 현재 문법이다. 지급 흐름만 보고 업종을 추론하지 않는다.
+DECLARATION_CURRENT_OPERATION_RE = re.compile(
+    r"^(?:\(\d+\)\s*(?:금융)?예수금)?(?:당사|회사)는\s*"
+    rf"(?P<item>[가-힣A-Za-z0-9][가-힣A-Za-z0-9 ·/&_-]{{1,{DECLARATION_OPERATION_ITEM_MAX_CHARS}}}?업)(?:을|를)\s*통하여\s*"
+    rf"[^.;\n]{{2,{DECLARATION_OPERATION_BODY_MAX_CHARS}}}?(?:제공|공급|판매|지급|정산|수취|제조)"
+    r"(?:하고\s*있습니다|하고\s*있다|합니다|한다)\s*[.。]?$"
 )
 DECLARATION_PREFIX_RE = re.compile(r"^(?:크게|주로)\s*")
 DECLARATION_QUALIFIER_RE = re.compile(

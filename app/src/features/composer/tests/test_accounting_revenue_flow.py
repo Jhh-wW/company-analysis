@@ -6,6 +6,7 @@ from src.features.composer import diagram_check
 from src.features.composer.constants import BUSINESS_FLOW_HEADERS, BUSINESS_FLOW_SECTION_ID
 from src.features.composer.diagram_check import check_diagram_numbers, check_diagrams
 from src.features.composer.diagram_review_constants import (
+    BUSINESS_FLOW_ACTION_HEADER,
     BUSINESS_FLOW_REVENUE_HEADER,
     FLOW_ACCOUNTING_REVENUE_CODE,
 )
@@ -20,9 +21,14 @@ LIVE_CELLS = (
 LIVE_SOURCE = "고객이 콘텐츠를 제공받는 시점에 수익을 인식하고 미수행의무는 선수수익으로 관리한다."
 
 
-def make_report(label=LIVE_CELLS[-1], section_id=BUSINESS_FLOW_SECTION_ID):
+def make_report(
+    label=LIVE_CELLS[-1],
+    section_id=BUSINESS_FLOW_SECTION_ID,
+    action_label="고객의 콘텐츠 제공받음",
+):
     cells = list(LIVE_CELLS)
     cells[BUSINESS_FLOW_HEADERS.index(BUSINESS_FLOW_REVENUE_HEADER)] = label
+    cells[BUSINESS_FLOW_HEADERS.index(BUSINESS_FLOW_ACTION_HEADER)] = action_label
     sentence = ComposedSentence(
         text="회사의 영업수익은 용역 매출과 인공지능 콘텐츠 매출로 구성된다.",
         citations=("1",), grade="확인",
@@ -89,6 +95,52 @@ def test_other_section_and_other_column_are_preserved():
     ),))
     checked, _ = check_diagram_numbers(report, fragments)
     assert checked.sections[0].flow_rows == report.sections[0].flow_rows
+
+
+@pytest.mark.parametrize("action_label", [
+    "일련의 구별되는 용역 제공; 청구권이 있는 금액으로 수익 인식(실무적 간편법)",
+    "청구권이 있는 금액으로 수익 인식(실무적 간편법)",
+])
+def test_pure_revenue_recognition_policy_in_customer_action_drops_row(action_label):
+    report, fragments = make_report(label="", action_label=action_label)
+    checked, problems = check_diagram_numbers(report, fragments)
+
+    assert checked.sections[0].flow_rows == ()
+    assert checked.sections[0].sentences == report.sections[0].sentences
+    assert any(FLOW_ACCOUNTING_REVENUE_CODE in reason for reason in problems)
+
+
+def test_action_policy_is_removed_before_legacy_relation_review():
+    report, fragments = make_report(
+        label="",
+        action_label="청구권이 있는 금액으로 수익 인식(실무적 간편법)",
+    )
+
+    def unexpected_call(_prompt):
+        raise AssertionError("순수 회계 문구 행을 관계 검수에 보내면 안 됩니다")
+
+    checked, problems = check_diagrams(report, fragments, unexpected_call)
+
+    assert checked.sections[0].flow_rows == ()
+    assert any(FLOW_ACCOUNTING_REVENUE_CODE in reason for reason in problems)
+
+
+@pytest.mark.parametrize("action_label", [
+    "가맹점 결제액의 0.8%를 PG 수수료로 받는다",
+    "고객 자금을 관리하고 계좌이체와 정산 서비스를 제공한다",
+    "가맹점 결제액의 0.8%를 수수료로 받고, 청구권이 있는 금액으로 수익 인식(실무적 간편법)",
+])
+def test_real_customer_transaction_fee_treasury_and_mixed_action_are_preserved(action_label):
+    report, fragments = make_report(
+        label="주문별 결제 수수료", action_label=action_label,
+    )
+    fragments = (CollectedFragment(
+        fragment_id="1", kind="사업내용", text=LIVE_SOURCE + " " + action_label,
+    ),)
+    checked, problems = check_diagram_numbers(report, fragments)
+
+    assert checked.sections[0].flow_rows == report.sections[0].flow_rows
+    assert not any(FLOW_ACCOUNTING_REVENUE_CODE in reason for reason in problems)
 
 
 def test_revenue_column_is_selected_by_header(monkeypatch):

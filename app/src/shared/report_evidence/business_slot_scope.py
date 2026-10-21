@@ -15,6 +15,36 @@ def _surface(text: str) -> str:
     return "".join(unicodedata.normalize("NFKC", text).split())
 
 
+def business_declaration_scope_allows(text: str) -> bool:
+    """새 현재 사업 신호를 타사 주어·조건부 진술에 붙이지 않는다."""
+    return not c.BUSINESS_DECLARATION_SCOPE_EXCLUDED_RE.search(_surface(text))
+
+
+def revenue_source_declared(text: str, context: str = "") -> bool:
+    """수익원 선언 내부의 열거 절도 보존하고 다른 회계 절은 빌리지 않는다."""
+    if context:
+        parts = tuple(_surface(unit) for unit in c.SENTENCE_BOUNDARY_RE.split(text) if unit.strip())
+        matching_context = tuple(unit for unit in c.SENTENCE_BOUNDARY_RE.split(context)
+                                 if parts and all(part in _surface(unit) for part in parts))
+        if matching_context and not any(business_declaration_scope_allows(unit) for unit in matching_context):
+            return False
+    surface = _surface(text)
+    if (business_declaration_scope_allows(text) and c.REVENUE_SOURCE_RE.search(surface)) or any(
+        business_declaration_scope_allows(unit) and c.REVENUE_SOURCE_RE.search(_surface(unit))
+        for unit in c.SENTENCE_BOUNDARY_RE.split(text)
+    ):
+        return True
+    for unit in c.SENTENCE_BOUNDARY_RE.split(context):
+        context_surface = _surface(unit)
+        start = context_surface.find(surface) if surface else -1
+        if start >= 0 and business_declaration_scope_allows(unit) and any(
+            start < match.end() and match.start() < start + len(surface)
+            for match in c.REVENUE_SOURCE_RE.finditer(context_surface)
+        ):
+            return True
+    return False
+
+
 def _administration(text: str, slot_id: str) -> bool:
     surface = _surface(text)
     if slot_id == c.PRODUCT_ROLE_SLOT:
@@ -55,6 +85,8 @@ def _business_fact(text: str, slot_id: str, context: str = "") -> bool:
                     or c.PRODUCT_NAMED_SOLUTION_RE.search(text)
                     or "|" in text)
     if slot_id in c.REVENUE_RELATION_SLOTS:
+        if slot_id == c.REVENUE_SLOT and revenue_source_declared(text, context):
+            return True
         if c.REVENUE_POLICY_RE.search(surface):
             return bool(c.REVENUE_TRANSACTION_RE.search(surface))
         return bool(c.REVENUE_ACTIVITY_RE.search(surface)

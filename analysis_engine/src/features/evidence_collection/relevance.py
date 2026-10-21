@@ -14,7 +14,7 @@ from features.evidence_collection import auditor_boilerplate, constants as c, li
 from features.evidence_collection.liquidity_constants import CHALLENGE_POLICY_SLOTS
 from features.evidence_collection.challenge_accounting_policy import split_challenge_accounting_policy
 from features.evidence_collection.challenge_slot_scope import challenge_table_scope
-from features.evidence_collection.business_slot_scope import business_slot_scope
+from features.evidence_collection.business_slot_scope import business_slot_scope, revenue_source_declared
 from features.evidence_collection.business_activity_declaration import declared_business_item
 from features.evidence_collection.weak_signal_context import (
     accounting_value_table_only,
@@ -379,6 +379,34 @@ def product_role_relation_scores(text: str, section_heading: str = '') -> tuple[
                       product_c.AUXILIARY_SCORE_MILLIS, (product_c.REASON_CODE,)),)
 
 
+def portfolio_revenue_source_scores(text: str) -> tuple[SlotScore, ...]:
+    """현재 명명된 서비스 수익원만 연결 칸에 보존하며 기능·역할을 추론하지 않는다."""
+    for unit in c.FACT_UNIT_BOUNDARY_PATTERN.split(text):
+        if not revenue_source_declared(unit) or c.PORTFOLIO_REVENUE_SOURCE_PAST_PATTERN.search(unit):
+            continue
+        surface = "".join(unit.split())
+        declaration = c.PORTFOLIO_REVENUE_SOURCE_LIST_PATTERN.search(surface)
+        if declaration is None:
+            continue
+        for item in c.PORTFOLIO_REVENUE_SOURCE_ITEM_SEPARATOR.split(declaration["items"]):
+            named = c.PORTFOLIO_REVENUE_SOURCE_ITEM_PATTERN.fullmatch(item)
+            if named and named["name"] not in c.PORTFOLIO_REVENUE_SOURCE_GENERIC_NAMES:
+                return (SlotScore("portfolio", c.PORTFOLIO_REVENUE_SOURCE_SLOT,
+                                  c.RELEVANCE_KEYWORD_HIT_SCORE_MILLIS,
+                                  (c.PORTFOLIO_REVENUE_SOURCE_REASON,)),)
+    return ()
+
+
+def _current_company_revenue_source(text: str) -> bool:
+    """수집의 새 직접 신호는 이름을 추측하지 않고 명시 자기주어만 받는다."""
+    return any(
+        c.CURRENT_COMPANY_REVENUE_SUBJECT_PATTERN.match("".join(unit.split()))
+        and not c.PORTFOLIO_REVENUE_SOURCE_PAST_PATTERN.search(unit)
+        and revenue_source_declared(unit)
+        for unit in c.FACT_UNIT_BOUNDARY_PATTERN.split(text)
+    )
+
+
 def score_fragment_text(text: str, section_heading: str = "") -> SlotScore | None:
     """조각 원문 하나에 가장 잘 맞는 (장, 슬롯)을 고른다. 신호가 없으면 None.
 
@@ -441,6 +469,7 @@ def score_fragment_slots_with_signal(
     section_heading: str = "",
     *,
     allowed_slot_ids: frozenset[str] | None = None,
+    allow_current_business_declarations: bool = True,
 ) -> tuple[tuple[SlotScore, ...], bool]:
     """허용 범위 채점 결과와 전체 직접 신호 존재 여부를 한 번에 돌려준다.
 
@@ -501,7 +530,8 @@ def score_fragment_slots_with_signal(
             score_text = business_scope.score_text
         hits = [keyword for keyword in keywords if keyword_has_direct_hit(keyword, score_text)]
         business_declaration = (
-            slot_id == "identity:business_definition" and bool(declared_business_item(score_text))
+            allow_current_business_declarations
+            and slot_id == "identity:business_definition" and bool(declared_business_item(score_text))
         )
         if business_declaration:
             hits.append("current_company_business_declaration")
@@ -513,7 +543,8 @@ def score_fragment_slots_with_signal(
             hits.append("business_incident_response")
         revenue_mix = (
             slot_id == "business_model:revenue_model"
-            and _has_revenue_type_mix(score_text)
+            and (_has_revenue_type_mix(score_text)
+                 or (allow_current_business_declarations and _current_company_revenue_source(text)))
         )
         if revenue_mix:
             hits.append("revenue_type_mix")
@@ -541,7 +572,9 @@ def score_fragment_slots_with_signal(
         )
         direct_exchange = (
             slot_id == "business_model:value_exchange"
-            and value_exchange_has_direct_relation(score_text)
+            and value_exchange_has_direct_relation(
+                score_text, allow_settlement=allow_current_business_declarations,
+            )
         )
         if slot_id == "business_model:value_exchange":
             raw_hits = tuple(hits)

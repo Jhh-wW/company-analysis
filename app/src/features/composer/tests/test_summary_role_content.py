@@ -12,12 +12,17 @@ from src.features.composer.tests.test_extractive_summary import _fact, _sentence
 
 RECOGNITION_ONLY = "회사는 PG 서비스의 경우, 거래승인이 이루어지는 시점에 수행의무가 완료되는 것으로 판단하고 있다."
 MERGER_ONLY = "회사는 2023년 10월 31일을 간주취득일로 하여 블리츠패스트 주식회사와의 합병을 완료하였으며, 이 합병은 지배회사 비바리퍼블리카의 또 다른 종속기업이었던 블리츠패스트를 흡수하는 방식으로 이루어졌다."
+FOUNDING_PURPOSE = (
+    "토스페이먼츠 주식회사는 전자지급결제대행업을 영위할 목적으로 설립된 회사로, "
+    "설립 당시의 사업 목적이 전자결제 분야에 있음이 공시 문서에 명시되어 있다."
+)
 
 
 @pytest.mark.parametrize("section,slot,text", [
     ("business_model", "business_model:value_exchange", RECOGNITION_ONLY),
     ("business_model", "business_model:revenue_model", RECOGNITION_ONLY),
     ("portfolio", "portfolio:product_role", MERGER_ONLY),
+    ("portfolio", "portfolio:product_role", FOUNDING_PURPOSE),
 ])
 def test_실제출력의_인식조건과_합병만으로_핵심역할요약을_채우지_않는다(section, slot, text):
     sentence = replace(_sentence("identity"), text=text, planned_claim_slot=slot)

@@ -66,7 +66,8 @@ def test_검수탈락_뉴스는_안내문없이_본문에서만_빠진다():
 
 
 def _run(mode=ReleaseMode.FULL, *, verdict="참", exclude=False, fragments=None,
-         direct_news=False, news_transform=None, news_attribution=True):
+         direct_news=False, news_transform=None, news_attribution=True,
+         direct_news_citations=None):
     news = fragments or _fragments()
     base = _packets()
     packets = replace(base, packets=tuple(
@@ -79,12 +80,17 @@ def _run(mode=ReleaseMode.FULL, *, verdict="참", exclude=False, fragments=None,
     def write(prompt):
         result = json.loads(writer(prompt))
         if direct_news and writer.calls == 2:
+            selected = (
+                ((news[0], tuple(direct_news_citations)),)
+                if direct_news_citations
+                else tuple((fragment, (fragment.fragment_id,)) for fragment in news)
+            )
             result["문장들"].extend({
                 "글": (f"{fragment.document_date} {fragment.source_publisher} 보도에 따르면, "
                        if news_attribution else "") + (news_transform(fragment.text) if news_transform else fragment.text),
-                "인용": [fragment.fragment_id], "등급": "확인",
+                "인용": list(citations), "등급": "확인",
                 "주장슬롯": fragment.supported_claim_slots[0],
-            } for fragment in news)
+            } for fragment, citations in selected)
         if exclude and writer.calls == 2:
             result["뉴스근거판정"] = [
                 {"조각": fragment.fragment_id, "사유": "중복", "설명": "동일 사업 설명이 공식 자료 본문에 이미 있어 반복하지 않습니다."}
@@ -171,6 +177,73 @@ def test_뉴스출처표기를_모델이_생략해도_확인된메타데이터�
     assert output.news_usage_diagnostics["본문사용기사수"] == 2
     assert writer.calls == 9
     assert len(reviewer.prompts) == 1
+
+
+@pytest.mark.parametrize("already_attributed", [False, True])
+def test_같은_보도_상대머리말은_검수입력에서_정규출처와_중복되지_않는다(already_attributed):
+    from src.features.composer.news_usage import attribution_prefix
+
+    fragment = _fragments()[0]
+    _, _, reviewer, _ = _run(
+        fragments=(fragment,),
+        direct_news=True,
+        news_attribution=already_attributed,
+        news_transform=lambda text: "같은 보도에 따르면, " + text,
+    )
+
+    reviewer_input = reviewer.prompts[0]
+    expected = attribution_prefix(fragment) + fragment.text
+    duplicated = attribution_prefix(fragment) + "같은 보도에 따르면, " + fragment.text
+    assert expected in reviewer_input
+    assert duplicated not in reviewer_input
+
+
+def test_다른_날짜와_발행처_머리말은_검수입력에서_보존한다():
+    from src.features.composer.news_usage import attribution_prefix
+
+    fragment = _fragments()[0]
+    other_lead = "2026-08-31 다른일보 보도에 따르면, "
+    _, _, reviewer, _ = _run(
+        fragments=(fragment,),
+        direct_news=True,
+        news_attribution=False,
+        news_transform=lambda text: other_lead + text,
+    )
+
+    assert attribution_prefix(fragment) + other_lead + fragment.text in reviewer.prompts[0]
+
+
+def test_본문중간의_같은_보도_표현은_검수입력에서_보존한다():
+    from src.features.composer.news_usage import attribution_prefix
+
+    fragment = _fragments()[0]
+    first, separator, remainder = fragment.text.partition(" ")
+    assert separator
+    body = first + " 같은 보도에 따르면, " + remainder
+    _, _, reviewer, _ = _run(
+        fragments=(fragment,),
+        direct_news=True,
+        news_attribution=False,
+        news_transform=lambda _text: body,
+    )
+
+    assert attribution_prefix(fragment) + body in reviewer.prompts[0]
+
+
+def test_다중출처_후보에는_상대머리말_정규화를_적용하지_않는다():
+    fragments = _fragments()
+    first = fragments[0]
+    body = "같은 보도에 따르면, " + first.text
+    _, _, reviewer, _ = _run(
+        fragments=fragments,
+        direct_news=True,
+        direct_news_citations=tuple(fragment.fragment_id for fragment in fragments),
+        news_attribution=False,
+        news_transform=lambda _text: body,
+    )
+
+    reviewer_input = reviewer.prompts[0]
+    assert body in reviewer_input
 
 
 @pytest.mark.parametrize("reason", ["not_verified", "mixed_sources", "attribution_invalid", "unsupported_number"])

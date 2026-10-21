@@ -90,8 +90,11 @@ from src.features.composer.challenge_guard import challenge_response_problem
 from src.features.composer.challenge_response_evidence import (
     challenge_response_evidence_problem,
 )
+from src.features.composer.accounting_policy_guard import accounting_policy_problem
 from src.features.composer.diagram_review_constants import (
+    BUSINESS_FLOW_ACTION_HEADER,
     BUSINESS_FLOW_PRODUCT_HEADER,
+    ACCOUNTING_POLICY_ACTION_LABEL_RE,
     ACCOUNTING_REVENUE_LABEL_RE,
     BUSINESS_FLOW_REVENUE_HEADER,
     FLOW_ACCOUNTING_REVENUE_CODE,
@@ -683,18 +686,35 @@ def _drop_uninformative_operations_rows(
 def _drop_accounting_revenue_rows(
     rows: tuple[FlowRow, ...],
 ) -> tuple[tuple[FlowRow, ...], tuple[str, ...]]:
-    # 수익 확대 칸의 회계 처리 설명은 사업의 반복 수익 경로를 입증하지 않는다.
-    index = _cell_index(BUSINESS_FLOW_SECTION_ID, BUSINESS_FLOW_REVENUE_HEADER)
-    if index is None:
+    # 순수 회계 처리 설명은 고객 과금이나 반복 수익 경로를 입증하지 않는다.
+    revenue_index = _cell_index(BUSINESS_FLOW_SECTION_ID, BUSINESS_FLOW_REVENUE_HEADER)
+    action_index = _cell_index(BUSINESS_FLOW_SECTION_ID, BUSINESS_FLOW_ACTION_HEADER)
+    if revenue_index is None and action_index is None:
         return rows, ()
     kept: list[FlowRow] = []
     problems: list[str] = []
     for row in rows:
-        if index < len(row.cells) and ACCOUNTING_REVENUE_LABEL_RE.fullmatch(
-            _compact_surface(row.cells[index])
-        ):
+        revenue_is_policy = (
+            revenue_index is not None
+            and revenue_index < len(row.cells)
+            and ACCOUNTING_REVENUE_LABEL_RE.fullmatch(
+                _compact_surface(row.cells[revenue_index])
+            )
+        )
+        action_is_policy = False
+        if action_index is not None and action_index < len(row.cells):
+            action_cell = row.cells[action_index]
+            # 기존 guard는 일반적인 회계정책 절을 잡는다. 실물 문구인 IFRS
+            # 실무적 간편법 표현은 guard 어휘에 없어 정확한 완전일치 보완을 둔다.
+            action_is_policy = bool(
+                accounting_policy_problem(action_cell)
+                or ACCOUNTING_POLICY_ACTION_LABEL_RE.fullmatch(
+                    _compact_surface(action_cell)
+                )
+            )
+        if revenue_is_policy or action_is_policy:
             problems.append(
-                f'{FLOW_ACCOUNTING_REVENUE_CODE}: 반복 수익 칸이 순수 회계 처리 설명인 경로 제외'
+                f'{FLOW_ACCOUNTING_REVENUE_CODE}: 사업 흐름 칸이 순수 회계 처리 설명인 경로 제외'
             )
         else:
             kept.append(row)

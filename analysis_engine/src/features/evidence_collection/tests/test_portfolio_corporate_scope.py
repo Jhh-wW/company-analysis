@@ -10,6 +10,8 @@ from features.evidence_collection.tests.test_product_role_relation import _harve
 
 @pytest.mark.parametrize("fact", [
     "회사는 전자지급결제대행업을 영위할 목적으로 설립된 회사다.",
+    "토스페이먼츠 주식회사는 전자지급결제대행업을 영위할 목적으로 설립된 회사로, "
+    "설립 당시의 사업 목적이 전자결제 분야에 있음이 공시 문서에 명시되어 있다.",
     "ANT INTERNATIONAL HOLDING PTE. LTD.는 지분을 보유한 주요 주주이다.",
     "회사는 다른 종속기업과의 합병을 완료했다.",
     "최대주주는 A기업이다.",

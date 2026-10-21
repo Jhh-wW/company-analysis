@@ -10,6 +10,10 @@ from src.shared.report_evidence.business_slot_scope import (
 
 SLOT = "portfolio:product_role"
 FOUNDING = "토스페이먼츠 주식회사는 전자지급결제대행업을 영위할 목적으로 설립된 회사다."
+FOUNDING_PURPOSE = (
+    "토스페이먼츠 주식회사는 전자지급결제대행업을 영위할 목적으로 설립된 회사로, "
+    "설립 당시의 사업 목적이 전자결제 분야에 있음이 공시 문서에 명시되어 있다."
+)
 SHAREHOLDER = (
     "ANT INTERNATIONAL TECHNOLOGIES(SINGAPORE) HOLDING PTE. LTD. 역시 "
     "상당한 지분을 보유한 주요 주주로 이름을 올리고 있다."
@@ -23,7 +27,8 @@ CORPORATE = " ".join((FOUNDING, SHAREHOLDER, MERGER))
 
 
 @pytest.mark.parametrize("text", [
-    FOUNDING, SHAREHOLDER, MERGER, CORPORATE,
+    FOUNDING, FOUNDING_PURPOSE, SHAREHOLDER, MERGER, CORPORATE,
+    "설립 초기의 사업 목적은 전자결제 분야였다.",
     "회사는 전자결제 서비스를 제공하는 것을 목적으로 설립되었습니다.",
     "당사의 주요 제품 소개: 회사는 결제대행업을 영위할 목적으로 설립되었다.",
     "회사는 2020년에 설립되었다.",
@@ -46,6 +51,8 @@ def test_설립목적_주주_합병만으로_제품역할을_채우지_않는다
     "합병 이후 회사의 주요 제품은 센서와 펌프로 구성됩니다.",
     "회사는 A기업 인수를 완료하고 데이터 솔루션을 제품군에 편입했다.",
     "합병으로 데이터 솔루션이 회사의 포트폴리오에 편입되었다.",
+    FOUNDING_PURPOSE + " " + SERVICE,
+    "설립 당시의 사업 목적을 확대하여 현재 전자결제 서비스를 제공한다.",
 ])
 def test_실제_서비스와_합병의_구체제품_역할은_남긴다(text):
     assert not business_slot_scope_problem(text, SLOT)

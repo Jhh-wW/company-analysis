@@ -21,6 +21,7 @@ from src.features.news_intake.models import GroundedNewsExcerpt, NewsCandidate, 
 from src.features.news_intake.identity_names import company_query_names, mentions_target
 from src.features.news_intake.article_identity import article_company_context
 from src.features.news_intake.reporting_subject_scope import target_is_only_interview_recipient
+from src.features.news_intake.attributed_statement import has_attributed_statement
 from src.features.news_intake.reporting_subject_scope_constants import SUBJECT_INTERVIEW_RECIPIENT_ONLY
 from src.features.news_intake.relation_subject_scope import bind_relation_subject, starts_relation_target
 from src.features.news_intake.relation_subject_scope_constants import RELATION_CONTEXT_REASON
@@ -203,7 +204,11 @@ def build_grounded_prompt(company: NewsCompanyContext, articles: list[tuple[News
         "긍정 수상·매출 성장·ESG 평가·PPA 체결 자체는 사업 문제나 그 문제의 대응을 증명하지 않습니다. "
         "reported_fact(기자가 확인한 외부사실), company_statement(회사/대표의 명시 발언), "
         "company_plan(아직 실현되지 않은 회사 계획)을 구별하세요. 미래 계획은 temporal_status=planned이며 "
-        "실행완료로 바꾸지 마세요. 5·6·8장의 발언은 대상 회사에 명시 귀속된 원문만 사용하세요. "
+        "실행완료로 바꾸지 마세요. 5·6·8장의 모든 후보는 대상 회사에 명시 귀속된 "
+        "company_statement 또는 company_plan 원문만 사용하세요. 5장의 issue도 기자의 서술이나 "
+        "제3자의 지적을 reported_fact로 넣거나 회사 발언으로 바꾸지 말고, 회사가 설명한 문제 범위만 고르세요. "
+        "대응은 무엇에 대한 대응인지 같은 연속 인용에서 확인되어야 합니다. '이에 대해'나 '피해'만 남기고 "
+        "문제의 대상을 생략한 짧은 범위보다 회사가 밝힌 문제와 대응이 함께 있는 후보를 우선하세요. "
         "기사에 등장하는 다른 회사 대표의 말을 대상 회사 발언으로 삼지 마세요.\n"
         "5. topic은 의미상 주제, event_key는 동일 사건을 가리키는 간결한 설명입니다. 발행일은 사건일과 "
         "다릅니다. event_on은 선택한 text 안에 해당 사건의 연월일이 명시된 경우만 YYYY-MM-DD로 반환하고, "
@@ -421,7 +426,7 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
         if kind not in {"company_statement", "company_plan"}:
             excluded["grounded_attribution_required"] += 1
             return None
-        if candidate.source_category != "official_release" and not any(marker in text for marker in c.ATTRIBUTED_STATEMENT_MARKERS):
+        if candidate.source_category != "official_release" and not has_attributed_statement(text, article_context):
             excluded["grounded_attribution_required"] += 1
             return None
     if raw["topic"] not in c.GROUNDED_TOPICS or not raw["event_key"].strip() or len(raw["event_key"]) > c.SEARCH_TITLE_CHARS:

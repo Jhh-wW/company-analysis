@@ -7,6 +7,10 @@ from src.features.composer.business_relation_scope import business_relation_scop
 from src.features.composer.verify import _apply_grounding
 
 FOUNDING = "토스페이먼츠 주식회사는 전자지급결제대행업을 영위할 목적으로 설립된 회사다."
+FOUNDING_PURPOSE = (
+    "토스페이먼츠 주식회사는 전자지급결제대행업을 영위할 목적으로 설립된 회사로, "
+    "설립 당시의 사업 목적이 전자결제 분야에 있음이 공시 문서에 명시되어 있다."
+)
 SHAREHOLDER = (
     "ANT INTERNATIONAL TECHNOLOGIES(SINGAPORE) HOLDING PTE. LTD. 역시 "
     "상당한 지분을 보유한 주요 주주로 이름을 올리고 있다."
@@ -51,6 +55,17 @@ def test_법인연혁_원문으로_새_제품기능을_만들지_못한다(slot)
     verdict, problems = _verdict("회사는 가맹점의 결제와 정산을 지원하는 서비스를 제공한다.", CORPORATE, slot)
     assert verdict != "참"
     assert problems[1] == "scope_condition_unbound"
+
+
+@pytest.mark.parametrize("slot", ["", "portfolio:product_role"])
+def test_설립목적의_공시확인_덧말도_제품본문으로_승인하지_않는다(slot):
+    verdict, problems = _verdict(FOUNDING_PURPOSE, FOUNDING_PURPOSE, slot)
+    assert verdict != "참"
+    assert problems[1] == "scope_condition_unbound"
+    assert not business_relation_scope_problem(
+        FOUNDING_PURPOSE, {"1": FOUNDING_PURPOSE}, section_id="identity",
+        claim_slot="identity:corporate_identity",
+    )
 
 
 @pytest.mark.parametrize("text", [BRANDPAY, PAYOUT])

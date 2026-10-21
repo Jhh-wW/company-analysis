@@ -270,7 +270,7 @@ def evaluate_verified_prose_fact(
         plan_status=plan_status,
         as_of=str(as_of_date or "").strip(),
         source_id=source_ids[0],
-        source_type=primary.source_type or primary.kind.value,
+        source_type=primary.source_type,
         source_title=primary.title or primary.label,
         source_publisher=primary.publisher,
         source_host=primary.host,

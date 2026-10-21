@@ -19,7 +19,8 @@ PRODUCT_POSITIONING_RE = re.compile(
 )
 # 설립 목적·주주·합병은 회사 사실이지만 그 자체로 현재 제품의 기능은 아니다.
 PRODUCT_CORPORATE_FACT_RE = re.compile(
-    r"목적으로설립|(?:영위|수행)하기위하여설립|설립목적|설립(?:되었|됐|된|하였|했다|일|연도)"
+    r"목적으로설립|(?:영위|수행)하기위하여설립|설립(?:당시|초기)?(?:의)?(?:사업)?목적"
+    r"|설립(?:되었|됐|된|하였|했다|일|연도)"
     r"|(?:주요|최대)주주|주주(?:로|는|구성)|지분(?:을)?보유"
     r"|합병|간주취득일|(?:기업|회사|법인)(?:을|를)?인수"
 )
@@ -58,6 +59,19 @@ REVENUE_CLAUSE_BOUNDARY_RE = re.compile(
     + r"|(?<=포함되고)\s+|(?<=제외되고)\s+|(?<=분류하고)\s+|(?<=계상하고)\s+"
     + r"|(?<=포함되며)\s+|(?<=제외되며)\s+|(?<=분류하며)\s+|(?<=계상하며)\s+")
 REVENUE_ACTIVITY_WINDOW_CHARS = 80
+# 수익원이 되는 실제 상품군 선언만 보존한다. 인식 시점·조건이나 계정명은 아니다.
+REVENUE_SOURCE_ITEM = r"(?:상품|제품|서비스|용역|콘텐츠|라이선스)"
+REVENUE_SOURCE_COUNT_MAX_CHARS = 12
+BUSINESS_DECLARATION_SCOPE_EXCLUDED_RE = re.compile(
+    r"(?:경쟁사|자회사|종속회사|종속기업|계열사|다른회사)(?:는|은|가|이)"
+    r"|경우|가정|가상|가령|만약|예정|계획|향후|한다면|된다면|하면|되면"
+)
+REVENUE_SOURCE_ENDING = r"(?:인식합니다|인식한다|인식됩니다|인식된다|인식하고있습니다|인식하고있다)(?=$|[.!?;]|고|며)"
+REVENUE_SOURCE_RE = re.compile(
+    rf"{REVENUE_SOURCE_ITEM}(?:으로부터|로부터|에서)(?:수익|매출)을{REVENUE_SOURCE_ENDING}"
+    rf"|(?:수익|매출)(?:은|는)[^.!?;]{{1,{REVENUE_ACTIVITY_WINDOW_CHARS}}}"
+    rf"{REVENUE_SOURCE_ITEM}(?:[가-힣0-9]{{1,{REVENUE_SOURCE_COUNT_MAX_CHARS}}}항목)?(?:으로부터|로부터|에서){REVENUE_SOURCE_ENDING}"
+)
 # 인식·측정 정책만으로 거래의 대가 칸을 채우지 않는다. 실제 수금 조건은 보존한다.
 REVENUE_POLICY_RE = re.compile(
     r"수익(?:의)?인식|(?:수익|매출)(?:은|는|을|으로)[^.!?;]{0,80}(?:인식|측정)|"

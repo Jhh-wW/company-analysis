@@ -110,6 +110,8 @@ def test_hash_tampering_removes_identity_from_public_report_and_roundtrip() -> N
     assert identity.prose_lines == []
     assert identity.prose_paragraphs == []
     assert identity.fact_ids == []
+    assert "검증된 내용이 남지 않았습니다" in identity.empty_reason
+    assert "나머지 내용을 담았습니다" not in identity.empty_reason
     assert all(fact.section_owner != "identity" for fact in filtered.fact_records)
     assert all(item.section_id != "identity" for item in filtered.summary_items)
     assert any(item.section_id == "business_model" for item in filtered.summary_items)
@@ -121,6 +123,7 @@ def test_hash_tampering_removes_identity_from_public_report_and_roundtrip() -> N
     ).prose_lines
 
     restored = _assert_storage_roundtrip(filtered)
+    assert _section(restored, "identity").empty_reason == identity.empty_reason
     assert _section(restored, "identity").prose_lines == []
     assert _section(restored, "identity").prose_paragraphs == []
     assert all(fact.section_owner != "identity" for fact in restored.fact_records)
