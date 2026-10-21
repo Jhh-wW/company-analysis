@@ -63,7 +63,7 @@ def test_다개년_구성표를_수집해_실적표_뒤_4장에_제품_지역_�
     monkeypatch.setenv(revenue_table_switch.REVENUE_TABLE_V2_ENV_NAME, "1")
     revenue_table_switch._reset_process_revenue_table_switch_for_tests()  # noqa: SLF001
     monkeypatch.setattr(real.filing_clean, "repair", lambda frags, *_args: (frags, 0))
-    monkeypatch.setattr(real.filing_extra, "add_to", lambda frags, *_args: (frags, 0))
+    monkeypatch.setattr(real.filing_extra, "add_to", lambda frags, *_args, **_kwargs: (frags, 0))
     monkeypatch.setattr(
         real.filing_relationships, "add_to", lambda frags, *_args: (frags, 0)
     )
@@ -121,7 +121,7 @@ def test_단년_원문에는_구성변화표와_연도가_기록되지_않는다
         "제품가 6,000 60.00% 제품나 4,000 40.00% 합계 10,000 100.00%"
     )
     monkeypatch.setattr(real.filing_clean, "repair", lambda frags, *_args: (frags, 0))
-    monkeypatch.setattr(real.filing_extra, "add_to", lambda frags, *_args: (frags, 0))
+    monkeypatch.setattr(real.filing_extra, "add_to", lambda frags, *_args, **_kwargs: (frags, 0))
     monkeypatch.setattr(
         real.filing_relationships, "add_to", lambda frags, *_args: (frags, 0)
     )
