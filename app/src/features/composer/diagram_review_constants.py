@@ -125,7 +125,7 @@ ACCOUNTING_REVENUE_LABEL_RE: Final[re.Pattern[str]] = re.compile(
 # 완전 일치로 판정해 거래·금액·수수료 설명이 덧붙은 혼합 셀은 보존한다.
 ACCOUNTING_POLICY_ACTION_LABEL_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:(?:일련의구별되는용역제공)?"
-    r"청구권이있는금액으로수익인식실무적간편법"
+    r"청구권이있는금액으로수익인식실무적간편법(?:적용)?"
     r"|일부는청구권기준수익인식실무적간편법"
     r"일부는수행의무이행시점에수익인식)"
 )

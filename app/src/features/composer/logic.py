@@ -45,6 +45,9 @@ from src.features.composer.challenge_response_feedback import ResponseSupplement
 from src.features.composer.partial_evidence import PartialEvidenceView
 from src.features.composer.revenue_source_slot import normalize_revenue_source_slot
 from src.features.composer.portfolio_revenue_content import supplement_portfolio_revenue_source
+from src.features.composer.settlement_candidate import supplement_settlement_candidates
+from src.features.composer.homepage_self_context import normalize_homepage_self_context
+from src.features.composer.homepage_self_context_constants import HOMEPAGE_SELF_CONTEXT_SECTION
 from src.features.composer.citation_labels import (
     normalize_draft_flow_citations, normalize_draft_sentence_citations,
 )
@@ -1212,6 +1215,7 @@ def _compose_one_section(
     parse_retry_limit: int = PARSE_RETRY_LIMIT,
     evidence_pairs: EvidencePairMap | None = None,
     source_fragments: Sequence[CollectedFragment] = (),
+    company_name: str = "",
 ) -> ComposedSection:
     """장 하나를 쓴다. 실패 시 재요청 1회, 그래도 실패면 정직한 안내문으로 남긴다."""
     sentences, raw = _ask_and_parse(
@@ -1269,6 +1273,10 @@ def _compose_one_section(
         return ComposedSection(
             section_id=section_id, sentences=(), notice=NOTICE_COMPOSE_FAILED
         )
+    if section_id == HOMEPAGE_SELF_CONTEXT_SECTION:
+        sentences = tuple(normalize_homepage_self_context(
+            sentence, source_fragments, company_name=company_name,
+        ) for sentence in sentences)
     if section_id == "portfolio":
         sentences = supplement_portfolio_revenue_source(sentences, source_fragments)
     if section_id == "business_model":
@@ -1279,6 +1287,7 @@ def _compose_one_section(
         if omitted_count:
             logger.info("사업 도식 검수 전 자기 근거에 없는 일반 자산 칸 정리 행수=%d", omitted_count)
         flow_rows = normalized_rows
+        sentences, flow_rows = supplement_settlement_candidates(sentences, flow_rows, source_fragments)
     if not sentences:
         return ComposedSection(
             section_id=section_id,
@@ -1928,6 +1937,7 @@ def compose_sections(
             ),
             section_ask,
             source_fragments=section_fragments,
+            company_name=company_name,
             reject_inline_citation_markers=independent,
             # packet/FULL 호출 계약은 장마다 정확히 한 번이다. 형식 오류를
             # 재호출로 감추지 않고 해당 장을 fail-closed 안내문으로 남긴다.
@@ -2063,6 +2073,7 @@ def compose_selected_sections(
             ),
             ask,
             source_fragments=prepared.packets[section_id],
+            company_name=company_name,
             reject_inline_citation_markers=True,
             parse_retry_limit=0,
             evidence_pairs=(

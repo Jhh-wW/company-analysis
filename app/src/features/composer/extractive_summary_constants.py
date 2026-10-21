@@ -15,6 +15,26 @@ SUMMARY_PERFORMANCE_SLOT: Final[str] = "past_changes:historical_performance"
 SUMMARY_PERFORMANCE_SECTION: Final[str] = "past_changes"
 SUMMARY_PERFORMANCE_ANCHOR_SECTION: Final[str] = "portfolio"
 
+# 이미 검증된 후보끼리 역할을 비교한다. 숫자·영문 표지가 제품 기능보다
+# 수익 분류를 앞세우거나 설립 목적이 현재 사업을 밀어내지 않게 한다.
+SUMMARY_PRODUCT_ROLE_SLOT: Final[str] = "portfolio:product_role"
+SUMMARY_IDENTITY_PURPOSE_PATTERN: Final[str] = (
+    r"(?:목적으로|목적을\s*위해|위하여)\s*설립(?:된|한|되었|됐|하였|했)"
+)
+SUMMARY_CURRENT_BUSINESS_PATTERN: Final[str] = (
+    r"(?:영위|운영|제조|판매|제공|공급|수령|수취|지급|개발|중개)"
+    r"(?:한다|합니다|하고|하며|하는|하여|해\s*왔다)"
+)
+# 비용 항목만 나열한 사실은 수익 모델을 설명하지 않는다. 매출·수익원이나
+# 실제 판매·수취도 함께 설명하는 혼합 사실은 기존 검증을 그대로 유지한다.
+SUMMARY_COST_COMPOSITION_PATTERN: Final[str] = (
+    r"비용\s*구조|영업\s*비용|판매관리비|매출원가|판관비"
+    r"|지급\s*수수료|판매\s*수수료|광고선전비|복리후생비|인건비"
+)
+SUMMARY_REVENUE_FACT_PATTERN: Final[str] = (
+    r"(?:매출(?:액)?|영업수익|수익(?:원)?)\s*(?:은|는|이|가|의|으로|에서)"
+)
+
 SUMMARY_NUMERIC_PATTERN: Final[str] = (
     r"(?<!\d)(?:\d[\d,]*(?:\.\d+)?\s*(?:억원|원|%|명|건|개|년|배)|\d{4}(?!\d))"
 )

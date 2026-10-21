@@ -10,6 +10,7 @@ from src.features.composer.future_plan_constants import (
     FUTURE_MODE_MISDECLARED, FUTURE_QUOTE_NOT_IN_SOURCE,
     FUTURE_SOURCE_NOT_CITED, FUTURE_TARGET_NOT_BOUND,
     FUTURE_SECTION_NO_FORWARD_STATEMENT,
+    GENERIC_SUBJECTS, THIRD_PARTY_SUBJECTS,
 )
 from src.features.composer.future_plan_guard import (
     _bounded_spans, _covering_sentences, _has_bounded, _normalized,
@@ -19,6 +20,10 @@ from src.features.composer.future_plan_guard import (
 from src.features.composer.plan_status_constants import (
     COMPLETED_ROLE_CLAUSE_RE, COMPLETED_ROLE_CURRENT_RE, COMPLETED_ROLE_EVENT_RE,
     COMPLETED_ROLE_NOUN_RE, COMPLETED_ROLE_MEMBERSHIP_RE,
+    COMPLETED_LEGACY_ROLE_NOUN_RE, COMPLETED_LEGACY_ROLE_CURRENT_RE,
+    COMPLETED_MODIFIER_SUBJECT_RE, COMPLETED_MODIFIER_DENIAL_RE,
+    COMPLETED_MODIFIER_OTHER_ACTOR_RE, COMPLETED_MODIFIER_OTHER_ORIGIN_RE,
+    COMPLETED_MODIFIER_OTHER_SUBJECTS,
     COMPLETED_EXECUTION_SLOT, COMPLETED_EXECUTION_STATE_MISMATCH, PLAN_STATUS_FIELDS, PLAN_STATUS_KEY, PLAN_STATUS_SLOT,
     STATE_RE, STATUS_ACTIVITY_BOUNDARY_RE, STATUS_COMPLETION_FACTS, STATUS_CONDITIONAL_RE,
     STATUS_CURRENT_CONTEXT_RE, STATUS_NEGATION_RE, STATUS_OWNER_MODIFIER_RE,
@@ -46,7 +51,7 @@ def plan_status_fact_state(text: str, claim_slot: str) -> tuple[str, str]:
     return ('present' if current else 'past'), state
 
 
-def _has_completed_statement(text: str) -> bool:
+def _has_completed_statement(text: str, *, defer_named_subject: bool = False) -> bool:
     """후보가 직접 서술한 실제 완료만 현재역할과 함께 남긴다."""
     for sentence in _sentences(_normalized(text)):
         for event in COMPLETED_ROLE_EVENT_RE.finditer(sentence):
@@ -59,6 +64,22 @@ def _has_completed_statement(text: str) -> bool:
             clause = sentence[:boundary.start()] if boundary else sentence
             if STATUS_NEGATION_RE.search(clause) or STATUS_CONDITIONAL_RE.search(clause):
                 continue
+            if event.lastgroup == 'active_modifier':
+                subjects = list(COMPLETED_MODIFIER_SUBJECT_RE.finditer(sentence[:event.start()]))
+                tail = clause[event.end():]
+                if (not subjects
+                        or COMPLETED_MODIFIER_OTHER_ORIGIN_RE.search(sentence[:event.start()])
+                        or COMPLETED_MODIFIER_DENIAL_RE.search(tail)
+                        or COMPLETED_MODIFIER_OTHER_ACTOR_RE.search(tail)):
+                    continue
+                subject = subjects[-1]['subject']
+                if subject not in GENERIC_SUBJECTS:
+                    if (not defer_named_subject or subject in THIRD_PARTY_SUBJECTS
+                            or subject in COMPLETED_MODIFIER_OTHER_SUBJECTS):
+                        continue
+                    # 이 함수에는 대상 회사명이 없다. 새 서비스 제한으로 고유명사
+                    # 완료를 더 거절하지 않고 기존 주체·원문 의미 검수에 맡긴다.
+                    return True
             if not _subject_problem(clause, '', event.start(), (text,)):
                 return True
     return False
@@ -68,8 +89,10 @@ def completed_execution_status_problem(text: str, claim_slot: str) -> str:
     """완료 칸에 진행상태만 쓴 산문을 완료 사실로 봉인하지 않는다."""
     if claim_slot != COMPLETED_EXECUTION_SLOT:
         return ''
+    legacy_role = bool(COMPLETED_LEGACY_ROLE_NOUN_RE.search(text)
+                       and COMPLETED_LEGACY_ROLE_CURRENT_RE.search(text))
     if (COMPLETED_ROLE_NOUN_RE.search(text) and COMPLETED_ROLE_CURRENT_RE.search(text)
-            and not _has_completed_statement(text)):
+            and not _has_completed_statement(text, defer_named_subject=not legacy_role)):
         # 원문에 별도 과거 이력이 있어도 현재역할만 요약한 후보의 완료 칸을 면제하지 않는다.
         return COMPLETED_EXECUTION_STATE_MISMATCH
     states = {match.lastgroup for match in STATE_RE.finditer(text)}

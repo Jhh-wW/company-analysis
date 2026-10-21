@@ -26,7 +26,7 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from src.features.composer.settlement_role_binding import settlement_role_spans
+from src.features.composer.settlement_role_binding import settlement_role_spans, settlement_statement_spans
 
 from src.features.composer.role_binding_constants import (
     COMPANY_FLOW_ACTION_INDEX, COMPANY_FLOW_SELF_ACTORS, COMPANY_FLOW_SENTENCE_RE,
@@ -690,6 +690,18 @@ def _binding_problem(
     target_key, role_key = _surface(target), _surface(role)
     if not target_key or not role_key:
         return ROLE_BINDING_PAIR_MISSING, (), kind, {}
+    # 일반 pair 검사의 예외는 자기 원문·제출 인용·완결 정산 후보가 모두 같은
+    # 주체/수취인/공제 관계인 경우뿐이다. 제출된 참 판정 자체는 바꾸지 않는다.
+    if (kind == RELATION_FEE and source_id in own_sources
+            and (quote_key := _surface(quote))
+            and quote_key in _surface(own_sources[source_id])):
+        settlement_spans = settlement_statement_spans(
+            tuple(unit.surface for unit in units),
+            tuple(clause.surface for clause in _source_clauses(own_sources[source_id])),
+            _surface(own_sources[source_id]), quote_key, target_key, role_key,
+        )
+        if settlement_spans:
+            return "", settlement_spans, kind, {}
     # ① 대상과 역할값은 서로 구별되어야 한다. 한쪽이 다른 쪽의 일부면 「광고」·
     #    「광고 제작」처럼 슬롯을 겹쳐 통과시키는 우회가 된다.
     if (target_key == role_key

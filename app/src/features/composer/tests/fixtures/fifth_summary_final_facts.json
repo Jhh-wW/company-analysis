@@ -1,0 +1,434 @@
+{
+  "origin": {
+    "run_id": "8079b9dfbdaa773ceb868cb3b2d5d9ff",
+    "report_sha256": "ad3cef486c7916676570343f2a2ee4cdd0b24078bcffed55a6ec8d358cca5170",
+    "note": "실제 5차 최종 승인 Fact의 기본값 필드만 생략했다. 본문·인용·검증 결속은 변경하지 않았으며 새 모델 승인 fixture가 아니다."
+  },
+  "company": "토스페이먼츠 주식회사",
+  "facts": [
+    {
+      "fact_id": "v2-prose-7459ed589693ec25b402e31d3711f7b3",
+      "legal_entity": "토스페이먼츠 주식회사",
+      "subject_scope": "토스페이먼츠 주식회사",
+      "relationship_or_action": "corporate_identity",
+      "claim": "토스페이먼츠 주식회사는 전자지급결제대행업을 영위할 목적으로 설립된 회사로, 스스로를 그 사업 목적 위에 세워진 법인으로 정의한다.",
+      "claim_type": "verified_prose",
+      "section_owner": "identity",
+      "time_state": "present",
+      "as_of": "2026-10-22",
+      "source_id": "v2-frag-32",
+      "source_type": "공식 공시",
+      "source_title": "감사보고서 (2024.12)",
+      "source_publisher": "토스페이먼츠 주식회사",
+      "source_host": "dart.fss.or.kr",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20250331000329",
+      "source_document_id": "20250331000329",
+      "location": "10622-10989",
+      "status": "verified",
+      "fact_status": "actual",
+      "verification_status": "verified",
+      "state_evidence": "[{\"document_identity\":\"document:dart.fss.or.kr:20250331000329\",\"exact_sha256\":\"bbfce27c5b7dbfb9fe4acbab3e4a0882fb55cf3e5ca193085c98c0143e770b6a\",\"fragment_id\":\"32\",\"source_id\":\"v2-frag-32\"},{\"document_identity\":\"document:dart.fss.or.kr:20260331000296\",\"exact_sha256\":\"76d4109dd23d50488508ad61ad0c4f3c34323fb177ea2e145fc32caca516587d\",\"fragment_id\":\"66\",\"source_id\":\"v2-frag-66\"}]",
+      "source_date": "2025-03-31",
+      "evidence_support_terms": [
+        "토스페이먼츠",
+        "주식회사",
+        "전자지급결제대행업을",
+        "영위할",
+        "목적으로",
+        "설립",
+        "사업",
+        "목적"
+      ],
+      "evidence_binding": "04bc61804b3615e1966303337b2035a3cc58125a17685b644799997fe460a85b",
+      "claim_slot": "identity:corporate_identity",
+      "supporting_source_ids": [
+        "v2-frag-32",
+        "v2-frag-66"
+      ],
+      "supporting_source_identities": [
+        "document:dart.fss.or.kr:20250331000329",
+        "document:dart.fss.or.kr:20260331000296"
+      ],
+      "supporting_evidence_hashes": [
+        "bbfce27c5b7dbfb9fe4acbab3e4a0882fb55cf3e5ca193085c98c0143e770b6a",
+        "76d4109dd23d50488508ad61ad0c4f3c34323fb177ea2e145fc32caca516587d"
+      ]
+    },
+    {
+      "fact_id": "v2-prose-cecd1ad5ebfb3f042eddc3e9cb670126",
+      "legal_entity": "토스페이먼츠 주식회사",
+      "subject_scope": "토스페이먼츠 주식회사",
+      "relationship_or_action": "business_definition",
+      "claim": "전자지불결제대행업의 실제 작동 방식은 공식 자료에 구체적으로 기술되어 있는데, 회사는 최종소비자가 결제한 거래금액을 원천사로부터 수령한 뒤 수수료와 부가가치세를 제외하고 가맹점에 지급하는 구조를 운영한다.",
+      "claim_type": "verified_prose",
+      "section_owner": "identity",
+      "time_state": "present",
+      "as_of": "2026-10-22",
+      "source_id": "v2-frag-49",
+      "source_type": "공식 공시",
+      "source_title": "감사보고서 (2024.12)",
+      "source_publisher": "토스페이먼츠 주식회사",
+      "source_host": "dart.fss.or.kr",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20250331000329",
+      "source_document_id": "20250331000329",
+      "location": "19235-19546",
+      "status": "verified",
+      "fact_status": "actual",
+      "verification_status": "verified",
+      "state_evidence": "[{\"document_identity\":\"document:dart.fss.or.kr:20250331000329\",\"exact_sha256\":\"861e1bbf7798a2247940ae005b7286d9ecc730298d18d1cc96fd7b993b207001\",\"fragment_id\":\"49\",\"source_id\":\"v2-frag-49\"},{\"document_identity\":\"document:dart.fss.or.kr:20260331000296\",\"exact_sha256\":\"b47274b85ce9c98521b62757baacef6d9890864f3c368322ea8521d8d7d7ad2a\",\"fragment_id\":\"87\",\"source_id\":\"v2-frag-87\"}]",
+      "source_date": "2025-03-31",
+      "evidence_support_terms": [
+        "전자지불결제대행업",
+        "회사는",
+        "최종소비자가",
+        "결제한",
+        "거래금액",
+        "원천사로부터",
+        "수수료와",
+        "부가가치세를",
+        "제외",
+        "가맹점",
+        "지급"
+      ],
+      "evidence_binding": "055f77b8a1a85bc85fddf83bcdf0704181da375482a92c9165b9c0adc7bc2ce4",
+      "claim_slot": "identity:business_definition",
+      "supporting_source_ids": [
+        "v2-frag-49",
+        "v2-frag-87"
+      ],
+      "supporting_source_identities": [
+        "document:dart.fss.or.kr:20250331000329",
+        "document:dart.fss.or.kr:20260331000296"
+      ],
+      "supporting_evidence_hashes": [
+        "861e1bbf7798a2247940ae005b7286d9ecc730298d18d1cc96fd7b993b207001",
+        "b47274b85ce9c98521b62757baacef6d9890864f3c368322ea8521d8d7d7ad2a"
+      ]
+    },
+    {
+      "fact_id": "v2-prose-b515e7312821477cce7e15e5f79f50cc",
+      "legal_entity": "토스페이먼츠 주식회사",
+      "subject_scope": "토스페이먼츠 주식회사",
+      "relationship_or_action": "revenue_model",
+      "claim": "비용 구조를 보면, 당기 영업비용 중 지급수수료 항목이 가장 큰 비중을 차지하며, 판매수수료도 전기 대비 증가하였다.",
+      "claim_type": "verified_prose",
+      "section_owner": "business_model",
+      "time_state": "present",
+      "as_of": "2026-10-22",
+      "source_id": "v2-frag-69",
+      "source_type": "공식 공시",
+      "source_title": "감사보고서 (2025.12)",
+      "source_publisher": "토스페이먼츠 주식회사",
+      "source_host": "dart.fss.or.kr",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260331000296",
+      "source_document_id": "20260331000296",
+      "location": "49583-50152",
+      "status": "verified",
+      "fact_status": "actual",
+      "verification_status": "verified",
+      "state_evidence": "[{\"document_identity\":\"document:dart.fss.or.kr:20260331000296\",\"exact_sha256\":\"c8b040f1b6368c0bf8e4b37ac6162d52d7db788edd6daf0d6c4f7177195c5619\",\"fragment_id\":\"69\",\"source_id\":\"v2-frag-69\"}]",
+      "source_date": "2026-03-31",
+      "evidence_support_terms": [
+        "비용",
+        "지급수수료",
+        "판매수수료"
+      ],
+      "evidence_binding": "0e77e143bc5bfa239f3216bfa934514036432024cf096dfef633cd994e4271d5",
+      "claim_slot": "business_model:revenue_model",
+      "supporting_source_ids": [
+        "v2-frag-69"
+      ],
+      "supporting_source_identities": [
+        "document:dart.fss.or.kr:20260331000296"
+      ],
+      "supporting_evidence_hashes": [
+        "c8b040f1b6368c0bf8e4b37ac6162d52d7db788edd6daf0d6c4f7177195c5619"
+      ]
+    },
+    {
+      "fact_id": "v2-prose-75d512e7fb4853571d74005407f3ff87",
+      "legal_entity": "토스페이먼츠 주식회사",
+      "subject_scope": "토스페이먼츠 주식회사",
+      "relationship_or_action": "revenue_link",
+      "claim": "이 수익 구조는 직전 감사보고서에서도 동일하게 확인되며, PG 서비스·자금관리 서비스·기타용역이라는 세 범주가 회사의 수익원으로 일관되게 기재되어 있다.",
+      "claim_type": "verified_prose",
+      "section_owner": "portfolio",
+      "time_state": "present",
+      "as_of": "2026-10-22",
+      "source_id": "v2-frag-50",
+      "source_type": "공식 공시",
+      "source_title": "감사보고서 (2024.12)",
+      "source_publisher": "토스페이먼츠 주식회사",
+      "source_host": "dart.fss.or.kr",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20250331000329",
+      "source_document_id": "20250331000329",
+      "location": "24003-24044",
+      "status": "verified",
+      "fact_status": "actual",
+      "verification_status": "verified",
+      "state_evidence": "[{\"document_identity\":\"document:dart.fss.or.kr:20250331000329\",\"exact_sha256\":\"8db4c564e324d875cf511def883dc173871509dc240b55d32cb3905286e5086b\",\"fragment_id\":\"50\",\"source_id\":\"v2-frag-50\"},{\"document_identity\":\"document:dart.fss.or.kr:20260331000296\",\"exact_sha256\":\"8db4c564e324d875cf511def883dc173871509dc240b55d32cb3905286e5086b\",\"fragment_id\":\"88\",\"source_id\":\"v2-frag-88\"}]",
+      "source_date": "2025-03-31",
+      "evidence_support_terms": [
+        "수익",
+        "pg",
+        "서비스",
+        "자금관리"
+      ],
+      "evidence_binding": "f1d3e603552f3587431c274d0922d0ae907df9802687d36bcd0d21d2a78a4855",
+      "claim_slot": "portfolio:revenue_link",
+      "supporting_source_ids": [
+        "v2-frag-50",
+        "v2-frag-88"
+      ],
+      "supporting_source_identities": [
+        "document:dart.fss.or.kr:20250331000329",
+        "document:dart.fss.or.kr:20260331000296"
+      ],
+      "supporting_evidence_hashes": [
+        "8db4c564e324d875cf511def883dc173871509dc240b55d32cb3905286e5086b",
+        "8db4c564e324d875cf511def883dc173871509dc240b55d32cb3905286e5086b"
+      ]
+    },
+    {
+      "fact_id": "v2-prose-3332efbc871dbb5c6936acd73d98b781",
+      "legal_entity": "토스페이먼츠 주식회사",
+      "subject_scope": "토스페이먼츠 주식회사",
+      "relationship_or_action": "product_role",
+      "claim": "제품·서비스 측면에서 토스페이먼츠는 브랜드페이를 제공하는데, 이는 누구나 간편결제를 쉽게 만들 수 있도록 돕는 솔루션으로, 고객의 첫 결제수단 등록부터 결제까지 구현할 수 있고 브랜드에 맞는 맞춤형 UI를 적용할 수 있다.",
+      "claim_type": "verified_prose",
+      "section_owner": "portfolio",
+      "time_state": "present",
+      "as_of": "2026-10-22",
+      "source_id": "v2-frag-8",
+      "source_type": "회사 공식 웹",
+      "source_title": "브랜드페이 | 토스페이먼츠",
+      "source_publisher": "토스페이먼츠 주식회사",
+      "source_host": "www.tosspayments.com",
+      "source_url": "https://www.tosspayments.com/services/brandpay",
+      "source_document_id": "1334377754be22ee5d674fc394b4765f4c7fcee55fcc4bc09fbc341a4ffc7322",
+      "location": "https://www.tosspayments.com/services/brandpay · 목록 1번째 항목",
+      "status": "verified",
+      "fact_status": "actual",
+      "verification_status": "verified",
+      "state_evidence": "[{\"document_identity\":\"url:https://www.tosspayments.com/services/brandpay\",\"exact_sha256\":\"3917a0aa5597f66bc187d5511b5657daed7734ab3ebf564084c99e10b2816427\",\"fragment_id\":\"8\",\"source_id\":\"v2-frag-8\"}]",
+      "source_date": "2026-10-22",
+      "evidence_support_terms": [
+        "브랜드페이",
+        "이는",
+        "누구나",
+        "간편결제를",
+        "쉽게",
+        "만들",
+        "있도록",
+        "돕는",
+        "고객의",
+        "결제수단",
+        "등록부터",
+        "결제까지"
+      ],
+      "evidence_binding": "f5dd9e2d36268554be3d1005a4704767d11e40774232f447adb6e303f48bffc2",
+      "claim_slot": "portfolio:product_role",
+      "supporting_source_ids": [
+        "v2-frag-8"
+      ],
+      "supporting_source_identities": [
+        "url:https://www.tosspayments.com/services/brandpay"
+      ],
+      "supporting_evidence_hashes": [
+        "3917a0aa5597f66bc187d5511b5657daed7734ab3ebf564084c99e10b2816427"
+      ]
+    },
+    {
+      "fact_id": "v2-prose-37d9d720e6d621f319f1a8b8d708bf94",
+      "legal_entity": "토스페이먼츠 주식회사",
+      "subject_scope": "토스페이먼츠 주식회사",
+      "relationship_or_action": "product_role",
+      "claim": "또한 결제위젯 서비스를 통해 토스의 결제 경험을 그대로 유지하면서도 UI를 가맹점의 브랜드이미지에 맞게 커스텀하여 제공할 수 있다.",
+      "claim_type": "verified_prose",
+      "section_owner": "portfolio",
+      "time_state": "present",
+      "as_of": "2026-10-22",
+      "source_id": "v2-frag-15",
+      "source_type": "회사 공식 웹",
+      "source_title": "결제위젯 | 토스페이먼츠",
+      "source_publisher": "토스페이먼츠 주식회사",
+      "source_host": "www.tosspayments.com",
+      "source_url": "https://www.tosspayments.com/services/payment-widget",
+      "source_document_id": "755b538a0bf3ac5e508eb3ea25cab3a5784b4826002c09cc501ab72166edeeb2",
+      "location": "https://www.tosspayments.com/services/payment-widget · 목록 1번째 항목",
+      "status": "verified",
+      "fact_status": "actual",
+      "verification_status": "verified",
+      "state_evidence": "[{\"document_identity\":\"url:https://www.tosspayments.com/services/payment-widget\",\"exact_sha256\":\"39d44b82fc9de3bcd75d7a5a7fbe27792cff4618f7fcb7db642e948412160cbf\",\"fragment_id\":\"15\",\"source_id\":\"v2-frag-15\"}]",
+      "source_date": "2026-10-22",
+      "evidence_support_terms": [
+        "토스의",
+        "결제",
+        "경험",
+        "그대로",
+        "ui",
+        "가맹점의",
+        "브랜드이미지에",
+        "맞게",
+        "커스텀하여",
+        "제공할"
+      ],
+      "evidence_binding": "3eedd422f569110969019ec68ec60c76b0c62b3c9c0a08f3b8399d3a6f56568c",
+      "claim_slot": "portfolio:product_role",
+      "supporting_source_ids": [
+        "v2-frag-15"
+      ],
+      "supporting_source_identities": [
+        "url:https://www.tosspayments.com/services/payment-widget"
+      ],
+      "supporting_evidence_hashes": [
+        "39d44b82fc9de3bcd75d7a5a7fbe27792cff4618f7fcb7db642e948412160cbf"
+      ]
+    },
+    {
+      "fact_id": "v2-prose-4ef9f7cd8b31968db64bf8125b649596",
+      "legal_entity": "토스페이먼츠 주식회사",
+      "subject_scope": "토스페이먼츠 주식회사",
+      "relationship_or_action": "revenue_link",
+      "claim": "회사는 PG 서비스, 자금관리 서비스, 기타용역으로부터 수익을 인식합니다.",
+      "claim_type": "verified_prose",
+      "section_owner": "portfolio",
+      "time_state": "present",
+      "as_of": "2026-10-22",
+      "source_id": "v2-frag-88",
+      "source_type": "공식 공시",
+      "source_title": "감사보고서 (2025.12)",
+      "source_publisher": "토스페이먼츠 주식회사",
+      "source_host": "dart.fss.or.kr",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260331000296",
+      "source_document_id": "20260331000296",
+      "location": "24428-24469",
+      "status": "verified",
+      "fact_status": "actual",
+      "verification_status": "verified",
+      "state_evidence": "[{\"document_identity\":\"document:dart.fss.or.kr:20260331000296\",\"exact_sha256\":\"8db4c564e324d875cf511def883dc173871509dc240b55d32cb3905286e5086b\",\"fragment_id\":\"88\",\"source_id\":\"v2-frag-88\"}]",
+      "source_date": "2026-03-31",
+      "evidence_support_terms": [
+        "회사는",
+        "pg",
+        "서비스",
+        "자금관리",
+        "기타용역으로부터",
+        "수익을",
+        "인식합니다"
+      ],
+      "evidence_binding": "b1db1986c63e4e61ea04e4d39fd82aa26685d93f76d3a0b90ed6931884deaf92",
+      "claim_slot": "portfolio:revenue_link",
+      "supporting_source_ids": [
+        "v2-frag-88"
+      ],
+      "supporting_source_identities": [
+        "document:dart.fss.or.kr:20260331000296"
+      ],
+      "supporting_evidence_hashes": [
+        "8db4c564e324d875cf511def883dc173871509dc240b55d32cb3905286e5086b"
+      ]
+    },
+    {
+      "fact_id": "v2-fact-c59cef80e9109a3c3ba588f6",
+      "legal_entity": "토스페이먼츠 주식회사",
+      "subject_scope": "separate",
+      "relationship_or_action": "매출액",
+      "claim": "별도 매출액은 2024년 8,196.8억원, 2025년 9,251.1억원이며, 증감률은 12.86%이다.",
+      "claim_type": "historical_performance_rate",
+      "section_owner": "past_changes",
+      "time_state": "past",
+      "as_of": "2026-10-22",
+      "source_id": "v2-frag-97",
+      "source_title": "감사보고서 (2025.12)",
+      "source_publisher": "토스페이먼츠 주식회사",
+      "source_host": "dart.fss.or.kr",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260331000296",
+      "source_document_id": "20260331000296",
+      "location": "평문 문자 4999-5702",
+      "status": "verified",
+      "fact_status": "actual",
+      "verification_status": "verified",
+      "state_evidence": "포 괄 손 익 계 산 서 제 6 기 2025년 01월 01일부터 2025년 12월 31일까지 제 5 기 2024년 01월 01일부터 2024년 12월 31일까지 토스페이먼츠 주식회사 (단위: 원) 과 목 주 석 제 6(당) 기 제 5(전) 기 Ⅰ. 영업수익 18,27 925,113,921,197 819,678,045,176 Ⅱ. 영업비용 19,27 926,427,926,044 842,349,948,978 Ⅲ. 영업손실 1,314,004,847 22,671,903,802 금융수익 20,23 19,970,555,894 12,164,621,697 금융비용 20,23 35,140,607,676 33,295,013,574 기타영업외수익 21 2,364,581,627 541,366,262 기타영업외비용 21 1,833,469,779 245,531,473 Ⅳ. 법인세비용차감전순손실 15,952,944,781 43,506,460,890 법인세수익 22 - - Ⅴ. 당기순손실 15,952,944,781 43,506,460,890 Ⅵ. 기타포괄손익 62,248,436 242,035,737 후속적으로 당기손익으로 재분류되지 않는 항목 62,248,436 242,035,737 - 확정급여제도의 재측정이익 13 62,248,436 242,035,737 Ⅶ. 총포괄손실 15,890,696,345 43,264,425,153 \"별첨 주석은 본 재무제표의 일부입니다.\"",
+      "source_date": "2026-03-31",
+      "evidence_binding": "088908cbd0b4342291799523ad3687dfbf80041d26a28e5d0fc8a382c0db9c2d",
+      "raw_value": "start=819678045176 | end=925113921197",
+      "calculation": "rate",
+      "display_value": "12.86",
+      "rounding_rule": "ROUND_HALF_UP:2",
+      "numeric_checks": [
+        "numeric-binding-v1:{\"calculated_value\":\"12.863084\",\"display_value\":\"12.86\",\"entity_scope\":\"separate\",\"formula\":\"rate\",\"metric\":\"매출액\",\"operands\":[{\"entity_scope\":\"separate\",\"metric\":\"매출액\",\"period\":\"2024\",\"role\":\"start\",\"sign\":\"positive\",\"source_identity\":\"document:dart.fss.or.kr:20260331000296\",\"unit\":\"원\",\"unit_dimension\":\"currency\",\"value\":\"819678045176\"},{\"entity_scope\":\"separate\",\"metric\":\"매출액\",\"period\":\"2025\",\"role\":\"end\",\"sign\":\"positive\",\"source_identity\":\"document:dart.fss.or.kr:20260331000296\",\"unit\":\"원\",\"unit_dimension\":\"currency\",\"value\":\"925113921197\"}],\"period_count\":\"\",\"period_end\":\"2025\",\"period_start\":\"2024\",\"rounding_mode\":\"ROUND_HALF_UP\",\"rounding_places\":2,\"sign\":\"positive\",\"source_identity\":\"document:dart.fss.or.kr:20260331000296\",\"tolerance\":\"0.000001\",\"unit\":\"%\",\"unit_dimension\":\"percent\",\"verification_state\":\"verified\",\"version\":\"numeric-binding-v1\"}"
+      ],
+      "claim_slot": "past_changes:historical_performance",
+      "metric": "매출액",
+      "period_start": "2024",
+      "period_end": "2025",
+      "sign": "positive",
+      "unit": "%",
+      "unit_dimension": "percent",
+      "formula": "rate",
+      "supporting_source_ids": [
+        "v2-frag-97"
+      ],
+      "supporting_source_identities": [
+        "document:dart.fss.or.kr:20260331000296"
+      ],
+      "supporting_evidence_hashes": [
+        "0b8d7a4db6f3f9de52965e7ab5a4047292d35cd1b58e4a9af5a76b1c977bfea1"
+      ]
+    },
+    {
+      "fact_id": "v2-prose-d901e864745ff620d1804cef7a4e6981",
+      "legal_entity": "토스페이먼츠 주식회사",
+      "subject_scope": "토스페이먼츠 주식회사",
+      "relationship_or_action": "partnership",
+      "claim": "2026-06-18 osen.co.kr 보도에 따르면, 토스페이먼츠가 웹케시와 결제·정산 데이터 연동 추진을 위한 업무협약을 체결했다.",
+      "claim_type": "verified_prose",
+      "section_owner": "operations_partners",
+      "time_state": "present",
+      "as_of": "2026-10-22",
+      "source_id": "v2-frag-95",
+      "source_type": "언론 보도",
+      "source_title": "토스페이먼츠가 웹케시와 결제·정산 데이터 연동 추진을 위한 업무협약",
+      "source_publisher": "osen.co.kr",
+      "source_host": "www.osen.co.kr",
+      "source_url": "http://www.osen.co.kr/article/G1112823571",
+      "source_document_id": "http://www.osen.co.kr/article/G1112823571",
+      "location": "기사 본문 · news-fragment-e45b6861d0a71ee7d336",
+      "status": "verified",
+      "fact_status": "actual",
+      "verification_status": "verified",
+      "state_evidence": "[{\"document_identity\":\"document:www.osen.co.kr:http://www.osen.co.kr/article/g1112823571\",\"exact_sha256\":\"6533ca352faa3e168554a64e1c29db9a56e48eff29b0167ae8fec7a014e0b138\",\"fragment_id\":\"95\",\"news_exact_text\":\"토스페이먼츠가 웹케시와 결제·정산 데이터 연동 추진을 위한 업무협약을 체결했다.\",\"source_id\":\"v2-frag-95\"}]",
+      "source_date": "2026-06-18",
+      "evidence_support_terms": [
+        "토스페이먼츠가",
+        "웹케시와",
+        "결제",
+        "정산",
+        "데이터",
+        "연동",
+        "추진을",
+        "위한",
+        "업무협약을",
+        "체결했다"
+      ],
+      "evidence_binding": "7b2fb6dc3ac7f60443798d6703836524b8f46b6c1091304aed04d11eedd36229",
+      "claim_slot": "operations_partners:partnership",
+      "supporting_source_ids": [
+        "v2-frag-95"
+      ],
+      "supporting_source_identities": [
+        "document:www.osen.co.kr:http://www.osen.co.kr/article/g1112823571"
+      ],
+      "supporting_evidence_hashes": [
+        "6533ca352faa3e168554a64e1c29db9a56e48eff29b0167ae8fec7a014e0b138"
+      ]
+    }
+  ],
+  "previous_summary_fact_ids": [
+    "v2-prose-b515e7312821477cce7e15e5f79f50cc",
+    "v2-fact-c59cef80e9109a3c3ba588f6",
+    "v2-prose-7459ed589693ec25b402e31d3711f7b3",
+    "v2-prose-d901e864745ff620d1804cef7a4e6981"
+  ]
+}

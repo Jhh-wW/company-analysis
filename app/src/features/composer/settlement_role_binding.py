@@ -9,6 +9,8 @@ from src.features.composer.settlement_role_constants import (
     SETTLEMENT_ROLE_RE,
     SETTLEMENT_SOURCE_TEMPLATE,
     SETTLEMENT_TAX_WORD,
+    SETTLEMENT_STATEMENT_RE,
+    SETTLEMENT_STATEMENT_TARGETS,
 )
 
 
@@ -43,6 +45,33 @@ def settlement_role_spans(
     )
     # 다른 칸에서 부가세를 회사 수익 등으로 새로 해석한 행에는 이 증명을
     # 빌려주지 않는다. 이 대조가 확인한 것은 지급액에서 빠지는 항목뿐이다.
+    if sum(surface.count(SETTLEMENT_TAX_WORD) for surface in surfaces) != len(spans):
+        return ()
+    return spans
+
+
+def settlement_statement_spans(
+    surfaces: Sequence[str], source_clauses: Sequence[str],
+    source_surface: str, quote: str, target: str, role: str,
+) -> tuple[tuple[int, int, int], ...]:
+    """완결된 정산 산문/원문 도식의 공제 자리만 자기 인용과 삼중 대조한다."""
+    if (target not in SETTLEMENT_STATEMENT_TARGETS
+            or not SETTLEMENT_ROLE_RE.fullmatch(role)
+            or SETTLEMENT_NONACTUAL_RE.search(source_surface)):
+        return ()
+    source_pattern = re.compile(SETTLEMENT_SOURCE_TEMPLATE.format(target="가맹점"))
+    if not any(
+        (match := source_pattern.fullmatch(clause)) is not None
+        and quote.rstrip(".") in clause and match.group("relation") in quote
+        for clause in source_clauses
+    ):
+        return ()
+    compact_pattern = re.compile(SETTLEMENT_CANDIDATE_TEMPLATE.format(target="가맹점"))
+    spans = tuple(
+        (index, *match.span("fees")) for index, surface in enumerate(surfaces)
+        if (match := (SETTLEMENT_STATEMENT_RE.fullmatch(surface)
+                      or compact_pattern.fullmatch(surface))) is not None
+    )
     if sum(surface.count(SETTLEMENT_TAX_WORD) for surface in surfaces) != len(spans):
         return ()
     return spans

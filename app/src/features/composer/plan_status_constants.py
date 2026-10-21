@@ -22,9 +22,18 @@ STATUS_ACTIVITY_BOUNDARY_RE = re.compile(r'[,;]|(?:했고|하였고|했으며|�
 STATUS_PLAN_DENIAL_RE = re.compile(r'계획(?:은|는|이|이란)?\s*(?:없|아니|아닙)')
 SCOPE_FEEDBACK_BODY_KIND = '본문'
 STATUS_COMPLETION_FACTS = ('완료했', '완료하였', '설립했', '설립하였', '착공했', '착공하였', '시행했', '시행하였')
-# 현재 조직·체계의 역할 설명은 설립·실시 이력과 구별한다. 일반 현재형은 대상이 아니다.
-COMPLETED_ROLE_NOUN_RE = re.compile(r'(?:위원회|협의체|조직|체계|구조|제도)')
+# 현재 조직·서비스의 역할 설명은 설립·출시·실시 이력과 구별한다.
+COMPLETED_ROLE_NOUN_RE = re.compile(r'(?:위원회|협의체|조직|체계|구조|제도|서비스|콘텐츠)')
 COMPLETED_ROLE_CURRENT_RE = re.compile(
+    r'(?:운영|수행|관리|유지|보유|보고|논의|제공|소개)하고\s*있(?:다|습니다|으며|고|는)'
+    r'|(?:운영|수행|관리|유지|보고|제공)되고\s*있(?:다|습니다|으며|고|는)'
+    r'|갖추고\s*있(?:다|습니다|으며|고|는)'
+    r'|구성되어\s*있(?:다|습니다|으며|고|는)'
+    r'|(?:운영|수행|관리|유지)\s*중(?:이다|입니다|인)'
+)
+# 기존 조직 역할의 거절 범위는 새 서비스 소개 제한과 구별해 그대로 보존한다.
+COMPLETED_LEGACY_ROLE_NOUN_RE = re.compile(r'(?:위원회|협의체|조직|체계|구조|제도)')
+COMPLETED_LEGACY_ROLE_CURRENT_RE = re.compile(
     r'(?:운영|수행|관리|유지|보유|보고|논의)하고\s*있(?:다|습니다|으며|고|는)'
     r'|(?:운영|수행|관리|유지|보고)되고\s*있(?:다|습니다|으며|고|는)'
     r'|갖추고\s*있(?:다|습니다|으며|고|는)'
@@ -33,8 +42,29 @@ COMPLETED_ROLE_CURRENT_RE = re.compile(
 )
 COMPLETED_ROLE_EVENT_RE = re.compile(
     r'(?:완료|준공|설립|구성|구축|도입|시행|실시|설치|출시|착공|개시)'
-    r'(?:했|하였|되었|됐|된)'
+    r'(?:했|하였|되었|됐|된|(?P<active_modifier>한)(?=\s|[,.;!?]))'
 )
+# 새 완료 관형형만 명시 자기 주어에 묶는다. 기존 미래 주어 검사는 바꾸지 않는다.
+COMPLETED_MODIFIER_SUBJECT_RE = re.compile(
+    r'(?:^|[\s,])(?P<subject>[가-힣A-Za-z0-9_]+?)(?:은|는|이|가)(?=\s)'
+)
+COMPLETED_MODIFIER_DENIAL_RE = re.compile(
+    r'^\s*(?:것|바|사실)(?:은|는|이|가|도)?\s*(?:아니|아님|아닙|없)'
+)
+# ‘신청을 완료한 고객에게’의 완료는 회사의 출시·도입 사건이 아니다.
+COMPLETED_MODIFIER_OTHER_ACTOR_RE = re.compile(
+    r'^\s*(?:고객|소비자|직원|임직원|경쟁사|타사|협력사|거래처)'
+    r'(?:에게|의|은|는|이|가|을|를|(?=\s))'
+)
+# 장소 부사 ‘온라인에서’와 달리 명시 타사에서 한 실행은 빌리지 않는다.
+COMPLETED_MODIFIER_OTHER_ORIGIN_RE = re.compile(
+    r'(?:^|[\s,])(?:경쟁사|경쟁업체|경쟁기업|타사|자회사|계열사|협력사|거래처|고객사)'
+    r'에서(?:는)?\s'
+)
+COMPLETED_MODIFIER_OTHER_SUBJECTS = frozenset({
+    '고객', '소비자', '직원', '임직원', '자회사', '계열사', '계열회사', '협력회사',
+    '연결회사', '관계회사', '다른회사',
+})
 COMPLETED_ROLE_CLAUSE_RE = re.compile(r'[.;!?\n]|(?:으며|(?<!다)고|지만)\s+')
 COMPLETED_ROLE_MEMBERSHIP_RE = re.compile(r'(?:으로|로)\s*$')
 PLAN_STATUS_REVIEW_GUIDE = (

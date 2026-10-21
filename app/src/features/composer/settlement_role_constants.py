@@ -27,3 +27,16 @@ SETTLEMENT_CANDIDATE_TEMPLATE: Final[str] = (
 SETTLEMENT_NONACTUAL_RE: Final[re.Pattern[str]] = re.compile(
     r"가상|가정|예시|예를들|사례를가정|교육용|교육을위한"
 )
+
+# 대상에 공제 항목을 적은 검수도 완결된 동일 정산 관계를 제출했을 때만 대조한다.
+# 일반 대상/역할 부분 일치는 그대로 금지하며 수취인·방향·공제 항목은 고정한다.
+SETTLEMENT_STATEMENT_TARGETS: Final[frozenset[str]] = frozenset({"수수료", "가맹점"})
+SETTLEMENT_STATEMENT_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:대금흐름의구조를보면,)?(?:회사|당사)는"
+    r"(?P<business>전자(?:지불|지급)결제대행업|결제대행업)을통하여"
+    r"최종소비자가결제한거래금액에대해원천사로부터대금을받은후,?"
+    r"(?:(?:회사|당사)의)?가맹점(?:으로|에게|에)"
+    r"(?P<fees>" + SETTLEMENT_FEES + r")를제외하여"
+    r"(?:지급하고있습니다|지급하며,지급할의무가발생하는시점에해당채무를"
+    r"재무상태표상예수금으로표시한다)[.]?"
+)

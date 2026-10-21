@@ -38,6 +38,11 @@ from src.features.composer.extractive_summary_constants import (
     SUMMARY_PERFORMANCE_SLOT,
     SUMMARY_PERFORMANCE_SECTION,
     SUMMARY_PERFORMANCE_ANCHOR_SECTION,
+    SUMMARY_PRODUCT_ROLE_SLOT,
+    SUMMARY_IDENTITY_PURPOSE_PATTERN,
+    SUMMARY_CURRENT_BUSINESS_PATTERN,
+    SUMMARY_COST_COMPOSITION_PATTERN,
+    SUMMARY_REVENUE_FACT_PATTERN,
 )
 from src.features.composer.logic import SummaryCandidate
 from src.features.composer.identity_content import administrative_identity_only
@@ -221,6 +226,13 @@ def _summary_content_ready(candidate: SummaryCandidate) -> bool:
         return False
     if (
         candidate.section_id == "business_model"
+        and re.search(SUMMARY_COST_COMPOSITION_PATTERN, text)
+        and not re.search(SUMMARY_REVENUE_FACT_PATTERN, text)
+        and not re.search(SUMMARY_BUSINESS_EXCHANGE_PATTERN, text)
+    ):
+        return False
+    if (
+        candidate.section_id == "business_model"
         and re.search(SUMMARY_RECOGNITION_ONLY_PATTERN, text)
         and not re.search(SUMMARY_BUSINESS_EXCHANGE_PATTERN, text)
     ):
@@ -334,6 +346,19 @@ def _summary_score(sentence: ComposedSentence) -> int:
     ))
 
 
+def _summary_role_priority(section_id: str, sentence: ComposedSentence) -> bool:
+    """검증 등급 안에서 제품 기능과 현재 사업 설명을 먼저 고른다."""
+
+    if section_id == "portfolio":
+        return sentence.planned_claim_slot == SUMMARY_PRODUCT_ROLE_SLOT
+    if section_id == "identity":
+        return not (
+            re.search(SUMMARY_IDENTITY_PURPOSE_PATTERN, sentence.text)
+            and not re.search(SUMMARY_CURRENT_BUSINESS_PATTERN, sentence.text)
+        )
+    return False
+
+
 def select_extractive_summary(
     report: ComposedReport,
     facts: Sequence[FactRecord],
@@ -378,6 +403,7 @@ def select_extractive_summary(
                 candidates,
                 key=lambda item: (
                     item.sentence.grade != GRADE_INTERPRETED,
+                    _summary_role_priority(section_id, item.sentence),
                     _summary_score(item.sentence),
                 ),
                 reverse=True,
