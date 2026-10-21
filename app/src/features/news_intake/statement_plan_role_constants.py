@@ -6,6 +6,15 @@ STATEMENT_PLAN_SPLIT = 'role_explicit_statement_plan_split'
 STATEMENT_PLAN_SENTENCES = 2
 STATEMENT_PLAN_SECTION = 'future_strategy'
 STATEMENT_PLAN_SLOT = 'future_strategy:stated_plan'
+STATEMENT_CURRENT_SLOTS = frozenset({
+    ('operations_partners', 'operations_partners:operating_role'),
+    ('portfolio', 'portfolio:product_role'),
+})
+# 지향점·행사 설명은 현재 제품 기능을 증명하지 않는다.
+CURRENT_ACTIVITY_ONLY_RE = re.compile(
+    r'(?:힘쓰고|주력하고|집중하고)\s*있다\.?$'
+)
+CURRENT_EVENT_ONLY_RE = re.compile(r'(?:세미나|행사|간담회|설명회).*(?:개최했다|진행했다|마쳤다)\.?$')
 DIRECT_QUOTE = r'(?:“[^“”\n]+”|"[^"\n]+")'
 REPRESENTATIVE_STATEMENT_SUFFIX = (
     r'\s+(?:관계자|대변인|대표)(?:는|은)\s+'

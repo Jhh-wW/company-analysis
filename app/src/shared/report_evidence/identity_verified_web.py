@@ -610,11 +610,14 @@ def verified_dart_filing_binding_allows_url(
 def identity_verified_web_expected_trust(
     identity_binding: object,
 ) -> tuple[SourceTier, SourceRequirement]:
-    """신원검증 웹의 유일한 등급 판정: 완전한 공시 proof만 TIER1이다."""
+    """닫힌 발견 계보와 실제 이중 신원을 함께 갖춘 proof만 TIER1이다."""
+
+    from src.shared.report_evidence.institution_directory_attestation import parse_verified_institution_directory_binding
 
     if (
         parse_verified_dart_filing_official_web_binding(identity_binding) is not None
         or parse_verified_dart_filing_subdomain_binding(identity_binding) is not None
+        or parse_verified_institution_directory_binding(identity_binding) is not None
     ):
         return (SourceTier.TIER_1_OFFICIAL, SourceRequirement.REQUIRED)
     return (SourceTier.TIER_3_TRUSTED, SourceRequirement.OPTIONAL)
@@ -629,7 +632,36 @@ def identity_binding_with_scope(identity_binding: str, scope_sha256: str) -> str
     subdomain = parse_verified_dart_filing_subdomain_binding(identity_binding)
     if subdomain is not None and subdomain.scope_sha256 == scope_sha256:
         return identity_binding
+    from src.shared.report_evidence.institution_directory_attestation import parse_verified_institution_directory_binding
+
+    directory = parse_verified_institution_directory_binding(identity_binding)
+    if directory is not None and directory.scope_sha256 == scope_sha256:
+        return identity_binding
     return f"{identity_binding}; scope_sha256={scope_sha256}"
+
+
+def verified_official_web_binding_allows_url(identity_binding: object, *, source_url: object, company_id: str = "") -> bool:
+    """기존 DART와 기관 게시 계보의 검증된 proof만 공통 경계에서 허용한다."""
+    if verified_dart_filing_binding_allows_url(identity_binding, source_url=source_url):
+        proof = parse_verified_dart_filing_official_web_binding(identity_binding)
+        subdomain = parse_verified_dart_filing_subdomain_binding(identity_binding)
+        if proof is None and subdomain is not None:
+            proof = parse_verified_dart_filing_official_web_binding(subdomain.root_binding)
+        return bool(proof and (not company_id or proof.provenance.company_id == company_id))
+    from src.shared.report_evidence.institution_directory_attestation import institution_directory_binding_allows_url
+
+    return institution_directory_binding_allows_url(identity_binding, source_url=source_url, company_id=company_id)
+
+
+def verified_official_web_binding_allows_public_source(identity_binding: object, *, company_name: object, source_url: object) -> bool:
+    """공개 Source의 법인명과 URL을 동일한 발견·이중신원 proof에 다시 결속한다."""
+    if verified_dart_filing_binding_allows_public_source(identity_binding, company_name=company_name, source_url=source_url):
+        return True
+    if type(company_name) is not str or not exact_company_name_key(company_name):
+        return False
+    from src.shared.report_evidence.institution_directory_attestation import institution_directory_binding_allows_url
+
+    return institution_directory_binding_allows_url(identity_binding, source_url=source_url, company_name=company_name)
 
 
 def provenance_digest(value: object) -> str:

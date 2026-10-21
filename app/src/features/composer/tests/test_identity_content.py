@@ -34,6 +34,9 @@ ADMINISTRATIVE_TEXTS = (
     "회사의 경영진은 2025년 12월 31일 현재 내부회계관리제도가 '내부회계관리제도 설계 및 운영 개념체계'에 근거하여 중요성의 관점에서 효과적으로 설계되어 운영되고 있다고 판단한다고 공식 보고서에 기술하고 있다.",
     "감사보고서에 기재된 법인명은 '가온 주식회사'로 확인된다.",
     "문서는 제3기말을 보고기간종료일로 삼고 있으며 회사는 제3기 재무제표를 공시했다.",
+    # 세 번째 실제 생성에서 직함을 생략한 뒷절 때문에 요약까지 남았던 문장.
+    "회사의 대표이사는 감사보고서 기준으로 문서 B에서는 강병훈, 문서 C에서는 임한욱으로 각각 기재되어 있다.",
+    "대표이사는 문서 A에서는 김가온, 문서 B에서는 이다온으로 각각 표기되었다.",
 )
 BUSINESS_TEXTS = (
     "회사는 서울 물류센터를 운영하여 판매자에게 상품 보관과 배송 서비스를 제공한다.",
@@ -63,6 +66,10 @@ BUSINESS_TEXTS = (
     "회사는 내부회계관리제도를 효과적으로 설계하고 운영하는 소프트웨어를 고객에게 제공한다.",
     "내부회계관리제도가 효과적으로 설계되어 운영되고 있다고 판단하며 회사는 물류센터를 운영한다.",
     "회사는 내부회계관리제도 설계 및 운영 개념체계에 맞춰 고객의 회계 시스템을 구축한다.",
+    "회사의 대표이사는 감사보고서 기준으로 문서 B에서는 강병훈, 문서 C에서는 신사업 전략을 설명했다.",
+    "회사의 대표이사는 문서 A에서는 김가온, 문서 B에서는 이다온으로 기재되어 있다. 회사는 고객에게 결제 서비스를 제공한다.",
+    "회사의 대표이사는 문서 A에서는 김가온, 문서 B에서는 이다온으로 기재되어 있으며 회사는 국내 시장 점유율 30%를 기록했다.",
+    "문서 B에서는 결제 서비스를 설명하고 문서 C에서는 수익 구조를 설명한다.",
 )
 
 
@@ -119,7 +126,7 @@ def test_부분본_요약도_주소와_설립일과_자본금으로_장수를_�
     assert admin.text == text
 
 
-@pytest.mark.parametrize("text", ADMINISTRATIVE_TEXTS[-6:])
+@pytest.mark.parametrize("text", ADMINISTRATIVE_TEXTS)
 def test_실제출력의_행정회계메타는_검수자가_참이라도_정체성에_남지_않는다(text):
     report = ComposedReport((ComposedSection("identity", (
         ComposedSentence(text, ("1",), "확인", planned_claim_slot="identity:business_definition"),
@@ -133,7 +140,7 @@ def test_실제출력의_행정회계메타는_검수자가_참이라도_정체�
     assert "identity_administrative_only" in str(diagnostics)
 
 
-@pytest.mark.parametrize("text", (ADMINISTRATIVE_TEXTS[0], *ADMINISTRATIVE_TEXTS[-6:]))
+@pytest.mark.parametrize("text", ADMINISTRATIVE_TEXTS)
 def test_FULL_요약도_행정정보를_빼고_검증된_사업문장의_사실결속을_보존한다(text):
     report, facts = _report(("business_model", "portfolio"))
     admin = replace(_sentence("identity"), text=text)

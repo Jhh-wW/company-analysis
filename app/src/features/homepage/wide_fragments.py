@@ -194,6 +194,11 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
         )
         if index in education_product_indices and EDUCATION_PRODUCT_SLOT not in slots_for_range:
             slots_for_range += (EDUCATION_PRODUCT_SLOT,)
+        # 교육상품 등 보조 후보도 예정·FAQ 문맥 검사를 우회할 수 없다.
+        if document.product_role_context_checked:
+            slots_for_range = tuple(slot for slot in slots_for_range if slot != "portfolio:product_role")
+            if "portfolio:product_role" in candidate_slots and text in document.current_product_role_ranges:
+                slots_for_range += ("portfolio:product_role",)
         if not slots_for_range:
             continue
         score = _SCORE_BODY_KEYWORD_MATCH

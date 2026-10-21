@@ -81,6 +81,15 @@ def prose_evidence_support_ready(
     )
 
 
+def fact_prose_evidence_support_ready(fact) -> bool:
+    """같은 언어 계약을 보존하고, 닫힌 번역 영수증이 있는 사실만 별도로 검산한다."""
+    from src.shared.report_quality.news_translation import fact_translation_supported
+    from src.shared.report_quality.news_translation_constants import TRANSLATION_MANIFEST_KEY
+    if TRANSLATION_MANIFEST_KEY in str(fact.state_evidence):
+        return fact_translation_supported(fact)
+    return prose_evidence_support_ready(fact.claim_type, fact.evidence_support_terms)
+
+
 __all__ = [
     "MIN_PROSE_EVIDENCE_SUPPORT_TERMS",
     "PROSE_CLAIM_TYPES",

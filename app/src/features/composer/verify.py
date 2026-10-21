@@ -32,6 +32,10 @@ from src.features.composer.news_compensation_scope import news_compensation_scop
 from src.shared.report_quality.supplementary_prose import news_numeric_text
 from src.features.composer.news_block import _is_news_fragment
 from src.features.composer.absence_claim_guard import absence_claim_problem
+from src.features.composer.news_translation import (
+    TranslationVerdicts, bind_translation_response, prepare_translation_requests,
+    sentence_translation_receipt, translation_request_hint,
+)
 from src.features.composer.flow_review_binding import bind_reviewed_flow_row
 from src.features.composer.flow_review_constants import FLOW_REVIEW_BINDING_INVALID
 from src.shared.report_quality.review_diagnostic_constants import CANDIDATE_FINGERPRINT_VERSION
@@ -1294,6 +1298,7 @@ def _build_grouped_review_prompt(
     verbatim_by_number: Optional[Mapping[int, VerbatimNewsSource]] = None,
     numeric_options_by_number: Optional[Mapping[int, tuple[NumericProofOption, ...]]] = None,
     future_options_by_number: Optional[Mapping[int, tuple[FutureProofOption, ...]]] = None,
+    translation_requests: Optional[Mapping[int, dict]] = None,
 ) -> str:
     """장별 후보와 그 장이 실제 인용한 원문만 한 블록에 묶는다.
 
@@ -1426,6 +1431,7 @@ def _build_grouped_review_prompt(
                     parts.append(flow_relation_hint)
             parts.append(numeric_proof_option_hint((numeric_options_by_number or {}).get(item.number, ())))
             parts.append(future_proof_option_hint((future_options_by_number or {}).get(item.number, ())))
+            parts.append(translation_request_hint((translation_requests or {}).get(item.number)))
             if item.sentence is not None and item.sentence.planned_claim_slot == PLAN_STATUS_SLOT:
                 parts.append(PLAN_STATUS_REVIEW_GUIDE)
         parts.append("===== 장별 검수 블록 끝 =====\n")
@@ -1735,9 +1741,11 @@ def _ask_grouped_verdicts(
         ((item.number, item.section_id, item.sentence.text, item.citations)
          for item in items if item.sentence is not None), frag_by_id,
     )
+    translation_requests = prepare_translation_requests(items, frag_by_id)
     prompt = _build_grouped_review_prompt(
         items, frag_by_id, table, verbatim_by_number=verbatim_by_number,
         numeric_options_by_number=numeric_options_by_number,
+        translation_requests=translation_requests,
         future_options_by_number=(future_options_by_number := _prepare_review_future_options(items, frag_by_id)),
     )
     owners = {item.number: item.section_id for item in items}
@@ -1855,6 +1863,7 @@ def _ask_grouped_verdicts(
                     missing_items, frag_by_id, table,
                     verbatim_by_number=verbatim_by_number,
                     numeric_options_by_number=numeric_options_by_number,
+                    translation_requests=translation_requests,
                     future_options_by_number=future_options_by_number,
                 ) + MISSING_VERDICTS_REMINDER
             )
@@ -1934,6 +1943,7 @@ def _ask_grouped_verdicts(
                                       for fid, fragment in frag_by_id.items()
                                       if fragment.section_context_json},
         source_fragments_by_id=frag_by_id,
+        translation_requests=translation_requests,
         numeric_options_by_number=numeric_options_by_number,
         future_options_by_number=future_options_by_number,
         entity_scope_by_number=_entity_scope_by_number(
@@ -2224,6 +2234,7 @@ def _apply_grounding(
     review_evidence_context: Optional[ReviewEvidenceContext] = None,
     section_context_by_source_id: Optional[Mapping[str, str]] = None,
     source_fragments_by_id: Optional[Mapping[str, CollectedFragment]] = None,
+    translation_requests: Optional[Mapping[int, dict]] = None,
 ) -> dict[int, str]:
     # ★ 보고서 기준일을 그대로 넘긴다. 안 넘기면 executive_status_guard 가 날짜
     #   문턱 없이 이탈 «표지» 존재만으로 판정해, 「기준일 이후에 물러날 예정」인
@@ -2248,6 +2259,12 @@ def _apply_grounding(
     #   판정들을 건너뛴다(fail-open). 읽히는 응답은 원문 그대로다. 부르는 쪽이
     #   원문을 넘기든 구제 문자열을 넘기든 결과가 같도록 이 한 곳에서 맞춘다.
     raw = _review_binding_text(raw)
+    translation_responses = {}
+    for entry in (_review_entries(raw, None) or []):
+        if isinstance(entry, dict):
+            n = coerce_verdict_number(entry.get(REVIEW_NUMBER_KEY))
+            translation_responses.setdefault(n, []).append(entry)
+    translation_receipts = {}
     invalid_evidence_ids: frozenset[int] = frozenset()
     if review_evidence_context is None:
         # 평문/legacy에는 상위 근거 배열을 새로 요구하지 않는다. 명시 ID 차용만 닫는다.
@@ -2327,6 +2344,11 @@ def _apply_grounding(
                 number, len(binding.waived), len(binding.required),
                 binding.rule_version, context.candidate_sha256,
             )
+    for number, entries in translation_responses.items():
+        if any(isinstance(entry.get('검증근거'), dict) and '번역' in entry['검증근거'] for entry in entries):
+            if number not in (translation_requests or {}):
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = 'news_translation_proof_invalid'
     relation_evidence = support_entries_by_number(raw)
     # ★ 수량 범위 결속(«결합» 유형)은 아직 진단 우선 모드다(COMBINED_RELATION_ENFORCED
     #   False) — 막지 않고 발동만 관측한다. confirmed_prose_numbers 로 좁혀 «해석» 등급·
@@ -2475,6 +2497,21 @@ def _apply_grounding(
                 if source_id != TABLE_SOURCE_ID
             }
             problem = prose_own_source_problem(text, own_sources)
+            request = (translation_requests or {}).get(number)
+            if request is not None:
+                entries = translation_responses.get(number, [])
+                req = request['request']
+                original_text = context[2] if context else ''
+                receipt = bind_translation_response(
+                    entries[0] if len(entries) == 1 else None, request,
+                    claim=original_text, quote=own_sources.get(req['fragment_id'], ''),
+                )
+                if receipt:
+                    translation_receipts[number] = receipt
+                    if problem == 'prose_own_source_unsupported':
+                        problem = ''
+                else:
+                    problem = 'news_translation_proof_invalid'
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED
                 problems[number] = problem
@@ -2771,7 +2808,7 @@ def _apply_grounding(
             )
     if grounding_problems is not None:
         grounding_problems.update(problems)
-    return constrained
+    return TranslationVerdicts(constrained, translation_receipts)
 
 
 def _raw_table_row(table: PerformanceTable, index: int) -> Optional[Sequence[str]]:
@@ -2895,6 +2932,7 @@ def _build_review_prompt(
     verbatim_by_number: Optional[Mapping[int, VerbatimNewsSource]] = None,
     numeric_options_by_number: Optional[Mapping[int, tuple[NumericProofOption, ...]]] = None,
     future_options_by_number: Optional[Mapping[int, tuple[FutureProofOption, ...]]] = None,
+    translation_requests: Optional[Mapping[int, dict]] = None,
 ) -> str:
     """문장과 근거를 «나란히» 놓는 대조 지시문 (writer/verify.py의 핵심 철학).
 
@@ -2975,6 +3013,7 @@ def _build_review_prompt(
         ))
         parts.append(numeric_proof_option_hint((numeric_options_by_number or {}).get(item.number, ())))
         parts.append(future_proof_option_hint((future_options_by_number or {}).get(item.number, ())))
+        parts.append(translation_request_hint((translation_requests or {}).get(item.number)))
         if item.sentence.planned_claim_slot == PLAN_STATUS_SLOT:
             parts.append(PLAN_STATUS_REVIEW_GUIDE)
     parts.append(REVIEW_TRUSTED_TAIL)
@@ -3151,10 +3190,12 @@ def _ask_verdicts(
         ((item.number, item.section_id, item.sentence.text, item.sentence.citations)
          for item in items), frag_by_id,
     )
+    translation_requests = prepare_translation_requests(items, frag_by_id)
     prompt = _build_review_prompt(
         items, frag_by_id, table_evidence, table_source,
         verbatim_by_number=verbatim_by_number,
         numeric_options_by_number=numeric_options_by_number,
+        translation_requests=translation_requests,
         future_options_by_number=(future_options_by_number := _prepare_review_future_options(items, frag_by_id)),
     )
     # 초기 재검수 호출자 선택은 위에서 함께 설정한다.
@@ -3260,6 +3301,7 @@ def _ask_verdicts(
                     missing_items, frag_by_id, table_evidence, table_source,
                     verbatim_by_number=verbatim_by_number,
                     numeric_options_by_number=numeric_options_by_number,
+                    translation_requests=translation_requests,
                     future_options_by_number=future_options_by_number,
                 ) + MISSING_VERDICTS_REMINDER,
                 FLAT_REVIEW_SCHEMA,
@@ -3323,6 +3365,7 @@ def _ask_verdicts(
                                       for fid, fragment in frag_by_id.items()
                                       if fragment.section_context_json},
         source_fragments_by_id=frag_by_id,
+        translation_requests=translation_requests,
         diagnostics=diagnostics,
         diagnostic_contexts={
             item.number: (item.section_id, item.kind, item.sentence.text)
@@ -3532,7 +3575,8 @@ def _recheck_rewritten(
         verdict = VERDICT_FALSE if verdicts is None else verdicts.get(item.number)
         if verdict == VERDICT_TRUE:
             final[item.number] = replace(
-                item.sentence, verification_state="verified"
+                item.sentence, verification_state="verified",
+                    news_translation_receipt=sentence_translation_receipt(verdicts, item.number)
             )
         elif verdict == VERDICT_UNCLEAR:
             final[item.number] = _demoted(item.sentence)
@@ -4007,7 +4051,8 @@ def _semantic_review(
             verdict = verdicts.get(item.number)
             if verdict == VERDICT_TRUE:
                 final[item.number] = replace(
-                    item.sentence, verification_state="verified"
+                    item.sentence, verification_state="verified",
+                    news_translation_receipt=sentence_translation_receipt(verdicts, item.number)
                 )
             elif verdict == VERDICT_FALSE:
                 if item.sentence.grade == GRADE_CONFIRMED:
@@ -4339,7 +4384,8 @@ def _semantic_review_grouped(
         if item.sentence is not None:
             if verdict == VERDICT_TRUE:
                 sentence_by_number[item.number] = replace(
-                    item.sentence, verification_state="verified"
+                    item.sentence, verification_state="verified",
+                    news_translation_receipt=sentence_translation_receipt(verdicts, item.number)
                 )
             elif verdict == VERDICT_UNCLEAR:
                 sentence_by_number[item.number] = (

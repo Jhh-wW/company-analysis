@@ -9,6 +9,9 @@
 
 from __future__ import annotations
 
+from src.shared.report_quality.news_translation import fact_translation_supported
+from src.shared.report_quality.news_translation_constants import TRANSLATION_MANIFEST_KEY
+
 import hashlib
 import json
 import re
@@ -140,6 +143,8 @@ class ComposedSentence:
     verified_fact_id: str = ""
     #: 검수 전 프로그램이 붙인 뉴스 원문 대체 후보. 승인 표시가 아니다.
     news_source_alternative: bool = False
+    #: 독립 검수 응답에서만 만든 번역 증명. 작가 JSON에서는 읽지 않는다.
+    news_translation_receipt: str = ""
 
 
 @dataclass(frozen=True)
@@ -657,6 +662,9 @@ class VerifiedProgramEvidence:
                     "프로그램 FactRecord의 state_evidence가 Source 원문 등록부에 "
                     "없습니다"
                 )
+            if (TRANSLATION_MANIFEST_KEY in fact.state_evidence
+                    and not fact_translation_supported(fact, source=primary_source)):
+                raise ValueError("프로그램 뉴스 번역 증명의 원문·출처·검수 결속이 다릅니다")
             if fact.claim_type in {
                 COMPETITIVE_COMPARISON_CONTEXT_CLAIM_TYPE,
                 COMPETITIVE_COMPARISON_CLAIM_TYPE,
@@ -701,6 +709,7 @@ class VerifiedProgramEvidence:
                 if unsupported_terms or (
                     requires_prose_terms
                     and len(support_terms) < MIN_PROSE_EVIDENCE_SUPPORT_TERMS
+                    and not fact_translation_supported(fact, source=primary_source)
                 ):
                     raise ValueError(
                         "프로그램 FactRecord의 claim·근거어·원문 결속이 다릅니다: "

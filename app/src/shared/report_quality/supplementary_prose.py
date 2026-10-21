@@ -8,6 +8,8 @@ import re
 
 from src.shared.report_quality.constants import VERIFIED_PROSE_CLAIM_TYPE
 from src.shared.report_quality.numeric_detection import korean_numeric_tokens
+from src.shared.report_quality.news_translation import translation_receipt_valid
+from src.shared.report_quality.news_translation_constants import TRANSLATION_MANIFEST_KEY
 
 NEWS_NUMBER_TOKEN = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?(?:\s*(?:조원|억원|만원|천원|원|퍼센트|%|건|명|개|곳|대|회|년|월|일|배|톤|달러))?")
 NEWS_PROTECTED_SECTIONS = frozenset({"identity", "competitive_position"})
@@ -73,6 +75,16 @@ def reviewed_news_prose_problems(fact, sources):
                 or evidence_hash not in source.exact_evidence_hashes):
                 raise ValueError
             texts.append(exact_text)
+            if TRANSLATION_MANIFEST_KEY in record:
+                receipt = record[TRANSLATION_MANIFEST_KEY]
+                req = receipt['request']
+                if (len(bound) != 1 or not translation_receipt_valid(
+                        receipt, claim=fact.claim, quote=exact_text, fragment_id=record['fragment_id'],
+                        section_id=fact.section_owner, claim_slot=fact.claim_slot,
+                        document_identity=source.document_identity,
+                        document_content_sha256=source.document_content_sha256,
+                        source_url=req['source_url'], source_location=req['source_location'], prefix=prefix)):
+                    problems.append("뉴스 번역 검수 증명이 정확 원문·출처·문장에 결속되지 않았습니다")
         claim_text = fact.claim[len(prefix):] if fact.claim.startswith(prefix) else fact.claim
         source_text = " ".join(texts)
         if not news_number_tokens(claim_text, source_text=source_text).issubset(

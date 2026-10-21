@@ -116,3 +116,44 @@ def test_실제_웹케시와_보안점검_계획의_기존거절은_완화하지
     assert len(excerpts) == 1 and excerpts[0].temporal_status == 'completed'
     assert not any(e.section_id == 'future_strategy' for e in excerpts)
     assert excluded == {reason: 1} and not roles
+
+
+def test_새실제_제품배정_혼합발언은_운영노력과_향후의지를_정확범위로_분리한다():
+    case = json.loads((Path(__file__).parent / 'fixtures/portfolio_mixed_statement.json').read_text(encoding='utf-8'))
+    original = deepcopy(case)
+    excerpts, excluded, roles = _validate(case)
+    assert len(excerpts) == 2
+    current, future = excerpts
+    assert current.claim_slot == 'operations_partners:operating_role'
+    assert current.claim_kind == 'reported_fact'
+    assert current.text.endswith('인사이트로 바꾸는 데 힘쓰고 있다.')
+    assert future.claim_slot == 'future_strategy:stated_plan'
+    assert future.claim_kind == 'company_plan' and future.temporal_status == 'planned'
+    assert not any(e.claim_slot == 'portfolio:product_role' for e in excerpts)
+    assert '이어가겠다' not in current.text and '이어가겠다' in future.text
+    for excerpt in excerpts:
+        assert case['article']['body'][excerpt.span_start:excerpt.span_end] == excerpt.text
+        assert to_evidence_fragment(excerpt).text_sha256 == hashlib.sha256(excerpt.text.encode()).hexdigest()
+    selected, _ = select_diverse_excerpts(list(excerpts), NewsCollectionPolicy(max_fragments=1))
+    assert selected == excerpts
+    assert excluded == {'grounded_attribution_required': 1}
+    assert roles == {'role_explicit_statement_plan_split': 1}
+    assert case == original
+
+
+@pytest.mark.parametrize('current_text,slot', [
+    ('토스페이먼츠는 고객의 온라인 결제 편의를 높이는 데 힘쓰고 있다.', 'operations_partners:operating_role'),
+    ('토스페이먼츠는 고객의 온라인 결제 편의를 높이는 데 주력하고 있다.', 'operations_partners:operating_role'),
+    ('토스페이먼츠는 사업자를 위한 무료 세미나를 개최했다.', 'operations_partners:operating_role'),
+    ('토스페이먼츠는 온라인 가맹점에 결제 인증과 대금 정산 서비스를 제공하고 있다.', 'portfolio:product_role'),
+])
+def test_기업지향점은_제품기능이아니며_현재서비스_설명은_보존한다(current_text, slot):
+    original = _validate(SAVED['cases'][0])[0][0]
+    start, end = sentence_ranges(original.text)[-1]
+    text = current_text + ' ' + original.text[start:end]
+    current, future = statement_plan_parts(replace(original, text=text,
+        section_id='portfolio', claim_slot='portfolio:product_role', span_end=original.span_start+len(text)), COMPANY)
+    assert current.claim_slot == slot and current.text == current_text
+    assert future.claim_slot == 'future_strategy:stated_plan'
+    if '세미나를 개최했다' in current_text:
+        assert current.temporal_status == 'completed'

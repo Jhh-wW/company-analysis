@@ -654,6 +654,9 @@ def test_스위치OFF면_3장_부족_바이트골든을_유지한다(
     # 골든 문자열만 맞추지 않고 요약이 실제 매출액 정본을 가리키는지도 확인한다.
     financial_summary = next(item for item in result.report.summary_items
                              if item.section_id == "past_changes")
+    assert [item.section_id for item in result.report.summary_items] == [
+        "business_model", "past_changes", "current_challenges", "future_strategy", "identity",
+    ]
     assert financial_summary.text == (
         "연결 매출액의 2023년부터 2025년까지 누적 증감률은 137.61%이다. [11]"
     )
@@ -721,6 +724,9 @@ def test_스위치OFF면_3장_부족_바이트골든을_유지한다(
     # 2026-10-21: 검증된 구조화 실적을 같은 장의 과거 소식보다 먼저 요약한다.
     # 바뀐 필드는 summary_items[4].text 한 곳뿐이다(8159→8160바이트).
     # 그 필드만 역치환하면 이전 골든과 정확히 같으며 본문·표·지표·인용은 그대로다.
+    # 2026-10-21(2): 검증된 구조화 실적이 최신 뉴스와 계획에 밀리지 않게 앞세운다.
+    # 다섯 요약의 문장·인용은 같고 순서만 바뀌었다(8160바이트 유지).
+    # 요약 순서를 되돌리면 이전 골든의 모든 필드와 같으며 본문·표·지표는 그대로다.
     actual = _stable_result_bytes(result)
     golden = json.loads(_GOLDEN_FIXTURE.read_text(encoding="utf-8"))
     assert golden["byte_count"] == len(actual)

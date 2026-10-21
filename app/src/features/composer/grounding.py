@@ -1049,6 +1049,11 @@ def grounding_problem(
                 detail.update(version=GROUNDING_DETAIL_VERSION, check_kind=kind, stage="grounding_missing")
             return GROUNDING_MISSING
     for kind, payload in evidence.items():
+        # 번역은 verify가 단일 영어 뉴스·요청 SHA·정확 범위·최종 참 판정에 결속한다.
+        if kind == '번역':
+            if not isinstance(payload, Mapping):
+                return invalid_shape()
+            continue
         # 관계 근거는 아래 constrain_verdicts가 번호 중복을 함께 확인한 뒤
         # 자기 인용에 결속한다. 기존 수치·추세·시점 검증은 전부 유지한다.
         if kind == RELATION_KEY:

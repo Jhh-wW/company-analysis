@@ -26,6 +26,8 @@ import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from src.features.composer.settlement_role_binding import settlement_role_spans
+
 from src.features.composer.role_binding_constants import (
     COMPANY_FLOW_ACTION_INDEX, COMPANY_FLOW_SELF_ACTORS, COMPANY_FLOW_SENTENCE_RE,
     COMPANY_FLOW_PARTICLE_RE, COMPANY_FLOW_NONACTION_RE, COMPANY_FLOW_NEGATIVE_RE,
@@ -704,6 +706,17 @@ def _binding_problem(
     quote_key = _surface(quote)
     if not quote_key or quote_key not in _surface(source):
         return ROLE_BINDING_QUOTE_NOT_IN_SOURCE, (), kind, {}
+    # 정산 도식의 공제·수령인 어순만 다른 동일 관계를 좁게 대조한다.
+    # 원문/인용/주체/방향 확인을 마친 실제 공제 자리만 증명하므로 다른 과금
+    # 주장이나 같은 행의 다른 칸을 이 근거 하나로 덮지 않는다.
+    if is_flow and kind == RELATION_FEE:
+        settlement_spans = settlement_role_spans(
+            tuple(unit.surface for unit in units),
+            tuple(clause.surface for clause in _source_clauses(source)),
+            _surface(source), quote_key, target_key, role_key,
+        )
+        if settlement_spans:
+            return "", settlement_spans, kind, {}
     # ④ 후보 쪽에서 «그 대상에 걸린 그 역할»의 자리를 확정한다.
     claim_problem, claim_spans = _candidate_binding(units, target_key, role_key, is_flow)
     if claim_problem or not claim_spans:

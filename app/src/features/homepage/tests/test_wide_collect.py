@@ -1722,8 +1722,8 @@ def test_v5_산출은_버전이_ID에_봉인되어_이전_따뜻한캐시와_섞
         "homepage-wide-collector/4", "homepage-wide-parser/2",
     )).encode("utf-8")).hexdigest()
 
-    assert WIDE_COLLECTOR_VERSION == "homepage-wide-collector/5"
-    assert WIDE_PARSER_VERSION == "homepage-wide-parser/2"
+    assert WIDE_COLLECTOR_VERSION == "homepage-wide-collector/6"
+    assert WIDE_PARSER_VERSION == "homepage-wide-parser/3"
     assert first_document.collector_version == WIDE_COLLECTOR_VERSION
     assert first_document.parser_version == WIDE_PARSER_VERSION
     assert first_document.document_id != legacy_v1_id

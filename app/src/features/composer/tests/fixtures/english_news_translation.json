@@ -1,0 +1,35 @@
+{
+  "provenance": "실제 355218a1 run 7a5042a4 원문과 검수. 새 번역증명 응답은 포함하지 않음. 단위시험은 선택 범위만 보존. 전체 body SHA와 절대좌표는 tmp 원본 소비 감사에서 확인한 값이며 여기서 전체본문 재계산으로 주장하지 않음.",
+  "call_id": "53c336932beb451aae1b45665b26bd6e",
+  "review_call_id": "b99b63f5a7d7465a9eb16370ac2d8a47",
+  "original_response_sha256": "c55122d470f45d84c302859e7a182015f44b8dc4cd1fdbddcbafd5e3ef9855aa",
+  "article": {
+    "id": "news-49cec9317780c43e321c",
+    "title": "\"Snarched 88 government agencies and 20 companies in South Korea\"",
+    "url": "https://it.chosun.com/news/articleView.html?idxno=2023092169927",
+    "publisher": "it.chosun.com",
+    "source_category": "news_report",
+    "indexed_published_on": "2026-09-11"
+  },
+  "quote": {
+    "id": "quote-0cc8a6f0e08132f2cc7c",
+    "start": 3339,
+    "end": 3574,
+    "begin_text": "Toss Payments emphas",
+    "end_text": "ystem was breached.”"
+  },
+  "quote_sha256": "0168718668b285d377628bcb4eb34cadfca29971a92e50ff4e80c7aa3141cb69",
+  "body_sha256": "27f4dad59e435fa81f04aa83d66b574fb6fd9c1d9658b6bd99c2b7f964d3234f",
+  "claim": "2026-09-11 it.chosun.com 보도에 따르면, 특정 가맹점의 결제 연동 인증 정보가 외부에 노출되어 제3자가 결제 내역을 열람할 수 있는 사고가 발생했으며, 토스페이먼츠는 \"토스페이먼츠 시스템이 침해된 증거는 없다\"고 밝혔다.",
+  "original_review_entry": {
+    "번호": 34,
+    "장": "current_challenges",
+    "근거": [
+      "83"
+    ],
+    "근거대조": "83: 결제 연동 인증 정보 노출·제3자 열람·시스템 침해 증거 없음 일치",
+    "결과": "참",
+    "검증근거": {}
+  },
+  "selected_text": "Toss Payments emphasized, “Payment linkage authentication information from a specific merchant was exposed, allowing a third party to view the payment details,” adding, “There is no evidence that the Toss Payments system was breached.”"
+}

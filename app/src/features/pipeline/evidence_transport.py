@@ -49,7 +49,7 @@ from src.shared.report_evidence.constants import (
     SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS,
 )
 from src.shared.report_evidence.identity_verified_web import (
-    verified_dart_filing_binding_allows_url,
+    verified_official_web_binding_allows_url,
 )
 from src.shared.report_evidence.profile_domain_attestation import (
     dart_profile_attestation_allows_source_url,
@@ -356,13 +356,14 @@ def _typed_metadata(
     )
     if (
         source_kind == SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE
-        and not verified_dart_filing_binding_allows_url(
+        and not verified_official_web_binding_allows_url(
             identity_binding,
             source_url=source_url,
+            company_id=corp_id,
         )
     ):
         raise _packet_invalid(
-            "신원검증 공식 웹의 DART proof가 원본 URL과 일치하지 않습니다"
+            "신원검증 공식 웹의 발견·신원 proof가 회사와 원본 URL에 일치하지 않습니다"
         )
 
     source_collected_on = _require_text(
@@ -421,9 +422,10 @@ def _typed_metadata(
         ):
             raise _packet_invalid("typed 보조 문서에 공식 웹·IR provenance가 섞였습니다")
     elif source_kind in OFFICIAL_WEB_SOURCE_KINDS:
-        strict_url_proof = verified_dart_filing_binding_allows_url(
+        strict_url_proof = verified_official_web_binding_allows_url(
             identity_binding,
             source_url=source_url,
+            company_id=corp_id,
         )
         if not strict_url_proof and not (
             domain_attestation_source_id and domain_attestation_evidence

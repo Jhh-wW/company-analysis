@@ -103,7 +103,7 @@ def _schema_sha(schema):
     (FLAT_REVIEW_SCHEMA,
      "ec40152ca2ad8aa43192180dd0583bff4a6c3f5e52042ac1f2b915bc7fd0b94d",
      "ff4e031accf5776e3f189483531e5c5270bea8c8d1ec8cd6da75008384f901ab",
-     "7cdc5e597a878676b5110e32f2ea094e722ff45791c0116027e1396c0b46f39c"),
+     "ecae80cef551cbb898bd1bd8fae219fd9bd93a0f16befcbda3db47d3f46a524a"),
     (DIAGRAM_REVIEW_SCHEMA,
      "ba1d778829286673bd6cde6ebb5d559274c78f0202b92d6e4128891736dfc1c8",
      "43db498656efc5545d712fcc1f0c9893fe69fbd1f2dcca8a42a470c03e4bcb8a",
@@ -116,6 +116,13 @@ def test_retry_schema_hash_matches_provider_accepted_schema(schema, accepted, re
     assert relation["required"] == ["근거", "원문", "유형"]
     assert relation["additionalProperties"] is False
     previous = deepcopy(schema)
+    if schema is FLAT_REVIEW_SCHEMA:
+        # 영어 뉴스의 독립 번역 증명 객체 한 칸만 추가했다. 제공자 승인 실측은 아니다.
+        translation = previous["$defs"]["grounding"]["properties"].pop("번역")
+        assert translation["required"] == ["요청SHA", "문장SHA", "원문SHA", "근거", "대응"]
+        assert translation["additionalProperties"] is False
+        assert translation["properties"]["대응"]["items"]["additionalProperties"] is False
+        assert _schema_sha(previous) == "7cdc5e597a878676b5110e32f2ea094e722ff45791c0116027e1396c0b46f39c"
     # 운영 도식 대상·행동 증명의 새 유형 한 항목만 제거하면 직전 스키마가 같다.
     previous["$defs"]["grounding"]["properties"]["관계"]["items"]["properties"]["유형"]["enum"].remove("경로")
     assert _schema_sha(previous) == (

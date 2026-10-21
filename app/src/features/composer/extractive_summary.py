@@ -35,6 +35,9 @@ from src.features.composer.extractive_summary_constants import (
     SUMMARY_RECOGNITION_ONLY_PATTERN,
     SUMMARY_BUSINESS_EXCHANGE_PATTERN,
     SUMMARY_STRUCTURED_PERFORMANCE_SCORE,
+    SUMMARY_PERFORMANCE_SLOT,
+    SUMMARY_PERFORMANCE_SECTION,
+    SUMMARY_PERFORMANCE_ANCHOR_SECTION,
 )
 from src.features.composer.logic import SummaryCandidate
 from src.features.composer.identity_content import administrative_identity_only
@@ -43,7 +46,7 @@ from src.features.composer.port import ComposedReport, ComposedSentence
 from src.features.pipeline.port import FactRecord
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_evidence.business_slot_scope import product_corporate_only_problem
-from src.shared.report_quality.evidence_support import prose_evidence_support_ready
+from src.shared.report_quality.evidence_support import fact_prose_evidence_support_ready
 from src.shared.report_quality.fact_binding import fact_evidence_binding
 
 
@@ -260,9 +263,7 @@ def _verified_fact_registry(
             or claim_slot not in CLAIM_SLOTS_BY_SECTION[section_id]
             or not key[1]
             or (fact.verification_status or fact.status) != "verified"
-            or not prose_evidence_support_ready(
-                fact.claim_type, fact.evidence_support_terms
-            )
+            or not fact_prose_evidence_support_ready(fact)
             or not fact.evidence_binding
             or fact.evidence_binding != fact_evidence_binding(fact)
         ):
@@ -329,7 +330,7 @@ def _summary_score(sentence: ComposedSentence) -> int:
         SUMMARY_FORMAL_ENDING_SCORE if re.search(SUMMARY_FORMAL_ENDING_PATTERN, text) else 0,
         SUMMARY_STRUCTURED_PERFORMANCE_SCORE
         if sentence.structured_claim is not None
-        and sentence.planned_claim_slot == "past_changes:historical_performance" else 0,
+        and sentence.planned_claim_slot == SUMMARY_PERFORMANCE_SLOT else 0,
     ))
 
 
@@ -371,8 +372,8 @@ def select_extractive_summary(
                     ExtractiveSummaryItem(section_id, sentence, fact.fact_id)
                 )
         if candidates:
-            # 숫자 가점이 확인 우선을 뒤집지 않게 등급부터 비교한다.
-            # 등급과 점수가 같으면 안정 정렬로 본문 순서를 지킨다.
+            # 확인 등급을 먼저 보고, 동급에서는 내용 점수를 비교한다.
+            # 등급·점수가 같으면 안정 정렬로 본문 순서를 지킨다.
             pools[section_id] = sorted(
                 candidates,
                 key=lambda item: (
@@ -397,11 +398,23 @@ def select_extractive_summary(
         for section_id, pool in pools.items()
     }
 
+    # 검증된 원값 실적이 있을 때는 최근 기사·계획만으로 다섯 자리를 채우지 않는다.
+    # 수치 근거가 없는 과거 사건 장에는 이 우선순위를 부여하지 않는다.
+    priority = list(SUMMARY_SECTION_PRIORITY)
+    if any(
+        item.sentence.structured_claim is not None
+        and item.sentence.planned_claim_slot == SUMMARY_PERFORMANCE_SLOT
+        for item in pools.get(SUMMARY_PERFORMANCE_SECTION, ())
+    ):
+        priority.remove(SUMMARY_PERFORMANCE_SECTION)
+        priority.insert(priority.index(SUMMARY_PERFORMANCE_ANCHOR_SECTION) + 1,
+                        SUMMARY_PERFORMANCE_SECTION)
+
     selected: list[ExtractiveSummaryItem] = []
     seen_claims: set[str] = set()
     deepest = max((len(pool) for pool in pools.values()), default=0)
     for round_index in range(deepest):
-        for section_id in SUMMARY_SECTION_PRIORITY:
+        for section_id in priority:
             pool = pools.get(section_id, ())
             if round_index >= len(pool):
                 continue

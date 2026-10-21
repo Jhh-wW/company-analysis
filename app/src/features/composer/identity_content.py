@@ -11,6 +11,7 @@ from src.features.composer.identity_content_constants import (
     IDENTITY_ADMINISTRATIVE_PATTERNS,
     IDENTITY_BUSINESS_ACTIVITY_RE,
     IDENTITY_CONNECTED_CLAUSE_RE,
+    IDENTITY_DOCUMENT_PERSON_METADATA_RE,
     IDENTITY_INTERNAL_CONTROL_ACTIVITY_RE,
     IDENTITY_INTERNAL_CONTROL_METADATA_RE,
     IDENTITY_METADATA_AUXILIARY_RE,
@@ -41,6 +42,8 @@ def _administrative_clause_only(clause: str) -> bool:
     )
     if IDENTITY_BUSINESS_ACTIVITY_RE.search(business_text):
         return False
+    if IDENTITY_DOCUMENT_PERSON_METADATA_RE.fullmatch(clause):
+        return True
     if control_metadata or any(pattern.search(clause) for pattern in IDENTITY_REPORT_METADATA_PATTERNS):
         parts = tuple(
             part.strip() for part in IDENTITY_METADATA_CLAUSE_SPLIT_RE.split(clause)

@@ -48,8 +48,8 @@ from src.shared.report_evidence.policy import (
 from src.shared.report_evidence.identity_verified_web import (
     canonical_identity_verified_web_url,
     identity_verified_web_expected_trust,
-    verified_dart_filing_binding_allows_public_source,
-    verified_dart_filing_binding_allows_url,
+    verified_official_web_binding_allows_public_source,
+    verified_official_web_binding_allows_url,
 )
 from src.shared.report_evidence.profile_domain_attestation import (
     dart_profile_attestation_allows_source_url,
@@ -127,7 +127,7 @@ def formal_web_public_source_metadata(
         return None
     attestation_id = domain_attestation_source_id.strip()
     attestation_evidence = domain_attestation_evidence.strip()
-    strict_dart_binding = verified_dart_filing_binding_allows_public_source(
+    strict_dart_binding = verified_official_web_binding_allows_public_source(
         identity_binding,
         company_name=company_name,
         source_url=canonical_url,
@@ -620,7 +620,7 @@ def formal_source_writer_ineligibility_reason(
         ):
             return "permanent_homepage_relocation_proof_invalid"
     if source_kind == SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE:
-        if not verified_dart_filing_binding_allows_url(
+        if not verified_official_web_binding_allows_url(
             identity_binding,
             source_url=canonical_url,
         ):

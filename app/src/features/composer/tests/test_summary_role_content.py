@@ -9,7 +9,7 @@ import pytest
 from src.features.composer.extractive_summary import distinct_summary_candidates, select_extractive_summary
 from src.features.composer.logic import SummaryCandidate
 from src.features.composer.port import ComposedReport, ComposedSection, StructuredClaim
-from src.features.composer.tests.test_extractive_summary import _fact, _sentence
+from src.features.composer.tests.test_extractive_summary import _fact, _report, _sentence
 
 
 RECOGNITION_ONLY = "회사는 PG 서비스의 경우, 거래승인이 이루어지는 시점에 수행의무가 완료되는 것으로 판단하고 있다."
@@ -91,3 +91,34 @@ def test_bound_performance_precedes_dated_news_in_the_same_section():
     # 가점은 기존 정본 결속 검사를 건너뛰지 못한다.
     damaged = replace(numeric_fact, evidence_binding="0" * 64)
     assert select_extractive_summary(report, (damaged, news_fact)).sentences == (news,)
+
+
+def test_verified_numeric_performance_remains_when_products_and_news_fill_other_sections():
+    report, facts = _report(("business_model", "portfolio", "current_challenges",
+                             "future_strategy", "competitive_position", "identity"))
+    performance = replace(_sentence("identity"), text="2025년 매출액은 9,251.1억원으로 전년 대비 12.86% 증가했다.",
+                          planned_claim_slot="past_changes:historical_performance")
+    performance_fact = _fact("past_changes", performance)
+    performance = replace(performance, structured_claim=StructuredClaim(
+        fact_id=performance_fact.fact_id, claim_slot=performance.planned_claim_slot,
+        section_owner="past_changes", source_fragment_id=performance.citations[0],
+        source_identity="검증된 공시", verification_state="verified", state_evidence=performance.text,
+        metric="매출액", raw_value="925113921197", unit="원",
+    ))
+    report = replace(report, sections=(*report.sections, ComposedSection("past_changes", (performance,))))
+    selected = select_extractive_summary(report, (*facts, performance_fact))
+    assert selected.section_ids == ("business_model", "portfolio", "past_changes",
+                                    "current_challenges", "future_strategy")
+    assert selected.sentences[2] is performance
+    assert selected.fact_ids[2] == performance_fact.fact_id
+    # 실제 원값 검증이 없는 과거 사건이나 손상된 사실은 기존 다섯 장을 밀어내지 않는다.
+    damaged = replace(performance_fact, evidence_binding="0" * 64)
+    assert select_extractive_summary(report, (*facts, damaged)).section_ids == (
+        "business_model", "portfolio", "current_challenges", "future_strategy", "competitive_position",
+    )
+    unstructured_report = replace(report, sections=(*report.sections[:-1], ComposedSection(
+        "past_changes", (replace(performance, structured_claim=None),),
+    )))
+    assert select_extractive_summary(unstructured_report, (*facts, performance_fact)).section_ids == (
+        "business_model", "portfolio", "current_challenges", "future_strategy", "competitive_position",
+    )

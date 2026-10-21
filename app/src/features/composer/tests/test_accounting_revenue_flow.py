@@ -143,6 +143,15 @@ def test_real_customer_transaction_fee_treasury_and_mixed_action_are_preserved(a
     assert not any(FLOW_ACCOUNTING_REVENUE_CODE in reason for reason in problems)
 
 
+def test_third_two_recognition_policies_do_not_erase_added_customer_transaction():
+    policy = "일부는 청구권 기준 수익 인식(실무적 간편법); 일부는 수행의무 이행 시점에 수익 인식"
+    action = "고객에게 월 구독료를 받는다; " + policy
+    report, fragments = make_report(label="", action_label=action)
+    checked, problems = check_diagram_numbers(report, fragments)
+    assert checked.sections[0].flow_rows == report.sections[0].flow_rows
+    assert not any(FLOW_ACCOUNTING_REVENUE_CODE in reason for reason in problems)
+
+
 def test_revenue_column_is_selected_by_header(monkeypatch):
     report, fragments = make_report()
     headers = tuple(reversed(BUSINESS_FLOW_HEADERS))

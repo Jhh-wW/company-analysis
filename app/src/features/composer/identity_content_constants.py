@@ -22,6 +22,16 @@ IDENTITY_BUSINESS_ACTIVITY_RE = re.compile(
 )
 IDENTITY_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|[\n;]+")
 
+# 문서별 대표자 표기는 뒤 절에서 직함을 생략해도 사업 설명이 아니다.
+# 문서 표지와 짧은 인명 값, 기재 종결형까지 닫힌 문형으로 확인한다.
+# '문서' 자체나 임의의 추가 절을 메타정보로 간주하지 않는다.
+_DOCUMENT_PERSON_VALUE = r"문서\s+[A-Z0-9]{1,4}(?:에서는|에서|\s*기준)\s+[가-힣]{2,5}"
+IDENTITY_DOCUMENT_PERSON_METADATA_RE = re.compile(
+    r"(?:회사의\s*)?대표이사(?:는|은)\s*(?:감사보고서\s*기준으로\s*)?"
+    rf"{_DOCUMENT_PERSON_VALUE}(?:\s*,\s*{_DOCUMENT_PERSON_VALUE})+"
+    r"(?:으로|로)\s*(?:각각\s*)?(?:기재|명시|표기)(?:되어\s*있다|되었다|됐다)[.!]?"
+)
+
 # 법적 표제·공시 기수·내부회계 평가를 사업 정체성으로 바꾸지 않는다.
 # 같은 문장에 실제 사업 활동이나 실적이 있으면 아래 표지만으로 제외하지 않는다.
 IDENTITY_REPORT_METADATA_PATTERNS = tuple(re.compile(pattern) for pattern in (

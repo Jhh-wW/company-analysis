@@ -24,6 +24,8 @@ from src.features.provenance.sources import Source, SourceKind, exact_evidence_t
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_quality.evidence_support import prose_evidence_support_ready
 from src.shared.report_quality.fact_binding import fact_evidence_binding
+from src.shared.report_quality.news_translation import translation_receipt_valid
+from src.shared.report_quality.news_translation_constants import TRANSLATION_MANIFEST_KEY
 from src.shared.report_quality.constants import (
     INTERPRETATION_CLAIM_TYPE,
     OFFICIAL_PROSE_EXACT_TEXT_KEY,
@@ -223,8 +225,25 @@ def evaluate_verified_prose_fact(
             #   원칙의 좁은 예외다 — FULL·확인 등급·숫자 든 산문에만.
             manifest[-1][OFFICIAL_PROSE_EXACT_TEXT_KEY] = item.exact_text
 
+    translation_bound = False
+    if sentence.news_translation_receipt:
+        if len(evidence) != 1 or sentence.grade != GRADE_CONFIRMED:
+            return ProseFactBuildResult(None, "news_translation_proof_invalid")
+        item = evidence[0]
+        source = item.source
+        translation_bound = source.kind is SourceKind.NEWS and translation_receipt_valid(
+            sentence.news_translation_receipt, claim=claim, quote=item.exact_text,
+            fragment_id=item.fragment_id, section_id=section_id, claim_slot=claim_slot,
+            document_identity=document_identity(source), document_content_sha256=source.document_content_sha256,
+            source_url=source.url, source_location=source.location,
+            prefix=f'{source.published_at} {source.publisher} 보도에 따르면, ',
+        )
+        if not translation_bound:
+            return ProseFactBuildResult(None, "news_translation_proof_invalid")
+        manifest[0][TRANSLATION_MANIFEST_KEY] = json.loads(sentence.news_translation_receipt)
+
     support_terms = _support_terms(claim, evidence)
-    if not prose_evidence_support_ready(
+    if not translation_bound and not prose_evidence_support_ready(
         (
             VERIFIED_PROSE_CLAIM_TYPE
             if sentence.grade == GRADE_CONFIRMED

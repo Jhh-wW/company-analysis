@@ -158,6 +158,8 @@ def build_grounded_prompt(company: NewsCompanyContext, articles: list[tuple[News
         "산업문맥도 text 대신 text_quote_id를 선택하고 나머지 짧은 사실 문구는 그 인용 안의 원문을 그대로 쓰세요. "
         "ID는 같은 기사의 후보만 허용됩니다. 넓은 인용에 회사 이름이 있어도 타법인·개인의 사건을 대상 회사 사건으로 바꾸지 마세요. "
         "각 인용은 subject_is_target에 해당 사건의 실제 주어가 대상 법인인지 별도로 판정하세요. "
+        "'이에 대해/이와 관련해/해당 사안'만으로 시작하는 발언은 같은 기사에서 사건 설명과 발언이 "
+        "함께 담긴 기존 연속 quote ID를 선택하세요. 다른 기사의 사건명이나 원인을 빌려 보충하지 마세요. "
         "이름이 인용에 나오는 것만으로 true가 아닙니다. 목록·발행처·과거 직장의 이름이면 false입니다. "
         "제품·브랜드·인물의 경우 명시 회사 관계와 그 회사의 실제 사업 사건이 모두 확인될 때만 true입니다. "
         + qc.QUOTE_SELF_CONTAINED_SELECTION_GUIDE

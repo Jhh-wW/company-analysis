@@ -53,6 +53,31 @@ def quote_response_sha256(raw: object) -> str | None:
         return None
 
 
+def _self_contained_statement_choices(output, body, units, company):
+    """출력표 안의 동일 본문 포함 후보가 있을 때만 단독 역참조 발언을 뺀다.
+
+    사건 의미를 판정하거나 원문을 확장하지 않는다. 남은 후보도 새 선택·주어 검증이 필요하다.
+    """
+    if company is None:
+        return output
+    unit_ranges = set(units)
+    def dependent(row):
+        start, end = row['start'], row['end']
+        text = body[start:end]
+        if ((start, end) not in unit_ranges
+                or not c.QUOTE_DEPENDENT_STATEMENT_PREFIX_RE.match(text)
+                or not c.QUOTE_DIRECT_STATEMENT_RE.search(text)
+                or not c.QUOTE_DIRECT_STATEMENT_END_RE.search(text)):
+            return False
+        return any(
+            other['start'] < start and other['end'] == end
+            and not c.QUOTE_DEPENDENT_STATEMENT_PREFIX_RE.match(body[other['start']:end])
+            and mentions_target(body[other['start']:start], company)
+            for other in output
+        )
+    return [row for row in output if not dependent(row)]
+
+
 def quote_candidates(candidate: NewsCandidate, body: str,
                      company: NewsCompanyContext | None = None) -> list[dict]:
     """문장·문단과 인접 범위만 제시하며 본문 문자열을 복제하지 않는다."""
@@ -112,7 +137,7 @@ def quote_candidates(candidate: NewsCandidate, body: str,
                        "end_text": text[-c.QUOTE_BOUNDARY_PREVIEW_CHARS:]})
         if len(output) >= c.QUOTE_MAX_CANDIDATES_PER_ARTICLE:
             break
-    return output
+    return _self_contained_statement_choices(output, body, units, company)
 
 
 def quote_schema(schema: dict, articles: list[tuple[NewsCandidate, str]],
