@@ -279,8 +279,10 @@ def retain_verified_news(report, fragments, *, review_input=None, diagnostics=No
             if not re.search(NEWS_KOREAN_SYLLABLE_PATTERN, sentence.text[len(prefix):]):
                 record(sentence, section.section_id, "게시조건", "korean_body_unverified")
                 return False
-            supported = news_number_tokens(sentence.text[len(prefix):]).issubset(
-                news_number_tokens(" ".join(news[fid].text for fid in sentence.citations)))
+            source_text = " ".join(news[fid].text for fid in sentence.citations)
+            supported = news_number_tokens(
+                sentence.text[len(prefix):], source_text=source_text,
+            ).issubset(news_number_tokens(source_text, source_text=source_text))
             if not supported:
                 record(sentence, section.section_id, "게시조건", "unsupported_number")
             return supported

@@ -137,6 +137,9 @@ def test_current_named_service_sources_also_reach_portfolio_revenue_link(fragmen
         start, end = map(int, fragment.location.split("-"))
         assert text[start:end] == fragment.text
         assert fragment.text_sha256 == hashlib.sha256(fragment.text.encode()).hexdigest()
+    assert all("PG 서비스" in fragment.text and "수익을 인식합니다" in fragment.text for fragment in portfolio)
+    assert all("실무적 간편법" not in fragment.text and "마케팅비용" not in fragment.text for fragment in portfolio)
+    assert any("실무적 간편법" in fragment.text for fragment in business)
 
 
 @pytest.mark.parametrize("text", (

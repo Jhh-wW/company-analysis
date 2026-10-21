@@ -27,6 +27,7 @@ IDENTITY_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|[\n;]+")
 IDENTITY_REPORT_METADATA_PATTERNS = tuple(re.compile(pattern) for pattern in (
     r"(?:법적\s*명칭|법인명|상호)(?:은|는|이|가)[^.!?\n]*(?:확인|기재|명시|이다|입니다)",
     r"(?:보고기간\s*종료일|제\s*\d+\s*기(?:말|까지))[^.!?\n]*재무제표[^.!?\n]*(?:공시|작성|제출)",
+    r"대표이사[^.!?\n]*재무제표\s*작성\s*책임자\s*표기[^.!?\n]*확인",
 ))
 IDENTITY_INTERNAL_CONTROL_METADATA_RE = re.compile(
     r"내부회계관리제도[^.!?\n]*(?:효과적|효과성|적정)[^.!?\n]*(?:판단|평가|보고|기술)"
@@ -48,6 +49,12 @@ IDENTITY_METADATA_CLAUSE_RE = re.compile(
     r"|제\s*\d+\s*기(?:말|까지)?|재무제표|내부회계관리제도"
 )
 IDENTITY_METADATA_AUXILIARY_RE = re.compile(r"(?:있다|있습니다|있음)[.!]?")
+# 앞 절이 내부회계 평가일 때만 '이에 대한 감사 검토'를 같은 메타 절로 본다.
+# 감사인이 제품을 검토하거나 다른 사업 행위를 한 문장은 이 문법에 들지 않는다.
+IDENTITY_METADATA_AUDIT_TAIL_RE = re.compile(
+    r"(?:외부\s*)?감사인(?:이|은)\s*(?:이에|그에)\s*대한\s*"
+    r"검토(?:를)?\s*실시(?:하였다|했습니다|하였습니다|했다)[.!]?"
+)
 
 # 한 문장의 주제부만 허용한다. 접속절이 있으면 전체를 행정정보로 단정하지 않는다.
 _SUBJECT = r"(?:[^,;.!?\n]{1,80}?(?:은|는|의)\s*)?"

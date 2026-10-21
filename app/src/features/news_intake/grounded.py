@@ -22,6 +22,9 @@ from src.features.news_intake.identity_names import company_query_names, mention
 from src.features.news_intake.article_identity import article_company_context
 from src.features.news_intake.reporting_subject_scope import target_is_only_interview_recipient
 from src.features.news_intake.attributed_statement import has_attributed_statement
+from src.features.news_intake.event_plan_context import event_plan_context_problem
+from src.features.news_intake.statement_plan_role import statement_plan_parts
+from src.features.news_intake.statement_plan_role_constants import STATEMENT_PLAN_SPLIT
 from src.features.news_intake.reporting_subject_scope_constants import SUBJECT_INTERVIEW_RECIPIENT_ONLY
 from src.features.news_intake.relation_subject_scope import bind_relation_subject, starts_relation_target
 from src.features.news_intake.relation_subject_scope_constants import RELATION_CONTEXT_REASON
@@ -418,6 +421,11 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
     if re.search(c.FUTURE_PLAN_PATTERN, text) and temporal != "planned":
         excluded["grounded_plan_mismatch"] += 1
         return None
+    if event_problem := event_plan_context_problem(
+        text, body, candidate, company, as_of, temporal_status=temporal,
+    ):
+        excluded[event_problem] += 1
+        return None
     if contract_problem := contract_execution_context_problem(text, body, article_context, as_of,
                                                             temporal_status=temporal):
         excluded[contract_problem] += 1
@@ -451,6 +459,11 @@ def _apply_claim_role(excerpt: GroundedNewsExcerpt, time_evidence: str,
     나눈 부분의 사건일은 그 부분 안에 날짜 원문이 있을 때만 남긴다.
     """
 
+    statement_parts = statement_plan_parts(excerpt, company)
+    if statement_parts is not None:
+        if role_diagnostics is not None:
+            role_diagnostics[STATEMENT_PLAN_SPLIT] += 1
+        return statement_parts
     partnership_parts = partnership_role_parts(
         excerpt.text, claim_slot=excerpt.claim_slot, company=company,
         temporal_status=excerpt.temporal_status,

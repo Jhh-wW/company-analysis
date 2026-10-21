@@ -15,6 +15,7 @@ from src.core.source_verification_adapter import supplementary_research_source_v
 from src.features.chapter_evidence.produce import produce_from_collection_envelopes
 from src.features.composer.port import ComposedSentence
 from src.features.composer.logic import build_section_prompt
+from src.features.composer.portfolio_revenue_content import supplement_portfolio_revenue_source
 from src.features.composer.evidence_pair_selection import writer_visible_fragments
 from src.features.composer.prose_facts import ProseEvidence, build_verified_prose_fact
 from src.features.composer.render import _build_source, _fragment_metas
@@ -93,9 +94,31 @@ def test_actual_service_sources_reach_typed_portfolio_writer_as_revenue_links(mo
     conversion = typed_fragments_from_raw(corp_id=COMPANY_ID, frags=merged, filing_meta=None)
     assert conversion.rejected_count == 0
     fragment = next(value for value in conversion.fragments if PORTFOLIO_REVENUE_SLOT in value.supported_claim_slots)
-    assert fragment.text == FIXTURE["fragments"][fragment_id]
+    assert fragment.text in FIXTURE["fragments"][fragment_id]
+    assert "실무적 간편법" not in fragment.text and "마케팅비용" not in fragment.text
     assert "portfolio:product_role" not in fragment.supported_claim_slots
     assert any("business_model:revenue_model" in value.supported_claim_slots for value in conversion.fragments)
     assert fragment in writer_visible_fragments("portfolio", conversion.fragments)
     prompt = build_section_prompt(COMPANY_NAME, "portfolio", (fragment,), None, show_supported_claim_slots=True)
     assert fragment.text in prompt and PORTFOLIO_REVENUE_SLOT in prompt
+    candidate, = supplement_portfolio_revenue_source((), (fragment,))
+    assert candidate.text == fragment.text and candidate.verification_state == "unverified"
+    assert candidate.citations == (fragment.fragment_id,)
+    # 검수 소비 이후 DTO를 모사한다. 신규 LLM 승인이 아니라 정상 Source 결속의 시험이다.
+    meta, = _fragment_metas((fragment,))
+    source = _build_source(meta, int(fragment.fragment_id), COMPANY_NAME, ("portfolio",))
+    fact = build_verified_prose_fact(
+        replace(candidate, verification_state="verified"), section_id="portfolio",
+        company_name=COMPANY_NAME, as_of_date=REFERENCE_DATE,
+        evidence=(ProseEvidence(fragment.fragment_id, source, fragment.text),),
+    )
+    assert fact is not None
+    bound = bound_supplementary_fact_sources(
+        fact, registry=(source,), reference_date=REFERENCE_DATE,
+        source_verifier=supplementary_research_source_verifier(),
+    )
+    assert len(bound) == 1 and bound[0].official
+    assert bound_supplementary_fact_sources(
+        fact, registry=(replace(source, document_content_sha256="f" * 64),),
+        reference_date=REFERENCE_DATE, source_verifier=supplementary_research_source_verifier(),
+    ) == ()

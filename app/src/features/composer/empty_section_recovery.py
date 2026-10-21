@@ -30,6 +30,8 @@ from src.features.composer.logic import AskFn, extract_json_payload, parse_secti
 from src.features.composer.port import AskFatalError, CollectedFragment, ComposedReport, ComposedSection
 from src.features.composer.verify import verify_report
 from src.features.composer.revenue_source_slot import normalize_revenue_source_slot
+from src.features.composer.citation_labels import normalize_draft_sentence_citations
+from src.features.composer.portfolio_revenue_content import supplement_portfolio_revenue_source
 from src.features.composer.structured_claims import enforce_public_numeric_safety
 from src.shared.report_evidence.constants import FORMAL_DOCUMENT_SOURCE_KINDS
 from src.shared.report_evidence.policy import required_slots_for
@@ -509,6 +511,10 @@ def recover_empty_sections(
         parsed = parse_section_response(json.dumps(usable[section_id], ensure_ascii=False), section_id,
                                         reject_inline_citation_markers=True)
         allowed = {f.fragment_id for f in evidence[section_id]}
+        parsed = tuple(normalize_draft_sentence_citations(sentence, allowed)
+                       for sentence in (parsed or ()))
+        if section_id == "portfolio":
+            parsed = supplement_portfolio_revenue_source(parsed, evidence[section_id])
         slots_by_fragment = supported_slots[section_id]
         fragments_by_id = {fragment.fragment_id: fragment for fragment in evidence[section_id]}
         if section_id == "business_model":

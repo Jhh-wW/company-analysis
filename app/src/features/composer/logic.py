@@ -44,6 +44,11 @@ from src.features.composer.scope_supplement_feedback import ScopeSupplementFailu
 from src.features.composer.challenge_response_feedback import ResponseSupplementFailure, render_response_supplement_feedback
 from src.features.composer.partial_evidence import PartialEvidenceView
 from src.features.composer.revenue_source_slot import normalize_revenue_source_slot
+from src.features.composer.portfolio_revenue_content import supplement_portfolio_revenue_source
+from src.features.composer.citation_labels import (
+    normalize_draft_flow_citations, normalize_draft_sentence_citations,
+)
+from src.features.composer.draft_flow_assets import omit_unstated_draft_flow_asset
 from src.features.composer.partial_evidence_constants import (
     EXACT_EVIDENCE_SCOPE_GUIDE,
     PARTIAL_EVIDENCE_SCOPE_GUIDE,
@@ -1244,6 +1249,11 @@ def _compose_one_section(
         if wants_flow and raw
         else ()
     )
+    allowed_source_ids = frozenset(fragment.fragment_id for fragment in source_fragments)
+    flow_rows = tuple(normalize_draft_flow_citations(row, allowed_source_ids) for row in flow_rows)
+    if sentences is not None:
+        sentences = tuple(normalize_draft_sentence_citations(sentence, allowed_source_ids)
+                          for sentence in sentences)
     if wants_flow and not flow_rows:
         # ★ 진단 — 도식이 안 나올 때 «작가가 안 냈는지» «우리가 걸렀는지»를
         #   구분하지 못하면 엉뚱한 데를 고치게 된다(실측에서 두 번 헛짚었다).
@@ -1259,6 +1269,16 @@ def _compose_one_section(
         return ComposedSection(
             section_id=section_id, sentences=(), notice=NOTICE_COMPOSE_FAILED
         )
+    if section_id == "portfolio":
+        sentences = supplement_portfolio_revenue_source(sentences, source_fragments)
+    if section_id == "business_model":
+        fragments_by_id = {fragment.fragment_id: fragment for fragment in source_fragments}
+        sentences = tuple(normalize_revenue_source_slot(sentence, fragments_by_id) for sentence in sentences)
+        normalized_rows = tuple(omit_unstated_draft_flow_asset(row, fragments_by_id) for row in flow_rows)
+        omitted_count = sum(before != after for before, after in zip(flow_rows, normalized_rows))
+        if omitted_count:
+            logger.info("사업 도식 검수 전 자기 근거에 없는 일반 자산 칸 정리 행수=%d", omitted_count)
+        flow_rows = normalized_rows
     if not sentences:
         return ComposedSection(
             section_id=section_id,
@@ -1267,9 +1287,6 @@ def _compose_one_section(
             flow_rows=flow_rows,
             news_decisions=parse_news_decisions(extract_json_payload(raw)),
         )
-    if section_id == "business_model":
-        fragments_by_id = {fragment.fragment_id: fragment for fragment in source_fragments}
-        sentences = tuple(normalize_revenue_source_slot(sentence, fragments_by_id) for sentence in sentences)
     return ComposedSection(
         section_id=section_id,
         sentences=sentences,
@@ -2045,6 +2062,7 @@ def compose_selected_sections(
                 # 캐시 표식을 켜지 않는다(기본값 False 유지).
             ),
             ask,
+            source_fragments=prepared.packets[section_id],
             reject_inline_citation_markers=True,
             parse_retry_limit=0,
             evidence_pairs=(

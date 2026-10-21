@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from src.features.composer.news_constants import NEWS_REVIEW_GUIDE
 from src.features.composer.news_usage import attribution_prefix, news_metadata
+from src.features.composer.news_compensation_scope import news_compensation_scope_problem
+from src.shared.report_quality.supplementary_prose import news_numeric_text
 from src.features.composer.news_block import _is_news_fragment
 from src.features.composer.absence_claim_guard import absence_claim_problem
 from src.features.composer.flow_review_binding import bind_reviewed_flow_row
@@ -1095,14 +1097,20 @@ def _numeric_disposal(
             if numeric_text.startswith(prefix):
                 numeric_text = numeric_text[len(prefix):]
                 break
-    numbers = _extract_numbers(numeric_text)
-    if not numbers:
-        return NUMERIC_PASS
     cited_texts = [
         frag_by_id[citation].text
         for citation in sentence.citations
         if citation in frag_by_id
     ]
+    if sentence.citations and all(
+        citation in frag_by_id and _is_news_fragment(frag_by_id[citation])
+        for citation in sentence.citations
+    ):
+        numeric_text = news_numeric_text(numeric_text, source_text=" ".join(cited_texts))
+        cited_texts = [news_numeric_text(text, source_text=text) for text in cited_texts]
+    numbers = _extract_numbers(numeric_text)
+    if not numbers:
+        return NUMERIC_PASS
     raw_values, absolute_values, has_unit_context, years = _evidence_number_pools(
         [*cited_texts, *table_texts]
     )
@@ -2356,6 +2364,14 @@ def _apply_grounding(
         if attribution_problem:
             constrained[number] = REVIEW_GROUNDING_REJECTED
             problems[number] = attribution_problem
+            continue
+        compensation_problem = news_compensation_scope_problem(
+            text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+            source_fragments_by_id or {},
+        )
+        if compensation_problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = compensation_problem
             continue
         # 검증된 자기 조각의 사업부 제목은 제약으로만 쓴다. 긍정 근거에 합치지 않는다.
         section_problem = section_investment_plan_problem(

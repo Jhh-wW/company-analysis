@@ -14,6 +14,7 @@ from src.features.composer.identity_content_constants import (
     IDENTITY_INTERNAL_CONTROL_ACTIVITY_RE,
     IDENTITY_INTERNAL_CONTROL_METADATA_RE,
     IDENTITY_METADATA_AUXILIARY_RE,
+    IDENTITY_METADATA_AUDIT_TAIL_RE,
     IDENTITY_METADATA_CLAUSE_RE,
     IDENTITY_METADATA_CLAUSE_SPLIT_RE,
     IDENTITY_REPORT_METADATA_PATTERNS,
@@ -48,6 +49,7 @@ def _administrative_clause_only(clause: str) -> bool:
         return all(
             IDENTITY_METADATA_CLAUSE_RE.search(part)
             or IDENTITY_METADATA_AUXILIARY_RE.fullmatch(part)
+            or (control_metadata and IDENTITY_METADATA_AUDIT_TAIL_RE.fullmatch(part))
             for part in parts
         )
     return (

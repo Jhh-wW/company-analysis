@@ -7,6 +7,8 @@ DartEvidenceHarvest 하나를 만든다.
 
 from __future__ import annotations
 
+from features.evidence_collection.service_revenue_declaration import service_revenue_declaration_spans
+
 import hashlib
 import re
 import time
@@ -465,16 +467,31 @@ def collect_dart_evidence(
                     constraint_count += 1
                     progress.candidates_seen += 1
 
-            # 현재 서비스 수익원은 사업모델과 같은 원문으로 수익 연결 칸에만 보조 배정한다.
+            # 현재 서비스 수익원은 선언의 정확 구간만 수익 연결 칸에 보조 배정한다.
+            # 같은 문단 뒤의 간편법·마케팅 대가 회계정책을 제품 설명으로 빌리지 않는다.
             if (c.PORTFOLIO_REVENUE_SOURCE_SLOT in allowed_slot_ids
                     and declaration_context_allowed
                     and not different_document_actor(context_json)
                     and not any(score.slot_id == c.PORTFOLIO_REVENUE_SOURCE_SLOT for score in slot_scores)):
                 revenue_source_scores = relevance.portfolio_revenue_source_scores(candidate.text)
-                if revenue_source_scores:
+                for relative_start, relative_end in service_revenue_declaration_spans(candidate.text) if revenue_source_scores else ():
+                    start, end = candidate.start + relative_start, candidate.start + relative_end
+                    exact_text = fetch_result.text[start:end]
+                    derived = segment.FragmentCandidate(
+                        start, end, exact_text, candidate.section_heading,
+                        source_context_json=context_for_candidate(
+                            text=exact_text, start=start, end=end,
+                            table_contexts=table_scopes, scopes=source_scopes,
+                        ),
+                        section_context_json=context_for_section_candidate(
+                            business_scopes, text=exact_text, start=start, end=end,
+                            document_id=document_id, document_sha256=content_sha256,
+                        ),
+                    )
+                    validate_source_context(derived.source_context_json, document_text=fetch_result.text)
                     previous_pools = {key: list(pool) for key, pool in retention.pools.items()}
                     previous_indices = {index for index, _candidate, _scores in retention.selected_scored()}
-                    retention.offer_scored(len(fetch_result.text) + constraint_count, candidate,
+                    retention.offer_scored(len(fetch_result.text) + constraint_count, derived,
                                            revenue_source_scores, rank_index=candidate_index)
                     current_indices = {index for index, _candidate, _scores in retention.selected_scored()}
                     if not previous_indices <= current_indices:

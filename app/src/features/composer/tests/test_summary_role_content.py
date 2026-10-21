@@ -1,12 +1,14 @@
 """실제 PDF의 회계 인식조건·합병이 가치교환·제품역할 요약으로 바뀌지 않는다."""
 
 from dataclasses import replace
+import json
+from pathlib import Path
 
 import pytest
 
 from src.features.composer.extractive_summary import distinct_summary_candidates, select_extractive_summary
 from src.features.composer.logic import SummaryCandidate
-from src.features.composer.port import ComposedReport, ComposedSection
+from src.features.composer.port import ComposedReport, ComposedSection, StructuredClaim
 from src.features.composer.tests.test_extractive_summary import _fact, _sentence
 
 
@@ -53,3 +55,39 @@ def test_실제사업설명과_혼합문장과_알맞은장의_합병은_그대�
     selected = select_extractive_summary(report, (_fact(section, sentence),))
     assert selected.sentences == (sentence,)
     assert selected.items[0].fact_id == _fact(section, sentence).fact_id
+
+
+def test_actual_followup_policies_and_identity_merger_are_not_key_summary():
+    fixture = json.loads((Path(__file__).parent / "fixtures/payment_portfolio_followup.json").read_text(encoding="utf-8"))
+    from src.features.composer.logic import extract_json_payload
+    rows = extract_json_payload(fixture["portfolio_writer_response"])["문장들"]
+    for section, slot, text in (
+        ("portfolio", "portfolio:revenue_link", rows[2]["글"]),
+        ("portfolio", "portfolio:revenue_link", rows[3]["글"]),
+        ("identity", "identity:origin_context", MERGER_ONLY),
+    ):
+        sentence = replace(_sentence("identity"), text=text, planned_claim_slot=slot)
+        candidate = SummaryCandidate(section, sentence)
+        assert distinct_summary_candidates((candidate,), company_name="토스페이먼츠 주식회사") == ()
+
+
+def test_bound_performance_precedes_dated_news_in_the_same_section():
+    numeric = replace(_sentence("identity"), text="2025년 매출액은 9,251.1억원으로 전년 대비 12.86% 증가했다.",
+                      planned_claim_slot="past_changes:historical_performance")
+    numeric_fact = _fact("past_changes", numeric)
+    numeric = replace(numeric, structured_claim=StructuredClaim(
+        fact_id=numeric_fact.fact_id, claim_slot=numeric.planned_claim_slot,
+        section_owner="past_changes", source_fragment_id=numeric.citations[0],
+        source_identity="검증된 공시", verification_state="verified", state_evidence=numeric.text,
+        metric="매출액", raw_value="925113921197", unit="원",
+    ))
+    news = replace(_sentence("identity"), text="회사는 2026년 10월 PQC 적용을 완료했다.",
+                   planned_claim_slot="past_changes:completed_execution")
+    report = ComposedReport((ComposedSection("past_changes", (news, numeric)),))
+    news_fact = _fact("past_changes", news)
+    selected = select_extractive_summary(report, (numeric_fact, news_fact))
+    assert selected.sentences == (numeric,)
+    assert selected.fact_ids == (numeric_fact.fact_id,)
+    # 가점은 기존 정본 결속 검사를 건너뛰지 못한다.
+    damaged = replace(numeric_fact, evidence_binding="0" * 64)
+    assert select_extractive_summary(report, (damaged, news_fact)).sentences == (news,)

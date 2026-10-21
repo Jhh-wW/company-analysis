@@ -9,6 +9,8 @@ SUMMARY_LOW_VALUE_SCORE: Final[int] = -3
 # 정렬 1순위는 등급이므로, 이 감점보다 큰 가점도 확인 우선을 뒤집지 못한다.
 SUMMARY_INTERPRETED_SCORE: Final[int] = -2
 SUMMARY_FORMAL_ENDING_SCORE: Final[int] = -2
+# 같은 실적 장에서는 날짜가 든 보도보다 원값 검증을 마친 핵심 실적을 먼저 고른다.
+SUMMARY_STRUCTURED_PERFORMANCE_SCORE: Final[int] = 5
 
 SUMMARY_NUMERIC_PATTERN: Final[str] = (
     r"(?<!\d)(?:\d[\d,]*(?:\.\d+)?\s*(?:억원|원|%|명|건|개|년|배)|\d{4}(?!\d))"

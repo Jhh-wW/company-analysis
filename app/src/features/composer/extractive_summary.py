@@ -34,9 +34,11 @@ from src.features.composer.extractive_summary_constants import (
     SUMMARY_REVENUE_MIN_STREAMS,
     SUMMARY_RECOGNITION_ONLY_PATTERN,
     SUMMARY_BUSINESS_EXCHANGE_PATTERN,
+    SUMMARY_STRUCTURED_PERFORMANCE_SCORE,
 )
 from src.features.composer.logic import SummaryCandidate
 from src.features.composer.identity_content import administrative_identity_only
+from src.features.composer.portfolio_revenue_content import portfolio_accounting_only_problem
 from src.features.composer.port import ComposedReport, ComposedSentence
 from src.features.pipeline.port import FactRecord
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
@@ -212,6 +214,8 @@ def _summary_content_ready(candidate: SummaryCandidate) -> bool:
     text = candidate.sentence.text
     if administrative_identity_only(text):
         return False
+    if candidate.section_id in {"portfolio", "business_model"} and portfolio_accounting_only_problem(text):
+        return False
     if (
         candidate.section_id == "business_model"
         and re.search(SUMMARY_RECOGNITION_ONLY_PATTERN, text)
@@ -219,7 +223,7 @@ def _summary_content_ready(candidate: SummaryCandidate) -> bool:
     ):
         return False
     if (
-        candidate.section_id == "portfolio"
+        candidate.section_id in {"portfolio", "identity"}
         and product_corporate_only_problem(text)
     ):
         return False
@@ -323,6 +327,9 @@ def _summary_score(sentence: ComposedSentence) -> int:
         SUMMARY_LOW_VALUE_SCORE if any(pattern in text for pattern in SUMMARY_LOW_VALUE_PATTERNS) else 0,
         SUMMARY_INTERPRETED_SCORE if sentence.grade == GRADE_INTERPRETED else 0,
         SUMMARY_FORMAL_ENDING_SCORE if re.search(SUMMARY_FORMAL_ENDING_PATTERN, text) else 0,
+        SUMMARY_STRUCTURED_PERFORMANCE_SCORE
+        if sentence.structured_claim is not None
+        and sentence.planned_claim_slot == "past_changes:historical_performance" else 0,
     ))
 
 
