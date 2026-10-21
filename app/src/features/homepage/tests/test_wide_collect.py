@@ -1721,14 +1721,19 @@ def test_v5_산출은_버전이_ID에_봉인되어_이전_따뜻한캐시와_섞
         f"{base}/", hashlib.sha256(f"{base}/".encode("utf-8")).hexdigest(),
         "homepage-wide-collector/4", "homepage-wide-parser/2",
     )).encode("utf-8")).hexdigest()
+    previous_parser_id = hashlib.sha256("\0".join((
+        f"{base}/", hashlib.sha256(f"{base}/".encode("utf-8")).hexdigest(),
+        "homepage-wide-collector/6", "homepage-wide-parser/3",
+    )).encode("utf-8")).hexdigest()
 
     assert WIDE_COLLECTOR_VERSION == "homepage-wide-collector/6"
-    assert WIDE_PARSER_VERSION == "homepage-wide-parser/3"
+    assert WIDE_PARSER_VERSION == "homepage-wide-parser/4"
     assert first_document.collector_version == WIDE_COLLECTOR_VERSION
     assert first_document.parser_version == WIDE_PARSER_VERSION
     assert first_document.document_id != legacy_v1_id
     assert first_document.document_id != legacy_v3_id
     assert first_document.document_id != legacy_v4_id
+    assert first_document.document_id != previous_parser_id
     assert first_document.document_id == second_document.document_id
 
 

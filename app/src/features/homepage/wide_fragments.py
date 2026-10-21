@@ -52,6 +52,8 @@ from src.features.homepage.education_product import (
     EDUCATION_PRODUCT_SLOT,
     education_product_range_indices,
 )
+from src.features.homepage.expired_plan import only_expired_plan
+from src.features.homepage.expired_plan_constants import FUTURE_SLOT_PREFIX
 from src.features.homepage.wide_types import (
     WideCollectionResult,
     WideDocumentIdentity,
@@ -199,6 +201,12 @@ def build_fragments(document: WideDocumentIdentity, *, company_id: str) -> tuple
             slots_for_range = tuple(slot for slot in slots_for_range if slot != "portfolio:product_role")
             if "portfolio:product_role" in candidate_slots and text in document.current_product_role_ranges:
                 slots_for_range += ("portfolio:product_role",)
+        if any(slot.startswith(FUTURE_SLOT_PREFIX) for slot in slots_for_range) and only_expired_plan(
+            text, collected_at=document.collected_at
+        ):
+            slots_for_range = tuple(
+                slot for slot in slots_for_range if not slot.startswith(FUTURE_SLOT_PREFIX)
+            )
         if not slots_for_range:
             continue
         score = _SCORE_BODY_KEYWORD_MATCH

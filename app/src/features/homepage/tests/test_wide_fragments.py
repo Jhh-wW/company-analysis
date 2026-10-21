@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import asdict
+from pathlib import Path
+
 import pytest
 
 from src.features.homepage.constants import WIDE_REQUIRED_SLOT_IDS
@@ -12,6 +17,10 @@ from src.features.homepage.wide_types import WideCollectionResult, WideDocumentI
 _SHA = "a" * 64
 _FORBIDDEN_SLOT_PREFIXES = ("comparison_", "limitation", "historical_performance")
 _COMPANY_ID = "c1"
+
+_EXPIRED_PLANS = json.loads(
+    (Path(__file__).parent / "fixtures/expired_official_plans.json").read_text(encoding="utf-8")
+)
 
 
 def _document(
@@ -36,6 +45,39 @@ def _document(
     )
     fields.update(overrides)
     return WideDocumentIdentity(**fields)
+
+
+@pytest.mark.parametrize("item", _EXPIRED_PLANS["items"], ids=("실제84", "실제94"))
+def test_만료한_실제_공식계획은_future_슬롯만_제외하고_문서는_보존한다(item):
+    document = _document(
+        item["url"], (item["text"],),
+        collected_at=_EXPIRED_PLANS["collected_at"],
+        content_sha256=item["text_sha256"],
+    )
+    original = asdict(document)
+    fragments = build_fragments(document, company_id=_COMPANY_ID)
+    assert not any(fragment.section_id == "future_strategy" for fragment in fragments)
+    assert asdict(document) == original
+    assert hashlib.sha256(document.usable_ranges[0].encode()).hexdigest() == item["text_sha256"]
+
+
+def test_동일원문의_다른장과_별도_현재상품_미래계획은_그대로_보존한다():
+    text = "주요 사업의 부가 기능은 24년 1분기 중 지원 예정입니다."
+    product = "맞춤형 결제 솔루션은 고객이 결제수단을 등록하고 결제하도록 돕습니다."
+    future = "새 상품은 2027년 1분기 중 제공 예정입니다."
+    document = _document(
+        "https://company.example/", (text, product, future), collected_at="2026-10-21",
+        product_role_context_checked=True, current_product_role_ranges=(product,),
+    )
+    original = asdict(document)
+    fragments = build_fragments(document, company_id=_COMPANY_ID)
+    assert any(f.text == text and f.section_id == "identity" for f in fragments)
+    assert not any(f.text == text and f.section_id == "future_strategy" for f in fragments)
+    assert any(f.text == product and f.slot_id == "portfolio:product_role" for f in fragments)
+    assert any(f.text == future and f.section_id == "future_strategy" for f in fragments)
+    assert all(f.text == document.usable_ranges[f.range_index] for f in fragments)
+    assert all(f.text_sha256 == hashlib.sha256(f.text.encode()).hexdigest() for f in fragments)
+    assert asdict(document) == original
 
 
 def test_채용_페이지는_culture_슬롯만_받는다():

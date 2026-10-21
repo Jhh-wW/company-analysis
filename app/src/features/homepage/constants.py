@@ -517,7 +517,7 @@ WIDE_ATTEMPT_TRUNCATED: Final[str] = "TRUNCATED"
 
 #: 원문 위치·수집기 계약에 함께 봉인할 버전 문자열.
 WIDE_COLLECTOR_VERSION: Final[str] = "homepage-wide-collector/6"
-WIDE_PARSER_VERSION: Final[str] = "homepage-wide-parser/3"
+WIDE_PARSER_VERSION: Final[str] = "homepage-wide-parser/4"
 
 # 기관 디렉터리 발견은 DART 홈페이지·IR·공시 URL이 모두 없을 때만 실행한다.
 DIRECTORY_DISCOVERY_TIMEOUT_SEC: Final[int] = 12
