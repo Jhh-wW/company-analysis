@@ -282,6 +282,7 @@ def _fragment_metas(fragments: FragmentsInput) -> tuple[_FragmentMeta, ...]:
                     item_url=str(item.get("item_url") or "").strip(),
                     location=str(item.get("원문위치") or "").strip(),
                     document_date=str(item.get("문서일") or "").strip(),
+                    reporting_period=str(item.get("보고기간") or "").strip(),
                     financial_api_disclosed_at=str(item.get("financial_api_disclosed_at") or ""),
                     from_filing=not source_url,
                     from_financial_api=text.startswith(DART_FINANCIAL_API_PREFIX),
@@ -1036,6 +1037,8 @@ def _build_source(
     # 봉인해야 저장·재로드에서 한 줄의 누락과 변조를 구분할 수 있다.
     # 출처 종류별 분기에서 문서 전체 지문을 손으로 복사하지 않는다. 새 Source
     # 종류가 생겨도 이 단일 경계를 반드시 거쳐 수집 지문을 그대로 봉인한다.
+    if source.kind == SourceKind.FILING and meta.reporting_period:
+        source = replace(source, reporting_period=meta.reporting_period)
     source = bind_document_content_sha256(source, meta.document_content_sha256)
     sealed = seal_collected_source(source)
     if meta.formal_source_kind:

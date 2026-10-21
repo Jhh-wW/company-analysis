@@ -23,8 +23,8 @@ from src.features.news_intake.article_identity import article_company_context
 from src.features.news_intake.reporting_subject_scope import target_is_only_interview_recipient
 from src.features.news_intake.attributed_statement import has_attributed_statement
 from src.features.news_intake.event_plan_context import event_plan_context_problem
-from src.features.news_intake.statement_plan_role import statement_plan_parts
-from src.features.news_intake.statement_plan_role_constants import STATEMENT_PLAN_SPLIT
+from src.features.news_intake.statement_plan_role import statement_plan_parts, normalize_statement_plan_kind
+from src.features.news_intake.statement_plan_role_constants import STATEMENT_PLAN_SPLIT, STATEMENT_PLAN_KIND_NORMALIZED
 from src.features.news_intake.reporting_subject_scope_constants import SUBJECT_INTERVIEW_RECIPIENT_ONLY
 from src.features.news_intake.relation_subject_scope import bind_relation_subject, starts_relation_target
 from src.features.news_intake.relation_subject_scope_constants import RELATION_CONTEXT_REASON
@@ -417,6 +417,7 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
     if kind not in c.GROUNDED_CLAIM_KINDS or temporal not in c.GROUNDED_TEMPORAL_STATES:
         excluded["grounded_invalid_claim_kind"] += 1
         return None
+    kind = normalize_statement_plan_kind(kind, temporal, section, slot, text, company)
     if (kind == "company_plan") != (temporal == "planned"):
         excluded["grounded_plan_mismatch"] += 1
         return None
@@ -528,6 +529,8 @@ def _article_excerpts(item: dict[str, Any], candidate: NewsCandidate, body: str,
         excerpt = _excerpt(raw_excerpt, candidate, body, company, as_of, excluded,
                            subject_diagnostics)
         if excerpt is not None:
+            if role_diagnostics is not None and excerpt.claim_kind != raw_excerpt['claim_kind']:
+                role_diagnostics[STATEMENT_PLAN_KIND_NORMALIZED] += 1
             excerpts.extend(_apply_claim_role(
                 excerpt, raw_excerpt["time_evidence"], company, as_of, role_diagnostics,
             ))

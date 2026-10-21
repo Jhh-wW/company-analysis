@@ -49,6 +49,7 @@ from src.features.composer.accounting_policy_guard import (
     accounting_policy_mixed, accounting_policy_problem,
 )
 from src.features.composer.challenge_business_scope import challenge_business_problem
+from src.features.composer.litigation_timing import litigation_numeric_text, litigation_period_context, litigation_timing_problem
 from src.features.composer.numeric_proof_selection import (
     NumericProofCandidate, NumericProofOption, prepare_numeric_proof_options,
     numeric_proof_option_hint, restore_numeric_proof_selections,
@@ -1106,6 +1107,11 @@ def _numeric_disposal(
         for citation in sentence.citations
         if citation in frag_by_id
     ]
+    if sentence.planned_claim_slot == "current_challenges:issue":
+        numeric_text = litigation_numeric_text(numeric_text, (
+            (frag_by_id[citation].text, frag_by_id[citation].reporting_period)
+            for citation in sentence.citations if citation in frag_by_id
+        ))
     if sentence.citations and all(
         citation in frag_by_id and _is_news_fragment(frag_by_id[citation])
         for citation in sentence.citations
@@ -1248,6 +1254,10 @@ def _review_fragment_metadata(fragment: CollectedFragment) -> str:
         "문서기준일": fragment.document_date,
         "원문위치": fragment.location,
     }
+    if litigation_period_context(fragment):
+        from src.features.composer.litigation_timing_constants import REPORTING_PERIOD_LABEL, REPORTING_PERIOD_GUIDE
+        metadata[REPORTING_PERIOD_LABEL] = fragment.reporting_period
+        metadata["보고기간 해석"] = REPORTING_PERIOD_GUIDE
     if fragment.section_context_json:
         from src.shared.report_evidence.section_context import parse_section_context
         from src.features.composer.section_context_constants import SECTION_CONTEXT_LABEL
@@ -2414,6 +2424,14 @@ def _apply_grounding(
             problems[number] = population_problem
             continue
         context = (diagnostic_contexts or {}).get(number)
+        timing_problem = litigation_timing_problem(
+            text, sources, source_fragments_by_id or {},
+            section_id=context[0] if context else "",
+        )
+        if timing_problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = timing_problem
+            continue
         if context and context[1] == DIAGNOSTIC_KIND_BODY:
             problem = identity_content_problem(text, section_id=context[0])
             if problem:
@@ -4548,6 +4566,9 @@ def _filter_challenge_flow_scope(
             sources = {fid: frag_by_id[fid].text for fid in row.citations if fid in frag_by_id}
             text = FLOW_CELL_JOIN.join(row.cells)
             problem = challenge_business_problem(row.cells[0] if row.cells else "", sources, cells=row.cells)
+            problem = problem or litigation_timing_problem(
+                text, sources, frag_by_id, section_id=section.section_id,
+            )
             if not problem:
                 problem = next((
                     issue for fid in row.citations if fid in frag_by_id

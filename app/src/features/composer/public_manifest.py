@@ -1480,6 +1480,8 @@ def _expected_source(
     # 특정 종류의 출처만 누락된 혼합 보고서를 막을 수 있다.
     # renderer와 같은 단일 projection을 써야 예상 manifest와 실제 공개 Source가
     # 출처 종류가 늘어난 뒤에도 문서 전체 지문에서 갈라지지 않는다.
+    if source.kind == SourceKind.FILING and fragment.reporting_period:
+        source = replace(source, reporting_period=fragment.reporting_period)
     source = bind_document_content_sha256(
         source,
         fragment.document_content_sha256,

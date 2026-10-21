@@ -660,12 +660,12 @@ def _collected_fragment_from_raw(
         document_content_sha256 = ""
         formal_source_kind = ""
         source_document_id = _optional_text(raw, "문서ID")
-        source_publisher = ""
+        source_publisher = _optional_text(raw, "발행주체")
         identity_binding = ""
         source_collected_on = ""
         domain_attestation_source_id = ""
         domain_attestation_evidence = ""
-        reporting_period = ""
+        reporting_period = _optional_text(raw, "보고기간")
         attachment_url = ""
         ir_metadata_verification = ""
         domain_redirect_verification = ""

@@ -10,6 +10,39 @@ from src.features.news_intake.identity_names import company_query_names, mention
 from src.features.news_intake.models import GroundedNewsExcerpt, NewsCompanyContext
 
 
+def _direct_company_plan_statement(
+    sentence: str, company: NewsCompanyContext, *, reject_reported_context: bool = False,
+) -> bool:
+    """선택 인용 한 문장 안의 동일 회사 발언과 자사 실행 의지만 인정한다."""
+    names = company_query_names(company)
+    match = next((matched for name in names if (matched := re.fullmatch(
+        re.escape(name) + pc.REPRESENTATIVE_STATEMENT_SUFFIX, sentence, re.I))), None)
+    if match is None or len(sentence) < c.GROUNDED_MIN_EXCERPT_CHARS:
+        return False
+    # 앞 인용에서 전달한 타사 계획을 마지막 인용의 '겠다'만으로 자사 의지로
+    # 바꾸지 않는다. 새 kind 정리에서만 이 보수적 경계를 추가한다.
+    if (reject_reported_context
+            and pc.STATEMENT_PLAN_REPORTED_CONTEXT_RE.search(match['context_quote'] or '')):
+        return False
+    quotation = match['quote'][1:-1]
+    if not pc.VOLITION_END_RE.search(quotation) or pc.CONDITIONAL_STATEMENT_RE.search(sentence):
+        return False
+    allowed = pc.SELF_SUBJECTS | pc.ATTRIBUTIVE_ACTION_STEMS | frozenset(names)
+    return not any(subject not in allowed for subject in pc.EXPLICIT_SUBJECT_RE.findall(quotation))
+
+
+def normalize_statement_plan_kind(
+    kind: str, temporal: str, section: str, slot: str, text: str, company: NewsCompanyContext,
+) -> str:
+    """이미 미래 칸으로 선택한 직접 자사 의지의 kind만 정리한다. 검수 승인은 아니다."""
+    if (kind == 'company_statement' and temporal == 'planned'
+            and section == pc.STATEMENT_PLAN_SECTION and slot == pc.STATEMENT_PLAN_SLOT
+            and not pc.STATEMENT_PLAN_KIND_DATED_RE.search(text)
+            and _direct_company_plan_statement(text, company, reject_reported_context=True)):
+        return 'company_plan'
+    return kind
+
+
 def statement_plan_parts(
     excerpt: GroundedNewsExcerpt, company: NewsCompanyContext,
 ) -> tuple[GroundedNewsExcerpt, ...] | None:
@@ -35,17 +68,7 @@ def statement_plan_parts(
             re.escape(name) + r'(?:은|는|이|가)\s', excerpt.text[current_start:current_end], re.I,
     ) for name in names):
         return None
-    match = next((matched for name in names if (matched := re.fullmatch(
-        re.escape(name) + pc.REPRESENTATIVE_STATEMENT_SUFFIX, sentence, re.I))), None)
-    if match is None or len(sentence) < c.GROUNDED_MIN_EXCERPT_CHARS:
-        return None
-    quotation = match['quote'][1:-1]
-    if (not pc.VOLITION_END_RE.search(quotation)
-            or pc.CONDITIONAL_STATEMENT_RE.search(sentence)):
-        return None
-    # 대표가 타사의 계획을 인용하는 경우는 자기 실행 의지가 아니다.
-    allowed_subjects = pc.SELF_SUBJECTS | pc.ATTRIBUTIVE_ACTION_STEMS | frozenset(names)
-    if any(subject not in allowed_subjects for subject in pc.EXPLICIT_SUBJECT_RE.findall(quotation)):
+    if not _direct_company_plan_statement(sentence, company):
         return None
     origin = excerpt.span_start
     current = replace(excerpt, split_from=origin)

@@ -258,6 +258,16 @@ def evaluate_verified_prose_fact(
     # 않는다. 이 표지는 시점 metadata만 보수화하며 인용 검수의 승인을 대신하지 않는다.
     forward_claim = bool(FUTURE_SECTION_FORWARD_RE.search(claim))
     status_time, plan_status = plan_status_fact_state(claim, claim_slot)
+    from src.features.composer.litigation_timing import litigation_snapshot_date, litigation_timing_problem
+    timing_problem = litigation_timing_problem(
+        claim, {item.fragment_id: item.exact_text for item in evidence},
+        {item.fragment_id: item.source for item in evidence}, section_id=section_id,
+    )
+    if timing_problem:
+        return ProseFactBuildResult(None, timing_problem)
+    litigation_as_of = litigation_snapshot_date(
+        claim, ((item.exact_text, item.source.reporting_period) for item in evidence),
+    ) if section_id == "current_challenges" else ""
     fact = FactRecord(
         fact_id=_fact_id(
             company_name=company_name,
@@ -285,9 +295,9 @@ def evaluate_verified_prose_fact(
             else INTERPRETATION_CLAIM_TYPE
         ),
         section_owner=section_id,
-        time_state=status_time or ("future" if forward_claim else _TIME_STATE_BY_SECTION.get(section_id, "present")),
+        time_state=("past" if litigation_as_of and litigation_as_of < str(as_of_date) else status_time or ("future" if forward_claim else _TIME_STATE_BY_SECTION.get(section_id, "present"))),
         plan_status=plan_status,
-        as_of=str(as_of_date or "").strip(),
+        as_of=litigation_as_of or str(as_of_date or "").strip(),
         source_id=source_ids[0],
         source_type=primary.source_type,
         source_title=primary.title or primary.label,

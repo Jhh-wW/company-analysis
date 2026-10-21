@@ -11,12 +11,12 @@ from pathlib import Path
 import pytest
 
 from src.features.news_intake.claim_role import sentence_ranges
-from src.features.news_intake.grounded import validate_grounded_response
+from src.features.news_intake.grounded import validate_grounded_response, EXCERPT_SCHEMA, _excerpt
 from src.features.news_intake.grounded_mapping import select_diverse_excerpts, to_evidence_fragment
 from src.features.news_intake.industry_context import split_response
 from src.features.news_intake.models import NewsCandidate, NewsCollectionPolicy, NewsCompanyContext
 from src.features.news_intake.quote_selection import quote_candidates
-from src.features.news_intake.statement_plan_role import statement_plan_parts
+from src.features.news_intake.statement_plan_role import statement_plan_parts, normalize_statement_plan_kind
 from src.shared.business_challenge_context import BusinessActivityAnchor
 
 
@@ -38,12 +38,67 @@ def _validate(case):
     article = case['article']
     candidate = _candidate(article)
     articles = [(candidate, article['body'])]
+    as_of = dt.date.fromisoformat(case['as_of']) if 'as_of' in case else AS_OF
     direct, _, _ = split_response(case['saved_response'], articles=articles, company=COMPANY,
-        as_of=AS_OF, full_body_hashes={candidate.source_url: hashlib.sha256(article['body'].encode()).hexdigest()})
+        as_of=as_of, full_body_hashes={candidate.source_url: hashlib.sha256(article['body'].encode()).hexdigest()})
     roles = Counter()
     excerpts, excluded = validate_grounded_response(direct, articles=articles, company=COMPANY,
-        as_of=AS_OF, role_diagnostics=roles)
+        as_of=as_of, role_diagnostics=roles)
     return excerpts, excluded, roles
+
+
+def test_6차에서_이미_선택한_직접미래발언의_kind만_정상화하고_원문은_보존한다():
+    case = json.loads((Path(__file__).parent / 'fixtures/sixth_selected_direct_plan.json').read_text(encoding='utf-8'))
+    before = deepcopy(case)
+    excerpts, excluded, roles = _validate(case)
+    assert len(excerpts) == 1
+    excerpt = excerpts[0]
+    assert excerpt.claim_kind == 'company_plan' and excerpt.temporal_status == 'planned'
+    assert excerpt.claim_slot == 'future_strategy:stated_plan'
+    assert (excerpt.span_start, excerpt.span_end) == (555, 692)
+    assert excerpt.text == case['article']['body'][555:692]
+    assert excerpt.text.endswith('자리를 이어가겠다”고 말했다.')
+    assert not excerpt.event_on and excerpt.split_from is None
+    assert not excluded and roles == {'role_explicit_statement_plan_kind': 1}
+    fragment = to_evidence_fragment(excerpt)
+    assert fragment.text_sha256 == hashlib.sha256(excerpt.text.encode()).hexdigest()
+    assert case == before
+
+
+@pytest.mark.parametrize('text', [
+    '다른회사 관계자는 “사업자를 위한 상담 지원을 앞으로도 이어가겠다”고 말했다.',
+    '토스페이먼츠 기자는 “사업자를 위한 상담 지원을 앞으로도 이어가겠다”고 말했다.',
+    '토스페이먼츠 관계자는 “조건이 맞으면 사업자를 위한 상담 지원을 이어가겠다”고 말했다.',
+    '토스페이먼츠 관계자는 “한빛회사는 사업자를 위한 상담 지원을 이어가겠다”고 말했다.',
+    '토스페이먼츠 관계자는 “사업자를 위한 상담 지원을 확대할 것으로 보인다”고 말했다.',
+    '토스페이먼츠 관계자는 “이번 행사를 성황리에 마쳤다”고 말했다.',
+    '토스페이먼츠 관계자는 “2026년 4월 14일 사업자 상담 서비스를 제공하겠다”고 말했다.',
+    '토스페이먼츠 관계자는 “오는 10월 14일 행사에서 사업자 상담을 지원하겠다”고 말했다.',
+    '토스페이먼츠는 사업자 상담 서비스를 확대할 예정이다.',
+    '토스페이먼츠 관계자는 “한빛회사가 밝힌 계획을 전하자면”이라며 “사업자를 위한 상담 지원을 앞으로도 확대하겠다”고 말했다.',
+    '토스페이먼츠 관계자는 “삼성전자가 발표한 계획을 인용하면”이라며 “사업자를 위한 상담 지원을 앞으로도 확대하겠다”고 말했다.',
+])
+def test_kind정리가_타사_기자_조건부_전망_완료_날짜있는계획을_승격하지_않는다(text):
+    assert normalize_statement_plan_kind('company_statement', 'planned', 'future_strategy',
+        'future_strategy:stated_plan', text, COMPANY) == 'company_statement'
+    case = json.loads((Path(__file__).parent / 'fixtures/sixth_selected_direct_plan.json').read_text(encoding='utf-8'))
+    raw = {key: '' for key in EXCERPT_SCHEMA['required']}
+    raw.update(text=text, section_id='future_strategy', claim_slot='future_strategy:stated_plan',
+        claim_kind='company_statement', temporal_status='planned', topic='strategy', event_key='사업자 지원 계획')
+    excluded = Counter()
+    assert _excerpt(raw, _candidate(case['article']), text, COMPANY, dt.date(2026, 10, 22), excluded) is None
+
+
+@pytest.mark.parametrize('kind,temporal,section,slot', [
+    ('reported_fact', 'planned', 'future_strategy', 'future_strategy:stated_plan'),
+    ('company_statement', 'ongoing', 'future_strategy', 'future_strategy:stated_plan'),
+    ('company_statement', 'completed', 'future_strategy', 'future_strategy:stated_plan'),
+    ('company_statement', 'planned', 'future_strategy', 'future_strategy:plan_status'),
+    ('company_statement', 'planned', 'portfolio', 'portfolio:product_role'),
+])
+def test_선택칸과_미래판정_둘다가_맞은_경우외에는_kind를_바꾸지_않는다(kind, temporal, section, slot):
+    text = '토스페이먼츠 관계자는 “사업자를 위한 상담 지원을 앞으로도 이어가겠다”고 말했다.'
+    assert normalize_statement_plan_kind(kind, temporal, section, slot, text, COMPANY) == kind
 
 
 def test_실제_선택인용에서_현재원후보와_동일대표의_명시미래발언을_정확히_보존한다():

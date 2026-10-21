@@ -429,6 +429,12 @@ def _render_fragments(
             label += (f" · {PLAN_DISCLOSURE_DATE_LABEL}: "
                       + json.dumps(fragment.document_date, ensure_ascii=False)
                       + f" ({PLAN_DISCLOSURE_DATE_PURPOSE})")
+        from src.features.composer.litigation_timing import litigation_period_context
+        if litigation_period_context(fragment):
+            from src.features.composer.litigation_timing_constants import REPORTING_PERIOD_LABEL, REPORTING_PERIOD_GUIDE
+            label += (f" · {REPORTING_PERIOD_LABEL}: "
+                      + json.dumps(fragment.reporting_period, ensure_ascii=False)
+                      + f" ({REPORTING_PERIOD_GUIDE})")
         show_location = fragment.location and (
             not omit_numeric_location
             or not _is_numeric_offset_location(fragment.location)

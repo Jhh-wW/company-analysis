@@ -1287,6 +1287,11 @@ def fragments_from_raw(
                 item_published_on=str(item.get("item_published_on") or "").strip(),
                 item_url=str(item.get("item_url") or "").strip(),
                 location=str(item.get("원문위치") or "").strip(),
+                reporting_period=str(item.get("보고기간") or "").strip(),
+                **({
+                    "document_date": str(item.get("문서일") or "").strip(),
+                    "source_publisher": str(item.get("발행주체") or "").strip(),
+                } if item.get("보고기간") else {}),
                 financial_api_disclosed_at=str(item.get("financial_api_disclosed_at") or ""),
                 source_context_json=str(item.get("source_context_json") or ""),
                 section_context_json=item.get("section_context_json", ""),
