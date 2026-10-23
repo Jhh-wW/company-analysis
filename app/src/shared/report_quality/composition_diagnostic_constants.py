@@ -58,6 +58,19 @@ ROW_EVIDENCE_DUPLICATE = "evidence_ids_duplicated"
 ROW_EVIDENCE_MISMATCH = "evidence_ids_mismatch"
 ROW_NUMBER_CONFLICT = "number_conflicting_duplicate"
 
+IDENTITY_OPENING_RECOVERY_STEP = '8_정체성_첫문장_보충'
+IDENTITY_OPENING_RECOVERY_STATES = frozenset((
+    '이미확보',
+    '재시도안함',
+    '근거없음',
+    '호출불가',
+    '작성형식실패',
+    '적격작성후보없음',
+    '검수탈락',
+    '검수승인후보추가',
+    '호출중단',
+))
+IDENTITY_OPENING_RECOVERY_SECTION = "identity"
 PROTOCOL_STEP = "8_본문검수_응답판독"
 SECTION_EXECUTION_STEP = "v2_작성_실행방식"
 # 장수는 반환 목차 수, 동시상한은 설정값이며 실제 공급자 호출 수가 아니다.

@@ -5,6 +5,9 @@ import json
 import pytest
 
 from src.shared.report_quality.composition_diagnostics import observed_composition_steps
+from src.shared.report_quality.composition_diagnostic_constants import (
+    IDENTITY_OPENING_RECOVERY_STEP,
+)
 
 
 def test_작성_시간과_상한만_남기고_원문은_버린다():
@@ -567,3 +570,43 @@ def test_출고모드_줄의_이름표는_장부와_출고모드_정본과_같�
         BUNDLED_REVIEW_SECTION_ID, BUNDLED_REVIEW_RETRY_SECTION_ID,
     )
     assert RELEASE_MODE_NAMES == {"SHADOW", "ENFORCE_NO_PARTIAL", "FULL"}
+
+
+
+def test_identity_opening_recovery_keeps_only_closed_observation_fields():
+    record = {
+        "step": IDENTITY_OPENING_RECOVERY_STEP,
+        "상태": "검수승인후보추가",
+        "대상장": ["identity"],
+        "최종반영": 1,
+        "원문": "private source text",
+        "candidate": "private rejected candidate",
+        "raw_review": "private review response",
+        "unknown": {"secret": True},
+    }
+    expected = {
+        "step": IDENTITY_OPENING_RECOVERY_STEP,
+        "상태": "검수승인후보추가",
+        "대상장": ["identity"],
+        "최종반영": 1,
+    }
+    assert observed_composition_steps([record]) == (expected,)
+    assert "private" not in json.dumps(observed_composition_steps([record]))
+
+
+@pytest.mark.parametrize("changes", [
+    {"상태": "unknown_state"},
+    {"대상장": ["identity", "summary"]},
+    {"최종반영": 2},
+    {"최종반영": True},
+    {"최종반영": 0},
+])
+def test_identity_opening_recovery_rejects_invalid_closed_fields(changes):
+    record = {
+        "step": IDENTITY_OPENING_RECOVERY_STEP,
+        "상태": "검수승인후보추가",
+        "대상장": ["identity"],
+        "최종반영": 1,
+        **changes,
+    }
+    assert observed_composition_steps([record]) == ()

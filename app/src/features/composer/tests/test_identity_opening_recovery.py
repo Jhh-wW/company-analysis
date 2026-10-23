@@ -294,3 +294,55 @@ def test_전역_호출중단은_임의의_승인이나_성공결과로_바꾸지
     assert report.sections[0].sentences[0].text == MERGER
     assert len(report.sections[0].sentences) == 2
     assert not calls.reviews
+
+
+def _source_opening_case():
+    from src.features.composer.tests.test_identity_opening_source_draft import _fragment
+    fragment = replace(_fragment(), source_document_id="20260331000296",
+                       document_identity="document:dart.fss.or.kr:20260331000296",
+                       document_title="감사보고서 (2025.12)", source_publisher=COMPANY)
+    report = ComposedReport((ComposedSection("identity", ()),))
+    return report, fragment
+
+
+def test_명시원문_첫소개는_작성호출없이_검수한번과_새Fact결속을_거친다():
+    from src.features.composer.tests.test_identity_opening_source_draft import EXPECTED
+    report, fragment = _source_opening_case()
+    calls = _Calls()
+    result = _run(calls, report, evidence=(fragment,),
+                  allowed_fragment_ids=frozenset((fragment.fragment_id,)), writer=None)
+    assert result.reason == IDENTITY_OPENING_RECOVERY_ADDED
+    assert not calls.writes and len(calls.reviews) == 1
+    sentence = result.report.sections[0].sentences[0]
+    assert sentence.text == EXPECTED and sentence.verification_state == "verified"
+    assert not sentence.verified_fact_id
+    assert [item.text for item in review_items(calls.reviews[0])] == [EXPECTED]
+    assert fragment.text in calls.reviews[0]
+    rendered = render_report(COMPANY, result.report, (fragment,), None, as_of_date="2026-10-24")
+    selected = select_bound_public_sentences(result.report, rendered)
+    assert has_bound_identity_opening(selected.report, rendered.fact_records)
+    assert selected.report.sections[0].sentences[0].text == EXPECTED
+    assert rendered.fact_records[0].claim == EXPECTED
+    assert rendered.fact_records[0].claim_slot == SLOT
+
+
+def test_원문후보도_모델이거절하면_공개하거나_작성재시도하지않는다():
+    report, fragment = _source_opening_case()
+    calls = _Calls(reviewer_response='{"판정":[{"번호":1,"결과":"거짓"}]}')
+    result = _run(calls, report, evidence=(fragment,),
+                  allowed_fragment_ids=frozenset((fragment.fragment_id,)))
+    assert result.reason == IDENTITY_OPENING_RECOVERY_REJECTED
+    assert result.report is report and result.added == 0
+    assert not calls.writes and len(calls.reviews) == 1
+
+
+def test_같은원문후보가_이미탈락했다면_우회하여_재검수하지않는다():
+    from src.features.composer.tests.test_identity_opening_source_draft import EXPECTED
+    report, fragment = _source_opening_case()
+    calls = _Calls()
+    result = _run(calls, report, evidence=(fragment,), writer=None,
+                  allowed_fragment_ids=frozenset((fragment.fragment_id,)),
+                  rejected_fingerprints=frozenset((rejected_sentence_fingerprint(EXPECTED),)))
+    assert result.reason == IDENTITY_OPENING_RECOVERY_NO_BUDGET
+    assert result.report is report
+    assert not calls.writes and not calls.reviews

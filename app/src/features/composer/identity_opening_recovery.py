@@ -1,4 +1,4 @@
-"""기존 승인 본문을 보존하며 첫 사업 소개 한 문장만 독립 작성·검수한다."""
+"""기존 승인 본문을 보존하며 원문 후보 또는 작성 후보 한 문장만 독립 검수한다."""
 
 from __future__ import annotations
 
@@ -45,6 +45,7 @@ from src.features.composer.identity_opening_recovery_constants import (
     IDENTITY_OPENING_RECOVERY_STEP,
     IDENTITY_OPENING_RECOVERY_WRITER_GUIDE,
 )
+from src.features.composer.identity_opening_source_draft import draft_identity_opening_from_sources
 from src.features.composer.logic import AskFn, extract_json_payload, parse_section_response
 from src.features.composer.port import (
     AskFatalError, CollectedFragment, ComposedReport, ComposedSection,
@@ -143,7 +144,9 @@ def recover_identity_opening(
     rejected_fingerprints: frozenset[str] = frozenset(),
     attempted: bool = False,
 ) -> IdentityOpeningRecoveryResult:
-    """작가·검수 각 최대 한 번. 기존 본문을 재검수하거나 비우지 않는다.
+    """명시 원문 후보는 검수만 한 번, 나머지는 작가·검수 각 최대 한 번.
+
+    기존 본문을 재검수하거나 비우지 않는다.
 
     writer/reviewer는 호출자가 기존 예산·장부·영수증 포트로 감싸서 주입한다.
     반환 후보도 최종 render→select_bound→현재 사업 소개 게이트를 통과해야 한다.
@@ -172,33 +175,40 @@ def recover_identity_opening(
     fragments = recovery_evidence(eligible).get(IDENTITY_SECTION_ID, ())
     if not fragments:
         return finish(IDENTITY_OPENING_RECOVERY_NO_EVIDENCE)
-    if writer is None or reviewer is None or can_start is None or not can_start():
+    if reviewer is None or can_start is None or not can_start():
         return finish(IDENTITY_OPENING_RECOVERY_NO_BUDGET)
-    payload = {
-        "기존본문": [sentence.text for sentence in original.sentences],
-        "공식근거": [{
-            "id": fragment.fragment_id, "원문": fragment.text,
-            "의미칸": [IDENTITY_BUSINESS_DEFINITION_SLOT],
-            **_section_context_metadata(fragment),
-        } for fragment in fragments],
-    }
-    prompt = (f"분석 회사: {company_name}\n{IDENTITY_OPENING_RECOVERY_WRITER_GUIDE}"
-              + IDENTITY_FIRST_SENTENCE_WRITER_GUIDE
-              + json.dumps(payload, ensure_ascii=False))
-    raw = extract_json_payload(writer(prompt))
-    usable, _extra, _shape = requested_sections_from_response(raw, (IDENTITY_SECTION_ID,))
-    if IDENTITY_SECTION_ID not in usable:
-        return finish(IDENTITY_OPENING_RECOVERY_PARSE_FAILED)
-    parsed = parse_section_response(
-        json.dumps(usable[IDENTITY_SECTION_ID], ensure_ascii=False), IDENTITY_SECTION_ID,
-        reject_inline_citation_markers=True,
-    )
-    if parsed is None:
-        return finish(IDENTITY_OPENING_RECOVERY_PARSE_FAILED)
     allowed = frozenset(fragment.fragment_id for fragment in fragments)
     excluded = rejected_fingerprints | frozenset(
         rejected_sentence_fingerprint(sentence.text) for sentence in original.sentences
     )
+    source_draft = draft_identity_opening_from_sources(fragments)
+    if source_draft is not None and rejected_sentence_fingerprint(source_draft.text) not in excluded:
+        # 원문의 닫힌 관계에서 만든 미검증 초안이다. 승인이나 Fact ID를 복사하지 않는다.
+        parsed = (source_draft,)
+    else:
+        if writer is None:
+            return finish(IDENTITY_OPENING_RECOVERY_NO_BUDGET)
+        payload = {
+            "기존본문": [sentence.text for sentence in original.sentences],
+            "공식근거": [{
+                "id": fragment.fragment_id, "원문": fragment.text,
+                "의미칸": [IDENTITY_BUSINESS_DEFINITION_SLOT],
+                **_section_context_metadata(fragment),
+            } for fragment in fragments],
+        }
+        prompt = (f"분석 회사: {company_name}\n{IDENTITY_OPENING_RECOVERY_WRITER_GUIDE}"
+                  + IDENTITY_FIRST_SENTENCE_WRITER_GUIDE
+                  + json.dumps(payload, ensure_ascii=False))
+        raw = extract_json_payload(writer(prompt))
+        usable, _extra, _shape = requested_sections_from_response(raw, (IDENTITY_SECTION_ID,))
+        if IDENTITY_SECTION_ID not in usable:
+            return finish(IDENTITY_OPENING_RECOVERY_PARSE_FAILED)
+        parsed = parse_section_response(
+            json.dumps(usable[IDENTITY_SECTION_ID], ensure_ascii=False), IDENTITY_SECTION_ID,
+            reject_inline_citation_markers=True,
+        )
+        if parsed is None:
+            return finish(IDENTITY_OPENING_RECOVERY_PARSE_FAILED)
     candidates = []
     for sentence in parsed:
         sentence = normalize_draft_sentence_citations(sentence, allowed)
