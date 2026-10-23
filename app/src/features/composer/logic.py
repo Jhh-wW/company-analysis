@@ -124,6 +124,7 @@ from src.features.composer.constants import (
     RESPONSE_TEXT_KEY,
     RETRY_REMINDER,
     SECTION_GUIDES,
+    IDENTITY_FIRST_SENTENCE_WRITER_GUIDE,
     COMPETITIVE_POSITION_PARAGRAPH_PLAN,
     SECTION_IDS,
     SECTION_TITLES,
@@ -708,6 +709,7 @@ def build_section_prompt(
             if show_supported_claim_slots and section_id == "past_changes"
             else SECTION_GUIDES[section_id]
         ),
+        IDENTITY_FIRST_SENTENCE_WRITER_GUIDE if section_id == "identity" else "",
         (
             COMPETITIVE_POSITION_PARAGRAPH_PLAN
             if section_id == "competitive_position"

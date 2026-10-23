@@ -11,6 +11,7 @@ from dataclasses import replace
 from src.features.composer.constants import (
     CLAIM_SLOTS_BY_SECTION, GRADE_CONFIRMED, PARSE_RETRY_LIMIT, RESPONSE_CLAIM_SLOT_KEY,
     RESPONSE_SENTENCES_KEY, SECTION_IDS, SECTION_GUIDES, SECTION_TITLES,
+    IDENTITY_FIRST_SENTENCE_WRITER_GUIDE,
 )
 from src.features.composer.culture_constants import SOURCE_CLAUSE_SPLIT_RE
 from src.features.composer.culture_guard import _clause_carries_section_subject
@@ -469,7 +470,10 @@ def recover_empty_sections(
     }
     payload = {
         section_id: {
-            "작성범위": SECTION_GUIDES[section_id],
+            "작성범위": SECTION_GUIDES[section_id] + (
+                IDENTITY_FIRST_SENTENCE_WRITER_GUIDE
+                if section_id == "identity" else ""
+            ),
             "공식근거": [{"id": f.fragment_id, "원문": f.text,
                        "의미칸": list(supported_slots[section_id][f.fragment_id]),
                        **_section_context_metadata(f)}

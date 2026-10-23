@@ -31,6 +31,8 @@ from src.features.composer.industry_context import (
 )
 from src.features.composer.challenge_presentation import challenge_response_only_notice
 from src.features.composer.future_presentation import section_guidance_lines
+from src.features.composer.identity_content_constants import IDENTITY_SECTION_ID
+from src.features.composer.identity_opening import identity_opening_sentence_eligible
 from src.features.composer.constants import (
     DART_DOCUMENT_HOST,
     DART_DOCUMENT_URL_TEMPLATE,
@@ -1236,10 +1238,15 @@ def _expected_display_text(
 
 
 def _expected_paragraph_starts(
-    sentences: Sequence[ComposedSentence], numbers: Mapping[str, int]
+    sentences: Sequence[ComposedSentence], numbers: Mapping[str, int],
+    *, section_id: str = "",
 ) -> tuple[int, ...]:
     if not sentences:
         return ()
+    separate_opening = (
+        section_id == IDENTITY_SECTION_ID
+        and identity_opening_sentence_eligible(sentences[0])
+    )
     starts = [0]
     current_key: frozenset[int] | None = None
     length = 0
@@ -1251,7 +1258,7 @@ def _expected_paragraph_starts(
             length = 1
             continue
         changed = bool(key) and not interpreted and key != current_key
-        if changed or length >= PARAGRAPH_MAX_SENTENCES:
+        if (index == 1 and separate_opening) or changed or length >= PARAGRAPH_MAX_SENTENCES:
             starts.append(index)
             length = 1
             if key:
@@ -1576,7 +1583,9 @@ def _expected_public_content_projection(
     groups = [
         (
             section.sentences,
-            list(marker_visibility(section.sentences, numbers, citation_style)),
+            list(marker_visibility(
+                section.sentences, numbers, citation_style, section_id=section.section_id,
+            )),
         )
         for section in report.sections
     ]
@@ -1597,7 +1606,9 @@ def _expected_public_content_projection(
         lines = [
             [display, ""] for display in displays
         ]
-        starts = set(_expected_paragraph_starts(section.sentences, numbers))
+        starts = set(_expected_paragraph_starts(
+            section.sentences, numbers, section_id=section.section_id,
+        ))
         paragraphs: list[str] = []
         buffer: list[str] = []
         for index, display in enumerate(displays):

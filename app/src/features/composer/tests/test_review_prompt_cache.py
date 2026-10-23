@@ -8,7 +8,7 @@ import json
 import pytest
 
 from src.features.composer import combined_relation_guard, diagram_check, verify
-from src.features.composer.constants import RETRY_REMINDER
+from src.features.composer.constants import IDENTITY_FIRST_SENTENCE_WRITER_GUIDE, RETRY_REMINDER
 from src.features.composer.financial_interpretation_constants import FINANCIAL_CAUSALITY_GUIDE
 from src.features.composer.port import FlowRow
 from src.features.composer.prompt_cache_constants import REVIEW_PROMPT_CACHE_ENV
@@ -23,6 +23,19 @@ from src.features.composer.tests.test_review_prompt_serialization import (
 @pytest.fixture(autouse=True)
 def _cache_off_by_default(monkeypatch):
     monkeypatch.delenv(REVIEW_PROMPT_CACHE_ENV, raising=False)
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("cache_enabled", [False, True])
+def test_첫_사업정의_작성지침은_검수_입력에_중복하지_않는다(
+    monkeypatch, grouped, cache_enabled,
+):
+    if cache_enabled:
+        monkeypatch.setenv(REVIEW_PROMPT_CACHE_ENV, "1")
+    prompt = _render_case(verify, _golden_case(), grouped)
+
+    assert IDENTITY_FIRST_SENTENCE_WRITER_GUIDE not in prompt
+    assert "첫 확인 문장은 identity:business_definition" not in prompt
 
 
 @pytest.mark.parametrize("configured", (None, "", "0", "false", "off", "no", "invalid"))
