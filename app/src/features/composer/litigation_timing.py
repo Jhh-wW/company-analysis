@@ -57,6 +57,18 @@ def litigation_snapshot_date(claim: str, sources) -> str:
     relevant = [(text, period, publisher) for text, period, publisher in sources if _snapshot(text)]
     if not relevant or not all(_source_date(text, period) == stated for text, period, _ in relevant):
         return ""
+    compact_before_date = c.COMPACT_SNAPSHOT_BEFORE_DATE_RE.search(claim[:dated.start()])
+    if compact_before_date:
+        # 후치 날짜 도식은 무주어 원형 또는 자기 공시 발행법인만 허용한다.
+        # 뒤의 '소송금액'이 날짜 문형에 맞아도 앞의 타사·가상 문맥을 버리지 않는다.
+        prefix = claim[:compact_before_date.start()]
+        if prefix.strip():
+            subject = c.COMPACT_SNAPSHOT_PUBLISHER_RE.fullmatch(prefix)
+            if not subject or not all(
+                exact_company_names_equivalent(subject['publisher'], publisher)
+                for _, _, publisher in relevant
+            ):
+                return ""
     leading = c.DATED_SNAPSHOT_LEAD_RE.match(claim, dated.end())
     trailing = (
         dated.group().rstrip().endswith(("기준", "현재"))

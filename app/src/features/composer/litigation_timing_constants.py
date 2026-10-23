@@ -35,6 +35,15 @@ SOURCE_CURRENT_COMPANY_SNAPSHOT_RE = re.compile(
 SNAPSHOT_BEFORE_DATE_RE = re.compile(r"(?:소송(?:사건)?|분쟁)(?:은|는|이|가)\s*$")
 DATED_SNAPSHOT_COUNT_RE = re.compile(r"\s*\d+\s*건(?:이|으|[, .]|$)")
 PUBLISHER_NAME_MAX_CHARS = 100
+COMPACT_SNAPSHOT_BEFORE_DATE_RE = re.compile(
+    r"(?<![가-힣])(?P<role>원고|피고)\s+(?:계류\s*(?:중(?:인)?)?\s*)?"
+    r"(?:소송(?:사건)?|분쟁)\s*(?:은|는|이|가)?\s*(?:총\s*)?\d+\s*건"
+)
+COMPACT_SNAPSHOT_PUBLISHER_RE = re.compile(
+    r"\s*(?P<publisher>[가-힣A-Za-z0-9㈜().&'· -]{1,"
+    + str(PUBLISHER_NAME_MAX_CHARS)
+    + r"}?)(?:가|는|의)\s*"
+)
 DATED_NAMED_SNAPSHOT_LEAD_RE = re.compile(
     r"(?:으로)?\s*(?P<publisher>[가-힣A-Za-z0-9㈜().&'· -]{1,"
     + str(PUBLISHER_NAME_MAX_CHARS)

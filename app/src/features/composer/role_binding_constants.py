@@ -259,7 +259,7 @@ ROLE_BINDING_ENTRY_TYPE_UNKNOWN: Final[str] = "role_binding_entry_type_unknown"
 
 #: 규칙 버전 — 진단이 «어느 규칙으로 판정했는지»를 남긴다. 발동·면제·대조 규칙이
 #: 바뀔 때마다 올린다. 회사·날짜·사례가 아니라 규칙의 판만 가리킨다.
-ROLE_BINDING_RULE_VERSION: Final[str] = "role-binding-rules/7"
+ROLE_BINDING_RULE_VERSION: Final[str] = "role-binding-rules/8"
 #: 결속 요구를 «제외»한 사유표 — 진단·안내문이 같은 이름을 쓴다.
 ROLE_BINDING_WAIVER_VERBATIM_CONDITION: Final[str] = "verbatim_news_participation_condition"
 ROLE_BINDING_WAIVER_TEXTS: Final[dict[str, str]] = {

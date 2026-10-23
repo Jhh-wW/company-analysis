@@ -27,7 +27,8 @@ LITIGATION_CURRENT_COMPANY_RE = re.compile(
     r"(?:피고|원고)로\s*계류\s*중인\s*소송사건"
 )
 LITIGATION_DIAGRAM_ROLE_COUNT_RE = re.compile(
-    r"(?<![가-힣])(?P<role>피고|원고)\s+소송(?:사건)?\s*(?:은|이)?\s*"
+    r"(?<![가-힣])(?P<role>피고|원고)\s+(?:계류\s*(?:중(?:인)?)?\s*)?"
+    r"소송(?:사건)?\s*(?:은|이)?\s*"
     r"(?P<count>\d+)\s*건"
 )
 LITIGATION_CLAUSE_TERMINATOR = "."

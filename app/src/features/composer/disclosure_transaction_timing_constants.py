@@ -1,4 +1,4 @@
-"""공시의 종료 회계기간 거래와 명시 합병 완료일에만 쓰는 시점 경계."""
+"""공시의 종료 회계기간 거래·합병일·명시 월 상환완료 확인일에만 쓰는 시점 경계."""
 import re
 
 FILING_KIND = "공시"
@@ -35,3 +35,19 @@ KOREAN_DATE_RE = re.compile(r"(?P<year>\d{4})\s*년\s*(?P<month>\d{1,2})\s*월\s
 MERGER_COMPLETE_RE = re.compile(r"합병을\s*완료(?:하였|했)")
 MERGER_CLAUSE_RE = re.compile(r"[^.!?\n]*합병을\s*완료(?:하였|했)[^.!?\n]*")
 MERGER_EVENT_DATE_SUFFIX_RE = re.compile(r"^\s*에(?:\s|$)")
+
+# 월 단위 완료 사건의 as_of는 사건일이 아니라 그 완료를 확인한 실제 공시일이다.
+REPAYMENT_CLAIM_PREFIX_RE = re.compile(r"^보고기간\s*이후\s*사건으로,\s*")
+REPAYMENT_ACTOR_RE = re.compile(r"^(?P<actor>.+?)(?:는|은)\s+")
+REPAYMENT_SELF_ACTORS = ("회사", "당사")
+REPAYMENT_MONTH_RE = re.compile(
+    r"(?P<year>\d{4})\s*년\s*(?P<month>\d{1,2})\s*월\s*중"
+)
+REPAYMENT_OBJECT = "신주인수권부사채"
+REPAYMENT_COMPLETE_RE = re.compile(r"전액\s*상환(?:하였습니다|하였다|하였으며|했습니다|했다|했으며)")
+REPAYMENT_CLOSED_PAST_END_RE = re.compile(r"(?:하였|했|받았)(?:다|습니다)[.!?\s]*$")
+REPAYMENT_SENTENCE_END_RE = re.compile(r"(?:습니다|니다|다)\s*(?:[.!?]|$)")
+REPAYMENT_UNCERTAIN_RE = re.compile(
+    r"고\s*있|계속|지속|유지|예정|계획|검토|가능|조건|경우|라면|다면|취소|철회|보류|미상환|일부|부분"
+)
+KOREAN_ACTOR_BOUNDARY_RE = re.compile(r"[가-힣]")

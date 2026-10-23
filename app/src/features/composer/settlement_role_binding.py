@@ -8,6 +8,9 @@ from src.features.composer.settlement_role_constants import (
     SETTLEMENT_BUSINESS_ROLE_RE,
     SETTLEMENT_BUSINESS_TARGETS,
     SETTLEMENT_PG_TARGET,
+    SETTLEMENT_MERCHANT_TARGET,
+    SETTLEMENT_MERCHANT_ROLE_RE,
+    SETTLEMENT_MERCHANT_FLOW_RE,
     SETTLEMENT_RECEIPT_ROLE_RE,
     SETTLEMENT_DEDUCTION_ROLE_RE,
     SETTLEMENT_RECEIPT_FLOW_RE,
@@ -64,6 +67,8 @@ def settlement_statement_spans(
     """완결된 정산 산문/원문 도식의 공제 자리만 자기 인용과 삼중 대조한다."""
     if is_flow:
         spans = _business_flow_spans(surfaces, source_clauses, source_surface, quote, target, role)
+        if not spans:
+            spans = _recipient_flow_spans(surfaces, source_clauses, source_surface, quote, target, role)
         if spans:
             return spans
     ordinary_pair = (target in SETTLEMENT_STATEMENT_TARGETS
@@ -90,6 +95,45 @@ def settlement_statement_spans(
     if sum(surface.count(SETTLEMENT_TAX_WORD) for surface in surfaces) != len(spans):
         return ()
     return spans
+
+
+def _recipient_flow_spans(
+    surfaces: Sequence[str], source_clauses: Sequence[str],
+    source_surface: str, quote: str, target: str, role: str,
+) -> tuple[tuple[int, int, int], ...]:
+    """같은 행의 수취인과 공제 후 지급을 자기 공시의 완결 관계에 묶는다."""
+    if (target != SETTLEMENT_MERCHANT_TARGET
+            or not SETTLEMENT_MERCHANT_ROLE_RE.fullmatch(role)
+            or SETTLEMENT_NONACTUAL_RE.search(source_surface)):
+        return ()
+    products = [(i, value) for i, value in enumerate(surfaces)
+                if value in SETTLEMENT_BUSINESS_TARGETS]
+    if len(products) != 1:
+        return ()
+    product_index, product = products[0]
+    source_pattern = re.compile(SETTLEMENT_SOURCE_TEMPLATE.format(target=target))
+    if source_pattern.fullmatch(quote) is None:
+        return ()
+    if not any((match := source_pattern.fullmatch(clause)) is not None
+               and match["business"] in SETTLEMENT_BUSINESS_TARGETS
+               and (product == SETTLEMENT_PG_TARGET or match["business"] == product)
+               and quote.rstrip(".") in clause and match["relation"] in quote
+               for clause in source_clauses):
+        return ()
+    full_pattern = re.compile(SETTLEMENT_CANDIDATE_TEMPLATE.format(target=target))
+    actions = [(i, match) for i, value in enumerate(surfaces)
+               if (match := (SETTLEMENT_MERCHANT_FLOW_RE.fullmatch(value)
+                             or full_pattern.fullmatch(value))) is not None]
+    if len(actions) != 1:
+        return ()
+    action_index, action = actions[0]
+    if any(value and i not in {product_index, action_index}
+           for i, value in enumerate(surfaces)):
+        return ()
+    # 부가세를 뺀 증명으로 부가세까지 증명하거나 다른 칸에 빌려주지 않는다.
+    if (SETTLEMENT_TAX_WORD in role) != (SETTLEMENT_TAX_WORD in action["fees"]):
+        return ()
+    return ((action_index, *action.span("fees")),)
 
 
 def _business_flow_spans(

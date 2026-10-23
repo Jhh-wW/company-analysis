@@ -14,6 +14,7 @@ class DisclosureSource(Protocol):
     publisher: str
     title: str
     reporting_period: str
+    disclosed_at: str
 
 
 @dataclass(frozen=True)
@@ -97,11 +98,71 @@ def _merger_date(text: str, company_name: str) -> set[date]:
     return result
 
 
+def _repayment_timing(
+    claim: str, evidence: Sequence[tuple[str, DisclosureSource]], *,
+    company_name: str, baseline: date,
+) -> DisclosureTransactionTiming | None:
+    """명시 월의 단일 상환 완료를 자기 공시일 기준으로 확인한다(사건일 추정 없음)."""
+    if len(evidence) != 1 or c.REPAYMENT_UNCERTAIN_RE.search(claim):
+        return None
+    body = c.REPAYMENT_CLAIM_PREFIX_RE.sub("", claim)
+    actor = c.REPAYMENT_ACTOR_RE.match(body)
+    own_actors = (*c.REPAYMENT_SELF_ACTORS, _company(company_name))
+    months = list(c.REPAYMENT_MONTH_RE.finditer(body))
+    if (actor is None or _company(actor["actor"]) not in own_actors
+            or len(months) != 1 or c.KOREAN_DATE_RE.search(body)
+            or c.REPAYMENT_OBJECT not in body
+            or len(c.REPAYMENT_COMPLETE_RE.findall(body)) != 1
+            or not c.REPAYMENT_CLOSED_PAST_END_RE.search(body)):
+        return None
+    event_month = (int(months[0]["year"]), int(months[0]["month"]))
+    if not (date.min.year <= event_month[0] <= date.max.year and 1 <= event_month[1] <= 12):
+        return None
+    text, source = evidence[0]
+    if not _own_filing(source, company_name):
+        return None
+    disclosed = getattr(source, "disclosed_at", "")
+    try:
+        confirmed_on = date.fromisoformat(disclosed)
+    except (TypeError, ValueError):
+        return None
+    if (confirmed_on.isoformat() != disclosed or confirmed_on > baseline
+            or event_month > (confirmed_on.year, confirmed_on.month)):
+        return None
+    supported = []
+    for month in c.REPAYMENT_MONTH_RE.finditer(text):
+        prefix = text[:month.start()].rstrip()
+        own = any(
+            prefix.endswith(subject + ending)
+            and (len(prefix) == len(subject + ending)
+                 or not c.KOREAN_ACTOR_BOUNDARY_RE.fullmatch(prefix[-len(subject + ending) - 1]))
+            for subject in own_actors for ending in ("는", "은")
+        )
+        if not own:
+            continue
+        end = c.REPAYMENT_SENTENCE_END_RE.search(text, month.end())
+        if end is None:
+            continue
+        clause = text[month.start():end.end()]
+        if (c.REPAYMENT_OBJECT not in clause or c.REPAYMENT_UNCERTAIN_RE.search(clause)
+                or c.CURRENT_OR_FUTURE_RE.search(clause)
+                or c.KOREAN_DATE_RE.search(clause)
+                or len(c.REPAYMENT_MONTH_RE.findall(clause)) != 1
+                or len(c.REPAYMENT_COMPLETE_RE.findall(clause)) != 1
+                or not c.REPAYMENT_CLOSED_PAST_END_RE.search(clause)):
+            continue
+        supported.append((int(month["year"]), int(month["month"])))
+    if supported != [event_month]:
+        return None
+    # 공시일은 '그 날짜까지 완료로 확인됨'의 기준일이다. 원문의 월을 사건일로 바꾸지 않는다.
+    return DisclosureTransactionTiming(claim, disclosed)
+
+
 def disclosure_transaction_timing(
     claim: str, evidence: Sequence[tuple[str, DisclosureSource]], *,
     section_id: str, company_name: str, as_of_date: str,
 ) -> DisclosureTransactionTiming | None:
-    """단일 명시 기간/완료일만 운반하며 전기의 실제 연도는 계산하지 않는다."""
+    """명시 기간·완료일·자기 공시 확인일만 운반하며 미상 사건일을 계산하지 않는다."""
     try:
         baseline = date.fromisoformat(as_of_date)
     except ValueError:
@@ -117,6 +178,12 @@ def disclosure_transaction_timing(
         if len(days) == 1 and days <= supported and next(iter(days)) < baseline:
             return DisclosureTransactionTiming(claim, next(iter(days)).isoformat())
         return None
+    if section_id == c.TRANSACTION_SECTION:
+        repayment = _repayment_timing(
+            claim, evidence, company_name=company_name, baseline=baseline,
+        )
+        if repayment is not None:
+            return repayment
     declared = c.PUBLIC_PERIOD_PREFIX_RE.match(claim)
     body = claim[declared.end():] if declared else claim
     if section_id != c.TRANSACTION_SECTION or c.NON_ANNUAL_CLAIM_RE.search(body):
