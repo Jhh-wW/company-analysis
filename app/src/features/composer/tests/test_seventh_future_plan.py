@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from src.core import news_intake_switch
 from src.features.composer.future_plan_guard import future_plan_prose_problem
 from src.features.composer.port import CollectedFragment, ComposedReport, ComposedSection, ComposedSentence
 from src.features.composer.render import render_report
@@ -48,9 +49,17 @@ def _response(entries):
     return json.dumps({'판정': entries}, ensure_ascii=False)
 
 
+@pytest.fixture
+def _news_intake_on(monkeypatch):
+    # 앞 시험의 OFF 동결값은 환경변수 변경만으로 바뀌지 않는다.
+    monkeypatch.setenv(news_intake_switch.NEWS_INTAKE_ENV_NAME, '1')
+    news_intake_switch._reset_process_news_intake_switch_for_tests()
+    yield
+    news_intake_switch._reset_process_news_intake_switch_for_tests()
+
+
 @pytest.mark.parametrize('number', [43, 44])
-def test_실제_재작성과_참응답_불변으로_최종_fact와_출처까지_복구된다(monkeypatch, number):
-    monkeypatch.setenv('NEWS_INTAKE', '1')
+def test_실제_재작성과_참응답_불변으로_최종_fact와_출처까지_복구된다(_news_intake_on, number):
     original = deepcopy(SAVED)
     fragment = _fragment()
     item = _rewritten_item(number)
