@@ -17,6 +17,9 @@ from src.web import job_runtime, main, paid_runtime, request_helpers, runtime
 from src.web.routers import analysis as analysis_router
 
 
+pytestmark = pytest.mark.usefixtures("canonical_demo_clock")
+
+
 def _token(html: str) -> str:
     match = re.search(r'name="paid_attempt_token" value="([^"]+)"', html)
     assert match is not None

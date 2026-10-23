@@ -35,6 +35,7 @@ from typing import Any, Final
 
 from src.core.docshape import is_table_of_contents
 from src.features.filingclean.logic import starts_with_boilerplate
+from src.features.filingclean.litigation_period import attach_litigation_period, inline_litigation_start
 from src.shared.report_evidence.legacy_fragment_kinds import (
     LEGACY_KIND_AUDITOR_FINDING,
     LEGACY_KIND_GOODS_CONTENT,
@@ -268,6 +269,7 @@ def find_section(
     *,
     keep_table: bool = False,
     stop_at_next_heading: bool = False,
+    preserve_litigation_prefix: bool = False,
 ) -> str:
     """표제를 찾아 «쓸 만한» 본문 덩어리를 돌려준다.
 
@@ -290,15 +292,16 @@ def find_section(
         for index, match in enumerate(re.finditer(re.escape(head), filing_text)):
             if index >= MAX_OCCURRENCES:
                 break
+            start = inline_litigation_start(filing_text, match.start()) if preserve_litigation_prefix else match.start()
             if stop_at_next_heading:
                 chunk = _chunk_until_next_heading(
                     filing_text,
-                    start=match.start(),
+                    start=start,
                     limit=frag_chars,
                     heads=heads,
                 )
             else:
-                chunk = filing_text[match.start(): match.start() + frag_chars].strip()
+                chunk = filing_text[start: start + frag_chars].strip()
             if len(chunk) <= MIN_CHUNK_CHARS:
                 continue
             if is_table_of_contents(chunk):
@@ -337,6 +340,7 @@ def collect(
             NAME_TABLE_MAX_FRAG_CHARS if is_name_table else frag_chars,
             keep_table=is_name_table,
             stop_at_next_heading=is_name_table,
+            preserve_litigation_prefix=kind == LEGACY_KIND_LITIGATION,
         )
         if chunk:
             out[kind] = chunk
@@ -347,6 +351,8 @@ def add_to(
     frags: dict[int, dict[str, Any]],
     filing_text: str,
     frag_chars: int = DEFAULT_FRAG_CHARS,
+    *, raw_path: str = "", receipt_number: str = "", corp_code: str = "",
+    document_title: str = "", disclosed_at: str = "",
 ) -> tuple[dict[int, dict[str, Any]], int]:
     """1판이 만든 조각에 «새 절»을 더한다.
 
@@ -371,4 +377,9 @@ def add_to(
         out[next_id] = {"종류": kind, "원문": chunk}
         next_id += 1
         더함 += 1
+    if raw_path:
+        out = attach_litigation_period(
+            out, filing_text=filing_text, raw_path=raw_path, receipt_number=receipt_number,
+            corp_code=corp_code, document_title=document_title, disclosed_at=disclosed_at,
+        )
     return out, 더함

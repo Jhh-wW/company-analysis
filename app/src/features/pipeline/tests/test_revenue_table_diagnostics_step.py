@@ -74,7 +74,7 @@ def _collect(filing_text: str, monkeypatch: pytest.MonkeyPatch) -> list[dict[str
     monkeypatch.setenv(revenue_table_switch.REVENUE_TABLE_V2_ENV_NAME, "1")
     revenue_table_switch._reset_process_revenue_table_switch_for_tests()  # noqa: SLF001
     monkeypatch.setattr(real.filing_clean, "repair", lambda frags, *_a: (frags, 0))
-    monkeypatch.setattr(real.filing_extra, "add_to", lambda frags, *_a: (frags, 0))
+    monkeypatch.setattr(real.filing_extra, "add_to", lambda frags, *_a, **_kwargs: (frags, 0))
     monkeypatch.setattr(
         real.filing_relationships, "add_to", lambda frags, *_a: (frags, 0)
     )

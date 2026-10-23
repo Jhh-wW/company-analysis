@@ -20,6 +20,7 @@ from features.evidence_collection.fetch_failure import (
     is_recoverable_external_fetch_error,
 )
 from features.evidence_collection.models import CollectionAttempt
+from features.evidence_collection.reporting_period import require_reporting_period
 
 
 _FETCH_RESULT_STATES = frozenset(
@@ -116,6 +117,7 @@ class DocumentFetchResult:
     document_actor: str = ""
     source_contexts: tuple[str, ...] = ()
     source_context_complete: bool = True
+    reporting_period: str = ""
 
     def __post_init__(self) -> None:
         _validate_fetch_result_common(
@@ -123,6 +125,7 @@ class DocumentFetchResult:
             elapsed_ms=self.elapsed_ms,
             bytes_downloaded=self.bytes_downloaded,
         )
+        require_reporting_period(self.reporting_period)
         if type(self.text) is not str or type(self.corp_code) is not str or type(self.document_actor) is not str:
             raise TypeError("DART 문서 fetch 결과의 text·corp_code는 문자열이어야 합니다")
         if type(self.source_context_complete) is not bool or type(self.source_contexts) is not tuple or any(type(raw) is not str for raw in self.source_contexts):
@@ -135,7 +138,7 @@ class DocumentFetchResult:
                 "DART 문서 fetch 결과 URL 후보는 DiscoveredDocumentUrl tuple이어야 합니다"
             )
         if self.state != c.ATTEMPT_STATE_OK and (
-            self.text or self.corp_code or self.official_url_candidates or self.document_actor or self.source_contexts
+            self.text or self.corp_code or self.official_url_candidates or self.document_actor or self.source_contexts or self.reporting_period
         ):
             raise ValueError(
                 "실패·부재 DART 문서 fetch 결과에는 문서 payload를 실을 수 없습니다"

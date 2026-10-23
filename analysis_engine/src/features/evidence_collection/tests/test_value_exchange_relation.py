@@ -12,6 +12,20 @@ def _result(text: str) -> tuple[bool, bool]:
     return (any(item.slot_id == "business_model:value_exchange" for item in scores), observed)
 
 
+def test_가맹점의_실제_서비스_제공과_수수료_수취를_가치교환으로_보존한다():
+    text = "당사는 온라인 가맹점에 결제 서비스를 제공하고 거래별 수수료를 받습니다."
+    assert _result(text)[0] is True
+
+
+@pytest.mark.parametrize("text", (
+    "당사는 가맹점에 결제 서비스를 제공할 때 수수료를 수익으로 인식합니다.",
+    "당사는 가맹점 현황을 관리합니다. 별도 자산의 서비스 수수료를 수취합니다.",
+    "가맹점 관련 금융자산의 공정가치와 결제 수수료 수익을 측정합니다.",
+))
+def test_가맹점_낱말만으로_회계정책과_다른_거래를_가치교환으로_바꾸지_않는다(text):
+    assert _result(text)[0] is False
+
+
 @pytest.mark.parametrize("text", (
     "금융부채를 양도하면서 수취한 대가는 상각후원가로 측정합니다.",
     "취득 자산의 대가와 공정가치를 비교해 손상 여부를 평가합니다.",

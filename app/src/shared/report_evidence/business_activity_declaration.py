@@ -17,6 +17,11 @@ def declared_business_item(text: str) -> str:
             continue
         declaration = c.DECLARATION_RE.fullmatch(unit)
         if declaration is None:
+            operation = c.DECLARATION_CURRENT_OPERATION_RE.fullmatch(unit)
+            if operation is not None:
+                item = operation["item"].strip()
+                if not c.DECLARATION_GENERIC_RE.search(item):
+                    return item
             continue
         items = c.DECLARATION_PREFIX_RE.sub("", declaration["items"].strip())
         items = c.DECLARATION_QUALIFIER_RE.sub("", items)

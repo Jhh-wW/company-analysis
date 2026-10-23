@@ -21,6 +21,9 @@ from src.features.storage import db as storage_db
 from src.features.storage import reports as report_store
 from src.web import main, runtime
 
+
+pytestmark = pytest.mark.usefixtures("canonical_demo_clock")
+
 _열쇠 = "0f0f0f0f1a1a1a1a2b2b2b2b3c3c3c3c"
 _발급 = "2026-09-02T09:00:00+09:00"
 

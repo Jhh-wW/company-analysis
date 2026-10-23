@@ -44,6 +44,7 @@ from src.features.homepage.constants import (
     WIDE_REASON_NO_USABLE_CONTENT,
     WIDE_REQUIRED_SLOT_IDS,
     WIDE_SECTION_PAGE_QUOTA,
+    WIDE_PRODUCT_DETAIL_PRIORITY,
     WIDE_ROOT_IDENTITY_SUPPLEMENT_PATH_MARKERS,
     WIDE_SOURCE_KIND_IDENTITY_VERIFIED_WEB_PAGE,
     WIDE_SOURCE_KIND_IR_PDF,
@@ -64,6 +65,16 @@ from src.features.homepage.official_identity import (
     verify_dart_root_company_identity_pages,
     verify_official_company_identity,
     verify_official_company_identity_pages,
+)
+from src.features.homepage.directory_discovery import (
+    DirectoryFetch,
+    discover_institution_homepage,
+    fetch_directory_page,
+)
+from src.shared.report_evidence.institution_directory_attestation import (
+    build_verified_institution_directory_binding,
+    parse_institution_directory_provenance,
+    parse_verified_institution_directory_binding,
 )
 from src.shared.official_ir import (
     IR_ATTACHMENT_URL_FIELD,
@@ -146,6 +157,9 @@ from src.features.homepage.wide_types import (
     WideDocumentIdentity,
 )
 from src.features.homepage.wide_fragments import extract_list_items
+from src.features.homepage.current_product_role import (
+    current_product_role_ranges, is_product_detail_url, product_role_context_required,
+)
 
 _PRIORITY_KEYWORDS: tuple[str, ...] = WIDE_PRIORITY_HOST_KEYWORDS + PRIORITY_PATH_KEYWORDS
 
@@ -431,6 +445,9 @@ def _has_official_discovery_lineage(
             provenance.company_id == state.company_id
             and _identity_candidate_https_url(provenance.url) == candidate_url
         )
+    directory = parse_institution_directory_provenance(source, reference_date=state.collected_at)
+    if directory is not None:
+        return directory.company_id == state.company_id and directory.url == candidate_url
     try:
         canonical_source = canonicalize_url(source)
     except (TypeError, ValueError):
@@ -520,6 +537,8 @@ def collect_official_web_documents(
     domain_attestation_source_id: str = "",
     domain_attestation_evidence: str = "",
     root_identity_verification_required: bool = True,
+    directory_fallback: bool = False,
+    directory_fetch: DirectoryFetch = fetch_directory_page,
     transport: RawWideTransport = default_wide_transport,
     ir_html_fetch: IrHtmlFetcher = default_ir_html_fetch,
     ir_pdf_fetch: IrPdfFetcher = default_ir_pdf_fetch,
@@ -583,6 +602,20 @@ def collect_official_web_documents(
             if (clean := str(value or "").strip())
         )
     )
+    # DART가 아무 발견 URL도 주지 않은 경우에만 선택적인 기관 게시 계보를 읽는다.
+    # profile 값은 그대로 두며, 실패·모호성은 독립 OPTIONAL attempt로 보존한다.
+    if (directory_fallback and not str(root_homepage_url or "").strip()
+            and not candidate_urls and not official_candidate_provenance
+            and identity is not None and identity.can_verify_cross_domain):
+        started = clock()
+        discovery = discover_institution_homepage(company_id=company_id, company_name=company_name,
+            collected_at=collected_at, fetch=directory_fetch)
+        official_candidate_provenance = discovery.candidates
+        state.add_attempt(kind="institution-directory", source_kind=WIDE_SOURCE_KIND_IDENTITY_VERIFIED_WEB_PAGE,
+            requirement=REQUIREMENT_OPTIONAL, state=discovery.state, slot_ids=(),
+            reason_code=discovery.reason_code, elapsed_ms=int((clock() - started) * 1000),
+            bytes_downloaded=discovery.bytes_downloaded, documents_seen=len(discovery.candidates),
+            documents_attempted=discovery.requests)
     verified_root_urls: list[str] = []
     if root_origin is not None and root_identity_verification_required:
         for candidate_origin in (
@@ -636,7 +669,7 @@ def collect_official_web_documents(
         # 계약 gen=8 마지막 고리: 문서·attempt가 0건이어도 결과 자신은 항상
         # 대상 회사를 싣는다(documents에서 역산하지 않는다 — 역산하면 0건일 때
         # 정본을 잃는다).
-        return WideCollectionResult(company_id=state.company_id, documents=(), attempts=())
+        return WideCollectionResult(company_id=state.company_id, documents=(), attempts=tuple(state.attempts))
 
     if (
         root_origin is not None
@@ -1114,6 +1147,11 @@ def _enqueue_verified_identity_link(
         ).casefold().rstrip(".")
     except (TypeError, ValueError):
         return
+    root_binding = state.bound_hosts.get(origin.host)
+    if (root_binding is not None
+            and parse_verified_institution_directory_binding(root_binding.identity_binding) is not None
+            and link_host != origin.host):
+        return
     if link_host == origin.host:
         if not origin.allows_content_url(link):
             return
@@ -1308,6 +1346,14 @@ def _collect_identity_verified_candidate(
             matched_name_sha256=match.matched_name_sha256,
             registration_number_sha256=match.registration_number_sha256,
         )
+        verified_directory_binding = build_verified_institution_directory_binding(
+            provenance_value=source_page_url, company_id=state.company_id,
+            company_name=identity.legal_name, company_registration_numbers=identity.registration_numbers,
+            candidate_url=candidate_url, effective_urls=tuple(item.effective_url for item in identity_responses),
+            scope_sha256=origin.scope_digest, scope_allows=origin.allows_content_url,
+            identity_evidence_sha256=match.evidence_sha256, matched_name_sha256=match.matched_name_sha256,
+            registration_number_sha256=match.registration_number_sha256, collected_at=state.collected_at,
+        )
         source_binding = (
             _DART_HOMEPAGE_DISCOVERY
             if promote_verified_root
@@ -1353,7 +1399,7 @@ def _collect_identity_verified_candidate(
             relocated_root = True
         # 이름-단독 결속도 DART가 보증한 host라는 계보는 같으므로 root의
         # 기존 신뢰 등급을 그대로 쓴다. 대신 라벨과 사유 코드로 구분한다.
-        is_high_confidence = bool(promote_verified_root or verified_filing_binding or relocated_root)
+        is_high_confidence = bool(promote_verified_root or verified_filing_binding or verified_directory_binding or relocated_root)
         identity_label = (
             _ROOT_NAME_ONLY_IDENTITY_LABEL
             if name_only_root
@@ -1363,6 +1409,7 @@ def _collect_identity_verified_candidate(
             host=host,
             identity_binding=(
                 verified_filing_binding
+                or verified_directory_binding
                 or (
                     f"{identity_label}; "
                     f"discovery={source_binding}; "
@@ -1376,7 +1423,7 @@ def _collect_identity_verified_candidate(
         )
         state.bound_hosts[host] = binding
         state.bound_origins[host] = origin
-        if binding.is_high_confidence and not relocated_root:
+        if binding.is_high_confidence and not relocated_root and not verified_directory_binding:
             state.official_link_source_urls.update(
                 _scoped_canonical_url(item.effective_url, origin)
                 for item in identity_responses
@@ -1412,7 +1459,7 @@ def _collect_identity_verified_candidate(
             else (
                 "dart_filing_identity_verified"
                 if verified_filing_binding
-                else "cross_domain_identity_verified"
+                else ("institution_directory_identity_verified" if verified_directory_binding else "cross_domain_identity_verified")
             )
         )
 
@@ -1565,6 +1612,11 @@ def _visit_page(
         return
     candidate_origin = candidate_origin.with_query_scope(root_origin.start_query)
     host = candidate_origin.host
+    root_binding = state.bound_hosts.get(root_host)
+    if (root_binding is not None
+            and parse_verified_institution_directory_binding(root_binding.identity_binding) is not None
+            and host != root_host):
+        return
     binding = state.bound_hosts.get(host)
     origin = state.bound_origins.get(host)
     if binding is None:
@@ -1677,7 +1729,7 @@ def _visit_page(
     page_classification = classify_official_page_url(classification_url)
     source_kind = (
         page_classification.source_kind
-        if binding.is_high_confidence
+        if binding.is_high_confidence and parse_verified_institution_directory_binding(binding.identity_binding) is None
         else WIDE_SOURCE_KIND_IDENTITY_VERIFIED_WEB_PAGE
     )
     slot_ids = page_classification.slot_ids
@@ -1689,6 +1741,7 @@ def _visit_page(
         if (
             binding.is_high_confidence
             and root_host not in state.permanent_relocation_proofs
+            and parse_verified_institution_directory_binding(binding.identity_binding) is None
             and origin.allows_content_url(response.effective_url)
             and host_policy.can_fetch(response.effective_url)
         ):
@@ -1719,6 +1772,8 @@ def _visit_page(
                         continue
                     canonical_link = _scoped_canonical_url(link, origin)
                 else:
+                    if parse_verified_institution_directory_binding(binding.identity_binding) is not None:
+                        continue
                     # 같은 등록 도메인이 아닌 exact 링크는 일반 queue에 넣어
                     # 나중에 조용히 버리지 않는다. 다만 현재 문서 자체가 DART
                     # root 계열 고신뢰 문서일 때만 «검증 전 후보»로 기록한다.
@@ -1810,6 +1865,8 @@ def _build_web_document(
     canonical = _scoped_canonical_url(response.effective_url, origin)
     host = (urllib.parse.urlsplit(canonical).hostname or "").casefold()
     document_id = _wide_document_id(canonical, origin)
+    product_context_checked = (product_role_context_required(canonical)
+        or parse_verified_institution_directory_binding(binding.identity_binding) is not None)
     (
         attestation_source_id,
         attestation_evidence,
@@ -1833,6 +1890,9 @@ def _build_web_document(
         ),
         usable_ranges=ranges,
         list_items=list_items,
+        product_role_context_checked=product_context_checked,
+        current_product_role_ranges=(current_product_role_ranges(response.text, source_url=canonical,
+            title=title, usable_ranges=ranges) if product_context_checked else ()),
         collector_version=WIDE_COLLECTOR_VERSION,
         parser_version=WIDE_PARSER_VERSION,
         requirement=requirement,
@@ -2340,6 +2400,8 @@ def _build_ir_document(
 
 
 def _priority_key(url: str) -> tuple[int, str]:
+    if is_product_detail_url(url):
+        return (WIDE_PRODUCT_DETAIL_PRIORITY, url)
     lowered = urllib.parse.unquote(url).lower()
     for rank, keyword in enumerate(_PRIORITY_KEYWORDS):
         if keyword in lowered:

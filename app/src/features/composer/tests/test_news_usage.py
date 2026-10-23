@@ -66,7 +66,8 @@ def test_검수탈락_뉴스는_안내문없이_본문에서만_빠진다():
 
 
 def _run(mode=ReleaseMode.FULL, *, verdict="참", exclude=False, fragments=None,
-         direct_news=False, news_transform=None, news_attribution=True):
+         direct_news=False, news_transform=None, news_attribution=True,
+         direct_news_citations=None):
     news = fragments or _fragments()
     base = _packets()
     packets = replace(base, packets=tuple(
@@ -79,12 +80,17 @@ def _run(mode=ReleaseMode.FULL, *, verdict="참", exclude=False, fragments=None,
     def write(prompt):
         result = json.loads(writer(prompt))
         if direct_news and writer.calls == 2:
+            selected = (
+                ((news[0], tuple(direct_news_citations)),)
+                if direct_news_citations
+                else tuple((fragment, (fragment.fragment_id,)) for fragment in news)
+            )
             result["문장들"].extend({
                 "글": (f"{fragment.document_date} {fragment.source_publisher} 보도에 따르면, "
                        if news_attribution else "") + (news_transform(fragment.text) if news_transform else fragment.text),
-                "인용": [fragment.fragment_id], "등급": "확인",
+                "인용": list(citations), "등급": "확인",
                 "주장슬롯": fragment.supported_claim_slots[0],
-            } for fragment in news)
+            } for fragment, citations in selected)
         if exclude and writer.calls == 2:
             result["뉴스근거판정"] = [
                 {"조각": fragment.fragment_id, "사유": "중복", "설명": "동일 사업 설명이 공식 자료 본문에 이미 있어 반복하지 않습니다."}
@@ -171,6 +177,73 @@ def test_뉴스출처표기를_모델이_생략해도_확인된메타데이터�
     assert output.news_usage_diagnostics["본문사용기사수"] == 2
     assert writer.calls == 9
     assert len(reviewer.prompts) == 1
+
+
+@pytest.mark.parametrize("already_attributed", [False, True])
+def test_같은_보도_상대머리말은_검수입력에서_정규출처와_중복되지_않는다(already_attributed):
+    from src.features.composer.news_usage import attribution_prefix
+
+    fragment = _fragments()[0]
+    _, _, reviewer, _ = _run(
+        fragments=(fragment,),
+        direct_news=True,
+        news_attribution=already_attributed,
+        news_transform=lambda text: "같은 보도에 따르면, " + text,
+    )
+
+    reviewer_input = reviewer.prompts[0]
+    expected = attribution_prefix(fragment) + fragment.text
+    duplicated = attribution_prefix(fragment) + "같은 보도에 따르면, " + fragment.text
+    assert expected in reviewer_input
+    assert duplicated not in reviewer_input
+
+
+def test_다른_날짜와_발행처_머리말은_검수입력에서_보존한다():
+    from src.features.composer.news_usage import attribution_prefix
+
+    fragment = _fragments()[0]
+    other_lead = "2026-08-31 다른일보 보도에 따르면, "
+    _, _, reviewer, _ = _run(
+        fragments=(fragment,),
+        direct_news=True,
+        news_attribution=False,
+        news_transform=lambda text: other_lead + text,
+    )
+
+    assert attribution_prefix(fragment) + other_lead + fragment.text in reviewer.prompts[0]
+
+
+def test_본문중간의_같은_보도_표현은_검수입력에서_보존한다():
+    from src.features.composer.news_usage import attribution_prefix
+
+    fragment = _fragments()[0]
+    first, separator, remainder = fragment.text.partition(" ")
+    assert separator
+    body = first + " 같은 보도에 따르면, " + remainder
+    _, _, reviewer, _ = _run(
+        fragments=(fragment,),
+        direct_news=True,
+        news_attribution=False,
+        news_transform=lambda _text: body,
+    )
+
+    assert attribution_prefix(fragment) + body in reviewer.prompts[0]
+
+
+def test_다중출처_후보에는_상대머리말_정규화를_적용하지_않는다():
+    fragments = _fragments()
+    first = fragments[0]
+    body = "같은 보도에 따르면, " + first.text
+    _, _, reviewer, _ = _run(
+        fragments=fragments,
+        direct_news=True,
+        direct_news_citations=tuple(fragment.fragment_id for fragment in fragments),
+        news_attribution=False,
+        news_transform=lambda _text: body,
+    )
+
+    reviewer_input = reviewer.prompts[0]
+    assert body in reviewer_input
 
 
 @pytest.mark.parametrize("reason", ["not_verified", "mixed_sources", "attribution_invalid", "unsupported_number"])
@@ -374,30 +447,35 @@ def test_최종품질은_뉴스_수치변조와_공식숫자_대체를_거절한
 
 
 @pytest.mark.parametrize("mode", list(ReleaseMode))
-def test_모드별_뉴스본문은_PDF_Notion에_실리고_확인범위_안내는_없다(mode):
-    """2026-09-16: 뉴스 조사 상태·범위 안내(「확인 범위: …」)는 어느 채널에도 싣지 않는다."""
+def test_모드별_뉴스본문은_PDF_Notion에_실리고_뉴스확인범위_안내는_없다(mode):
+    """뉴스 조사 상태 안내를 금지하며 6장 계획의 현재 이행 미확인 안내는 보존한다."""
+    from src.features.composer.future_presentation_constants import PLAN_SCOPE_NOTICE
     from src.features.export_pdf.release import prepare_pdf_release
     output, *_ = _run(mode)
     report = output.report
     validate_v2(report)
+    assert [section.cell for section in report.sections if PLAN_SCOPE_NOTICE in section.guidance_lines] == ["future_strategy"]
     assert not any(text.startswith("확인 범위") for section in report.sections
                    for text in section.prose_paragraphs)
     before = report.public_projection
     blocks = build_blocks(report)
     texts = json.dumps(blocks, ensure_ascii=False)
-    assert "확인 범위" not in texts
+    assert texts.count(PLAN_SCOPE_NOTICE) == 1
+    assert "확인 범위" not in texts.replace(PLAN_SCOPE_NOTICE, "")
     assert "공급 계약을 3건" in texts
     assert _fragments()[0].source_url in texts
     assert report.public_projection is before
     candidate = prepare_pdf_release(report)
     pdf_text = "".join(page.extract_text() or "" for page in PdfReader(io.BytesIO(candidate.pdf_bytes)).pages)
     squeezed = re.sub(r"\s+", "", pdf_text)
-    assert "확인범위" not in squeezed
+    squeezed_plan_notice = re.sub(r"\s+", "", PLAN_SCOPE_NOTICE)
+    assert squeezed.count(squeezed_plan_notice) == 1
+    assert "확인범위" not in squeezed.replace(squeezed_plan_notice, "")
     assert "공급계약을3건" in squeezed
 
 
 @pytest.mark.parametrize("mode", list(ReleaseMode))
-def test_모드별_웹도_같은_보도숫자를_공개하고_확인범위_안내는_없다(mode, monkeypatch):
+def test_모드별_웹도_같은_보도숫자를_공개하고_뉴스확인범위_안내는_없다(mode, monkeypatch):
     import uuid
     from fastapi.testclient import TestClient
     from src.features.auth import constants as auth_constants
@@ -406,6 +484,7 @@ def test_모드별_웹도_같은_보도숫자를_공개하고_확인범위_안�
     from src.web.main import app
     from src.web.routers import reports as reports_router
     from src.web.tests.report_route_support import serve_legacy_report_snapshot
+    from src.features.composer.future_presentation_constants import PLAN_SCOPE_NOTICE
 
     output, *_ = _run(mode)
     job_id = "news-usage-" + uuid.uuid4().hex
@@ -419,7 +498,9 @@ def test_모드별_웹도_같은_보도숫자를_공개하고_확인범위_안�
     with TestClient(app) as client:
         response = client.get(f"/result/{job_id}", cookies={auth_constants.SESSION_COOKIE_NAME: session.token})
     assert response.status_code == 200
-    assert "확인 범위" not in response.text
+    assert [section.cell for section in output.report.sections if PLAN_SCOPE_NOTICE in section.guidance_lines] == ["future_strategy"]
+    assert response.text.count(PLAN_SCOPE_NOTICE) == 1
+    assert "확인 범위" not in response.text.replace(PLAN_SCOPE_NOTICE, "")
     assert "공급 계약을 3건" in response.text
 
 

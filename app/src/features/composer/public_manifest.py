@@ -30,6 +30,7 @@ from src.features.composer.industry_context import (
     has_verified_direct_business_issue,
 )
 from src.features.composer.challenge_presentation import challenge_response_only_notice
+from src.features.composer.future_presentation import section_guidance_lines
 from src.features.composer.constants import (
     DART_DOCUMENT_HOST,
     DART_DOCUMENT_URL_TEMPLATE,
@@ -1480,6 +1481,8 @@ def _expected_source(
     # 특정 종류의 출처만 누락된 혼합 보고서를 막을 수 있다.
     # renderer와 같은 단일 projection을 써야 예상 manifest와 실제 공개 Source가
     # 출처 종류가 늘어난 뒤에도 문서 전체 지문에서 갈라지지 않는다.
+    if source.kind == SourceKind.FILING and fragment.reporting_period:
+        source = replace(source, reporting_period=fragment.reporting_period)
     source = bind_document_content_sha256(
         source,
         fragment.document_content_sha256,
@@ -1562,7 +1565,14 @@ def _expected_public_content_projection(
     )
 
     numbers = _citation_numbers_for_fragments(fragments)
-    style_normalizer = SentenceStyleNormalizer(report, fragments, as_of_date=as_of_date)
+    fragments_by_id = {fragment.fragment_id: fragment for fragment in fragments}
+    style_normalizer = SentenceStyleNormalizer(
+        report, fragments, as_of_date=as_of_date, company_name=company_name,
+        source_for_fragment=lambda fragment_id: _expected_source(
+            fragments_by_id[fragment_id], number=numbers[fragment_id], company_name=company_name,
+            used_in=(), filing_meta=filing_meta,
+        ) if fragment_id in fragments_by_id and fragment_id in numbers else None,
+    )
     groups = [
         (
             section.sentences,
@@ -1623,7 +1633,7 @@ def _expected_public_content_projection(
                 "empty_reason": "",
                 "prose_lines": lines,
                 "prose_paragraphs": paragraphs,
-                "guidance_lines": [section.notice] if section.notice else [],
+                "guidance_lines": section_guidance_lines(section),
                 "display_number": str(section_index + 1),
                 "tag": _SECTION_TAGS.get(section.section_id, ""),
                 "tables": section_tables,

@@ -1,0 +1,25 @@
+{
+  "설명": "2026-10-21 공개 HTML의 검색 표·회사 필드·제품 section을 축소했다. style/class/이미지/스크립트/개인 연락처는 제외하고 기업명·홈페이지·역할·예정/FAQ 문맥은 유지한다. 실행 응답 헤더와 사적 원문은 포함하지 않는다.",
+  "원천": [
+    {
+      "url": "https://sandbox.fintech.or.kr/business/enterprise_intro.do?lang=ko&search=%ED%86%A0%EC%8A%A4%ED%8E%98%EC%9D%B4%EB%A8%BC%EC%B8%A0",
+      "원천_sha256": "e5557f8e2798291f105882fdc58bb8ba45cad5d70943c572a3bb93b72c4f1aab"
+    },
+    {
+      "url": "https://sandbox.fintech.or.kr/business/enterprise.do?lang=ko&id=536",
+      "원천_sha256": "dd3d601723c836a75898644142d0110beddb8bb42ad6f7cec045d8e46aff0984"
+    },
+    {
+      "url": "https://www.tosspayments.com/",
+      "원천_sha256": "5fc2d4c47e59023b0df1679fffbac86199472ecbde6e25ae9da040e136995057"
+    },
+    {
+      "url": "https://www.tosspayments.com/services/payment-widget",
+      "원천_sha256": "35d147cd61d998121152caebe3d2eccb4ca79e5a1f7238a6378ec209f1eb6868"
+    },
+    {
+      "url": "https://www.tosspayments.com/services/brandpay",
+      "원천_sha256": "048502576a349be1296c2d239dde2d67d3a5d7e9dfd236059f5bd05cfcfc2be3"
+    }
+  ]
+}

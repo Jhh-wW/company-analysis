@@ -7,6 +7,8 @@ from src.features.chapter_evidence.tests.fixtures import make_document, make_fra
 
 
 @pytest.mark.parametrize("section,slot,other,text", [
+    ("portfolio", "portfolio:product_role", "portfolio:revenue_link",
+     "회사는 전자지급결제대행업을 영위할 목적으로 설립되었으며, 주요 주주는 별도 법인이다."),
     ("business_model", "business_model:revenue_model", "business_model:customer_type",
      "기타 수익 항목에는 수입기술료와 수입수수료가 포함되며 배당금수익은 제외된다. 주요 고객사는 의료기관이다."),
     ("business_model", "business_model:customer_type", "business_model:revenue_model",

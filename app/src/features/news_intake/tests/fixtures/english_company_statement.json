@@ -1,0 +1,62 @@
+{
+  "source_call": "call-0d427c7efe6343f8a169ebaf1eedffa8.json",
+  "as_of": "2026-10-21",
+  "company": {
+    "company_name": "토스페이먼츠 주식회사",
+    "aliases": [
+      "Toss Payments Co.,Ltd",
+      "토스페이먼츠"
+    ],
+    "company_id": "01492697"
+  },
+  "article": {
+    "id": "news-49cec9317780c43e321c",
+    "title": "\"Snarched 88 government agencies and 20 companies in South Korea\"",
+    "url": "https://it.chosun.com/news/articleView.html?idxno=2023092169927",
+    "publisher": "it.chosun.com",
+    "source_category": "news_report",
+    "indexed_published_on": "2026-09-11",
+    "body": "A hacker believed to be Chinese claimed to have attacked 88 government agencies and about 20 companies in our country. The hackers said they had extracted financial, personal, and military information from government and corporate systems, but the actual scale of the damage has not yet been confirmed. It appears that the government and related agencies are investigating the facts based on the materials presented by the hacker. According to industry sources on the 10th, a hacker believed to be Chinese attacked major government agencies and companies in South Korea for six days, and in early September informed major institutions such as the Ministry of Science and ICT and the Korea Internet & Security Agency (KISA) about the matter. The hackers claimed to have attacked 88 government agencies and about 20 companies. However, the authenticity of the materials presented by the hacker and whether an actual intrusion occurred have not been verified. The hacker first claimed to have accessed Incheon City's RFID-based government asset management system and the location information of closed-circuit television (CCTV) in Cheongju. It was also pointed out that the database access information of 88 government agencies, including Incheon City Hall, Gwangju City Hall, and Gyeonggi Provincial Office, had been stored in an unencrypted plain-text state. They also stated that the information was extracted through an application programming interface (API) that does not require authentication procedures. They also claimed to have stolen the B2B Bank seller platform password and the government procurement agency’s account, which is the purchaser of B2B Bank, including bid registration, purchase orders, payment methods, and point history inquiries. The B2B bank buyers include the government (korea.kr ), the Small and Medium Business Administration, the Korea Post, the Korea Meteorological Administration, and the Korea Airports Corporation. They also claimed to have secured materials related to military intelligence and defense facilities. The hacker said that it had leaked access logs to an armory in Jincheon, Chungbuk, as well as information on auxiliary facilities and equipment, and military service numbers. They also claimed to have obtained, among other things, the resident registration numbers and salary information of KOICA employees, information on students who suffered school violence, the status of members of the Korean Metal Workers’ Union, personal information of advertisers for Musinsa, and Hanwha employees’ passwords. They also claimed that 58% of Hanwha employees used the same password. There were also claims that the Generative AI service account had been compromised. The hackers said they accessed some of ChatGPT Pro, Google Gemini, Anthropic Claude Max, and DeepSeek accounts and extracted around 10,000 AI conversations. The self-inspection results of the companies targeted by the hackers showed discrepancies from the hackers’ claims. SSG.com reported to KISA that it had identified signs of abnormal access in the front-end API. SSG.com stated, “An abnormal access was detected on a web display system that shows customers products and prices, rather than on an internal payment system,” adding that no customer data breach or intrusion into the internal payment system had been confirmed. Toss Payments emphasized, “Payment linkage authentication information from a specific merchant was exposed, allowing a third party to view the payment details,” adding, “There is no evidence that the Toss Payments system was breached.” Hanwha stated, “After being contacted by KISA last week, we conducted an internal inspection but were unable to find any particular abnormalities.” The security industry explained that there are quite a few cases where hackers first inform the organization or company of an attack and then reach out to them. A security industry official said, “Hackers sometimes notify companies of an attack first and then approach them,” adding, “They may demand money or even offer to reveal the breach route if they receive a price in return.” Another security industry official said, “There are cases where companies or institutions fail to detect an intrusion through their own security monitoring and only become aware of it belatedly through external notifications such as contact from hackers.” The Ministry of Science and ICT did not provide a separate comment when asked about the hacker’s claims and the government’s response. Starting September 9, the Financial Supervisory Service began on-site inspections of Toss Payments and CoamPayments. The relevant agencies are verifying the authenticity of the information presented by the hacker, the actual intrusion route, and whether any information was leaked. An industry insider who requested anonymity said, “After the hacker sent the email, related agencies such as the Ministry of Science and ICT launched an investigation.” fun3503@chosunbiz.com 관련기사 Budget phones breaking the official “no contract” rule Tving, which leaked 39.54 million accounts Labor-management conflicts in Telco are spreading “We detected a construction site” Labor-management conflict erupting among Telco KB pricing plan halted just one day after launch If you click late, you fail...KISA exam controversy A ‘10% hacking fine’ that benefits only the government Two institutions with different natures to merge in four months To write more call summaries, please visit A. 기자의 전체기사 저작권자 © IT조선 무단전재 및 재배포 금지 키워드 #the Ministry of Science and ICT #hacker #attack 더보기 닫기 닫기 내 댓글 모음 닫기"
+  },
+  "saved_response": {
+    "items": [
+      {
+        "entity_evidence_quote_id": "quote-03c2484d40f6526ebfe6",
+        "excerpts": [
+          {
+            "claim_kind": "company_statement",
+            "claim_slot": "current_challenges:issue",
+            "event_key": "토스페이먼츠 특정 가맹점 결제 연동 인증정보 노출로 결제 내역 제3자 열람 가능 사고",
+            "event_on": "",
+            "section_id": "current_challenges",
+            "subject": "",
+            "subject_evidence_quote_id": "",
+            "subject_is_target": true,
+            "temporal_status": "completed",
+            "text_quote_id": "quote-03c2484d40f6526ebfe6",
+            "time_evidence_quote_id": "",
+            "topic": "risk"
+          },
+          {
+            "claim_kind": "reported_fact",
+            "claim_slot": "current_challenges:response",
+            "event_key": "금융감독원 토스페이먼츠 현장검사 착수",
+            "event_on": "",
+            "section_id": "current_challenges",
+            "subject": "",
+            "subject_evidence_quote_id": "",
+            "subject_is_target": true,
+            "temporal_status": "ongoing",
+            "text_quote_id": "quote-1fbdcdac1680d37d6ba2",
+            "time_evidence_quote_id": "",
+            "topic": "risk"
+          }
+        ],
+        "id": "news-49cec9317780c43e321c",
+        "material": true,
+        "same_company": true,
+        "source_type": "news_report"
+      }
+    ]
+  }
+}

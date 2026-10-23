@@ -42,6 +42,7 @@ from features.evidence_collection.filing_select import (
     RawFilingRow,
 )
 from features.evidence_collection.table_text import table_replacements
+from features.evidence_collection.reporting_period import reporting_period_from_xml
 from features.evidence_collection.source_context import table_source_contexts, SourceContextBudgetExceeded
 
 #: list.json 조회 창 — 최근 N년. survey_audit_reports.py·run_pilot.py의
@@ -413,4 +414,5 @@ class DartRuntimeFetcher:
             official_url_candidates=tuple(official_url_candidates),
             document_actor=document_actor,
             source_contexts=source_contexts,
+            reporting_period=reporting_period_from_xml(markup, document_corp_code=corp_code),
         )

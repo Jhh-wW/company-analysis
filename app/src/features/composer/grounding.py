@@ -18,6 +18,15 @@ from src.features.composer.future_plan_constants import FUTURE_KEY
 from src.features.composer.plan_status_constants import PLAN_STATUS_KEY
 from src.features.composer.grounding_constants import REVIEW_SUPPORT_CANDIDATE_VERDICTS
 from src.features.composer.grounding_constants import BOUND_VALUE_RE, BOUND_TAIL_RE, RATIO_BASIS_RE
+from src.features.composer.grounding_constants import APPROXIMATE_VALUE_RE, APPROXIMATE_PREFIX_RE
+from src.features.composer.grounding_constants import (
+    LITIGATION_COUNT_LABEL_RE, LITIGATION_COUNT_SURFACE_RE, LITIGATION_COUNT_VALUE_RE,
+    LITIGATION_CURRENT_COMPANY_RE, LITIGATION_ROLE_COUNT_RE,
+    LITIGATION_DIAGRAM_ROLE_COUNT_RE, LITIGATION_CLAUSE_TERMINATOR,
+    LITIGATION_NONASSERTIVE_TERMINATORS,
+)
+from src.features.composer.litigation_timing import litigation_numeric_text
+from src.features.composer.litigation_timing_constants import CURRENT_LITIGATION_CLAUSE_RE, LITIGATION_AMOUNT_METRIC
 from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_VERSION
 
 from collections import Counter
@@ -490,6 +499,9 @@ def _metric_value_spans(metric: str, value: str, text: str) -> tuple[_BoundAmoun
     bounded_value = BOUND_VALUE_RE.fullmatch(value.strip())
     numeric_value = bounded_value["value"] if bounded_value else value
     declared_bound = bounded_value["bound"] if bounded_value else ""
+    approximate_value = APPROXIMATE_VALUE_RE.fullmatch(numeric_value.strip())
+    if approximate_value:
+        numeric_value = approximate_value['value']
     results: list[_BoundAmount] = []
     for clause_match in re.finditer(r"[^;\n]+", text):
         clause = clause_match.group()
@@ -503,6 +515,8 @@ def _metric_value_spans(metric: str, value: str, text: str) -> tuple[_BoundAmoun
                 continue
             for number in _amount_spans(clause):
                 if _surface(number.text) != _surface(numeric_value):
+                    continue
+                if approximate_value and not APPROXIMATE_PREFIX_RE.search(clause[:number.start]):
                     continue
                 tail = BOUND_TAIL_RE.match(clause, number.end)
                 actual_bound = tail[1] if tail else ""
@@ -634,9 +648,70 @@ def _dimension(text: str) -> str:
     return DIMENSION_AMOUNT
 
 
+def _litigation_count_label(value: object, role: str = "") -> bool:
+    """건수 범주만 읽으며 명시한 소송 당사자 역할은 실제 주장과 같아야 한다."""
+    match = LITIGATION_COUNT_LABEL_RE.fullmatch(value) if isinstance(value, str) else None
+    return bool(match and (not role or not match['role'] or match['role'] == role))
+
+
+def _litigation_numeric_clauses(source: str):
+    """문장 끝 마침표만 포함하며 물음·감탄 종결절을 현황 단정으로 쓰지 않는다."""
+    for match in CURRENT_LITIGATION_CLAUSE_RE.finditer(source):
+        end = match.end()
+        ending = source[end:end + 1]
+        if ending in LITIGATION_NONASSERTIVE_TERMINATORS:
+            continue
+        if ending == LITIGATION_CLAUSE_TERMINATOR:
+            end += len(LITIGATION_CLAUSE_TERMINATOR)
+        yield source[match.start():end]
+
+
+def _litigation_numeric_binding(text: str, entry: Mapping, sources: Mapping[str, str],
+                                litigation_text: str | None) -> tuple[str, re.Match[str]] | None:
+    """같은 기말·주체·역할·건수의 단일 소송절에 증명 범주와 정확 인용을 결속한다."""
+    if litigation_text is None or litigation_text == text:
+        return None
+    metric, source_metric = entry.get("항목"), entry.get("원문항목")
+    count_metric = _litigation_count_label(metric) and _litigation_count_label(source_metric)
+    if not (count_metric
+            or metric == source_metric == LITIGATION_AMOUNT_METRIC):
+        return None
+    source, quote = sources.get(str(entry.get("근거", "")), ""), entry.get("원문")
+    candidates = (tuple(LITIGATION_ROLE_COUNT_RE.finditer(text))
+                  + tuple(LITIGATION_DIAGRAM_ROLE_COUNT_RE.finditer(text)))
+    if not isinstance(quote, str) or not quote.strip() or len(candidates) != 1:
+        return None
+    candidate = candidates[0]
+    if count_metric and not all(_litigation_count_label(value, candidate['role'])
+                                for value in (metric, source_metric)):
+        return None
+    if BOUND_TAIL_RE.match(text, candidate.end()):
+        return None
+    for clause in _litigation_numeric_clauses(source):
+        originals = tuple(LITIGATION_ROLE_COUNT_RE.finditer(clause))
+        if (not LITIGATION_CURRENT_COMPANY_RE.match(clause) or len(originals) != 1
+                or originals[0]['role'] != candidate['role']
+                or originals[0]['count'] != candidate['count']
+                or BOUND_TAIL_RE.match(clause, originals[0].end())):
+            continue
+        # 공백만 달라도 실제 원문 좌표를 되찾는다. 글자·숫자·문장부호는 바꾸지 않는다.
+        positions = [index for index, char in enumerate(clause) if not char.isspace()]
+        compact = ''.join(clause[index] for index in positions)
+        quoted = ''.join(quote.split())
+        matches = tuple(re.finditer(re.escape(quoted), compact))
+        if len(matches) != 1:
+            continue
+        match = matches[0]
+        bound = clause[positions[match.start()]:positions[match.end() - 1] + 1]
+        if _quote(dict(entry, 원문=bound), sources) is not None:
+            return bound, candidate
+    return None
+
+
 def _numeric_valid(
     text: str, entries: object, sources: Mapping[str, str],
     detail: dict[str, object] | None = None,
+    *, litigation_text: str | None = None,
 ) -> bool:
     def fail(stage: str, index: int | None = None) -> bool:
         if detail is not None:
@@ -655,12 +730,46 @@ def _numeric_valid(
         quote = _quote(entry, sources)
         if not all(isinstance(x, str) and x for x in (expression, metric, source_metric)):
             return fail("expression_fields", index)
+        litigation_binding = _litigation_numeric_binding(text, entry, sources, litigation_text)
+        if litigation_binding:
+            quote = litigation_binding[0]
+            entry = dict(entry, 원문=quote)
+        if (litigation_binding and _litigation_count_label(metric)
+                and _litigation_count_label(source_metric)):
+            candidate = litigation_binding[1]
+            values = [LITIGATION_COUNT_VALUE_RE.fullmatch(str(entry.get(key, "")))
+                      for key in ("후보값", "원문값")]
+            original = LITIGATION_ROLE_COUNT_RE.search(quote)
+            if (expression not in text or not LITIGATION_COUNT_SURFACE_RE.search(expression)
+                    or not original or original['role'] != candidate['role']
+                    or original['count'] != candidate['count']
+                    or not all(value and value['count'] == candidate['count'] for value in values)):
+                return fail("candidate_value_scope", index)
+            span = candidate.span('count')
+            if (not any(start <= span[0] and span[1] <= end
+                        for start, end in (match.span() for match in re.finditer(re.escape(expression), text)))
+                    or any(span[0] < end and start < span[1] for start, end in used_spans)):
+                return fail("candidate_value_scope", index)
+            # '건'은 기존 금액 숫자 풀에 넣지 않는다. 검증한 실제 건수 좌표는 중복 금지한다.
+            used_spans.append(span)
+            continue
         if expression not in text or metric not in expression:
             return fail("expression_not_in_candidate", index)
         if quote is None:
             return fail("quote_not_bound", index)
         if not _metric_matches(metric, source_metric):
             return fail("metric_mismatch", index)
+        # 정본 기말을 이미 확인한 소송금액만 날짜 없는 수치 대조용으로 본다.
+        # 원문 인용이 같은 '당기말 현재 소송' 절에 있어야 하며 매출·타기간 금액에는 적용하지 않는다.
+        numeric_text = text
+        source = sources.get(str(entry.get('근거', '')), '')
+        if (litigation_text is not None and metric == source_metric == LITIGATION_AMOUNT_METRIC
+                and (litigation_binding or (
+                    not (LITIGATION_ROLE_COUNT_RE.search(text)
+                         or LITIGATION_DIAGRAM_ROLE_COUNT_RE.search(text))
+                    and any(quote in clause.removesuffix(LITIGATION_CLAUSE_TERMINATOR)
+                            for clause in _litigation_numeric_clauses(source))))):
+            numeric_text = litigation_text
         expression_amounts = _amount_spans(expression)
         candidate_value = entry.get("후보값")
         if candidate_value is None and len(expression_amounts) == 1:
@@ -704,7 +813,7 @@ def _numeric_valid(
             return fail("value_mismatch", index)
         if not (same_dimension or ratio_conversion):
             return fail("dimension_mismatch", index)
-        candidate_period = _bound_period(metric, candidate, text)
+        candidate_period = _bound_period(metric, candidate, numeric_text)
         source_bindings = _metric_value_spans(source_metric, entry["원문값"], quote)
         source_periods = {_bound_period(source_metric, number, quote) for number in source_bindings}
         if ratio_conversion:
@@ -1004,6 +1113,7 @@ def _reported_comparison_valid(text: str, entries: object, sources: Mapping[str,
 def grounding_problem(
     text: str, sources: Mapping[str, str], entry: Mapping,
     *, detail: dict[str, object] | None = None,
+    litigation_sources: Sequence[tuple[str, str, str]] = (),
 ) -> str:
     """필요 근거 누락과 결속·연산 실패를 구분하며 호출이나 저장을 하지 않는다."""
     def invalid_shape() -> str:
@@ -1035,7 +1145,8 @@ def grounding_problem(
         if NUMERIC_KEY in evidence else None
     )
     numeric_detail: dict[str, object] = {}
-    numeric_valid = (_numeric_valid(text, numeric_entries, sources, numeric_detail)
+    numeric_valid = (_numeric_valid(text, numeric_entries, sources, numeric_detail,
+                                   litigation_text=litigation_numeric_text(text, litigation_sources, preserve_offsets=True))
                      if NUMERIC_KEY in evidence else None)
     if (TREND_KEY in required and NUMERIC_KEY in evidence
         and numeric_valid
@@ -1049,6 +1160,11 @@ def grounding_problem(
                 detail.update(version=GROUNDING_DETAIL_VERSION, check_kind=kind, stage="grounding_missing")
             return GROUNDING_MISSING
     for kind, payload in evidence.items():
+        # 번역은 verify가 단일 영어 뉴스·요청 SHA·정확 범위·최종 참 판정에 결속한다.
+        if kind == '번역':
+            if not isinstance(payload, Mapping):
+                return invalid_shape()
+            continue
         # 관계 근거는 아래 constrain_verdicts가 번호 중복을 함께 확인한 뒤
         # 자기 인용에 결속한다. 기존 수치·추세·시점 검증은 전부 유지한다.
         if kind == RELATION_KEY:
@@ -1128,6 +1244,7 @@ def constrain_verdicts(
     confirmed_prose_numbers: frozenset[int] = frozenset(),
     details_by_number: dict[int, dict[str, object]] | None = None,
     entity_scope_by_number: Mapping[int, Sequence[EntityScopeContext]] | None = None,
+    litigation_sources_by_number: Mapping[int, Sequence[tuple[str, str, str]]] | None = None,
 ) -> tuple[dict[int, str], dict[int, str]]:
     """같은 검수 응답의 근거를 실제 입력에 결속한다. 추가 AI 호출은 없다.
 
@@ -1167,7 +1284,8 @@ def constrain_verdicts(
             continue
         text, sources = candidates[number]
         detail: dict[str, object] = {}
-        problem = grounding_problem(text, sources, entry, detail=detail)
+        problem = grounding_problem(text, sources, entry, detail=detail,
+                                    litigation_sources=(litigation_sources_by_number or {}).get(number, ()))
         if problem:
             if details_by_number is not None and detail:
                 details_by_number[number] = detail

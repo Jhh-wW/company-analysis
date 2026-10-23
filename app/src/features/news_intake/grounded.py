@@ -21,6 +21,12 @@ from src.features.news_intake.models import GroundedNewsExcerpt, NewsCandidate, 
 from src.features.news_intake.identity_names import company_query_names, mentions_target
 from src.features.news_intake.article_identity import article_company_context
 from src.features.news_intake.reporting_subject_scope import target_is_only_interview_recipient
+from src.features.news_intake.attributed_statement import has_attributed_statement
+from src.features.news_intake.event_plan_context import event_plan_context_problem
+from src.features.news_intake.statement_plan_role import (
+    statement_plan_parts, normalize_statement_plan_kind, selected_statement_plan_part,
+)
+from src.features.news_intake.statement_plan_role_constants import STATEMENT_PLAN_SPLIT, STATEMENT_PLAN_KIND_NORMALIZED
 from src.features.news_intake.reporting_subject_scope_constants import SUBJECT_INTERVIEW_RECIPIENT_ONLY
 from src.features.news_intake.relation_subject_scope import bind_relation_subject, starts_relation_target
 from src.features.news_intake.relation_subject_scope_constants import RELATION_CONTEXT_REASON
@@ -149,9 +155,13 @@ def build_grounded_prompt(company: NewsCompanyContext, articles: list[tuple[News
         "start/end는 서버 위치 정보이며 직접 숫자를 세거나 반환할 필요가 없습니다. text/entity_evidence/"
         "subject_evidence/time_evidence 대신 같은 이름의 _quote_id 필드를 반환하세요. "
         "날짜와 관계 근거가 필요 없을 때는 해당 ID를 빈 문자열로 두세요. "
+        "text_quote_id 인용에 대상 법인명이 직접 있으면 subject와 subject_evidence_quote_id는 모두 빈 문자열입니다. "
+        "별도 subject_is_target 판정은 생략하지 마세요. "
         "산업문맥도 text 대신 text_quote_id를 선택하고 나머지 짧은 사실 문구는 그 인용 안의 원문을 그대로 쓰세요. "
         "ID는 같은 기사의 후보만 허용됩니다. 넓은 인용에 회사 이름이 있어도 타법인·개인의 사건을 대상 회사 사건으로 바꾸지 마세요. "
         "각 인용은 subject_is_target에 해당 사건의 실제 주어가 대상 법인인지 별도로 판정하세요. "
+        "'이에 대해/이와 관련해/해당 사안'만으로 시작하는 발언은 같은 기사에서 사건 설명과 발언이 "
+        "함께 담긴 기존 연속 quote ID를 선택하세요. 다른 기사의 사건명이나 원인을 빌려 보충하지 마세요. "
         "이름이 인용에 나오는 것만으로 true가 아닙니다. 목록·발행처·과거 직장의 이름이면 false입니다. "
         "제품·브랜드·인물의 경우 명시 회사 관계와 그 회사의 실제 사업 사건이 모두 확인될 때만 true입니다. "
         + qc.QUOTE_SELF_CONTAINED_SELECTION_GUIDE
@@ -201,7 +211,11 @@ def build_grounded_prompt(company: NewsCompanyContext, articles: list[tuple[News
         "긍정 수상·매출 성장·ESG 평가·PPA 체결 자체는 사업 문제나 그 문제의 대응을 증명하지 않습니다. "
         "reported_fact(기자가 확인한 외부사실), company_statement(회사/대표의 명시 발언), "
         "company_plan(아직 실현되지 않은 회사 계획)을 구별하세요. 미래 계획은 temporal_status=planned이며 "
-        "실행완료로 바꾸지 마세요. 5·6·8장의 발언은 대상 회사에 명시 귀속된 원문만 사용하세요. "
+        "실행완료로 바꾸지 마세요. 5·6·8장의 모든 후보는 대상 회사에 명시 귀속된 "
+        "company_statement 또는 company_plan 원문만 사용하세요. 5장의 issue도 기자의 서술이나 "
+        "제3자의 지적을 reported_fact로 넣거나 회사 발언으로 바꾸지 말고, 회사가 설명한 문제 범위만 고르세요. "
+        "대응은 무엇에 대한 대응인지 같은 연속 인용에서 확인되어야 합니다. '이에 대해'나 '피해'만 남기고 "
+        "문제의 대상을 생략한 짧은 범위보다 회사가 밝힌 문제와 대응이 함께 있는 후보를 우선하세요. "
         "기사에 등장하는 다른 회사 대표의 말을 대상 회사 발언으로 삼지 마세요.\n"
         "5. topic은 의미상 주제, event_key는 동일 사건을 가리키는 간결한 설명입니다. 발행일은 사건일과 "
         "다릅니다. event_on은 선택한 text 안에 해당 사건의 연월일이 명시된 경우만 YYYY-MM-DD로 반환하고, "
@@ -318,7 +332,16 @@ def _bound_subject(raw: dict[str, str], body: str, company: NewsCompanyContext,
     if target_is_only_interview_recipient(text, article_context):
         return _subject_rejected(diagnostics, SUBJECT_INTERVIEW_RECIPIENT_ONLY)
     if mentions_target(text, article_context) or starts_relation_target(text, article_context):
-        if subject or evidence:
+        # 전체 회사명과 선택 원문을 그대로 반복한 필드만 중복으로 본다.
+        # 다른 관계 근거를 무시하거나 제품·관계사 이름을 대상회사로 바꾸지 않는다.
+        names = {normalize_company_name(name) for name in company_query_names(article_context)}
+        redundant_subject = (
+            not subject or (
+                len(subject) <= c.GROUNDED_SUBJECT_CHARS
+                and normalize_company_name(subject) in names
+            )
+        )
+        if not redundant_subject or evidence not in ("", text):
             return _subject_rejected(diagnostics, c.SUBJECT_DIRECT_NAME_EXTRA_FIELDS)
         bound = bind_relation_subject(text, body, article_context, start,
                                       max_chars=c.GROUNDED_MAX_EXCERPT_CHARS)
@@ -396,11 +419,27 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
     if kind not in c.GROUNDED_CLAIM_KINDS or temporal not in c.GROUNDED_TEMPORAL_STATES:
         excluded["grounded_invalid_claim_kind"] += 1
         return None
+    # 복합 미래 선택은 같은 원문 안의 직접 발언만 먼저 분리한 뒤 기존 검사를 받는다.
+    # 현재 문장까지 계획으로 올리거나, 분리만으로 후속 검수 승인을 만들지 않는다.
+    selected_part = selected_statement_plan_part(GroundedNewsExcerpt(
+        candidate=candidate, text=text, section_id=section, claim_slot=slot,
+        claim_kind=kind, temporal_status=temporal, topic=raw['topic'],
+        event_key=raw['event_key'], event_on=raw['event_on'],
+        span_start=start, span_end=start + len(text),
+    ), company, body=body, as_of=as_of)
+    if selected_part is not None:
+        text, start = selected_part.text, selected_part.span_start
+    kind = normalize_statement_plan_kind(kind, temporal, section, slot, text, company)
     if (kind == "company_plan") != (temporal == "planned"):
         excluded["grounded_plan_mismatch"] += 1
         return None
     if re.search(c.FUTURE_PLAN_PATTERN, text) and temporal != "planned":
         excluded["grounded_plan_mismatch"] += 1
+        return None
+    if event_problem := event_plan_context_problem(
+        text, body, candidate, company, as_of, temporal_status=temporal,
+    ):
+        excluded[event_problem] += 1
         return None
     if contract_problem := contract_execution_context_problem(text, body, article_context, as_of,
                                                             temporal_status=temporal):
@@ -410,7 +449,7 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
         if kind not in {"company_statement", "company_plan"}:
             excluded["grounded_attribution_required"] += 1
             return None
-        if candidate.source_category != "official_release" and not any(marker in text for marker in c.ATTRIBUTED_STATEMENT_MARKERS):
+        if candidate.source_category != "official_release" and not has_attributed_statement(text, article_context):
             excluded["grounded_attribution_required"] += 1
             return None
     if raw["topic"] not in c.GROUNDED_TOPICS or not raw["event_key"].strip() or len(raw["event_key"]) > c.SEARCH_TITLE_CHARS:
@@ -423,18 +462,24 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
         candidate=candidate, text=text, section_id=section, claim_slot=slot,
         claim_kind=kind, temporal_status=temporal, topic=raw["topic"],
         event_key=raw["event_key"].strip(), event_on=raw["event_on"], span_start=start, span_end=start + len(text),
+        split_from=selected_part.split_from if selected_part is not None else None,
     )
 
 
 def _apply_claim_role(excerpt: GroundedNewsExcerpt, time_evidence: str,
                       company: NewsCompanyContext, as_of: dt.date,
-                      role_diagnostics: Counter[str] | None) -> tuple[GroundedNewsExcerpt, ...]:
+                      role_diagnostics: Counter[str] | None, *, body: str = '') -> tuple[GroundedNewsExcerpt, ...]:
     """명백히 다른 장의 역할인 기간 실적만 4장 보조 칸으로 옮기거나 나눈다.
 
     원문 글자·출처·위치는 그대로 두고 칸과 (나눴을 때) 연속 부분 범위만 바꾼다.
     나눈 부분의 사건일은 그 부분 안에 날짜 원문이 있을 때만 남긴다.
     """
 
+    statement_parts = statement_plan_parts(excerpt, company, body=body, as_of=as_of)
+    if statement_parts is not None:
+        if role_diagnostics is not None:
+            role_diagnostics[STATEMENT_PLAN_SPLIT] += 1
+        return statement_parts
     partnership_parts = partnership_role_parts(
         excerpt.text, claim_slot=excerpt.claim_slot, company=company,
         temporal_status=excerpt.temporal_status,
@@ -497,8 +542,11 @@ def _article_excerpts(item: dict[str, Any], candidate: NewsCandidate, body: str,
         excerpt = _excerpt(raw_excerpt, candidate, body, company, as_of, excluded,
                            subject_diagnostics)
         if excerpt is not None:
+            if role_diagnostics is not None and excerpt.claim_kind != raw_excerpt['claim_kind']:
+                role_diagnostics[STATEMENT_PLAN_KIND_NORMALIZED] += 1
             excerpts.extend(_apply_claim_role(
                 excerpt, raw_excerpt["time_evidence"], company, as_of, role_diagnostics,
+                body=body,
             ))
     if not raw_excerpts:
         excluded["grounded_no_substantive_excerpt"] += 1

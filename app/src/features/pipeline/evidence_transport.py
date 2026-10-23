@@ -37,6 +37,7 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_DETAIL_PREFLIGHT_UNREGISTERED_FRAGMENT_KIND,
 )
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+from src.shared.report_evidence.filing_period import filing_period_is_valid
 from src.shared.report_evidence.legacy_fragment_kinds import (
     LEGACY_FRAGMENT_KINDS,
     sections_for_legacy_fragment_kind,
@@ -49,7 +50,7 @@ from src.shared.report_evidence.constants import (
     SUPPLEMENTARY_DOCUMENT_SOURCE_KINDS,
 )
 from src.shared.report_evidence.identity_verified_web import (
-    verified_dart_filing_binding_allows_url,
+    verified_official_web_binding_allows_url,
 )
 from src.shared.report_evidence.profile_domain_attestation import (
     dart_profile_attestation_allows_source_url,
@@ -356,13 +357,14 @@ def _typed_metadata(
     )
     if (
         source_kind == SOURCE_KIND_OFFICIAL_IDENTITY_VERIFIED_WEB_PAGE
-        and not verified_dart_filing_binding_allows_url(
+        and not verified_official_web_binding_allows_url(
             identity_binding,
             source_url=source_url,
+            company_id=corp_id,
         )
     ):
         raise _packet_invalid(
-            "신원검증 공식 웹의 DART proof가 원본 URL과 일치하지 않습니다"
+            "신원검증 공식 웹의 발견·신원 proof가 회사와 원본 URL에 일치하지 않습니다"
         )
 
     source_collected_on = _require_text(
@@ -421,9 +423,10 @@ def _typed_metadata(
         ):
             raise _packet_invalid("typed 보조 문서에 공식 웹·IR provenance가 섞였습니다")
     elif source_kind in OFFICIAL_WEB_SOURCE_KINDS:
-        strict_url_proof = verified_dart_filing_binding_allows_url(
+        strict_url_proof = verified_official_web_binding_allows_url(
             identity_binding,
             source_url=source_url,
+            company_id=corp_id,
         )
         if not strict_url_proof and not (
             domain_attestation_source_id and domain_attestation_evidence
@@ -457,13 +460,16 @@ def _typed_metadata(
         (
             domain_attestation_source_id,
             domain_attestation_evidence,
-            reporting_period,
             attachment_url,
             ir_metadata_verification,
             *redirect_parts,
         )
     ):
         raise _packet_invalid("typed DART 공시에 웹·IR provenance가 섞였습니다")
+
+    if (source_kind not in OFFICIAL_WEB_SOURCE_KINDS and reporting_period
+            and not filing_period_is_valid(reporting_period)):
+        raise _packet_invalid("typed DART 공시의 명시 보고기간이 올바르지 않습니다")
 
     if is_supplementary:
         # 표를 실제 transport가 읽게 해 목록과 Writer 자격이 선언만 남지 않게 한다.
@@ -658,12 +664,12 @@ def _collected_fragment_from_raw(
         document_content_sha256 = ""
         formal_source_kind = ""
         source_document_id = _optional_text(raw, "문서ID")
-        source_publisher = ""
+        source_publisher = _optional_text(raw, "발행주체")
         identity_binding = ""
         source_collected_on = ""
         domain_attestation_source_id = ""
         domain_attestation_evidence = ""
-        reporting_period = ""
+        reporting_period = _optional_text(raw, "보고기간")
         attachment_url = ""
         ir_metadata_verification = ""
         domain_redirect_verification = ""

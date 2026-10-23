@@ -111,6 +111,19 @@ FINANCIAL_STATEMENT_PRESENTATION_RE: Final[re.Pattern[str]] = re.compile(
     r"작성하고있|작성되었|주석으로기재"
 )
 
+# 실제 사업부·수익원 설명 없이 내부 보고를 공시에 반영한다는 방법만 적은 절.
+# 절 전체의 문형을 한정해, 같은 문장에 제품·고객·부문 구성 사실이 있으면 보존한다.
+SEGMENT_REPORTING_SUBJECT_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:영업)?부문(?:별)?정보"
+)
+SEGMENT_REPORTING_PRESENTATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"\A(?:(?:회사|당사)의)?"
+    r"(?:최고영업의사결정자는[가-힣a-z·]+(?:이며|이고)[,，]?)?"
+    r"(?:영업)?부문(?:별)?정보는최고영업의사결정자에게"
+    r"(?:내부적으로)?보고되는방식에(?:기초하여|따라)"
+    r"공시(?:된다|됩니다|되고있다|하고있다)\Z"
+)
+
 # ── ⑨ 수익인식 «기준» ────────────────────────────────────────────────
 # ★ 「시점에 인식된다」만으로는 절대 막지 않는다 — 「콘텐츠 매출은 … 이용하는
 #   시점에 인식된다」는 수익원을 설명하는 사업 문장이기도 하다(경계 사례).
@@ -238,6 +251,7 @@ ACCOUNTING_POLICY_RULES: Final[tuple[tuple[str, re.Pattern[str], re.Pattern[str]
     ("이연법인세", DEFERRED_TAX_SUBJECT_RE, DEFERRED_TAX_TREATMENT_RE),
     ("회계기준적용", ACCOUNTING_STANDARD_SUBJECT_RE, ACCOUNTING_STANDARD_CONTEXT_RE),
     ("재무제표표시", FINANCIAL_STATEMENT_SUBJECT_RE, FINANCIAL_STATEMENT_PRESENTATION_RE),
+    ("부문보고방법", SEGMENT_REPORTING_SUBJECT_RE, SEGMENT_REPORTING_PRESENTATION_RE),
     ("회계처리방법", ACCOUNTING_TREATMENT_SUBJECT_RE, ACCOUNTING_TREATMENT_CONTEXT_RE),
     ("수익인식기준", REVENUE_RECOGNITION_ACT_RE, REVENUE_RECOGNITION_CRITERION_RE),
     ("유동성관리", LIQUIDITY_SUBJECT_RE, LIQUIDITY_BOILERPLATE_RE),

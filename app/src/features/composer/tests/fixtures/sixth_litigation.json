@@ -1,0 +1,59 @@
+{
+  "original_xml_sha256": "0e31e6d744826a007cf5ba1175473de087b0bbfcff9e7155b2b601a41534d7b0",
+  "fixture_kind": "실제 XML의 법인·기간·소송 단락만 발췌한 회귀 입력; 원본 전체 아님",
+  "document_id": "20260331000296",
+  "corp_code": "01492697",
+  "xml_excerpt": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<DOCUMENT>\n<COMPANY-NAME AREGCIK=\"01492697\" AACCOUNTTYPE=\"A\">토스페이먼츠 주식회사</COMPANY-NAME>\n<TU CLASS=\"NORMAL\" ALIGN=\"RIGHT\" VALIGN=\"MIDDLE\" WIDTH=\"333\" HEIGHT=\"23\" AUNIT=\"PERIODFROM\" AUNITVALUE=\"20250101\">2025년 01월 01일</TU>\n<TU CLASS=\"NORMAL\" ALIGN=\"RIGHT\" WIDTH=\"333\" HEIGHT=\"23\" AUNIT=\"PERIODTO\" AUNITVALUE=\"20251231\">2025년 12월 31일</TU>\n<P>(4) 당기말 현재 회사가 피고로 계류중인 소송사건은 9건으로 소송금액은 405,535천원입니다. 계류중인 소송사건 등에 대해서는 소송의 결과를 합리적으로 예측할 수 없음에 따라 관련 충당부채를 계상하지 아니하였습니다.</P>\n<P>27. 특수관계자</P>\n<P>(1) 당기 또는 전기 회사와 거래 또는 채권, 채무 잔액이 있는 주요 특수관계자의 현황은 다음과 같습니다.</P>\n\n\n<TABLE WIDTH=\"799\" ACLASS=\"NORMAL\" AFIXTABLE=\"N\" BORDER=\"1\">\n\n<COLGROUP WIDTH=\"799\">\n<COL WIDTH=\"237\"></COL>\n<COL WIDTH=\"281\"></COL>\n<COL WIDTH=\"281\"></COL>\n</COLGROUP>\n\n<THEAD>\n\n<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"30\">\n<TH VALIGN=\"MIDDLE\" WIDTH=\"228\" ACOPYCOL=\"Y\" ADELETECOL=\"Y\" AMOVECOL=\"N\" HEIGHT=\"23\">구  분</TH>\n<TH VALIGN=\"MIDDLE\" WIDTH=\"272\" ACOPYCOL=\"Y\" ADELETECOL=\"Y\" AMOVECOL=\"N\" HEIGHT=\"23\">당기말</TH>\n<TH VALIGN=\"MIDDLE\" WIDTH=\"272\" ACOPYCOL=\"Y\" ADELETECOL=\"Y\" AMOVECOL=\"N\" HEIGHT=\"23\">전기말</TH>\n</TR>\n</THEAD>\n\n<TBODY>\n\n<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"30\">\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"228\" HEIGHT=\"23\">지배기업(*1)</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">주식회사 비바리퍼블리카</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">주식회사 비바리퍼블리카</TD>\n</TR>\n\n<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"53\">\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"228\" HEIGHT=\"46\">유의적인 영향력을 행사하는 기업</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"46\">ANT INTERNATIONAL TECHNOLOGIES(SINGAPORE) HOLDING PTE. LTD.</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"46\">ANT INTERNATIONAL TECHNOLOGIES(SINGAPORE) HOLDING PTE. LTD.</TD>\n</TR>\n\n<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"30\">\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" ROWSPAN=\"10\" WIDTH=\"228\" HEIGHT=\"293\">기타(*2)</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">토스뱅크 주식회사</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">토스뱅크 주식회사</TD>\n</TR>\n\n<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"30\">\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">토스증권 주식회사</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">토스증권 주식회사</TD>\n</TR>\n\n<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"30\">\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">토스씨엑스 주식회사</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">토스씨엑스 주식회사</TD>\n</TR>\n\n<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"30\">\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">(주)스포츠토토코리아</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">(주)스포츠토토코리아</TD>\n</TR>\n\n<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"30\">\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">브이씨엔씨㈜</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">브이씨엔씨㈜</TD>\n</TR>\n\n<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"30\">\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">(유)편안한이동</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">(유)편안한이동</TD>\n</TR>\n\n<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"30\">\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">토스플레이스(주)</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">토스플레이스(주)</TD>\n</TR>\n\n<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"30\">\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">토스인컴㈜</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">토스인컴㈜</TD>\n</TR>\n\n<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"30\">\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">㈜아이샵케어</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">㈜아이샵케어</TD>\n</TR>\n\n<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"30\">\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">토스인슈어런스(주) 등</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"23\">-</TD>\n</TR>\n\n<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"53\">\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"228\" HEIGHT=\"46\">기타(*3)</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"46\">ALIPAY SINGAPORE E-COMMERCEPRIVATE LIMITED</TD>\n<TD ALIGN=\"CENTER\" VALIGN=\"MIDDLE\" WIDTH=\"272\" HEIGHT=\"46\">ALIPAY SINGAPORE E-COMMERCEPRIVATE LIMITED</TD>\n</TR>\n</TBODY>\n</TABLE>\n</DOCUMENT>",
+  "writer_response": {
+    "문장들": [
+      {
+        "글": "계류 중인 소송사건은 9건으로, 소송의 결과를 합리적으로 예측할 수 없어 관련 충당부채를 계상하지 않은 상태이다.",
+        "인용": [
+          "6"
+        ],
+        "등급": "확인",
+        "주장슬롯": "current_challenges:issue"
+      }
+    ],
+    "경로표": [
+      {
+        "칸": [
+          "계류 중인 소송사건 9건 — 결과 예측 불가",
+          "충당부채 미계상 (소송 결과 합리적 예측 불가 사유)"
+        ],
+        "인용": [
+          "6"
+        ]
+      }
+    ]
+  },
+  "review_response": {
+    "판정": [
+      {
+        "번호": 37,
+        "장": "current_challenges",
+        "근거": [
+          "6"
+        ],
+        "근거대조": "6: 소송 9건·충당부채 미계상 일치",
+        "결과": "참",
+        "검증근거": {}
+      },
+      {
+        "번호": 57,
+        "장": "current_challenges",
+        "근거": [
+          "6"
+        ],
+        "근거대조": "6: 소송 9건·결과 예측 불가·충당부채 미계상 일치; 소송 자체가 사업 과제인지 연결 근거 없으나 소송 계류 자체가 법적 불확실성 과제로 인정 가능",
+        "결과": "참",
+        "검증근거": {}
+      }
+    ]
+  },
+  "writer_prompt_sha256": "002185a816d2ec2c43242305524549b5543df86fbc1dc524a29efc97f2cb022f",
+  "writer_response_sha256": "02817092cacf453fb2b146d390a828f3cd65411e1f105ab193a4308b712e027e",
+  "review_prompt_sha256": "9f293c889e4e94998fea4c6cdb0e8c297b964998c5dcc4fcb113b83e9b8df520",
+  "review_response_sha256": "368340c65689a93c4e689f7e23046fb8b2f1e17404b5181939284a821105fbd5",
+  "legacy_fragment_text": "계류중인 소송사건은 9건으로 소송금액은 405,535천원입니다. 계류중인 소송사건 등에 대해서는 소송의 결과를 합리적으로 예측할 수 없음에 따라 관련 충당부채를 계상하지 아니하였습니다. 27. 특수관계자 (1) 당기 또는 전기 회사와 거래 또는 채권, 채무 잔액이 있는 주요 특수관계자의 현황은 다음과 같습니다. 구 분 당기말 전기말 지배기업(*1) 주식회사 비바리퍼블리카 주식회사 비바리퍼블리카 유의적인 영향력을 행사하는 기업 ANT INTERNATIONAL TECHNOLOGIES(SINGAPORE) HOLDING PTE. LTD. ANT INTERNATIONAL TECHNOLOGIES(SINGAPORE) HOLDING PTE. LTD. 기타(*2) 토스뱅크 주식회사 토스뱅크 주식회사 토스증권 주식회사 토스증권 주식회사 토스씨엑스 주식회사 토스씨엑스 주식회사 (주)스포츠토토코리아 (주)스포츠토토코리아 브이씨엔씨㈜ 브이씨엔씨㈜ (유)편안한이동 (유)편안한이동 토스플레이스(주) 토스플레이스(주) 토스인컴㈜ 토스인컴㈜ ㈜아이샵케어 ㈜아이샵케어 토스인슈어런스(주) 등 - 기타(*3) ALIPAY SINGAPORE E-COMMERCEPRIVATE LIMITED ALIPAY SINGAPORE E-COMMERCEPRIVATE LIMITED (*1) 최상위지배기업에 해당합니다.(*2) 회사의 지배기업이 지배력 또는 유의적인 영향력을 가지고 있는 기업입니다.(*3) 회사에 유의적인 영향력을 행사하는 ANT INTERNATIONAL TECHNOLOGIES(SINGAPORE) HOLDING PTE. LTD.의 특수관계자입니다. (2) 당기와 전기 중 특수관계자와의 주요 거래 내역은 다음과 같습니다.① 당기 (단위: 천원) 구 분 회사명 영업수익 등 유무형자산취득 유형자산처분 영업비용 등 지배기업 주식회사 비바리퍼블리카 44,106,989 63,913 - 46,749,066 기타 토스뱅크 주식회사 4,259 - - 78,181 토스씨엑스 주식회사 - 155,382 - 2,482,778 토스플레이스㈜ 38,205 - - 30,948 토스인컴㈜ 931 - - - ㈜스포츠토토코리아 1,060,336 - - - 브이씨엔씨㈜ 30,382 - - - ALIPAY SINGAPORE E-COMMERCE PRIVATE LIMITED 19,322,803 - - - ㈜아이샵케어 6,213 - - 11,115 토스인슈어런스(주) - - 585 - 토스증권"
+}

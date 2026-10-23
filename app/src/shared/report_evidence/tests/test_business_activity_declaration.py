@@ -72,3 +72,30 @@ def test_앱과_엔진_문법은_배포경계만_다르다():
     assert (app / "business_activity_declaration.py").read_text(encoding="utf-8").replace(
         "src.shared.report_evidence", "features.evidence_collection") == (
         engine / "business_activity_declaration.py").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("text", (
+    "회사는 전자지불결제대행업을 통하여 원천사로부터 대금을 받은 후 가맹점에 지급하고 있습니다.",
+    "(3) 금융예수금회사는 전자지불결제대행업을 통하여 원천사로부터 대금을 받은 후 가맹점에 지급하고 있습니다.",
+    "당사는 통신장비 제조업을 통하여 고객에게 장비를 공급합니다.",
+))
+def test_명시한_현재업종_수행만_사업정의로_보존한다(text):
+    item = declared_business_item(text)
+    assert item and item in text
+
+
+@pytest.mark.parametrize("text", (
+    "회사는 원천사로부터 대금을 받은 후 가맹점에 지급하고 있습니다.",
+    "회사는 결제대행업을 통하여 원천사로부터 대금을 받은 후 가맹점에 지급할 예정입니다.",
+    "회사는 결제대행업을 통하여 원천사로부터 대금을 받은 후 가맹점에 지급하지 않습니다.",
+    "자회사는 결제대행업을 통하여 원천사로부터 대금을 받은 후 가맹점에 지급하고 있습니다.",
+    "(3) 자회사는 결제대행업을 통하여 원천사로부터 대금을 받은 후 가맹점에 지급하고 있습니다.",
+    "(3) 한빛회사는 통신장비 제조업을 통하여 고객에게 장비를 공급합니다.",
+    "(3) 다른회사는 통신장비 제조업을 통하여 고객에게 장비를 공급합니다.",
+    "회사는 결제대행업을 영위할 목적으로 설립되었습니다.",
+    "회사는 결제대행업을 통하여 원천사로부터 대금을 받은 경우 가맹점에 지급합니다.",
+    "회사는 결제대행업을 통하여 업무를 검토합니다. 가맹점에 지급하고 있습니다.",
+    "회사는 기타 사업을 통하여 고객에게 서비스를 공급합니다.",
+))
+def test_흐름_설립목적_타법인_예정으로_현재업종을_지어내지_않는다(text):
+    assert not declared_business_item(text)

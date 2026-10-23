@@ -8,12 +8,30 @@ import re
 
 from src.shared.report_quality.constants import VERIFIED_PROSE_CLAIM_TYPE
 from src.shared.report_quality.numeric_detection import korean_numeric_tokens
+from src.shared.report_quality.news_translation import translation_receipt_valid
+from src.shared.report_quality.news_translation_constants import TRANSLATION_MANIFEST_KEY
 
 NEWS_NUMBER_TOKEN = re.compile(r"[+-]?\d[\d,]*(?:\.\d+)?(?:\s*(?:조원|억원|만원|천원|원|퍼센트|%|건|명|개|곳|대|회|년|월|일|배|톤|달러))?")
 NEWS_PROTECTED_SECTIONS = frozenset({"identity", "competitive_position"})
+NEWS_THIRD_PARTY_WORD = re.compile(
+    r"(?<![가-힣A-Za-z0-9])제3자(?=(?:에게는|에게|에는|는|가|의|를|와|에|로|도|만)?(?:\s|[.,;:!?\"'“”‘’()]|$))"
+)
+NEWS_ENGLISH_THIRD_PARTY_WORD = re.compile(r"\bthird[ -]part(?:y|ies)\b", re.I)
 
 
-def news_number_tokens(text: str) -> set[str]:
+def news_numeric_text(text: str, *, source_text: str = "") -> str:
+    """자기 인용이 뜻을 뒷받침하는 '제3자'만 수치 비교용 보기에서 가린다.
+
+    공개 문장·원문·좌표는 바꾸지 않는다. 인원수·분기·차수는 그대로 검사한다.
+    """
+    if not (NEWS_THIRD_PARTY_WORD.search(source_text)
+            or NEWS_ENGLISH_THIRD_PARTY_WORD.search(source_text)):
+        return text
+    return NEWS_THIRD_PARTY_WORD.sub("제삼자", text)
+
+
+def news_number_tokens(text: str, *, source_text: str = "") -> set[str]:
+    text = news_numeric_text(text, source_text=source_text)
     return {re.sub(r"\s+", "", match.group()) for match in NEWS_NUMBER_TOKEN.finditer(text)} | korean_numeric_tokens(text)
 
 
@@ -57,8 +75,20 @@ def reviewed_news_prose_problems(fact, sources):
                 or evidence_hash not in source.exact_evidence_hashes):
                 raise ValueError
             texts.append(exact_text)
+            if TRANSLATION_MANIFEST_KEY in record:
+                receipt = record[TRANSLATION_MANIFEST_KEY]
+                req = receipt['request']
+                if (len(bound) != 1 or not translation_receipt_valid(
+                        receipt, claim=fact.claim, quote=exact_text, fragment_id=record['fragment_id'],
+                        section_id=fact.section_owner, claim_slot=fact.claim_slot,
+                        document_identity=source.document_identity,
+                        document_content_sha256=source.document_content_sha256,
+                        source_url=req['source_url'], source_location=req['source_location'], prefix=prefix)):
+                    problems.append("뉴스 번역 검수 증명이 정확 원문·출처·문장에 결속되지 않았습니다")
         claim_text = fact.claim[len(prefix):] if fact.claim.startswith(prefix) else fact.claim
-        if not news_number_tokens(claim_text).issubset(news_number_tokens(" ".join(texts))):
+        source_text = " ".join(texts)
+        if not news_number_tokens(claim_text, source_text=source_text).issubset(
+                news_number_tokens(source_text, source_text=source_text)):
             problems.append("뉴스 산문의 숫자·단위가 정확 원문과 다릅니다")
     except (ValueError, TypeError, KeyError, json.JSONDecodeError):
         problems.append("뉴스 산문의 정확 원문 지문을 재검증할 수 없습니다")

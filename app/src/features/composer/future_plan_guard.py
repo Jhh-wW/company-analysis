@@ -83,6 +83,10 @@ from src.features.composer.future_plan_constants import (
     FUTURE_TEMPORAL_RE,
     FUTURE_DIRECTION_OBJECT_RE,
     POST_ACTIVITY_TIMED_COMPLETION_RE,
+    PROMISSORY_ACTIVITY_RE,
+    PROMISSORY_REPORT_VERB,
+    PROMISSORY_REPORT_TAIL_RE,
+    PROMISSORY_FOLLOWUP_DENIAL_RE,
     GENERIC_SUBJECTS,
     GENERIC_TARGETS,
     MIN_ACTIVITY_CHARS,
@@ -172,6 +176,10 @@ def _bounded_spans(
     if not needle:
         return ()
     right = _VERBAL_RIGHT if verbal else _NOUN_RIGHT
+    if verbal and PROMISSORY_ACTIVITY_RE.fullmatch(needle):
+        # '이어가겠다'를 '이어가겠다고 말했다'에서 찾되 임의 접미사는 벗기지 않는다.
+        right = (r"(?:" + _NOUN_RIGHT + r"|(?=고\s*"
+                 + PROMISSORY_REPORT_VERB + r"(?!" + WORD_CHAR + r")))")
     # ★ 낱말 사이에는 «닫힌 조사»만 끼어들 수 있다. 「이종산업 제휴」가 원문의
     #   「이종산업과의 제휴」와 같은 구임을 알아보되, 내용어가 끼면 다른 구다.
     tokens = [re.escape(token) for token in needle.split() if token]
@@ -378,6 +386,13 @@ def _source_modality(sentence: str, activity_span: tuple[int, int]) -> tuple[str
     """
 
     tail = sentence[activity_span[1]:]
+    activity = sentence[activity_span[0]:activity_span[1]]
+    if PROMISSORY_ACTIVITY_RE.fullmatch(activity):
+        if not PROMISSORY_REPORT_TAIL_RE.fullmatch(tail):
+            return "", FUTURE_MODALITY_NOT_BOUND, ""
+        # 활동에 이미 포함된 '겠'을 건너뛰어 뒤의 보고 동사를 완료로 읽지 않는다.
+        # 기존 첫 양태·부정 검사는 활동 어간부터 그대로 수행한다.
+        tail = activity + tail
     match = _first_modality(tail)
     if match is not None:
         # 시점 부사는 뒤에 오는 활동을 수식한다. 앞 활동 뒤의 '향후 방향성을'
@@ -428,6 +443,18 @@ def _candidate_polarity(cell: str, activity: str) -> bool:
     start, end = spans[0]
     return bool(CANDIDATE_NEGATION_RE.search(cell[end:])
                 or CANDIDATE_NEGATION_RE.search(cell[:start]))
+
+
+def _promissory_followup_denied(source: str, sentence: str, activity: str) -> bool:
+    """같은 원문의 바로 다음 문장이 방금 계획을 명시적으로 철회했는가."""
+    if not PROMISSORY_ACTIVITY_RE.fullmatch(activity):
+        return False
+    sentences = _sentences(_normalized(source))
+    return any(
+        previous == sentence
+        and PROMISSORY_FOLLOWUP_DENIAL_RE.fullmatch(following.strip())
+        for previous, following in zip(sentences, sentences[1:])
+    )
 
 
 def _covering_sentences(source: str, quote_text: str) -> tuple[str, ...]:
@@ -554,6 +581,9 @@ def _one_item_problem(
             )
             if subject_problem:
                 problems.append(subject_problem)
+                continue
+            if _promissory_followup_denied(source, sentence, activity):
+                problems.append(FUTURE_PLAN_DENIED_IN_SOURCE)
                 continue
             mode, modality_problem, negation = _source_modality(sentence, activity_span)
             if modality_problem:
@@ -812,7 +842,7 @@ def _one_prose_item_problem(
         for candidate_span in candidate_spans:
             if _bind_prose_position(
                 source_sentences, candidate_sentence, candidate_span,
-                target, activity, declared, problems,
+                target, activity, declared, problems, source_context=source,
             ):
                 positions.append((sentence_index, candidate_span[0]))
     if positions:
@@ -858,6 +888,8 @@ def _bind_prose_position(
     activity: str,
     declared: str,
     problems: list[str],
+    *,
+    source_context: str = "",
 ) -> bool:
     """후보 문장의 «이 자리 하나»가 원문으로 결속되는지 본다. 잣대는 표와 같다.
 
@@ -902,6 +934,9 @@ def _bind_prose_position(
                 candidate_sentence, candidate_span[0]
             ):
                 problems.append(FUTURE_MODALITY_NOT_BOUND)
+                continue
+            if _promissory_followup_denied(source_context, source_sentence, activity):
+                problems.append(FUTURE_PLAN_DENIED_IN_SOURCE)
                 continue
             mode, modality_problem, negation = _source_modality(
                 source_sentence, activity_span)

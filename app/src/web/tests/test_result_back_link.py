@@ -49,6 +49,9 @@ from src.web import main, report_publication, runtime
 from src.web.tests import report_route_support
 from src.web.tests._visible_text import visible_text
 
+
+pytestmark = pytest.mark.usefixtures("canonical_demo_clock")
+
 _열쇠 = "c3d4e5f6a7b8c9d0c3d4e5f6a7b8c9d0"
 
 #: ★ 화면에 나와야 하는 글자를 «리터럴»로 적는다. 생산 상수를 import해 비교하면

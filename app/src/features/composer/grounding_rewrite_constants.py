@@ -34,6 +34,8 @@ from src.features.composer.grounding_constants import (
     GROUNDING_INVALID,
     GROUNDING_MISSING,
 )
+from src.features.composer.identity_content_constants import IDENTITY_ADMINISTRATIVE_ONLY
+from src.features.composer.financial_interpretation_constants import FINANCIAL_INTERPRETATION_REASONS
 from src.features.composer.prose_own_source_constants import (
     PROSE_OWN_SOURCE_UNSUPPORTED,
 )
@@ -57,6 +59,11 @@ GROUNDING_REWRITE_EXCLUDED_REASONS: Final[frozenset[str]] = frozenset({
     "accounting_policy_boilerplate", "culture_accounting_policy_misplaced",
     "competitive_section_evidence_offcontract",
     "source_practice_unbound",
+    # 행정정보 자체는 틀린 말이 아니며 같은 위치 슬롯의 바꿔쓰기로 사업 설명이
+    # 되지 않는다. 장별 사업 근거를 고르는 빈 장 복구의 기회는 그대로 둔다.
+    IDENTITY_ADMINISTRATIVE_ONLY,
+    # 잘못된 인과는 문구 재작성으로 증명하지 않는다. 정확한 같은 장의 수치 본문은 남긴다.
+    *FINANCIAL_INTERPRETATION_REASONS,
 })
 
 #: 묶음 재작성 프롬프트 전체의 글자 상한. 완전한 자기 인용이 들어갈 후보만 담는다.
@@ -113,6 +120,13 @@ GROUNDING_REWRITE_ABANDON_KEY: Final[str] = "포기"
 #:   하는지 알 수 없다.
 #: ⚠️ 지도에 없는 코드는 «코드 그대로» 보낸다 — 사유를 지어내지 않는다.
 _OWN_REASON_TEXTS: Final[dict[str, str]] = {
+    "disclosure_comparison_period_unbound":
+        "당기·전기 비용 비교의 원공시 보고기간을 확정하지 못했습니다. 자료 제목·공시일·수집일로 "
+        "연도를 추측하지 마십시오. 같은 공시에 명시된 기간이 없으면 기간을 새로 만들지 마십시오",
+    "disclosure_snapshot_date_unsupported":
+        "공시의 보고기간종료일 현재 담보·보증 현황을 현재 지속으로 바꾸었습니다. "
+        "같은 원문의 명시 보고기간말을 문장 앞에 기준일로 밝히거나 당시 현황으로만 쓰십시오. "
+        "자료 수집일·공시일을 사실 기준일로 바꾸거나 다른 사건의 시점을 빌리지 마십시오",
     GROUNDING_INVALID:
         "적어 낸 검증 근거가 인용 원문과 어긋납니다(수치·추세·시점 중 하나가 원문과 다릅니다)",
     GROUNDING_MISSING:
@@ -143,6 +157,7 @@ GROUNDING_REWRITE_REASON_TEXTS: Final[dict[str, str]] = {
     **DIRECT_SUPPORT_REASON_TEXTS,
     **COMBINED_RELATION_REASON_TEXTS,
     **EXECUTIVE_STATUS_REASON_TEXTS,
+    **FINANCIAL_INTERPRETATION_REASONS,
 }
 
 

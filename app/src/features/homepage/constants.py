@@ -415,6 +415,9 @@ WIDE_MAX_PAGES: Final[int] = 12
 #:   않기 위해서다. 그 페이지들은 모든 장이 몫을 채운 뒤 기존 순위로 읽힌다.
 WIDE_SECTION_PAGE_QUOTA: Final[int] = 2
 
+#: 장별 최소 몫 이후에는 일반 기사보다 상품 상세를 먼저 읽는다. 전체 상한은 유지한다.
+WIDE_PRODUCT_DETAIL_PRIORITY: Final[int] = -1
+
 #: HTML 한 페이지에서 일반 탐색 큐로 옮기는 링크 상한. 응답 바이트가 작아도
 #: 수만 개의 짧은 ``<a>``가 queue 정렬과 중복 검사를 폭증시키지 못하게 한다.
 WIDE_MAX_LINKS_PER_PAGE: Final[int] = 200
@@ -513,8 +516,22 @@ WIDE_ATTEMPT_FAILED: Final[str] = "FAILED"
 WIDE_ATTEMPT_TRUNCATED: Final[str] = "TRUNCATED"
 
 #: 원문 위치·수집기 계약에 함께 봉인할 버전 문자열.
-WIDE_COLLECTOR_VERSION: Final[str] = "homepage-wide-collector/5"
-WIDE_PARSER_VERSION: Final[str] = "homepage-wide-parser/2"
+WIDE_COLLECTOR_VERSION: Final[str] = "homepage-wide-collector/6"
+WIDE_PARSER_VERSION: Final[str] = "homepage-wide-parser/4"
+
+# 기관 디렉터리 발견은 DART 홈페이지·IR·공시 URL이 모두 없을 때만 실행한다.
+DIRECTORY_DISCOVERY_TIMEOUT_SEC: Final[int] = 12
+DIRECTORY_DISCOVERY_MAX_REQUESTS: Final[int] = 3  # robots, 회사 검색, 유일한 상세
+
+# 제품 역할은 제품 상세의 실제 현재 기능 문장으로 제한한다.
+PRODUCT_ROLE_DETAIL_PATH: Final[str] = r"(?:^|/)(?:services?|products?|solutions?)/[^/]+"
+PRODUCT_ROLE_EXCLUDED_PATH: Final[str] = r"(?:^|/)(?:news|blog|press|events?|notice|privacy|terms|faq)(?:/|$)"
+PRODUCT_ROLE_FUTURE_OR_CLOSED: Final[str] = r"예정|계획|향후|곧\s*출시|출시될|준비\s*중|출시\s*전|서비스\s*종료|제공\s*중단|coming\s*soon"
+PRODUCT_ROLE_NON_FUNCTION: Final[str] = r"쿠키|개인정보|이용약관|이벤트|행사|프로모션\s*(?:행사|할인)|할인|세미나|설명회|발언|말했|발표했|전환율|인건비|매출\s*(?:상승|증가)|[0-9]\s*(?:%|배)"
+PRODUCT_ROLE_OBJECT: Final[str] = r"UI|화면|업무|데이터|결제|서비스|상품|공정|문서|자금|고객|사용자"
+PRODUCT_ROLE_ACTION: Final[str] = r"(?:연동|등록|수정|운영|편집|관리|구현|설정|조회|처리|통합|자동화|커스텀|제공|적용)[^.!?。]{0,60}(?:할\s*수|합니다|해요|해\s*드|가능|제공)|만들\s*수\s*있도록\s*돕는"
+PRODUCT_ROLE_DEFINITION: Final[str] = r"솔루션|플랫폼|도구|시스템|서비스(?:예요|에요|입니다)|제품(?:이에요|입니다)"
+PRODUCT_ROLE_MAX_TITLE_CHARS: Final[int] = 120
 
 #: 채용·IR·뉴스룸·블로그 호스트·경로를 먼저 살펴보게 하는 우선순위 키워드.
 WIDE_PRIORITY_HOST_KEYWORDS: Final[tuple[str, ...]] = (

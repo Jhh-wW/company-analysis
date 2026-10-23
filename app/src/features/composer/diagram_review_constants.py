@@ -110,6 +110,7 @@ FLOW_PRODUCT_GOODS_CONFLICT_CODE: Final[str] = "flow_product_goods_conflict"
 #: ★ 글자는 `constants.BUSINESS_FLOW_HEADERS`·`OPERATIONS_FLOW_HEADERS`와
 #:   같아야 한다. 어긋나면 `test_flow_generic_cells` 의 대조 시험이 잡는다.
 BUSINESS_FLOW_PRODUCT_HEADER: Final[str] = "제품·서비스"
+BUSINESS_FLOW_ACTION_HEADER: Final[str] = "고객 행동·과금"
 BUSINESS_FLOW_REVENUE_HEADER: Final[str] = "반복·확장 수익"
 FLOW_ACCOUNTING_REVENUE_CODE: Final[str] = "flow_accounting_revenue"
 # 실제 뤼튼 도식의 순수 회계 처리 딱지만 가린다. 선결제·구독 등 거래 설명을
@@ -118,6 +119,17 @@ ACCOUNTING_REVENUE_LABEL_RE: Final[re.Pattern[str]] = re.compile(
     r"(?:(?:선수수익|계약부채)(?:으로|로)?(?:미수행|미이행|수행)의무(?:를)?"
     r"|(?:미수행|미이행|수행)의무(?:를)?(?:선수수익|계약부채)(?:으로|로)?)"
     r"(?:관리|인식|계상)(?:한다|함)?"
+)
+# 고객 행동 칸에 수익모델 대신 들어온 실제 회계정책 문구만 가린다.
+# 구두점·띄어쓰기 차이는 diagram_check._compact_surface에서 정규화한다.
+# 완전 일치로 판정해 거래·금액·수수료 설명이 덧붙은 혼합 셀은 보존한다.
+ACCOUNTING_POLICY_ACTION_LABEL_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:일련의구별되는용역(?:을)?제공(?:하고|하며)?(?:→|⇒|>)?)?"
+    r"(?:(?:일부는)?(?:"
+    r"수행의무이행시점에수익인식"
+    r"|청구권(?:이있는금액으로|기준)(?:"
+    r"수익(?:을)?인식(?:한다|함)?(?:실무적간편법(?:적용)?)?|실무적간편법(?:적용)?)"
+    r")(?:→|⇒|>)?)+"
 )
 
 OPERATIONS_FLOW_ORIGIN_HEADER: Final[str] = "무엇으로 시작하나"

@@ -85,6 +85,13 @@ def _relation_actors(text: str, section_heading: str):
         if index + 1 < len(units) and c.CURRENT_ITEM_END_RE.search(units[index + 1]):
             continue
         body = unit[subject.end():]
+        current_service = c.CURRENT_SERVICE_ROLE_RE.fullmatch(body)
+        if (current_service
+                and not c.GENERIC_SERVICE_NAME_RE.fullmatch(current_service['name'].strip())
+                and not c.EMBEDDED_SUBJECT_RE.search(current_service['function'])
+                and not business_slot_scope_problem(current_service['function'], c.SLOT_ID)):
+            yield subject['actor']
+            continue
         manufacturing = c.MANUFACTURING_RE.search(body)
         if (manufacturing and not c.GENERIC_OBJECT_RE.fullmatch(manufacturing['objects'].strip())
                 and not c.EMBEDDED_SUBJECT_RE.search(manufacturing['objects'])):

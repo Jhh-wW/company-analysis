@@ -18,6 +18,7 @@ from src.features.pipeline.supplementary_research_release import (
     _source_can_ground_body, _visible_fact_ids,
 )
 from src.features.pipeline.supplementary_research_runtime_constants import (
+    SUPPLEMENTARY_RESEARCH_FILTER_EMPTY_REASON,
     SUPPLEMENTARY_RESEARCH_FILTER_NOTICE,
 )
 from src.shared.report_evidence.runtime_port import OfficialEvidenceCollectionResult
@@ -363,7 +364,10 @@ def filter_supplementary_research_report(
                    if _normalized(text) not in invalid_claims
                    and not prose_matches(section, text)[0].intersection(invalid_ids)
                    and citation_number(cite) not in invalid_numbers],
-            empty_reason=(section.empty_reason if prose or tables else SUPPLEMENTARY_RESEARCH_FILTER_NOTICE),
+            empty_reason=(
+                section.empty_reason if prose or tables
+                else SUPPLEMENTARY_RESEARCH_FILTER_EMPTY_REASON
+            ),
         ))
     content_changed = bool(invalid_ids or rejected_lines or sections != report.sections)
     summaries = ([item for item in report.summary_items

@@ -156,10 +156,21 @@ def search_plan(company: NewsCompanyContext, as_of: dt.date) -> tuple[tuple[str,
             query = " ".join(part for part in (expression, region, theme) if part)
             industry_queries.append((query, "sim",
                                      f"industry_{topic}:{anchor.anchor_id}", recent_months))
-        # 회사 검색 두 개를 유지하고 기존 뒤쪽 탐색을 대체한다. 총 호출은 늘리지 않는다.
+        # 회사 검색 두 개와 제품·발표·최신 과거 질의를 보존한다. 총 호출은 늘리지 않는다.
         industry_queries = list(dict.fromkeys(industry_queries))
-        plan = plan[:ic.INDUSTRY_COMPANY_QUERY_COUNT] + industry_queries + plan[ic.INDUSTRY_COMPANY_QUERY_COUNT:]
-        plan = plan[:original_length]
+        prefix = plan[:ic.INDUSTRY_COMPANY_QUERY_COUNT]
+        supplements = plan[ic.INDUSTRY_COMPANY_QUERY_COUNT:]
+        remaining = original_length - len(prefix) - len(industry_queries)
+        selected = set()
+        for topic in c.SEARCH_PRESERVED_COMPANY_TOPICS:
+            match = next((row for row in supplements if row[2] == topic), None)
+            if match is not None and len(selected) < remaining:
+                selected.add(match)
+        for row in supplements:
+            if len(selected) >= remaining:
+                break
+            selected.add(row)
+        plan = prefix + industry_queries + [row for row in supplements if row in selected]
     return tuple(plan)
 
 
@@ -441,7 +452,7 @@ def industry_body_reservations(candidates: list[NewsCandidate], budget: int, *,
 
 def diverse_candidates(candidates: list[NewsCandidate], limit: int, *,
                        company: NewsCompanyContext | None = None) -> tuple[NewsCandidate, ...]:
-    """같은 기간 안에서 이름 관측을 우선하고 각 순위의 주제를 번갈아 읽는다."""
+    """주제별 기회를 유지하며 제목에 대상 전체 이름이 있는 기사부터 읽는다."""
 
     ordered = sorted(candidates, key=lambda item: (item.published_on, item.source_url), reverse=True)
     selected: list[NewsCandidate] = []
@@ -450,6 +461,13 @@ def diverse_candidates(candidates: list[NewsCandidate], limit: int, *,
         for candidate in ordered:
             if candidate.metadata_name_match is name_match:
                 groups[candidate.topics[0] if candidate.topics else "business"].append(candidate)
+        if company is not None:
+            # 최신 종합 기사에 한 번 언급된 회사 때문에 회사 고유 제품 기사가
+            # 밀리지 않게 한다. 제목은 탐색 순위만 정하며 본문 검증은 그대로다.
+            for topic, rows in groups.items():
+                groups[topic] = deque(sorted(
+                    rows, key=lambda item: not mentions_target(item.title, company),
+                ))
         while groups and len(selected) < limit:
             for topic in tuple(groups):
                 selected.append(groups[topic].popleft())

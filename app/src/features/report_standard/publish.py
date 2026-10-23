@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from src.shared.report_quality.news_translation import fact_translation_supported
+from src.shared.report_quality.news_translation_constants import TRANSLATION_MANIFEST_KEY
+
 import json
 import re
 from dataclasses import dataclass, replace
@@ -1043,12 +1046,15 @@ def _location_is_bound(fact_location: str, source_location: str) -> bool:
     )
 
 
-def _evidence_support_problems(fact: FactRecord) -> list[str]:
+def _evidence_support_problems(fact: FactRecord, *, source: Source | None = None) -> list[str]:
     problems: list[str] = []
     terms = list(normalized_support_terms(fact.evidence_support_terms))
+    if TRANSLATION_MANIFEST_KEY in fact.state_evidence and not fact_translation_supported(fact, source=source):
+        problems.append(f"[evidence] {fact.fact_id}: 뉴스 번역 검수 증명의 문장·원문 결속이 다릅니다")
     if (
         len(set(terms)) < 2
         and not historical_performance_numeric_evidence_is_bound(fact)
+        and not fact_translation_supported(fact, source=source)
     ):
         problems.append(
             f"[evidence] {fact.fact_id}: claim과 원문을 잇는 서로 다른 근거어가 두 개 이상 필요합니다"
@@ -1788,7 +1794,7 @@ def _fact_problems(
                 f"[section] {fact.fact_id}: 서로 다른 추진 신호 두 개가 "
                 "서로 다른 원문 사건 절에 결속되지 않았습니다"
             )
-    problems.extend(_evidence_support_problems(fact))
+    problems.extend(_evidence_support_problems(fact, source=sources.get(fact.source_id)))
     problems.extend(_temporal_lexical_problems(fact))
     if _status_stages(fact.claim) != _status_stages(fact.state_evidence):
         problems.append(

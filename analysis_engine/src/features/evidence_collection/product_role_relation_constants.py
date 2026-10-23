@@ -36,21 +36,41 @@ SERVICE_ROLE_RE = re.compile(
     r'(?P<function>[가-힣A-Za-z0-9 ·-]{2,70})\s*서비스(?:를|을)\s*제공하는\s+'
     r'(?P<name>[가-힣A-Za-z0-9_-]{2,30})\s*사업부(?:를|을)\s*주력으로\s*하고\s*있(?:습니다|다)'
 )
+# 사업부 이름이나 '주력' 수식어가 없어도 기능과 현재 제공이 직접 연결된
+# 서비스는 제품 근거다. 기능의 목적어·동사와 구체 이름을 같은 문장에서 요구한다.
+SERVICE_FUNCTION_MAX_CHARS = 250
+SERVICE_NAME_MAX_CHARS = 60
+CURRENT_SERVICE_ROLE_RE = re.compile(
+    rf'^(?P<function>[^.!?;\n]{{2,{SERVICE_FUNCTION_MAX_CHARS}}}?'
+    r'(?:을|를)\s+[가-힣]{2,20}하는)\s+'
+    rf'(?P<name>[가-힣A-Za-z0-9][가-힣A-Za-z0-9 _·()-]{{1,{SERVICE_NAME_MAX_CHARS}}}?)\s*'
+    r'(?P<kind>서비스|플랫폼|솔루션|시스템)(?:을|를)\s*'
+    r'(?:현재\s*)?(?:제공|운영|판매)(?:한다|합니다|하고\s*있(?:다|습니다))$'
+)
+GENERIC_SERVICE_NAME_RE = re.compile(
+    r'^(?:(?:여러|다양한|각종|혁신적인|혁신|새로운|종합|최고의|최적의|편리한|'
+    r'우수한|좋은|해당|이|본|동|자체|자사|핵심|주요)\s*)+$'
+)
 CURRENT_ITEM_END_RE = re.compile(r'^(?:해당|이|본|동)\s*(?:제품|상품|서비스)(?:은|는|이|가|의\s*제공은)\s*[^.!?;\n]{0,30}(?:단종|종료|중단)')
 NAME_BOUNDARY_CHARS = '가-힣A-Za-z0-9_-'
 LEGAL_NAME_RE = re.compile(r'\s+|주식회사|\(주\)|㈜')
 SELF_ACTORS = frozenset({'당사', '회사', '본사', '연결회사'})
 MAX_CONTEXT_EVENTS = 4096
+FICTIONAL_COMPANY_DECLARATION_PATTERN = (
+    r'(?:(?:다음은|교육을\s*위한)\s+)?가상의\s*(?:회사|기업)'
+    r'(?:가[^\n.!?]{0,180}가정합니다|(?:\s*사례)?입니다|(?:을|를)\s*대상으로[^\n.!?]{0,180}실습입니다)'
+)
 EXAMPLE_MARKER_RE = re.compile(
     r'예(?:를\s*들어|를\s*들면|컨대)[\s\S]{0,300}?'
     r'(?:해\s*보겠습니다|가정(?:합니다|한다|해)|이렇습니다|요청(?:합니다|한다)|정의(?:합니다|한다))|'
-    r'(?:프롬프트|요청|실습|프로젝트\s*규칙)의?\s*예시\s*[:：]'
+    r'(?:프롬프트|요청|실습(?:\s*프로젝트)?|프로젝트(?:\s*규칙)?)의?\s*예시\s*[:：]'
+    r'(?:\s*(?:[^.!?;\n]{0,300}?가정(?:합니다|한다|해)|'
+    + FICTIONAL_COMPANY_DECLARATION_PATTERN + r'[.!?](?=\s|$)))?'
 )
 HYPOTHETICAL_MARKER_RE = re.compile(r'가정|가상|가령|해\s*보겠습니다')
 FICTIONAL_COMPANY_DECLARATION_RE = re.compile(
-    r'^[ \t]*(?:다음은\s+)?가상의\s*(?:회사|기업)'
-    r'(?:가[^\n.!?]{0,180}가정합니다|입니다|(?:을|를)\s*대상으로[^\n.!?]{0,180}실습입니다)'
-    r'[.!?](?:\s|$)', re.MULTILINE,
+    r'^[ \t]*' + FICTIONAL_COMPANY_DECLARATION_PATTERN + r'[.!?](?:\s|$)',
+    re.MULTILINE,
 )
 ACTUAL_CASE_HEADING_RE = re.compile(
     r'^(?:실제\s*(?:회사|고객|도입|적용)\s*(?:적용\s*)?사례|고객\s*성공\s*사례)[\s:：]*$'

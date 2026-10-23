@@ -84,3 +84,109 @@ def test_own_source_completion_cannot_supply_an_unstated_completed_claim(source)
     )
     assert result[1] != '참'
     assert any(item.get('reason_code') == COMPLETED_EXECUTION_STATE_MISMATCH for item in diagnostics)
+
+
+@pytest.mark.parametrize('claim', [
+    '회사는 쇼핑몰 창업자를 대상으로 홈택스에 접속하지 않고도 사업자등록 신청을 '
+    '바로 할 수 있는 서비스를 제공하고 있으며, 신청 후 최소 3일 뒤 국세청으로부터 '
+    '사업자등록 신청 완료 메시지를 받을 수 있다고 안내하고 있다.',
+    '회사는 쇼핑몰 운영자를 위한 마케팅 정보 콘텐츠를 공식 채널을 통해 제공하고 '
+    '있으며, 하반기 소비 시즌 프로모션 전략 등을 다루는 콘텐츠가 포함되어 있다.',
+    '회사의 상담 서비스가 온라인으로 제공되고 있다.',
+])
+def test_current_service_is_not_a_completed_company_change_after_review(claim):
+    """실제 생성에서 참 판정을 받은 현재 소개를 과거 실행으로 승격하지 않는다."""
+    diagnostics = []
+    result = _apply_grounding(
+        json.dumps({'판정': [{'번호': 1, '결과': '참', '검증근거': {}}]}, ensure_ascii=False),
+        {1: '참'}, {1: (claim, {'1': claim})}, diagnostics=diagnostics,
+        diagnostic_contexts={1: ('past_changes', '본문', claim)},
+        claim_slots_by_number={1: COMPLETED_EXECUTION_SLOT},
+    )
+    assert result[1] != '참'
+    assert any(item.get('reason_code') == COMPLETED_EXECUTION_STATE_MISMATCH for item in diagnostics)
+    assert completed_execution_status_problem(claim, 'portfolio:product_role') == ''
+
+
+@pytest.mark.parametrize('claim', [
+    '회사는 2025년 상담 서비스를 출시했고 현재 서비스를 제공하고 있다.',
+    '회사는 지난해 교육 콘텐츠를 도입했으며 현재 공식 채널로 제공하고 있다.',
+    '회사는 상담 서비스를 개시했다. 현재 서비스를 제공하고 있다.',
+])
+def test_actual_service_launch_is_preserved_with_current_service_description(claim):
+    assert completed_execution_status_problem(claim, COMPLETED_EXECUTION_SLOT) == ''
+
+
+@pytest.mark.parametrize('claim', [
+    '회사는 2025년에 출시한 상담 서비스를 현재 제공하고 있다.',
+    '회사는 지난해 도입한 교육 콘텐츠를 현재 제공하고 있다.',
+    '회사는 상담 서비스 도입을 완료한 뒤 현재 서비스를 제공하고 있다.',
+    '당사가 2025년에 출시한 서비스를 현재 제공하고 있다.',
+    '회사는 온라인에서 출시한 상담 서비스를 현재 제공하고 있다.',
+])
+def test_explicit_self_completion_modifier_is_not_just_current_introduction(claim):
+    assert completed_execution_status_problem(claim, COMPLETED_EXECUTION_SLOT) == ''
+
+
+@pytest.mark.parametrize('claim', [
+    '회사는 상담 서비스 도입을 완료한 경우 현재 서비스를 제공하고 있다.',
+    '회사는 상담 서비스 도입을 완료한 것이 아님을 밝히며 기존 서비스를 제공하고 있다.',
+    '회사는 상담 서비스 도입을 완료한 바 없음에도 기존 서비스를 제공하고 있다.',
+    '경쟁사가 출시한 서비스를 회사는 현재 제공하고 있다.',
+    '회사는 경쟁사가 출시한 서비스를 현재 제공하고 있다.',
+    '회사는 경쟁사에서 출시한 서비스를 현재 제공하고 있다.',
+    '회사는 자회사에서 도입한 서비스를 현재 제공하고 있다.',
+    '회사는 고객이 신청을 완료한 뒤 상담 서비스를 제공하고 있다.',
+    '회사는 신청을 완료한 고객에게 상담 서비스를 제공하고 있다.',
+])
+def test_completion_modifier_keeps_condition_denial_and_other_actor_boundaries(claim):
+    assert completed_execution_status_problem(claim, COMPLETED_EXECUTION_SLOT) == COMPLETED_EXECUTION_STATE_MISMATCH
+    assert completed_execution_status_problem(claim, 'portfolio:product_role') == ''
+
+
+def test_completion_only_in_source_does_not_change_current_candidate():
+    claim = '회사는 상담 서비스를 제공하고 있다.'
+    source = '회사는 2025년에 출시한 상담 서비스를 현재 제공하고 있다.'
+    result = _apply_grounding(
+        json.dumps({'판정': [{'번호': 1, '결과': '참', '검증근거': {}}]}, ensure_ascii=False),
+        {1: '참'}, {1: (claim, {'1': source})},
+        diagnostic_contexts={1: ('past_changes', '본문', claim)},
+        claim_slots_by_number={1: COMPLETED_EXECUTION_SLOT},
+    )
+    assert result[1] != '참'
+
+
+@pytest.mark.parametrize('claim', [
+    '가온페이는 2025년에 출시한 상담 서비스를 현재 제공하고 있다.',
+    '주식회사 가온은 2025년에 도입한 상담 서비스를 현재 제공하고 있다.',
+])
+def test_new_service_guard_defers_named_completed_actor_to_existing_review(claim):
+    # 회사명 입력이 없는 가드에서 자기 회사로 추정하지 않는다. 이전 의미 검수에 남긴다.
+    assert completed_execution_status_problem(claim, COMPLETED_EXECUTION_SLOT) == ''
+    result = _apply_grounding(
+        json.dumps({'판정': [{'번호': 1, '결과': '거짓', '검증근거': {}}]}, ensure_ascii=False),
+        {1: '거짓'}, {1: (claim, {'1': claim})},
+        diagnostic_contexts={1: ('past_changes', '본문', claim)},
+        claim_slots_by_number={1: COMPLETED_EXECUTION_SLOT},
+    )
+    assert result[1] == '거짓'
+
+
+@pytest.mark.parametrize('actor', ['경쟁사', '자회사', '고객', '관계회사'])
+def test_named_subject_deferral_does_not_cover_explicit_other_actors(actor):
+    claim = f'{actor}가 출시한 상담 서비스를 현재 제공하고 있다.'
+    assert completed_execution_status_problem(claim, COMPLETED_EXECUTION_SLOT) == COMPLETED_EXECUTION_STATE_MISMATCH
+
+
+def test_named_modifier_does_not_expand_preexisting_organization_guard():
+    claim = '가온페이는 2025년에 설립한 연구위원회를 현재 운영하고 있다.'
+    assert completed_execution_status_problem(claim, COMPLETED_EXECUTION_SLOT) == COMPLETED_EXECUTION_STATE_MISMATCH
+
+
+@pytest.mark.parametrize('claim', [
+    '가온페이는 상담 서비스를 현재 제공하고 있다.',
+    '가온페이는 출시한 경우 상담 서비스를 현재 제공하고 있다.',
+    '가온페이는 출시한 것이 아니라 기존 서비스를 현재 제공하고 있다.',
+])
+def test_named_service_guard_keeps_current_only_condition_and_denial(claim):
+    assert completed_execution_status_problem(claim, COMPLETED_EXECUTION_SLOT) == COMPLETED_EXECUTION_STATE_MISMATCH

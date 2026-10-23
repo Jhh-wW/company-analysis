@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import uuid
 from pathlib import Path
@@ -236,6 +237,11 @@ def _persist_immutable_delivery(
 ):
     """시험 보고서를 운영과 같은 자동검사·불변 PDF 완료 경계로 확정한다."""
 
+    # 데모 자료의 생성일과 전달·조회 시계를 맞춘다. 실행 날짜가 달라져도
+    # 정상 전달 시험이 내용 만료 시험으로 바뀌지 않으며 운영 만료 기준은 유지한다.
+    generated_day = dt.date.fromisoformat(report.generated_at)
+    fixed_now = dt.datetime.combine(generated_day, dt.time(hour=12), tzinfo=clock.KST)
+    monkeypatch.setattr(clock, "now_kst", lambda: fixed_now)
     monkeypatch.setenv("APP_DATA_ROOT", str(tmp_path / f"artifacts-{job_id}"))
     return reports_router.finalize_new_report_delivery(
         report_id=job_id,

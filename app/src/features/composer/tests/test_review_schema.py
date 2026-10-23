@@ -103,7 +103,7 @@ def _schema_sha(schema):
     (FLAT_REVIEW_SCHEMA,
      "ec40152ca2ad8aa43192180dd0583bff4a6c3f5e52042ac1f2b915bc7fd0b94d",
      "ff4e031accf5776e3f189483531e5c5270bea8c8d1ec8cd6da75008384f901ab",
-     "7cdc5e597a878676b5110e32f2ea094e722ff45791c0116027e1396c0b46f39c"),
+     "ecae80cef551cbb898bd1bd8fae219fd9bd93a0f16befcbda3db47d3f46a524a"),
     (DIAGRAM_REVIEW_SCHEMA,
      "ba1d778829286673bd6cde6ebb5d559274c78f0202b92d6e4128891736dfc1c8",
      "43db498656efc5545d712fcc1f0c9893fe69fbd1f2dcca8a42a470c03e4bcb8a",
@@ -116,6 +116,13 @@ def test_retry_schema_hash_matches_provider_accepted_schema(schema, accepted, re
     assert relation["required"] == ["근거", "원문", "유형"]
     assert relation["additionalProperties"] is False
     previous = deepcopy(schema)
+    if schema is FLAT_REVIEW_SCHEMA:
+        # 영어 뉴스의 독립 번역 증명 객체 한 칸만 추가했다. 제공자 승인 실측은 아니다.
+        translation = previous["$defs"]["grounding"]["properties"].pop("번역")
+        assert translation["required"] == ["요청SHA", "문장SHA", "원문SHA", "근거", "대응"]
+        assert translation["additionalProperties"] is False
+        assert translation["properties"]["대응"]["items"]["additionalProperties"] is False
+        assert _schema_sha(previous) == "7cdc5e597a878676b5110e32f2ea094e722ff45791c0116027e1396c0b46f39c"
     # 운영 도식 대상·행동 증명의 새 유형 한 항목만 제거하면 직전 스키마가 같다.
     previous["$defs"]["grounding"]["properties"]["관계"]["items"]["properties"]["유형"]["enum"].remove("경로")
     assert _schema_sha(previous) == (
@@ -209,13 +216,20 @@ def test_initial_builders_return_plain_strings_without_schema(kind, empty):
 # paid/9c46-role-origin-prompt-baseline-private.json: 후보·원문·번호·스키마는 같다.
 # 거래 존재와 독립 체결을 구분하는 안내 50자만 역치환해 직전 네 지문을 복원했다.
 # 증거: tmp/audit-20261010/c11-schema-transaction-guide-baseline-private.json.
+# 2026-10-20: 1장 사업 우선 안내 세 문장(130자·UTF-8 325바이트)만 제거하면
+# 직전 네 지문과 HEAD 안내로 재생한 전체 바이트가 같다. 캐시 접두부·스키마 불변.
+# 증거: tmp/quality-audit-20261020-prompt-baselines.json.
 @pytest.mark.parametrize("factory,grouped,expected", (
-        (_golden_case, False, "66811c4f7c637c489ea4a04410b18b71a2be2c234fc86615b031950a6d1be61f"),
-        (_golden_case, True, "78ebdf6952eb113692469a5edda74b1ea22c919251c98dab119e872db90766c0"),
-        (_boundary_case, False, "71335a9a68930aefb05ec45fa13904de73164bf1c8f7ff8ac99f24a2c65103cc"),
-        (_boundary_case, True, "2ddae513cedefc551365a11f1a7e43ac5c289cd5d163303e6e69e72e046b70c0"),
+        (_golden_case, False, "586e20cd01a492e5c4eb7326e56f51b127da71147d93c582df7e2d791b3627de"),
+        (_golden_case, True, "0ab54992f359646e48a4b2e163e614807a72004f4b084b740eb91af70e0ec0fb"),
+        (_boundary_case, False, "3f5eaad6cc657c4dd54a4abbc85940d0632c047482f3dc4c0c1998c2a2b02b4f"),
+        (_boundary_case, True, "1157357aa945876a011e40e76462ab55cf3c5e249e2326d6486908c680df1f81"),
 ))
 def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected):
+    # 2026-10-22: 4·7·9장 안내만 역치환해 직전 네 지문·전체 바이트를 복원했다.
+    # 후보·원문·번호·스키마·캐시 접두부 불변: sixth-review-prompt-byte-proof.json.
+    # 2026-10-22: 3·7장 안내만 역치환해 직전 네 지문/전체 바이트를 확인했다.
+    # 후보·원문·번호·스키마·캐시 접두부 불변: seventh-review-prompt-byte-proof.json.
     # 2장 매출 모집단 안내 101자만 역치환해 기존 네 지문과 전체 바이트를 복원했다.
     # paid/97-prompt-baseline-private.json: 원문·번호·스키마·캐시 접두부 불변.
     # 6장 주어 범위 안내 64자만 제거하면 3728의 네 지문이 복원된다.
@@ -244,6 +258,8 @@ def test_body_prompt_bytes_match_pre_schema_baseline(factory, grouped, expected)
     # 2026-10-07 검수 12항·근거대조 안내·5장 작성범위만 역치환하면 HEAD 네 지문이 정확복구된다.
     # 공통 접두부 +435자, 5장이 있는 골든 suffix만 +204자이며 원문·번호·스키마는 동일하다.
     # 증거: tmp/audit-20260930/paid/8f3e-review-prompt-baseline-complete-private.json.
+    # 2026-10-23 손익 인과 안내만 접두부·4장에 추가했다. 캐시 시험의
+    # 안내 역복원으로 이전 네 지문을 검증하며 스키마 계약은 그대로 둔다.
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
 

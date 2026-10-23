@@ -43,6 +43,16 @@ from src.features.composer.supplement_feedback import supplement_feedback
 from src.features.composer.scope_supplement_feedback import ScopeSupplementFailure, render_scope_supplement_feedback
 from src.features.composer.challenge_response_feedback import ResponseSupplementFailure, render_response_supplement_feedback
 from src.features.composer.partial_evidence import PartialEvidenceView
+from src.features.composer.revenue_source_slot import normalize_revenue_source_slot
+from src.features.composer.portfolio_revenue_content import supplement_portfolio_revenue_source
+from src.features.composer.litigation_draft import prepare_litigation_draft
+from src.features.composer.settlement_candidate import supplement_settlement_candidates
+from src.features.composer.homepage_self_context import normalize_homepage_self_context
+from src.features.composer.homepage_self_context_constants import HOMEPAGE_SELF_CONTEXT_SECTION
+from src.features.composer.citation_labels import (
+    normalize_draft_flow_citations, normalize_draft_sentence_citations,
+)
+from src.features.composer.draft_flow_assets import omit_unstated_draft_flow_asset
 from src.features.composer.partial_evidence_constants import (
     EXACT_EVIDENCE_SCOPE_GUIDE,
     PARTIAL_EVIDENCE_SCOPE_GUIDE,
@@ -420,6 +430,18 @@ def _render_fragments(
             label += (f" · {PLAN_DISCLOSURE_DATE_LABEL}: "
                       + json.dumps(fragment.document_date, ensure_ascii=False)
                       + f" ({PLAN_DISCLOSURE_DATE_PURPOSE})")
+        from src.features.composer.litigation_timing import litigation_period_context
+        if litigation_period_context(fragment):
+            from src.features.composer.litigation_timing_constants import REPORTING_PERIOD_LABEL, REPORTING_PERIOD_GUIDE
+            label += (f" · {REPORTING_PERIOD_LABEL}: "
+                      + json.dumps(fragment.reporting_period, ensure_ascii=False)
+                      + f" ({REPORTING_PERIOD_GUIDE})")
+        from src.features.composer.disclosure_snapshot_timing import disclosure_snapshot_context_date
+        snapshot_date = disclosure_snapshot_context_date(fragment)
+        if snapshot_date:
+            from src.features.composer.disclosure_snapshot_timing_constants import SNAPSHOT_DATE_LABEL, SNAPSHOT_DATE_GUIDE
+            label += (f" · {SNAPSHOT_DATE_LABEL}: " + json.dumps(snapshot_date, ensure_ascii=False)
+                      + f" ({SNAPSHOT_DATE_GUIDE})")
         show_location = fragment.location and (
             not omit_numeric_location
             or not _is_numeric_offset_location(fragment.location)
@@ -1205,6 +1227,8 @@ def _compose_one_section(
     reject_inline_citation_markers: bool = False,
     parse_retry_limit: int = PARSE_RETRY_LIMIT,
     evidence_pairs: EvidencePairMap | None = None,
+    source_fragments: Sequence[CollectedFragment] = (),
+    company_name: str = "",
 ) -> ComposedSection:
     """장 하나를 쓴다. 실패 시 재요청 1회, 그래도 실패면 정직한 안내문으로 남긴다."""
     sentences, raw = _ask_and_parse(
@@ -1242,6 +1266,11 @@ def _compose_one_section(
         if wants_flow and raw
         else ()
     )
+    allowed_source_ids = frozenset(fragment.fragment_id for fragment in source_fragments)
+    flow_rows = tuple(normalize_draft_flow_citations(row, allowed_source_ids) for row in flow_rows)
+    if sentences is not None:
+        sentences = tuple(normalize_draft_sentence_citations(sentence, allowed_source_ids)
+                          for sentence in sentences)
     if wants_flow and not flow_rows:
         # ★ 진단 — 도식이 안 나올 때 «작가가 안 냈는지» «우리가 걸렀는지»를
         #   구분하지 못하면 엉뚱한 데를 고치게 된다(실측에서 두 번 헛짚었다).
@@ -1257,6 +1286,25 @@ def _compose_one_section(
         return ComposedSection(
             section_id=section_id, sentences=(), notice=NOTICE_COMPOSE_FAILED
         )
+    if section_id == HOMEPAGE_SELF_CONTEXT_SECTION:
+        sentences = tuple(normalize_homepage_self_context(
+            sentence, source_fragments, company_name=company_name,
+        ) for sentence in sentences)
+    if section_id == "portfolio":
+        sentences = supplement_portfolio_revenue_source(sentences, source_fragments)
+    if section_id == "current_challenges":
+        fragments_by_id = {fragment.fragment_id: fragment for fragment in source_fragments}
+        sentences = tuple(prepare_litigation_draft(sentence, fragments_by_id, company_name=company_name)
+                          for sentence in sentences)
+    if section_id == "business_model":
+        fragments_by_id = {fragment.fragment_id: fragment for fragment in source_fragments}
+        sentences = tuple(normalize_revenue_source_slot(sentence, fragments_by_id) for sentence in sentences)
+        normalized_rows = tuple(omit_unstated_draft_flow_asset(row, fragments_by_id) for row in flow_rows)
+        omitted_count = sum(before != after for before, after in zip(flow_rows, normalized_rows))
+        if omitted_count:
+            logger.info("사업 도식 검수 전 자기 근거에 없는 일반 자산 칸 정리 행수=%d", omitted_count)
+        flow_rows = normalized_rows
+        sentences, flow_rows = supplement_settlement_candidates(sentences, flow_rows, source_fragments)
     if not sentences:
         return ComposedSection(
             section_id=section_id,
@@ -1905,6 +1953,8 @@ def compose_sections(
                 ),
             ),
             section_ask,
+            source_fragments=section_fragments,
+            company_name=company_name,
             reject_inline_citation_markers=independent,
             # packet/FULL 호출 계약은 장마다 정확히 한 번이다. 형식 오류를
             # 재호출로 감추지 않고 해당 장을 fail-closed 안내문으로 남긴다.
@@ -2039,6 +2089,8 @@ def compose_selected_sections(
                 # 캐시 표식을 켜지 않는다(기본값 False 유지).
             ),
             ask,
+            source_fragments=prepared.packets[section_id],
+            company_name=company_name,
             reject_inline_citation_markers=True,
             parse_retry_limit=0,
             evidence_pairs=(

@@ -15,10 +15,41 @@ def _surface(text: str) -> str:
     return "".join(unicodedata.normalize("NFKC", text).split())
 
 
+def business_declaration_scope_allows(text: str) -> bool:
+    """새 현재 사업 신호를 타사 주어·조건부 진술에 붙이지 않는다."""
+    return not c.BUSINESS_DECLARATION_SCOPE_EXCLUDED_RE.search(_surface(text))
+
+
+def revenue_source_declared(text: str, context: str = "") -> bool:
+    """수익원 선언 내부의 열거 절도 보존하고 다른 회계 절은 빌리지 않는다."""
+    if context:
+        parts = tuple(_surface(unit) for unit in c.SENTENCE_BOUNDARY_RE.split(text) if unit.strip())
+        matching_context = tuple(unit for unit in c.SENTENCE_BOUNDARY_RE.split(context)
+                                 if parts and all(part in _surface(unit) for part in parts))
+        if matching_context and not any(business_declaration_scope_allows(unit) for unit in matching_context):
+            return False
+    surface = _surface(text)
+    if (business_declaration_scope_allows(text) and c.REVENUE_SOURCE_RE.search(surface)) or any(
+        business_declaration_scope_allows(unit) and c.REVENUE_SOURCE_RE.search(_surface(unit))
+        for unit in c.SENTENCE_BOUNDARY_RE.split(text)
+    ):
+        return True
+    for unit in c.SENTENCE_BOUNDARY_RE.split(context):
+        context_surface = _surface(unit)
+        start = context_surface.find(surface) if surface else -1
+        if start >= 0 and business_declaration_scope_allows(unit) and any(
+            start < match.end() and match.start() < start + len(surface)
+            for match in c.REVENUE_SOURCE_RE.finditer(context_surface)
+        ):
+            return True
+    return False
+
+
 def _administration(text: str, slot_id: str) -> bool:
     surface = _surface(text)
     if slot_id == c.PRODUCT_ROLE_SLOT:
-        return bool(c.PRODUCT_POSITIONING_RE.search(surface))
+        return bool(c.PRODUCT_POSITIONING_RE.search(surface)
+                    or c.PRODUCT_CORPORATE_FACT_RE.search(surface))
     if slot_id in c.REVENUE_RELATION_SLOTS:
         account = (c.REVENUE_ACCOUNT_RE.search(surface)
                    or (c.REVENUE_IMPLICIT_ACCOUNT_RE.search(surface)
@@ -48,10 +79,14 @@ def _personal_past_role(text: str, context: str = "") -> bool:
 def _business_fact(text: str, slot_id: str, context: str = "") -> bool:
     surface = _surface(text)
     if slot_id == c.PRODUCT_ROLE_SLOT:
+        if c.PRODUCT_CORPORATE_FACT_RE.search(surface):
+            return bool(c.PRODUCT_CORPORATE_CURRENT_ROLE_RE.search(surface))
         return bool(c.OPERATING_ACTION_RE.search(surface)
                     or c.PRODUCT_NAMED_SOLUTION_RE.search(text)
                     or "|" in text)
     if slot_id in c.REVENUE_RELATION_SLOTS:
+        if slot_id == c.REVENUE_SLOT and revenue_source_declared(text, context):
+            return True
         if c.REVENUE_POLICY_RE.search(surface):
             return bool(c.REVENUE_TRANSACTION_RE.search(surface))
         return bool(c.REVENUE_ACTIVITY_RE.search(surface)
@@ -163,6 +198,13 @@ def business_slot_scope_problem(text: str, slot_id: str) -> str:
         _business_fact(scoped.score_text, slot_id, text)
         or (remaining and remaining.search(_surface(scoped.score_text)))
     ) else ""
+
+
+def product_corporate_only_problem(text: str) -> str:
+    """의미칸 없는 구형 조각도 순수 법인 행정·연혁으로 제품 설명을 대신하지 않는다."""
+    if not c.PRODUCT_CORPORATE_FACT_RE.search(_surface(text)):
+        return ""
+    return business_slot_scope_problem(text, c.PRODUCT_ROLE_SLOT)
 
 
 def business_slot_quote_problem(text: str, slot_id: str, quote_start: int, quote_end: int) -> str:

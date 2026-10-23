@@ -16,14 +16,25 @@ from typing import Final, Optional, Sequence
 from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
 from src.features.composer.future_plan_constants import FUTURE_SECTION_FORWARD_RE
 from src.features.composer.plan_status_scope import plan_status_fact_state
+from src.features.composer.completed_news_timing import completed_news_as_of
 from src.features.composer.port import ComposedSentence
 from src.features.composer.prose_own_source import own_source_support_terms
 from src.features.composer.source_actor_scope import source_actor_subject_scope
+from src.features.composer.disclosure_transaction_timing import disclosure_transaction_timing
+from src.features.composer.disclosure_snapshot_timing import (
+    disclosure_snapshot_date, disclosure_snapshot_timing_problem,
+)
+from src.features.composer.disclosure_comparison_timing import (
+    disclosure_comparison_date, disclosure_comparison_timing_problem,
+)
+from src.features.composer.disclosure_transaction_timing_constants import REVIEWED_CLAIM_SHA256_KEY
 from src.features.pipeline.port import FactRecord
 from src.features.provenance.sources import Source, SourceKind, exact_evidence_text_hash
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
 from src.shared.report_quality.evidence_support import prose_evidence_support_ready
 from src.shared.report_quality.fact_binding import fact_evidence_binding
+from src.shared.report_quality.news_translation import translation_receipt_valid
+from src.shared.report_quality.news_translation_constants import TRANSLATION_MANIFEST_KEY
 from src.shared.report_quality.constants import (
     INTERPRETATION_CLAIM_TYPE,
     OFFICIAL_PROSE_EXACT_TEXT_KEY,
@@ -157,6 +168,23 @@ def evaluate_verified_prose_fact(
         if failed:
             return ProseFactBuildResult(None, reason)
 
+    snapshot_sources = {item.fragment_id: item.exact_text for item in evidence}
+    snapshot_fragments = {item.fragment_id: item.source for item in evidence}
+    snapshot_problem = disclosure_snapshot_timing_problem(
+        claim, snapshot_sources, snapshot_fragments, baseline_date=as_of_date,
+    )
+    if snapshot_problem:
+        return ProseFactBuildResult(None, snapshot_problem)
+    snapshot_as_of = disclosure_snapshot_date(claim, snapshot_sources, snapshot_fragments)
+    comparison_problem = disclosure_comparison_timing_problem(
+        claim, snapshot_sources, snapshot_fragments, company_name=company_name, baseline_date=as_of_date,
+    )
+    if comparison_problem:
+        return ProseFactBuildResult(None, comparison_problem)
+    comparison_as_of = disclosure_comparison_date(
+        claim, snapshot_sources, snapshot_fragments, company_name=company_name, baseline_date=as_of_date,
+    )
+
     subject_scope = source_actor_subject_scope(
         claim, tuple(item.source_context_json for item in evidence if item.source_context_json),
         company_name=_normalized_text(company_name),
@@ -172,6 +200,15 @@ def evaluate_verified_prose_fact(
     )
     if practice_problem:
         return ProseFactBuildResult(None, practice_problem)
+
+    transaction_timing = disclosure_transaction_timing(
+        claim, tuple((item.exact_text, item.source) for item in evidence),
+        section_id=section_id, company_name=company_name, as_of_date=as_of_date,
+    ) if sentence.grade == GRADE_CONFIRMED else None
+    if transaction_timing is not None:
+        # 원 검수 문장은 변경하지 않는다. 같은 출처로 확정한 기간 표기만
+        # 공개 표시와 Fact 주장 양쪽에 동일하게 운반한다.
+        claim = transaction_timing.public_claim
 
     # FULL에서 확인 등급 산문에 숫자 토큰이 있으면 공식 출처 조각의 원문을 함께 싣는다.
     # 싣는 조건은 안전 판정이 수치 결속을 요구하는 조건(공개 숫자 감지)과 같은 술어다.
@@ -216,15 +253,40 @@ def evaluate_verified_prose_fact(
             # 보도 수치는 계산값이 아니다. 최종 품질 검사가 날짜·출처와 함께
             # 실제 숫자·단위를 재대조할 정확 원문을 사실 결속 안에 남긴다.
             manifest[-1]["news_exact_text"] = item.exact_text
-        elif numeric_confirmed_claim:
+        elif numeric_confirmed_claim or comparison_as_of or (
+            transaction_timing is not None and transaction_timing.public_claim != _normalized_text(sentence.text)
+        ):
             # ★ 확인 등급 공식 원문 산문의 숫자는 FULL 안전 판정이 «인용 조각 원문에
             #   그대로 있는가»를 바이트 지문과 함께 다시 대조한다(ADR 0005). 그 대조에
             #   쓸 원문을 사실 결속 안에 싣는다. «원문을 문장마다 중복 저장하지 않는다»
             #   원칙의 좁은 예외다 — FULL·확인 등급·숫자 든 산문에만.
             manifest[-1][OFFICIAL_PROSE_EXACT_TEXT_KEY] = item.exact_text
+        if transaction_timing is not None and transaction_timing.public_claim != _normalized_text(sentence.text):
+            # 날짜를 표시한 일반 산문의 원 검수 주장 지문이다. 이 값만 믿지 않고
+            # 공개 투영은 같은 exact 원문·출처 신원으로 기간을 다시 계산한다.
+            manifest[-1][REVIEWED_CLAIM_SHA256_KEY] = hashlib.sha256(
+                _normalized_text(sentence.text).encode("utf-8"),
+            ).hexdigest()
+
+    translation_bound = False
+    if sentence.news_translation_receipt:
+        if len(evidence) != 1 or sentence.grade != GRADE_CONFIRMED:
+            return ProseFactBuildResult(None, "news_translation_proof_invalid")
+        item = evidence[0]
+        source = item.source
+        translation_bound = source.kind is SourceKind.NEWS and translation_receipt_valid(
+            sentence.news_translation_receipt, claim=claim, quote=item.exact_text,
+            fragment_id=item.fragment_id, section_id=section_id, claim_slot=claim_slot,
+            document_identity=document_identity(source), document_content_sha256=source.document_content_sha256,
+            source_url=source.url, source_location=source.location,
+            prefix=f'{source.published_at} {source.publisher} 보도에 따르면, ',
+        )
+        if not translation_bound:
+            return ProseFactBuildResult(None, "news_translation_proof_invalid")
+        manifest[0][TRANSLATION_MANIFEST_KEY] = json.loads(sentence.news_translation_receipt)
 
     support_terms = _support_terms(claim, evidence)
-    if not prose_evidence_support_ready(
+    if not translation_bound and not prose_evidence_support_ready(
         (
             VERIFIED_PROSE_CLAIM_TYPE
             if sentence.grade == GRADE_CONFIRMED
@@ -239,6 +301,21 @@ def evaluate_verified_prose_fact(
     # 않는다. 이 표지는 시점 metadata만 보수화하며 인용 검수의 승인을 대신하지 않는다.
     forward_claim = bool(FUTURE_SECTION_FORWARD_RE.search(claim))
     status_time, plan_status = plan_status_fact_state(claim, claim_slot)
+    completed_news_date = completed_news_as_of(
+        claim, quote=evidence[0].exact_text, publisher=primary.publisher,
+        published_on=primary.published_at, baseline_date=str(as_of_date),
+    ) if (sentence.grade == GRADE_CONFIRMED and len(evidence) == 1
+          and primary.kind is SourceKind.NEWS and not forward_claim and not status_time) else ""
+    from src.features.composer.litigation_timing import litigation_snapshot_date, litigation_timing_problem
+    timing_problem = litigation_timing_problem(
+        claim, {item.fragment_id: item.exact_text for item in evidence},
+        {item.fragment_id: item.source for item in evidence}, section_id=section_id,
+    )
+    if timing_problem:
+        return ProseFactBuildResult(None, timing_problem)
+    litigation_as_of = litigation_snapshot_date(
+        claim, ((item.exact_text, item.source.reporting_period, item.source.publisher) for item in evidence),
+    ) if section_id == "current_challenges" else ""
     fact = FactRecord(
         fact_id=_fact_id(
             company_name=company_name,
@@ -266,11 +343,11 @@ def evaluate_verified_prose_fact(
             else INTERPRETATION_CLAIM_TYPE
         ),
         section_owner=section_id,
-        time_state=status_time or ("future" if forward_claim else _TIME_STATE_BY_SECTION.get(section_id, "present")),
+        time_state=("past" if transaction_timing or comparison_as_of or completed_news_date or ((snapshot_as_of or litigation_as_of) and (snapshot_as_of or litigation_as_of) < str(as_of_date)) else status_time or ("future" if forward_claim else _TIME_STATE_BY_SECTION.get(section_id, "present"))),
         plan_status=plan_status,
-        as_of=str(as_of_date or "").strip(),
+        as_of=(transaction_timing.as_of if transaction_timing else comparison_as_of or snapshot_as_of or litigation_as_of or completed_news_date or str(as_of_date or "").strip()),
         source_id=source_ids[0],
-        source_type=primary.source_type or primary.kind.value,
+        source_type=primary.source_type,
         source_title=primary.title or primary.label,
         source_publisher=primary.publisher,
         source_host=primary.host,

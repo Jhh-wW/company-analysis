@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 import hashlib
 import json
+import pytest
 
 from src.features.composer.constants import GRADE_CONFIRMED
 from src.features.composer.port import ComposedReport, ComposedSection, ComposedSentence
@@ -24,7 +25,9 @@ from src.shared.report_quality.dto import (
     ReportSectionCandidate,
     SourceDocument,
 )
-from src.shared.report_quality.fact_binding import fact_evidence_binding
+from src.shared.report_quality.fact_binding import (
+    fact_evidence_binding, fact_primary_source_metadata_mismatches,
+)
 from src.shared.report_quality.models import ReleaseDecision
 from src.shared.report_quality.source_identity import document_identity
 
@@ -33,6 +36,7 @@ def _source(number: int, text: str) -> Source:
     return Source(
         number=number,
         kind=SourceKind.OTHER,
+        source_type=SourceKind.OTHER.value,
         label=f"공식 자료 {number}",
         source_id=f"source-{number}",
         title=f"공식 문서 {number}",
@@ -82,6 +86,26 @@ def test_검증된_일반문장은_모든_인용의_신원과_원문해시에_�
         exact_evidence_text_hash(item.exact_text) for item in _evidence()
     ]
     assert fact.evidence_binding == fact_evidence_binding(fact)
+
+
+@pytest.mark.parametrize("source_type", ("", "공식 공시"))
+def test_prose_copies_canonical_source_type_without_promoting_legacy(source_type):
+    evidence = tuple(replace(item, source=replace(
+        item.source, kind=SourceKind.FILING, source_type=source_type,
+    )) for item in _evidence())
+    fact = build_verified_prose_fact(
+        _sentence(), section_id="business_model", company_name="예시회사",
+        as_of_date="2026-10-21", evidence=evidence,
+    )
+    assert fact is not None
+    assert fact.source_type == source_type
+    assert fact_primary_source_metadata_mismatches(fact, evidence[0].source) == ()
+    assert fact.evidence_binding == fact_evidence_binding(fact)
+
+    # 공개 지문을 다시 계산해도 출처 정본과 다른 분류를 붙일 수 없다.
+    changed = replace(fact, source_type="외부 분석")
+    changed = replace(changed, evidence_binding=fact_evidence_binding(changed))
+    assert fact_primary_source_metadata_mismatches(changed, evidence[0].source) == ("source_type",)
 
 
 def _actor_evidence() -> ProseEvidence:

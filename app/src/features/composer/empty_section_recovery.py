@@ -29,8 +29,13 @@ from src.features.composer.empty_section_recovery_constants import (
 from src.features.composer.logic import AskFn, extract_json_payload, parse_section_response, _strip_inline_citation_markers
 from src.features.composer.port import AskFatalError, CollectedFragment, ComposedReport, ComposedSection
 from src.features.composer.verify import verify_report
+from src.features.composer.revenue_source_slot import normalize_revenue_source_slot
+from src.features.composer.citation_labels import normalize_draft_sentence_citations
+from src.features.composer.portfolio_revenue_content import supplement_portfolio_revenue_source
+from src.features.composer.litigation_draft import prepare_litigation_draft
 from src.features.composer.structured_claims import enforce_public_numeric_safety
 from src.shared.report_evidence.constants import FORMAL_DOCUMENT_SOURCE_KINDS
+from src.shared.report_evidence.policy import required_slots_for
 
 logger = logging.getLogger(__name__)
 
@@ -49,31 +54,81 @@ def _section_context_metadata(fragment: CollectedFragment) -> dict[str, str]:
     return {SECTION_CONTEXT_LABEL: parse_section_context(fragment.section_context_json)["text"]}
 
 
+def _select_recovery_evidence(
+    fragments: Sequence[CollectedFragment], section_id: str,
+) -> tuple[CollectedFragment, ...]:
+    """같은 질문의 반복보다 보완 근거를 먼저 담고 원래 순서와 원문을 보존한다."""
+    selected: set[int] = set()
+    covered_slots: set[str] = set()
+    required_slots = set(required_slots_for(section_id))
+    chars = 0
+
+    def select(index: int, *, replace_redundant: bool = False) -> bool:
+        nonlocal chars
+        fragment = fragments[index]
+        if index in selected:
+            return False
+        replaced: set[int] = set()
+        next_chars = chars + len(fragment.text)
+        if (len(selected) >= MAX_EMPTY_RECOVERY_FRAGMENTS
+                or next_chars > MAX_EMPTY_RECOVERY_EVIDENCE_CHARS):
+            if not replace_redundant:
+                return False
+            # 뒤 조각이 기존 대표의 필수 칸까지 직접 지지하면 중복만 교체한다.
+            # 다른 필수 칸을 버려 새 칸을 얻거나 원문을 잘라 예산을 맞추지 않는다.
+            incoming_slots = required_slots.intersection(fragment.supported_claim_slots)
+            replaced = {
+                prior for prior in selected
+                if required_slots.intersection(fragments[prior].supported_claim_slots)
+                <= incoming_slots
+            }
+            next_chars -= sum(len(fragments[prior].text) for prior in replaced)
+            if (len(selected) - len(replaced) >= MAX_EMPTY_RECOVERY_FRAGMENTS
+                    or next_chars > MAX_EMPTY_RECOVERY_EVIDENCE_CHARS):
+                return False
+        selected.difference_update(replaced)
+        selected.add(index)
+        covered_slots.update(fragment.supported_claim_slots)
+        chars = next_chars
+        return True
+
+    # 제품 설명만 여섯 조각을 담아 뒤의 수익 연결을 버리면 재작성해도
+    # 빈 장을 회복할 수 없다. 원문에 이미 배정된 필수 칸부터 하나씩 보존한다.
+    for slot in required_slots_for(section_id):
+        if slot in covered_slots:
+            continue
+        # 대표 조각은 짧은 적격 원문부터 고른다. 같은 칸의 긴 문단 하나가
+        # 문자 예산을 독점해 뒤 칸을 다시 밀어내지 않게 한다.
+        for index in sorted(range(len(fragments)), key=lambda index: (len(fragments[index].text), index)):
+            fragment = fragments[index]
+            if slot in fragment.supported_claim_slots and select(index, replace_redundant=True):
+                break
+    for index in range(len(fragments)):
+        select(index)
+    return tuple(fragments[index] for index in sorted(selected))
+
+
 def recovery_evidence(fragments: Sequence[CollectedFragment]) -> dict[str, tuple[CollectedFragment, ...]]:
     """이미 신원이 결속된 공식 조각의 해당 장 slot만 사용한다."""
     result = {}
     for section_id in SECTION_IDS:
-        selected = []
-        chars = 0
+        eligible = []
+        allowed_slots = set(CLAIM_SLOTS_BY_SECTION[section_id])
         for fragment in fragments:
             if (fragment.formal_source_kind not in FORMAL_DOCUMENT_SOURCE_KINDS
                     or not fragment.document_identity or not fragment.document_content_sha256
                     or not fragment.identity_binding or not fragment.text.strip()
-                    or not any(slot.startswith(section_id + ":") for slot in fragment.supported_claim_slots)):
+                    or not allowed_slots.intersection(fragment.supported_claim_slots)):
                 continue
             if section_id == "culture" and not any(
                 _clause_carries_section_subject(clause)
                 for clause in SOURCE_CLAUSE_SPLIT_RE.split(fragment.text)
             ):
                 continue
-            if chars + len(fragment.text) > MAX_EMPTY_RECOVERY_EVIDENCE_CHARS:
-                continue
-            selected.append(fragment)
-            chars += len(fragment.text)
-            if len(selected) >= MAX_EMPTY_RECOVERY_FRAGMENTS:
-                break
+            eligible.append(fragment)
+        selected = _select_recovery_evidence(eligible, section_id)
         if selected:
-            result[section_id] = tuple(selected)
+            result[section_id] = selected
     return result
 
 
@@ -457,7 +512,18 @@ def recover_empty_sections(
         parsed = parse_section_response(json.dumps(usable[section_id], ensure_ascii=False), section_id,
                                         reject_inline_citation_markers=True)
         allowed = {f.fragment_id for f in evidence[section_id]}
+        parsed = tuple(normalize_draft_sentence_citations(sentence, allowed)
+                       for sentence in (parsed or ()))
+        if section_id == "portfolio":
+            parsed = supplement_portfolio_revenue_source(parsed, evidence[section_id])
         slots_by_fragment = supported_slots[section_id]
+        fragments_by_id = {fragment.fragment_id: fragment for fragment in evidence[section_id]}
+        if section_id == "current_challenges":
+            parsed = tuple(prepare_litigation_draft(sentence, fragments_by_id, company_name=company_name)
+                           for sentence in parsed)
+        if section_id == "business_model":
+            parsed = tuple(normalize_revenue_source_slot(sentence, fragments_by_id)
+                           for sentence in (parsed or ()))
         sentences = tuple(
             sentence for sentence in (parsed or ())
             if sentence.grade == GRADE_CONFIRMED and sentence.citations

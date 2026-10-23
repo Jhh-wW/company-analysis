@@ -14,6 +14,7 @@ from src.features.composer.news_constants import (
     NEWS_VALID_EXCLUSION_REASONS,
     NEWS_REJECTION_REASONS,
     NEWS_KOREAN_SYLLABLE_PATTERN,
+    NEWS_REDUNDANT_SAME_REPORT_LEAD_RE,
     NEWS_WRITER_ATTRIBUTION_LEAD_RE,
 )
 from src.features.composer.news_block import _is_news_fragment, news_ownership_from_claim_slots
@@ -215,13 +216,24 @@ def _attribute_news_candidate(sentence, news):
         return sentence
     prefix = attribution_prefix(cited[0])
     if sentence.text.startswith(prefix):
-        return sentence
+        body = sentence.text[len(prefix):]
+        normalized_body = _strip_same_report_lead(body)
+        if normalized_body == body:
+            return sentence
+        return replace(sentence, text=prefix + normalized_body)
+    text = _strip_same_report_lead(sentence.text)
     # 작가가 스스로 단 비규격 머리말은 같은 날짜·발행처일 때만 규격으로 바꾼다.
     # 머리말을 겹쳐 붙이면 날짜 숫자가 원문에 없는 수치로 읽혀 정상 문장이 떨어진다.
-    lead = NEWS_WRITER_ATTRIBUTION_LEAD_RE.match(sentence.text)
-    if lead is not None and sentence.text[lead.end():].strip() and _writer_lead_matches(lead, cited[0]):
-        return replace(sentence, text=prefix + sentence.text[lead.end():])
-    return replace(sentence, text=prefix + sentence.text)
+    lead = NEWS_WRITER_ATTRIBUTION_LEAD_RE.match(text)
+    if lead is not None and text[lead.end():].strip() and _writer_lead_matches(lead, cited[0]):
+        text = _strip_same_report_lead(text[lead.end():])
+    return replace(sentence, text=prefix + text)
+
+
+def _strip_same_report_lead(text: str) -> str:
+    """문장 맨 앞의 정확한 상대 머리말 하나만 걷어낸다."""
+    lead = NEWS_REDUNDANT_SAME_REPORT_LEAD_RE.match(text)
+    return text[lead.end():] if lead is not None else text
 
 
 def retain_verified_news(report, fragments, *, review_input=None, diagnostics=None):
@@ -267,8 +279,10 @@ def retain_verified_news(report, fragments, *, review_input=None, diagnostics=No
             if not re.search(NEWS_KOREAN_SYLLABLE_PATTERN, sentence.text[len(prefix):]):
                 record(sentence, section.section_id, "게시조건", "korean_body_unverified")
                 return False
-            supported = news_number_tokens(sentence.text[len(prefix):]).issubset(
-                news_number_tokens(" ".join(news[fid].text for fid in sentence.citations)))
+            source_text = " ".join(news[fid].text for fid in sentence.citations)
+            supported = news_number_tokens(
+                sentence.text[len(prefix):], source_text=source_text,
+            ).issubset(news_number_tokens(source_text, source_text=source_text))
             if not supported:
                 record(sentence, section.section_id, "게시조건", "unsupported_number")
             return supported

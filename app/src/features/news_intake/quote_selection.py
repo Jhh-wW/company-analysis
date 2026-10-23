@@ -53,6 +53,58 @@ def quote_response_sha256(raw: object) -> str | None:
         return None
 
 
+def _dependent_statement(text: str) -> bool:
+    return bool(c.QUOTE_DEPENDENT_STATEMENT_PREFIX_RE.match(text)
+                and c.QUOTE_DIRECT_STATEMENT_RE.search(text)
+                and c.QUOTE_DIRECT_STATEMENT_END_RE.search(text))
+
+
+def _preceding_statement_context_ranges(body, units, company, target_starts):
+    """역참조 발언과 다음 회사 문장에 바로 앞 문맥을 붙인 기존 범위를 우선한다."""
+    if company is None:
+        return []
+    ranges = []
+    for index in target_starts:
+        if index < c.QUOTE_DEPENDENT_CONTEXT_SENTENCES:
+            continue
+        start, context_end = units[index - c.QUOTE_DEPENDENT_CONTEXT_SENTENCES]
+        statement_start, statement_end = units[index - c.QUOTE_PRECEDING_CONTEXT_SENTENCES]
+        following_start, end = units[index]
+        context = body[start:context_end]
+        if (end - start <= c.QUOTE_MAX_CHARS
+                and _dependent_statement(body[statement_start:statement_end])
+                and not c.QUOTE_DEPENDENT_STATEMENT_PREFIX_RE.match(context)
+                and mentions_target(context, company)
+                and '\n' not in body[context_end:statement_start]
+                and '\n' not in body[statement_end:following_start]
+                and _selection_subject_supported(body[start:end], company, body)):
+            ranges.append((start, end))
+    return ranges
+
+
+def _self_contained_statement_choices(output, body, units, company):
+    """출력표 안의 동일 본문 포함 후보가 있을 때만 단독 역참조 발언을 뺀다.
+
+    사건 의미를 판정하거나 원문을 확장하지 않는다. 남은 후보도 새 선택·주어 검증이 필요하다.
+    """
+    if company is None:
+        return output
+    unit_ends = dict(units)
+    def dependent(row):
+        start, end = row['start'], row['end']
+        first_end = unit_ends.get(start)
+        if first_end is None or first_end > end or not _dependent_statement(body[start:first_end]):
+            return False
+        return any(
+            other['start'] < start and other['end'] == end
+            and not c.QUOTE_DEPENDENT_STATEMENT_PREFIX_RE.match(body[other['start']:end])
+            and mentions_target(body[other['start']:start], company)
+            and _selection_subject_supported(body[other['start']:end], company, body)
+            for other in output
+        )
+    return [row for row in output if not dependent(row)]
+
+
 def quote_candidates(candidate: NewsCandidate, body: str,
                      company: NewsCompanyContext | None = None) -> list[dict]:
     """문장·문단과 인접 범위만 제시하며 본문 문자열을 복제하지 않는다."""
@@ -79,6 +131,7 @@ def quote_candidates(candidate: NewsCandidate, body: str,
     # 대상명으로 시작하는 연속 범위는 선택지일 뿐 해당 사건의 주어라는 판정이 아니다.
     target_starts = [i for i, (start, end) in enumerate(units)
                      if company is not None and mentions_target(body[start:end], company)]
+    ranges.extend(_preceding_statement_context_ranges(body, units, company, target_starts))
     # 관계 문장의 생략된 행위주어를 읽을 수 있도록 직전 문장과 정확히 이어 준다.
     # 선택 기회일 뿐 회사 귀속 판정은 기존 원문·주어 검수에 그대로 남긴다.
     ranges.extend((units[i - c.QUOTE_PRECEDING_CONTEXT_SENTENCES][0], units[i][1])
@@ -112,7 +165,7 @@ def quote_candidates(candidate: NewsCandidate, body: str,
                        "end_text": text[-c.QUOTE_BOUNDARY_PREVIEW_CHARS:]})
         if len(output) >= c.QUOTE_MAX_CANDIDATES_PER_ARTICLE:
             break
-    return output
+    return _self_contained_statement_choices(output, body, units, company)
 
 
 def quote_schema(schema: dict, articles: list[tuple[NewsCandidate, str]],

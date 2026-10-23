@@ -227,7 +227,13 @@ def _copy_launcher(tmp_path: Path, name: str) -> Path:
 
 def _copy_runnable_app(tmp_path: Path) -> Path:
     app_copy = _copy_launcher(tmp_path, "한글과 공백 경로 실제 서버")
-    shutil.copytree(APP_ROOT / "src", app_copy / "src")
+    # 테스트 실행 중 만들어질 수 있는 바이트코드 캐시는 배포 가능한 앱에
+    # 포함되지 않으며, 임시 격리본으로 복사할 때 경로 오류를 일으킬 수 있다.
+    shutil.copytree(
+        APP_ROOT / "src",
+        app_copy / "src",
+        ignore=shutil.ignore_patterns("__pycache__", "*.py[cod]"),
+    )
     pilot_source = APP_ROOT.parent / "analysis_engine" / "data" / "pilot"
     pilot_target = app_copy.parent / "analysis_engine" / "data" / "pilot"
     shutil.copytree(pilot_source, pilot_target)

@@ -359,7 +359,7 @@ URL_VARIANT_ORDER: Final[tuple[str, ...]] = (
 MAX_URL_VARIANTS: Final[int] = 3
 
 # 새 수집 경로의 상한은 기사 수를 채우는 목표가 아니라 요청 비용의 경계다.
-COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v31"
+COLLECTION_POLICY_VERSION: Final[str] = "news-grounded-v38"
 EXCLUDED_DUPLICATE_BODY_CHAIN_URL: Final[str] = "duplicate_body_chain_url"
 NAME_ACRONYM_MIN_CHARS: Final[int] = 2
 NAME_ACRONYM_MAX_CHARS: Final[int] = 8
@@ -396,6 +396,8 @@ SEARCH_PAGE_SIZE: Final[int] = 20
 SEARCH_CANDIDATE_BUDGET: Final[int] = 80
 SEARCH_SECONDS_BUDGET: Final[int] = 90
 SEARCH_ALIAS_BUDGET: Final[int] = 2
+# 산업 탐색이 추가돼도 회사 제품·공식 발표·과거 근거를 찾는 질의는 남긴다.
+SEARCH_PRESERVED_COMPANY_TOPICS: Final[tuple[str, ...]] = ("products", "official", "archive")
 SEARCH_TITLE_CHARS: Final[int] = 500
 SEARCH_DESCRIPTION_CHARS: Final[int] = 2_000
 SEARCH_URL_CHARS: Final[int] = 2_000
@@ -596,6 +598,13 @@ ARTICLE_PUBLISHED_META_KEYS: Final[frozenset[str]] = frozenset({
 })
 ATTRIBUTED_STATEMENT_MARKERS: Final[tuple[str, ...]] = (
     "밝혔다", "말했다", "설명했다", "전했다", "발표했다", "강조했다", "계획", "예정", "방침",
+)
+ATTRIBUTED_ENGLISH_VERB: Final[str] = r"(?:said|stated|explained|announced|emphasized|emphasised)"
+ATTRIBUTED_ENGLISH_VERB_RE: Final[re.Pattern[str]] = re.compile(
+    rf"\b{ATTRIBUTED_ENGLISH_VERB}\b", re.I,
+)
+ATTRIBUTED_ENGLISH_REPRESENTATIVE: Final[str] = (
+    r"(?:spokesperson|representative|CEO|chief\s+executive(?:\s+officer)?)"
 )
 FUTURE_PLAN_PATTERN: Final[str] = r"(?:할|될|할\s*수\s*있도록)\s*(?:계획|예정)|하기로\s*(?:했다|계획)|목표로\s*(?:한다|하고|추진)"
 

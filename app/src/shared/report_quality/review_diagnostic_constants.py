@@ -31,6 +31,10 @@ REVIEW_SCOPE_ITEMS = {
     "accounting_scope_unbound": "회계 범위",
     "transaction_independence_unbound": "거래 독립성",
     "time_invalid": "시점",
+    "financial_snapshot_current_relation_unsupported": "시점",
+    "litigation_snapshot_date_unsupported": "시점",
+    "disclosure_snapshot_date_unsupported": "시점",
+    "disclosure_comparison_period_unbound": "시점",
     # ★ 장과 무관한 부재 단언(composer.absence_claim_constants). 코드 문자열은
     #   그 모듈의 상수와 «반드시 같은 값»이어야 한다.
     "absence_claim_unsupported": "자료 부재 단언",
@@ -40,6 +44,8 @@ REVIEW_SCOPE_ITEMS = {
     "prose_revenue_primacy_from_recognition_only": "자기 근거 부족",
     "superlative_attribution_without_source": "회사 직접표현",
     "causal_relation_evidence_missing": "인과 관계",
+    "financial_comparison_basis_mismatch": "인과 관계",
+    "net_loss_operating_cause_unbound": "인과 관계",
     "causal_relation_quote_not_in_source": "인과 관계",
     "causal_relation_quote_not_causal": "인과 관계",
     "causal_relation_pair_missing": "인과 관계",

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from features.evidence_collection import constants as c
+from features.evidence_collection.business_slot_scope import business_declaration_scope_allows
 
 
 def _value_exchange_units(text: str) -> tuple[str, ...]:
@@ -205,12 +206,16 @@ def value_exchange_has_payment_route(text: str) -> bool:
     )
 
 
-def value_exchange_has_direct_relation(text: str) -> bool:
+def value_exchange_has_direct_relation(text: str, *, allow_settlement: bool = True) -> bool:
     """약키워드가 없어도 실제 이용료·대금회수·서비스 효용은 보존한다."""
 
     for unit in _value_exchange_units(text):
         if _value_exchange_policy_only(unit) or _value_exchange_accounting_only(unit):
             continue
+        if (allow_settlement and business_declaration_scope_allows(unit)
+                and c.VALUE_EXCHANGE_SETTLEMENT_SUBJECT_PATTERN.search("".join(unit.split()))
+                and c.VALUE_EXCHANGE_SETTLEMENT_PATTERN.search("".join(unit.split()))):
+            return True
         recipient = any(marker in unit for marker in c.VALUE_EXCHANGE_RECIPIENT_MARKERS)
         business_object = any(marker in unit for marker in c.VALUE_EXCHANGE_OBJECT_MARKERS)
         delivery = any(marker in unit for marker in c.VALUE_EXCHANGE_DELIVERY_MARKERS)

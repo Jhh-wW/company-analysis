@@ -11,14 +11,22 @@ QUOTE_MAX_CANDIDATES_PER_ARTICLE = 48
 QUOTE_UNIT_CANDIDATE_BUDGET = 24
 QUOTE_MAX_ADJACENT_SENTENCES = 16
 QUOTE_PRECEDING_CONTEXT_SENTENCES = 1
+QUOTE_DEPENDENT_CONTEXT_SENTENCES = 2
 QUOTE_MAX_CHARS = 1_000
 QUOTE_BOUNDARY_PREVIEW_CHARS = 20
+QUOTE_DEPENDENT_STATEMENT_PREFIX_RE = re.compile(r'^(?:이에 대해|이와 관련해)\s+')
+QUOTE_DIRECT_STATEMENT_RE = re.compile(r'(?:“[^“”\n]+”|"[^"\n]+")')
+QUOTE_DIRECT_STATEMENT_END_RE = re.compile(r'(?:고\s+말했다|고\s+밝혔다|고\s+설명했다|고\s+전했다)\.$')
 QUOTE_SOURCE_FIELDS = ("entity_evidence", "text", "time_evidence", "subject_evidence")
 QUOTE_EXCERPT_SOURCE_FIELDS = ("text", "time_evidence", "subject_evidence")
 QUOTE_FIELD_SUFFIX = "_quote_id"
 QUOTE_SUBJECT_PREFIX = r"^\s*(?:(?:한편|또한|반면)\s+)?['\"‘’“”]?(?:\(주\))?"
 QUOTE_KNOWN_NAME_BOUNDARY = r"(?:[\s,，:：'\"‘’“”()]|은|는|이|가|$)"
-QUOTE_SENTENCE_RE = re.compile(r"[^\n]+?(?:[.!?。](?=\s|$)|(?=\n|$))")
+# 완결된 인용 안의 마침표를 쪼개지 않고, 닫는 인용부호 뒤의 문장 끝은 보존한다.
+QUOTE_SENTENCE_RE = re.compile(
+    r'(?>“[^”\n]*”|‘[^’\n]*’|"[^"\n]*"|[^\n])+?'
+    r'(?:[.!?。](?=\s|$)|(?<=[.!?。]["\'”’])(?=\s|$)|(?=\n|$))'
+)
 QUOTE_EXPLICIT_BUSINESS_ACTION_RE = re.compile(
     r"(?:개발|공급|생산|판매|운영|체결|인수|설립|출시|수주)(?:했|한|하고|한다|해|하였|했다|한다|에\s*나섰)"
 )
@@ -43,7 +51,7 @@ QUOTE_OPENING_BYLINE_MAX_CHARS = 80
 QUOTE_OPENING_BYLINE_RE = re.compile(
     rf"^\s*\[[^\[\]\n.!?。]{{1,{QUOTE_OPENING_BYLINE_MAX_CHARS}}}\s+기자\]\s*"
 )
-QUOTE_PRIOR_SENTENCE_END_RE = re.compile(r"[.!?。](?=\s|$)")
+QUOTE_PRIOR_SENTENCE_END_RE = re.compile(r"[.!?。][\"'”’]*(?=\s|$)")
 QUOTE_PRE_BYLINE_CAPTION_RE = re.compile(
     r"^[^\n]*[.!?。]\s*\((?:사진|자료)\s*=[^()\n]+\)\s*$", re.M
 )

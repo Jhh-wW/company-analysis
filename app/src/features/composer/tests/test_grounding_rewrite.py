@@ -70,7 +70,7 @@ from src.shared.report_quality.composition_diagnostic_constants import (
 
 #: 조각 원문 — 고쳐 쓴 문장이 «기댈 수 있는» 사실이 들어 있다.
 _SOURCES = {
-    1: "가람전자의 본사는 경기도 성남시에 있습니다.",
+    1: "가람전자는 기업 고객에게 물류 관리 소프트웨어를 제공합니다.",
     2: "나래산업의 주요 거래처는 국내 완성차 회사입니다.",
     3: "다온소재의 공장은 충청북도 청주시에 있습니다.",
     4: "마루기업의 지난해 매출액은 120억원입니다.",
@@ -84,10 +84,12 @@ _REJECTED = {
 }
 #: 작가가 «제대로» 고쳐 쓴 문장 — 인용 원문에 그대로 있는 사실만 남겼다.
 _FIXED = {
-    1: "가람전자의 본사는 경기도 성남시에 있다.",
+    1: "가람전자는 기업 고객에게 물류 관리 소프트웨어를 제공한다.",
     2: "나래산업의 주요 거래처는 국내 완성차 회사이다.",
     3: "다온소재의 공장은 충청북도 청주시에 있다.",
 }
+# 정체성의 정상 복구 재료는 주소가 아니라 자기 인용으로 확인되는 사업 설명이다.
+_CLAIM_SLOTS = {1: "identity:business_definition"}
 
 
 def _raw_fragments(numbers=(1,)) -> dict[int, dict[str, str]]:
@@ -107,6 +109,7 @@ def _report(numbers=(1,), extra: tuple[ComposedSentence, ...] = ()) -> ComposedR
                         text=_REJECTED[number],
                         citations=(str(number),),
                         grade=GRADE_CONFIRMED,
+                        planned_claim_slot=_CLAIM_SLOTS.get(number, ""),
                     )
                     for number in numbers
                 )
@@ -300,6 +303,7 @@ def test_켜도_탈락_문장이_없으면_아무_호출도_기록도_없다():
             section_id="identity",
             sentences=(ComposedSentence(
                 text=_FIXED[1], citations=("1",), grade=GRADE_CONFIRMED,
+                planned_claim_slot=_CLAIM_SLOTS[1],
             ),),
         ),),
         summary=(),
@@ -551,6 +555,7 @@ def test_두_번_다_못_읽으면_작성형식실패로_전부_제거된다():
 def test_예산이_부족하면_호출중단_기록만_남기고_나머지_문장은_그대로_낸다():
     성한문장 = ComposedSentence(
         text=_FIXED[1], citations=("1",), grade=GRADE_CONFIRMED,
+        planned_claim_slot=_CLAIM_SLOTS[1],
     )
     ask = _FakeAI(
         [_verdicts({1: VERDICT_TRUE, 2: VERDICT_TRUE})],
@@ -696,9 +701,10 @@ def test_대상이_상한을_넘으면_앞쪽만_보내고_대상에는_전체_�
 
 def test_거짓_재작성이_함께_있어도_재검수는_한_번이다():
     거짓문장 = ComposedSentence(
-        text="가람전자의 본사는 서울특별시에 있다.",
+        text="가람전자는 개인 고객에게 게임 소프트웨어를 제공한다.",
         citations=("1",),
         grade=GRADE_CONFIRMED,
+        planned_claim_slot=_CLAIM_SLOTS[1],
     )
     ask = _FakeAI(
         [
@@ -845,7 +851,8 @@ def test_요약_그룹의_탈락_문장은_재작성_프롬프트에_실리지_�
         sections=(ComposedSection(
             section_id="identity",
             sentences=(ComposedSentence(text=_REJECTED[1], citations=("1",),
-                                        grade=GRADE_CONFIRMED),),
+                                        grade=GRADE_CONFIRMED,
+                                        planned_claim_slot=_CLAIM_SLOTS[1]),),
         ),),
         summary=(ComposedSentence(text=_REJECTED[2], citations=("1",),
                                   grade=GRADE_CONFIRMED),),

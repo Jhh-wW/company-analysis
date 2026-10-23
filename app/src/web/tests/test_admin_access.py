@@ -45,6 +45,9 @@ from src.web.routers import admin as admin_router
 from src.web.routers import reports as reports_router
 
 
+pytestmark = pytest.mark.usefixtures("canonical_demo_clock")
+
+
 @pytest.fixture
 def client():
     runtime._PIPELINE = DemoPipeline()

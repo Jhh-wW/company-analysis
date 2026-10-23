@@ -15,6 +15,7 @@ from datetime import date
 from core.dart_client import normalize_document_web_url
 from features.evidence_collection import constants as c
 from features.evidence_collection.scan_contract import DocumentScan
+from features.evidence_collection.reporting_period import require_reporting_period
 
 _SHA256_HEX_LENGTH = 64
 _SHA256_HEX_CHARS = frozenset("0123456789abcdef")
@@ -115,6 +116,7 @@ class CollectedDocument:
     collector_version: str
     parser_version: str
     requirement: str
+    reporting_period: str = ""
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -135,6 +137,10 @@ class CollectedDocument:
         _require_choice(self.requirement, c.VALID_REQUIREMENTS, "requirement")
         _require_iso_date(self.published_on, "published_on")
         _require_sha256(self.content_sha256, "content_sha256")
+        try:
+            require_reporting_period(self.reporting_period)
+        except (TypeError, ValueError) as error:
+            raise EvidenceCollectionError(str(error)) from error
         object.__setattr__(
             self,
             "usable_ranges",

@@ -6,6 +6,9 @@ from src.features.evidence_reclassify.tests.test_logic import _candidate, _assig
 
 
 @pytest.mark.parametrize("slot,quote", [
+    ("portfolio:product_role", "회사는 전자지급결제대행업을 영위할 목적으로 설립된 회사다."),
+    ("portfolio:product_role", "주요 주주는 상당한 지분을 보유한 다른 법인이다."),
+    ("portfolio:product_role", "회사는 다른 종속기업과의 합병을 완료했다."),
     ("business_model:revenue_model", "기타 수익 항목에는 수입기술료와 수입수수료가 포함된다."),
     ("business_model:customer_type", "회사는 신용등급이 높은 거래처와만 거래하고 담보를 수취한다."),
     ("operations_partners:operating_role", "회사는 제조물책임법에 따라 보험계약을 체결한다."),

@@ -1012,6 +1012,7 @@ class ProductionOfficialEvidenceCollector:
             # DART hm_url도 오래되어 다른 회사에 재할당될 수 있다. 정식 운영은
             # 법인명+등록번호 확인 전 root를 TIER1+REQUIRED로 쓰지 않는다.
             root_identity_verification_required=True,
+            directory_fallback=True,
             collected_at=request.collected_at,
         )
         wide_fragments = build_fragments_for_collection(wide_result)

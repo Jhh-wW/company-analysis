@@ -9658,8 +9658,16 @@ def _collect(
     # ★ 1판이 «안 뜨는» 절을 더 모은다 — 신규사업 전망·시장 특성·소송.
     #   결과가 전자공시 원문을 그대로 옮긴 것처럼 보이던 핵심 원인이
     #   **정작 필요한 절을 안 뜨던 것**이었다. 1판은 0줄 고치지 않고 «더할» 뿐이다.
+    raw_disclosed = str((filing or {}).get("rcept_dt") or "")
+    disclosed = (
+        f"{raw_disclosed[:4]}-{raw_disclosed[4:6]}-{raw_disclosed[6:]}"
+        if re.fullmatch(r"\d{8}", raw_disclosed) else raw_disclosed
+    )
     frags, added = filing_extra.add_to(
-        frags, filing_text, getattr(engine, "FRAG_CHARS", filing_extra.DEFAULT_FRAG_CHARS)
+        frags, filing_text, getattr(engine, "FRAG_CHARS", filing_extra.DEFAULT_FRAG_CHARS),
+        raw_path=filing_raw_path, receipt_number=str((filing or {}).get("rcept_no") or ""),
+        corp_code=corp_code, document_title=str((filing or {}).get("report_nm") or ""),
+        disclosed_at=disclosed,
     )
     if added:
         steps.append({"step": "6_수집_추가절", "더한조각": added})

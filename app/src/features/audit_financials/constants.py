@@ -19,6 +19,10 @@ PLAIN_INLINE_NOTE_PATTERN = (
     r"^\s*\(\s*주\s*석\s*"
     r"(?P<numbers>[1-9][0-9]*(?:\s*,\s*[1-9][0-9]*)*)\s*\)"
 )
+# 주석 열에서만 읽는 쉼표 구분 번호 목록. 금액의 천 단위 표기와 겹치면 제외한다.
+PLAIN_NOTE_LIST_PATTERN = (
+    r"^\s*(?P<numbers>[1-9][0-9]*(?:\s*,\s*[1-9][0-9]*)+)(?=\s|$)"
+)
 AUDIT_REPORT_STATEMENT_SOURCE = "audit_report_statement"
 
 DIAGNOSTIC_STATEMENT_NOT_FOUND = "손익계산서 미탐"

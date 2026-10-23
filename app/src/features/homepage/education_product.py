@@ -63,14 +63,21 @@ def education_product_range_indices(
     이 함수는 기존 작성 자격 검사 이후에만 호출한다. 학습에 쓰는 도구를
     제공자의 개발 제품으로 추출하거나 가격·매출 슬롯을 추가하지 않는다.
     """
+    return education_product_text_range_indices(title=document.title,
+        canonical_url=document.canonical_url, ranges=document.usable_ranges,
+        candidate_slots=candidate_slots)
+
+
+def education_product_text_range_indices(*, title: str, canonical_url: str,
+        ranges: tuple[str, ...], candidate_slots: tuple[str, ...]) -> frozenset[int]:
+    """DOM 검사 전후가 동일한 교육상품 신원·등록·실습·제외 계약을 재사용한다."""
     if EDUCATION_PRODUCT_SLOT not in candidate_slots or _EDITORIAL_PATH_RE.search(
-        urlsplit(document.canonical_url).path
+        urlsplit(canonical_url).path
     ):
         return frozenset()
-    title = " ".join(document.title.split())
+    title = " ".join(title.split())
     if not title or _non_product_relation(title):
         return frozenset()
-    ranges = document.usable_ranges
     if not any(" ".join(text.split()) == title for text in ranges):
         return frozenset()
     if not any(_ENROLLMENT_RE.search(text) for text in ranges):

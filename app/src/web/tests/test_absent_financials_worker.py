@@ -44,6 +44,9 @@ from src.web import job_runtime, report_delivery_adapter, runtime
 from src.web.main import app
 
 
+pytestmark = pytest.mark.usefixtures("canonical_demo_clock")
+
+
 #: 실측 회사와 같은 모양의 14자리 접수번호. 원문·회사명은 싣지 않는다.
 _RECEIPT = "20260406001240"
 #: 공식 자료 snapshot SHA-256 자리. 값 자체는 시험 안에서만 의미가 있다.

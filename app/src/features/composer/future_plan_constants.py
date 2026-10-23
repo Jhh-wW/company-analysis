@@ -291,6 +291,21 @@ _OUTLOOK: Final[str] = (
 #:    않는다. 완료·진행 표지가 «먼저» 오면 교대 순서대로 그쪽이 이긴다 —
 #:    「운영하고 있으며 확대하겠습니다」의 「운영」은 여전히 진행이다.
 PROMISSORY_MARKER: Final[str] = r"[가-힣]겠"
+# 검수가 활동을 종결형 전체로 옮긴 경우에도 그 활동 자체의 의지 어미를 본다.
+# 명사형 계획·철회·부인까지 넓히지 않고 직접 발언의 닫힌 종결만 허용한다.
+PROMISSORY_ACTIVITY_RE: Final[re.Pattern[str]] = re.compile(
+    r"[가-힣]+(?:\s+[가-힣]+)*겠(?:다|습니다)\Z"
+)
+PROMISSORY_REPORT_VERB: Final[str] = r"(?:말했다|밝혔다|설명했다|강조했다|전했다|덧붙였다)"
+PROMISSORY_REPORT_TAIL_RE: Final[re.Pattern[str]] = re.compile(
+    r"\A\s*(?:고\s*" + PROMISSORY_REPORT_VERB + r")?\s*\Z"
+)
+# 바로 다음 문장이 방금 말한 동일 계획을 철회한 경우만 잇는다.
+PROMISSORY_FOLLOWUP_DENIAL_RE: Final[re.Pattern[str]] = re.compile(
+    r"\A\s*(?:(?:하지만|그러나|다만|이후)\s+)?"
+    r"(?:이|해당|위|그)\s*계획(?:은|는|을|이)\s*"
+    r"(?:철회|취소|폐기)(?:했다|하였다|되었다|됐다|했습니다|되었습니다)\s*\Z"
+)
 _PLAN: Final[str] = (
     r"(?:할|하는|한다는|해\s*나갈|나갈|칠|될|낼)\s*(?:계획|예정|방침|목표)"
     r"|(?:을|를)\s*(?:계획|목표|방침)(?:으로|로)"

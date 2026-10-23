@@ -27,6 +27,9 @@ from src.web import job_runtime, main, runtime
 from src.web.routers import auth as auth_router
 
 
+pytestmark = pytest.mark.usefixtures("canonical_demo_clock")
+
+
 def _start_public_demo(client: TestClient) -> tuple[str, object]:
     form = {"company": CANONICAL_DEMO_COMPANY, "region": "서울"}
     confirmed = client.post("/confirm", data=form)

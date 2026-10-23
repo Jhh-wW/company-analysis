@@ -7,6 +7,8 @@ DartEvidenceHarvest 하나를 만든다.
 
 from __future__ import annotations
 
+from features.evidence_collection.service_revenue_declaration import service_revenue_declaration_spans
+
 import hashlib
 import re
 import time
@@ -26,6 +28,8 @@ from features.evidence_collection.official_industry_discovery_constants import D
 from features.evidence_collection.source_context import context_for_candidate, heading_source_scopes, different_document_actor, validate_source_context, prepare_table_contexts
 from features.evidence_collection.source_context import SourceContextBudgetExceeded
 from features.evidence_collection.business_activity_table import activity_table_ranges
+from features.evidence_collection.business_activity_declaration import declared_business_item
+from features.evidence_collection.business_activity_declaration_constants import DECLARATION_IDENTITY_SLOT
 from features.evidence_collection.business_constraint_signal import business_constraint_signals
 from features.evidence_collection.product_role_relation import (
     product_role_actor_matches, product_role_context_allows, product_role_hypothetical_ranges,
@@ -387,12 +391,18 @@ def collect_dart_evidence(
             if candidate.is_short:
                 retention.offer_unclassified(candidate_index, candidate)
                 continue
+            declaration_context_allowed = product_role_context_allows(
+                candidate.text, start=candidate.start, end=candidate.end,
+                document_text=fetch_result.text, hypothetical_ranges=product_hypothetical_ranges,
+            )
             slot_scores, has_any_direct_signal = relevance.score_fragment_slots_with_signal(
                 candidate.text, candidate.section_heading, allowed_slot_ids=allowed_slot_ids,
+                allow_current_business_declarations=declaration_context_allowed,
             )
             # 다른 법인의 사업 소개를 대상 회사의 정체성 준비 칸으로 세지 않는다.
             # 해당 원문과 다른 장의 그룹·관계 근거는 그대로 남는다.
-            if different_document_actor(context_json):
+            if (different_document_actor(context_json)
+                    or (declared_business_item(candidate.text) and not declaration_context_allowed)):
                 slot_scores = tuple(score for score in slot_scores if score.section_id != "identity")
             if slot_scores:
                 retention.offer_scored(candidate_index, candidate, slot_scores)
@@ -434,6 +444,60 @@ def collect_dart_evidence(
                 else:
                     constraint_count += 1
                 progress.candidates_seen += 1
+
+            # 명시 현재 업종은 거래 설명과 함께 있어도 정체성 입력에서 소실되지 않는다.
+            # 기존 사업모델 후보·원문·출처는 보존하고 정체성의 기존 보관 몫에서만 경쟁한다.
+            if (DECLARATION_IDENTITY_SLOT in allowed_slot_ids
+                    and declared_business_item(candidate.text)
+                    and declaration_context_allowed
+                    and not different_document_actor(context_json)
+                    and not any(score.slot_id == DECLARATION_IDENTITY_SLOT for score in slot_scores)):
+                identity_scores, _ = relevance.score_fragment_slots_with_signal(
+                    candidate.text, candidate.section_heading,
+                    allowed_slot_ids=frozenset({DECLARATION_IDENTITY_SLOT}),
+                )
+                if identity_scores:
+                    previous_pools = {key: list(pool) for key, pool in retention.pools.items()}
+                    previous_indices = {index for index, _candidate, _scores in retention.selected_scored()}
+                    retention.offer_scored(len(fetch_result.text) + constraint_count, candidate,
+                                           identity_scores, rank_index=candidate_index)
+                    current_indices = {index for index, _candidate, _scores in retention.selected_scored()}
+                    if not previous_indices <= current_indices:
+                        retention.pools = previous_pools
+                    constraint_count += 1
+                    progress.candidates_seen += 1
+
+            # 현재 서비스 수익원은 선언의 정확 구간만 수익 연결 칸에 보조 배정한다.
+            # 같은 문단 뒤의 간편법·마케팅 대가 회계정책을 제품 설명으로 빌리지 않는다.
+            if (c.PORTFOLIO_REVENUE_SOURCE_SLOT in allowed_slot_ids
+                    and declaration_context_allowed
+                    and not different_document_actor(context_json)
+                    and not any(score.slot_id == c.PORTFOLIO_REVENUE_SOURCE_SLOT for score in slot_scores)):
+                revenue_source_scores = relevance.portfolio_revenue_source_scores(candidate.text)
+                for relative_start, relative_end in service_revenue_declaration_spans(candidate.text) if revenue_source_scores else ():
+                    start, end = candidate.start + relative_start, candidate.start + relative_end
+                    exact_text = fetch_result.text[start:end]
+                    derived = segment.FragmentCandidate(
+                        start, end, exact_text, candidate.section_heading,
+                        source_context_json=context_for_candidate(
+                            text=exact_text, start=start, end=end,
+                            table_contexts=table_scopes, scopes=source_scopes,
+                        ),
+                        section_context_json=context_for_section_candidate(
+                            business_scopes, text=exact_text, start=start, end=end,
+                            document_id=document_id, document_sha256=content_sha256,
+                        ),
+                    )
+                    validate_source_context(derived.source_context_json, document_text=fetch_result.text)
+                    previous_pools = {key: list(pool) for key, pool in retention.pools.items()}
+                    previous_indices = {index for index, _candidate, _scores in retention.selected_scored()}
+                    retention.offer_scored(len(fetch_result.text) + constraint_count, derived,
+                                           revenue_source_scores, rank_index=candidate_index)
+                    current_indices = {index for index, _candidate, _scores in retention.selected_scored()}
+                    if not previous_indices <= current_indices:
+                        retention.pools = previous_pools
+                    constraint_count += 1
+                    progress.candidates_seen += 1
 
             # 같은 문단의 기존 장 배정은 그대로 둔다. 명시 사업 제약→현재 대응만
             # 정확 부분구간으로 기존 5장 몫에서 경쟁하며 다른 장 몫은 건드리지 않는다.
@@ -557,6 +621,8 @@ def collect_dart_evidence(
                     collector_version=c.COLLECTOR_VERSION,
                     parser_version=c.PARSER_VERSION,
                     requirement=filing.requirement,
+                    reporting_period=(fetch_result.reporting_period
+                                      if fetch_result.corp_code == company_id else ""),
                 )
                 new_unclassified_fragments = [
                     EvidenceFragment(
@@ -643,6 +709,8 @@ def collect_dart_evidence(
                 collector_version=c.COLLECTOR_VERSION,
                 parser_version=c.PARSER_VERSION,
                 requirement=filing.requirement,
+                reporting_period=(fetch_result.reporting_period
+                                  if fetch_result.corp_code == company_id else ""),
             )
             new_fragments = []
             for candidate_index, candidate, slot_scores in scored:

@@ -90,8 +90,11 @@ from src.features.composer.challenge_guard import challenge_response_problem
 from src.features.composer.challenge_response_evidence import (
     challenge_response_evidence_problem,
 )
+from src.features.composer.accounting_policy_guard import accounting_policy_problem
 from src.features.composer.diagram_review_constants import (
+    BUSINESS_FLOW_ACTION_HEADER,
     BUSINESS_FLOW_PRODUCT_HEADER,
+    ACCOUNTING_POLICY_ACTION_LABEL_RE,
     ACCOUNTING_REVENUE_LABEL_RE,
     BUSINESS_FLOW_REVENUE_HEADER,
     FLOW_ACCOUNTING_REVENUE_CODE,
@@ -146,6 +149,7 @@ from src.features.composer.business_relation_scope import business_relation_scop
 from src.features.composer.identity_flow_scope import identity_flow_scope_problem
 from src.features.composer.role_binding import company_flow_actor_problem
 from src.features.composer.absence_claim_guard import absence_claim_problem
+from src.features.composer.litigation_timing import litigation_numeric_text
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_financial_risk_goal_problem,
     culture_flow_cells_evidence_problem,
@@ -586,6 +590,7 @@ def _drop_invented_numbers(
     *,
     section_id: str = "",
     derived_ratio_diagnostics: Optional[list[dict]] = None,
+    fragments_by_id: Optional[Mapping[str, CollectedFragment]] = None,
 ) -> tuple[tuple[FlowRow, ...], list[str]]:
     """지어낸 수가 든 줄만 뺀다. 파생 비율 판정은 «전용» 진단에 남긴다.
 
@@ -604,13 +609,23 @@ def _drop_invented_numbers(
     dropped: list[str] = []
     for row in rows:
         source_texts = _source_texts(row, texts)
-        row_numbers = _extract_numbers(" ".join(row.cells))
+        numeric_text = FLOW_CELL_JOIN.join(row.cells)
+        if (section_id == "current_challenges" and fragments_by_id
+                and all(fid in fragments_by_id for fid in row.citations)):
+            numeric_text = litigation_numeric_text(numeric_text, (
+                (texts[fid], fragments_by_id[fid].reporting_period,
+                 fragments_by_id[fid].source_publisher) for fid in row.citations if fid in texts
+            ), preserve_offsets=True)
+        row_numbers = _extract_numbers(numeric_text)
         invented: list[str] = []
         blocked_codes: list[str] = []
+        offset = 0
         for cell in row.cells:
+            numeric_cell = numeric_text[offset:offset + len(cell)]
+            offset += len(cell) + len(FLOW_CELL_JOIN)
             notes: list[DerivedRatioResult] = []
             missing = _numbers_are_grounded(
-                cell,
+                numeric_cell,
                 source_texts,
                 stated_numbers=row_numbers,
                 derived_notes=notes,
@@ -683,18 +698,35 @@ def _drop_uninformative_operations_rows(
 def _drop_accounting_revenue_rows(
     rows: tuple[FlowRow, ...],
 ) -> tuple[tuple[FlowRow, ...], tuple[str, ...]]:
-    # 수익 확대 칸의 회계 처리 설명은 사업의 반복 수익 경로를 입증하지 않는다.
-    index = _cell_index(BUSINESS_FLOW_SECTION_ID, BUSINESS_FLOW_REVENUE_HEADER)
-    if index is None:
+    # 순수 회계 처리 설명은 고객 과금이나 반복 수익 경로를 입증하지 않는다.
+    revenue_index = _cell_index(BUSINESS_FLOW_SECTION_ID, BUSINESS_FLOW_REVENUE_HEADER)
+    action_index = _cell_index(BUSINESS_FLOW_SECTION_ID, BUSINESS_FLOW_ACTION_HEADER)
+    if revenue_index is None and action_index is None:
         return rows, ()
     kept: list[FlowRow] = []
     problems: list[str] = []
     for row in rows:
-        if index < len(row.cells) and ACCOUNTING_REVENUE_LABEL_RE.fullmatch(
-            _compact_surface(row.cells[index])
-        ):
+        revenue_is_policy = (
+            revenue_index is not None
+            and revenue_index < len(row.cells)
+            and ACCOUNTING_REVENUE_LABEL_RE.fullmatch(
+                _compact_surface(row.cells[revenue_index])
+            )
+        )
+        action_is_policy = False
+        if action_index is not None and action_index < len(row.cells):
+            action_cell = row.cells[action_index]
+            # 기존 guard는 일반적인 회계정책 절을 잡는다. 실물 문구인 IFRS
+            # 실무적 간편법 표현은 guard 어휘에 없어 정확한 완전일치 보완을 둔다.
+            action_is_policy = bool(
+                accounting_policy_problem(action_cell)
+                or ACCOUNTING_POLICY_ACTION_LABEL_RE.fullmatch(
+                    _compact_surface(action_cell)
+                )
+            )
+        if revenue_is_policy or action_is_policy:
             problems.append(
-                f'{FLOW_ACCOUNTING_REVENUE_CODE}: 반복 수익 칸이 순수 회계 처리 설명인 경로 제외'
+                f'{FLOW_ACCOUNTING_REVENUE_CODE}: 사업 흐름 칸이 순수 회계 처리 설명인 경로 제외'
             )
         else:
             kept.append(row)
@@ -1385,6 +1417,7 @@ def check_diagram_numbers(
             texts,
             section_id=section.section_id,
             derived_ratio_diagnostics=derived_ratio_diagnostics,
+            fragments_by_id={fragment.fragment_id: fragment for fragment in fragments},
         )
         problems.extend(f"[{section.section_id}] {reason}" for reason in dropped)
         rebuilt.append(

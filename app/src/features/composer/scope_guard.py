@@ -55,7 +55,7 @@ from src.features.composer.direct_support_constants import SELF_REFERENCE_SUBJEC
 from src.features.composer.audit_boilerplate_guard import audit_boilerplate_problem
 from src.shared.revenue_population_scope import revenue_population_claim_problem
 from src.features.composer.outsourcing_scope import outsourcing_scope_problem
-from src.features.composer.founding_purpose_scope import founding_purpose_scope_problem
+from src.features.composer.founding_purpose_scope import founding_purpose_scope_problem, founding_purpose_flow_problem
 from src.features.composer.founding_event_scope import founding_event_scope_problem
 from src.features.composer.division_type_scope import division_type_scope_problem
 from src.features.composer.business_origin_scope import business_origin_scope_problem
@@ -738,6 +738,9 @@ def flow_scope_problem(cells: Sequence[str], sources_mapping: Mapping[str, str])
     빈 결과는 전체 도식 승인이나 수치·시점·JSON 검증의 면제를 뜻하지 않는다.
     """
     values = [unicodedata.normalize("NFKC", cell).strip() for cell in cells]
+    founding_problem = founding_purpose_flow_problem(values, sources_mapping)
+    if founding_problem:
+        return founding_problem
     for cell in values:
         problem = scope_problem(cell, sources_mapping)
         if problem:

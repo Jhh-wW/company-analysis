@@ -145,6 +145,11 @@ def _grounding_schema(*, numeric_selection: bool = False) -> dict[str, Any]:
         RECOGNITION_KEY: _array(_object(_strings("표현", "근거", "원문"))),
     }
     if numeric_selection:
+        properties['번역'] = _object({
+            **_strings('요청SHA', '문장SHA', '원문SHA', '근거'),
+            '대응': _array(_object(_strings('원문', '주장'))),
+        })
+    if numeric_selection:
         # 본문만 지원한다. 실제 선택 자격·번호·원문 결속은 요청 로컬 코드가 검사한다.
         properties[NUMERIC_SELECTION_KEY] = {"type": "string"}
         properties[FUTURE_SELECTION_KEY] = {"type": "string"}

@@ -101,8 +101,16 @@ class WideDocumentIdentity:
     domain_redirect_to_host: str = ""
     #: 이미 받은 목록 HTML에서 읽은 항목별 원문과 메타데이터다.
     list_items: tuple[tuple[str, str, str, str], ...] = ()
+    #: 상품 상세 HTML은 원문 DOM의 예정·FAQ 문맥을 확인한 현재 기능만 허용한다.
+    product_role_context_checked: bool = False
+    current_product_role_ranges: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if (type(self.product_role_context_checked) is not bool
+                or type(self.current_product_role_ranges) is not tuple
+                or any(text not in self.usable_ranges for text in self.current_product_role_ranges)
+                or (self.current_product_role_ranges and not self.product_role_context_checked)):
+            raise ValueError("현재 제품 역할 범위가 검증한 원문과 다릅니다")
         for name in (
             "company_id",
             "document_id",

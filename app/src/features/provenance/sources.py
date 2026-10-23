@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import hashlib
+from src.shared.report_evidence.filing_period import filing_period_is_valid
 import hmac
 import ipaddress
 import json
@@ -36,7 +37,7 @@ from src.shared.official_ir import (
     safe_https_attachment_url,
 )
 from src.shared.report_evidence.identity_verified_web import (
-    verified_dart_filing_binding_allows_public_source,
+    verified_official_web_binding_allows_public_source,
 )
 from src.shared.report_evidence.profile_domain_attestation import (
     dart_profile_attestation_allows_source_url,
@@ -591,7 +592,7 @@ class Source:
             # Source 하나만 보고 OTHER 도메인의 소유자를 확정할 수는 없다. 다만
             # 독립 공시 결속 필드조차 없으면 후보로도 올리지 않아 조립 단계부터
             # fail-closed 한다. 실제 결속은 아래 registry 함수가 검증한다.
-            strict_typed_binding = verified_dart_filing_binding_allows_public_source(
+            strict_typed_binding = verified_official_web_binding_allows_public_source(
                 self.identity_binding,
                 company_name=self.publisher,
                 source_url=self.url,
@@ -971,7 +972,7 @@ def official_domain_attestation_problem(
     # DART 첨부 원문 계보+법인명+등록번호+same-origin을 함께 확인한 typed
     # proof는 별도 가짜 attester Source를 만들지 않는다. proof 자체가 Source
     # 도장에 포함되고 URL·발행 법인 중 하나가 바뀌면 위 판정에서 즉시 닫힌다.
-    if verified_dart_filing_binding_allows_public_source(
+    if verified_official_web_binding_allows_public_source(
         source.identity_binding,
         company_name=source.publisher,
         source_url=source.url,
@@ -1162,7 +1163,6 @@ def full_typed_source_registry_problem(
         for value in (
             source.domain_attestation_source_id,
             source.domain_attestation_evidence,
-            source.reporting_period,
             source.attachment_url,
             source.ir_metadata_verification,
             source.domain_redirect_verification,
@@ -1171,6 +1171,8 @@ def full_typed_source_registry_problem(
         )
     ):
         return "typed DART 공시에 웹·IR 전용 provenance가 섞였습니다"
+    if source.reporting_period and not filing_period_is_valid(source.reporting_period):
+        return "typed DART 공시의 명시 보고기간이 올바르지 않습니다"
     if not is_canonical_official_with_registry(source, sources):
         return "typed DART 공시의 공식 출처 계약이 불완전합니다"
     return ""

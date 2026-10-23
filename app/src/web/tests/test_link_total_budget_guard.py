@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import time
 import uuid
 
@@ -38,8 +39,17 @@ from src.web import job_runtime, main, paid_runtime, request_helpers, runtime
 from src.web.routers import reports as reports_router
 from src.web.tests._visible_text import visible_text
 
+
 _열쇠 = "b1b2c3d4e5f60718b1b2c3d4e5f60718"
 _시각 = "2026-09-02T09:00:00+09:00"
+
+
+@pytest.fixture(autouse=True)
+def _issued_link_clock(canonical_demo_clock, monkeypatch):
+    """데모와 링크가 모두 유효한 발급 시점에서 실제 예산 경계를 검사한다."""
+    fixed_now = dt.datetime.fromisoformat(_시각)
+    monkeypatch.setattr(clock, "now_kst", lambda: fixed_now)
+
 
 #: 누적 상한값과 그 경계. ★ 생산 상수를 import해 비교하면 값이 몰래 낮아져도
 #:  시험이 통과한다. 여기서는 리터럴로 못 박고, 상수 자체는 sharelink 시험이 본다.

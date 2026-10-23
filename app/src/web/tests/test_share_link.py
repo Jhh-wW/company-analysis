@@ -57,6 +57,9 @@ from src.web import paid_runtime, request_helpers, runtime
 from src.web.routers import analysis as analysis_router
 from src.web.routers import reports as reports_router
 
+
+pytestmark = pytest.mark.usefixtures("canonical_demo_clock")
+
 _REAL_RELEASE_STATE = reports_router._release_state
 
 _카카오열쇠 = "a1b2c3d4e5f60718a1b2c3d4e5f60718"

@@ -1,0 +1,86 @@
+{
+  "scope": "9차 실제 분석 응답에서 기사1개만 추출한 단위 fixture. 원문과 해당 응답 항목은 불변. 후속 작가/검수 응답은 포함하지 않는다.",
+  "as_of": "2026-10-23",
+  "company": {
+    "company_name": "토스페이먼츠 주식회사",
+    "aliases": [
+      "Toss Payments Co.,Ltd",
+      "토스페이먼츠"
+    ],
+    "executive_names": [
+      "임한욱"
+    ],
+    "company_id": "01492697"
+  },
+  "article": {
+    "id": "news-011e343e0069d0b89c10",
+    "title": "토스페이먼츠, AI 검색 시대 브랜드 노출 전략 공유…'GEO 그로스 살롱'...",
+    "url": "https://www.etnews.com/20261021000310",
+    "publisher": "etnews.com",
+    "source_category": "news_report",
+    "indexed_published_on": "2026-10-21",
+    "body": "경제 금융 토스페이먼츠, AI 검색 시대 브랜드 노출 전략 공유…'GEO 그로스 살롱' 개최 발행일 : 2026-10-21 14:33 전자신문을 선호 매체로 추가 공유하기 페이스북 X(트위터) 메일 URL 복사 글자크기 설정 가 작게 가 보통 가 크게 토스페이먼츠가 사업자를 대상으로 한 무료 세미나 '2026 GEO 그로스 살롱'을 성황리에 마쳤다. 지난 14일 열린 이번 행사는 신청만 1000여건을 돌파했다. 토스페이먼츠는 이 가운데 현장 참석사 53곳을 선정하고 온라인 송출을 함께 진행했다. GEO(생성형 엔진 최적화)는 생성형 인공지능(AI)이 새로운 정보 탐색 창구로 떠오르면서 주목받는 마케팅 전략이다. 기존 검색엔진최적화(SEO)를 넘어, 생성형 AI가 브랜드와 콘텐츠를 이해하고 답변에 인용하도록 최적화하는 방식이다. 이번 세미나는 이런 변화에 대응하려는 사업자에게 AI 검색 환경에서의 브랜드 노출 전략과 이를 실제 성과로 잇는 방법을 소개하기 위해 마련됐다. 토스페이먼츠는 결제 과정에서 쌓이는 데이터를 사업자가 바로 활용할 수 있는 인사이트로 바꾸는 데 힘쓰고 있다. 토스페이먼츠 관계자는 “생성형 AI가 바꾸는 검색 환경에서 사업자들이 가장 궁금해하는 것은 브랜드 노출을 어떻게 실제 매출로 잇느냐는 점”이라며 “이번 세미나를 시작으로 사업자에게 필요한 마케팅 과제를 함께 풀어가는 자리를 이어가겠다”고 말했다. 박두호 기자 walnut_park@etnews.com"
+  },
+  "selected_quotes": [
+    {
+      "id": "quote-b93bfecb98e325f23234",
+      "start": 0,
+      "end": 196,
+      "begin_text": "경제 금융 토스페이먼츠, AI 검색 ",
+      "end_text": "O 그로스 살롱'을 성황리에 마쳤다."
+    },
+    {
+      "id": "quote-633cc080843bd097790f",
+      "start": 493,
+      "end": 692,
+      "begin_text": "토스페이먼츠는 결제 과정에서 쌓이는 ",
+      "end_text": "어가는 자리를 이어가겠다”고 말했다."
+    }
+  ],
+  "saved_response": {
+    "items": [
+      {
+        "entity_evidence_quote_id": "quote-b93bfecb98e325f23234",
+        "excerpts": [
+          {
+            "claim_kind": "reported_fact",
+            "claim_slot": "culture:verified_case",
+            "event_key": "토스페이먼츠 GEO 그로스 살롱 세미나 개최",
+            "event_on": "",
+            "section_id": "culture",
+            "subject": "",
+            "subject_evidence_quote_id": "",
+            "subject_is_target": true,
+            "temporal_status": "completed",
+            "text_quote_id": "quote-b93bfecb98e325f23234",
+            "time_evidence_quote_id": "",
+            "topic": "business"
+          },
+          {
+            "claim_kind": "company_statement",
+            "claim_slot": "culture:work_principle",
+            "event_key": "토스페이먼츠 결제 데이터 기반 사업자 인사이트 제공 및 마케팅 과제 지원 방침",
+            "event_on": "",
+            "section_id": "culture",
+            "subject": "",
+            "subject_evidence_quote_id": "",
+            "subject_is_target": true,
+            "temporal_status": "ongoing",
+            "text_quote_id": "quote-633cc080843bd097790f",
+            "time_evidence_quote_id": "",
+            "topic": "strategy"
+          }
+        ],
+        "id": "news-011e343e0069d0b89c10",
+        "industry_problems": [],
+        "material": true,
+        "same_company": true,
+        "source_type": "news_report"
+      }
+    ]
+  },
+  "call_id": "227ad6065db946018fe594423ce91abc",
+  "prompt_sha256": "1afb0c7fc62e645edb27184af21a18cfaa7a385681d55b71ee574b598fe3659c",
+  "response_sha256": "1613613986337cf57766013dd0bf7f124d194150cf39d5a40cb81d1168598493",
+  "body_sha256": "0763e363c2b88b1379b7908980bc83021e0fc360aee7ac112bd6e6c73b966160"
+}

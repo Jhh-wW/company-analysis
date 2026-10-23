@@ -3,6 +3,6 @@
 from typing import Final
 
 
-# '뤼튼테크놀로지스도'의 보조사만 추가한다. 조사 다음 경계도 반드시 확인한다.
+# 확인한 보조사와 복합조사만 추가한다. 조사 다음 경계도 반드시 확인한다.
 # 짧은 브랜드명이나 나머지 법인명 접미사를 추측하는 목록이 아니다.
-ADDITIONAL_NAME_PARTICLE_PATTERN: Final[str] = r"(?:도)"
+ADDITIONAL_NAME_PARTICLE_PATTERN: Final[str] = r"(?:도|에서는)"

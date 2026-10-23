@@ -11,6 +11,28 @@ GROUNDING_KEY = "검증근거"
 #: 값이 TABLE_SOURCE_ID 이면 그 후보는 실적표를 근거로 든 것이다.
 GROUNDING_SOURCE_FIELD = "근거"
 NUMERIC_KEY = "수치"
+# 소송의 같은 기말·당사자·건수를 확인한 경우에만 읽는 수치 증명의 표면형.
+LITIGATION_COUNT_LABEL_RE = re.compile(
+    r"(?:(?P<role>피고|원고)(?:로|인)?\s*)?"
+    r"(?:계류\s*(?:중(?:인)?)?\s*)?소송(?:\s*사건)?(?:\s*(?:건수|수))?"
+)
+LITIGATION_COUNT_SURFACE_RE = re.compile(r"소송(?:\s*사건)?")
+LITIGATION_COUNT_VALUE_RE = re.compile(r"(?P<count>\d+)\s*건")
+LITIGATION_ROLE_COUNT_RE = re.compile(
+    r"(?P<role>피고|원고)로\s*계류\s*중인\s*소송사건(?:은|이)\s*"
+    r"(?P<count>\d+)\s*건"
+)
+LITIGATION_CURRENT_COMPANY_RE = re.compile(
+    r"(?:당기말|보고기간말|기말)\s*현재\s*(?:회사|당사)가\s*"
+    r"(?:피고|원고)로\s*계류\s*중인\s*소송사건"
+)
+LITIGATION_DIAGRAM_ROLE_COUNT_RE = re.compile(
+    r"(?<![가-힣])(?P<role>피고|원고)\s+(?:계류\s*(?:중(?:인)?)?\s*)?"
+    r"소송(?:사건)?\s*(?:은|이)?\s*"
+    r"(?P<count>\d+)\s*건"
+)
+LITIGATION_CLAUSE_TERMINATOR = "."
+LITIGATION_NONASSERTIVE_TERMINATORS = frozenset({"!", "?"})
 TREND_KEY = "추세"
 TIME_KEY = "시점"
 #: 정성 «수익 인식 기준» 단정의 정확 인용 요구(4차 채택안). 완료·진행 기준을
@@ -52,6 +74,8 @@ ORDINAL_RE = re.compile(r"\d+위")
 RATIO_QUALIFIER_RE = re.compile(r"비중(?:은|는|이|가)?")
 # 상한·하한과 회계 기준은 제거해서 같은 값으로 만들지 않는다.
 BOUND_VALUE_RE = re.compile(r"(?P<value>.+?)\s*(?P<bound>이하|이상|미만|초과)$")
+APPROXIMATE_VALUE_RE = re.compile(r"약\s*(?P<value>.+)")
+APPROXIMATE_PREFIX_RE = re.compile(r"약\s*$")
 BOUND_TAIL_RE = re.compile(r"\s*(이하|이상|미만|초과)(?=$|[\s,.;:)]|(?:으로|로|를|을|의|인|이다|입니다|이며|이고|이어야|여야))")
 RATIO_BASIS_RE = re.compile(r"(?:연결|별도|개별)(?:재무제표)?\s*기준")
 QUARTER_RE = re.compile(r"([1-4])\s*분기")

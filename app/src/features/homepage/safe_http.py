@@ -733,17 +733,7 @@ def read_limited_text(
     ``read1``로 작게 읽고 실제 읽기마다 하나의 절대 마감을 다시 확인한다.
     """
 
-    deadline, effective_clock = response_deadline(
-        response,
-        timeout=timeout,
-        clock=clock,
-    )
-    validate_text_response(response)
-    raw = _read_limited_body(
-        response,
-        deadline=deadline,
-        clock=effective_clock,
-    )
+    raw = read_limited_body(response, timeout=timeout, clock=clock)
 
     charset = _content_charset(getattr(response, "headers", None))
     if charset:
@@ -755,6 +745,19 @@ def read_limited_text(
         return raw.decode("utf-8")
     except UnicodeDecodeError:
         return raw.decode("cp949", errors="replace")
+
+
+def read_limited_body(
+    response: object,
+    *,
+    timeout: float,
+    clock: Callable[[], float] = time.monotonic,
+) -> bytes:
+    """동일한 콘텐츠·바이트·시간 검사를 유지하면서 원문 해시용 바이트를 보존한다."""
+
+    deadline, effective_clock = response_deadline(response, timeout=timeout, clock=clock)
+    validate_text_response(response)
+    return _read_limited_body(response, deadline=deadline, clock=effective_clock)
 
 
 def _read_limited_body(

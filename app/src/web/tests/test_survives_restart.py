@@ -34,6 +34,9 @@ from src.web import main
 from src.web import job_runtime, runtime
 from src.web.routers import reports as reports_router
 
+
+pytestmark = pytest.mark.usefixtures("canonical_demo_clock")
+
 #: 현재 출고 게이트를 통과하는 1~9장 canonical 데모 회사.
 COMPANY = CANONICAL_DEMO_COMPANY
 _REAL_REQUIRE_REPORT_DELIVERY = job_runtime._require_report_delivery
