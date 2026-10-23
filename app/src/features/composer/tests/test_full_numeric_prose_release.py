@@ -48,8 +48,9 @@ from src.shared.report_quality.source_identity import document_identity_from_par
 #: (장, 문장 번호) → 문장에 끼워 넣는 숫자 문구. 인용 조각 원문에도 같은 글자로
 #: 들어간다. 7차 실측처럼 날짜가 대부분이고 개수가 일부다 — 합계 15건.
 _NUMERIC_PHRASES: dict[tuple[str, int], str] = {
-    ("identity", 0): "2019년 3월 15일 기준",
-    ("identity", 1): "2021년 1월 기준",
+    # 첫 사업 소개는 현재 사업 정의로 유지하고 날짜 변조는 독립 사업 문장에 둔다.
+    ("business_model", 0): "2019년 3월 15일 기준",
+    ("business_model", 2): "2021년 1월 기준",
     ("identity", 2): "12개 항목 기준",
     ("identity", 3): "2020년 7월 1일 기준",
     ("identity", 4): "3개 부문 기준",
@@ -226,7 +227,7 @@ def test_작가가_원문_날짜_표기를_바꿔_옮기면_FULL_후보에서_�
     """값이 같아도 자기 인용의 표기가 다르면 최종 후보에 싣지 않는다."""
 
     _install_numeric_sentences(
-        monkeypatch, source_phrases={("identity", 0): "2019.03.15 기준"},
+        monkeypatch, source_phrases={("business_model", 0): "2019.03.15 기준"},
     )
     output = _run(ReleaseMode.FULL)
 

@@ -82,6 +82,7 @@ _FILING_TEXT = (
 )
 _MARKS = "가나다라마바사아자"
 _ENDINGS = ("첫째", "둘째", "셋째", "넷째", "다섯째")
+_IDENTITY_INTRO = "가나다회사는 기업 고객에게 반도체 검사 장비를 공급하는 장비 제조사다."
 _REVIEW_ITEM_RE = re.compile(
     r"\[(\d+)\] \(장: ([^,]+), 종류: ([^,]+), 인용: ([^)]+)\)"
 )
@@ -116,11 +117,13 @@ def _section_sentences(section_index: int) -> tuple[str, ...]:
             f"{mark} {body}고 공식 자료에서 확인했다."
             for body in _CULTURE_SENTENCE_BODIES
         )
-    return tuple(
+    sentences = tuple(
         f"{mark} 회사 사업 고객 제품 전략 운영 문화 경쟁 과제 대응 협력 실적 "
         f"{ending} 공식 자료에서 확인했다."
         for ending in _ENDINGS
     )
+    # exact 공식 원문과 작가가 같은 현재 사업 소개를 사용해 최종 FULL 계약까지 도달한다.
+    return (_IDENTITY_INTRO, *sentences[1:]) if section_index == SECTION_IDS.index("identity") else sentences
 
 
 def _official_evidence() -> OfficialEvidenceCollectionResult:

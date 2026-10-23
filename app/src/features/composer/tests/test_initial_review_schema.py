@@ -1,9 +1,10 @@
 """최초 본문 검수의 «첫 요청»이 구조화 출력 계약을 싣는지 무과금으로 확인한다.
 
 `initial_ask`(최초 본문 검수 전용 호출자)가 있을 때만 첫 프롬프트가
-FLAT_REVIEW_SCHEMA 를 싣는다. 전송 문자열 바이트·캐시 경계·재요청 문구·호출자
+FLAT_REVIEW_SCHEMA 를 싣는다. 원래 검수 내용·캐시 경계·재요청 문구·호출자
 선택·의미 검증기는 그대로다. 스키마는 응답의 «모양»만 제한하므로 번호 누락·
 수치 증명 누락·인용 불일치는 예전처럼 거절돼야 한다(스키마 적합 ≠ 의미 합격).
+실제 전송에는 키 별칭 안내만 덧붙이고 원래 검수 내용의 바이트는 유지한다.
 실제 공급자의 문법 컴파일·지연·절감액은 이 시험의 범위가 아니다.
 """
 
@@ -29,6 +30,7 @@ from src.features.composer.port import (
 from src.features.composer.prompt_cache_constants import REVIEW_PROMPT_CACHE_ENV
 from src.features.composer.review_protocol_observation import READ_JSON_SYNTAX, READ_OK
 from src.features.composer.review_schema import FLAT_REVIEW_SCHEMA, ReviewPrompt
+from src.features.composer.review_wire_constants import REVIEW_WIRE_GUIDE
 from src.features.composer.tests import test_numeric_quote_refs as numeric_fixture
 
 
@@ -136,10 +138,13 @@ def test_initial_review_sends_schema_on_first_request_with_same_bytes(monkeypatc
     [first] = run.calls
     assert isinstance(first, ReviewPrompt)
     assert first.response_schema is FLAT_REVIEW_SCHEMA
-    assert first.encode("utf-8") == plain.encode("utf-8")
+    # 새 전송 안내만 명시적으로 제외하면 기존 검수 내용의 바이트가 같다.
+    assert first.count(REVIEW_WIRE_GUIDE) == 1
+    assert first.encode("utf-8") == (str(plain) + REVIEW_WIRE_GUIDE).encode("utf-8")
+    assert first[:-len(REVIEW_WIRE_GUIDE)].encode("utf-8") == plain.encode("utf-8")
     assert first.cache_prefix_chars == expected_prefix
     assert first[:expected_prefix] == plain[:expected_prefix]
-    assert run.protocol[0]["입력문자"] == len(plain)
+    assert run.protocol[0]["입력문자"] == len(first)
     assert run.protocol[0]["판독"] == READ_OK
 
 
@@ -201,7 +206,11 @@ def test_retry_after_schema_first_keeps_cache_boundary(monkeypatch, enabled):
     run = _run(ITEMS, FRAGMENTS, [INVALID, _response(_row(1))], schema_first=True)
     first, second = run.calls
     assert first.cache_prefix_chars == second.cache_prefix_chars == expected_prefix
-    assert second.encode("utf-8") == (str(plain) + RETRY_REMINDER).encode("utf-8")
+    assert second.encode("utf-8") == (
+        str(plain) + REVIEW_WIRE_GUIDE + RETRY_REMINDER
+    ).encode("utf-8")
+    assert second.count(REVIEW_WIRE_GUIDE) == 1
+    assert second[:-len(RETRY_REMINDER + REVIEW_WIRE_GUIDE)].encode("utf-8") == plain.encode("utf-8")
     assert second[:expected_prefix] == plain[:expected_prefix]
 
 

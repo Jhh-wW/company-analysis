@@ -384,6 +384,7 @@ def _full_packets(*, culture_owns_recovery_fragment: bool):
     # 6장 정상 계획은 현재 근거 계약대로 자기 원문과 미래 증명을 함께 공급한다.
     base = _strict_packet_set(evidence_texts=(
         COMPETITIVE_TEXT, _SECTION_CLAIMS["future_strategy"][0][1],
+        _SECTION_CLAIMS["identity"][0][1],
     ))
     extra = _culture_recovery_fragment()
     return SectionEvidencePacketSet(
@@ -417,6 +418,15 @@ def _full_writer_leaving_culture_empty():
 
     class _Writer(_StrictThinWriter):
         def __call__(self, prompt: str) -> str:
+            if self.section_calls == 0:
+                # 이 시험은 8장 복구를 다룬다. 1장은 원문에 있는 정상 소개를 준다.
+                self.prompts.append(prompt)
+                self.section_calls += 1
+                slot, text = _SECTION_CLAIMS["identity"][0]
+                return json.dumps({"문장들": [{
+                    "글": text, "인용": ["1"], "등급": GRADE_CONFIRMED,
+                    "주장슬롯": slot,
+                }]}, ensure_ascii=False)
             if self.section_calls < len(_ALL_SECTION_IDS) and (
                 _ALL_SECTION_IDS[self.section_calls] == "future_strategy"
             ):

@@ -35,6 +35,18 @@ class IdentityOpeningFact(Protocol):
 FactValue = TypeVar("FactValue", bound=IdentityOpeningFact)
 
 
+def identity_opening_definition_form(text: str) -> bool:
+    """승인 여부와 분리된 정의문 형식 검사. 새 승인이나 현재성을 만들지 않는다."""
+
+    return (
+        bool(IDENTITY_ENTITY_DEFINITION_END_RE.search(text.strip()))
+        and not IDENTITY_SENTENCE_SPLIT_RE.search(text.strip())
+        and not administrative_identity_only(text)
+        and not IDENTITY_PURPOSE_RE.search(text)
+        and not IDENTITY_DEPENDENT_OPENING_RE.search(text.lstrip())
+    )
+
+
 def identity_opening_sentence_eligible(sentence: ComposedSentence) -> bool:
     """첫 문장으로 독립해서 읽을 수 있는 승인된 사업 설명인지 확인한다.
 
@@ -46,11 +58,7 @@ def identity_opening_sentence_eligible(sentence: ComposedSentence) -> bool:
         sentence.grade == GRADE_CONFIRMED
         and sentence.verification_state == IDENTITY_VERIFIED_STATE
         and sentence.planned_claim_slot == IDENTITY_BUSINESS_DEFINITION_SLOT
-        and bool(IDENTITY_ENTITY_DEFINITION_END_RE.search(sentence.text.strip()))
-        and not IDENTITY_SENTENCE_SPLIT_RE.search(sentence.text.strip())
-        and not administrative_identity_only(sentence.text)
-        and not IDENTITY_PURPOSE_RE.search(sentence.text)
-        and not IDENTITY_DEPENDENT_OPENING_RE.search(sentence.text.lstrip())
+        and identity_opening_definition_form(sentence.text)
     )
 
 

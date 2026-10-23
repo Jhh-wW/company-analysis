@@ -103,6 +103,8 @@ _PROGRAM_FRAGMENT_NUMBER: Final[int] = 90
 # 합성 작가는 아홉 장에 여섯 문장씩 쓰고, 실제 검증 프로그램이 4장을 두 문장,
 # 9장을 두 문장 보강한다. 주입 칸을 작가가 다시 쓰지는 않는다.
 _ENDINGS = ("첫째", "둘째", "셋째", "넷째", "다섯째", "여섯째")
+_IDENTITY_INTRO = "가나다전자는 기업 고객에게 반도체 검사장비를 제공하는 장비 제조사다."
+_IDENTITY_ALTERNATE_INTRO = "가나다전자는 생산라인의 제품 결함을 찾는 검사장비를 제공하는 회사다."
 _GROUPED_ITEM_RE = re.compile(
     r"\[(\d+)\] \(장: ([^,]+), 종류: ([^,]+), 인용: ([^)]+)\)"
 )
@@ -356,6 +358,13 @@ def _section_sentence(section_id: str, mark: str, ending_index: int, ending: str
       꼬리(공식 자료에서 확인했다)는 그대로 둔다 — 다른 시험이 이 어휘로
       근거 결속을 확인한다.
     """
+    # FULL 성공 재료는 첫 소개의 사업 정의를 후보와 실제 합성 원문에 함께 싣는다.
+    if mark == _MARKS[SECTION_IDS.index("identity")]:
+        if ending_index == 0:
+            return _IDENTITY_INTRO
+        # 첫 판정이 손상되는 공격에서도 나머지 검증 본문에 실제 사업 소개가 남는다.
+        if ending_index == 1:
+            return _IDENTITY_ALTERNATE_INTRO
     if section_id == "future_strategy":
         return _FUTURE_STRATEGY_SENTENCES[ending_index]
     if section_id == "culture":
@@ -499,6 +508,9 @@ def _writer_slots(section_id: str) -> tuple[str, ...]:
     slots = tuple(
         slot for slot in CLAIM_SLOTS_BY_SECTION[section_id] if slot not in injected
     )
+    if section_id == "identity":
+        opening_slot = "identity:business_definition"
+        return (opening_slot, *(slot for slot in slots if slot != opening_slot))
     if section_id == "competitive_position":
         return tuple(
             slot for slot in slots

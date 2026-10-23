@@ -206,6 +206,7 @@ from src.features.composer.review_schema import (
     ReviewPrompt,
 )
 from src.features.composer.prompt_metadata import with_review_prompt_cache
+from src.features.composer.review_wire import review_wire_prompt, with_review_wire
 
 import hashlib
 import json
@@ -723,7 +724,8 @@ def _safe_ask(ask: AskFn, prompt: str) -> Optional[str]:
       장애)는 삼키지 않고 재전파한다 — logic.py의 같은 예외와 짝이다.
     """
     try:
-        return str(ask(prompt))
+        answer = ask(prompt)
+        return answer if isinstance(answer, str) else str(answer)
     except AskFatalError:
         raise
     except Exception:  # noqa: BLE001 - 검수 호출 실패는 «검수 불능»으로 처리한다
@@ -1790,8 +1792,8 @@ def _ask_grouped_verdicts(
     )
     # 최초 본문 검수 전용 호출자가 있으면 첫 요청에 쓴다. 재요청·후속은 전용
     # 재요청 호출자가 있으면 그것, 없으면 첫 요청과 같은 호출자다.
-    reviewer = initial_ask or ask
-    retry_reviewer = initial_retry_ask or reviewer
+    reviewer = with_review_wire(initial_ask or ask)
+    retry_reviewer = with_review_wire(initial_retry_ask or reviewer)
 
     def _observe_attempt(
         attempt: int, sent: str, answer: Optional[str],
@@ -1804,8 +1806,8 @@ def _ask_grouped_verdicts(
         return new_protocol_observation(
             PATH_PACKET,
             attempt,
-            prompt_chars=len(sent),
-            response_chars=len(answer or ""),
+            prompt_chars=len(review_wire_prompt(sent)),
+            response_chars=getattr(answer, "wire_response_chars", len(answer or "")),
             requested_count=(
                 len(owners) if requested_count is None else requested_count
             ),
@@ -3239,8 +3241,8 @@ def _ask_verdicts(
     (`_second_review_call_allowed`) — 첫 응답을 통째로 못 읽었으면 예전처럼 None
     이다. 생략하면 예전과 같다.
     """
-    reviewer = initial_ask or ask
-    retry_reviewer = (
+    reviewer = with_review_wire(initial_ask or ask)
+    retry_reviewer = with_review_wire(
         (initial_retry_ask or initial_ask) if initial_ask is not None else ask
     )
     # ★ 후보별 보도 원문 문맥은 «한 번» 계산해 안내와 판정에 같은 값을 준다. 평문
@@ -3282,8 +3284,8 @@ def _ask_verdicts(
         return new_protocol_observation(
             PATH_FLAT,
             attempt,
-            prompt_chars=len(sent),
-            response_chars=len(answer or ""),
+            prompt_chars=len(review_wire_prompt(sent)),
+            response_chars=getattr(answer, "wire_response_chars", len(answer or "")),
             requested_count=(
                 len(requested_numbers) if requested_count is None else requested_count
             ),

@@ -150,6 +150,13 @@ from src.features.composer.empty_section_recovery import (
     recovery_evidence, recover_empty_sections, rejected_sentence_fingerprint,
 )
 from src.features.composer.empty_section_recovery_constants import EMPTY_RECOVERY_STEP, MAX_EMPTY_RECOVERY_SECTIONS
+from src.features.composer.identity_opening_recovery import (
+    has_bound_identity_opening, recover_identity_opening,
+)
+from src.features.composer.identity_opening_policy import apply_identity_opening_policy
+from src.features.composer.identity_opening_recovery_constants import (
+    IDENTITY_OPENING_RECOVERY_STEP, IDENTITY_OPENING_RECOVERY_PARSE_FAILED,
+)
 from src.features.composer.diagram_check import check_diagram_numbers, check_diagrams
 from src.features.composer.partial_evidence import build_partial_evidence_view
 from src.features.composer.flow_review_binding import filter_reviewed_flow_rows
@@ -1640,6 +1647,7 @@ def _finish_evidence_available(
     industry_anchors: tuple[BusinessActivityAnchor, ...] = (),
     industry_problems: tuple[IndustryProblemEvidence, ...] = (),
     official_industry_fallback: Callable[[tuple[CollectedFragment, ...]], tuple[IndustryProblemEvidence, ...]] | None = None,
+    identity_opening_reason: str = "",
 ) -> V2RunOutput:
     """검증된 본문(또는 안내뿐인 본문)으로 확보 근거 보고서를 마무리한다.
 
@@ -1738,6 +1746,11 @@ def _finish_evidence_available(
     )
     if discovery_fragments:
         fragments = (*_normalize_fragments(fragments), *discovery_fragments)
+    opening_policy = apply_identity_opening_policy(
+        body, body_rendered.fact_records, reason=identity_opening_reason,
+    )
+    body = opening_policy.report
+    extra_reasons.extend(opening_policy.shortfall_reasons)
     extractive = select_extractive_summary(body, body_rendered.fact_records)
     _record_fact_summary(len(selection.fact_ids), len(extractive.items), composition_diagnostics)
     final = ComposedReport(sections=body.sections, summary=extractive.bound_sentences)
@@ -2789,6 +2802,8 @@ def run_v2(
         ),
     )
     name_table = name_table_result.table
+    identity_opening_reason = ""
+    identity_opening_attempted = False
 
     def _downgrade_after_write(
         reason: str,
@@ -2797,6 +2812,7 @@ def run_v2(
     ) -> V2RunOutput:
         """FULL이 작성 뒤 품질 하한에 걸렸을 때 검증 본문으로 부분 보고서를 낸다."""
 
+        _recover_bound_identity_opening()
         downgraded = _finish_evidence_available(
             company_name,
             verified,
@@ -2837,6 +2853,7 @@ def run_v2(
             industry_anchors=industry_anchors,
             industry_problems=industry_problems,
             official_industry_fallback=(official_industry_fallback if ai_failure is None else None),
+            identity_opening_reason=identity_opening_reason,
             # 본문은 FULL 작성본 그대로라 프로그램 등록부에 결속된 문장이 살아
             # 있다. 같은 등록부를 넘겨야 renderer가 그 문장의 짝을 찾는다 —
             # 빼면 무차감 중단이 생성 실패로 뒤집힌다.
@@ -2990,6 +3007,67 @@ def run_v2(
     body_rendered = _render_bound_body()
     public_selection = select_bound_public_sentences(verified, body_rendered)
     verified = public_selection.report
+    def _recover_bound_identity_opening():
+        nonlocal verified, body_rendered, public_selection, draft_body_count
+        nonlocal identity_opening_reason, identity_opening_attempted
+        if identity_opening_attempted or has_bound_identity_opening(
+            verified, body_rendered.fact_records,
+        ):
+            return
+        identity_opening_attempted = True
+        # 한 문장만 독립 검수한다. FULL 추가 호출은 완성 영수증에 숨기지 않고
+        # 기존 본문을 보존하는 확보 근거 출고에서만 사용한다.
+        opening_recovery = None
+        try:
+            opening_recovery = recover_identity_opening(
+                company_name, verified, bound_facts=body_rendered.fact_records,
+                evidence=_normalize_fragments(verification_fragments),
+                allowed_fragment_ids=(
+                    writer_allowed_ids.get("identity", frozenset())
+                    if writer_allowed_ids is not None else frozenset(
+                        fragment.fragment_id
+                        for fragment in _normalize_fragments(verification_fragments)
+                    )
+                ),
+                writer=empty_recovery_writer_ask,
+                reviewer=empty_recovery_reviewer_ask,
+                can_start=(empty_recovery_can_start if ai_failure is None else None),
+                baseline_date=baseline_date, diagnostics=review_diagnostics,
+                protocol_diagnostics=composition_diagnostics,
+                rejected_fingerprints=frozenset(
+                    rejected_sentence_fingerprint(sentence.text)
+                    for section in draft.sections if section.section_id == "identity"
+                    for sentence in section.sentences
+                ),
+            )
+            identity_opening_reason = opening_recovery.reason
+        except AskFatalError as error:
+            if _fallback_blocked(error):
+                raise
+            identity_opening_reason = "호출중단"
+            composition_diagnostics.append({
+                "step": IDENTITY_OPENING_RECOVERY_STEP, "상태": identity_opening_reason,
+                "오류종류": type(error.cause).__name__, "최종반영": 0,
+            })
+        except (TypeError, ValueError):
+            identity_opening_reason = IDENTITY_OPENING_RECOVERY_PARSE_FAILED
+            composition_diagnostics.append({
+                "step": IDENTITY_OPENING_RECOVERY_STEP, "상태": identity_opening_reason,
+                "최종반영": 0,
+            })
+        if opening_recovery is not None and opening_recovery.added:
+            draft_body_count += opening_recovery.added
+            verified = opening_recovery.report
+            body_rendered = _render_bound_body()
+            recovered_selection = select_bound_public_sentences(verified, body_rendered)
+            public_selection = replace(
+                recovered_selection,
+                excluded=(*public_selection.excluded, *recovered_selection.excluded),
+            )
+            verified = public_selection.report
+
+    if release_mode is ReleaseMode.SHADOW:
+        _recover_bound_identity_opening()
     # 완료 문장의 사실 결속이 확보된 뒤에만 같은 행동의 예고를 대체한다.
     verified, superseded = drop_superseded_news_plans(
         verified, fragments=_normalize_fragments(verification_fragments),
@@ -3021,6 +3099,11 @@ def run_v2(
         )
         if discovery_fragments:
             verification_fragments = (*_normalize_fragments(verification_fragments), *discovery_fragments)
+    opening_policy = apply_identity_opening_policy(
+        verified, body_rendered.fact_records, reason=identity_opening_reason,
+    )
+    if release_mode is ReleaseMode.SHADOW:
+        verified = opening_policy.report
     extractive = select_extractive_summary(verified, body_rendered.fact_records)
     # FULL 하한은 뒤의 권위 있는 품질/복구 정책이 판정한다. 확보자료 보고서는
     # 근거가 0~2개뿐이면 그 범위만 보여 주며 요약 길이를 맞추려고 호출하지 않는다.
@@ -3431,6 +3514,9 @@ def run_v2(
                 _raise_recovery_stop("non_target_section_mutated")
             if supplement_selection.excluded or supplement_superseded:
                 body_rendered = _render_bound_body()
+            opening_policy = apply_identity_opening_policy(
+                verified, body_rendered.fact_records, reason=identity_opening_reason,
+            )
             extractive = select_extractive_summary(verified, body_rendered.fact_records)
             _record_fact_summary(
                 len(supplement_selection.fact_ids), len(extractive.items), composition_diagnostics,
@@ -3632,6 +3718,10 @@ def run_v2(
             strict_problems,
             problem_codes=quality_observation.quality_problem_codes,
         )
+    if opening_policy.missing and release_mode is not ReleaseMode.SHADOW:
+        if fallback_allowed:
+            return _downgrade_after_write(DEGRADED_REASON_QUALITY_FLOOR)
+        _raise_recovery_stop("identity_opening_missing")
     final_review_diagnostics = final_review_outcomes(final, review_diagnostics)
     degraded_reason = ""
     if ai_failure is not None:
@@ -3663,6 +3753,13 @@ def run_v2(
                 ),
                 degraded_reason=degraded_reason,
                 notice_only=_notice_only_sections(final),
+            )
+        if opening_policy.missing:
+            rendered = replace(
+                rendered, grade=Grade.PARTIAL,
+                shortfall_reasons=list(dict.fromkeys((
+                    *rendered.shortfall_reasons, *opening_policy.shortfall_reasons,
+                ))),
             )
     else:
         # 엄격 계약을 실제로 통과한 결과만 여기 온다. 입력 grade의 옛 기본값

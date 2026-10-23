@@ -760,6 +760,9 @@ def test_엄격모드는_충분한_검증사실만_완성으로_봉인한다():
     )
 
     def complete_sentence(section_index, index):
+        # 완성 보고서의 첫 문장은 합성 근거에도 실린 실제 사업 소개여야 한다.
+        if SECTION_IDS[section_index] == "identity" and index == 0:
+            return _SECTION_CLAIMS["identity"][0][1]
         # 명시 계획 두 행은 확인 placeholder 대신 자기 원문·미래근거가 있는 계획이다.
         # 기존 검수 대역이 이 정확 문장에만 대상·활동·양태 증명을 공급한다.
         if SECTION_IDS[section_index] == "future_strategy" and index in (0, 5):

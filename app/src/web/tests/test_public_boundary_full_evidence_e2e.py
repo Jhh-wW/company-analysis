@@ -137,6 +137,7 @@ _PAGE_PATH_BY_SECTION = {
     "competitive_position": "/about/competitive",
 }
 _ORDINALS = ("첫째", "둘째", "셋째", "넷째", "다섯째")
+_IDENTITY_INTRO = "가나다전자는 기업 고객에게 반도체 검사 장비를 제조 및 판매하는 전문기업이다."
 _IR_SECTION_SENTENCES = {
     "business_model": (
         "가나다전자는 기업 고객사에 반도체 검사 솔루션을 제공하고 "
@@ -191,7 +192,9 @@ def _section_sentences(section_id: str) -> tuple[str, ...]:
             "가나다전자는 공정 추적을 강점으로 삼아 차별화된 검사 경쟁력을 갖춘다는 {ordinal} 자기 설명을 공식 공개한다."
         ),
     }
-    return tuple(templates[section_id].format(ordinal=value) for value in _ORDINALS)
+    sentences = tuple(templates[section_id].format(ordinal=value) for value in _ORDINALS)
+    # 공식 웹 HTML과 가짜 작가가 함께 쓰는 첫 문장이다. 슬롯·문장 수는 유지한다.
+    return (_IDENTITY_INTRO, *sentences[1:]) if section_id == "identity" else sentences
 
 
 def _future_sentences(ordinal: str) -> tuple[str, str]:

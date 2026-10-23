@@ -1098,8 +1098,12 @@ def test_스키마_스위치와_무관하게_프롬프트_바이트와_캐시_�
     _ask_grouped(ITEMS, FRAGMENTS, initial=initial, retry=retry)
 
     first, followup = initial.prompts[0], retry.prompts[0]
-    assert first.encode("utf-8") == plain.encode("utf-8")
-    assert followup.encode("utf-8") == (str(plain_missing) + MISSING_VERDICTS_REMINDER).encode("utf-8")
+    # 공급자 전송 경계의 키 별칭 안내만 추가하며 원래 검수 내용은 그대로다.
+    from src.features.composer.review_wire_constants import REVIEW_WIRE_GUIDE
+    assert first.encode("utf-8") == (str(plain) + REVIEW_WIRE_GUIDE).encode("utf-8")
+    assert followup.encode("utf-8") == (
+        str(plain_missing) + REVIEW_WIRE_GUIDE + MISSING_VERDICTS_REMINDER
+    ).encode("utf-8")
     # 고정 지침 길이는 후보와 무관하다 — 후속도 같은 캐시 경계를 쓴다. 스키마를
     # 끈 갈래는 캐시 표식이 없으면(캐시 끔) 평범한 str 이라 칸 자체가 없다(0 으로 본다).
     assert (
