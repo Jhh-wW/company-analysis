@@ -23,7 +23,7 @@ STATUS_PLAN_DENIAL_RE = re.compile(r'계획(?:은|는|이|이란)?\s*(?:없|아�
 SCOPE_FEEDBACK_BODY_KIND = '본문'
 STATUS_COMPLETION_FACTS = ('완료했', '완료하였', '설립했', '설립하였', '착공했', '착공하였', '시행했', '시행하였')
 # 현재 조직·서비스의 역할 설명은 설립·출시·실시 이력과 구별한다.
-COMPLETED_ROLE_NOUN_RE = re.compile(r'(?:위원회|협의체|조직|체계|구조|제도|서비스|콘텐츠)')
+COMPLETED_ROLE_NOUN_RE = re.compile(r'(?:위원회|협의체|조직|체계|구조|제도|서비스|콘텐츠|기능|도구|솔루션|플랫폼|제품)')
 COMPLETED_ROLE_CURRENT_RE = re.compile(
     r'(?:운영|수행|관리|유지|보유|보고|논의|제공|소개)하고\s*있(?:다|습니다|으며|고|는)'
     r'|(?:운영|수행|관리|유지|보고|제공)되고\s*있(?:다|습니다|으며|고|는)'
@@ -41,7 +41,7 @@ COMPLETED_LEGACY_ROLE_CURRENT_RE = re.compile(
     r'|(?:운영|수행|관리|유지)\s*중(?:이다|입니다|인)'
 )
 COMPLETED_ROLE_EVENT_RE = re.compile(
-    r'(?:완료|준공|설립|구성|구축|도입|시행|실시|설치|출시|착공|개시)'
+    r'(?:완료|준공|설립|구성|구축|도입|시행|실시|설치|출시|착공|개시|체결)'
     r'(?:했|하였|되었|됐|된|(?P<active_modifier>한)(?=\s|[,.;!?]))'
 )
 # 새 완료 관형형만 명시 자기 주어에 묶는다. 기존 미래 주어 검사는 바꾸지 않는다.

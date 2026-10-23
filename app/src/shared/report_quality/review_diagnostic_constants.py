@@ -31,6 +31,8 @@ REVIEW_SCOPE_ITEMS = {
     "accounting_scope_unbound": "회계 범위",
     "transaction_independence_unbound": "거래 독립성",
     "time_invalid": "시점",
+    "financial_snapshot_current_relation_unsupported": "시점",
+    "litigation_snapshot_date_unsupported": "시점",
     # ★ 장과 무관한 부재 단언(composer.absence_claim_constants). 코드 문자열은
     #   그 모듈의 상수와 «반드시 같은 값»이어야 한다.
     "absence_claim_unsupported": "자료 부재 단언",

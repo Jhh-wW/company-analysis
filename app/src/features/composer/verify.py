@@ -49,6 +49,7 @@ from src.features.composer.accounting_policy_guard import (
     accounting_policy_mixed, accounting_policy_problem,
 )
 from src.features.composer.challenge_business_scope import challenge_business_problem
+from src.features.composer.financial_relation_timing import financial_relation_timing_problem
 from src.features.composer.litigation_timing import litigation_numeric_text, litigation_period_context, litigation_timing_problem
 from src.features.composer.numeric_proof_selection import (
     NumericProofCandidate, NumericProofOption, prepare_numeric_proof_options,
@@ -1109,7 +1110,8 @@ def _numeric_disposal(
     ]
     if sentence.planned_claim_slot == "current_challenges:issue":
         numeric_text = litigation_numeric_text(numeric_text, (
-            (frag_by_id[citation].text, frag_by_id[citation].reporting_period)
+            (frag_by_id[citation].text, frag_by_id[citation].reporting_period,
+             frag_by_id[citation].source_publisher)
             for citation in sentence.citations if citation in frag_by_id
         ))
     if sentence.citations and all(
@@ -2320,6 +2322,13 @@ def _apply_grounding(
         confirmed_prose_numbers=confirmed_prose_numbers,
         details_by_number=grounding_details,
         entity_scope_by_number=entity_scope_by_number,
+        litigation_sources_by_number={
+            number: tuple((original, source_fragments_by_id[fid].reporting_period,
+                           source_fragments_by_id[fid].source_publisher)
+                          for fid, original in sources.items() if fid in (source_fragments_by_id or {}))
+            for number, (_text, sources) in candidates.items()
+            if (diagnostic_contexts or {}).get(number, ("",))[0] == "current_challenges"
+        },
     )
     for number in invalid_numeric_selections:
         if verdicts.get(number) not in (VERDICT_TRUE, VERDICT_UNCLEAR):
@@ -2431,6 +2440,14 @@ def _apply_grounding(
         if timing_problem:
             constrained[number] = REVIEW_GROUNDING_REJECTED
             problems[number] = timing_problem
+            continue
+        financial_timing_problem = financial_relation_timing_problem(
+            text, sources, source_fragments_by_id or {},
+            section_id=context[0] if context else "", baseline_date=baseline_date,
+        )
+        if financial_timing_problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = financial_timing_problem
             continue
         if context and context[1] == DIAGNOSTIC_KIND_BODY:
             problem = identity_content_problem(text, section_id=context[0])

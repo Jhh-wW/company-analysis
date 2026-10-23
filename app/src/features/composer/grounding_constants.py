@@ -52,6 +52,8 @@ ORDINAL_RE = re.compile(r"\d+위")
 RATIO_QUALIFIER_RE = re.compile(r"비중(?:은|는|이|가)?")
 # 상한·하한과 회계 기준은 제거해서 같은 값으로 만들지 않는다.
 BOUND_VALUE_RE = re.compile(r"(?P<value>.+?)\s*(?P<bound>이하|이상|미만|초과)$")
+APPROXIMATE_VALUE_RE = re.compile(r"약\s*(?P<value>.+)")
+APPROXIMATE_PREFIX_RE = re.compile(r"약\s*$")
 BOUND_TAIL_RE = re.compile(r"\s*(이하|이상|미만|초과)(?=$|[\s,.;:)]|(?:으로|로|를|을|의|인|이다|입니다|이며|이고|이어야|여야))")
 RATIO_BASIS_RE = re.compile(r"(?:연결|별도|개별)(?:재무제표)?\s*기준")
 QUARTER_RE = re.compile(r"([1-4])\s*분기")

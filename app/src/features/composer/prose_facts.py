@@ -266,7 +266,7 @@ def evaluate_verified_prose_fact(
     if timing_problem:
         return ProseFactBuildResult(None, timing_problem)
     litigation_as_of = litigation_snapshot_date(
-        claim, ((item.exact_text, item.source.reporting_period) for item in evidence),
+        claim, ((item.exact_text, item.source.reporting_period, item.source.publisher) for item in evidence),
     ) if section_id == "current_challenges" else ""
     fact = FactRecord(
         fact_id=_fact_id(

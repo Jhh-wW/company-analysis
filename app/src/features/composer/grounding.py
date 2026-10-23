@@ -18,6 +18,9 @@ from src.features.composer.future_plan_constants import FUTURE_KEY
 from src.features.composer.plan_status_constants import PLAN_STATUS_KEY
 from src.features.composer.grounding_constants import REVIEW_SUPPORT_CANDIDATE_VERDICTS
 from src.features.composer.grounding_constants import BOUND_VALUE_RE, BOUND_TAIL_RE, RATIO_BASIS_RE
+from src.features.composer.grounding_constants import APPROXIMATE_VALUE_RE, APPROXIMATE_PREFIX_RE
+from src.features.composer.litigation_timing import litigation_numeric_text
+from src.features.composer.litigation_timing_constants import CURRENT_LITIGATION_CLAUSE_RE, LITIGATION_AMOUNT_METRIC
 from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_VERSION
 
 from collections import Counter
@@ -490,6 +493,9 @@ def _metric_value_spans(metric: str, value: str, text: str) -> tuple[_BoundAmoun
     bounded_value = BOUND_VALUE_RE.fullmatch(value.strip())
     numeric_value = bounded_value["value"] if bounded_value else value
     declared_bound = bounded_value["bound"] if bounded_value else ""
+    approximate_value = APPROXIMATE_VALUE_RE.fullmatch(numeric_value.strip())
+    if approximate_value:
+        numeric_value = approximate_value['value']
     results: list[_BoundAmount] = []
     for clause_match in re.finditer(r"[^;\n]+", text):
         clause = clause_match.group()
@@ -503,6 +509,8 @@ def _metric_value_spans(metric: str, value: str, text: str) -> tuple[_BoundAmoun
                 continue
             for number in _amount_spans(clause):
                 if _surface(number.text) != _surface(numeric_value):
+                    continue
+                if approximate_value and not APPROXIMATE_PREFIX_RE.search(clause[:number.start]):
                     continue
                 tail = BOUND_TAIL_RE.match(clause, number.end)
                 actual_bound = tail[1] if tail else ""
@@ -637,6 +645,7 @@ def _dimension(text: str) -> str:
 def _numeric_valid(
     text: str, entries: object, sources: Mapping[str, str],
     detail: dict[str, object] | None = None,
+    *, litigation_text: str | None = None,
 ) -> bool:
     def fail(stage: str, index: int | None = None) -> bool:
         if detail is not None:
@@ -661,6 +670,13 @@ def _numeric_valid(
             return fail("quote_not_bound", index)
         if not _metric_matches(metric, source_metric):
             return fail("metric_mismatch", index)
+        # 정본 기말을 이미 확인한 소송금액만 날짜 없는 수치 대조용으로 본다.
+        # 원문 인용이 같은 '당기말 현재 소송' 절에 있어야 하며 매출·타기간 금액에는 적용하지 않는다.
+        numeric_text = text
+        source = sources.get(str(entry.get('근거', '')), '')
+        if (litigation_text is not None and metric == source_metric == LITIGATION_AMOUNT_METRIC
+                and any(quote in match.group() for match in CURRENT_LITIGATION_CLAUSE_RE.finditer(source))):
+            numeric_text = litigation_text
         expression_amounts = _amount_spans(expression)
         candidate_value = entry.get("후보값")
         if candidate_value is None and len(expression_amounts) == 1:
@@ -704,7 +720,7 @@ def _numeric_valid(
             return fail("value_mismatch", index)
         if not (same_dimension or ratio_conversion):
             return fail("dimension_mismatch", index)
-        candidate_period = _bound_period(metric, candidate, text)
+        candidate_period = _bound_period(metric, candidate, numeric_text)
         source_bindings = _metric_value_spans(source_metric, entry["원문값"], quote)
         source_periods = {_bound_period(source_metric, number, quote) for number in source_bindings}
         if ratio_conversion:
@@ -1004,6 +1020,7 @@ def _reported_comparison_valid(text: str, entries: object, sources: Mapping[str,
 def grounding_problem(
     text: str, sources: Mapping[str, str], entry: Mapping,
     *, detail: dict[str, object] | None = None,
+    litigation_sources: Sequence[tuple[str, str, str]] = (),
 ) -> str:
     """필요 근거 누락과 결속·연산 실패를 구분하며 호출이나 저장을 하지 않는다."""
     def invalid_shape() -> str:
@@ -1035,7 +1052,8 @@ def grounding_problem(
         if NUMERIC_KEY in evidence else None
     )
     numeric_detail: dict[str, object] = {}
-    numeric_valid = (_numeric_valid(text, numeric_entries, sources, numeric_detail)
+    numeric_valid = (_numeric_valid(text, numeric_entries, sources, numeric_detail,
+                                   litigation_text=litigation_numeric_text(text, litigation_sources, preserve_offsets=True))
                      if NUMERIC_KEY in evidence else None)
     if (TREND_KEY in required and NUMERIC_KEY in evidence
         and numeric_valid
@@ -1133,6 +1151,7 @@ def constrain_verdicts(
     confirmed_prose_numbers: frozenset[int] = frozenset(),
     details_by_number: dict[int, dict[str, object]] | None = None,
     entity_scope_by_number: Mapping[int, Sequence[EntityScopeContext]] | None = None,
+    litigation_sources_by_number: Mapping[int, Sequence[tuple[str, str, str]]] | None = None,
 ) -> tuple[dict[int, str], dict[int, str]]:
     """같은 검수 응답의 근거를 실제 입력에 결속한다. 추가 AI 호출은 없다.
 
@@ -1172,7 +1191,8 @@ def constrain_verdicts(
             continue
         text, sources = candidates[number]
         detail: dict[str, object] = {}
-        problem = grounding_problem(text, sources, entry, detail=detail)
+        problem = grounding_problem(text, sources, entry, detail=detail,
+                                    litigation_sources=(litigation_sources_by_number or {}).get(number, ()))
         if problem:
             if details_by_number is not None and detail:
                 details_by_number[number] = detail

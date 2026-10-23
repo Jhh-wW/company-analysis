@@ -100,6 +100,9 @@ def test_other_section_and_other_column_are_preserved():
 @pytest.mark.parametrize("action_label", [
     "일련의 구별되는 용역 제공; 청구권이 있는 금액으로 수익 인식(실무적 간편법)",
     "청구권이 있는 금액으로 수익 인식(실무적 간편법)",
+    "수행의무 이행 시점에 수익 인식; 일부는 청구권 기준 실무적 간편법 적용",
+    "일부는 청구권 기준 실무적 간편법 적용; 수행의무 이행 시점에 수익 인식",
+    "수행의무 이행 시점에 수익 인식",
 ])
 def test_pure_revenue_recognition_policy_in_customer_action_drops_row(action_label):
     report, fragments = make_report(label="", action_label=action_label)
@@ -147,6 +150,23 @@ def test_third_two_recognition_policies_do_not_erase_added_customer_transaction(
     policy = "일부는 청구권 기준 수익 인식(실무적 간편법); 일부는 수행의무 이행 시점에 수익 인식"
     action = "고객에게 월 구독료를 받는다; " + policy
     report, fragments = make_report(label="", action_label=action)
+    checked, problems = check_diagram_numbers(report, fragments)
+    assert checked.sections[0].flow_rows == report.sections[0].flow_rows
+    assert not any(FLOW_ACCOUNTING_REVENUE_CODE in reason for reason in problems)
+
+
+@pytest.mark.parametrize("transaction", [
+    "고객에게 월 구독료를 받는다",
+    "원천사로부터 대금을 받아 수수료와 부가가치세를 제외해 가맹점에 지급한다",
+    "고객 자금을 관리하고 계좌이체와 정산 서비스를 제공한다",
+])
+@pytest.mark.parametrize("transaction_first", [True, False])
+def test_seventh_accounting_clauses_preserve_real_transaction_in_either_order(
+    transaction, transaction_first,
+):
+    policy = "수행의무 이행 시점에 수익 인식; 일부는 청구권 기준 실무적 간편법 적용"
+    parts = (transaction, policy) if transaction_first else (policy, transaction)
+    report, fragments = make_report(label="", action_label="; ".join(parts))
     checked, problems = check_diagram_numbers(report, fragments)
     assert checked.sections[0].flow_rows == report.sections[0].flow_rows
     assert not any(FLOW_ACCOUNTING_REVENUE_CODE in reason for reason in problems)

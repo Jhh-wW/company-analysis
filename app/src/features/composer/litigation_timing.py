@@ -3,6 +3,7 @@
 from datetime import date
 
 from src.features.composer import litigation_timing_constants as c
+from src.shared.company_identity import exact_company_names_equivalent
 from src.shared.report_evidence.legacy_fragment_kinds import LEGACY_KIND_LITIGATION
 
 
@@ -53,20 +54,49 @@ def litigation_snapshot_date(claim: str, sources) -> str:
     if len(dates) != 1:
         return ""
     dated = dates[0]
+    relevant = [(text, period, publisher) for text, period, publisher in sources if _snapshot(text)]
+    if not relevant or not all(_source_date(text, period) == stated for text, period, _ in relevant):
+        return ""
     leading = c.DATED_SNAPSHOT_LEAD_RE.match(claim, dated.end())
     trailing = (
         dated.group().rstrip().endswith(("기준", "현재"))
         and c.SNAPSHOT_BEFORE_DATE_RE.search(claim[:dated.start()])
         and c.DATED_SNAPSHOT_COUNT_RE.match(claim, dated.end())
     )
-    if not leading and not trailing:
+    named = c.DATED_NAMED_SNAPSHOT_LEAD_RE.match(claim, dated.end())
+    counts = {int(match['count']) for match in c.CASE_COUNT_RE.finditer(claim)}
+    same_count = len(counts) == 1 and all(
+        {int(match['count']) for match in c.CASE_COUNT_RE.finditer(text)} == counts
+        for text, _, _ in relevant
+    )
+
+    def same_role(role):
+        return not role or all(
+            (subject := c.SOURCE_COMPANY_SNAPSHOT_RE.search(text)) and subject['role'] == role
+            for text, _, _ in relevant
+        )
+
+    if leading and not same_role(leading['role']):
+        leading = None
+    before_subject = c.SOURCE_COMPANY_SNAPSHOT_RE.search(claim[:dated.start()])
+    if trailing and before_subject and not same_role(before_subject['role']):
+        trailing = False
+    named_leading = bool(named and all(
+        exact_company_names_equivalent(named['publisher'], publisher)
+        and c.SOURCE_COMPANY_SNAPSHOT_RE.search(text)
+        for text, _, publisher in relevant
+    ) and same_count and same_role(named['role']))
+    parenthesized_head = c.PARENTHESIZED_SNAPSHOT_HEAD_RE.fullmatch(claim[:dated.start()])
+    parenthesized = (
+        dated.group().rstrip().endswith(("기준", "현재"))
+        and parenthesized_head and same_count and same_role(parenthesized_head['role'])
+        and c.PARENTHESIZED_SNAPSHOT_END_RE.match(claim, dated.end())
+    )
+    if not (leading or trailing or named_leading or parenthesized):
         # 날짜의 단순 존재가 아니라 바로 뒤 소송 현황을 한정하는 범위만 쓴다.
         # '이후에도', '기준일을 지나 현재'를 같은 시점 스냅샷으로 바꾸지 않는다.
         return ""
-    relevant = [(text, period) for text, period in sources if _snapshot(text)]
-    if relevant and all(_source_date(text, period) == stated for text, period in relevant):
-        return stated
-    return ""
+    return stated
 
 
 def litigation_timing_problem(text: str, sources, fragments, *, section_id: str) -> str:
@@ -81,13 +111,16 @@ def litigation_timing_problem(text: str, sources, fragments, *, section_id: str)
                 or (fragment and (fragment.kind == LEGACY_KIND_LITIGATION
                     or fragment.location == LEGACY_KIND_LITIGATION)))):
             continue
-        relevant.append((original, getattr(fragment, "reporting_period", "")))
+        relevant.append((
+            original, getattr(fragment, "reporting_period", ""),
+            getattr(fragment, "source_publisher", "") or getattr(fragment, "publisher", ""),
+        ))
     if not relevant:
         return ""
     return "" if litigation_snapshot_date(text, relevant) else c.LITIGATION_TIMING_UNSUPPORTED
 
 
-def litigation_numeric_text(text: str, sources) -> str:
+def litigation_numeric_text(text: str, sources, *, preserve_offsets: bool = False) -> str:
     """자기 원문의 정본 기간과 대조한 날짜만 수치 검사에서 분리한다.
 
     기간의 연도·월·일을 일반 숫자 풀에 넣지 않는다. 건수·금액 등 나머지
@@ -96,4 +129,7 @@ def litigation_numeric_text(text: str, sources) -> str:
     if not litigation_snapshot_date(text, sources):
         return text
     match = c.AS_OF_RE.search(text)
-    return text[:match.start()] + text[match.end():] if match else text
+    if not match:
+        return text
+    replacement = ' ' * len(match.group()) if preserve_offsets else ''
+    return text[:match.start()] + replacement + text[match.end():]

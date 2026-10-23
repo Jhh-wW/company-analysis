@@ -13,14 +13,42 @@ AS_OF_RE = re.compile(
     r"|(?P<sep>[-.])(?P<iso_month>\d{1,2})(?P=sep)(?P<iso_day>\d{1,2}))"
     r"\s*(?:기준|현재)?"
 )
-UNBOUND_CURRENT_RE = re.compile(r"현재도|지금도|현재까지|지금까지|아직(?:도)?\s*(?:계류|진행)")
+UNBOUND_CURRENT_RE = re.compile(
+    r"현재도|지금도|현재까지|지금까지|이후에도|기준일을\s*지나\s*현재|"
+    r"아직(?:도)?\s*(?:계류|진행)"
+)
 DATED_SNAPSHOT_LEAD_RE = re.compile(
     r"(?:으로)?\s*[,·]?\s*(?:(?:회사|당사)(?:가|는|의)\s*)?"
-    r"(?:(?:원고|피고)(?:로|인)\s*)?(?:계류\s*중인\s*)?"
+    r"(?:(?P<role>원고|피고)(?:로|인)\s*)?(?:계류\s*중인\s*)?"
     r"(?:총\s*\d+\s*건의\s*)?(?:소송|분쟁)"
 )
 SNAPSHOT_BEFORE_DATE_RE = re.compile(r"(?:소송(?:사건)?|분쟁)(?:은|는|이|가)\s*$")
 DATED_SNAPSHOT_COUNT_RE = re.compile(r"\s*\d+\s*건(?:이|으|[, .]|$)")
+PUBLISHER_NAME_MAX_CHARS = 100
+DATED_NAMED_SNAPSHOT_LEAD_RE = re.compile(
+    r"(?:으로)?\s*(?P<publisher>[가-힣A-Za-z0-9㈜().&'· -]{1,"
+    + str(PUBLISHER_NAME_MAX_CHARS)
+    + r"}?)(?:가|는|의)\s*(?:(?P<role>원고|피고)(?:로|인)\s*)?"
+    r"(?:계류\s*중인\s*)?(?:소송|분쟁)"
+)
+SOURCE_COMPANY_SNAPSHOT_RE = re.compile(
+    r"(?:회사|당사)(?:가|는|의)\s*(?:(?P<role>원고|피고)(?:로|인)\s*)?"
+    r"(?:계류\s*중인\s*)?(?:소송|분쟁)"
+)
+# 괄호 날짜는 바로 앞의 소송 건수·금액 문장만 한정한다. 다른 문장의 날짜는 제외한다.
+PARENTHESIZED_SNAPSHOT_HEAD_RE = re.compile(
+    r"\s*(?:(?:회사|당사)(?:가|는|의)\s*)?"
+    r"(?:(?P<role>원고|피고)(?:로|인)?\s*)?(?:계류\s*(?:중인\s*)?)?"
+    r"(?:소송(?:사건)?|분쟁)\s*(?:은|는|이|가)?\s*(?:총\s*)?\d+\s*건"
+    r"(?:\s*,\s*소송금액(?:은)?\s*(?:약\s*)?[\d,]+(?:\.\d+)?"
+    r"\s*(?:천|만|억|조)?\s*원(?:\s*규모)?)?\s*\(\s*"
+)
+PARENTHESIZED_SNAPSHOT_END_RE = re.compile(r"\s*\)\s*(?:[|;]|$|[.]\s*$)")
+LITIGATION_AMOUNT_METRIC = "소송금액"
+CURRENT_LITIGATION_CLAUSE_RE = re.compile(
+    r"(?:당기말|보고기간말|기말)\s*현재[^.!?;\n]*?(?:소송|분쟁)[^.!?;\n]*"
+)
+CASE_COUNT_RE = re.compile(r"(?:소송(?:사건)?|분쟁)\s*(?:은|는|이|가)?\s*(?:총\s*)?(?P<count>\d+)\s*건")
 YEAR_END_MONTH = 12
 YEAR_END_DAY = 31
 REPORTING_PERIOD_LABEL = "공시 명시 보고기간"

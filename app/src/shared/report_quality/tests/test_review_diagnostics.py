@@ -7,6 +7,22 @@ import pytest
 from src.shared.report_quality.review_diagnostics import observed_review_outcomes
 
 
+@pytest.mark.parametrize('section,reason', [
+    ('operations_partners', 'financial_snapshot_current_relation_unsupported'),
+    ('current_challenges', 'litigation_snapshot_date_unsupported'),
+])
+def test_snapshot_time_producer_reasons_survive_closed_transport(section, reason):
+    from src.features.composer.verify import _append_grounding_diagnostic
+    diagnostics = []
+    _append_grounding_diagnostic(diagnostics, section_id=section, kind='본문',
+        reason_code=reason, candidate_text='검사 후보', sources={'6': '검사 원문'})
+    observed = observed_review_outcomes(diagnostics)
+    assert len(observed) == 1
+    assert observed[0]['reason_code'] == reason
+    assert observed[0]['verification_items'] == ('시점',)
+    assert '검사 원문' not in repr(observed) and '검사 후보' not in repr(observed)
+
+
 def test_transport_contract_matches_the_actual_producer():
     from src.features.composer.transaction_independence_constants import TRANSACTION_INDEPENDENCE_UNBOUND
     from src.features.composer.research_table_status_scope_constants import RESEARCH_TABLE_STATE_UNSUPPORTED
@@ -65,6 +81,8 @@ def test_transport_contract_matches_the_actual_producer():
         FLOW_REVIEW_BINDING_INVALID, FLOW_REVIEW_BINDING_MISSING,
     )
     from src.features.composer.competitive_scope_constants import COMPETITIVE_SECTION_EVIDENCE_OFFCONTRACT
+    from src.features.composer.financial_relation_timing_constants import FINANCIAL_SNAPSHOT_CURRENT_UNSUPPORTED
+    from src.features.composer.litigation_timing_constants import LITIGATION_TIMING_UNSUPPORTED
     assert set(REVIEW_SCOPE_ITEMS) == {
         TRANSACTION_INDEPENDENCE_UNBOUND,
         RESEARCH_TABLE_STATE_UNSUPPORTED,
@@ -82,6 +100,7 @@ def test_transport_contract_matches_the_actual_producer():
         FUTURE_SECTION_NO_FORWARD_STATEMENT,
         # 완료 실행 칸에 진행 상태를 배치한 생산자 사유도 같은 전송 계약에 속한다.
         COMPLETED_EXECUTION_STATE_MISMATCH,
+        FINANCIAL_SNAPSHOT_CURRENT_UNSUPPORTED, LITIGATION_TIMING_UNSUPPORTED,
         CHALLENGE_RESPONSE_MISSING,
         HISTORICAL_EVENT_ONLY, ADMINISTRATIVE_EVENT_ONLY, POSITIVE_RESPONSE_ONLY,
         CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,

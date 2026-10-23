@@ -64,8 +64,11 @@ def _has_completed_statement(text: str, *, defer_named_subject: bool = False) ->
             clause = sentence[:boundary.start()] if boundary else sentence
             if STATUS_NEGATION_RE.search(clause) or STATUS_CONDITIONAL_RE.search(clause):
                 continue
+            subjects = list(COMPLETED_MODIFIER_SUBJECT_RE.finditer(sentence[:event.start()]))
+            # 고객의 신청 완료를 회사의 기능 출시·도입 이력으로 빌리지 않는다.
+            if subjects and subjects[-1]['subject'] in COMPLETED_MODIFIER_OTHER_SUBJECTS:
+                continue
             if event.lastgroup == 'active_modifier':
-                subjects = list(COMPLETED_MODIFIER_SUBJECT_RE.finditer(sentence[:event.start()]))
                 tail = clause[event.end():]
                 if (not subjects
                         or COMPLETED_MODIFIER_OTHER_ORIGIN_RE.search(sentence[:event.start()])
