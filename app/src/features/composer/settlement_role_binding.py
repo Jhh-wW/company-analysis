@@ -6,6 +6,11 @@ import re
 from src.features.composer.settlement_role_constants import (
     SETTLEMENT_CANDIDATE_TEMPLATE,
     SETTLEMENT_BUSINESS_ROLE_RE,
+    SETTLEMENT_BUSINESS_TARGETS,
+    SETTLEMENT_PG_TARGET,
+    SETTLEMENT_RECEIPT_ROLE_RE,
+    SETTLEMENT_DEDUCTION_ROLE_RE,
+    SETTLEMENT_RECEIPT_FLOW_RE,
     SETTLEMENT_NONACTUAL_RE,
     SETTLEMENT_ROLE_RE,
     SETTLEMENT_SOURCE_TEMPLATE,
@@ -57,6 +62,10 @@ def settlement_statement_spans(
     *, is_flow: bool = False,
 ) -> tuple[tuple[int, int, int], ...]:
     """완결된 정산 산문/원문 도식의 공제 자리만 자기 인용과 삼중 대조한다."""
+    if is_flow:
+        spans = _business_flow_spans(surfaces, source_clauses, source_surface, quote, target, role)
+        if spans:
+            return spans
     ordinary_pair = (target in SETTLEMENT_STATEMENT_TARGETS
                      and SETTLEMENT_ROLE_RE.fullmatch(role))
     business_pair = (is_flow and target in surfaces
@@ -81,3 +90,45 @@ def settlement_statement_spans(
     if sum(surface.count(SETTLEMENT_TAX_WORD) for surface in surfaces) != len(spans):
         return ()
     return spans
+
+
+def _business_flow_spans(
+    surfaces: Sequence[str], source_clauses: Sequence[str],
+    source_surface: str, quote: str, target: str, role: str,
+) -> tuple[tuple[int, int, int], ...]:
+    """같은 PG 정산의 수취와 공제 자리를 따로 증명한다.
+
+    원문에 회사·원천사·가맹점·두 공제 항목이 모두 있고, 검수자가 제출한
+    자기 인용도 그 완결 관계를 포함해야 한다. '받은 후/수취', '제외하여/차감 후'
+    차이만 같은 관계의 자리로 연결하며 회사 수익이나 세금의 수취로 바꾸지 않는다.
+    """
+    receipt = bool(SETTLEMENT_RECEIPT_ROLE_RE.fullmatch(role))
+    deduction = bool(SETTLEMENT_DEDUCTION_ROLE_RE.fullmatch(role))
+    if (target not in SETTLEMENT_BUSINESS_TARGETS or not (receipt or deduction)
+            or SETTLEMENT_NONACTUAL_RE.search(source_surface)):
+        return ()
+    source_pattern = re.compile(SETTLEMENT_SOURCE_TEMPLATE.format(target="가맹점"))
+    if not any((match := source_pattern.fullmatch(clause)) is not None
+               and match["business"] in SETTLEMENT_BUSINESS_TARGETS
+               and (target == SETTLEMENT_PG_TARGET or match["business"] == target)
+               and quote.rstrip(".") in clause and match["relation"] in quote
+               for clause in source_clauses):
+        return ()
+    products = [i for i, value in enumerate(surfaces) if value == target]
+    pattern = re.compile(SETTLEMENT_CANDIDATE_TEMPLATE.format(target="가맹점"))
+    actions = [(i, match) for i, value in enumerate(surfaces)
+               if (match := (SETTLEMENT_RECEIPT_FLOW_RE.fullmatch(value)
+                             or pattern.fullmatch(value))) is not None]
+    if len(products) != 1 or len(actions) != 1:
+        return ()
+    index, action = actions[0]
+    # 새 예외는 업종과 완결 정산 칸뿐이다. 다른 회사·매출·대가를 끼운 칸은 빌리지 않는다.
+    if any(value and i not in {products[0], index} for i, value in enumerate(surfaces)):
+        return ()
+    if receipt:
+        if "receipt" not in action.re.groupindex:
+            return ()
+        start, end = action.span("receipt")
+    else:
+        start, end = action.span("fees")
+    return ((index, start, end),)

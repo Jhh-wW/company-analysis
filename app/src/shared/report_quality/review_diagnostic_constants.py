@@ -42,6 +42,8 @@ REVIEW_SCOPE_ITEMS = {
     "prose_revenue_primacy_from_recognition_only": "자기 근거 부족",
     "superlative_attribution_without_source": "회사 직접표현",
     "causal_relation_evidence_missing": "인과 관계",
+    "financial_comparison_basis_mismatch": "인과 관계",
+    "net_loss_operating_cause_unbound": "인과 관계",
     "causal_relation_quote_not_in_source": "인과 관계",
     "causal_relation_quote_not_causal": "인과 관계",
     "causal_relation_pair_missing": "인과 관계",

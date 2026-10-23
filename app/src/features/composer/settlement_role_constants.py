@@ -13,6 +13,26 @@ SETTLEMENT_ROLE_RE: Final[re.Pattern[str]] = re.compile(
 SETTLEMENT_BUSINESS_ROLE_RE: Final[re.Pattern[str]] = re.compile(
     rf"{SETTLEMENT_FEES}(?:를)?(?:차감후|제외하여)가맹점(?:에게|에)지급"
 )
+# 자기 공시의 PG 업종과 도식의 업종명만 대응한다. 임의 상품명은 별칭이 아니다.
+SETTLEMENT_PG_TARGET: Final[str] = "pg서비스"
+SETTLEMENT_BUSINESS_TARGETS: Final[frozenset[str]] = frozenset({
+    "전자지불결제대행업", "전자지급결제대행업", "결제대행업", SETTLEMENT_PG_TARGET,
+})
+SETTLEMENT_RECEIPT_ROLE_RE: Final[re.Pattern[str]] = re.compile(
+    r"원천사로부터(?:대금|거래금액)(?:을)?(?:받은후|수취(?:후)?)"
+)
+SETTLEMENT_PAYMENT_ENDING: Final[str] = r"지급(?:하고있(?:습니다|다)|합니다|한다|함)?"
+SETTLEMENT_DEDUCTION_ROLE_RE: Final[re.Pattern[str]] = re.compile(
+    rf"(?:{SETTLEMENT_FEES}(?:를)?(?:차감후|제외하여|제외후|제외)"
+    r"(?:가맹점(?:으로|에게|에))?"
+    rf"|가맹점(?:으로|에게|에){SETTLEMENT_FEES}(?:를)?(?:차감후|제외하여|제외후|제외))"
+    + SETTLEMENT_PAYMENT_ENDING
+)
+SETTLEMENT_RECEIPT_FLOW_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?P<receipt>원천사로부터(?:대금|거래금액)(?:을)?(?:수취|받은)후)"
+    r"가맹점(?:에게|에)(?P<fees>" + SETTLEMENT_FEES + r")"
+    r"(?:를)?(?:제외하여|제외후|제외|차감후)지급[.]?"
+)
 SETTLEMENT_SOURCE_TEMPLATE: Final[str] = (
     r"(?:\(\d+\)금융예수금)?(?:회사|당사)는"
     r"(?:(?P<business>전자(?:지불|지급)결제대행업|결제대행업)을통하여)?"

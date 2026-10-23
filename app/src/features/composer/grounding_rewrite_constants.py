@@ -35,6 +35,7 @@ from src.features.composer.grounding_constants import (
     GROUNDING_MISSING,
 )
 from src.features.composer.identity_content_constants import IDENTITY_ADMINISTRATIVE_ONLY
+from src.features.composer.financial_interpretation_constants import FINANCIAL_INTERPRETATION_REASONS
 from src.features.composer.prose_own_source_constants import (
     PROSE_OWN_SOURCE_UNSUPPORTED,
 )
@@ -61,6 +62,8 @@ GROUNDING_REWRITE_EXCLUDED_REASONS: Final[frozenset[str]] = frozenset({
     # 행정정보 자체는 틀린 말이 아니며 같은 위치 슬롯의 바꿔쓰기로 사업 설명이
     # 되지 않는다. 장별 사업 근거를 고르는 빈 장 복구의 기회는 그대로 둔다.
     IDENTITY_ADMINISTRATIVE_ONLY,
+    # 잘못된 인과는 문구 재작성으로 증명하지 않는다. 정확한 같은 장의 수치 본문은 남긴다.
+    *FINANCIAL_INTERPRETATION_REASONS,
 })
 
 #: 묶음 재작성 프롬프트 전체의 글자 상한. 완전한 자기 인용이 들어갈 후보만 담는다.
@@ -147,6 +150,7 @@ GROUNDING_REWRITE_REASON_TEXTS: Final[dict[str, str]] = {
     **DIRECT_SUPPORT_REASON_TEXTS,
     **COMBINED_RELATION_REASON_TEXTS,
     **EXECUTIVE_STATUS_REASON_TEXTS,
+    **FINANCIAL_INTERPRETATION_REASONS,
 }
 
 

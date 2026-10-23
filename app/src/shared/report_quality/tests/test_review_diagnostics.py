@@ -28,6 +28,7 @@ def test_transport_contract_matches_the_actual_producer():
     from src.features.composer.research_table_status_scope_constants import RESEARCH_TABLE_STATE_UNSUPPORTED
     from src.features.composer.accounting_scope_constants import ACCOUNTING_SCOPE_UNBOUND
     from src.features.composer.direct_support_constants import DIRECT_SUPPORT_REASON_TEXTS
+    from src.features.composer.financial_interpretation_constants import FINANCIAL_INTERPRETATION_REASONS
     from src.features.composer.constants import SECTION_IDS
     from src.features.composer.grounding_constants import (
         GROUNDING_INVALID, GROUNDING_MISSING, NUMERIC_KEY, RECOGNITION_KEY,
@@ -94,6 +95,7 @@ def test_transport_contract_matches_the_actual_producer():
         SCOPE_CONDITION_UNBOUND, CULTURE_EVIDENCE_SCOPE_MISMATCH,
         QUANTIFIED_DIVIDEND_UNBOUND,
         CULTURE_ACCOUNTING_POLICY_MISPLACED, *DIRECT_SUPPORT_REASON_TEXTS,
+        *FINANCIAL_INTERPRETATION_REASONS,
         *ROLE_BINDING_REASON_TEXTS,
         *FUTURE_REASON_CODES,
         # 6장 장 계약 — 근거 결속 사유가 아니라 «작성 범위» 사유다.

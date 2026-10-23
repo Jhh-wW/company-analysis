@@ -50,6 +50,7 @@ from src.features.composer.accounting_policy_guard import (
 )
 from src.features.composer.challenge_business_scope import challenge_business_problem
 from src.features.composer.financial_relation_timing import financial_relation_timing_problem
+from src.features.composer.financial_interpretation import financial_interpretation_problem
 from src.features.composer.litigation_timing import litigation_numeric_text, litigation_period_context, litigation_timing_problem
 from src.features.composer.numeric_proof_selection import (
     NumericProofCandidate, NumericProofOption, prepare_numeric_proof_options,
@@ -2450,6 +2451,14 @@ def _apply_grounding(
             problems[number] = financial_timing_problem
             continue
         if context and context[1] == DIAGNOSTIC_KIND_BODY:
+            problem = financial_interpretation_problem(
+                text, {key: value for key, value in sources.items() if key != TABLE_SOURCE_ID},
+                relation_evidence.get(number),
+            )
+            if problem:
+                constrained[number] = REVIEW_GROUNDING_REJECTED
+                problems[number] = problem
+                continue
             problem = identity_content_problem(text, section_id=context[0])
             if problem:
                 constrained[number] = REVIEW_GROUNDING_REJECTED

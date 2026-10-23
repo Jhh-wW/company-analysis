@@ -1,6 +1,6 @@
 """설립 목적을 현재 계속사업으로 바꾼 경우 자기 인용의 현재 활동을 확인한다."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import unicodedata
 
 from src.features.composer import founding_purpose_constants as c
@@ -72,4 +72,42 @@ def founding_purpose_scope_problem(text: str, sources: Mapping[str, str]) -> str
                 return SCOPE_CONDITION_UNBOUND
             if not mentioned and not evidence:
                 return SCOPE_CONDITION_UNBOUND
+    return ""
+
+
+def founding_purpose_flow_problem(cells: Sequence[str], sources: Mapping[str, str]) -> str:
+    """설립 목적의 업종을 명사형 현재 운영 도식으로 빌린 경우만 막는다."""
+    values = tuple(_surface(cell) for cell in cells)
+    if (any(c.FLOW_HISTORICAL_RE.search(value) for value in values)
+            and not any(c.EXPLICIT_PRESENT_CLAIM_RE.search(value) for value in values)):
+        return ""
+    units = [unit for source in sources.values()
+             for unit in c.UNIT_RE.split(unicodedata.normalize("NFKC", source))]
+    purposes = [match["object"] for unit in units for match in c.PURPOSE_OBJECT_RE.finditer(unit)]
+    if not purposes:
+        return ""
+
+    def activity_key(value: str) -> str:
+        # 같은 PG 업종의 지급/지불 표기 차이만 비교한다. 다른 업종 별칭은 만들지 않는다.
+        return c.FLOW_PG_ACTIVITY_RE.sub(c.FLOW_PG_ACTIVITY_CANONICAL, _surface(value))
+
+    current = []
+    for unit in units:
+        for clause in _current_activities(unit):
+            if c.SOURCE_SELF_SUBJECT_RE.search(clause):
+                current.append(clause)
+        # 현재 정산 절은 영위한다는 종결어미 없이도 회사의 직접 운영을 증명한다.
+        surface = _surface(unit)
+        if c.FLOW_CURRENT_SETTLEMENT_RE.fullmatch(surface):
+            current.append(surface)
+    for value in values:
+        value = c.SOURCE_SELF_SUBJECT_RE.sub("", value)
+        value = c.FLOW_PRESENT_PREFIX_RE.sub("", value)
+        match = c.FLOW_NOMINAL_ACTIVITY_RE.fullmatch(value)
+        if match is None:
+            continue
+        activity = activity_key(match["activity"])
+        if (any(activity in activity_key(purpose) for purpose in purposes)
+                and not any(activity in activity_key(source) for source in current)):
+            return SCOPE_CONDITION_UNBOUND
     return ""

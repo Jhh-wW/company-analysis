@@ -22,6 +22,8 @@ ADMINISTRATIVE_TEXTS = (
     "회사는 서울특별시 강남구 예시로 10에 본점을 두고 있다.",
     "본점 소재지는 서울특별시 강남구 예시로 10이다.",
     "회사의 본사는 경기도 성남시에 위치한다.",
+    # 실제 10차: '하고 있다' 보조용언을 사업 접속절로 오인했던 순수 주소.
+    "본사는 서울특별시 강남구 테헤란로 131, 14층에 위치하고 있다.",
     "가나다 주식회사는 2020년 8월 3일에 설립되었다.",
     "주식회사 가나다는 2020년 설립되었다.",
     "회사의 설립일은 2020년 8월 3일이다.",
@@ -86,6 +88,35 @@ def test_행정정보만_있는_완결문장은_정체성에_쓰지_않는다(te
 
 @pytest.mark.parametrize("text", BUSINESS_TEXTS + ("", "회사의 본사는 혁신의 중심이다."))
 def test_사업활동과_혼합문장과_모르는문형은_기존검수에_맡긴다(text):
+    assert not administrative_identity_only(text)
+
+
+@pytest.mark.parametrize("subject", ("본사는", "회사의 본점은"))
+@pytest.mark.parametrize("ending", (
+    "위치하고 있다", "위치해 있습니다", "위치하여 있었다", "위치되어 있습니다",
+    "소재하고 있다", "소재해 있습니다", "소재하여 있었습니다", "소재돼 있다",
+))
+def test_소재상태의_보조용언과_접속절을_구별한다(subject, ending):
+    text = f"{subject} 부산광역시 해운대구 예시로 20, 3층에 {ending}."
+    assert administrative_identity_only(text)
+    assert identity_content_problem(text, section_id="identity") == "identity_administrative_only"
+    assert identity_content_problem(text, section_id="past_changes") == ""
+
+
+@pytest.mark.parametrize("text", (
+    "본사는 서울특별시에 위치하고 고객에게 결제 서비스를 제공하고 있다.",
+    "본사는 고객에게 결제 서비스를 제공하고 서울특별시에 위치하고 있다.",
+    "본사는 주소 검증 서비스를 제공하는 소프트웨어 기업으로 서울특별시에 소재하고 있다.",
+    "본사는 서울특별시에 위치하고 있다. 회사는 가맹점에 대금을 지급한다.",
+    "본사는 서울특별시에 위치하고 있으며 고객에게 결제 서비스를 제공한다.",
+    "본사는 서울특별시에 있으며 해외 조직을 연결하고 있다.",
+    "본사는 서울특별시에 위치하고 시장 점유율도 높아지고 있다.",
+    "본사는 서울특별시에 소재하고 거래액은 100억원이다.",
+    "회사는 서울특별시에 위치한 물류센터에서 상품을 보관하고 있다.",
+    "본사는 혁신의 중심에 위치하고 있다.",
+    "본사는 서울특별시에 위치하고 있다는 주장을 부인했다.",
+))
+def test_소재상태가_있어도_사업문장과_모르는절을_삭제하지_않는다(text):
     assert not administrative_identity_only(text)
 
 

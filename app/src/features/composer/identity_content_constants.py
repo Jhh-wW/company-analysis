@@ -21,6 +21,12 @@ IDENTITY_BUSINESS_ACTIVITY_RE = re.compile(
     r"|(?:업체|제조사|공급사|사업자)\s"
 )
 IDENTITY_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|[\n;]+")
+# 정적인 소재 상태의 보조용언은 문장 접속절과 구별한다. 문장 끝에서만
+# 정규화하며 주소·주제부·사업활동 검사는 그대로 적용한다.
+IDENTITY_STATIC_LOCATION_END_RE = re.compile(
+    r"(?P<verb>위치|소재)(?:하고|하여|해|되어|돼)\s*"
+    r"(?:있다|있습니다|있었다|있었습니다)(?P<punct>[.!]?)$"
+)
 
 # 문서별 대표자 표기는 뒤 절에서 직함을 생략해도 사업 설명이 아니다.
 # 문서 표지와 짧은 인명 값, 기재 종결형까지 닫힌 문형으로 확인한다.
@@ -82,7 +88,7 @@ IDENTITY_ADMINISTRATIVE_PATTERNS = tuple(re.compile(pattern) for pattern in (
     rf"{_SUBJECT}{_DATE}\s*(?:에\s*)?설립(?:되었다|됐다|되었습니다|되었음|된\s*(?:회사|법인){_ENDING})[.!]?",
     rf"{_SUBJECT}설립(?:일|연도)(?:은|는|이|가)?\s*{_DATE}\s*{_ENDING}[.!]?",
     rf"{_SUBJECT}(?:납입\s*)?자본금(?:은|는|이|가)?\s*(?:약\s*)?\d[\d,.]*\s*(?:천|백만|억|조)?\s*(?:원|달러|USD)\s*{_ENDING}[.!]?",
-    rf"{_SUBJECT}(?:본점|본사)(?:\s*(?:소재지|주소))?(?:은|는|이|가)?\s*{_ADDRESS}\s*(?:에\s*)?(?:있다|있습니다|위치한다|위치해\s*있다|소재한다|소재하고\s*있다|{_ENDING})[.!]?",
+    rf"{_SUBJECT}(?:본점|본사)(?:\s*(?:소재지|주소))?(?:은|는|이|가)?\s*{_ADDRESS}\s*(?:에\s*)?(?:있다|있습니다|위치한다|소재한다|{_ENDING})[.!]?",
     rf"{_SUBJECT}{_ADDRESS}\s*에\s*(?:본점|본사)(?:을|를)\s*두고\s*(?:있다|있습니다)[.!]?",
 ))
 IDENTITY_CONNECTED_CLAUSE_RE = re.compile(r"(?:이며|이고|으며|하고|하며|하는|하여|했던|위해|면서|지만)\s")

@@ -21,6 +21,7 @@ from src.features.composer.identity_content_constants import (
     IDENTITY_REPORT_METADATA_PATTERNS,
     IDENTITY_SECTION_ID,
     IDENTITY_SENTENCE_SPLIT_RE,
+    IDENTITY_STATIC_LOCATION_END_RE,
 )
 
 
@@ -55,9 +56,14 @@ def _administrative_clause_only(clause: str) -> bool:
             or (control_metadata and IDENTITY_METADATA_AUDIT_TAIL_RE.fullmatch(part))
             for part in parts
         )
+    # '위치하고 있다'의 '하고'는 별도 사업 절을 잇지 않는다. 판정용 문자열만
+    # 정규화하여 원래 문장·인용·검수 증명은 바꾸지 않는다.
+    administrative_clause = IDENTITY_STATIC_LOCATION_END_RE.sub(
+        r"\g<verb>한다\g<punct>", clause,
+    )
     return (
-        not IDENTITY_CONNECTED_CLAUSE_RE.search(clause)
-        and any(pattern.fullmatch(clause) for pattern in IDENTITY_ADMINISTRATIVE_PATTERNS)
+        not IDENTITY_CONNECTED_CLAUSE_RE.search(administrative_clause)
+        and any(pattern.fullmatch(administrative_clause) for pattern in IDENTITY_ADMINISTRATIVE_PATTERNS)
     )
 
 
