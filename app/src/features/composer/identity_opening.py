@@ -5,12 +5,15 @@ from typing import Protocol, TypeVar
 
 from src.features.composer.constants import GRADE_CONFIRMED
 from src.features.composer.identity_content import administrative_identity_only
-from src.features.composer.identity_content_constants import IDENTITY_SECTION_ID
+from src.features.composer.identity_content_constants import (
+    IDENTITY_SECTION_ID, IDENTITY_SENTENCE_SPLIT_RE,
+)
 from src.features.composer.identity_opening_constants import (
     IDENTITY_ACTUAL_FACT_STATUS,
     IDENTITY_BUSINESS_DEFINITION_SLOT,
     IDENTITY_CURRENT_TIME_STATE,
     IDENTITY_DEPENDENT_OPENING_RE,
+    IDENTITY_ENTITY_DEFINITION_END_RE,
     IDENTITY_PURPOSE_RE,
     IDENTITY_VERIFIED_STATE,
 )
@@ -43,6 +46,8 @@ def identity_opening_sentence_eligible(sentence: ComposedSentence) -> bool:
         sentence.grade == GRADE_CONFIRMED
         and sentence.verification_state == IDENTITY_VERIFIED_STATE
         and sentence.planned_claim_slot == IDENTITY_BUSINESS_DEFINITION_SLOT
+        and bool(IDENTITY_ENTITY_DEFINITION_END_RE.search(sentence.text.strip()))
+        and not IDENTITY_SENTENCE_SPLIT_RE.search(sentence.text.strip())
         and not administrative_identity_only(sentence.text)
         and not IDENTITY_PURPOSE_RE.search(sentence.text)
         and not IDENTITY_DEPENDENT_OPENING_RE.search(sentence.text.lstrip())

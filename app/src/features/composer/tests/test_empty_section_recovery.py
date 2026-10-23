@@ -11,6 +11,7 @@ import pytest
 
 from src.features.composer.constants import (
     GRADE_CONFIRMED, GRADE_INTERPRETED, SECTION_GUIDES, SECTION_IDS as _ALL_SECTION_IDS,
+    IDENTITY_FIRST_SENTENCE_WRITER_GUIDE,
 )
 from src.features.composer.empty_section_recovery import (
     recover_empty_sections, recovery_evidence, rejected_sentence_fingerprint,
@@ -61,6 +62,30 @@ def _response(sections, *, claim_slot=None):
             for text, fragment_id, grade in sentences]}
         for section_id, sentences in sections.items()
     }}, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("section_id", ["identity", "culture"])
+@pytest.mark.parametrize("require_claim_slot", [False, True])
+def test_복구_작가에게도_정체성_첫문장_규칙만_해당_장에_전달한다(
+    section_id, require_claim_slot,
+):
+    writes = []
+
+    def writer(prompt):
+        writes.append(prompt)
+        return json.dumps({"장들": {section_id: {"문장들": []}}}, ensure_ascii=False)
+
+    recover_empty_sections(
+        "가나다전자", _report(section_id), targets=(section_id,),
+        evidence={section_id: (_fragment(section_id),)}, writer=writer,
+        reviewer=_FakeReviewer(), require_claim_slot=require_claim_slot,
+    )
+
+    assert len(writes) == 1
+    payload = json.loads(writes[0][writes[0].index('{"' + section_id + '"'):])
+    guide = payload[section_id]["작성범위"]
+    assert guide.startswith(SECTION_GUIDES[section_id])
+    assert guide.count(IDENTITY_FIRST_SENTENCE_WRITER_GUIDE) == (1 if section_id == "identity" else 0)
 
 
 def test_selects_only_bound_official_section_evidence():

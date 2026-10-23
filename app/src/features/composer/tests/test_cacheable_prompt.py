@@ -7,7 +7,7 @@
   프롬프트 캐시는 앞부분이 바이트 단위로 완전히 같을 때만 맞는다.
 
 ★ 이 시험이 지키는 것
-  ① 명시 근거 범위 지침 한 벌 외에는 기본값의 예전 문자열·조립 순서를 보존한다.
+  ① 명시 근거 범위·정체성 작성 전용 지침 외에는 예전 문자열·조립 순서를 보존한다.
   ② True면 아홉 장의 앞부분이 서로 바이트 동일하다 — 캐시가 맞는 유일한 조건.
   ③ 순서만 바뀌고 글자는 한 자도 바뀌지 않는다.
   ④ flat 모드에서만 켜진다 — packet 모드는 장마다 조각이 달라 공유분이 없다.
@@ -32,6 +32,7 @@ from src.features.composer.constants import (
     PROMPT_HEADER,
     RETRY_REMINDER,
     SECTION_GUIDES,
+    IDENTITY_FIRST_SENTENCE_WRITER_GUIDE,
     SECTION_IDS,
     SECTION_SENTENCE_RANGES,
     SENTENCE_RANGE_GUIDE,
@@ -166,7 +167,10 @@ def test_기본값은_기존_프롬프트와_바이트가_같다(section_id: str
     )
 
     assert prompt.count(EXACT_EVIDENCE_SCOPE_GUIDE) == 1
-    assert prompt.replace(EXACT_EVIDENCE_SCOPE_GUIDE, "", 1) == _legacy_prompt(
+    # 신규 작성 전용 안내 외에는 기존 블록의 바이트와 조립 순서를 유지한다.
+    assert prompt.replace(EXACT_EVIDENCE_SCOPE_GUIDE, "", 1).replace(
+        IDENTITY_FIRST_SENTENCE_WRITER_GUIDE, "", 1,
+    ) == _legacy_prompt(
         _COMPANY, section_id, _fragments(), table, _ALREADY_WRITTEN
     )
     # 기본 경로는 캐시 표식을 달지 않는다 — 켜지 않았는데 켜지면 안 된다.
@@ -178,7 +182,9 @@ def test_기본값은_앞_장_문장이_없어도_예전과_같다():
     prompt = build_section_prompt(_COMPANY, _SECTION, _fragments(), None, ())
 
     assert prompt.count(EXACT_EVIDENCE_SCOPE_GUIDE) == 1
-    assert prompt.replace(EXACT_EVIDENCE_SCOPE_GUIDE, "", 1) == _legacy_prompt(
+    assert prompt.replace(EXACT_EVIDENCE_SCOPE_GUIDE, "", 1).replace(
+        IDENTITY_FIRST_SENTENCE_WRITER_GUIDE, "", 1,
+    ) == _legacy_prompt(
         _COMPANY, _SECTION, _fragments(), None, (),
     )
 
@@ -216,6 +222,17 @@ def test_정체성_작성경로에_첫_사업정의와_근거제약을_전달한
     ):
         assert instruction in prompt
     assert prompt.count(SECTION_GUIDES[_SECTION]) == 1
+    assert prompt.count(IDENTITY_FIRST_SENTENCE_WRITER_GUIDE) == 1
+    assert IDENTITY_FIRST_SENTENCE_WRITER_GUIDE not in SECTION_GUIDES[_SECTION]
+    if shared_evidence_prefix:
+        assert IDENTITY_FIRST_SENTENCE_WRITER_GUIDE not in prompt[:prompt.cache_prefix_chars]
+
+
+@pytest.mark.parametrize("section_id", [sid for sid in SECTION_IDS if sid != _SECTION])
+def test_첫_사업정의_작성지침은_다른_장에_주입하지_않는다(section_id: str):
+    prompt = build_section_prompt(_COMPANY, section_id, _fragments(), None, ())
+
+    assert IDENTITY_FIRST_SENTENCE_WRITER_GUIDE not in prompt
 
 
 # ══════════════════════════════════════════════════════════

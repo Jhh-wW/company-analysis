@@ -49,7 +49,7 @@ def _selection(pairs, *, section_id="identity"):
 def test_결속된_현재사업_문장과_FactID를_함께_안정이동한다():
     origin = _pair(ORIGIN, slot="identity:corporate_identity")
     business = _pair()
-    later = _pair(BUSINESS + " 회사는 공식 제품을 공급한다.")
+    later = _pair("회사는 공식 제품인 검사장비를 공급하는 기업이다.")
     composed, rendered, selection = _selection((origin, business, later))
 
     assert selection.report.sections[0].sentences == (business[0], origin[0], later[0])
@@ -124,4 +124,38 @@ def test_후보없으면_본문을_만들지않는다():
     origin = _pair(ORIGIN, slot="identity:corporate_identity")
     _composed, _rendered, selection = _selection((origin,))
     assert selection.report.sections[0].sentences == (origin[0],)
+
+
+@pytest.mark.parametrize("text", [
+    "회사는 공식 제품인 검사장비를 제조하는 업체다.",
+    "회사는 공식 제품인 검사장비를 만드는 제조사이다.",
+    "회사는 공식 제품인 검사장비를 공급하는 공급사다.",
+    "회사는 공식 제품의 결제를 중개하는 사업자다.",
+    "회사는 공식 제품의 거래를 중개하는 플랫폼이다.",
+    "회사는 공식 제품의 결제를 처리하는 대행사입니다.",
+    "회사는 공식 제품의 정보를 제공하는 기관이다.",
+])
+def test_업종을_제한하지않고_기업유형_정의문을_우선한다(text):
+    origin = _pair(ORIGIN, slot="identity:corporate_identity")
+    business = _pair(text)
+    assert prioritize_identity_opening((origin, business)) == (business, origin)
+
+
+@pytest.mark.parametrize("text", [
+    "기능별 수직 조직보다 아티스트별 레이블을 두고 각 IP의 수명주기에 맞춰 콘텐츠와 사업을 운영한다.",
+    "회사는 전자지불결제대행업을 통하여 대금을 받은 후 가맹점에 지급하는 구조를 운영한다.",
+    "회사는 공식 제품을 제공한다. 회사는 기업 고객을 지원하는 기업이다.",
+])
+def test_운영설명과_여러문장을_쉬운_기업정의로_승격하지않는다(text):
+    introduction = _pair(
+        "제이와이피엔터테인먼트는 아티스트를 발굴·육성하고 음악·영상 콘텐츠의 제작·유통, 공연과 IP 라이선싱 사업을 전개하는 엔터테인먼트 기업이다.",
+        slot="identity:corporate_identity",
+    )
+    operational = _pair(text)
+    composed, _rendered, selection = _selection((introduction, operational))
+    assert selection.report.sections[0].sentences == composed.sections[0].sentences
+    assert selection.report.sections[0].sentences[0] is introduction[0]
+    assert selection.report.sections[0].sentences[1] is operational[0]
+    assert selection.fact_ids == (introduction[1].fact_id, operational[1].fact_id)
+    assert not selection.excluded
 
