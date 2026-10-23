@@ -20,6 +20,7 @@ from src.features.composer import verify
 from src.features.composer.constants import MISSING_VERDICTS_REMINDER, RETRY_REMINDER
 from src.features.composer.port import CollectedFragment, ComposedSentence
 from src.features.composer.review_schema import FLAT_REVIEW_SCHEMA
+from src.features.composer.review_wire_constants import REVIEW_WIRE_GUIDE
 from src.features.pipeline import real
 from src.features.pipeline.tests import test_v2_native_schema_metering as native
 from src.features.pipeline.v2_response_constants import V2_RESPONSE_STEP
@@ -148,7 +149,8 @@ def test_only_initial_parse_retry_sends_schema_with_separate_cap(
         calls.regular, FLAT_ITEMS, FRAGMENTS, "",
         initial_ask=calls.initial, initial_retry_ask=calls.retry,
     ) == expected
-    prompts = [prompt] if len(caps) == 1 else [prompt, str(prompt) + RETRY_REMINDER]
+    sent_prompt = str(prompt) + REVIEW_WIRE_GUIDE
+    prompts = [sent_prompt] if len(caps) == 1 else [sent_prompt, sent_prompt + RETRY_REMINDER]
     # 2026-09-22: 최초 본문 검수(initial_ask)는 첫 요청부터 스키마를 싣는다.
     #   재요청의 별도 상한·같은 계량 경계는 그대로다(test_initial_review_schema.py 참조).
     schemas = [FLAT_REVIEW_SCHEMA] * len(caps)
@@ -164,7 +166,8 @@ def test_followup_parse_retry_keeps_regular_caller_with_native_schema(review_cal
         calls.regular, FLAT_ITEMS, FRAGMENTS, "", initial_retry_ask=calls.retry,
     ) == {1: "참"}
     _assert_payloads(
-        calls, [16000, 16000], [prompt, str(prompt) + RETRY_REMINDER],
+        calls, [16000, 16000], [str(prompt) + REVIEW_WIRE_GUIDE,
+                              str(prompt) + REVIEW_WIRE_GUIDE + RETRY_REMINDER],
         [None, FLAT_REVIEW_SCHEMA],
     )
 
@@ -208,7 +211,8 @@ def test_grouped_review_parse_retry_uses_the_separate_cap_with_schema_per_switch
         calls.regular, GROUPED_ITEMS, FRAGMENTS, None,
         initial_ask=calls.initial, initial_retry_ask=calls.retry,
     ) == expected
-    prompts = [prompt] if len(caps) == 1 else [prompt, str(prompt) + RETRY_REMINDER]
+    sent_prompt = str(prompt) + REVIEW_WIRE_GUIDE
+    prompts = [sent_prompt] if len(caps) == 1 else [sent_prompt, sent_prompt + RETRY_REMINDER]
     schema = FLAT_REVIEW_SCHEMA if schema_enabled else None
     _assert_payloads(calls, caps, prompts, [schema] * len(caps))
     assert calls.engine.usages[0]["out"] == 7000
@@ -228,12 +232,12 @@ def test_grouped_missing_followup_asks_only_the_missing_item_through_the_retry_c
     )
     followup_prompt = verify._build_grouped_review_prompt(
         TWO_GROUPED_ITEMS[1:], TWO_FRAGMENTS, None,
-    ) + MISSING_VERDICTS_REMINDER
+    ) + REVIEW_WIRE_GUIDE + MISSING_VERDICTS_REMINDER
     assert verify._ask_grouped_verdicts(
         calls.regular, TWO_GROUPED_ITEMS, TWO_FRAGMENTS, None,
         initial_ask=calls.initial, initial_retry_ask=calls.retry,
     ) == {1: "참", 2: "참"}
     schema = FLAT_REVIEW_SCHEMA if schema_enabled else None
     _assert_payloads(
-        calls, [24000, 12000], [first_prompt, followup_prompt], [schema, schema],
+        calls, [24000, 12000], [str(first_prompt) + REVIEW_WIRE_GUIDE, followup_prompt], [schema, schema],
     )

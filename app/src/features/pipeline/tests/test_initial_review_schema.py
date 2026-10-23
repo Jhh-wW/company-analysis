@@ -17,6 +17,7 @@ from src.features.composer import verify
 from src.features.composer.constants import RETRY_REMINDER
 from src.features.composer.prompt_cache_constants import REVIEW_PROMPT_CACHE_ENV
 from src.features.composer.review_schema import FLAT_REVIEW_SCHEMA
+from src.features.composer.review_wire_constants import REVIEW_WIRE_GUIDE
 from src.features.pipeline import real
 from src.features.pipeline.tests import test_v2_native_schema_metering as native
 from src.features.pipeline.tests.test_native_review_retry_integration import (  # noqa: F401
@@ -48,7 +49,9 @@ def test_initial_review_sends_schema_from_first_request_with_same_caps(
         calls.regular, FLAT_ITEMS, FRAGMENTS, "",
         initial_ask=calls.initial, initial_retry_ask=calls.retry,
     ) == expected
-    prompts = [prompt] if len(caps) == 1 else [prompt, str(prompt) + RETRY_REMINDER]
+    # 정본 검수 내용은 그대로이며 전송 경계에서 응답 형식 안내만 덧붙인다.
+    sent_prompt = str(prompt) + REVIEW_WIRE_GUIDE
+    prompts = [sent_prompt] if len(caps) == 1 else [sent_prompt, sent_prompt + RETRY_REMINDER]
     # 첫 요청부터 스키마가 실리고, 재요청은 예전처럼 축소 상한 + 스키마다.
     _assert_payloads(calls, caps, prompts, [FLAT_REVIEW_SCHEMA] * len(caps))
     assert calls.engine.usages[0]["out"] == first_output
@@ -62,7 +65,8 @@ def test_followup_review_keeps_plain_first_request_on_regular_caller(review_call
         calls.regular, FLAT_ITEMS, FRAGMENTS, "", initial_retry_ask=calls.retry,
     ) == {1: "참"}
     _assert_payloads(
-        calls, [16000, 16000], [prompt, str(prompt) + RETRY_REMINDER],
+        calls, [16000, 16000], [str(prompt) + REVIEW_WIRE_GUIDE,
+                              str(prompt) + REVIEW_WIRE_GUIDE + RETRY_REMINDER],
         [None, FLAT_REVIEW_SCHEMA],
     )
 
@@ -79,7 +83,7 @@ def test_initial_review_with_prompt_cache_sends_two_blocks_and_schema(review_cal
         initial_ask=calls.initial, initial_retry_ask=calls.retry,
     ) == {1: "참"}
     [request] = calls.messages.requests
-    text = str(prompt)
+    text = str(prompt) + REVIEW_WIRE_GUIDE
     assert request["messages"] == [{"role": "user", "content": [
         {"type": "text", "text": text[:boundary], "cache_control": {"type": "ephemeral"}},
         {"type": "text", "text": text[boundary:]},

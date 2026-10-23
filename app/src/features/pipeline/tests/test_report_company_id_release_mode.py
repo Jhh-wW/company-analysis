@@ -75,6 +75,7 @@ _DATE = dt.date(2026, 8, 24)
 # 9개 장에 하나씩 붙일 표식 글자 — 장마다 다른 문장이 나오게 한다.
 _SECTION_MARKS = "가나다라마바사아자"
 _SENTENCE_ENDINGS = ("첫째", "둘째", "셋째", "넷째", "다섯째")
+_IDENTITY_INTRO = "가나다전자는 기업 고객에게 반도체 검사 장비를 제공하는 장비 제조사다."
 
 #: 성장 전략 장은 «앞으로의 계획»만 실을 수 있다(`composer/verify.py`의
 #: `future_section_prose_problem`·`future_plan_prose_problem`). 그래서 이 장만
@@ -127,6 +128,8 @@ _COMPETITIVE_SENTENCES: Final[tuple[str, ...]] = (
 
 def _장_문장(section_index: int, mark: str, ending_index: int) -> str:
     """작가 대역과 조각 원문이 같은 장별 문장을 쓰게 한다."""
+    if section_index == SECTION_IDS.index("identity") and ending_index == 0:
+        return _IDENTITY_INTRO
     if section_index == _FUTURE_SECTION_INDEX:
         return _FUTURE_STRATEGY_SENTENCES[ending_index]
     if section_index == SECTION_IDS.index("competitive_position"):
