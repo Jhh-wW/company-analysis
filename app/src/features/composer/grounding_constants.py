@@ -11,6 +11,18 @@ GROUNDING_KEY = "검증근거"
 #: 값이 TABLE_SOURCE_ID 이면 그 후보는 실적표를 근거로 든 것이다.
 GROUNDING_SOURCE_FIELD = "근거"
 NUMERIC_KEY = "수치"
+# 소송의 같은 기말·당사자·건수를 확인한 경우에만 읽는 수치 증명의 표면형.
+LITIGATION_COUNT_SURFACE = "소송사건"
+LITIGATION_COUNT_LABELS = frozenset({LITIGATION_COUNT_SURFACE, "소송사건 건수"})
+LITIGATION_COUNT_VALUE_RE = re.compile(r"(?P<count>\d+)\s*건")
+LITIGATION_ROLE_COUNT_RE = re.compile(
+    r"(?P<role>피고|원고)로\s*계류\s*중인\s*소송사건(?:은|이)\s*"
+    r"(?P<count>\d+)\s*건"
+)
+LITIGATION_CURRENT_COMPANY_RE = re.compile(
+    r"(?:당기말|보고기간말|기말)\s*현재\s*(?:회사|당사)가\s*"
+    r"(?:피고|원고)로\s*계류\s*중인\s*소송사건"
+)
 TREND_KEY = "추세"
 TIME_KEY = "시점"
 #: 정성 «수익 인식 기준» 단정의 정확 인용 요구(4차 채택안). 완료·진행 기준을

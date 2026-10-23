@@ -19,6 +19,10 @@ from src.features.composer.plan_status_constants import PLAN_STATUS_KEY
 from src.features.composer.grounding_constants import REVIEW_SUPPORT_CANDIDATE_VERDICTS
 from src.features.composer.grounding_constants import BOUND_VALUE_RE, BOUND_TAIL_RE, RATIO_BASIS_RE
 from src.features.composer.grounding_constants import APPROXIMATE_VALUE_RE, APPROXIMATE_PREFIX_RE
+from src.features.composer.grounding_constants import (
+    LITIGATION_COUNT_LABELS, LITIGATION_COUNT_SURFACE, LITIGATION_COUNT_VALUE_RE,
+    LITIGATION_CURRENT_COMPANY_RE, LITIGATION_ROLE_COUNT_RE,
+)
 from src.features.composer.litigation_timing import litigation_numeric_text
 from src.features.composer.litigation_timing_constants import CURRENT_LITIGATION_CLAUSE_RE, LITIGATION_AMOUNT_METRIC
 from src.features.composer.grounding_detail_constants import GROUNDING_DETAIL_VERSION
@@ -642,6 +646,44 @@ def _dimension(text: str) -> str:
     return DIMENSION_AMOUNT
 
 
+def _litigation_numeric_binding(text: str, entry: Mapping, sources: Mapping[str, str],
+                                litigation_text: str | None) -> tuple[str, re.Match[str]] | None:
+    """같은 기말 소송절의 공백 표기와 건수 이름표만 실제 원문에 결속한다."""
+    if litigation_text is None or litigation_text == text:
+        return None
+    metric, source_metric = entry.get("항목"), entry.get("원문항목")
+    if not ((metric in LITIGATION_COUNT_LABELS and source_metric in LITIGATION_COUNT_LABELS)
+            or metric == source_metric == LITIGATION_AMOUNT_METRIC):
+        return None
+    source, quote = sources.get(str(entry.get("근거", "")), ""), entry.get("원문")
+    candidates = tuple(LITIGATION_ROLE_COUNT_RE.finditer(text))
+    if not isinstance(quote, str) or not quote.strip() or len(candidates) != 1:
+        return None
+    candidate = candidates[0]
+    if BOUND_TAIL_RE.match(text, candidate.end()):
+        return None
+    for clause_match in CURRENT_LITIGATION_CLAUSE_RE.finditer(source):
+        clause = clause_match.group()
+        originals = tuple(LITIGATION_ROLE_COUNT_RE.finditer(clause))
+        if (not LITIGATION_CURRENT_COMPANY_RE.match(clause) or len(originals) != 1
+                or originals[0]['role'] != candidate['role']
+                or originals[0]['count'] != candidate['count']
+                or BOUND_TAIL_RE.match(clause, originals[0].end())):
+            continue
+        # 공백만 달라도 실제 원문 좌표를 되찾는다. 글자·숫자·문장부호는 바꾸지 않는다.
+        positions = [index for index, char in enumerate(clause) if not char.isspace()]
+        compact = ''.join(clause[index] for index in positions)
+        quoted = ''.join(quote.split())
+        matches = tuple(re.finditer(re.escape(quoted), compact))
+        if len(matches) != 1:
+            continue
+        match = matches[0]
+        bound = clause[positions[match.start()]:positions[match.end() - 1] + 1]
+        if _quote(dict(entry, 원문=bound), sources) is not None:
+            return bound, candidate
+    return None
+
+
 def _numeric_valid(
     text: str, entries: object, sources: Mapping[str, str],
     detail: dict[str, object] | None = None,
@@ -664,6 +706,29 @@ def _numeric_valid(
         quote = _quote(entry, sources)
         if not all(isinstance(x, str) and x for x in (expression, metric, source_metric)):
             return fail("expression_fields", index)
+        litigation_binding = _litigation_numeric_binding(text, entry, sources, litigation_text)
+        if litigation_binding:
+            quote = litigation_binding[0]
+            entry = dict(entry, 원문=quote)
+        if (litigation_binding and metric in LITIGATION_COUNT_LABELS
+                and source_metric in LITIGATION_COUNT_LABELS):
+            candidate = litigation_binding[1]
+            values = [LITIGATION_COUNT_VALUE_RE.fullmatch(str(entry.get(key, "")))
+                      for key in ("후보값", "원문값")]
+            original = LITIGATION_ROLE_COUNT_RE.search(quote)
+            if (expression not in text or LITIGATION_COUNT_SURFACE not in expression
+                    or not original or original['role'] != candidate['role']
+                    or original['count'] != candidate['count']
+                    or not all(value and value['count'] == candidate['count'] for value in values)):
+                return fail("candidate_value_scope", index)
+            span = candidate.span('count')
+            if (not any(start <= span[0] and span[1] <= end
+                        for start, end in (match.span() for match in re.finditer(re.escape(expression), text)))
+                    or any(span[0] < end and start < span[1] for start, end in used_spans)):
+                return fail("candidate_value_scope", index)
+            # '건'은 기존 금액 숫자 풀에 넣지 않는다. 검증한 실제 건수 좌표는 중복 금지한다.
+            used_spans.append(span)
+            continue
         if expression not in text or metric not in expression:
             return fail("expression_not_in_candidate", index)
         if quote is None:
