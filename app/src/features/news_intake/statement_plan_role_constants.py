@@ -16,7 +16,17 @@ STATEMENT_PLAN_SLOT = 'future_strategy:stated_plan'
 STATEMENT_CURRENT_SLOTS = frozenset({
     ('operations_partners', 'operations_partners:operating_role'),
     ('portfolio', 'portfolio:product_role'),
+    ('culture', 'culture:work_principle'),
 })
+# 문화로 배정된 직접 의지를 옮길 때는 옛 계획·인용 전달·바로 뒤 철회를 제외한다.
+STATEMENT_CULTURE_SLOT = ('culture', 'culture:work_principle')
+STATEMENT_PLAN_WITHDRAWAL_RE = re.compile(
+    r'^(?:(?:하지만|그러나|다만|이후)\s+)?'
+    r'(?:(?:회사|당사)(?:는|가)\s+)?'
+    r'(?:이|그|해당)\s*(?:계획|방침)(?:은|을)\s*'
+    r'(?:(?:이미|이후)\s+)?(?:철회|취소|중단)'
+    r'(?:했다|하였다|했다고\s+밝혔다|됐다고\s+밝혔다|됐다|되었다)\.?$'
+)
 # 지향점·행사 설명은 현재 제품 기능을 증명하지 않는다.
 CURRENT_ACTIVITY_ONLY_RE = re.compile(
     r'(?:힘쓰고|주력하고|집중하고)\s*있다\.?$'

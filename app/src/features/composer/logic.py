@@ -45,6 +45,7 @@ from src.features.composer.challenge_response_feedback import ResponseSupplement
 from src.features.composer.partial_evidence import PartialEvidenceView
 from src.features.composer.revenue_source_slot import normalize_revenue_source_slot
 from src.features.composer.portfolio_revenue_content import supplement_portfolio_revenue_source
+from src.features.composer.litigation_draft import prepare_litigation_draft
 from src.features.composer.settlement_candidate import supplement_settlement_candidates
 from src.features.composer.homepage_self_context import normalize_homepage_self_context
 from src.features.composer.homepage_self_context_constants import HOMEPAGE_SELF_CONTEXT_SECTION
@@ -1285,6 +1286,10 @@ def _compose_one_section(
         ) for sentence in sentences)
     if section_id == "portfolio":
         sentences = supplement_portfolio_revenue_source(sentences, source_fragments)
+    if section_id == "current_challenges":
+        fragments_by_id = {fragment.fragment_id: fragment for fragment in source_fragments}
+        sentences = tuple(prepare_litigation_draft(sentence, fragments_by_id, company_name=company_name)
+                          for sentence in sentences)
     if section_id == "business_model":
         fragments_by_id = {fragment.fragment_id: fragment for fragment in source_fragments}
         sentences = tuple(normalize_revenue_source_slot(sentence, fragments_by_id) for sentence in sentences)

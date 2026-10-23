@@ -46,6 +46,7 @@ from src.features.composer.extractive_summary_constants import (
 )
 from src.features.composer.logic import SummaryCandidate
 from src.features.composer.identity_content import administrative_identity_only
+from src.features.composer.summary_settlement import distinct_settlement_summaries
 from src.features.composer.portfolio_revenue_content import portfolio_accounting_only_problem
 from src.features.composer.port import ComposedReport, ComposedSentence
 from src.features.pipeline.port import FactRecord
@@ -170,6 +171,9 @@ def distinct_summary_candidates(
         candidate for candidate in candidates
         if _summary_content_ready(candidate)
     )
+    candidates = distinct_settlement_summaries(
+        candidates, company_name=company_name, facts_by_sentence_id=facts_by_sentence_id,
+    )
     keys = [
         _revenue_composition_key(candidate.sentence.text, company_name)
         if candidate.sentence.verification_state == "verified" else None
@@ -232,7 +236,7 @@ def _summary_content_ready(candidate: SummaryCandidate) -> bool:
     ):
         return False
     if (
-        candidate.section_id == "business_model"
+        candidate.section_id in {"business_model", "identity"}
         and re.search(SUMMARY_RECOGNITION_ONLY_PATTERN, text)
         and not re.search(SUMMARY_BUSINESS_EXCHANGE_PATTERN, text)
     ):

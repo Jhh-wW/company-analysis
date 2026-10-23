@@ -5,6 +5,7 @@ import re
 
 from src.features.composer.settlement_role_constants import (
     SETTLEMENT_CANDIDATE_TEMPLATE,
+    SETTLEMENT_BUSINESS_ROLE_RE,
     SETTLEMENT_NONACTUAL_RE,
     SETTLEMENT_ROLE_RE,
     SETTLEMENT_SOURCE_TEMPLATE,
@@ -53,16 +54,21 @@ def settlement_role_spans(
 def settlement_statement_spans(
     surfaces: Sequence[str], source_clauses: Sequence[str],
     source_surface: str, quote: str, target: str, role: str,
+    *, is_flow: bool = False,
 ) -> tuple[tuple[int, int, int], ...]:
     """완결된 정산 산문/원문 도식의 공제 자리만 자기 인용과 삼중 대조한다."""
-    if (target not in SETTLEMENT_STATEMENT_TARGETS
-            or not SETTLEMENT_ROLE_RE.fullmatch(role)
+    ordinary_pair = (target in SETTLEMENT_STATEMENT_TARGETS
+                     and SETTLEMENT_ROLE_RE.fullmatch(role))
+    business_pair = (is_flow and target in surfaces
+                     and SETTLEMENT_BUSINESS_ROLE_RE.fullmatch(role))
+    if (not (ordinary_pair or business_pair)
             or SETTLEMENT_NONACTUAL_RE.search(source_surface)):
         return ()
     source_pattern = re.compile(SETTLEMENT_SOURCE_TEMPLATE.format(target="가맹점"))
     if not any(
         (match := source_pattern.fullmatch(clause)) is not None
         and quote.rstrip(".") in clause and match.group("relation") in quote
+        and (ordinary_pair or match.group("business") == target)
         for clause in source_clauses
     ):
         return ()

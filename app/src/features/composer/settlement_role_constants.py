@@ -9,9 +9,13 @@ SETTLEMENT_TAX_WORD: Final[str] = "부가가치세"
 SETTLEMENT_ROLE_RE: Final[re.Pattern[str]] = re.compile(
     rf"{SETTLEMENT_FEES}(?:를)?(?:차감후|제외하여)지급"
 )
+# 도식 검수자가 원문의 업종을 대상으로 적을 때도 수령인까지 같은 관계여야 한다.
+SETTLEMENT_BUSINESS_ROLE_RE: Final[re.Pattern[str]] = re.compile(
+    rf"{SETTLEMENT_FEES}(?:를)?(?:차감후|제외하여)가맹점(?:에게|에)지급"
+)
 SETTLEMENT_SOURCE_TEMPLATE: Final[str] = (
     r"(?:\(\d+\)금융예수금)?(?:회사|당사)는"
-    r"(?:(?:전자(?:지불|지급)결제대행업|결제대행업)을통하여)?"
+    r"(?:(?P<business>전자(?:지불|지급)결제대행업|결제대행업)을통하여)?"
     r"최종소비자가결제한거래금액에대해"
     r"원천사로부터대금을받은후,?"
     r"(?P<relation>(?:회사|당사)의{target}(?:으로|에게|에)"

@@ -182,7 +182,10 @@ def test_prompt_change_invalidates_old_policy_cache_namespace(monkeypatch) -> No
     # 산업 본문 실패의 제한 보충으로 수집 정책 캐시를 분리한다. 인용 계약은 같다.
     # 제품 역할에 섞인 미래 분리와 역참조 후보의 문맥 보존으로 직전 v33 캐시도 무효화한다.
     # 복합조사와 실제 문맥 후보의 우선배치가 바뀌어 직전 v34 선택 결과도 재사용하지 않는다.
-    assert c.COLLECTION_POLICY_VERSION == "news-grounded-v36"
+    # 문화 칸에 섞인 직접 미래 의지도 정상 작성 후보로 분리하므로 v36을 재사용하지 않는다.
+    assert c.COLLECTION_POLICY_VERSION == "news-grounded-v37"
+    monkeypatch.setattr(c, "COLLECTION_POLICY_VERSION", "news-grounded-v36")
+    assert policy_digest(policy) != current
     monkeypatch.setattr(c, "COLLECTION_POLICY_VERSION", "news-grounded-v34")
     assert policy_digest(policy) != current
     monkeypatch.setattr(c, "COLLECTION_POLICY_VERSION", "news-grounded-v33")

@@ -1,6 +1,7 @@
 """검증된 동일 인용의 회사 대표 발언만 정상 미래 작성 후보로 전달한다."""
 
 from dataclasses import replace
+import datetime as dt
 import re
 
 from src.features.news_intake import constants as c
@@ -43,8 +44,33 @@ def normalize_statement_plan_kind(
     return kind
 
 
+def _culture_plan_context_allows(
+    excerpt: GroundedNewsExcerpt, company: NewsCompanyContext, body: str, as_of: dt.date | None,
+) -> bool:
+    """새 문화 경로는 검증된 원문 좌표와 직접 계획의 현재 문맥을 함께 요구한다."""
+    if (as_of is None or not body or body[excerpt.span_start:excerpt.span_end] != excerpt.text
+            or pc.STATEMENT_PLAN_KIND_DATED_RE.search(excerpt.text)):
+        return False
+    try:
+        if dt.date.fromisoformat(excerpt.candidate.published_on) > as_of:
+            return False
+    except ValueError:
+        return False
+    # 같은 원문 바로 다음의 명시적인 '이 계획' 철회만 연결한다. 타사·다른 계획은 제외.
+    following = sentence_ranges(body[excerpt.span_end:])
+    if following:
+        start, end = following[0]
+        sentence = body[excerpt.span_end:][start:end]
+        for name in company_query_names(company):
+            sentence = re.sub(r'^(?:(하지만|그러나|다만|이후)\s+)?' + re.escape(name)
+                              + r'(?:는|가)\s+', lambda m: (m[1] + ' ') if m[1] else '', sentence)
+        if pc.STATEMENT_PLAN_WITHDRAWAL_RE.fullmatch(sentence):
+            return False
+    return True
+
+
 def statement_plan_parts(
-    excerpt: GroundedNewsExcerpt, company: NewsCompanyContext,
+    excerpt: GroundedNewsExcerpt, company: NewsCompanyContext, *, body: str = '', as_of: dt.date | None = None,
 ) -> tuple[GroundedNewsExcerpt, ...] | None:
     """현재 원후보를 보존하고, 선택 인용 안의 독립 발언 한 문장만 추가한다.
 
@@ -64,11 +90,14 @@ def statement_plan_parts(
         return None
     sentence = excerpt.text[start:end]
     names = company_query_names(company)
-    if excerpt.section_id == 'portfolio' and not any(re.match(
+    culture = (excerpt.section_id, excerpt.claim_slot) == pc.STATEMENT_CULTURE_SLOT
+    if culture and not _culture_plan_context_allows(excerpt, company, body, as_of):
+        return None
+    if (excerpt.section_id == 'portfolio' or culture) and not any(re.match(
             re.escape(name) + r'(?:은|는|이|가)\s', excerpt.text[current_start:current_end], re.I,
     ) for name in names):
         return None
-    if not _direct_company_plan_statement(sentence, company):
+    if not _direct_company_plan_statement(sentence, company, reject_reported_context=culture):
         return None
     origin = excerpt.span_start
     current = replace(excerpt, split_from=origin)

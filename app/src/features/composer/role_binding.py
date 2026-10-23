@@ -699,6 +699,7 @@ def _binding_problem(
             tuple(unit.surface for unit in units),
             tuple(clause.surface for clause in _source_clauses(own_sources[source_id])),
             _surface(own_sources[source_id]), quote_key, target_key, role_key,
+            is_flow=is_flow,
         )
         if settlement_spans:
             return "", settlement_spans, kind, {}

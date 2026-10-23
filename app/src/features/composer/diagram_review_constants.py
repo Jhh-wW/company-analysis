@@ -124,11 +124,12 @@ ACCOUNTING_REVENUE_LABEL_RE: Final[re.Pattern[str]] = re.compile(
 # 구두점·띄어쓰기 차이는 diagram_check._compact_surface에서 정규화한다.
 # 완전 일치로 판정해 거래·금액·수수료 설명이 덧붙은 혼합 셀은 보존한다.
 ACCOUNTING_POLICY_ACTION_LABEL_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?:일련의구별되는용역제공)?"
+    r"(?:일련의구별되는용역(?:을)?제공(?:하고|하며)?(?:→|⇒|>)?)?"
     r"(?:(?:일부는)?(?:"
     r"수행의무이행시점에수익인식"
-    r"|청구권(?:이있는금액으로|기준)(?:수익인식)?실무적간편법(?:적용)?"
-    r"))+"
+    r"|청구권(?:이있는금액으로|기준)(?:"
+    r"수익(?:을)?인식(?:한다|함)?(?:실무적간편법(?:적용)?)?|실무적간편법(?:적용)?)"
+    r")(?:→|⇒|>)?)+"
 )
 
 OPERATIONS_FLOW_ORIGIN_HEADER: Final[str] = "무엇으로 시작하나"

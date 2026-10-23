@@ -32,6 +32,7 @@ from src.features.composer.verify import verify_report
 from src.features.composer.revenue_source_slot import normalize_revenue_source_slot
 from src.features.composer.citation_labels import normalize_draft_sentence_citations
 from src.features.composer.portfolio_revenue_content import supplement_portfolio_revenue_source
+from src.features.composer.litigation_draft import prepare_litigation_draft
 from src.features.composer.structured_claims import enforce_public_numeric_safety
 from src.shared.report_evidence.constants import FORMAL_DOCUMENT_SOURCE_KINDS
 from src.shared.report_evidence.policy import required_slots_for
@@ -517,6 +518,9 @@ def recover_empty_sections(
             parsed = supplement_portfolio_revenue_source(parsed, evidence[section_id])
         slots_by_fragment = supported_slots[section_id]
         fragments_by_id = {fragment.fragment_id: fragment for fragment in evidence[section_id]}
+        if section_id == "current_challenges":
+            parsed = tuple(prepare_litigation_draft(sentence, fragments_by_id, company_name=company_name)
+                           for sentence in parsed)
         if section_id == "business_model":
             parsed = tuple(normalize_revenue_source_slot(sentence, fragments_by_id)
                            for sentence in (parsed or ()))

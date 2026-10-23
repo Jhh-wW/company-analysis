@@ -455,14 +455,14 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
 
 def _apply_claim_role(excerpt: GroundedNewsExcerpt, time_evidence: str,
                       company: NewsCompanyContext, as_of: dt.date,
-                      role_diagnostics: Counter[str] | None) -> tuple[GroundedNewsExcerpt, ...]:
+                      role_diagnostics: Counter[str] | None, *, body: str = '') -> tuple[GroundedNewsExcerpt, ...]:
     """명백히 다른 장의 역할인 기간 실적만 4장 보조 칸으로 옮기거나 나눈다.
 
     원문 글자·출처·위치는 그대로 두고 칸과 (나눴을 때) 연속 부분 범위만 바꾼다.
     나눈 부분의 사건일은 그 부분 안에 날짜 원문이 있을 때만 남긴다.
     """
 
-    statement_parts = statement_plan_parts(excerpt, company)
+    statement_parts = statement_plan_parts(excerpt, company, body=body, as_of=as_of)
     if statement_parts is not None:
         if role_diagnostics is not None:
             role_diagnostics[STATEMENT_PLAN_SPLIT] += 1
@@ -533,6 +533,7 @@ def _article_excerpts(item: dict[str, Any], candidate: NewsCandidate, body: str,
                 role_diagnostics[STATEMENT_PLAN_KIND_NORMALIZED] += 1
             excerpts.extend(_apply_claim_role(
                 excerpt, raw_excerpt["time_evidence"], company, as_of, role_diagnostics,
+                body=body,
             ))
     if not raw_excerpts:
         excluded["grounded_no_substantive_excerpt"] += 1

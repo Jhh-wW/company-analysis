@@ -149,6 +149,7 @@ from src.features.composer.business_relation_scope import business_relation_scop
 from src.features.composer.identity_flow_scope import identity_flow_scope_problem
 from src.features.composer.role_binding import company_flow_actor_problem
 from src.features.composer.absence_claim_guard import absence_claim_problem
+from src.features.composer.litigation_timing import litigation_numeric_text
 from src.features.composer.culture_guard import (
     culture_accounting_flow_problem, culture_financial_risk_goal_problem,
     culture_flow_cells_evidence_problem,
@@ -589,6 +590,7 @@ def _drop_invented_numbers(
     *,
     section_id: str = "",
     derived_ratio_diagnostics: Optional[list[dict]] = None,
+    fragments_by_id: Optional[Mapping[str, CollectedFragment]] = None,
 ) -> tuple[tuple[FlowRow, ...], list[str]]:
     """지어낸 수가 든 줄만 뺀다. 파생 비율 판정은 «전용» 진단에 남긴다.
 
@@ -607,13 +609,23 @@ def _drop_invented_numbers(
     dropped: list[str] = []
     for row in rows:
         source_texts = _source_texts(row, texts)
-        row_numbers = _extract_numbers(" ".join(row.cells))
+        numeric_text = FLOW_CELL_JOIN.join(row.cells)
+        if (section_id == "current_challenges" and fragments_by_id
+                and all(fid in fragments_by_id for fid in row.citations)):
+            numeric_text = litigation_numeric_text(numeric_text, (
+                (texts[fid], fragments_by_id[fid].reporting_period,
+                 fragments_by_id[fid].source_publisher) for fid in row.citations if fid in texts
+            ), preserve_offsets=True)
+        row_numbers = _extract_numbers(numeric_text)
         invented: list[str] = []
         blocked_codes: list[str] = []
+        offset = 0
         for cell in row.cells:
+            numeric_cell = numeric_text[offset:offset + len(cell)]
+            offset += len(cell) + len(FLOW_CELL_JOIN)
             notes: list[DerivedRatioResult] = []
             missing = _numbers_are_grounded(
-                cell,
+                numeric_cell,
                 source_texts,
                 stated_numbers=row_numbers,
                 derived_notes=notes,
@@ -1405,6 +1417,7 @@ def check_diagram_numbers(
             texts,
             section_id=section.section_id,
             derived_ratio_diagnostics=derived_ratio_diagnostics,
+            fragments_by_id={fragment.fragment_id: fragment for fragment in fragments},
         )
         problems.extend(f"[{section.section_id}] {reason}" for reason in dropped)
         rebuilt.append(

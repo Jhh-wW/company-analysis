@@ -54,6 +54,23 @@ SUMMARY_REVENUE_ROUTE_SUFFIX: Final[str] = r"\s*(?P<count>두|세|네) 가지 (?
 SUMMARY_REVENUE_ROUTE_COUNTS: Final[dict[str, int]] = {"두": 2, "세": 3, "네": 4}
 SUMMARY_REVENUE_STREAM_SEPARATOR: Final[str] = r"(?:과|와|및)\s+"
 SUMMARY_REVENUE_MIN_STREAMS: Final[int] = 2
+# 같은 정산 관계의 순서·종결어미만 다른 요약 후보를 비교한다.
+# 조건·부정·다른 상대방·숫자·추가 사실은 이 닫힌 문법에 포함하지 않는다.
+SUMMARY_SETTLEMENT_PATTERN: Final[str] = (
+    r"(?:(?:사업의실질적작동방식을|전자(?:지불|지급)결제대행업의자금흐름구조를|대금흐름의구조를)보면,)?"
+    r"(?:(?:{subject})는)?"
+    r"(?:(?:전자(?:지불|지급)결제대행업|결제대행업)을통하여)?"
+    r"최종소비자가결제한거래금액에대해(?:(?:{subject})는)?"
+    r"원천사로부터대금을받은후,?"
+    r"(?:수수료(?:와|및|·)부가가치세를제외하여가맹점(?:으로|에게|에)"
+    r"|(?:(?:회사|당사)의)?가맹점(?:으로|에게|에)수수료(?:와|및|·)부가가치세를제외하여)"
+    r"지급(?:한다|하고있습니다|하는구조를운영한다)[.]?"
+)
+SUMMARY_SETTLEMENT_BUSINESS_PATTERN: Final[str] = r"전자(?:지불|지급)결제대행업|결제대행업"
+SUMMARY_FACT_SCOPE_FIELDS: Final[tuple[str, ...]] = (
+    "legal_entity", "subject_scope", "time_state", "as_of", "fiscal_year",
+    "event_date", "period_start", "period_end",
+)
 # 본문에서 허용한 회계 인식조건·채무 표시도 그 자체가 제공 가치·대가 요약은 아니다.
 # 구체 거래·제공물이나 대금 수취가 함께 있으면 혼합 사실을 보존한다.
 SUMMARY_RECOGNITION_ONLY_PATTERN: Final[str] = (
@@ -61,7 +78,7 @@ SUMMARY_RECOGNITION_ONLY_PATTERN: Final[str] = (
     r"|수익\s*인식\s*(?:시점|기준|조건|정책)"
     r"|(?:시점|기간|간편법)[^.!?\n]*수익[^.!?\n]*인식"
     r"|거래\s*가격[^.!?\n]*(?:배분|차감)"
-    r"|(?:채무|부채)[^.!?\n]*(?:재무상태표|대차대조표)[^.!?\n]*"
+    r"|(?:채무|부채|지급\s*의무)[^.!?\n]*(?:재무상태표|대차대조표)[^.!?\n]*"
     r"(?:예수금|미지급금)[^.!?\n]*(?:표시|계상)"
 )
 SUMMARY_BUSINESS_EXCHANGE_PATTERN: Final[str] = (
