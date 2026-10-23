@@ -32,6 +32,8 @@ from src.features.composer.industry_context import (
 )
 from src.features.composer.challenge_presentation import challenge_response_only_notice
 from src.features.composer.future_presentation import section_guidance_lines
+from src.features.composer.identity_content_constants import IDENTITY_SECTION_ID
+from src.features.composer.identity_opening import identity_opening_sentence_eligible
 from src.features.composer.constants import (
     CITATION_STYLE_MERGED,
     PARAGRAPH_MAX_SENTENCES,
@@ -455,6 +457,7 @@ def marker_visibility(
     sentences: Sequence[ComposedSentence],
     numbers: Mapping[str, int],
     style: str,
+    *, section_id: str = "",
 ) -> tuple[bool, ...]:
     """문장마다 인용 번호를 «보일지» 정한다.
 
@@ -502,7 +505,12 @@ def marker_visibility(
             ),
             None,
         )
-        defer = following is not None and keys[following] == keys[index]
+        independent_opening = (
+            section_id == IDENTITY_SECTION_ID and index == 0
+            and identity_opening_sentence_eligible(sentence)
+        )
+        defer = (following is not None and keys[following] == keys[index]
+                 and not independent_opening)
         visible.append(not defer)
     return tuple(visible)
 
@@ -528,7 +536,8 @@ def summary_marker_visibility(
 
 
 def _paragraph_breaks(
-    sentences: Sequence[ComposedSentence], numbers: Mapping[str, int]
+    sentences: Sequence[ComposedSentence], numbers: Mapping[str, int],
+    *, section_id: str = "",
 ) -> tuple[int, ...]:
     """문단이 시작되는 문장 위치들.
 
@@ -541,6 +550,10 @@ def _paragraph_breaks(
     """
     if not sentences:
         return ()
+    separate_opening = (
+        section_id == IDENTITY_SECTION_ID
+        and identity_opening_sentence_eligible(sentences[0])
+    )
     starts = [0]
     current_key: Optional[frozenset[int]] = None
     length = 0
@@ -552,7 +565,7 @@ def _paragraph_breaks(
             length = 1
             continue
         changed = bool(key) and not is_interpretation and key != current_key
-        if changed or length >= PARAGRAPH_MAX_SENTENCES:
+        if (index == 1 and separate_opening) or changed or length >= PARAGRAPH_MAX_SENTENCES:
             starts.append(index)
             length = 1
             if key:
@@ -1344,7 +1357,9 @@ def render_report(
     # 표기 방식을 적용한 가시성을 먼저 전부 계산한다 — 고아 번호를 되살리려면
     # 본문과 요약을 «함께» 봐야 한다.
     visibility_groups: list[tuple[Sequence[ComposedSentence], list[bool]]] = [
-        (section.sentences, list(marker_visibility(section.sentences, numbers, citation_style)))
+        (section.sentences, list(marker_visibility(
+            section.sentences, numbers, citation_style, section_id=section.section_id,
+        )))
         for section in report.sections
     ]
     visibility_groups.append(
@@ -1369,7 +1384,9 @@ def render_report(
         # 자료 부족·생성 실패의 정직한 안내문을 본문 «앞»에 둔다
         # (기준문서 3절: 안내 1~2문장 + 찾은 만큼의 내용).
         shows = section_shows[section.section_id]
-        breaks = set(_paragraph_breaks(section.sentences, numbers))
+        breaks = set(_paragraph_breaks(
+            section.sentences, numbers, section_id=section.section_id,
+        ))
         prose_paragraphs: list[str] = []
         buffer: list[str] = []
         for index, sentence in enumerate(section.sentences):

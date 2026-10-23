@@ -18,6 +18,8 @@ from src.features.composer.constants import (
     GRADE_CONFIRMED, GRADE_INTERPRETED, NOTICE_INSUFFICIENT_EVIDENCE,
 )
 from src.features.composer.port import ComposedReport, ComposedSentence
+from src.features.composer.identity_content_constants import IDENTITY_SECTION_ID
+from src.features.composer.identity_opening import prioritize_identity_opening
 from src.features.composer.disclosure_transaction_timing import disclosure_transaction_timing
 from src.features.composer.disclosure_transaction_timing_constants import REVIEWED_CLAIM_SHA256_KEY
 from src.features.composer.news_block import (
@@ -331,7 +333,7 @@ def select_bound_public_sentences(
     for section in composed.sections:
         output_section = rendered_sections.get(section.section_id)
         owned = set(output_section.fact_ids) if output_section is not None else set()
-        kept = []
+        kept_pairs = []
         for index, sentence in enumerate(section.sentences):
             fact_id = _sentence_fact_id(
                 section.section_id, sentence, by_id=by_id, by_key=by_key,
@@ -347,15 +349,22 @@ def select_bound_public_sentences(
                     sha256(sentence.text.encode("utf-8")).hexdigest(), reason,
                 ))
                 continue
-            kept.append(sentence)
+            kept_pairs.append((sentence, by_id[fact_id]))
             seen.add(fact_id)
-            fact_ids.append(fact_id)
+        # 공개 결속을 통과한 동일 문장·Fact 쌍만 이동한다. 요약·manifest·최종
+        # 렌더가 이 순서를 함께 받아 세 출력 채널의 첫 사업 설명이 같아진다.
+        ordered_pairs = (
+            prioritize_identity_opening(kept_pairs)
+            if section.section_id == IDENTITY_SECTION_ID else tuple(kept_pairs)
+        )
+        kept = tuple(sentence for sentence, _fact in ordered_pairs)
+        fact_ids.extend(fact.fact_id for _sentence, fact in ordered_pairs)
         # 마지막 결속 단계가 본문을 전부 제외한 경우에도 빈 장의 이유를 남긴다.
         # 뒤의 안내 조정이 실제 남은 표·도식·이동 사실에 맞춰 문구를 확정한다.
         notice = section.notice
         if section.sentences and not kept and not notice:
             notice = NOTICE_INSUFFICIENT_EVIDENCE
-        sections.append(replace(section, sentences=tuple(kept), notice=notice))
+        sections.append(replace(section, sentences=kept, notice=notice))
     return BoundPublicSentenceSelection(
         replace(composed, sections=tuple(sections), summary=()),
         tuple(excluded), tuple(fact_ids),

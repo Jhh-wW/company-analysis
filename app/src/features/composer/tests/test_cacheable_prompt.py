@@ -183,6 +183,41 @@ def test_기본값은_앞_장_문장이_없어도_예전과_같다():
     )
 
 
+@pytest.mark.parametrize("shared_evidence_prefix", [False, True])
+@pytest.mark.parametrize("show_supported_claim_slots", [False, True])
+def test_정체성_작성경로에_첫_사업정의와_근거제약을_전달한다(
+    shared_evidence_prefix: bool, show_supported_claim_slots: bool,
+):
+    fragments = (
+        CollectedFragment(
+            fragment_id="1",
+            kind="홈페이지",
+            text="가나다전자는 전자부품을 제조하는 기업이다.",
+            source_url="https://example.com/about",
+            supported_claim_slots=("identity:business_definition",),
+        ),
+    )
+
+    prompt = build_section_prompt(
+        _COMPANY, _SECTION, fragments, None, (),
+        shared_evidence_prefix=shared_evidence_prefix,
+        show_supported_claim_slots=show_supported_claim_slots,
+    )
+
+    for instruction in (
+        "첫 확인 문장은 identity:business_definition 의미칸으로",
+        "무엇을 주로 만들거나 제공하는지와 어떤 유형의 기업인지",
+        "쉬운 한 문장으로 요약한다",
+        "자기 인용 원문의 현재 사업 설명이 뒷받침하는 범위만",
+        "복합기업은 검증된 주력 사업을 중심으로",
+        "미확인 내용은 추측하거나 종결 형식에 맞추려고 덧붙이지 않는다",
+        "사업 정의의 근거가 없으면 그 문장을 만들지 않으며",
+        "주소·설립 목적·비전으로 대신하지 않는다",
+    ):
+        assert instruction in prompt
+    assert prompt.count(SECTION_GUIDES[_SECTION]) == 1
+
+
 # ══════════════════════════════════════════════════════════
 # ② 공유 앞부분은 아홉 장에서 바이트 동일하다 (캐시가 맞는 유일한 조건)
 # ══════════════════════════════════════════════════════════
