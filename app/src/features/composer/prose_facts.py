@@ -16,6 +16,7 @@ from typing import Final, Optional, Sequence
 from src.features.composer.constants import GRADE_CONFIRMED, GRADE_INTERPRETED
 from src.features.composer.future_plan_constants import FUTURE_SECTION_FORWARD_RE
 from src.features.composer.plan_status_scope import plan_status_fact_state
+from src.features.composer.completed_news_timing import completed_news_as_of
 from src.features.composer.port import ComposedSentence
 from src.features.composer.prose_own_source import own_source_support_terms
 from src.features.composer.source_actor_scope import source_actor_subject_scope
@@ -300,6 +301,11 @@ def evaluate_verified_prose_fact(
     # 않는다. 이 표지는 시점 metadata만 보수화하며 인용 검수의 승인을 대신하지 않는다.
     forward_claim = bool(FUTURE_SECTION_FORWARD_RE.search(claim))
     status_time, plan_status = plan_status_fact_state(claim, claim_slot)
+    completed_news_date = completed_news_as_of(
+        claim, quote=evidence[0].exact_text, publisher=primary.publisher,
+        published_on=primary.published_at, baseline_date=str(as_of_date),
+    ) if (sentence.grade == GRADE_CONFIRMED and len(evidence) == 1
+          and primary.kind is SourceKind.NEWS and not forward_claim and not status_time) else ""
     from src.features.composer.litigation_timing import litigation_snapshot_date, litigation_timing_problem
     timing_problem = litigation_timing_problem(
         claim, {item.fragment_id: item.exact_text for item in evidence},
@@ -337,9 +343,9 @@ def evaluate_verified_prose_fact(
             else INTERPRETATION_CLAIM_TYPE
         ),
         section_owner=section_id,
-        time_state=("past" if transaction_timing or comparison_as_of or ((snapshot_as_of or litigation_as_of) and (snapshot_as_of or litigation_as_of) < str(as_of_date)) else status_time or ("future" if forward_claim else _TIME_STATE_BY_SECTION.get(section_id, "present"))),
+        time_state=("past" if transaction_timing or comparison_as_of or completed_news_date or ((snapshot_as_of or litigation_as_of) and (snapshot_as_of or litigation_as_of) < str(as_of_date)) else status_time or ("future" if forward_claim else _TIME_STATE_BY_SECTION.get(section_id, "present"))),
         plan_status=plan_status,
-        as_of=(transaction_timing.as_of if transaction_timing else comparison_as_of or snapshot_as_of or litigation_as_of or str(as_of_date or "").strip()),
+        as_of=(transaction_timing.as_of if transaction_timing else comparison_as_of or snapshot_as_of or litigation_as_of or completed_news_date or str(as_of_date or "").strip()),
         source_id=source_ids[0],
         source_type=primary.source_type,
         source_title=primary.title or primary.label,

@@ -1,6 +1,6 @@
 """실제14 당기·전기 비용비교의 원문과 사실 기준일을 독립적으로 검증한다."""
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 import hashlib
 import json
 from pathlib import Path
@@ -133,3 +133,59 @@ def test_actual_typed_dart_publisher_projects_to_company_before_comparison_fact_
     from src.features.provenance.sources import has_valid_provenance_seal
     assert has_valid_provenance_seal(public.citations[0])
     assert not has_valid_provenance_seal(replace(public.citations[0], reporting_period="2024-01-01/2024-12-31"))
+
+
+FIFTEENTH = json.loads((Path(__file__).parent / "fixtures/fifteenth_financial_comparison.json").read_text(encoding="utf-8"))
+
+
+def fifteenth_source(**changes):
+    fields = {key: value for key, value in FIFTEENTH["source"].items() if key in Source.__dataclass_fields__}
+    fields["kind"] = SourceKind.FILING
+    return replace(Source(**fields), **changes)
+
+
+def test_actual_fifteenth_financial_comparison_keeps_original_true_and_binds_existing_period():
+    saved = FIFTEENTH
+    original = json.dumps(saved, ensure_ascii=False, sort_keys=True)
+    fact, text, entry = saved["original_fact"], saved["source_text"], saved["review_row"]
+    assert hashlib.sha256(text.encode()).hexdigest() == saved["source_sha256"]
+    assert entry["결과"] == "참"
+    assert fact["as_of"] == saved["baseline"]
+    sentence = ComposedSentence(fact["claim"], ("5",), "확인", planned_claim_slot=fact["claim_slot"], verification_state="verified")
+    result = evaluate_verified_prose_fact(sentence, section_id="past_changes", company_name=saved["company"],
+        as_of_date=saved["baseline"], evidence=(ProseEvidence("5", fifteenth_source(), text),))
+    assert result.fact is not None, result.reason_code
+    assert (result.fact.time_state, result.fact.as_of, result.fact.source_date, result.fact.event_date) == (
+        "past", "2025-12-31", "2026-03-31", "")
+    assert (result.fact.fact_id, result.fact.claim) == (fact["fact_id"], fact["claim"])
+    manifest = json.loads(result.fact.state_evidence)
+    assert manifest[0].pop(OFFICIAL_PROSE_EXACT_TEXT_KEY) == text
+    assert manifest == json.loads(fact["state_evidence"])
+    before = asdict(type(result.fact)(**fact))
+    changed = {key for key, value in asdict(result.fact).items() if value != before[key]}
+    assert changed == {"as_of", "state_evidence", "evidence_binding"}
+    assert result.fact.evidence_binding == fact_evidence_binding(result.fact)
+    fragment = CollectedFragment("5", "판관비", text, document_title=fifteenth_source().title,
+        reporting_period=PERIOD, source_document_id=fifteenth_source().document_id)
+    problems = {}
+    verdicts = _apply_grounding(json.dumps({"판정": [entry]}, ensure_ascii=False), {30: "참"}, {30: (fact["claim"], {"5": text})},
+        diagnostic_contexts={30: ("past_changes", "본문", fact["claim"])}, claim_slots_by_number={30: fact["claim_slot"]},
+        source_fragments_by_id={"5": fragment}, grounding_problems=problems, baseline_date=saved["baseline"])
+    assert verdicts[30] == "참", problems
+    assert json.dumps(saved, ensure_ascii=False, sort_keys=True) == original
+
+
+@pytest.mark.parametrize("changes", [{"reporting_period": ""}, {"reporting_period": "2026-01-01/2026-12-31"},
+    {"reporting_period": "2025-02-30/2025-12-31"}, {"reporting_period": "2025-12-31/2025-01-01"},
+    {"publisher": "다른회사"}, {"title": "감사보고서 (2024.12)"}])
+def test_fifteenth_financial_comparison_does_not_accept_unbound_period_or_company(changes):
+    saved = FIFTEENTH
+    assert disclosure_comparison_timing_problem(saved["original_fact"]["claim"], {"5": saved["source_text"]},
+        {"5": fifteenth_source(**changes)}, company_name=saved["company"], baseline_date=saved["baseline"]) == COMPARISON_PERIOD_UNBOUND
+
+
+@pytest.mark.parametrize("claim", ["금융수익은 유효이자율법에 따라 인식한다.", "회사는 금융비용을 비용으로 계상한다.",
+    "회사는 현재 금융비용을 관리하고 있다."])
+def test_financial_accounting_and_current_business_are_not_treated_as_past_comparison(claim):
+    assert disclosure_comparison_timing_problem(claim, {"5": FIFTEENTH["source_text"]},
+        {"5": fifteenth_source(reporting_period="")}, baseline_date=BASELINE) == ""
