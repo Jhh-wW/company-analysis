@@ -5,6 +5,8 @@ from collections.abc import Mapping
 
 from src.shared.report_quality.composition_diagnostic_constants import (
     BODY_MACHINE_STEP, BODY_DISPOSITION_STEP, BODY_SECTION_IDS, BODY_DISPOSITIONS,
+    IDENTITY_OPENING_RECOVERY_STEP, IDENTITY_OPENING_RECOVERY_STATES,
+    IDENTITY_OPENING_RECOVERY_SECTION,
     BODY_SECTION_MOVE_STEP, SECTION_MOVE_BLOCKERS, SECTION_MOVE_REASONS,
     EMPTY_RECOVERY_STEP, EMPTY_RECOVERY_STATES, EMPTY_RECOVERY_ERRORS,
     GROUNDING_REWRITE_STEP, GROUNDING_REWRITE_STATES, GROUNDING_REWRITE_COUNT_KEYS,
@@ -275,6 +277,7 @@ def observed_composition_steps(diagnostics: object) -> tuple[dict[str, object], 
             _body_machine(record) if step == BODY_MACHINE_STEP else
             _body_disposition(record) if step == BODY_DISPOSITION_STEP else
             _body_section_move(record) if step == BODY_SECTION_MOVE_STEP else
+            _identity_opening_recovery(record) if step == IDENTITY_OPENING_RECOVERY_STEP else
             _empty_recovery(record) if step == EMPTY_RECOVERY_STEP else
             _grounding_rewrite(record) if step == GROUNDING_REWRITE_STEP else
             _style(record) if step == STYLE_STEP else
@@ -500,6 +503,24 @@ def _closed_shape_list(value: object) -> list[str] | None:
            for item in value):
         return None
     return list(value)
+
+
+def _identity_opening_recovery(record: Mapping) -> dict[str, object] | None:
+    state = record.get("상태")
+    sections = record.get("대상장")
+    added = record.get("최종반영")
+    added_state = "검수승인후보추가"
+    if (not isinstance(state, str) or state not in IDENTITY_OPENING_RECOVERY_STATES
+            or sections != [IDENTITY_OPENING_RECOVERY_SECTION]
+            or type(added) is not int or added not in (0, 1)
+            or (added == 1) != (state == added_state)):
+        return None
+    return {
+        "step": IDENTITY_OPENING_RECOVERY_STEP,
+        "상태": state,
+        "대상장": [IDENTITY_OPENING_RECOVERY_SECTION],
+        "최종반영": added,
+    }
 
 
 def _empty_recovery(record: Mapping) -> dict[str, object] | None:

@@ -3047,13 +3047,13 @@ def run_v2(
             identity_opening_reason = "호출중단"
             composition_diagnostics.append({
                 "step": IDENTITY_OPENING_RECOVERY_STEP, "상태": identity_opening_reason,
-                "오류종류": type(error.cause).__name__, "최종반영": 0,
+                "대상장": ["identity"], "오류종류": type(error.cause).__name__, "최종반영": 0,
             })
         except (TypeError, ValueError):
             identity_opening_reason = IDENTITY_OPENING_RECOVERY_PARSE_FAILED
             composition_diagnostics.append({
                 "step": IDENTITY_OPENING_RECOVERY_STEP, "상태": identity_opening_reason,
-                "최종반영": 0,
+                "대상장": ["identity"], "최종반영": 0,
             })
         if opening_recovery is not None and opening_recovery.added:
             draft_body_count += opening_recovery.added
