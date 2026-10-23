@@ -727,6 +727,12 @@ def test_스위치OFF면_3장_부족_바이트골든을_유지한다(
     # 2026-10-21(2): 검증된 구조화 실적이 최신 뉴스와 계획에 밀리지 않게 앞세운다.
     # 다섯 요약의 문장·인용은 같고 순서만 바뀌었다(8160바이트 유지).
     # 요약 순서를 되돌리면 이전 골든의 모든 필드와 같으며 본문·표·지표는 그대로다.
+    # 2026-10-23: 정상 생성 결과를 필드별 대조한 유일한 변화는
+    # report.sections[5].guidance_lines의 계획 이행 미확인 안내 한 줄이다(8160→8313바이트).
+    # 회사 사실·본문·표·요약·지표는 모두 같으며 재판정 OFF 계약도 유지한다.
+    from src.features.composer.future_presentation_constants import PLAN_SCOPE_NOTICE
+    future = next(section for section in result.report.sections if section.cell == "future_strategy")
+    assert future.guidance_lines == [PLAN_SCOPE_NOTICE]
     actual = _stable_result_bytes(result)
     golden = json.loads(_GOLDEN_FIXTURE.read_text(encoding="utf-8"))
     assert golden["byte_count"] == len(actual)

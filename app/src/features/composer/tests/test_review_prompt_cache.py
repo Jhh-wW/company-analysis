@@ -9,6 +9,7 @@ import pytest
 
 from src.features.composer import combined_relation_guard, diagram_check, verify
 from src.features.composer.constants import RETRY_REMINDER
+from src.features.composer.financial_interpretation_constants import FINANCIAL_CAUSALITY_GUIDE
 from src.features.composer.port import FlowRow
 from src.features.composer.prompt_cache_constants import REVIEW_PROMPT_CACHE_ENV
 from src.features.composer.prompt_metadata import PromptMetadata, with_review_prompt_cache
@@ -72,7 +73,8 @@ def test_explicit_opt_in_only_attaches_metadata(monkeypatch, configured):
 # 제재표 상태 안내 209자만 역치환해 직전 전체 바이트와 접두부를 복원했다.
 # 근거: tmp/audit-20261010/sanction-response-prompt-baseline-private.json.
 # 거래 존재와 독립 체결을 구분하는 안내 50자만 역치환하면 직전 지문이 복원된다.
-@pytest.mark.parametrize("grouped,prefix_chars", ((False, 14536), (True, 15715)))
+# 2026-10-23: 손익 인과 안내 261자 추가. 아래 역복원 검사로 기존 전체 지문도 유지한다.
+@pytest.mark.parametrize("grouped,prefix_chars", ((False, 14797), (True, 15976)))
 @pytest.mark.parametrize("factory", (_golden_case, _large_case, _boundary_case))
 def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
     monkeypatch, grouped, prefix_chars, factory,
@@ -95,14 +97,18 @@ def test_body_cache_preserves_entire_prompt_and_input_independent_prefix(
         assert cached[prefix_chars:].startswith("장별 작성 범위: ")
 
 
-@pytest.mark.parametrize("factory,grouped,expected", (
-        (_golden_case, False, "9ceec40220ae6ede993ac319e5728252020084b859db7ca900643be6b843b04d"),
-        (_golden_case, True, "77e85aa73f89dab6879035e9d11905f9c6e701491c975b496fe0a9932d3b677c"),
-        (_boundary_case, False, "337b02ccdf0da86f9e17b69095c792222630f518376edb7a5f1735dd370cee9d"),
-        (_boundary_case, True, "2ec618ef7ba7a9543d84f48f411ca12137f1714b54c9bdf7022e09759b5af8cb"),
+@pytest.mark.parametrize("factory,grouped,expected,previous", (
+        (_golden_case, False, "586e20cd01a492e5c4eb7326e56f51b127da71147d93c582df7e2d791b3627de",
+         "9ceec40220ae6ede993ac319e5728252020084b859db7ca900643be6b843b04d"),
+        (_golden_case, True, "0ab54992f359646e48a4b2e163e614807a72004f4b084b740eb91af70e0ec0fb",
+         "77e85aa73f89dab6879035e9d11905f9c6e701491c975b496fe0a9932d3b677c"),
+        (_boundary_case, False, "3f5eaad6cc657c4dd54a4abbc85940d0632c047482f3dc4c0c1998c2a2b02b4f",
+         "337b02ccdf0da86f9e17b69095c792222630f518376edb7a5f1735dd370cee9d"),
+        (_boundary_case, True, "1157357aa945876a011e40e76462ab55cf3c5e249e2326d6486908c680df1f81",
+         "2ec618ef7ba7a9543d84f48f411ca12137f1714b54c9bdf7022e09759b5af8cb"),
 ))
 def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
-    monkeypatch, factory, grouped, expected,
+    monkeypatch, factory, grouped, expected, previous,
 ):
     # 2026-10-22: 3·7장 안내만 역치환해 직전 네 지문/전체 바이트를 확인했다.
     # 후보·원문·번호·스키마·캐시 접두부 불변: seventh-review-prompt-byte-proof.json.
@@ -140,6 +146,12 @@ def test_enabled_body_prompt_matches_existing_pre_change_byte_baseline(
     monkeypatch.setenv(REVIEW_PROMPT_CACHE_ENV, "1")
     prompt = _render_case(verify, factory(), grouped)
     assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == expected
+    # 새 지침은 공통 접두부와 4장 범위에만 한 번씩 있다. 이를 제거하면
+    # 직전 전체 지문이 복원되어 근거·후보·번호·경계 변경을 함께 감시한다.
+    prefix, suffix = prompt[:prompt.cache_prefix_chars], prompt[prompt.cache_prefix_chars:]
+    assert prefix.count(FINANCIAL_CAUSALITY_GUIDE) == suffix.count(FINANCIAL_CAUSALITY_GUIDE) == 1
+    restored = prompt.replace(FINANCIAL_CAUSALITY_GUIDE, "")
+    assert hashlib.sha256(restored.encode("utf-8")).hexdigest() == previous
 
 
 def test_grouped_cache_does_not_merge_individual_evidence_boundaries(monkeypatch):
