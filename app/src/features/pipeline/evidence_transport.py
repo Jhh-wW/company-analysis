@@ -37,6 +37,7 @@ from src.shared.final_gate_diagnostics import (
     FINAL_GATE_DETAIL_PREFLIGHT_UNREGISTERED_FRAGMENT_KIND,
 )
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
+from src.shared.report_evidence.filing_period import filing_period_is_valid
 from src.shared.report_evidence.legacy_fragment_kinds import (
     LEGACY_FRAGMENT_KINDS,
     sections_for_legacy_fragment_kind,
@@ -459,13 +460,16 @@ def _typed_metadata(
         (
             domain_attestation_source_id,
             domain_attestation_evidence,
-            reporting_period,
             attachment_url,
             ir_metadata_verification,
             *redirect_parts,
         )
     ):
         raise _packet_invalid("typed DART 공시에 웹·IR provenance가 섞였습니다")
+
+    if (source_kind not in OFFICIAL_WEB_SOURCE_KINDS and reporting_period
+            and not filing_period_is_valid(reporting_period)):
+        raise _packet_invalid("typed DART 공시의 명시 보고기간이 올바르지 않습니다")
 
     if is_supplementary:
         # 표를 실제 transport가 읽게 해 목록과 Writer 자격이 선언만 남지 않게 한다.

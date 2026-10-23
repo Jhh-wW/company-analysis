@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import hashlib
+from src.shared.report_evidence.filing_period import filing_period_is_valid
 import hmac
 import ipaddress
 import json
@@ -1162,7 +1163,6 @@ def full_typed_source_registry_problem(
         for value in (
             source.domain_attestation_source_id,
             source.domain_attestation_evidence,
-            source.reporting_period,
             source.attachment_url,
             source.ir_metadata_verification,
             source.domain_redirect_verification,
@@ -1171,6 +1171,8 @@ def full_typed_source_registry_problem(
         )
     ):
         return "typed DART 공시에 웹·IR 전용 provenance가 섞였습니다"
+    if source.reporting_period and not filing_period_is_valid(source.reporting_period):
+        return "typed DART 공시의 명시 보고기간이 올바르지 않습니다"
     if not is_canonical_official_with_registry(source, sources):
         return "typed DART 공시의 공식 출처 계약이 불완전합니다"
     return ""

@@ -16,6 +16,9 @@ SETTLEMENT_BUSINESS_ROLE_RE: Final[re.Pattern[str]] = re.compile(
 # 자기 공시의 PG 업종과 도식의 업종명만 대응한다. 임의 상품명은 별칭이 아니다.
 SETTLEMENT_PG_TARGET: Final[str] = "pg서비스"
 SETTLEMENT_MERCHANT_TARGET: Final[str] = "가맹점"
+SETTLEMENT_OWN_MERCHANT_TARGETS: Final[frozenset[str]] = frozenset({
+    "회사의가맹점", "당사의가맹점",
+})
 # 수취인을 역할값 안에도 명시한 공제·지급 관계만 별도로 대조한다.
 SETTLEMENT_MERCHANT_FEES: Final[str] = r"수수료(?:(?:·|와|및)부가가치세)?"
 SETTLEMENT_MERCHANT_ROLE_RE: Final[re.Pattern[str]] = re.compile(

@@ -3,14 +3,18 @@
 from collections.abc import Mapping
 import unicodedata
 
-from src.features.composer.direct_support import _relation_entries, _relation_problem
+from src.features.composer.direct_support import (
+    _relation_entries, _relation_problem, _role_match, _sentences_covering,
+)
 from src.features.composer.financial_interpretation_constants import (
     CAUSE_FIRST_RESULT_RE, CHANGE_BASES, FINANCIAL_CAUSE_DENIAL_RE,
     FINANCIAL_CAUSE_RE, FINANCIAL_COMPARISON_BASIS_MISMATCH,
     FINANCIAL_COMPARISON_RE, FINANCIAL_LOSS_RE, FINANCIAL_SENTENCE_RE,
     FINANCIAL_SUBJECT_COMPARISON_RE,
+    FINANCIAL_SELF_PREFIX_RE, FINANCIAL_SOURCE_MODAL_RE, FINANCIAL_CAUSAL_BRIDGE_RE,
     NAMED_CAUSE_RE, NET_LOSS_CAUSE_UNBOUND, NET_LOSS_RE,
     NONOPERATING_METRIC_RE, OPERATING_METRIC_RE, RATE_BASES, RESULT_FIRST_CAUSE_RE,
+    RESULT_FIRST_BACKGROUND_CAUSE_RE,
 )
 
 
@@ -24,6 +28,46 @@ def _basis(value: str) -> str:
     if value in RATE_BASES:
         return "rate"
     return "level"
+
+
+def _relation_context_preserved(sentence: str, sources: Mapping[str, str],
+                                entry: Mapping, span: tuple[int, int]) -> bool:
+    """관계 앞의 다른 주어·조건을 잘라 같은 회사의 확정 인과로 옮기지 않는다."""
+    # 기존 원문 문장 분리기는 종결 마침표를 제거한다. 포함 검증을 마친 구절의
+    # 마지막 마침표만 같은 형태로 맞추고 주어·조건 텍스트는 보존한다.
+    quote = _surface(entry["원문"]).removesuffix(".")
+    matched = _role_match(quote, _surface(entry["원인"]), _surface(entry["결과"]))
+    if matched is None:
+        return False
+    source_bridge = _inter_role_context(matched.group(), entry)
+    claim_bridge = _inter_role_context(sentence[span[0]:span[1]], entry)
+    if source_bridge is None or source_bridge != claim_bridge:
+        return False
+    claim_prefix = sentence[:span[0]]
+    if FINANCIAL_SELF_PREFIX_RE.fullmatch(claim_prefix):
+        claim_prefix = ""
+    for part in _sentences_covering(sources[entry["근거"].strip()], quote):
+        source = _surface(part)
+        quote_start = source.find(quote)
+        if quote_start < 0 or FINANCIAL_SOURCE_MODAL_RE.search(source):
+            continue
+        source_prefix = source[:quote_start + matched.start()]
+        if FINANCIAL_SELF_PREFIX_RE.fullmatch(source_prefix):
+            source_prefix = ""
+        if source_prefix == claim_prefix:
+            return True
+    return False
+
+
+def _inter_role_context(text: str, entry: Mapping) -> str | None:
+    roles = (_surface(entry["원인"]), _surface(entry["결과"]))
+    positions = sorted((text.find(role), role) for role in roles)
+    if positions[0][0] < 0:
+        return None
+    start, first = positions[0]
+    bridge = text[start + len(first):positions[1][0]]
+    context = FINANCIAL_CAUSAL_BRIDGE_RE.sub("", bridge, count=1)
+    return "" if FINANCIAL_SELF_PREFIX_RE.fullmatch(context) else context
 
 
 def _direct_net_loss_support(sentence: str, sources: Mapping[str, str], entries: object) -> bool:
@@ -42,7 +86,8 @@ def _direct_net_loss_support(sentence: str, sources: Mapping[str, str], entries:
                 or not NET_LOSS_RE.search(_surface(entry["결과"]))):
             continue
         problem, span = _relation_problem(entry, sentence, sources, None)
-        if not problem and span is not None:
+        if (not problem and span is not None
+                and _relation_context_preserved(sentence, sources, entry, span)):
             return True
     return False
 
@@ -77,6 +122,7 @@ def financial_interpretation_problem(
             continue
         cause = next((match["cause"] for pattern in (
             RESULT_FIRST_CAUSE_RE, CAUSE_FIRST_RESULT_RE, NAMED_CAUSE_RE,
+            RESULT_FIRST_BACKGROUND_CAUSE_RE,
         ) if (match := pattern.search(sentence)) and any(
             match.start() <= marker.start() < match.end() for marker in positive
         )), "")

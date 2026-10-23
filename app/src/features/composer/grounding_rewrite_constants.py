@@ -120,6 +120,13 @@ GROUNDING_REWRITE_ABANDON_KEY: Final[str] = "포기"
 #:   하는지 알 수 없다.
 #: ⚠️ 지도에 없는 코드는 «코드 그대로» 보낸다 — 사유를 지어내지 않는다.
 _OWN_REASON_TEXTS: Final[dict[str, str]] = {
+    "disclosure_comparison_period_unbound":
+        "당기·전기 비용 비교의 원공시 보고기간을 확정하지 못했습니다. 자료 제목·공시일·수집일로 "
+        "연도를 추측하지 마십시오. 같은 공시에 명시된 기간이 없으면 기간을 새로 만들지 마십시오",
+    "disclosure_snapshot_date_unsupported":
+        "공시의 보고기간종료일 현재 담보·보증 현황을 현재 지속으로 바꾸었습니다. "
+        "같은 원문의 명시 보고기간말을 문장 앞에 기준일로 밝히거나 당시 현황으로만 쓰십시오. "
+        "자료 수집일·공시일을 사실 기준일로 바꾸거나 다른 사건의 시점을 빌리지 마십시오",
     GROUNDING_INVALID:
         "적어 낸 검증 근거가 인용 원문과 어긋납니다(수치·추세·시점 중 하나가 원문과 다릅니다)",
     GROUNDING_MISSING:

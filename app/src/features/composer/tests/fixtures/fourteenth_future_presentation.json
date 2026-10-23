@@ -1,0 +1,14 @@
+{
+  "run_id": "a5cfa249df6bc01a47c8d54bf2aa07f0",
+  "claim": "2026-10-21 etnews.com 보도에 따르면, 토스페이먼츠 관계자는 \"이번 세미나를 시작으로 사업자에게 필요한 마케팅 과제를 함께 풀어가는 자리를 이어가겠다\"고 밝혔다.",
+  "source": "토스페이먼츠 관계자는 “생성형 AI가 바꾸는 검색 환경에서 사업자들이 가장 궁금해하는 것은 브랜드 노출을 어떻게 실제 매출로 잇느냐는 점”이라며 “이번 세미나를 시작으로 사업자에게 필요한 마케팅 과제를 함께 풀어가는 자리를 이어가겠다”고 말했다.",
+  "source_url": "https://www.etnews.com/20261021000310",
+  "source_date": "2026-10-21",
+  "fact_id": "v2-prose-8ae4b72d886e07d0cf00cc7d392dcd10",
+  "claim_slot": "future_strategy:stated_plan",
+  "original_report_sha256": "64e8fa03b9143ab84fb04cab461280189f12d4f7509bfef5e72477802720a497",
+  "review_file": "call-201bc12dd57e40fc91de2b526a2e846a.json",
+  "review_file_sha256": "9fa09b0ddd07b151852cedee01db1373c4c1616265f6522bbbe67f37e1504839",
+  "source_sha256": "b05912f5f43076f8b39cd854a7ba7e4a5615e2deb8056f2bd21ebc351ea0572b",
+  "scope": "기존 발언을 고치지 않는 안내 표시 회귀이며 새 검수 승인이나 전체 실행 재생이 아님"
+}

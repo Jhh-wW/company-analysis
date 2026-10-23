@@ -93,7 +93,9 @@ def litigation_snapshot_date(claim: str, sources) -> str:
     before_subject = c.SOURCE_COMPANY_SNAPSHOT_RE.search(claim[:dated.start()])
     if trailing and before_subject and not same_role(before_subject['role']):
         trailing = False
-    named_leading = bool(named and all(
+    # 명시 법인명 경로는 날짜부터 시작하는 한 현황 문장만 받는다.
+    # 앞의 타사·가상 문맥을 버린 채 뒤 법인명만 자기회사로 결속하지 않는다.
+    named_leading = bool(named and not claim[:dated.start()].strip() and all(
         exact_company_names_equivalent(named['publisher'], publisher)
         and c.SOURCE_COMPANY_SNAPSHOT_RE.search(text)
         for text, _, publisher in relevant

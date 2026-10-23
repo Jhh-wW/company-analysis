@@ -15,6 +15,7 @@ from typing import Final
 
 from src.core.revenue_table_switch import revenue_table_v2_enabled
 from src.features.composer.partial_evidence_constants import EXACT_EVIDENCE_SCOPE_GUIDE
+from src.features.composer.financial_interpretation_constants import FINANCIAL_CAUSALITY_GUIDE
 from src.shared.report_evidence.constants import (
     SOURCE_KIND_DART_AUDIT_REPORT,
     SOURCE_KIND_DART_BUSINESS_REPORT,
@@ -171,6 +172,7 @@ SECTION_GUIDES: Final[dict[str, str]] = {
         "★ 전사 3개년 실적 수치와 그 변화의 의미는 «이 장이 소유한다». 앞 장에서 "
         "비슷한 내용을 봤더라도 여기서는 반드시 쓴다 — 매출·이익의 연도별 흐름, "
         "늘거나 준 방향, 그 배경으로 회사가 밝힌 이유를 실적표를 근거로 서술한다.\n"
+        + FINANCIAL_CAUSALITY_GUIDE +
         "이 장이 소유하지 않는 것: 아직 해결되지 않은 문제(5장), 미래 계획(6장)."
     ),
     "current_challenges": (

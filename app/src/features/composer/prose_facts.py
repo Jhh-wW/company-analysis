@@ -20,6 +20,12 @@ from src.features.composer.port import ComposedSentence
 from src.features.composer.prose_own_source import own_source_support_terms
 from src.features.composer.source_actor_scope import source_actor_subject_scope
 from src.features.composer.disclosure_transaction_timing import disclosure_transaction_timing
+from src.features.composer.disclosure_snapshot_timing import (
+    disclosure_snapshot_date, disclosure_snapshot_timing_problem,
+)
+from src.features.composer.disclosure_comparison_timing import (
+    disclosure_comparison_date, disclosure_comparison_timing_problem,
+)
 from src.features.composer.disclosure_transaction_timing_constants import REVIEWED_CLAIM_SHA256_KEY
 from src.features.pipeline.port import FactRecord
 from src.features.provenance.sources import Source, SourceKind, exact_evidence_text_hash
@@ -161,6 +167,23 @@ def evaluate_verified_prose_fact(
         if failed:
             return ProseFactBuildResult(None, reason)
 
+    snapshot_sources = {item.fragment_id: item.exact_text for item in evidence}
+    snapshot_fragments = {item.fragment_id: item.source for item in evidence}
+    snapshot_problem = disclosure_snapshot_timing_problem(
+        claim, snapshot_sources, snapshot_fragments, baseline_date=as_of_date,
+    )
+    if snapshot_problem:
+        return ProseFactBuildResult(None, snapshot_problem)
+    snapshot_as_of = disclosure_snapshot_date(claim, snapshot_sources, snapshot_fragments)
+    comparison_problem = disclosure_comparison_timing_problem(
+        claim, snapshot_sources, snapshot_fragments, company_name=company_name, baseline_date=as_of_date,
+    )
+    if comparison_problem:
+        return ProseFactBuildResult(None, comparison_problem)
+    comparison_as_of = disclosure_comparison_date(
+        claim, snapshot_sources, snapshot_fragments, company_name=company_name, baseline_date=as_of_date,
+    )
+
     subject_scope = source_actor_subject_scope(
         claim, tuple(item.source_context_json for item in evidence if item.source_context_json),
         company_name=_normalized_text(company_name),
@@ -229,7 +252,7 @@ def evaluate_verified_prose_fact(
             # 보도 수치는 계산값이 아니다. 최종 품질 검사가 날짜·출처와 함께
             # 실제 숫자·단위를 재대조할 정확 원문을 사실 결속 안에 남긴다.
             manifest[-1]["news_exact_text"] = item.exact_text
-        elif numeric_confirmed_claim or (
+        elif numeric_confirmed_claim or comparison_as_of or (
             transaction_timing is not None and transaction_timing.public_claim != _normalized_text(sentence.text)
         ):
             # ★ 확인 등급 공식 원문 산문의 숫자는 FULL 안전 판정이 «인용 조각 원문에
@@ -314,9 +337,9 @@ def evaluate_verified_prose_fact(
             else INTERPRETATION_CLAIM_TYPE
         ),
         section_owner=section_id,
-        time_state=("past" if transaction_timing or (litigation_as_of and litigation_as_of < str(as_of_date)) else status_time or ("future" if forward_claim else _TIME_STATE_BY_SECTION.get(section_id, "present"))),
+        time_state=("past" if transaction_timing or comparison_as_of or ((snapshot_as_of or litigation_as_of) and (snapshot_as_of or litigation_as_of) < str(as_of_date)) else status_time or ("future" if forward_claim else _TIME_STATE_BY_SECTION.get(section_id, "present"))),
         plan_status=plan_status,
-        as_of=(transaction_timing.as_of if transaction_timing else litigation_as_of or str(as_of_date or "").strip()),
+        as_of=(transaction_timing.as_of if transaction_timing else comparison_as_of or snapshot_as_of or litigation_as_of or str(as_of_date or "").strip()),
         source_id=source_ids[0],
         source_type=primary.source_type,
         source_title=primary.title or primary.label,

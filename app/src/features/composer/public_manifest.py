@@ -30,6 +30,7 @@ from src.features.composer.industry_context import (
     has_verified_direct_business_issue,
 )
 from src.features.composer.challenge_presentation import challenge_response_only_notice
+from src.features.composer.future_presentation import section_guidance_lines
 from src.features.composer.constants import (
     DART_DOCUMENT_HOST,
     DART_DOCUMENT_URL_TEMPLATE,
@@ -1632,7 +1633,7 @@ def _expected_public_content_projection(
                 "empty_reason": "",
                 "prose_lines": lines,
                 "prose_paragraphs": paragraphs,
-                "guidance_lines": [section.notice] if section.notice else [],
+                "guidance_lines": section_guidance_lines(section),
                 "display_number": str(section_index + 1),
                 "tag": _SECTION_TAGS.get(section.section_id, ""),
                 "tables": section_tables,

@@ -6,6 +6,7 @@ REVIEWED_CLAIM_SHA256_KEY = "disclosure_reviewed_claim_sha256"
 DART_HOST = "dart.fss.or.kr"
 TRANSACTION_SECTION = "operations_partners"
 MERGER_SECTION = "identity"
+MERGER_SECTIONS = frozenset({MERGER_SECTION, "past_changes"})
 RELATIVE_PERIOD_RE = re.compile(r"(?<![가-힣])(?:당기|전기)\s*중")
 FINANCING_RE = re.compile(r"자금\s*거래")
 PAST_TRANSACTION_RE = re.compile(r"(?:수행하였|수행했|자금\s*거래[를가]?\s*(?:하였|했|없었)|없었다)")

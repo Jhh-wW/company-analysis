@@ -68,6 +68,7 @@ def _document_to_mapping(
         "exact_evidence_bindings": exact_evidence_bindings,
         **({"exact_source_context_bindings": source_context_bindings} if source_context_bindings else {}),
         **({"exact_section_context_bindings": section_context_bindings} if section_context_bindings else {}),
+        **({"reporting_period": document.reporting_period} if document.reporting_period else {}),
     }
 
 

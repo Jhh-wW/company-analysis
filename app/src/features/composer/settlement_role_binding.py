@@ -9,6 +9,7 @@ from src.features.composer.settlement_role_constants import (
     SETTLEMENT_BUSINESS_TARGETS,
     SETTLEMENT_PG_TARGET,
     SETTLEMENT_MERCHANT_TARGET,
+    SETTLEMENT_OWN_MERCHANT_TARGETS,
     SETTLEMENT_MERCHANT_ROLE_RE,
     SETTLEMENT_MERCHANT_FLOW_RE,
     SETTLEMENT_RECEIPT_ROLE_RE,
@@ -102,8 +103,10 @@ def _recipient_flow_spans(
     source_surface: str, quote: str, target: str, role: str,
 ) -> tuple[tuple[int, int, int], ...]:
     """같은 행의 수취인과 공제 후 지급을 자기 공시의 완결 관계에 묶는다."""
-    if (target != SETTLEMENT_MERCHANT_TARGET
-            or not SETTLEMENT_MERCHANT_ROLE_RE.fullmatch(role)
+    own_recipient = target in SETTLEMENT_OWN_MERCHANT_TARGETS
+    if ((target != SETTLEMENT_MERCHANT_TARGET and not own_recipient)
+            or not (SETTLEMENT_MERCHANT_ROLE_RE.fullmatch(role)
+                    or (own_recipient and SETTLEMENT_ROLE_RE.fullmatch(role)))
             or SETTLEMENT_NONACTUAL_RE.search(source_surface)):
         return ()
     products = [(i, value) for i, value in enumerate(surfaces)
@@ -111,7 +114,9 @@ def _recipient_flow_spans(
     if len(products) != 1:
         return ()
     product_index, product = products[0]
-    source_pattern = re.compile(SETTLEMENT_SOURCE_TEMPLATE.format(target=target))
+    # 자기 소유 표현은 이 완결 회사 정산 관계 안에서만 같은 수취인으로 대조한다.
+    # 일반 역할 대상의 소유격을 지우거나 임의 회사명을 자기회사로 바꾸지 않는다.
+    source_pattern = re.compile(SETTLEMENT_SOURCE_TEMPLATE.format(target=SETTLEMENT_MERCHANT_TARGET))
     if source_pattern.fullmatch(quote) is None:
         return ()
     if not any((match := source_pattern.fullmatch(clause)) is not None
@@ -120,7 +125,7 @@ def _recipient_flow_spans(
                and quote.rstrip(".") in clause and match["relation"] in quote
                for clause in source_clauses):
         return ()
-    full_pattern = re.compile(SETTLEMENT_CANDIDATE_TEMPLATE.format(target=target))
+    full_pattern = re.compile(SETTLEMENT_CANDIDATE_TEMPLATE.format(target=SETTLEMENT_MERCHANT_TARGET))
     actions = [(i, match) for i, value in enumerate(surfaces)
                if (match := (SETTLEMENT_MERCHANT_FLOW_RE.fullmatch(value)
                              or full_pattern.fullmatch(value))) is not None]

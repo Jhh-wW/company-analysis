@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 from urllib.parse import urlsplit
+from src.shared.report_evidence.filing_period import DART_PERIOD_SOURCE_KINDS, filing_period_is_valid
 
 from src.shared.official_ir import (
     IR_METADATA_VERIFICATION_VALUES,
@@ -589,6 +590,11 @@ def formal_source_writer_ineligibility_reason(
             )
         ):
             return "official_ir_writer_metadata_incomplete"
+    elif source_kind in DART_PERIOD_SOURCE_KINDS:
+        if str(reporting_period or "").strip() and not filing_period_is_valid(reporting_period):
+            return "dart_writer_reporting_period_invalid"
+        if any(str(value or "").strip() for value in (attachment_url, ir_metadata_verification)):
+            return "non_ir_writer_has_ir_metadata"
     elif any(
         str(value or "").strip()
         for value in (reporting_period, attachment_url, ir_metadata_verification)

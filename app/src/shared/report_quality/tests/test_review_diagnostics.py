@@ -84,6 +84,8 @@ def test_transport_contract_matches_the_actual_producer():
     from src.features.composer.competitive_scope_constants import COMPETITIVE_SECTION_EVIDENCE_OFFCONTRACT
     from src.features.composer.financial_relation_timing_constants import FINANCIAL_SNAPSHOT_CURRENT_UNSUPPORTED
     from src.features.composer.litigation_timing_constants import LITIGATION_TIMING_UNSUPPORTED
+    from src.features.composer.disclosure_snapshot_timing_constants import SNAPSHOT_TIMING_UNSUPPORTED
+    from src.features.composer.disclosure_comparison_timing_constants import COMPARISON_PERIOD_UNBOUND
     assert set(REVIEW_SCOPE_ITEMS) == {
         TRANSACTION_INDEPENDENCE_UNBOUND,
         RESEARCH_TABLE_STATE_UNSUPPORTED,
@@ -103,6 +105,8 @@ def test_transport_contract_matches_the_actual_producer():
         # 완료 실행 칸에 진행 상태를 배치한 생산자 사유도 같은 전송 계약에 속한다.
         COMPLETED_EXECUTION_STATE_MISMATCH,
         FINANCIAL_SNAPSHOT_CURRENT_UNSUPPORTED, LITIGATION_TIMING_UNSUPPORTED,
+        SNAPSHOT_TIMING_UNSUPPORTED,
+        COMPARISON_PERIOD_UNBOUND,
         CHALLENGE_RESPONSE_MISSING,
         HISTORICAL_EVENT_ONLY, ADMINISTRATIVE_EVENT_ONLY, POSITIVE_RESPONSE_ONLY,
         CULTURE_FINANCIAL_RISK_SCOPE_MISPLACED,

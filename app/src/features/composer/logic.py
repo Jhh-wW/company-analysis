@@ -436,6 +436,12 @@ def _render_fragments(
             label += (f" · {REPORTING_PERIOD_LABEL}: "
                       + json.dumps(fragment.reporting_period, ensure_ascii=False)
                       + f" ({REPORTING_PERIOD_GUIDE})")
+        from src.features.composer.disclosure_snapshot_timing import disclosure_snapshot_context_date
+        snapshot_date = disclosure_snapshot_context_date(fragment)
+        if snapshot_date:
+            from src.features.composer.disclosure_snapshot_timing_constants import SNAPSHOT_DATE_LABEL, SNAPSHOT_DATE_GUIDE
+            label += (f" · {SNAPSHOT_DATE_LABEL}: " + json.dumps(snapshot_date, ensure_ascii=False)
+                      + f" ({SNAPSHOT_DATE_GUIDE})")
         show_location = fragment.location and (
             not omit_numeric_location
             or not _is_numeric_offset_location(fragment.location)

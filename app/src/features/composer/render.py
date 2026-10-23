@@ -31,6 +31,7 @@ from src.features.composer.industry_context import (
     has_verified_direct_business_issue,
 )
 from src.features.composer.challenge_presentation import challenge_response_only_notice
+from src.features.composer.future_presentation import section_guidance_lines
 from src.features.composer.constants import (
     CITATION_STYLE_MERGED,
     PARAGRAPH_MAX_SENTENCES,
@@ -1565,7 +1566,7 @@ def render_report(
                 # 화면·PDF가 문단을 만드는 단위. 비면 소비하는 쪽이 예전처럼
                 # prose_lines를 이어 붙인다 (뒤로 호환).
                 prose_paragraphs=prose_paragraphs,
-                guidance_lines=[section.notice] if section.notice else [],
+                guidance_lines=section_guidance_lines(section),
                 display_number=SECTION_DISPLAY_NUMBERS.get(
                     section.section_id, ""
                 ),

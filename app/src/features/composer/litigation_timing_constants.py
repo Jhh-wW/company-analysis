@@ -45,7 +45,7 @@ COMPACT_SNAPSHOT_PUBLISHER_RE = re.compile(
     + r"}?)(?:가|는|의)\s*"
 )
 DATED_NAMED_SNAPSHOT_LEAD_RE = re.compile(
-    r"(?:으로)?\s*(?P<publisher>[가-힣A-Za-z0-9㈜().&'· -]{1,"
+    r"(?:으로)?\s*,?\s*(?P<publisher>[가-힣A-Za-z0-9㈜().&'· -]{1,"
     + str(PUBLISHER_NAME_MAX_CHARS)
     + r"}?)(?:가|는|의)\s*(?:(?P<role>원고|피고)(?:로|인)\s*)?"
     r"(?:계류\s*중인\s*)?(?:소송|분쟁)"

@@ -50,7 +50,10 @@ from src.features.composer.accounting_policy_guard import (
 )
 from src.features.composer.challenge_business_scope import challenge_business_problem
 from src.features.composer.financial_relation_timing import financial_relation_timing_problem
+from src.features.composer.disclosure_snapshot_timing import disclosure_snapshot_timing_problem
+from src.features.composer.disclosure_comparison_timing import disclosure_comparison_timing_problem
 from src.features.composer.financial_interpretation import financial_interpretation_problem
+from src.features.composer.financial_interpretation_constants import FINANCIAL_CAUSALITY_GUIDE
 from src.features.composer.litigation_timing import litigation_numeric_text, litigation_period_context, litigation_timing_problem
 from src.features.composer.numeric_proof_selection import (
     NumericProofCandidate, NumericProofOption, prepare_numeric_proof_options,
@@ -522,6 +525,7 @@ REVIEW_PROMPT_RULES: Final[str] = (
     "금융서비스 회사의 실제 상품·고객 문제는 금융 용어가 있다는 이유로 "
     "거절하지 않는다.\n"
     + PLAN_DISCLOSURE_REVIEW_GUIDE
+    + FINANCIAL_CAUSALITY_GUIDE
 )
 REVIEW_JSON_GUIDE: Final[str] = (
     "\n출력 형식 — 설명 없이 아래 모양의 JSON만 출력한다:\n"
@@ -1261,6 +1265,12 @@ def _review_fragment_metadata(fragment: CollectedFragment) -> str:
         from src.features.composer.litigation_timing_constants import REPORTING_PERIOD_LABEL, REPORTING_PERIOD_GUIDE
         metadata[REPORTING_PERIOD_LABEL] = fragment.reporting_period
         metadata["보고기간 해석"] = REPORTING_PERIOD_GUIDE
+    from src.features.composer.disclosure_snapshot_timing import disclosure_snapshot_context_date
+    snapshot_date = disclosure_snapshot_context_date(fragment)
+    if snapshot_date:
+        from src.features.composer.disclosure_snapshot_timing_constants import SNAPSHOT_DATE_LABEL, SNAPSHOT_DATE_GUIDE
+        metadata[SNAPSHOT_DATE_LABEL] = snapshot_date
+        metadata["현황 기준일 해석"] = SNAPSHOT_DATE_GUIDE
     if fragment.section_context_json:
         from src.shared.report_evidence.section_context import parse_section_context
         from src.features.composer.section_context_constants import SECTION_CONTEXT_LABEL
@@ -2434,6 +2444,20 @@ def _apply_grounding(
             problems[number] = population_problem
             continue
         context = (diagnostic_contexts or {}).get(number)
+        comparison_problem = disclosure_comparison_timing_problem(
+            text, sources, source_fragments_by_id or {}, baseline_date=baseline_date or "",
+        )
+        if comparison_problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = comparison_problem
+            continue
+        snapshot_problem = disclosure_snapshot_timing_problem(
+            text, sources, source_fragments_by_id or {}, baseline_date=baseline_date,
+        )
+        if snapshot_problem:
+            constrained[number] = REVIEW_GROUNDING_REJECTED
+            problems[number] = snapshot_problem
+            continue
         timing_problem = litigation_timing_problem(
             text, sources, source_fragments_by_id or {},
             section_id=context[0] if context else "",

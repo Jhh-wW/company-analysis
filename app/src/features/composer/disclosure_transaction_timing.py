@@ -169,7 +169,7 @@ def disclosure_transaction_timing(
         return None
     if not evidence or c.QUOTE_RE.search(claim) or c.CURRENT_OR_FUTURE_RE.search(claim):
         return None
-    if section_id == c.MERGER_SECTION:
+    if section_id in c.MERGER_SECTIONS:
         days = _merger_date(claim, company_name)
         supported = set()
         for text, source in evidence:

@@ -621,6 +621,8 @@ def collect_dart_evidence(
                     collector_version=c.COLLECTOR_VERSION,
                     parser_version=c.PARSER_VERSION,
                     requirement=filing.requirement,
+                    reporting_period=(fetch_result.reporting_period
+                                      if fetch_result.corp_code == company_id else ""),
                 )
                 new_unclassified_fragments = [
                     EvidenceFragment(
@@ -707,6 +709,8 @@ def collect_dart_evidence(
                 collector_version=c.COLLECTOR_VERSION,
                 parser_version=c.PARSER_VERSION,
                 requirement=filing.requirement,
+                reporting_period=(fetch_result.reporting_period
+                                  if fetch_result.corp_code == company_id else ""),
             )
             new_fragments = []
             for candidate_index, candidate, slot_scores in scored:

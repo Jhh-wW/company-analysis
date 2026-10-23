@@ -6,7 +6,6 @@ from pathlib import Path
 from lxml import etree
 
 from src.features.filingclean import litigation_constants as c
-from src.shared.report_evidence.legacy_fragment_kinds import LEGACY_KIND_LITIGATION
 
 
 def inline_litigation_start(text: str, start: int) -> int:
@@ -75,7 +74,7 @@ def attach_litigation_period(
         disclosed = ""
     out = dict(fragments)
     for number, fragment in fragments.items():
-        if (fragment.get("종류") != LEGACY_KIND_LITIGATION
+        if (fragment.get("종류") not in c.PERIOD_FRAGMENT_KINDS
                 or not fragment.get("원문") or fragment["원문"] not in filing_text
                 or fragment.get("출처")
                 or fragment.get("문서ID", receipt_number) != receipt_number):
@@ -83,6 +82,6 @@ def attach_litigation_period(
         out[number] = {
             **fragment, "문서ID": receipt_number, "문서명": document_title,
             "문서일": disclosed, "발행주체": publisher,
-            "원문위치": LEGACY_KIND_LITIGATION, "보고기간": f"{start}/{end}",
+            "원문위치": fragment["종류"], "보고기간": f"{start}/{end}",
         }
     return out

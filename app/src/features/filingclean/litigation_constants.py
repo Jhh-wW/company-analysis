@@ -2,6 +2,12 @@
 
 import re
 
+from src.shared.report_evidence.legacy_fragment_kinds import (
+    LEGACY_KIND_LITIGATION, LEGACY_KIND_RELATED_PARTY, LEGACY_KIND_SG_AND_A,
+)
+
+PERIOD_FRAGMENT_KINDS = frozenset({LEGACY_KIND_LITIGATION, LEGACY_KIND_RELATED_PARTY, LEGACY_KIND_SG_AND_A})
+
 LITIGATION_PREFIX_LOOKBACK = 160
 LITIGATION_PREFIX_RE = re.compile(
     r"(?:\(\d+\)\s*)?(?:(?:당기말|전기말|보고기간말|기말)\s*)?현재\s*"
