@@ -1356,7 +1356,12 @@ def render_report(
         for index, section in enumerate(report.sections)
     }
     summary_shows = visibility_groups[-1][1]
-    style_normalizer = SentenceStyleNormalizer(report, fragments, as_of_date=as_of_date)
+    style_normalizer = SentenceStyleNormalizer(
+        report, fragments, as_of_date=as_of_date, company_name=company_name,
+        source_for_fragment=lambda fragment_id: _build_source(
+            metas_by_fragment[fragment_id], numbers[fragment_id], company_name, (), filing_meta,
+        ) if fragment_id in metas_by_fragment and fragment_id in numbers else None,
+    )
 
     for section in report.sections:
         prose_lines: list[tuple[str, str]] = []

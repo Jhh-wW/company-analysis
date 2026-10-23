@@ -11,6 +11,12 @@ STATEMENT_PLAN_REPORTED_CONTEXT_RE = re.compile(
     r'계획|전망|전하|전달|인용|밝힌|밝혔|발표한|발표했|설명한|설명했|따르면|대신|대변'
 )
 STATEMENT_PLAN_SENTENCES = 2
+# 현재 설명 뒤의 직접 미래 발언만 분리한다. 과거 사건을 현재 설명으로 읽지 않는다.
+STATEMENT_CURRENT_END_RE = re.compile(r'(?:고\s*있다|한다)\.?$')
+STATEMENT_CURRENT_WITHDRAWAL_RE = re.compile(
+    r'(?:이|그|해당)\s*(?:계획|방침)(?:은|을)\s*'
+    r'(?:이미\s+)?(?:철회|취소|중단)(?:한다|하고\s*있다)\.?$'
+)
 STATEMENT_PLAN_SECTION = 'future_strategy'
 STATEMENT_PLAN_SLOT = 'future_strategy:stated_plan'
 STATEMENT_CURRENT_SLOTS = frozenset({

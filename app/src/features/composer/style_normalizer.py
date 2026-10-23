@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import date
 from re import Match
+from typing import Callable
 
 from src.features.composer.port import (
     CollectedFragment, ComposedReport, ComposedSentence, fragments_from_raw,
@@ -17,6 +18,8 @@ from src.features.composer.style_normalizer_constants import (
     SENTENCE_ENDING_REPLACEMENTS,
 )
 from src.features.composer.verbatim_news import verbatim_news_source
+from src.features.composer.disclosure_transaction_timing import disclosure_transaction_timing
+from src.features.composer.constants import GRADE_CONFIRMED
 
 
 def _unquoted_text(text: str) -> str:
@@ -90,11 +93,19 @@ class SentenceStyleNormalizer:
         fragments: Mapping | Sequence[CollectedFragment],
         *,
         as_of_date: str,
+        company_name: str = "",
+        source_for_fragment: Callable[[str], object | None] | None = None,
     ) -> None:
         collected = fragments_from_raw(fragments) if isinstance(fragments, Mapping) else fragments
         self._fragments = {fragment.fragment_id: fragment for fragment in collected}
         self._section_ids = tuple(section.section_id for section in report.sections)
         self._as_of_date = as_of_date
+        self._company_name = company_name
+        self._source_for_fragment = source_for_fragment
+        self._section_by_key = {
+            _sentence_key(sentence): section.section_id
+            for section in report.sections for sentence in section.sentences
+        }
         self._ai_keys = {
             _sentence_key(sentence)
             for section in report.sections for sentence in section.sentences
@@ -118,6 +129,21 @@ class SentenceStyleNormalizer:
                 self._cache[key] = sentence.text
             else:
                 text, count = annotate_past_dated_future(sentence.text, self._as_of_date)
+                if self._source_for_fragment is not None and sentence.grade == GRADE_CONFIRMED:
+                    evidence = []
+                    for fragment_id in sentence.citations:
+                        fragment = self._fragments.get(fragment_id)
+                        source = self._source_for_fragment(fragment_id)
+                        if fragment is None or source is None:
+                            evidence = []
+                            break
+                        evidence.append((fragment.text, source))
+                    timing = disclosure_transaction_timing(
+                        text, evidence, section_id=self._section_by_key.get(key, ""),
+                        company_name=self._company_name, as_of_date=self._as_of_date,
+                    )
+                    if timing is not None:
+                        text = timing.public_claim
                 self._cache[key] = normalize_sentence_style(text)
                 if count:
                     self.diagnostics[PAST_DATED_FUTURE_TENSE] = (

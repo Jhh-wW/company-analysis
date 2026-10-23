@@ -22,6 +22,16 @@ DATED_SNAPSHOT_LEAD_RE = re.compile(
     r"(?:(?P<role>원고|피고)(?:로|인)\s*)?(?:계류\s*중인\s*)?"
     r"(?:총\s*\d+\s*건의\s*)?(?:소송|분쟁)"
 )
+# 도식의 축약 역할도 같은 기말·자기회사·당사자 역할·건수가 맞을 때만 받는다.
+DATED_COMPACT_SNAPSHOT_LEAD_RE = re.compile(
+    r"\s*(?P<role>원고|피고)\s+(?:소송(?:사건)?|분쟁)\s*"
+    r"(?:은|는|이|가)?\s*(?:총\s*)?(?P<count>\d+)\s*건"
+)
+SOURCE_CURRENT_COMPANY_SNAPSHOT_RE = re.compile(
+    r"(?:^|(?<=[.!?;\n]))\s*(?:\(\d+\)\s*)?"
+    r"(?:당기말|보고기간말|기말)\s*현재\s*(?:회사|당사)(?:가|는|의)\s*"
+    r"(?P<role>원고|피고)(?:로|인)\s*(?:계류\s*중인\s*)?(?:소송|분쟁)"
+)
 SNAPSHOT_BEFORE_DATE_RE = re.compile(r"(?:소송(?:사건)?|분쟁)(?:은|는|이|가)\s*$")
 DATED_SNAPSHOT_COUNT_RE = re.compile(r"\s*\d+\s*건(?:이|으|[, .]|$)")
 PUBLISHER_NAME_MAX_CHARS = 100

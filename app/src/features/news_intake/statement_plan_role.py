@@ -44,10 +44,10 @@ def normalize_statement_plan_kind(
     return kind
 
 
-def _culture_plan_context_allows(
+def _statement_plan_context_allows(
     excerpt: GroundedNewsExcerpt, company: NewsCompanyContext, body: str, as_of: dt.date | None,
 ) -> bool:
-    """새 문화 경로는 검증된 원문 좌표와 직접 계획의 현재 문맥을 함께 요구한다."""
+    """정확한 원문 좌표와 직접 계획의 현재 문맥을 함께 요구한다."""
     if (as_of is None or not body or body[excerpt.span_start:excerpt.span_end] != excerpt.text
             or pc.STATEMENT_PLAN_KIND_DATED_RE.search(excerpt.text)):
         return False
@@ -67,6 +67,37 @@ def _culture_plan_context_allows(
         if pc.STATEMENT_PLAN_WITHDRAWAL_RE.fullmatch(sentence):
             return False
     return True
+
+
+def selected_statement_plan_part(
+    excerpt: GroundedNewsExcerpt, company: NewsCompanyContext, *, body: str, as_of: dt.date,
+) -> GroundedNewsExcerpt | None:
+    """이미 미래 칸에 선택된 복합 인용에서 직접 의지만 분리한다. 승인은 만들지 않는다."""
+    if (excerpt.claim_kind != 'company_statement' or excerpt.temporal_status != 'planned'
+            or excerpt.section_id != pc.STATEMENT_PLAN_SECTION
+            or excerpt.claim_slot != pc.STATEMENT_PLAN_SLOT or excerpt.event_on
+            or not _statement_plan_context_allows(excerpt, company, body, as_of)
+            or pc.CONDITIONAL_STATEMENT_RE.search(excerpt.text)):
+        return None
+    ranges = sentence_ranges(excerpt.text)
+    if len(ranges) != pc.STATEMENT_PLAN_SENTENCES:
+        return None
+    current_start, current_end = ranges[0]
+    current = excerpt.text[current_start:current_end]
+    subject = next((matched for name in company_query_names(company) if (matched := re.match(
+        re.escape(name) + r'(?:은|는|이|가)\s+', current, re.I,
+    ))), None)
+    if not pc.STATEMENT_CURRENT_END_RE.search(current) or subject is None:
+        return None
+    # 같은 계획을 철회하는 앞 문장을 잘라 오래된 의지만 남기지 않는다.
+    if pc.STATEMENT_CURRENT_WITHDRAWAL_RE.fullmatch(current[subject.end():]):
+        return None
+    start, end = ranges[-1]
+    sentence = excerpt.text[start:end]
+    if not _direct_company_plan_statement(sentence, company, reject_reported_context=True):
+        return None
+    return replace(excerpt, text=sentence, span_start=excerpt.span_start + start,
+                   span_end=excerpt.span_start + end, split_from=excerpt.span_start)
 
 
 def statement_plan_parts(
@@ -91,7 +122,7 @@ def statement_plan_parts(
     sentence = excerpt.text[start:end]
     names = company_query_names(company)
     culture = (excerpt.section_id, excerpt.claim_slot) == pc.STATEMENT_CULTURE_SLOT
-    if culture and not _culture_plan_context_allows(excerpt, company, body, as_of):
+    if culture and not _statement_plan_context_allows(excerpt, company, body, as_of):
         return None
     if (excerpt.section_id == 'portfolio' or culture) and not any(re.match(
             re.escape(name) + r'(?:은|는|이|가)\s', excerpt.text[current_start:current_end], re.I,

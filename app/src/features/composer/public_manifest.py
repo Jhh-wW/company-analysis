@@ -1564,7 +1564,14 @@ def _expected_public_content_projection(
     )
 
     numbers = _citation_numbers_for_fragments(fragments)
-    style_normalizer = SentenceStyleNormalizer(report, fragments, as_of_date=as_of_date)
+    fragments_by_id = {fragment.fragment_id: fragment for fragment in fragments}
+    style_normalizer = SentenceStyleNormalizer(
+        report, fragments, as_of_date=as_of_date, company_name=company_name,
+        source_for_fragment=lambda fragment_id: _expected_source(
+            fragments_by_id[fragment_id], number=numbers[fragment_id], company_name=company_name,
+            used_in=(), filing_meta=filing_meta,
+        ) if fragment_id in fragments_by_id and fragment_id in numbers else None,
+    )
     groups = [
         (
             section.sentences,

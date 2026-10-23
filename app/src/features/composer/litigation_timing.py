@@ -92,7 +92,17 @@ def litigation_snapshot_date(claim: str, sources) -> str:
         and parenthesized_head and same_count and same_role(parenthesized_head['role'])
         and c.PARENTHESIZED_SNAPSHOT_END_RE.match(claim, dated.end())
     )
-    if not (leading or trailing or named_leading or parenthesized):
+    compact = c.DATED_COMPACT_SNAPSHOT_LEAD_RE.match(claim, dated.end())
+    compact_leading = bool(
+        compact and dated.group().rstrip().endswith(("기준", "현재"))
+        and not claim[:dated.start()].strip()
+        and same_count and all(
+            (subject := c.SOURCE_CURRENT_COMPANY_SNAPSHOT_RE.search(text))
+            and subject['role'] == compact['role']
+            for text, _, _ in relevant
+        )
+    )
+    if not (leading or trailing or named_leading or parenthesized or compact_leading):
         # 날짜의 단순 존재가 아니라 바로 뒤 소송 현황을 한정하는 범위만 쓴다.
         # '이후에도', '기준일을 지나 현재'를 같은 시점 스냅샷으로 바꾸지 않는다.
         return ""

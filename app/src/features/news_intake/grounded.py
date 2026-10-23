@@ -23,7 +23,9 @@ from src.features.news_intake.article_identity import article_company_context
 from src.features.news_intake.reporting_subject_scope import target_is_only_interview_recipient
 from src.features.news_intake.attributed_statement import has_attributed_statement
 from src.features.news_intake.event_plan_context import event_plan_context_problem
-from src.features.news_intake.statement_plan_role import statement_plan_parts, normalize_statement_plan_kind
+from src.features.news_intake.statement_plan_role import (
+    statement_plan_parts, normalize_statement_plan_kind, selected_statement_plan_part,
+)
 from src.features.news_intake.statement_plan_role_constants import STATEMENT_PLAN_SPLIT, STATEMENT_PLAN_KIND_NORMALIZED
 from src.features.news_intake.reporting_subject_scope_constants import SUBJECT_INTERVIEW_RECIPIENT_ONLY
 from src.features.news_intake.relation_subject_scope import bind_relation_subject, starts_relation_target
@@ -417,6 +419,16 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
     if kind not in c.GROUNDED_CLAIM_KINDS or temporal not in c.GROUNDED_TEMPORAL_STATES:
         excluded["grounded_invalid_claim_kind"] += 1
         return None
+    # 복합 미래 선택은 같은 원문 안의 직접 발언만 먼저 분리한 뒤 기존 검사를 받는다.
+    # 현재 문장까지 계획으로 올리거나, 분리만으로 후속 검수 승인을 만들지 않는다.
+    selected_part = selected_statement_plan_part(GroundedNewsExcerpt(
+        candidate=candidate, text=text, section_id=section, claim_slot=slot,
+        claim_kind=kind, temporal_status=temporal, topic=raw['topic'],
+        event_key=raw['event_key'], event_on=raw['event_on'],
+        span_start=start, span_end=start + len(text),
+    ), company, body=body, as_of=as_of)
+    if selected_part is not None:
+        text, start = selected_part.text, selected_part.span_start
     kind = normalize_statement_plan_kind(kind, temporal, section, slot, text, company)
     if (kind == "company_plan") != (temporal == "planned"):
         excluded["grounded_plan_mismatch"] += 1
@@ -450,6 +462,7 @@ def _excerpt(raw: object, candidate: NewsCandidate, body: str, company: NewsComp
         candidate=candidate, text=text, section_id=section, claim_slot=slot,
         claim_kind=kind, temporal_status=temporal, topic=raw["topic"],
         event_key=raw["event_key"].strip(), event_on=raw["event_on"], span_start=start, span_end=start + len(text),
+        split_from=selected_part.split_from if selected_part is not None else None,
     )
 
 

@@ -183,7 +183,10 @@ def test_prompt_change_invalidates_old_policy_cache_namespace(monkeypatch) -> No
     # 제품 역할에 섞인 미래 분리와 역참조 후보의 문맥 보존으로 직전 v33 캐시도 무효화한다.
     # 복합조사와 실제 문맥 후보의 우선배치가 바뀌어 직전 v34 선택 결과도 재사용하지 않는다.
     # 문화 칸에 섞인 직접 미래 의지도 정상 작성 후보로 분리하므로 v36을 재사용하지 않는다.
-    assert c.COLLECTION_POLICY_VERSION == "news-grounded-v37"
+    # 미래로 선택된 현재·미래 혼합 인용을 먼저 분리하므로 직전 v37도 분리한다.
+    assert c.COLLECTION_POLICY_VERSION == "news-grounded-v38"
+    monkeypatch.setattr(c, "COLLECTION_POLICY_VERSION", "news-grounded-v37")
+    assert policy_digest(policy) != current
     monkeypatch.setattr(c, "COLLECTION_POLICY_VERSION", "news-grounded-v36")
     assert policy_digest(policy) != current
     monkeypatch.setattr(c, "COLLECTION_POLICY_VERSION", "news-grounded-v34")

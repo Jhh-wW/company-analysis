@@ -19,6 +19,8 @@ from src.features.composer.plan_status_scope import plan_status_fact_state
 from src.features.composer.port import ComposedSentence
 from src.features.composer.prose_own_source import own_source_support_terms
 from src.features.composer.source_actor_scope import source_actor_subject_scope
+from src.features.composer.disclosure_transaction_timing import disclosure_transaction_timing
+from src.features.composer.disclosure_transaction_timing_constants import REVIEWED_CLAIM_SHA256_KEY
 from src.features.pipeline.port import FactRecord
 from src.features.provenance.sources import Source, SourceKind, exact_evidence_text_hash
 from src.shared.report_claim_policy import CLAIM_SLOTS_BY_SECTION
@@ -175,6 +177,15 @@ def evaluate_verified_prose_fact(
     if practice_problem:
         return ProseFactBuildResult(None, practice_problem)
 
+    transaction_timing = disclosure_transaction_timing(
+        claim, tuple((item.exact_text, item.source) for item in evidence),
+        section_id=section_id, company_name=company_name, as_of_date=as_of_date,
+    ) if sentence.grade == GRADE_CONFIRMED else None
+    if transaction_timing is not None:
+        # 원 검수 문장은 변경하지 않는다. 같은 출처로 확정한 기간 표기만
+        # 공개 표시와 Fact 주장 양쪽에 동일하게 운반한다.
+        claim = transaction_timing.public_claim
+
     # FULL에서 확인 등급 산문에 숫자 토큰이 있으면 공식 출처 조각의 원문을 함께 싣는다.
     # 싣는 조건은 안전 판정이 수치 결속을 요구하는 조건(공개 숫자 감지)과 같은 술어다.
     numeric_confirmed_claim = (
@@ -218,12 +229,20 @@ def evaluate_verified_prose_fact(
             # 보도 수치는 계산값이 아니다. 최종 품질 검사가 날짜·출처와 함께
             # 실제 숫자·단위를 재대조할 정확 원문을 사실 결속 안에 남긴다.
             manifest[-1]["news_exact_text"] = item.exact_text
-        elif numeric_confirmed_claim:
+        elif numeric_confirmed_claim or (
+            transaction_timing is not None and transaction_timing.public_claim != _normalized_text(sentence.text)
+        ):
             # ★ 확인 등급 공식 원문 산문의 숫자는 FULL 안전 판정이 «인용 조각 원문에
             #   그대로 있는가»를 바이트 지문과 함께 다시 대조한다(ADR 0005). 그 대조에
             #   쓸 원문을 사실 결속 안에 싣는다. «원문을 문장마다 중복 저장하지 않는다»
             #   원칙의 좁은 예외다 — FULL·확인 등급·숫자 든 산문에만.
             manifest[-1][OFFICIAL_PROSE_EXACT_TEXT_KEY] = item.exact_text
+        if transaction_timing is not None and transaction_timing.public_claim != _normalized_text(sentence.text):
+            # 날짜를 표시한 일반 산문의 원 검수 주장 지문이다. 이 값만 믿지 않고
+            # 공개 투영은 같은 exact 원문·출처 신원으로 기간을 다시 계산한다.
+            manifest[-1][REVIEWED_CLAIM_SHA256_KEY] = hashlib.sha256(
+                _normalized_text(sentence.text).encode("utf-8"),
+            ).hexdigest()
 
     translation_bound = False
     if sentence.news_translation_receipt:
@@ -295,9 +314,9 @@ def evaluate_verified_prose_fact(
             else INTERPRETATION_CLAIM_TYPE
         ),
         section_owner=section_id,
-        time_state=("past" if litigation_as_of and litigation_as_of < str(as_of_date) else status_time or ("future" if forward_claim else _TIME_STATE_BY_SECTION.get(section_id, "present"))),
+        time_state=("past" if transaction_timing or (litigation_as_of and litigation_as_of < str(as_of_date)) else status_time or ("future" if forward_claim else _TIME_STATE_BY_SECTION.get(section_id, "present"))),
         plan_status=plan_status,
-        as_of=litigation_as_of or str(as_of_date or "").strip(),
+        as_of=(transaction_timing.as_of if transaction_timing else litigation_as_of or str(as_of_date or "").strip()),
         source_id=source_ids[0],
         source_type=primary.source_type,
         source_title=primary.title or primary.label,

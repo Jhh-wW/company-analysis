@@ -11,11 +11,15 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
+from datetime import date
+from types import SimpleNamespace
 
 from src.features.composer.constants import (
     GRADE_CONFIRMED, GRADE_INTERPRETED, NOTICE_INSUFFICIENT_EVIDENCE,
 )
 from src.features.composer.port import ComposedReport, ComposedSentence
+from src.features.composer.disclosure_transaction_timing import disclosure_transaction_timing
+from src.features.composer.disclosure_transaction_timing_constants import REVIEWED_CLAIM_SHA256_KEY
 from src.features.composer.news_block import (
     NEWS_BLOCK_HEADERS,
     news_block_caption,
@@ -23,14 +27,14 @@ from src.features.composer.news_block import (
     oldest_stale_report_year,
 )
 from src.features.pipeline.port import FactRecord, Report
-from src.features.provenance.sources import Source, SourceKind, exact_evidence_text_hash
+from src.features.provenance.sources import Source, SourceKind, exact_evidence_text_hash, has_valid_provenance_seal
 from src.shared.report_quality.dto import (
     ClaimFact,
     ReportCandidate,
     ReportSectionCandidate,
     SourceDocument,
 )
-from src.shared.report_quality.fact_binding import fact_evidence_binding
+from src.shared.report_quality.fact_binding import fact_evidence_binding, fact_primary_source_metadata_mismatches
 from src.shared.report_quality.evidence_support import fact_prose_evidence_support_ready
 from src.shared.report_quality.source_identity import (
     document_identity,
@@ -42,6 +46,7 @@ from src.shared.report_quality.constants import (
     HISTORICAL_PERFORMANCE_RATE_CLAIM_TYPE,
     INTERPRETATION_CLAIM_TYPE,
     OFFICIAL_PROSE_LEGACY_FILING_KIND,
+    OFFICIAL_PROSE_EXACT_TEXT_KEY,
     VERIFIED_PROSE_CLAIM_TYPE,
 )
 
@@ -103,6 +108,7 @@ def _fact_key(
 
 def _valid_fact_registries(
     facts: Sequence[FactRecord],
+    sources: Sequence[Source] | None = None,
 ) -> tuple[dict[str, FactRecord], dict[tuple[str, str, str], FactRecord]]:
     """ID나 공개 문장 키가 모호하면 어느 쪽도 임의 선택하지 않는다."""
 
@@ -110,6 +116,7 @@ def _valid_fact_registries(
     by_key: dict[tuple[str, str, str], FactRecord] = {}
     duplicate_ids: set[str] = set()
     duplicate_keys: set[tuple[str, str, str]] = set()
+    sources_by_id = {source.source_id: source for source in sources or ()}
     for fact in facts:
         fact_id = fact.fact_id.strip()
         key = _fact_key(
@@ -126,6 +133,21 @@ def _valid_fact_registries(
             or fact.evidence_binding != fact_evidence_binding(fact)
         ):
             continue
+        try:
+            manifest = json.loads(fact.state_evidence)
+        except (TypeError, ValueError):
+            manifest = None
+        timed_manifest = isinstance(manifest, list) and any(
+            isinstance(item, dict) and REVIEWED_CLAIM_SHA256_KEY in item for item in manifest
+        )
+        if sources is not None and timed_manifest:
+            source = sources_by_id.get(fact.source_id)
+            if (source is None or source.kind is not SourceKind.FILING
+                    or not has_valid_provenance_seal(source)
+                    or fact_primary_source_metadata_mismatches(fact, source)
+                    or document_identity(source) != fact_document_identity(fact)
+                    or any(value not in source.exact_evidence_hashes for value in fact.supporting_evidence_hashes)):
+                continue
         if fact_id in by_id:
             duplicate_ids.add(fact_id)
         else:
@@ -139,6 +161,45 @@ def _valid_fact_registries(
     for key in duplicate_keys:
         by_key.pop(key, None)
     return by_id, by_key
+
+
+def _disclosure_timed_fact(
+    section_id: str, sentence: ComposedSentence, by_id: dict[str, FactRecord],
+) -> FactRecord | None:
+    """원 검수 지문과 단일 공시 exact 원문으로 같은 기간 표기만 다시 결속한다."""
+    matches = []
+    claim = _normalized_text(sentence.text)
+    digest = sha256(claim.encode("utf-8")).hexdigest()
+    for fact in by_id.values():
+        if (fact.claim_type != VERIFIED_PROSE_CLAIM_TYPE or fact.section_owner != section_id
+                or fact.claim_slot != sentence.planned_claim_slot or fact.time_state != "past"
+                or len(fact.supporting_source_ids) != 1):
+            continue
+        try:
+            records = json.loads(fact.state_evidence)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
+            continue
+        record = records[0]
+        exact = record.get(OFFICIAL_PROSE_EXACT_TEXT_KEY)
+        if (record.get(REVIEWED_CLAIM_SHA256_KEY) != digest or not isinstance(exact, str)
+                or record.get("source_id") != fact.source_id
+                or record.get("document_identity") != fact_document_identity(fact)
+                or tuple(fact.supporting_source_ids) != (fact.source_id,)
+                or tuple(fact.supporting_source_identities) != (fact_document_identity(fact),)
+                or tuple(fact.supporting_evidence_hashes) != (sha256(exact.encode("utf-8")).hexdigest(),)
+                or record.get("exact_sha256") != fact.supporting_evidence_hashes[0]):
+            continue
+        # 이곳은 이미 결속이 유효한 Fact를 역대조한다. Source 메타·원문 지문은
+        # 공개 안전 계약이 별도로 등록부와 검산하며 임의 prefix 제거는 없다.
+        source = SimpleNamespace(kind=SourceKind.FILING, host=fact.source_host,
+            publisher=fact.source_publisher, title=fact.source_title, reporting_period="")
+        timing = disclosure_transaction_timing(claim, ((exact, source),),
+            section_id=section_id, company_name=fact.legal_entity, as_of_date=date.max.isoformat())
+        if timing is not None and timing.public_claim == fact.claim and timing.as_of == fact.as_of:
+            matches.append(fact)
+    return matches[0] if len(matches) == 1 else None
 
 
 def _sentence_fact_id(
@@ -168,6 +229,9 @@ def _sentence_fact_id(
         if structured is not None
         else by_key.get(key)
     )
+    timed_fact = _disclosure_timed_fact(section_id, sentence, by_id) if fact is None and structured is None else None
+    if timed_fact is not None:
+        fact = timed_fact
     if fact is None:
         return ""
     # 문장 등급과 FactRecord 종류는 같은 판단의 양쪽 표현이다. 둘 중 한쪽만
@@ -203,7 +267,7 @@ def _sentence_fact_id(
         claim=fact.claim,
         claim_slot=fact.claim_slot,
     )
-    if fact_key != key:
+    if fact_key != key and timed_fact is None:
         return ""
     if structured is not None:
         if (
@@ -258,7 +322,7 @@ def select_bound_public_sentences(
     본문을 먼저 정리해야 요약·렌더·봉인이 서로 다른 공개 문장을 보지 않는다.
     도식과 안내문은 각자의 계약이 검사하며, 요약은 정리된 본문에서 다시 고른다.
     """
-    by_id, by_key = _valid_fact_registries(rendered.fact_records)
+    by_id, by_key = _valid_fact_registries(rendered.fact_records, rendered.citations)
     rendered_sections = {section.cell: section for section in rendered.sections}
     seen: set[str] = set()
     fact_ids: list[str] = []
@@ -388,6 +452,11 @@ def _summary_sentence_fact_id(
         for (section_id, claim, slot), fact in by_key.items()
         if section_id and claim == normalized_claim and slot == claim_slot
     ]
+    if not matches:
+        section_id = claim_slot.split(":", 1)[0]
+        timed_fact = _disclosure_timed_fact(section_id, sentence, by_id)
+        if timed_fact is not None:
+            matches = [(section_id, timed_fact)]
     if len(matches) != 1:
         return ""
     section_id, _fact = matches[0]
@@ -419,7 +488,7 @@ def build_generation_quality_candidate(
 ) -> ReportCandidate:
     """렌더 결과와 본문을 원자 사실 ID 기준으로 품질 평가기에 투영한다."""
 
-    by_id, by_key = _valid_fact_registries(rendered.fact_records)
+    by_id, by_key = _valid_fact_registries(rendered.fact_records, rendered.citations)
     structures_manifest_bound = False
     if rendered.public_structure_manifest:
         # 순환 import를 피하면서 FULL pipeline의 독립 manifest 검증 결과를
