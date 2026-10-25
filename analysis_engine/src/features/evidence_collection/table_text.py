@@ -272,7 +272,7 @@ class _TableParser(HTMLParser):
         if self.table is not None:
             self.table.invalid = True
 
-    def _finish_table(self) -> None:
+    def _finish_table(self, *, replacement_window_chars: int | None = None) -> None:
         table = self.table
         self.table = None
         if (table is None or table.invalid or self.over_budget
@@ -280,7 +280,11 @@ class _TableParser(HTMLParser):
             return
         if table.caption_parts is not None or not table.rows:
             return
-        grid = _owned_grid(table.rows, max_chars=self.max_window_chars)
+        window_chars = self.max_window_chars if replacement_window_chars is None else replacement_window_chars
+        # 주어 문맥은 더 큰 표를 읽지만 평문 표 변환의 기존 작은 상한은 유지한다.
+        if table.stored_chars > window_chars:
+            return
+        grid = _owned_grid(table.rows, max_chars=window_chars)
         if grid is None:
             return
         end_match = _END_TABLE.match(self.document, self._offset())
@@ -288,7 +292,7 @@ class _TableParser(HTMLParser):
             return
         row_texts = [" | ".join(row) for row in grid]
         body = " ; ".join(([table.caption] if table.caption else []) + row_texts)
-        if not body or len(body) > self.max_window_chars:
+        if not body or len(body) > window_chars:
             return
         if (len(self.replacements) >= c.MAX_REPLACEMENTS_PER_DOCUMENT
                 or self.replacement_chars + len(body) > c.MAX_REPLACEMENT_CHARS_PER_DOCUMENT):

@@ -8,7 +8,8 @@ import re
 from dataclasses import dataclass
 
 from features.evidence_collection import source_context_constants as c
-from features.evidence_collection.table_text import _TableParser, _owned_grid
+from features.evidence_collection import table_text_constants as table_c
+from features.evidence_collection.table_text import TableReplacement, _TableParser, _owned_grid
 
 
 def _hash(text: str) -> str:
@@ -32,8 +33,9 @@ def _payload(*, text: str, start: int, actor: str, document_actor: str,
 
 
 class _ContextTableParser(_TableParser):
-    def __init__(self, markup: str) -> None:
+    def __init__(self, markup: str, *, replacement_window_chars: int | None = None) -> None:
         super().__init__(markup, max_window_chars=c.MAX_CONTEXT_TABLE_CHARS)
+        self.replacement_window_chars = replacement_window_chars
         self.grids: list[list[list[str]]] = []
         self.context_budget_exceeded = False
         self.context_chars = 0
@@ -64,29 +66,59 @@ class _ContextTableParser(_TableParser):
                 else:
                     self.grids.append(grid)
                     self.context_chars += size
-        super()._finish_table()
+        super()._finish_table(replacement_window_chars=self.replacement_window_chars)
 
 
-def table_source_contexts(markup: str, plain_text: str, *, document_actor: str) -> tuple[str, ...]:
+@dataclass(frozen=True)
+class DocumentTableViews:
+    """동일 원문을 한 번 읽어 만든 평문 표와 회사 주어 표의 독립된 결과."""
+
+    markup: str
+    replacements: tuple[TableReplacement, ...]
+    context_grids: tuple[tuple[tuple[str, ...], ...], ...]
+    context_budget_exceeded: bool
+
+
+def parse_document_tables(markup: str, *, replacement_window_chars: int) -> DocumentTableViews:
+    """큰 주어 표를 확인하면서도 평문 변환의 별도 상한과 실패 판정을 보존한다."""
+
+    if not 0 < replacement_window_chars <= c.MAX_CONTEXT_TABLE_CHARS:
+        raise ValueError("평문 표 변환 상한이 주어 문맥 파싱 범위를 벗어났습니다")
+    parser = _ContextTableParser(markup, replacement_window_chars=replacement_window_chars)
+    parser.feed(markup)
+    parser.close()
+    unfinished_actor_table = parser.table is not None and any(
+        re.sub(r"\s+", "", cell.text) in c.TABLE_ACTOR_HEADERS
+        for row in parser.table.rows for cell in row
+    )
+    return DocumentTableViews(
+        markup=markup,
+        replacements=(() if parser.table_count > table_c.MAX_TABLES_PER_DOCUMENT or parser.over_budget
+                      else tuple(parser.replacements)),
+        context_grids=tuple(tuple(tuple(row) for row in grid) for grid in parser.grids),
+        context_budget_exceeded=bool(parser.context_budget_exceeded or unfinished_actor_table),
+    )
+
+
+def table_source_contexts(
+    markup: str, plain_text: str, *, document_actor: str,
+    table_views: DocumentTableViews | None = None,
+) -> tuple[str, ...]:
     """명시적인 회사 열과 같은 표 행만 원문 위치에 결속한다."""
     actor_start = plain_text.find(document_actor) if document_actor else -1
     if actor_start < 0:
         return ()
-    parser = _ContextTableParser(markup)
-    try:
-        parser.feed(markup)
-        parser.close()
-    except (ValueError, RecursionError):
-        raise SourceContextBudgetExceeded("문서의 회사 주어 표 구조를 끝까지 확인하지 못했습니다") from None
-    if parser.table is not None and any(
-        re.sub(r"\s+", "", cell.text) in c.TABLE_ACTOR_HEADERS
-        for row in parser.table.rows for cell in row
-    ):
-        parser.context_budget_exceeded = True
-    if parser.context_budget_exceeded:
+    if table_views is None:
+        try:
+            table_views = parse_document_tables(markup, replacement_window_chars=c.MAX_CONTEXT_TABLE_CHARS)
+        except (ValueError, RecursionError):
+            raise SourceContextBudgetExceeded("문서의 회사 주어 표 구조를 끝까지 확인하지 못했습니다") from None
+    elif table_views.markup != markup:
+        raise ValueError("표 파싱 결과와 주어 문맥의 원문이 다릅니다")
+    if table_views.context_budget_exceeded:
         raise SourceContextBudgetExceeded("문서의 회사 주어 문맥 확인 상한에 도달했습니다")
     result: list[str] = []
-    for grid in parser.grids:
+    for grid in table_views.context_grids:
         header_index = next((i for i, row in enumerate(grid)
                              if any(re.sub(r"\s+", "", cell) in c.TABLE_ACTOR_HEADERS for cell in row)), None)
         if header_index is None:
