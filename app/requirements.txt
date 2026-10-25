@@ -82,7 +82,7 @@ spacy-legacy==3.0.12
 spacy-loggers==1.0.5
 srsly==2.5.3
 starlette==1.6.0
-thinc==8.3.13
+thinc==9.1.1
 tldextract==5.3.2
 tqdm==4.70.0
 typer==0.27.1
