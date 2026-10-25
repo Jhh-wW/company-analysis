@@ -31,10 +31,14 @@ FONT_DIR: Final[Path] = Path(__file__).with_name("fonts")
 FONT_REGULAR_PATH: Final[Path] = FONT_DIR / "Freesentation-Regular.ttf"
 FONT_SEMIBOLD_PATH: Final[Path] = FONT_DIR / "Freesentation-SemiBold.ttf"
 FONT_FALLBACK_PATH: Final[Path] = FONT_DIR / "NotoSansKR-Regular.ttf"
+FONT_MATH_PATH: Final[Path] = FONT_DIR / "NotoSansMath-Regular.ttf"
 FONT_REGULAR: Final[str] = "FreesentationPDF"
 FONT_SEMIBOLD: Final[str] = "FreesentationPDF-SemiBold"
 FONT_FALLBACK: Final[str] = "NotoSansKRPDF"
+FONT_MATH: Final[str] = "NotoSansMathPDF"
+FONT_FALLBACKS: Final[tuple[str, ...]] = (FONT_FALLBACK, FONT_MATH)
 FONT_FALLBACK_MAX_BYTES: Final[int] = 6 * 1024 * 1024
+FONT_MATH_MAX_BYTES: Final[int] = 1024 * 1024
 
 # 디자인 토큰 v1의 무채색 팔레트. 웹도 같은 값을 사용해야 한다.
 COLOR_INK: Final[str] = "#111111"

@@ -530,6 +530,11 @@ def test_폰트_라이선스_원문을_배포물과_함께_둔다() -> None:
         < constants.FONT_FALLBACK_PATH.stat().st_size
         <= constants.FONT_FALLBACK_MAX_BYTES
     )
+    math_license = (constants.FONT_DIR / "NotoSansMath-OFL.txt").read_text(encoding="utf-8")
+    assert "Copyright 2018 The Noto Project Authors" in math_license
+    assert "SIL OPEN FONT LICENSE Version 1.1" in math_license
+    assert "NotoSansMath-Regular.ttf" in readme
+    assert 100_000 < constants.FONT_MATH_PATH.stat().st_size <= constants.FONT_MATH_MAX_BYTES
 
 
 def test_기본글꼴에_없는_한자는_Noto_대체글꼴로_검색가능하게_그린다() -> None:
@@ -570,6 +575,47 @@ def test_기본글꼴에_없는_한자는_Noto_대체글꼴로_검색가능하�
         canvas_pdf,
         render_scale=0.75,
         expected_fact_ids=("canvas-hanja-fallback",),
+    ).page_count == 1
+
+
+def test_한글_대체글꼴에도_없는_가운뎃점은_원문_문자로_보존한다() -> None:
+    sentence = "이(利)롭게 하는 소매∙유통 보안 서비스"
+    assert _normalize_pdf_text(sentence) == sentence
+    assert _missing_glyphs(sentence, constants.FONT_FALLBACK) == ("∙",)
+    assert _unsupported_glyphs(sentence) == ()
+
+    pdf = build_pdf(replace(_report(), corp_type=sentence))
+    assert "".join(sentence.split()) in "".join(_text(pdf).split())
+    assert prepare_pdf_bytes(
+        pdf,
+        render_scale=0.75,
+        expected_fact_ids=("math-symbol-fallback",),
+    ).page_count > 0
+    assert any(
+        "NotoSansMath" in str(font.get("/BaseFont", ""))
+        for font in _font_objects(PdfReader(io.BytesIO(pdf), strict=True))
+    )
+
+    output = io.BytesIO()
+    _register_fonts()
+    canvas = Canvas(output, invariant=1)
+    canvas.setFont(constants.FONT_SEMIBOLD, 12)
+    _draw_text_with_fallback(
+        canvas,
+        72,
+        720,
+        sentence,
+        font_name=constants.FONT_SEMIBOLD,
+        font_size=12,
+    )
+    canvas.save()
+    canvas_pdf = output.getvalue()
+    canvas_text = PdfReader(io.BytesIO(canvas_pdf)).pages[0].extract_text() or ""
+    assert "".join(sentence.split()) in "".join(canvas_text.split())
+    assert prepare_pdf_bytes(
+        canvas_pdf,
+        render_scale=0.75,
+        expected_fact_ids=("canvas-math-symbol-fallback",),
     ).page_count == 1
 
 
