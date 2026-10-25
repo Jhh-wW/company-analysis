@@ -21,3 +21,12 @@ Noto CJK Sans 2.004의 한국어 글꼴을 정적 TrueType으로 패키징한 �
 
 ReportLab 런타임에는 별도 `fontTools` 의존성을 추가하지 않고 TTF `cmap`을
 읽어, 기본 글꼴에 없는 문자 구간에만 이 대체 글꼴을 적용합니다.
+
+`NotoSansMath-Regular.ttf`는 앞의 두 글꼴에 없는 수학 기호를 보완합니다.
+원문의 `∙`(U+2219 BULLET OPERATOR)를 다른 점으로 바꾸지 않고 그대로
+검색 가능한 문자로 보존합니다. 기본 글꼴과 Noto Sans KR에 없는 문자에만 적용합니다.
+
+- 저작권: `Copyright 2018 The Noto Project Authors`
+- 라이선스: SIL Open Font License 1.1 (`NotoSansMath-OFL.txt`)
+- 원본: <https://github.com/notofonts/noto-fonts/blob/main/hinted/ttf/NotoSansMath/NotoSansMath-Regular.ttf>
+- SHA-256: `80b61fd613d3519197e64fff6f7e71fdc7f3e6526440ea4115b554ef7fd59af7`

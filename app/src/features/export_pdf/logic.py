@@ -111,6 +111,7 @@ _FONT_PATHS = {
     constants.FONT_REGULAR: constants.FONT_REGULAR_PATH,
     constants.FONT_SEMIBOLD: constants.FONT_SEMIBOLD_PATH,
     constants.FONT_FALLBACK: constants.FONT_FALLBACK_PATH,
+    constants.FONT_MATH: constants.FONT_MATH_PATH,
 }
 _ISO_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}(?:$|T|\s)")
 _PDF_TEXT_REPLACEMENTS = (
@@ -1362,10 +1363,9 @@ def _register_fonts() -> None:
             pdfmetrics.registerFont(
                 TTFont(constants.FONT_SEMIBOLD, str(constants.FONT_SEMIBOLD_PATH))
             )
-        if constants.FONT_FALLBACK not in registered:
-            pdfmetrics.registerFont(
-                TTFont(constants.FONT_FALLBACK, str(constants.FONT_FALLBACK_PATH))
-            )
+        for font_name in constants.FONT_FALLBACKS:
+            if font_name not in registered:
+                pdfmetrics.registerFont(TTFont(font_name, str(_FONT_PATHS[font_name])))
         pdfmetrics.registerFontFamily(
             "FreesentationPDF",
             normal=constants.FONT_REGULAR,
@@ -1526,9 +1526,11 @@ def _missing_glyphs(
 
 
 def _unsupported_glyphs(value: object) -> tuple[str, ...]:
-    """기본·대체 글꼴 어느 쪽에도 없는 문자를 순서대로 찾는다."""
+    """기본·한글·기호 대체 글꼴 모두에 없는 문자를 순서대로 찾는다."""
 
-    fallback_codepoints = _font_codepoints(constants.FONT_FALLBACK)
+    fallback_codepoints = frozenset().union(
+        *(_font_codepoints(name) for name in constants.FONT_FALLBACKS)
+    )
     return tuple(
         char
         for char in _missing_glyphs(value)
@@ -1540,17 +1542,22 @@ def _font_runs(text: str, font_name: str) -> tuple[tuple[str, str], ...]:
     """기본 글꼴을 보존하고 누락 문자 구간에만 대체 글꼴을 배정한다."""
 
     primary_codepoints = _font_codepoints(font_name)
-    fallback_codepoints = _font_codepoints(constants.FONT_FALLBACK)
+    fallback_codepoints = tuple(
+        (name, _font_codepoints(name)) for name in constants.FONT_FALLBACKS
+    )
     runs: list[tuple[str, str]] = []
     current_font = ""
     current_text: list[str] = []
     for char in text:
         if char == "\n" or ord(char) in primary_codepoints:
             next_font = font_name
-        elif ord(char) in fallback_codepoints:
-            next_font = constants.FONT_FALLBACK
         else:
-            raise PDFGenerationError("PDF 글꼴에 없는 문자가 있습니다.")
+            next_font = next(
+                (name for name, codepoints in fallback_codepoints if ord(char) in codepoints),
+                "",
+            )
+            if not next_font:
+                raise PDFGenerationError("PDF 글꼴에 없는 문자가 있습니다.")
         if current_text and next_font != current_font:
             runs.append((current_font, "".join(current_text)))
             current_text = []
@@ -1568,8 +1575,8 @@ def _escape(value: object) -> str:
     markup: list[str] = []
     for font_name, run in _font_runs(text, constants.FONT_REGULAR):
         escaped = html.escape(run, quote=False).replace("\n", "<br/>")
-        if font_name == constants.FONT_FALLBACK:
-            markup.append(f'<font name="{constants.FONT_FALLBACK}">{escaped}</font>')
+        if font_name != constants.FONT_REGULAR:
+            markup.append(f'<font name="{font_name}">{escaped}</font>')
         else:
             markup.append(escaped)
     return "".join(markup)
