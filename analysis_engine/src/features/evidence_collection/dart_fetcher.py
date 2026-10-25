@@ -41,9 +41,11 @@ from features.evidence_collection.filing_select import (
     FilingListResult,
     RawFilingRow,
 )
-from features.evidence_collection.table_text import table_replacements
+from features.evidence_collection.table_text import TableReplacement, table_replacements
 from features.evidence_collection.reporting_period import reporting_period_from_xml
-from features.evidence_collection.source_context import table_source_contexts, SourceContextBudgetExceeded
+from features.evidence_collection.source_context import (
+    SourceContextBudgetExceeded, parse_document_tables, table_source_contexts,
+)
 
 #: list.json 조회 창 — 최근 N년. survey_audit_reports.py·run_pilot.py의
 #: AUDIT_WINDOW_YEARS(3년, 「잠정 3년」)와 같은 값을 그대로 따른다 —
@@ -184,6 +186,12 @@ def _xml_to_plain_text(raw: bytes) -> str:
     """
     text = _decode_document_bytes(raw)
     replacements = table_replacements(text, max_window_chars=c.MAX_CANDIDATE_WINDOW_CHARS)
+    return _markup_to_plain_text(text, replacements)
+
+
+def _markup_to_plain_text(text: str, replacements: tuple[TableReplacement, ...]) -> str:
+    """검증된 같은 표 좌표로만 기존 태그·공백 변환을 수행한다."""
+
     if replacements:
         # 표 밖의 문자열은 건드리지 않는다. 형식이 확인된 작은 표만 한 문단으로
         # 묶으며 실패한 표는 아래의 기존 태그-개행 변환을 그대로 탄다.
@@ -378,11 +386,24 @@ class DartRuntimeFetcher:
                 "DART 공시 대표 cache가 XML 문서 형식이 아닙니다"
             )
         corp_code, document_actor = _document_header_identity(raw)
-        text = _xml_to_plain_text(raw)
         # 코드 검증을 통과한 같은 표제의 원문 법인명만 읽는다. 본문 이름은 빌리지 않는다.
         markup = _decode_document_bytes(raw)
         try:
-            source_contexts = table_source_contexts(markup, text, document_actor=document_actor)
+            try:
+                if not document_actor:
+                    # 표제 법인명이 없으면 주어 표를 읽던 기존 경로도 열리지 않는다.
+                    text = _markup_to_plain_text(markup, table_replacements(markup, max_window_chars=c.MAX_CANDIDATE_WINDOW_CHARS))
+                    table_views = None
+                else:
+                    table_views = parse_document_tables(markup, replacement_window_chars=c.MAX_CANDIDATE_WINDOW_CHARS)
+            except (ValueError, AssertionError, RecursionError):
+                # 드문 파서 오류도 기존 두 경계의 각자 실패 규칙을 그대로 적용한다.
+                table_views = None
+                text = _xml_to_plain_text(raw)
+            else:
+                if table_views is not None:
+                    text = _markup_to_plain_text(markup, table_views.replacements)
+            source_contexts = table_source_contexts(markup, text, document_actor=document_actor, table_views=table_views)
         except SourceContextBudgetExceeded:
             return DocumentFetchResult(state=c.ATTEMPT_STATE_FAILED, elapsed_ms=max(0, int((self._clock() - started) * 1000)), bytes_downloaded=len(raw), source_context_complete=False)
         sidecar_candidates = _load_document_url_sidecar(
