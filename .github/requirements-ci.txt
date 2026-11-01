@@ -1,7 +1,7 @@
 # 시험 전용 패키지. 실제 실행 의존성은 app/requirements.txt에만 둔다.
 pytest==9.1.1
 iniconfig==2.3.0
-pluggy==1.6.0
+pluggy==1.7.0
 pygments==2.20.0
 # 검수 출력 스키마와 정상·변조 응답의 호환성을 지속 검증한다.
 jsonschema==4.26.0
